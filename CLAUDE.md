@@ -44,6 +44,15 @@ Do not call `cargo` or `rustc` directly. Always use `nix-shell --run "..."`.
 Do not install tools with `rustup`, `cargo install`, or `nix-env`. If you
 need a new tool, add it to `shell.nix`.
 
+### Memory cap
+
+`shell.nix` caps the address space of every process in the build shell
+at 4 GiB (`ulimit -v`). A runaway allocation in a test or a fuzz case
+must fail with an allocation error, not exhaust the host memory. Do not
+remove or raise this cap. Do not run tests outside the capped shell.
+If one process has a real need past the cap, raise it in `shell.nix`
+in its own reviewed commit.
+
 ## Repository layout
 
 - `docs/specs/language-spec.md` — the normative language specification
@@ -68,6 +77,9 @@ need a new tool, add it to `shell.nix`.
   frontend.
 - Unsupported syntax or semantics must reject with a clear diagnostic.
   Do not add a silent fallback path.
+- A decoder must never size an allocation from an untrusted length
+  field before it checks the length against the remaining input.
+  Reject impossible sizes before any large allocation.
 - Every executed function must pass the independent bytecode verifier.
 - Format code with `nix-shell --run "cargo fmt"`. Keep
   `nix-shell --run "cargo clippy --workspace"` clean before a commit.
