@@ -1,0 +1,14 @@
+# A default-deny table blocks the child's print. The holder observes
+# the fault as an ordinary frozen value with a stable code.
+
+def run_blocked(): String with Vm
+  vm = sys.vm.Vm().from_object(do || with Io.Print
+    sys.io.Print("hi\n")
+  end, args: ())
+  case vm.run()
+  in Done(_)  then "done"
+  in Fault(f) then f.code()
+  end
+end
+
+run_blocked()

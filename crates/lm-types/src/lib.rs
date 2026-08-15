@@ -33,6 +33,14 @@ pub const NEVER: TypeId = TypeId(4);
 pub const STRING_BUILDER: TypeId = TypeId(5);
 /// The `ByteBuffer` native type.
 pub const BYTE_BUFFER: TypeId = TypeId(6);
+/// The frozen machine `Fault` value type.
+pub const FAULT: TypeId = TypeId(7);
+/// The opaque pending-request token type.
+pub const REQUEST: TypeId = TypeId(8);
+/// The holder-local policy-table handle type.
+pub const POLICY_TABLE: TypeId = TypeId(9);
+/// The unloaded virtual machine handle type.
+pub const EMPTY_VM: TypeId = TypeId(10);
 
 /// One element of an effect row.
 ///
@@ -83,6 +91,22 @@ pub enum Type {
     Fn(Vec<TypeId>, TypeId, Row),
     /// One type parameter of the enclosing generic definition.
     Var(u32),
+    /// The frozen machine `Fault` value type.
+    Fault,
+    /// The opaque pending-request token type.
+    Request,
+    /// The holder-local policy-table handle type.
+    PolicyTable,
+    /// The unloaded virtual machine handle type.
+    EmptyVm,
+    /// A loaded virtual machine typed by its terminal result.
+    Vm(TypeId),
+    /// A typed pending-call token: the argument view type and the
+    /// reply type.
+    PendingCall(TypeId, TypeId),
+    /// An identity-indexed first-class operation value: the manifest
+    /// operation slot and the callable function type.
+    Op(u32, TypeId),
 }
 
 /// The registered metadata of one class.
@@ -130,6 +154,10 @@ impl TypeStore {
         store.intern(Type::Never);
         store.intern(Type::StringBuilder);
         store.intern(Type::ByteBuffer);
+        store.intern(Type::Fault);
+        store.intern(Type::Request);
+        store.intern(Type::PolicyTable);
+        store.intern(Type::EmptyVm);
         store
     }
 
@@ -250,6 +278,10 @@ impl TypeStore {
             "String" => Some(STRING),
             "StringBuilder" => Some(STRING_BUILDER),
             "ByteBuffer" => Some(BYTE_BUFFER),
+            "Fault" => Some(FAULT),
+            "Request" => Some(REQUEST),
+            "PolicyTable" => Some(POLICY_TABLE),
+            "EmptyVm" => Some(EMPTY_VM),
             _ => None,
         }
     }
@@ -352,7 +384,8 @@ impl TypeStore {
         None
     }
 
-    /// Return true when values of the type live in the heap.
+    /// Return true when values of the type live in the heap. An `Op`
+    /// value is an immediate and does not live in the heap.
     pub fn is_heap(&self, id: TypeId) -> bool {
         matches!(
             self.get(id),
@@ -365,6 +398,12 @@ impl TypeStore {
                 | Type::Map(_, _)
                 | Type::Tuple(_)
                 | Type::Fn(_, _, _)
+                | Type::Fault
+                | Type::Request
+                | Type::PolicyTable
+                | Type::EmptyVm
+                | Type::Vm(_)
+                | Type::PendingCall(_, _)
         )
     }
 
@@ -409,6 +448,15 @@ impl TypeStore {
                 let row = self.substitute_row(&row, rowargs);
                 self.intern(Type::Fn(params, ret, row))
             }
+            Type::Vm(t) => {
+                let t = self.substitute(t, targs, rowargs);
+                self.intern(Type::Vm(t))
+            }
+            Type::PendingCall(a, r) => {
+                let a = self.substitute(a, targs, rowargs);
+                let r = self.substitute(r, targs, rowargs);
+                self.intern(Type::PendingCall(a, r))
+            }
             _ => ty,
         }
     }
@@ -439,6 +487,27 @@ impl TypeStore {
             Type::Fn(params, ret, _) => {
                 params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
             }
+            Type::Vm(t) => self.contains_var(*t),
+            Type::PendingCall(a, r) => self.contains_var(*a) || self.contains_var(*r),
+            _ => false,
+        }
+    }
+
+    /// Return true when the type contains an effect variable inside a
+    /// function-type row.
+    pub fn contains_effect_var(&self, ty: TypeId) -> bool {
+        match self.get(ty) {
+            Type::Inst(_, args) => args.iter().any(|a| self.contains_effect_var(*a)),
+            Type::List(e) => self.contains_effect_var(*e),
+            Type::Map(k, v) => self.contains_effect_var(*k) || self.contains_effect_var(*v),
+            Type::Tuple(elems) => elems.iter().any(|e| self.contains_effect_var(*e)),
+            Type::Fn(params, ret, row) => {
+                row.iter().any(|e| matches!(e, RowElem::Var(_)))
+                    || params.iter().any(|p| self.contains_effect_var(*p))
+                    || self.contains_effect_var(*ret)
+            }
+            Type::Vm(t) => self.contains_effect_var(*t),
+            Type::PendingCall(a, r) => self.contains_effect_var(*a) || self.contains_effect_var(*r),
             _ => false,
         }
     }
@@ -497,6 +566,17 @@ impl TypeStore {
                 out
             }
             Type::Var(i) => format!("${i}"),
+            Type::Fault => "Fault".to_string(),
+            Type::Request => "Request".to_string(),
+            Type::PolicyTable => "PolicyTable".to_string(),
+            Type::EmptyVm => "EmptyVm".to_string(),
+            Type::Vm(t) => format!("Vm[{}]", self.display(*t)),
+            Type::PendingCall(a, r) => {
+                format!("PendingCall[{}, {}]", self.display(*a), self.display(*r))
+            }
+            Type::Op(op, f) => {
+                format!("Op[{}, {}]", lm_abi::op_name(*op), self.display(*f))
+            }
         }
     }
 }

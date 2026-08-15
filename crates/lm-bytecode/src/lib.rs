@@ -8,6 +8,7 @@
 //! `lm-verify` validates tables, types, rows, type applications,
 //! jumps, calls, and stack shapes.
 
+pub mod corelink;
 pub mod hash;
 
 use std::fmt;
@@ -60,6 +61,22 @@ pub enum BcType {
     Var(u32),
     StringBuilder,
     ByteBuffer,
+    /// The frozen machine `Fault` value type.
+    Fault,
+    /// The opaque pending-request token type.
+    Request,
+    /// The holder-local policy-table handle type.
+    PolicyTable,
+    /// The unloaded virtual machine handle type.
+    EmptyVm,
+    /// A loaded virtual machine typed by its terminal result index.
+    Vm(u32),
+    /// A typed pending call: argument-view type index and reply type
+    /// index.
+    PendingCall(u32, u32),
+    /// An identity-indexed operation value: the manifest operation
+    /// slot and the function type index.
+    Op(u32, u32),
 }
 
 /// The declaration kind of one class.
@@ -257,12 +274,43 @@ pub enum Instr {
     JumpIfTrue(u32),
     /// Pop the result value and return it. Ends the block.
     Return,
+    /// Perform the exact manifest operation `op` over `argc` popped
+    /// arguments and push the reply.
+    Perform {
+        op: u32,
+        argc: u32,
+    },
+    /// Perform through a first-class operation value: pop `argc`
+    /// arguments over the operation value and push the reply.
+    PerformValue {
+        argc: u32,
+    },
+    /// Push the first-class value of the exact manifest operation.
+    OpConst(u32),
+    /// Edit a policy table: pop the table handle and, for a mock, the
+    /// handler closure. `action`: 0 pass, 1 block, 2 mock, 3 clear.
+    /// `kind`: 0 exact operation, 1 group. Push unit.
+    TableEdit {
+        action: u32,
+        kind: u32,
+        slot: u32,
+    },
+    /// Pop a Request and push `Option[PendingCall[...]]` for the
+    /// exact operation.
+    AsCall(u32),
+    /// Pop a PendingCall and push its boundary-copied argument view.
+    CallArgs,
+    /// Pop a Fault value and push its stable code as a string.
+    FaultCode,
+    /// The runtime backstop behind a proven-exhaustive `case`. It
+    /// faults if executed. Ends the block.
+    Unreachable,
 }
 
 impl Instr {
     /// Return true when the instruction ends a basic block.
     pub fn is_terminator(&self) -> bool {
-        matches!(self, Instr::Jump(_) | Instr::Return)
+        matches!(self, Instr::Jump(_) | Instr::Return | Instr::Unreachable)
     }
 }
 
@@ -306,7 +354,7 @@ pub struct Module {
 }
 
 const MAGIC: &[u8; 4] = b"LMBC";
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
 
 // Opcode bytes for the serialized form.
 const OP_CONST_UNIT: u8 = 0x00;
@@ -373,6 +421,14 @@ const OP_TUPLE_NEW: u8 = 0x63;
 const OP_TUPLE_GET: u8 = 0x64;
 const OP_IS_TYPE: u8 = 0x65;
 const OP_CAST_TYPE: u8 = 0x66;
+const OP_PERFORM: u8 = 0x70;
+const OP_PERFORM_VALUE: u8 = 0x71;
+const OP_OP_CONST: u8 = 0x72;
+const OP_TABLE_EDIT: u8 = 0x73;
+const OP_AS_CALL: u8 = 0x74;
+const OP_CALL_ARGS: u8 = 0x75;
+const OP_FAULT_CODE: u8 = 0x76;
+const OP_UNREACHABLE: u8 = 0x77;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -388,6 +444,13 @@ const TY_BB: u8 = 9;
 const TY_INST: u8 = 10;
 const TY_TUPLE: u8 = 11;
 const TY_VAR: u8 = 12;
+const TY_FAULT: u8 = 13;
+const TY_REQUEST: u8 = 14;
+const TY_POLICY_TABLE: u8 = 15;
+const TY_EMPTY_VM: u8 = 16;
+const TY_VM: u8 = 17;
+const TY_PENDING_CALL: u8 = 18;
+const TY_OP: u8 = 19;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -540,6 +603,24 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
         }
         BcType::StringBuilder => out.push(TY_SB),
         BcType::ByteBuffer => out.push(TY_BB),
+        BcType::Fault => out.push(TY_FAULT),
+        BcType::Request => out.push(TY_REQUEST),
+        BcType::PolicyTable => out.push(TY_POLICY_TABLE),
+        BcType::EmptyVm => out.push(TY_EMPTY_VM),
+        BcType::Vm(t) => {
+            out.push(TY_VM);
+            write_u32(out, *t);
+        }
+        BcType::PendingCall(a, r) => {
+            out.push(TY_PENDING_CALL);
+            write_u32(out, *a);
+            write_u32(out, *r);
+        }
+        BcType::Op(op, f) => {
+            out.push(TY_OP);
+            write_u32(out, *op);
+            write_u32(out, *f);
+        }
     }
 }
 
@@ -706,6 +787,32 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             write_u32(out, *block);
         }
         Instr::Return => out.push(OP_RETURN),
+        Instr::Perform { op, argc } => {
+            out.push(OP_PERFORM);
+            write_u32(out, *op);
+            write_u32(out, *argc);
+        }
+        Instr::PerformValue { argc } => {
+            out.push(OP_PERFORM_VALUE);
+            write_u32(out, *argc);
+        }
+        Instr::OpConst(op) => {
+            out.push(OP_OP_CONST);
+            write_u32(out, *op);
+        }
+        Instr::TableEdit { action, kind, slot } => {
+            out.push(OP_TABLE_EDIT);
+            write_u32(out, *action);
+            write_u32(out, *kind);
+            write_u32(out, *slot);
+        }
+        Instr::AsCall(op) => {
+            out.push(OP_AS_CALL);
+            write_u32(out, *op);
+        }
+        Instr::CallArgs => out.push(OP_CALL_ARGS),
+        Instr::FaultCode => out.push(OP_FAULT_CODE),
+        Instr::Unreachable => out.push(OP_UNREACHABLE),
     }
 }
 
@@ -987,6 +1094,13 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_VAR => BcType::Var(cur.u32()?),
         TY_SB => BcType::StringBuilder,
         TY_BB => BcType::ByteBuffer,
+        TY_FAULT => BcType::Fault,
+        TY_REQUEST => BcType::Request,
+        TY_POLICY_TABLE => BcType::PolicyTable,
+        TY_EMPTY_VM => BcType::EmptyVm,
+        TY_VM => BcType::Vm(cur.u32()?),
+        TY_PENDING_CALL => BcType::PendingCall(cur.u32()?, cur.u32()?),
+        TY_OP => BcType::Op(cur.u32()?, cur.u32()?),
         other => return Err(DecodeError::BadTypeTag(other)),
     };
     Ok(ty)
@@ -1084,6 +1198,21 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_JUMP_IF_FALSE => Instr::JumpIfFalse(cur.u32()?),
         OP_JUMP_IF_TRUE => Instr::JumpIfTrue(cur.u32()?),
         OP_RETURN => Instr::Return,
+        OP_PERFORM => Instr::Perform {
+            op: cur.u32()?,
+            argc: cur.u32()?,
+        },
+        OP_PERFORM_VALUE => Instr::PerformValue { argc: cur.u32()? },
+        OP_OP_CONST => Instr::OpConst(cur.u32()?),
+        OP_TABLE_EDIT => Instr::TableEdit {
+            action: cur.u32()?,
+            kind: cur.u32()?,
+            slot: cur.u32()?,
+        },
+        OP_AS_CALL => Instr::AsCall(cur.u32()?),
+        OP_CALL_ARGS => Instr::CallArgs,
+        OP_FAULT_CODE => Instr::FaultCode,
+        OP_UNREACHABLE => Instr::Unreachable,
         other => return Err(DecodeError::BadOpcode(other)),
     };
     Ok(instr)

@@ -358,6 +358,12 @@ pub enum ExprKind {
         scrut: Box<Expr>,
         arms: Vec<CaseArm>,
     },
+    /// A labeled call argument, for example `args: ()`. Valid only in
+    /// the argument positions the checker accepts.
+    Labeled {
+        label: String,
+        value: Box<Expr>,
+    },
 }
 
 /// Render a module as an indented, stable, human-readable tree.
@@ -772,6 +778,10 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
                     dump_stmt(out, s, depth + 2);
                 }
             }
+        }
+        ExprKind::Labeled { label, value } => {
+            let _ = writeln!(out, "labeled {label}");
+            dump_expr(out, value, depth + 1);
         }
     }
 }

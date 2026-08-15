@@ -9,9 +9,19 @@ use std::time::{Duration, Instant};
 
 const BOUND: Duration = Duration::from_secs(30);
 
-fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
+fn timed<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    // The deep-nesting cases sit near 100 source levels. The
+    // supported guarantee is a standard 8 MiB stack (week-2 note);
+    // the compile pipeline grew with the week-4 surfaces, so the
+    // gate runs on the guaranteed stack instead of the smaller
+    // default test-thread stack.
     let start = Instant::now();
-    let out = f();
+    let out = std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(f)
+        .expect("thread starts")
+        .join()
+        .expect("no stack overflow");
     let elapsed = start.elapsed();
     assert!(
         elapsed < BOUND,
@@ -33,7 +43,7 @@ fn large_enum_match_is_linear() {
         source.push_str(&format!("  in A{i}(v) then v + {i}\n"));
     }
     source.push_str("  end\nend\npick(A7(100))\n");
-    let out = timed("large enum match", || {
+    let out = timed("large enum match", move || {
         run_text("big.lm", &source, VmConfig::default()).unwrap()
     });
     assert_eq!(out, "Done(107)");
@@ -52,15 +62,10 @@ fn deep_generic_nesting_is_bounded() {
         "class Box[T]\n  v: T\n  def init(mut self, v: T)\n    self.v = v\n  end\nend\n\
          x: {ty} = {build}\n0\n"
     );
-    let handle = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            timed("deep generic nesting", || {
-                run_text("deep.lm", &source, VmConfig::default()).unwrap()
-            })
-        })
-        .unwrap();
-    assert_eq!(handle.join().unwrap(), "Done(0)");
+    let out = timed("deep generic nesting", move || {
+        run_text("deep.lm", &source, VmConfig::default()).unwrap()
+    });
+    assert_eq!(out, "Done(0)");
 }
 
 #[test]
@@ -75,7 +80,7 @@ fn wide_branch_joins_are_bounded() {
         source.push_str(&format!("  elsif n == {i}\n    Cat()\n"));
     }
     source.push_str("  else\n    Dog()\n  end\nend\npick(3) is Cat\n");
-    let out = timed("wide joins", || {
+    let out = timed("wide joins", move || {
         run_text("wide.lm", &source, VmConfig::default()).unwrap()
     });
     assert_eq!(out, "Done(true)");
@@ -103,7 +108,7 @@ fn many_generic_instantiations_are_bounded() {
         }
     }
     source.push_str("total\n");
-    let out = timed("many instantiations", || {
+    let out = timed("many instantiations", move || {
         run_text("insts.lm", &source, VmConfig::default()).unwrap()
     });
     assert_eq!(out, format!("Done({n})"));
@@ -139,7 +144,7 @@ fn nested_pattern_analysis_stays_inside_its_budget() {
         build = format!("Some({build})");
     }
     source.push_str(&format!("probe({build})\n"));
-    let out = timed("nested pattern analysis", || {
+    let out = timed("nested pattern analysis", move || {
         run_text("nested.lm", &source, VmConfig::default()).unwrap()
     });
     assert_eq!(out, "Done(3)");

@@ -51,3 +51,83 @@ fn allocation_and_collection_smoke() {
     eprintln!("bench-smoke alloc_gc_100k: {:?}", start.elapsed());
     assert_eq!(outcome, "Done(100000)");
 }
+
+/// Time one effectful workload in a world with grants.
+fn timed_world(name: &str, source: &str, allow: &[&str], expected: &str) {
+    let start = Instant::now();
+    let outcome = lm_testkit::run_allowed("bench.lm", source, allow).unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(outcome, expected, "{name}");
+    eprintln!("bench-smoke {name}: {elapsed:?}");
+}
+
+#[test]
+fn perform_exact_pass_smoke() {
+    let source = "def go(): Int with Clock.Now\n  i = 0\n  last = 0\n  while i < 20000\n    \
+                  last = sys.clock.Now()\n    i = i + 1\n  end\n  i\nend\ngo()\n";
+    timed_world(
+        "perform_exact_pass_20k",
+        source,
+        &["Clock.Now"],
+        "Done(20000)",
+    );
+}
+
+#[test]
+fn perform_group_pass_smoke() {
+    let source = "def go(): Int with Clock\n  i = 0\n  last = 0\n  while i < 20000\n    \
+                  last = sys.clock.Monotonic()\n    i = i + 1\n  end\n  i\nend\ngo()\n";
+    timed_world("perform_group_pass_20k", source, &["Clock"], "Done(20000)");
+}
+
+#[test]
+fn perform_block_smoke() {
+    // Each child performs one blocked operation; the holder observes
+    // the fault. This times the block path plus machine creation.
+    let source = "def one(): String with Vm\n  \
+                  vm = sys.vm.Vm().from_object(do || with Io.Print\n    sys.io.Print(\"x\")\n  end, args: ())\n  \
+                  case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\n\
+                  def go(): Int with Vm\n  i = 0\n  while i < 300\n    one()\n    i = i + 1\n  end\n  i\nend\ngo()\n";
+    timed_world("perform_block_300", source, &["Vm"], "Done(300)");
+}
+
+#[test]
+fn perform_mock_smoke() {
+    let source = "def go(): Int with Vm\n  \
+                  vm = sys.vm.Vm().from_object(do || with Clock.Now\n    \
+                  i = 0\n    total = 0\n    while i < 5000\n      total = total + sys.clock.Now()\n      i = i + 1\n    end\n    total\n  end, args: ())\n  \
+                  vm.table().mock(Clock.Now, do ||: Int 1 end)\n  \
+                  case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
+    timed_world("perform_mock_5k", source, &["Vm"], "Done(5000)");
+}
+
+#[test]
+fn drive_interception_smoke() {
+    let source = "def go(): Int with Vm\n  \
+                  vm = sys.vm.Vm().from_object(do || with Clock.Now\n    \
+                  i = 0\n    total = 0\n    while i < 5000\n      total = total + sys.clock.Now()\n      i = i + 1\n    end\n    total\n  end, args: ())\n  \
+                  guard = 0\n  while guard < 100000\n    guard = guard + 1\n    \
+                  case vm.drive()\n    in Asked(q)\n      \
+                  case q.as_call(sys.clock.Now)\n      in Some(call) then vm.answer(call, 1)\n      in None then vm.dispatch(q)\n      end\n    \
+                  in Done(v)\n      return v\n    in Fault(_)\n      return 0 - 1\n    end\n  end\n  0 - 2\nend\ngo()\n";
+    timed_world("drive_interception_5k", source, &["Vm"], "Done(5000)");
+}
+
+#[test]
+fn nested_vm_run_smoke() {
+    let source = "def tower(n: Int): Int with Vm\n  if n <= 0\n    1\n  else\n    \
+                  vm = sys.vm.Vm().from_object(do || with Vm\n      tower(n - 1)\n    end, args: ())\n    \
+                  vm.table().pass(Vm)\n    \
+                  case vm.run()\n    in Done(v) then v + 1\n    in Fault(_) then 0 - 1\n    end\n  end\nend\ntower(40)\n";
+    timed_world("nested_vm_run_40", source, &["Vm"], "Done(41)");
+}
+
+#[test]
+fn async_wait_smoke() {
+    let source = "def go(): Int with Vm, Clock.Sleep\n  \
+                  vm = sys.vm.Vm().from_object(do || with Clock.Sleep\n    \
+                  i = 0\n    while i < 50\n      sys.clock.Sleep(1)\n      i = i + 1\n    end\n    i\n  end, args: ())\n  \
+                  vm.table().pass(Clock.Sleep)\n  \
+                  case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
+    timed_world("async_wait_50", source, &["Vm", "Clock.Sleep"], "Done(50)");
+}

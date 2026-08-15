@@ -21,8 +21,12 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     /// A reference to a heap object: string, instance, list, map,
-    /// closure, or builder.
+    /// closure, builder, or native handle.
     Obj(ObjRef),
+    /// A first-class operation value: the dense manifest slot of one
+    /// exact operation. The identity-indexed type lives in the static
+    /// type system, not in the value.
+    Op(u32),
     /// The marker for an object field without a first assignment.
     /// No instruction can produce or store this value.
     Uninit,

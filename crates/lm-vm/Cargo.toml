@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+lm-abi = { path = "../lm-abi" }
 lm-bytecode = { path = "../lm-bytecode" }
 lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }

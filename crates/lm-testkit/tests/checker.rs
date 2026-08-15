@@ -26,10 +26,10 @@ fn negative_cases_have_stable_codes() {
     assert_eq!(code_of("\"\"\"x\"\"\"\n"), "E0010");
     // Parser rules.
     assert_eq!(code_of("x = 1 y = 2\n"), "E1001");
-    // Week 3: enums and tuples moved from rejected to supported. The
-    // reserved-keyword rejection now uses `loop`, and an empty enum
-    // is a declaration error.
-    assert_eq!(code_of("loop do\nend\n"), "E1002");
+    // Week 3: enums and tuples moved from rejected to supported.
+    // Week 4: `loop` moved from reserved to supported, so the
+    // position rule stands in for the E1002 family.
+    assert_eq!(code_of("while true\nclass C\nend\nend\n"), "E1002");
     assert_eq!(code_of("enum Color\nend\n"), "E1040");
     assert_eq!(code_of("m = {1: 2}\nm[1] = 3\n"), "E1002");
     assert_eq!(code_of("if true\n1\n"), "E1003");

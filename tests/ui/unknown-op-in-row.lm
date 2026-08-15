@@ -1,0 +1,4 @@
+def f() with Io.Blast
+end
+
+f()

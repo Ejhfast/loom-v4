@@ -1,0 +1,7 @@
+# A direct perform through the generated `sys` object.
+
+def greet(name: String) with Io.Print
+  sys.io.Print("Hello {name}!\n")
+end
+
+greet("Ada")

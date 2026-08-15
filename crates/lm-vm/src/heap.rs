@@ -40,6 +40,22 @@ pub enum Object {
     StrBuilder(String),
     /// A byte buffer.
     ByteBuf(Vec<u8>),
+    /// A holder-local handle to one machine in the world registry.
+    /// The static type separates `EmptyVm` and `Vm[T]` views.
+    NativeVm { vm: u32 },
+    /// A holder-local handle to the policy table of one machine.
+    NativeTable { vm: u32 },
+    /// A holder-local token for one pending perform of one machine.
+    NativeRequest { vm: u32, ordinal: u64 },
+    /// A typed pending-call token: the machine, the request ordinal,
+    /// and the exact operation slot the token was minted for.
+    NativeCall { vm: u32, ordinal: u64, op: u32 },
+    /// A frozen machine fault value.
+    NativeFault {
+        code: crate::FaultCode,
+        message: String,
+        op: Option<u32>,
+    },
 }
 
 /// A native shape descriptor. The tracer and the printer read the
@@ -94,6 +110,31 @@ const SHAPE_BB: ShapeDesc = ShapeDesc {
     has_refs: false,
     born_frozen: false,
 };
+const SHAPE_VM: ShapeDesc = ShapeDesc {
+    name: "Vm",
+    has_refs: false,
+    born_frozen: true,
+};
+const SHAPE_TABLE: ShapeDesc = ShapeDesc {
+    name: "PolicyTable",
+    has_refs: false,
+    born_frozen: true,
+};
+const SHAPE_REQUEST: ShapeDesc = ShapeDesc {
+    name: "Request",
+    has_refs: false,
+    born_frozen: true,
+};
+const SHAPE_CALL: ShapeDesc = ShapeDesc {
+    name: "PendingCall",
+    has_refs: false,
+    born_frozen: true,
+};
+const SHAPE_FAULT: ShapeDesc = ShapeDesc {
+    name: "Fault",
+    has_refs: false,
+    born_frozen: true,
+};
 
 impl Object {
     /// The shape descriptor for this object.
@@ -107,6 +148,11 @@ impl Object {
             Object::Closure { .. } => &SHAPE_CLOSURE,
             Object::StrBuilder(_) => &SHAPE_SB,
             Object::ByteBuf(_) => &SHAPE_BB,
+            Object::NativeVm { .. } => &SHAPE_VM,
+            Object::NativeTable { .. } => &SHAPE_TABLE,
+            Object::NativeRequest { .. } => &SHAPE_REQUEST,
+            Object::NativeCall { .. } => &SHAPE_CALL,
+            Object::NativeFault { .. } => &SHAPE_FAULT,
         }
     }
 
@@ -122,6 +168,11 @@ impl Object {
                 Object::Closure { captures, .. } => captures.len() * VALUE_COST,
                 Object::StrBuilder(s) => s.len(),
                 Object::ByteBuf(b) => b.len(),
+                Object::NativeVm { .. }
+                | Object::NativeTable { .. }
+                | Object::NativeRequest { .. }
+                | Object::NativeCall { .. } => VALUE_COST,
+                Object::NativeFault { message, .. } => message.len(),
             }
     }
 
@@ -134,7 +185,14 @@ impl Object {
             }
         };
         match self {
-            Object::Str(_) | Object::StrBuilder(_) | Object::ByteBuf(_) => {}
+            Object::Str(_)
+            | Object::StrBuilder(_)
+            | Object::ByteBuf(_)
+            | Object::NativeVm { .. }
+            | Object::NativeTable { .. }
+            | Object::NativeRequest { .. }
+            | Object::NativeCall { .. }
+            | Object::NativeFault { .. } => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
             Object::Map { entries } => {

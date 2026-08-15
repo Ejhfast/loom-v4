@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+lm-abi = { path = "../lm-abi" }
 lm-source = { path = "../lm-source" }
 lm-types = { path = "../lm-types" }
 lm-hir = { path = "../lm-hir" }

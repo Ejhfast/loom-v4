@@ -108,6 +108,10 @@ trait OuterScope {
     ) -> Result<Option<(TypeId, bool, CapSource)>, Diagnostic>;
 }
 
+/// The result of checking the module entry: body, type, capability,
+/// locals, and the collected entry row.
+pub(crate) type CheckedEntry = (Vec<HStmt>, TypeId, bool, Vec<TypeId>, Row);
+
 /// The result of checking one callable body.
 pub(crate) struct CheckedBody {
     pub(crate) body: Vec<HStmt>,
@@ -157,6 +161,9 @@ pub(crate) struct FnChecker<'o> {
     pub(crate) ctor: Option<CtorCtx>,
     pub(crate) env: TyEnv,
     declared_row: Row,
+    /// True for the module entry: charged rows accumulate into
+    /// `declared_row` instead of raising `E1046`.
+    collect_row: bool,
 }
 
 impl<'o> OuterScope for FnChecker<'o> {
@@ -350,7 +357,16 @@ impl<'o> FnChecker<'o> {
             ctor: None,
             env,
             declared_row,
+            collect_row: false,
         }
+    }
+
+    /// The checker for the module entry. The entry has no declared
+    /// row; the charged rows accumulate into the inferred entry row.
+    pub(crate) fn entry_collect(env: TyEnv) -> FnChecker<'static> {
+        let mut checker = FnChecker::top_level(RetKind::Entry, env, vec![]);
+        checker.collect_row = true;
+        checker
     }
 
     fn lookup_slot(&self, name: &str) -> Option<u32> {
@@ -402,9 +418,16 @@ impl<'o> FnChecker<'o> {
         )
     }
 
-    /// Require the row of a call to be inside the declared row.
-    fn charge_row(&self, ctx: &Ctx, row: &Row, span: Span) -> Result<(), Diagnostic> {
+    /// Require the row of a call to be inside the declared row. The
+    /// entry checker collects the union instead.
+    fn charge_row(&mut self, ctx: &Ctx, row: &Row, span: Span) -> Result<(), Diagnostic> {
         if ctx.store.row_included(row, &self.declared_row) {
+            return Ok(());
+        }
+        if self.collect_row {
+            let mut merged = self.declared_row.clone();
+            merged.extend_from_slice(row);
+            self.declared_row = ctx.store.canonical_row(merged);
             return Ok(());
         }
         let declared = if self.declared_row.is_empty() {
@@ -446,16 +469,17 @@ impl<'o> FnChecker<'o> {
         })
     }
 
-    /// Check the module entry block and synthesize its type.
+    /// Check the module entry block and synthesize its type. The last
+    /// result element is the collected entry row.
     pub(crate) fn check_entry(
         mut self,
         ctx: &mut Ctx,
         stmts: &[ast::Stmt],
         span: Span,
-    ) -> Result<(Vec<HStmt>, TypeId, bool, Vec<TypeId>), Diagnostic> {
+    ) -> Result<CheckedEntry, Diagnostic> {
         let (body, ty, mutable) = self.check_block(ctx, stmts, BlockMode::Synth, span)?;
         let locals = self.locals.iter().map(|(t, _)| *t).collect();
-        Ok((body, ty, mutable, locals))
+        Ok((body, ty, mutable, locals, self.declared_row))
     }
 
     /// Check one expression against an expected type, exposed for
@@ -964,6 +988,13 @@ impl<'o> FnChecker<'o> {
                 if let Some(found) = self.try_ctor_name(ctx, name, expr.span, None)? {
                     return Ok(found);
                 }
+                if name == "sys" {
+                    return Err(Diagnostic::new(
+                        "E1051",
+                        "`sys` is not a value; use `sys.<group>.<Operation>`",
+                        expr.span,
+                    ));
+                }
                 if ctx.func_index.contains_key(name) {
                     return Err(Diagnostic::new(
                         "E1018",
@@ -1147,6 +1178,14 @@ impl<'o> FnChecker<'o> {
                 self.check_if(ctx, arms, else_body, None, expr.span)
             }
             ExprKind::Case { scrut, arms } => self.check_case(ctx, scrut, arms, None, expr.span),
+            ExprKind::Labeled { label, .. } => Err(Diagnostic::new(
+                "E1006",
+                format!(
+                    "the argument label `{label}:` is only valid on the `args` \
+                     argument of `from_object`"
+                ),
+                expr.span,
+            )),
         }
     }
 
@@ -1608,6 +1647,25 @@ impl<'o> FnChecker<'o> {
         callee_span: Span,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
+        // Calling an identity-indexed operation value performs the
+        // operation. The row charge follows the identity in the type.
+        if let Type::Op(op, fn_ty) = ctx.store.get(callee.ty).clone() {
+            let (params, ret) = match ctx.store.get(fn_ty) {
+                Type::Fn(params, ret, _) => (params.clone(), *ret),
+                _ => unreachable!("an Op type embeds a function type"),
+            };
+            self.charge_op(ctx, op, span)?;
+            let muts = vec![false; params.len()];
+            let args = self.check_args_simple(ctx, args, &params, &muts, "operation", span)?;
+            return Ok(HExpr {
+                ty: ret,
+                mutable: true,
+                kind: HExprKind::CallValue {
+                    callee: Box::new(callee),
+                    args,
+                },
+            });
+        }
         let (params, ret, row) = match ctx.store.get(callee.ty) {
             Type::Fn(params, ret, row) => (params.clone(), *ret, row.clone()),
             _ => {
@@ -1784,11 +1842,15 @@ impl<'o> FnChecker<'o> {
             unify(ctx, decl_ret, expected, &mut targs, &mut rowargs, false);
         }
         // Pass A: synthesize the arguments whose declared parameter
-        // still contains an unresolved variable.
+        // still contains an unresolved type or effect variable, so an
+        // explicitly rowed function argument binds the effect
+        // variable of a higher-order callee.
         let mut pre: Vec<Option<HExpr>> = Vec::with_capacity(args.len());
         for (arg, decl) in args.iter().zip(decl_params.iter()) {
             let part = self.partial_substitute(ctx, *decl, &targs, &rowargs);
-            if ctx.store.contains_var(part) && self.can_synth(ctx, arg) {
+            if (ctx.store.contains_var(part) || ctx.store.contains_effect_var(part))
+                && self.can_synth(ctx, arg)
+            {
                 let h = self.synth_expr(ctx, arg)?;
                 unify(ctx, part, h.ty, &mut targs, &mut rowargs, true);
                 pre.push(Some(h));
@@ -1905,6 +1967,28 @@ impl<'o> FnChecker<'o> {
                 .expect("qualified constructors resolve or fail");
             return self.construct_arm(ctx, arm, &[], &[], expected, name_span);
         }
+        // A first-class operation value `sys.<group>.<Member>`.
+        if let Some(group) = self.sys_group_of(ctx, recv)? {
+            return self.check_sys_value(ctx, group, name, name_span);
+        }
+        // A bare `sys.<group>` is not a value.
+        if matches!(recv.kind, ExprKind::Name(ref n) if n == "sys") && self.sys_in_scope()? {
+            if Self::sys_group(name).is_some() {
+                return Err(Diagnostic::new(
+                    "E1051",
+                    format!(
+                        "`sys.{name}` is not a value; name an operation such as \
+                         `sys.{name}.<Operation>`"
+                    ),
+                    name_span,
+                ));
+            }
+            return Err(Diagnostic::new(
+                "E1051",
+                format!("`sys` has no group named `{name}`"),
+                name_span,
+            ));
+        }
         // A field read on `self` inside a constructor checks definite
         // initialization and needs no completeness.
         if matches!(recv.kind, ExprKind::SelfRef) && self.ctor.is_some() {
@@ -1977,8 +2061,26 @@ impl<'o> FnChecker<'o> {
                 .expect("qualified constructors resolve or fail");
             return self.construct_arm(ctx, arm, type_args, args, expected, span);
         }
+        // A direct operation call `sys.<group>.<Member>(args)`.
+        if let Some(group) = self.sys_group_of(ctx, recv)? {
+            return self.check_sys_call(ctx, group, name, name_span, type_args, args, span);
+        }
         let recv_h = self.synth_expr(ctx, recv)?;
         let recv_ty = recv_h.ty;
+        // Native control methods on the VM surface types.
+        if matches!(
+            ctx.store.get(recv_ty),
+            Type::EmptyVm
+                | Type::Vm(_)
+                | Type::PolicyTable
+                | Type::Request
+                | Type::PendingCall(_, _)
+                | Type::Fault
+        ) {
+            let out =
+                self.check_control_method(ctx, recv_h, name, name_span, type_args, args, span)?;
+            return Ok(out.expect("control receivers resolve or fail"));
+        }
         // Class and enum methods first, then the universal `freeze`.
         if let Some((class, class_args)) = class_of(ctx, recv_ty) {
             if let Some(sig) = ctx.find_method(class, name) {
@@ -2446,6 +2548,7 @@ impl<'o> FnChecker<'o> {
             ctor: None,
             env: env.clone(),
             declared_row: declared_row.clone(),
+            collect_row: false,
         };
         let (body_h, body_ty) = match declared_ret {
             Some(t) => {
@@ -2509,6 +2612,584 @@ impl<'o> FnChecker<'o> {
                 captures: capture_inits,
             },
         })
+    }
+
+    /// Map a surface `sys` member name to its manifest group name.
+    fn sys_group(name: &str) -> Option<&'static str> {
+        match name {
+            "io" => Some("Io"),
+            "fs" => Some("Fs"),
+            "clock" => Some("Clock"),
+            "rand" => Some("Rand"),
+            "net" => Some("Net"),
+            "proc" => Some("Proc"),
+            "vm" => Some("Vm"),
+            "compiler" => Some("Compiler"),
+            "reflect" => Some("Reflect"),
+            _ => None,
+        }
+    }
+
+    /// True when the bare name `sys` means the ABI root object here.
+    fn sys_in_scope(&mut self) -> Result<bool, Diagnostic> {
+        Ok(self.resolve_name("sys")?.is_none())
+    }
+
+    /// Read `sys.<group>` out of a receiver expression.
+    fn sys_group_of(
+        &mut self,
+        ctx: &Ctx,
+        recv: &ast::Expr,
+    ) -> Result<Option<&'static str>, Diagnostic> {
+        let _ = ctx;
+        if let ExprKind::Field {
+            recv: inner, name, ..
+        } = &recv.kind
+        {
+            if matches!(inner.kind, ExprKind::Name(ref n) if n == "sys") && self.sys_in_scope()? {
+                return Ok(Self::sys_group(name));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Convert one manifest type to a checker type.
+    fn abi_type_id(ctx: &mut Ctx, t: lm_abi::AbiType) -> TypeId {
+        match t {
+            lm_abi::AbiType::Unit => UNIT,
+            lm_abi::AbiType::Int => INT,
+            lm_abi::AbiType::Str => STRING,
+            lm_abi::AbiType::ResultOptionStrIoError => {
+                let option = ctx.core_types["Option"];
+                let result = ctx.core_types["Result"];
+                let io_error = ctx.core_types["IoError"];
+                let opt_str = ctx
+                    .store
+                    .intern(Type::Inst(lm_types::ClassId(option), vec![STRING]));
+                let err = ctx.store.intern(Type::Class(lm_types::ClassId(io_error)));
+                ctx.store
+                    .intern(Type::Inst(lm_types::ClassId(result), vec![opt_str, err]))
+            }
+        }
+    }
+
+    /// The callable function type of one fixed operation.
+    fn op_fn_type(ctx: &mut Ctx, op: u32) -> TypeId {
+        let def = lm_abi::op(op);
+        debug_assert_eq!(def.kind, lm_abi::OpKind::Fixed);
+        let params: Vec<TypeId> = def
+            .params
+            .iter()
+            .map(|p| Self::abi_type_id(ctx, *p))
+            .collect();
+        let ret = Self::abi_type_id(ctx, def.reply);
+        ctx.store.intern_fn(params, ret, vec![])
+    }
+
+    /// The argument-view type of one fixed operation: `()` for a
+    /// zero-parameter operation, a tuple otherwise.
+    fn op_args_type(ctx: &mut Ctx, op: u32) -> TypeId {
+        let def = lm_abi::op(op);
+        if def.params.is_empty() {
+            return UNIT;
+        }
+        let elems: Vec<TypeId> = def
+            .params
+            .iter()
+            .map(|p| Self::abi_type_id(ctx, *p))
+            .collect();
+        ctx.store.intern(Type::Tuple(elems))
+    }
+
+    /// Charge one exact operation to the enclosing row.
+    fn charge_op(&mut self, ctx: &mut Ctx, op: u32, span: Span) -> Result<(), Diagnostic> {
+        let idx = ctx.store.intern_row_name(&lm_abi::op_name(op));
+        let row = vec![lm_types::RowElem::Op(idx)];
+        self.charge_row(ctx, &row, span)
+    }
+
+    /// An instance type of a core enum found by name.
+    fn core_inst(ctx: &mut Ctx, name: &str, args: Vec<TypeId>) -> TypeId {
+        let class = ctx.core_types[name];
+        ctx.store.intern(Type::Inst(lm_types::ClassId(class), args))
+    }
+
+    /// Check a direct operation call `sys.<group>.<Member>(args)`.
+    #[allow(clippy::too_many_arguments)]
+    fn check_sys_call(
+        &mut self,
+        ctx: &mut Ctx,
+        group: &str,
+        member: &str,
+        name_span: Span,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if !type_args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1024",
+                "an operation call does not take type arguments",
+                name_span,
+            ));
+        }
+        // `sys.vm.Vm()` creates an EmptyVm through `Vm.New`.
+        if group == "Vm" && member == "Vm" {
+            if !args.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    "`sys.vm.Vm` expects 0 argument(s)",
+                    span,
+                ));
+            }
+            self.charge_op(ctx, lm_abi::OP_VM_NEW, span)?;
+            return Ok(HExpr {
+                ty: lm_types::EMPTY_VM,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_VM_NEW,
+                    args: vec![],
+                },
+            });
+        }
+        let Some(op) = lm_abi::fixed_member(group, member) else {
+            return Err(Diagnostic::new(
+                "E1051",
+                format!("the group `{group}` has no operation named `{member}`"),
+                name_span,
+            ));
+        };
+        let def = lm_abi::op(op);
+        let params: Vec<TypeId> = def
+            .params
+            .iter()
+            .map(|p| Self::abi_type_id(ctx, *p))
+            .collect();
+        let muts = vec![false; params.len()];
+        let checked = self.check_args_simple(ctx, args, &params, &muts, member, span)?;
+        self.charge_op(ctx, op, span)?;
+        let ret = Self::abi_type_id(ctx, def.reply);
+        Ok(HExpr {
+            ty: ret,
+            mutable: true,
+            kind: HExprKind::Perform { op, args: checked },
+        })
+    }
+
+    /// Check a first-class operation value `sys.<group>.<Member>`.
+    fn check_sys_value(
+        &mut self,
+        ctx: &mut Ctx,
+        group: &str,
+        member: &str,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let Some(op) = lm_abi::fixed_member(group, member) else {
+            return Err(Diagnostic::new(
+                "E1051",
+                format!(
+                    "`sys.{}.{member}` is not a first-class operation value",
+                    group.to_ascii_lowercase()
+                ),
+                span,
+            ));
+        };
+        let fn_ty = Self::op_fn_type(ctx, op);
+        let ty = ctx.store.intern(Type::Op(op, fn_ty));
+        Ok(HExpr {
+            ty,
+            mutable: true,
+            kind: HExprKind::OpConst(op),
+        })
+    }
+
+    /// Resolve a policy-target descriptor expression: a group name
+    /// such as `Io`, or an exact name such as `Clock.Now`.
+    fn resolve_descriptor(
+        &self,
+        expr: &ast::Expr,
+    ) -> Result<(TargetKind, u32, String), Diagnostic> {
+        match &expr.kind {
+            ExprKind::Name(name) => {
+                if let Some(slot) = lm_abi::group_by_name(name) {
+                    return Ok((TargetKind::Group, slot, name.clone()));
+                }
+                Err(Diagnostic::new(
+                    "E1051",
+                    format!("`{name}` is not a group in the operation manifest"),
+                    expr.span,
+                ))
+            }
+            ExprKind::Field { recv, name, .. } => {
+                if let ExprKind::Name(group) = &recv.kind {
+                    let full = format!("{group}.{name}");
+                    if let Some(slot) = lm_abi::op_by_name(&full) {
+                        return Ok((TargetKind::Exact, slot, full));
+                    }
+                    return Err(Diagnostic::new(
+                        "E1051",
+                        format!("`{full}` is not an operation in the operation manifest"),
+                        expr.span,
+                    ));
+                }
+                Err(Diagnostic::new(
+                    "E1051",
+                    "a policy target must be a group name or an exact operation name",
+                    expr.span,
+                ))
+            }
+            _ => Err(Diagnostic::new(
+                "E1051",
+                "a policy target must be a group name or an exact operation name",
+                expr.span,
+            )),
+        }
+    }
+
+    /// Check a policy-table edit method.
+    fn check_table_edit(
+        &mut self,
+        ctx: &mut Ctx,
+        table: HExpr,
+        name: &str,
+        name_span: Span,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let action = match name {
+            "pass" => TableAction::Pass,
+            "block" => TableAction::Block,
+            "mock" => TableAction::Mock,
+            "clear" => TableAction::Clear,
+            _ => {
+                return Err(Diagnostic::new(
+                    "E1026",
+                    format!("`PolicyTable` has no method named `{name}`"),
+                    name_span,
+                ));
+            }
+        };
+        let want_args = if action == TableAction::Mock { 2 } else { 1 };
+        if args.len() != want_args {
+            return Err(Diagnostic::new(
+                "E1006",
+                format!(
+                    "`{name}` expects {want_args} argument(s), found {}",
+                    args.len()
+                ),
+                span,
+            ));
+        }
+        let (kind, slot, target_name) = self.resolve_descriptor(&args[0])?;
+        let mock = if action == TableAction::Mock {
+            if kind != TargetKind::Exact || lm_abi::op(slot).kind != lm_abi::OpKind::Fixed {
+                return Err(Diagnostic::new(
+                    "E1051",
+                    "`mock` needs an exact host operation, for example `Clock.Now`",
+                    args[0].span,
+                ));
+            }
+            let handler_ty = Self::op_fn_type(ctx, slot);
+            let handler = self.check_expr(ctx, &args[1], handler_ty)?;
+            Some(Box::new(handler))
+        } else {
+            None
+        };
+        if action == TableAction::Pass {
+            // The dependent grant rule: passing authority is charged
+            // to the granter's row.
+            let idx = ctx.store.intern_row_name(&target_name);
+            let row = vec![lm_types::RowElem::Op(idx)];
+            self.charge_row(ctx, &row, span)?;
+        }
+        Ok(HExpr {
+            ty: UNIT,
+            mutable: true,
+            kind: HExprKind::TableEdit {
+                action,
+                kind,
+                slot,
+                table: Box::new(table),
+                mock,
+            },
+        })
+    }
+
+    /// Check the native methods of the VM control surface: EmptyVm,
+    /// Vm[T], PolicyTable, Request, PendingCall, and Fault receivers.
+    /// Return `None` when the receiver type has no such method.
+    #[allow(clippy::too_many_arguments)]
+    fn check_control_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        name: &str,
+        name_span: Span,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<Option<HExpr>, Diagnostic> {
+        let recv_ty = ctx.store.get(recv_h.ty).clone();
+        if !matches!(
+            recv_ty,
+            Type::EmptyVm
+                | Type::Vm(_)
+                | Type::PolicyTable
+                | Type::Request
+                | Type::PendingCall(_, _)
+                | Type::Fault
+        ) {
+            return Ok(None);
+        }
+        if !type_args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1024",
+                "a native control method does not take type arguments",
+                name_span,
+            ));
+        }
+        let out = match (recv_ty, name) {
+            (Type::EmptyVm, "from_object") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`from_object` expects 2 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let program = self.synth_expr(ctx, &args[0])?;
+                let Type::Fn(params, ret, _) = ctx.store.get(program.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`from_object` needs a function value, found {}",
+                            ctx.store.display(program.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                let args_expr = match &args[1].kind {
+                    ExprKind::Labeled { label, value } if label == "args" => value.as_ref(),
+                    ExprKind::Labeled { label, .. } => {
+                        return Err(Diagnostic::new(
+                            "E1006",
+                            format!("unknown argument label `{label}`; use `args:`"),
+                            args[1].span,
+                        ));
+                    }
+                    _ => &args[1],
+                };
+                let want = if params.is_empty() {
+                    UNIT
+                } else {
+                    ctx.store.intern(Type::Tuple(params))
+                };
+                let tuple = self.check_expr(ctx, args_expr, want)?;
+                self.charge_op(ctx, lm_abi::OP_VM_FROM_OBJECT, span)?;
+                let vm_ty = ctx.store.intern(Type::Vm(ret));
+                HExpr {
+                    ty: vm_ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_FROM_OBJECT,
+                        args: vec![recv_h, program, tuple],
+                    },
+                }
+            }
+            (Type::Vm(t), "run") | (Type::Vm(t), "step") | (Type::Vm(t), "drive") => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`{name}` expects 0 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let (op, event) = match name {
+                    "run" => (lm_abi::OP_VM_RUN, "RunResult"),
+                    "step" => (lm_abi::OP_VM_STEP, "StepEvent"),
+                    _ => (lm_abi::OP_VM_DRIVE, "DriveEvent"),
+                };
+                self.charge_op(ctx, op, span)?;
+                let ty = Self::core_inst(ctx, event, vec![t]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Vm(_), "table") => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`table` expects 0 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_TABLE, span)?;
+                HExpr {
+                    ty: lm_types::POLICY_TABLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_TABLE,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Vm(_), "answer") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`answer` expects 2 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let Type::PendingCall(_, reply) = ctx.store.get(call.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`answer` needs a PendingCall token, found {}",
+                            ctx.store.display(call.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                let value = self.check_expr(ctx, &args[1], reply)?;
+                self.charge_op(ctx, lm_abi::OP_VM_ANSWER, span)?;
+                HExpr {
+                    ty: UNIT,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_ANSWER,
+                        args: vec![recv_h, call, value],
+                    },
+                }
+            }
+            (Type::Vm(_), "reject") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`reject` expects 2 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let request = self.check_expr(ctx, &args[0], lm_types::REQUEST)?;
+                let fault = self.check_expr(ctx, &args[1], lm_types::FAULT)?;
+                self.charge_op(ctx, lm_abi::OP_VM_REJECT, span)?;
+                HExpr {
+                    ty: UNIT,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_REJECT,
+                        args: vec![recv_h, request, fault],
+                    },
+                }
+            }
+            (Type::Vm(_), "dispatch") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`dispatch` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let request = self.check_expr(ctx, &args[0], lm_types::REQUEST)?;
+                self.charge_op(ctx, lm_abi::OP_VM_DISPATCH, span)?;
+                HExpr {
+                    ty: UNIT,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_DISPATCH,
+                        args: vec![recv_h, request],
+                    },
+                }
+            }
+            (Type::PolicyTable, _) => {
+                return self
+                    .check_table_edit(ctx, recv_h, name, name_span, args, span)
+                    .map(Some);
+            }
+            (Type::Request, "as_call") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`as_call` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let op_value = self.synth_expr(ctx, &args[0])?;
+                let Type::Op(op, _) = ctx.store.get(op_value.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`as_call` needs an identity-indexed operation value \
+                             such as `sys.io.Print`, found {}",
+                            ctx.store.display(op_value.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                let args_ty = Self::op_args_type(ctx, op);
+                let def = lm_abi::op(op);
+                let reply_ty = Self::abi_type_id(ctx, def.reply);
+                let call_ty = ctx.store.intern(Type::PendingCall(args_ty, reply_ty));
+                let ty = Self::core_inst(ctx, "Option", vec![call_ty]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::AsCall {
+                        request: Box::new(recv_h),
+                        op,
+                    },
+                }
+            }
+            (Type::PendingCall(a, _), "args") => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`args` expects 0 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                HExpr {
+                    ty: a,
+                    mutable: true,
+                    kind: HExprKind::CallArgs {
+                        call: Box::new(recv_h),
+                    },
+                }
+            }
+            (Type::Fault, "code") => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`code` expects 0 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                HExpr {
+                    ty: STRING,
+                    mutable: true,
+                    kind: HExprKind::FaultCodeGet {
+                        fault: Box::new(recv_h),
+                    },
+                }
+            }
+            (recv_ty, _) => {
+                return Err(Diagnostic::new(
+                    "E1026",
+                    format!("the type {} has no method named `{name}`", {
+                        let id = ctx.store.intern(recv_ty);
+                        ctx.store.display(id)
+                    }),
+                    name_span,
+                ));
+            }
+        };
+        Ok(Some(out))
     }
 
     fn synth_binary(
@@ -3058,12 +3739,44 @@ impl<'o> FnChecker<'o> {
                     ));
                 };
                 let Some(family) = ctx.family_of(class) else {
-                    return Err(Diagnostic::new(
-                        "E1041",
-                        "class constructor patterns are not supported in this \
-                         slice; use a binding or `_`",
-                        pat.span,
-                    ));
+                    // An ordinary class constructor pattern: it tests
+                    // the scrutinee class and binds the full field
+                    // layout in declaration order.
+                    let named = ctx.lookup_type(name, &self.env);
+                    if qualifier.is_some() || named != Some(class) {
+                        return Err(Diagnostic::new(
+                            "E1041",
+                            format!(
+                                "a class constructor pattern must name the \
+                                 scrutinee class `{}`",
+                                ctx.classes[class as usize].name
+                            ),
+                            pat.span,
+                        ));
+                    }
+                    let field_tys = ctx.classes[class as usize].field_tys.clone();
+                    if !*has_parens || args.len() != field_tys.len() {
+                        return Err(Diagnostic::new(
+                            "E1041",
+                            format!(
+                                "the class `{name}` has {} field(s), found {} \
+                                 pattern(s)",
+                                field_tys.len(),
+                                args.len()
+                            ),
+                            pat.span,
+                        ));
+                    }
+                    let mut sub = Vec::with_capacity(args.len());
+                    for (arg, field_ty) in args.iter().zip(field_tys.iter()) {
+                        let sub_ty = ctx.store.substitute(*field_ty, &class_args, &[]);
+                        sub.push(self.check_pattern(ctx, arg, sub_ty, scrut_mut, binds)?);
+                    }
+                    return Ok(HPattern::Ctor {
+                        class,
+                        ty: scrut_ty,
+                        args: sub,
+                    });
                 };
                 if let Some(q) = qualifier {
                     let named = ctx.lookup_type(q, &self.env);

@@ -20,10 +20,22 @@ pub fn scan(text: &str) -> Result<Vec<Token>, Diagnostic> {
         bytes: text.as_bytes(),
         pos: 0,
         tokens: Vec::new(),
-        depth: 0,
+        nesting: Vec::new(),
     };
     scanner.run()?;
     Ok(scanner.tokens)
+}
+
+/// One open nesting context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Nest {
+    /// An open `(`, `[`, or `{`. Newlines inside do not end a
+    /// statement.
+    Delim,
+    /// An open statement block: `do`, `if`, `case`, `while`, or
+    /// `loop`, closed by `end`. Newlines inside end statements, so a
+    /// block body parses the same way at any delimiter depth.
+    Block,
 }
 
 struct Scanner<'a> {
@@ -31,8 +43,8 @@ struct Scanner<'a> {
     bytes: &'a [u8],
     pos: usize,
     tokens: Vec<Token>,
-    /// Open delimiter depth. Newlines inside delimiters do not end a statement.
-    depth: u32,
+    /// The open nesting contexts, innermost last.
+    nesting: Vec<Nest>,
 }
 
 impl<'a> Scanner<'a> {
@@ -104,7 +116,7 @@ impl<'a> Scanner<'a> {
 
     /// Push a statement terminator unless the position continues an expression.
     fn push_newline(&mut self, start: usize) {
-        if self.depth > 0 {
+        if self.nesting.last() == Some(&Nest::Delim) {
             return;
         }
         let continues = match self.tokens.last().map(|t| &t.tok) {
@@ -398,11 +410,38 @@ impl<'a> Scanner<'a> {
             "is" => Tok::KwIs,
             "then" => Tok::KwThen,
             "with" => Tok::KwWith,
-            "loop" => Tok::KwReserved("loop"),
+            "loop" => Tok::KwLoop,
             _ => Tok::Ident(word.to_string()),
         };
+        // Track statement blocks, so a block body inside `(`, `[`, or
+        // `{` still ends its statements at newlines.
+        match &tok {
+            Tok::KwIf | Tok::KwCase | Tok::KwWhile | Tok::KwLoop => {
+                self.nesting.push(Nest::Block);
+            }
+            Tok::KwDo => {
+                // `loop do` opens one block, not two.
+                if !matches!(self.tokens.last().map(|t| &t.tok), Some(Tok::KwLoop)) {
+                    self.nesting.push(Nest::Block);
+                }
+            }
+            Tok::KwEnd => {
+                if self.nesting.last() == Some(&Nest::Block) {
+                    self.nesting.pop();
+                }
+            }
+            _ => {}
+        }
         self.push(tok, start);
         Ok(())
+    }
+
+    /// Close one open delimiter. An unbalanced closer keeps the block
+    /// contexts intact; the parser reports the mismatch.
+    fn close_delim(&mut self) {
+        if self.nesting.last() == Some(&Nest::Delim) {
+            self.nesting.pop();
+        }
     }
 
     fn scan_punct(&mut self, start: usize) -> Result<(), Diagnostic> {
@@ -433,27 +472,27 @@ impl<'a> Scanner<'a> {
                 b'/' => Tok::Slash,
                 b'%' => Tok::Percent,
                 b'(' => {
-                    self.depth += 1;
+                    self.nesting.push(Nest::Delim);
                     Tok::LParen
                 }
                 b')' => {
-                    self.depth = self.depth.saturating_sub(1);
+                    self.close_delim();
                     Tok::RParen
                 }
                 b'[' => {
-                    self.depth += 1;
+                    self.nesting.push(Nest::Delim);
                     Tok::LBracket
                 }
                 b']' => {
-                    self.depth = self.depth.saturating_sub(1);
+                    self.close_delim();
                     Tok::RBracket
                 }
                 b'{' => {
-                    self.depth += 1;
+                    self.nesting.push(Nest::Delim);
                     Tok::LBrace
                 }
                 b'}' => {
-                    self.depth = self.depth.saturating_sub(1);
+                    self.close_delim();
                     Tok::RBrace
                 }
                 b',' => Tok::Comma,

@@ -11,6 +11,7 @@
 //! call sites substitute the callee signature through the type
 //! application. The verifier shares no code with the source checker.
 
+use lm_bytecode::corelink::CoreLayout;
 use lm_bytecode::{BcClassKind, BcRow, BcType, Func, Instr, Module};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -21,6 +22,15 @@ const MAX_STATIC_STACK: usize = 4096;
 
 /// The largest portable tuple arity.
 const MAX_TUPLE_ARITY: usize = 16;
+
+/// The largest local slot count of one function. The bound rejects a
+/// forged `local_count` before any allocation is sized from it.
+const MAX_LOCAL_SLOTS: u32 = 65_536;
+
+/// The largest dataflow footprint of one function: block count times
+/// local slots. The bound keeps hostile inputs from demanding an
+/// unbounded state table.
+const MAX_DATAFLOW_CELLS: u64 = 1 << 24;
 
 /// Canonical type-table indices for the primitive types. Every module
 /// must begin its type table with these entries in this order.
@@ -84,6 +94,8 @@ struct Ctx<'m> {
     /// module contains one.
     class_ty: Vec<Option<u32>>,
     uni: RefCell<Universe>,
+    /// The resolved pinned core definitions of this module.
+    core: CoreLayout,
 }
 
 impl<'m> Ctx<'m> {
@@ -198,6 +210,15 @@ impl<'m> Ctx<'m> {
                 let row = self.row_subst(&row, rows);
                 self.intern(BcType::Fn(params, ret, row))
             }
+            BcType::Vm(t) => {
+                let t = self.subst(t, targs, rows);
+                self.intern(BcType::Vm(t))
+            }
+            BcType::PendingCall(a, r) => {
+                let a = self.subst(a, targs, rows);
+                let r = self.subst(r, targs, rows);
+                self.intern(BcType::PendingCall(a, r))
+            }
             _ => ty,
         }
     }
@@ -302,7 +323,8 @@ impl<'m> Ctx<'m> {
         }
     }
 
-    /// Return true when the type is a heap object type.
+    /// Return true when the type is a heap object type. An `Op` value
+    /// is an immediate.
     fn is_heap(&self, idx: u32) -> bool {
         matches!(
             self.ty(idx),
@@ -315,6 +337,12 @@ impl<'m> Ctx<'m> {
                 | BcType::Fn(_, _, _)
                 | BcType::StringBuilder
                 | BcType::ByteBuffer
+                | BcType::Fault
+                | BcType::Request
+                | BcType::PolicyTable
+                | BcType::EmptyVm
+                | BcType::Vm(_)
+                | BcType::PendingCall(_, _)
         )
     }
 
@@ -334,6 +362,11 @@ impl<'m> Ctx<'m> {
                     && self.vars_bounded(ret, limit, elimit)
                     && self.row_vars_bounded(&row, elimit)
             }
+            BcType::Vm(t) => self.vars_bounded(t, limit, elimit),
+            BcType::PendingCall(a, r) => {
+                self.vars_bounded(a, limit, elimit) && self.vars_bounded(r, limit, elimit)
+            }
+            BcType::Op(_, f) => self.vars_bounded(f, limit, elimit),
             _ => true,
         }
     }
@@ -343,6 +376,76 @@ impl<'m> Ctx<'m> {
             BcRow::Var(v) => *v < elimit,
             BcRow::Op(_) => true,
         })
+    }
+
+    /// True when a claimed row covers one exact operation name: the
+    /// row holds the exact name or its group.
+    fn row_has_name(&self, row: &[BcRow], name: &str) -> bool {
+        let group = name.split_once('.').map(|(g, _)| g);
+        row.iter().any(|elem| match elem {
+            BcRow::Op(idx) => {
+                let text = &self.module.strings[*idx as usize];
+                text == name || group.map(|g| text == g).unwrap_or(false)
+            }
+            BcRow::Var(_) => false,
+        })
+    }
+
+    /// Convert one manifest type into a universe type index. The core
+    /// enums must be present when a signature names them.
+    fn abi_ty(&self, t: lm_abi::AbiType) -> Result<u32, String> {
+        match t {
+            lm_abi::AbiType::Unit => Ok(TY_UNIT),
+            lm_abi::AbiType::Int => Ok(TY_INT),
+            lm_abi::AbiType::Str => Ok(TY_STR),
+            lm_abi::AbiType::ResultOptionStrIoError => {
+                let (Some(option), Some(result), Some(io_error)) =
+                    (self.core.option, self.core.result, self.core.io_error)
+                else {
+                    return Err("the module does not carry the pinned core Option, Result, \
+                         and IoError definitions"
+                        .to_string());
+                };
+                let opt_str = self.intern(BcType::Inst(option, vec![TY_STR]));
+                let err = self.intern(BcType::Class(io_error));
+                Ok(self.intern(BcType::Inst(result, vec![opt_str, err])))
+            }
+        }
+    }
+
+    /// The function type of one fixed operation as a universe index.
+    fn fixed_sig_type(&self, op: u32) -> Result<u32, String> {
+        let def = lm_abi::op(op);
+        let mut params = Vec::with_capacity(def.params.len());
+        for p in def.params {
+            params.push(self.abi_ty(*p)?);
+        }
+        let ret = self.abi_ty(def.reply)?;
+        Ok(self.intern(BcType::Fn(params, ret, vec![])))
+    }
+
+    /// The argument-view type of one fixed operation: unit for a
+    /// zero-parameter operation, a tuple otherwise.
+    fn op_args_view(&self, op: u32) -> Result<u32, String> {
+        let def = lm_abi::op(op);
+        if def.params.is_empty() {
+            return Ok(TY_UNIT);
+        }
+        let mut elems = Vec::with_capacity(def.params.len());
+        for p in def.params {
+            elems.push(self.abi_ty(*p)?);
+        }
+        Ok(self.intern(BcType::Tuple(elems)))
+    }
+
+    /// One VM event instance type, for example `RunResult[t]`.
+    fn event_inst(&self, parent: Option<u32>, what: &str, arg: u32) -> Result<u32, String> {
+        let Some(parent) = parent else {
+            return Err(format!(
+                "the module does not carry the pinned core {what} definition"
+            ));
+        };
+        Ok(self.intern(BcType::Inst(parent, vec![arg])))
     }
 }
 
@@ -477,8 +580,31 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
                                 "type {idx} has a row with an invalid string index"
                             )));
                         }
+                        if !lm_abi::row_name_valid(&module.strings[*s as usize]) {
+                            return Err(terr(format!(
+                                "type {idx} has a row that names `{}`, which is \
+                                 not in the operation manifest",
+                                module.strings[*s as usize]
+                            )));
+                        }
                     }
                 }
+            }
+            BcType::Fault | BcType::Request | BcType::PolicyTable | BcType::EmptyVm => {}
+            BcType::Vm(t) => check_ref(*t)?,
+            BcType::PendingCall(a, r) => {
+                check_ref(*a)?;
+                check_ref(*r)?;
+            }
+            BcType::Op(op, f) => {
+                if *op >= lm_abi::OP_COUNT || lm_abi::op(*op).kind != lm_abi::OpKind::Fixed {
+                    return Err(terr(format!(
+                        "type {idx} names an invalid first-class operation slot {op}"
+                    )));
+                }
+                check_ref(*f)?;
+                // The function type must equal the manifest
+                // signature; the check runs after the context exists.
             }
         }
     }
@@ -496,12 +622,26 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
             types: module.types.clone(),
             index,
         }),
+        core: lm_bytecode::corelink::core_layout(module),
     };
     // Row canonicality inside function types.
     for (idx, ty) in module.types.iter().enumerate() {
         if let BcType::Fn(_, _, row) = ty {
             if !ctx.row_canonical(row) {
                 return Err(terr(format!("type {idx} has a non-canonical row")));
+            }
+        }
+    }
+    // First-class operation types must carry the exact manifest
+    // signature.
+    for (idx, ty) in module.types.iter().enumerate() {
+        if let BcType::Op(op, f) = ty {
+            let sig = ctx.fixed_sig_type(*op).map_err(&terr)?;
+            if *f != sig {
+                return Err(terr(format!(
+                    "type {idx} claims a wrong signature for operation {}",
+                    lm_abi::op_name(*op)
+                )));
             }
         }
     }
@@ -520,6 +660,13 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
                     if *s as usize >= module.strings.len() {
                         return Err(terr(format!(
                             "application {aidx} has a row with an invalid string index"
+                        )));
+                    }
+                    if !lm_abi::row_name_valid(&module.strings[*s as usize]) {
+                        return Err(terr(format!(
+                            "application {aidx} has a row that names `{}`, which \
+                             is not in the operation manifest",
+                            module.strings[*s as usize]
                         )));
                     }
                 }
@@ -701,6 +848,16 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
                             "the declared row references an invalid string index",
                         ));
                     }
+                    if !lm_abi::row_name_valid(&module.strings[*s as usize]) {
+                        return Err(err(
+                            fidx as u32,
+                            format!(
+                                "the declared row names `{}`, which is not in the \
+                                 operation manifest",
+                                module.strings[*s as usize]
+                            ),
+                        ));
+                    }
                 }
                 BcRow::Var(v) => {
                     if *v >= func.effect_params {
@@ -717,6 +874,22 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
         }
     }
     Ok(ctx)
+}
+
+/// The expected operand count of one perform instruction. VM control
+/// operations count their receiver.
+fn perform_argc(op: u32) -> u32 {
+    let def = lm_abi::op(op);
+    match def.kind {
+        lm_abi::OpKind::Fixed => def.params.len() as u32,
+        lm_abi::OpKind::VmControl => match op {
+            lm_abi::OP_VM_NEW => 0,
+            lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE | lm_abi::OP_VM_TABLE => 1,
+            lm_abi::OP_VM_DISPATCH => 2,
+            lm_abi::OP_VM_FROM_OBJECT | lm_abi::OP_VM_ANSWER | lm_abi::OP_VM_REJECT => 3,
+            _ => unreachable!("every VmControl slot has an arity"),
+        },
+    }
 }
 
 /// Validate one type application against a callee's generic arity and
@@ -762,6 +935,24 @@ fn check_app(
 
 fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError> {
     let module = ctx.module;
+    // Reject a forged slot count before any allocation is sized from
+    // it. The dataflow pass allocates one state cell per block and
+    // local, so both bounds run first.
+    if func.local_count > MAX_LOCAL_SLOTS {
+        return Err(err(
+            fidx,
+            format!(
+                "the local slot count {} exceeds the portable limit {MAX_LOCAL_SLOTS}",
+                func.local_count
+            ),
+        ));
+    }
+    if (func.blocks.len() as u64) * (func.local_count as u64 + 1) > MAX_DATAFLOW_CELLS {
+        return Err(err(
+            fidx,
+            "the function exceeds the verifier state budget; split it",
+        ));
+    }
     if func.params.len() > func.local_count as usize {
         return Err(err(fidx, "more parameters than local slots"));
     }
@@ -920,6 +1111,44 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                 Instr::Jump(target) | Instr::JumpIfFalse(target) | Instr::JumpIfTrue(target) => {
                     if *target as usize >= func.blocks.len() {
                         return Err(err(fidx, at("jump target is not a block")));
+                    }
+                }
+                Instr::Perform { op, argc } => {
+                    if *op >= lm_abi::OP_COUNT {
+                        return Err(err(fidx, at("perform operation slot out of range")));
+                    }
+                    let want = perform_argc(*op);
+                    if *argc != want {
+                        return Err(err(fidx, at("perform argument count mismatch")));
+                    }
+                }
+                Instr::OpConst(op) | Instr::AsCall(op) => {
+                    if *op >= lm_abi::OP_COUNT || lm_abi::op(*op).kind != lm_abi::OpKind::Fixed {
+                        return Err(err(
+                            fidx,
+                            at("first-class operation slot is out of range or not fixed"),
+                        ));
+                    }
+                }
+                Instr::TableEdit { action, kind, slot } => {
+                    if *action > 3 || *kind > 1 {
+                        return Err(err(fidx, at("invalid table edit encoding")));
+                    }
+                    let bound = if *kind == 0 {
+                        lm_abi::OP_COUNT
+                    } else {
+                        lm_abi::GROUP_COUNT
+                    };
+                    if *slot >= bound {
+                        return Err(err(fidx, at("table edit target out of range")));
+                    }
+                    if *action == 2
+                        && (*kind != 0 || lm_abi::op(*slot).kind != lm_abi::OpKind::Fixed)
+                    {
+                        return Err(err(
+                            fidx,
+                            at("a mock target must be an exact fixed operation"),
+                        ));
                     }
                 }
                 _ => {}
@@ -1349,7 +1578,11 @@ fn step(
                     "type test target {ty} is not an instance type"
                 )));
             };
-            if !(ctx.class_extends(tc, vc) || ctx.class_extends(vc, tc)) {
+            // Sibling enum cases share their family parent, so a test
+            // between them is legal and false at run time. The
+            // exhaustiveness backstop emits such tests on flow-narrowed
+            // values. Classes without a common ancestor stay rejected.
+            if ctx.common_ancestor(vc, tc).is_none() {
                 return Err(fail("type test between unrelated classes".to_string()));
             }
             // Class arguments are invariant, and every legal nominal
@@ -1508,6 +1741,219 @@ fn step(
         }
         Instr::Return => {
             pop_expect(state, func.ret)?;
+        }
+        Instr::Perform { op, .. } => {
+            let op = *op;
+            let name = lm_abi::op_name(op);
+            if !ctx.row_has_name(&func.row, &name) {
+                return Err(fail(format!(
+                    "the perform of `{name}` is not inside the claimed row"
+                )));
+            }
+            let def = lm_abi::op(op);
+            match def.kind {
+                lm_abi::OpKind::Fixed => {
+                    for want in def.params.iter().rev() {
+                        let want = ctx.abi_ty(*want).map_err(&fail)?;
+                        pop_expect(state, want)?;
+                    }
+                    let reply = ctx.abi_ty(def.reply).map_err(&fail)?;
+                    push(state, reply)?;
+                }
+                lm_abi::OpKind::VmControl => {
+                    let pop_vm = |state: &mut State| -> Result<u32, VerifyError> {
+                        let v = pop(state)?;
+                        match ctx.ty(v) {
+                            BcType::Vm(t) => Ok(t),
+                            _ => Err(fail(format!(
+                                "`{name}` needs a loaded Vm receiver, found type {v}"
+                            ))),
+                        }
+                    };
+                    match op {
+                        lm_abi::OP_VM_NEW => {
+                            let empty = ctx.intern(BcType::EmptyVm);
+                            push(state, empty)?;
+                        }
+                        lm_abi::OP_VM_FROM_OBJECT => {
+                            let args_ty = pop(state)?;
+                            let fn_ty = pop(state)?;
+                            let recv = pop(state)?;
+                            if ctx.ty(recv) != BcType::EmptyVm {
+                                return Err(fail(
+                                    "`Vm.FromObject` needs an EmptyVm receiver".to_string(),
+                                ));
+                            }
+                            let BcType::Fn(params, ret, _) = ctx.ty(fn_ty) else {
+                                return Err(fail(
+                                    "`Vm.FromObject` needs a function value".to_string(),
+                                ));
+                            };
+                            let want = if params.is_empty() {
+                                TY_UNIT
+                            } else {
+                                ctx.intern(BcType::Tuple(params))
+                            };
+                            if !ctx.is_subtype(args_ty, want) {
+                                return Err(fail(
+                                    "`Vm.FromObject` arguments do not match the \
+                                     program parameters"
+                                        .to_string(),
+                                ));
+                            }
+                            let vm = ctx.intern(BcType::Vm(ret));
+                            push(state, vm)?;
+                        }
+                        lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE => {
+                            let t = pop_vm(state)?;
+                            let (parent, what) = match op {
+                                lm_abi::OP_VM_RUN => (ctx.core.run_result, "RunResult"),
+                                lm_abi::OP_VM_STEP => (ctx.core.step_event, "StepEvent"),
+                                _ => (ctx.core.drive_event, "DriveEvent"),
+                            };
+                            let event = ctx.event_inst(parent, what, t).map_err(&fail)?;
+                            push(state, event)?;
+                        }
+                        lm_abi::OP_VM_TABLE => {
+                            pop_vm(state)?;
+                            let table = ctx.intern(BcType::PolicyTable);
+                            push(state, table)?;
+                        }
+                        lm_abi::OP_VM_ANSWER => {
+                            let value = pop(state)?;
+                            let call = pop(state)?;
+                            pop_vm(state)?;
+                            let BcType::PendingCall(_, reply) = ctx.ty(call) else {
+                                return Err(fail(
+                                    "`Vm.Answer` needs a PendingCall token".to_string(),
+                                ));
+                            };
+                            if !ctx.is_subtype(value, reply) {
+                                return Err(fail(format!(
+                                    "`Vm.Answer` reply expects type {reply}, found \
+                                     type {value}"
+                                )));
+                            }
+                            push(state, TY_UNIT)?;
+                        }
+                        lm_abi::OP_VM_REJECT => {
+                            let fault = pop(state)?;
+                            let request = pop(state)?;
+                            pop_vm(state)?;
+                            if ctx.ty(fault) != BcType::Fault || ctx.ty(request) != BcType::Request
+                            {
+                                return Err(fail(
+                                    "`Vm.Reject` needs a Request and a Fault".to_string(),
+                                ));
+                            }
+                            push(state, TY_UNIT)?;
+                        }
+                        lm_abi::OP_VM_DISPATCH => {
+                            let request = pop(state)?;
+                            pop_vm(state)?;
+                            if ctx.ty(request) != BcType::Request {
+                                return Err(fail("`Vm.Dispatch` needs a Request".to_string()));
+                            }
+                            push(state, TY_UNIT)?;
+                        }
+                        _ => unreachable!("every VmControl slot has a rule"),
+                    }
+                }
+            }
+        }
+        Instr::PerformValue { argc } => {
+            let argc = *argc as usize;
+            if state.stack.len() < argc + 1 {
+                return Err(fail("perform through a value on a short stack".to_string()));
+            }
+            let callee_ty = state.stack[state.stack.len() - 1 - argc];
+            let BcType::Op(op, fn_ty) = ctx.ty(callee_ty) else {
+                return Err(fail(format!(
+                    "perform target type {callee_ty} is not an operation value"
+                )));
+            };
+            let name = lm_abi::op_name(op);
+            if !ctx.row_has_name(&func.row, &name) {
+                return Err(fail(format!(
+                    "the perform of `{name}` is not inside the claimed row"
+                )));
+            }
+            let BcType::Fn(params, ret, _) = ctx.ty(fn_ty) else {
+                unreachable!("a verified Op type embeds a function type");
+            };
+            if params.len() != argc {
+                return Err(fail("perform argument count mismatch".to_string()));
+            }
+            pop_args(state, &params)?;
+            pop(state)?;
+            push(state, ret)?;
+        }
+        Instr::OpConst(op) => {
+            let sig = ctx.fixed_sig_type(*op).map_err(&fail)?;
+            let ty = ctx.intern(BcType::Op(*op, sig));
+            push(state, ty)?;
+        }
+        Instr::TableEdit { action, kind, slot } => {
+            if *action == 2 {
+                let handler = pop(state)?;
+                let want = ctx.fixed_sig_type(*slot).map_err(&fail)?;
+                if !ctx.is_subtype(handler, want) {
+                    return Err(fail(format!(
+                        "a mock handler must have the exact operation signature \
+                         with an empty row, found type {handler}"
+                    )));
+                }
+            }
+            let table = pop(state)?;
+            if ctx.ty(table) != BcType::PolicyTable {
+                return Err(fail(format!("table edit on non-table type {table}")));
+            }
+            if *action == 0 {
+                // The dependent grant rule: `pass` is charged to the
+                // granter's claimed row.
+                let name = if *kind == 0 {
+                    lm_abi::op_name(*slot)
+                } else {
+                    lm_abi::GROUPS[*slot as usize].to_string()
+                };
+                if !ctx.row_has_name(&func.row, &name) {
+                    return Err(fail(format!(
+                        "the pass of `{name}` is not inside the claimed row"
+                    )));
+                }
+            }
+            push(state, TY_UNIT)?;
+        }
+        Instr::AsCall(op) => {
+            let request = pop(state)?;
+            if ctx.ty(request) != BcType::Request {
+                return Err(fail(format!("as_call on non-request type {request}")));
+            }
+            let view = ctx.op_args_view(*op).map_err(&fail)?;
+            let def = lm_abi::op(*op);
+            let reply = ctx.abi_ty(def.reply).map_err(&fail)?;
+            let call = ctx.intern(BcType::PendingCall(view, reply));
+            let out = ctx
+                .event_inst(ctx.core.option, "Option", call)
+                .map_err(&fail)?;
+            push(state, out)?;
+        }
+        Instr::CallArgs => {
+            let call = pop(state)?;
+            let BcType::PendingCall(view, _) = ctx.ty(call) else {
+                return Err(fail(format!("args view on non-call type {call}")));
+            };
+            push(state, view)?;
+        }
+        Instr::FaultCode => {
+            let fault = pop(state)?;
+            if ctx.ty(fault) != BcType::Fault {
+                return Err(fail(format!("fault code on non-fault type {fault}")));
+            }
+            push(state, TY_STR)?;
+        }
+        Instr::Unreachable => {
+            // A diverging terminator: no stack effect, no successor.
         }
     }
     Ok(())

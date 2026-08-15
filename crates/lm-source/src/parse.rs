@@ -700,6 +700,26 @@ impl Parser {
                     span: while_tok.span.to(end_tok.span),
                 })
             }
+            Tok::KwLoop => {
+                // `loop [do] ... end` is sugar for `while true`.
+                let loop_tok = self.next();
+                if matches!(self.peek(), Tok::KwDo) {
+                    self.pos += 1;
+                }
+                let body = self.block(&[Tok::KwEnd])?;
+                let end_tok = self.expect(Tok::KwEnd, "`end`")?;
+                let span = loop_tok.span.to(end_tok.span);
+                Ok(Stmt {
+                    kind: StmtKind::While {
+                        cond: Expr {
+                            kind: ExprKind::Bool(true),
+                            span: loop_tok.span,
+                        },
+                        body,
+                    },
+                    span,
+                })
+            }
             Tok::Ident(_) if matches!(self.peek_at(1), Tok::Colon) => {
                 let (name, name_span) = self.ident("a name")?;
                 self.pos += 1; // consume `:`
@@ -1051,12 +1071,28 @@ impl Parser {
     }
 
     /// Parse `(arg, ...)` and return the arguments and the span of `)`.
+    /// An argument may carry a label, for example `args: ()`. The
+    /// checker validates where a label is permitted.
     fn call_args(&mut self) -> Result<(Vec<Expr>, Span), Diagnostic> {
         self.expect(Tok::LParen, "`(`")?;
         let mut args = Vec::new();
         if !matches!(self.peek(), Tok::RParen) {
             loop {
-                args.push(self.expr()?);
+                if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Colon) {
+                    let (label, label_span) = self.ident("an argument label")?;
+                    self.pos += 1; // consume `:`
+                    let value = self.expr()?;
+                    let span = label_span.to(value.span);
+                    args.push(Expr {
+                        kind: ExprKind::Labeled {
+                            label,
+                            value: Box::new(value),
+                        },
+                        span,
+                    });
+                } else {
+                    args.push(self.expr()?);
+                }
                 if matches!(self.peek(), Tok::Comma) {
                     self.pos += 1;
                 } else {
@@ -1675,10 +1711,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reserved_keyword() {
-        let err = parse("loop do\nend\n").unwrap_err();
-        assert_eq!(err.code, "E1002");
-        assert!(err.message.contains("`loop`"));
+    fn parses_loop_as_while_true() {
+        let module = parse("loop do\nbreak\nend\n1\n").unwrap();
+        match &module.entry[0].kind {
+            StmtKind::While { cond, .. } => {
+                assert!(matches!(cond.kind, ExprKind::Bool(true)));
+            }
+            other => panic!("expected a while, got {other:?}"),
+        }
+        // The `do` is optional.
+        assert!(parse("loop\nbreak\nend\n1\n").is_ok());
     }
 
     #[test]

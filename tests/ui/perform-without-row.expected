@@ -1,0 +1,2 @@
+error[E1046]: this call needs the effect row `Io.Print`, but the declared row of the enclosing callable is empty
+  --> tests/ui/perform-without-row.lm:2:3

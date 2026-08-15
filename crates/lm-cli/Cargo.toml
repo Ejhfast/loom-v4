@@ -9,6 +9,7 @@ name = "lm"
 path = "src/main.rs"
 
 [dependencies]
+lm-abi = { path = "../lm-abi" }
 lm-source = { path = "../lm-source" }
 lm-types = { path = "../lm-types" }
 lm-hir = { path = "../lm-hir" }
@@ -16,3 +17,4 @@ lm-bytecode = { path = "../lm-bytecode" }
 lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }
 lm-vm = { path = "../lm-vm" }
+lm-host = { path = "../lm-host" }

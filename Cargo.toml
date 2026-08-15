@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lm-abi",
     "crates/lm-source",
     "crates/lm-types",
     "crates/lm-hir",
@@ -9,6 +10,7 @@ members = [
     "crates/lm-value",
     "crates/lm-vm",
     "crates/lm-cli",
+    "crates/lm-host",
     "crates/lm-testkit",
 ]
 

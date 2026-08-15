@@ -121,6 +121,23 @@ impl<'m> ModLowerer<'m> {
                 self.intern_type(BcType::Fn(params, ret, row))
             }
             Type::Var(i) => self.intern_type(BcType::Var(i)),
+            Type::Fault => self.intern_type(BcType::Fault),
+            Type::Request => self.intern_type(BcType::Request),
+            Type::PolicyTable => self.intern_type(BcType::PolicyTable),
+            Type::EmptyVm => self.intern_type(BcType::EmptyVm),
+            Type::Vm(t) => {
+                let t = self.bc_ty(t);
+                self.intern_type(BcType::Vm(t))
+            }
+            Type::PendingCall(a, r) => {
+                let a = self.bc_ty(a);
+                let r = self.bc_ty(r);
+                self.intern_type(BcType::PendingCall(a, r))
+            }
+            Type::Op(op, f) => {
+                let f = self.bc_ty(f);
+                self.intern_type(BcType::Op(op, f))
+            }
         }
     }
 
@@ -547,13 +564,21 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 });
             }
             HExprKind::CallValue { callee, args } => {
+                let is_op = matches!(self.m.store.get(callee.ty), Type::Op(_, _));
                 self.lower_expr(callee);
                 for arg in args {
                     self.lower_expr(arg);
                 }
-                self.emit(Instr::CallValue {
-                    argc: args.len() as u32,
-                });
+                if is_op {
+                    self.m.bc_ty(expr.ty);
+                    self.emit(Instr::PerformValue {
+                        argc: args.len() as u32,
+                    });
+                } else {
+                    self.emit(Instr::CallValue {
+                        argc: args.len() as u32,
+                    });
+                }
             }
             HExprKind::TupleLit(items) => {
                 for item in items {
@@ -685,6 +710,63 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 scrut_slot,
                 arms,
             } => self.lower_case(scrut, *scrut_slot, arms),
+            HExprKind::Perform { op, args } => {
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                // The verifier reconstructs the perform result type
+                // through the module type table, so the entry exists.
+                self.m.bc_ty(expr.ty);
+                self.emit(Instr::Perform {
+                    op: *op,
+                    argc: args.len() as u32,
+                });
+            }
+            HExprKind::OpConst(op) => {
+                self.m.bc_ty(expr.ty);
+                self.emit(Instr::OpConst(*op));
+            }
+            HExprKind::TableEdit {
+                action,
+                kind,
+                slot,
+                table,
+                mock,
+            } => {
+                self.lower_expr(table);
+                if let Some(mock) = mock {
+                    self.lower_expr(mock);
+                }
+                let action = match action {
+                    TableAction::Pass => 0,
+                    TableAction::Block => 1,
+                    TableAction::Mock => 2,
+                    TableAction::Clear => 3,
+                };
+                let kind = match kind {
+                    TargetKind::Exact => 0,
+                    TargetKind::Group => 1,
+                };
+                self.emit(Instr::TableEdit {
+                    action,
+                    kind,
+                    slot: *slot,
+                });
+            }
+            HExprKind::AsCall { request, op } => {
+                self.lower_expr(request);
+                self.m.bc_ty(expr.ty);
+                self.emit(Instr::AsCall(*op));
+            }
+            HExprKind::CallArgs { call } => {
+                self.lower_expr(call);
+                self.m.bc_ty(expr.ty);
+                self.emit(Instr::CallArgs);
+            }
+            HExprKind::FaultCodeGet { fault } => {
+                self.lower_expr(fault);
+                self.emit(Instr::FaultCode);
+            }
         }
     }
 
@@ -767,10 +849,15 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         self.lower_expr(scrut);
         self.emit(Instr::StoreLocal(scrut_slot));
         let join_b = self.new_block();
+        // The runtime backstop behind the static exhaustiveness
+        // proof: the last arm keeps its tests, and a value no arm
+        // accepts reaches an `Unreachable` fault instead of falling
+        // through silently.
+        let unreach_b = self.new_block();
         let last = arms.len() - 1;
         for (aidx, arm) in arms.iter().enumerate() {
             if aidx == last {
-                self.lower_pattern(&arm.pattern, scrut_slot, None);
+                self.lower_pattern(&arm.pattern, scrut_slot, Some(unreach_b));
                 let pushed = self.lower_block_value(&arm.body);
                 if pushed {
                     self.emit(Instr::Jump(join_b));
@@ -785,6 +872,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.switch_to(next_b);
             }
         }
+        self.switch_to(unreach_b);
+        self.emit(Instr::Unreachable);
         self.switch_to(join_b);
     }
 
@@ -976,6 +1065,21 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
                 }
             }
         }
+        HExprKind::Perform { args, .. } => {
+            for a in args {
+                shift_expr_in_place(a, base, max);
+            }
+        }
+        HExprKind::OpConst(_) => {}
+        HExprKind::TableEdit { table, mock, .. } => {
+            shift_expr_in_place(table, base, max);
+            if let Some(mock) = mock {
+                shift_expr_in_place(mock, base, max);
+            }
+        }
+        HExprKind::AsCall { request, .. } => shift_expr_in_place(request, base, max),
+        HExprKind::CallArgs { call } => shift_expr_in_place(call, base, max),
+        HExprKind::FaultCodeGet { fault } => shift_expr_in_place(fault, base, max),
     }
 }
 
@@ -1237,6 +1341,31 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::Jump(_) => (0, 0),
         Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => (1, 0),
         Instr::Return => (1, 0),
+        Instr::Perform { argc, .. } => (*argc as usize, 1),
+        Instr::PerformValue { argc } => (*argc as usize + 1, 1),
+        Instr::OpConst(_) => (0, 1),
+        Instr::TableEdit { action, .. } => {
+            // A mock edit also pops the handler closure.
+            if *action == 2 {
+                (2, 1)
+            } else {
+                (1, 1)
+            }
+        }
+        Instr::AsCall(_) => (1, 1),
+        Instr::CallArgs => (1, 1),
+        Instr::FaultCode => (1, 1),
+        Instr::Unreachable => (0, 0),
+    }
+}
+
+/// The display name of one operation slot, safe for out-of-range
+/// slots in hand-built modules.
+fn op_text(slot: u32) -> String {
+    if slot < lm_abi::OP_COUNT {
+        lm_abi::op_name(slot)
+    } else {
+        format!("op{slot}")
     }
 }
 
@@ -1314,6 +1443,31 @@ fn instr_text(instr: &Instr) -> String {
         Instr::JumpIfFalse(b) => format!("JumpIfFalse -> b{b}"),
         Instr::JumpIfTrue(b) => format!("JumpIfTrue -> b{b}"),
         Instr::Return => "Return".to_string(),
+        Instr::Perform { op, argc } => {
+            format!("Perform {} argc {argc}", op_text(*op))
+        }
+        Instr::PerformValue { argc } => format!("PerformValue argc {argc}"),
+        Instr::OpConst(op) => format!("OpConst {}", op_text(*op)),
+        Instr::TableEdit { action, kind, slot } => {
+            let action_text = match action {
+                0 => "pass",
+                1 => "block",
+                2 => "mock",
+                _ => "clear",
+            };
+            let target = match kind {
+                0 => op_text(*slot),
+                _ => lm_abi::GROUPS
+                    .get(*slot as usize)
+                    .map(|g| g.to_string())
+                    .unwrap_or_else(|| format!("group{slot}")),
+            };
+            format!("TableEdit {action_text} {target}")
+        }
+        Instr::AsCall(op) => format!("AsCall {}", op_text(*op)),
+        Instr::CallArgs => "CallArgs".to_string(),
+        Instr::FaultCode => "FaultCode".to_string(),
+        Instr::Unreachable => "Unreachable".to_string(),
     }
 }
 
@@ -1376,6 +1530,17 @@ fn type_text(module: &Module, idx: u32) -> String {
             out
         }
         BcType::Var(i) => format!("${i}"),
+        BcType::Fault => "Fault".to_string(),
+        BcType::Request => "Request".to_string(),
+        BcType::PolicyTable => "PolicyTable".to_string(),
+        BcType::EmptyVm => "EmptyVm".to_string(),
+        BcType::Vm(t) => format!("Vm[{}]", type_text(module, *t)),
+        BcType::PendingCall(a, r) => format!(
+            "PendingCall[{}, {}]",
+            type_text(module, *a),
+            type_text(module, *r)
+        ),
+        BcType::Op(op, f) => format!("Op[{}, {}]", op_text(*op), type_text(module, *f)),
     }
 }
 

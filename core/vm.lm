@@ -1,0 +1,29 @@
+# Core: virtual machine event enums.
+#
+# The VM control operations reply with these values. `Fault` and
+# `Request` are native holder-local types declared by the ABI.
+
+enum RunResult[T]
+  Done(value: T)
+  Fault(fault: Fault)
+
+  def is_done(self): Bool
+    case self
+    in Done(_)  then true
+    in Fault(_) then false
+    end
+  end
+end
+
+enum StepEvent[T]
+  Ran
+  Waiting
+  Done(value: T)
+  Fault(fault: Fault)
+end
+
+enum DriveEvent[T]
+  Asked(request: Request)
+  Done(value: T)
+  Fault(fault: Fault)
+end

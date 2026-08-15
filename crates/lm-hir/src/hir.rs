@@ -156,6 +156,24 @@ pub enum HInterpPart {
     Expr(HExpr),
 }
 
+/// One policy-table edit action.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TableAction {
+    Pass,
+    Block,
+    Mock,
+    Clear,
+}
+
+/// The kind of one policy target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TargetKind {
+    /// An exact operation slot.
+    Exact,
+    /// A group slot.
+    Group,
+}
+
 /// One resolved pattern.
 #[derive(Clone)]
 pub enum HPattern {
@@ -280,6 +298,36 @@ pub enum HExprKind {
         scrut: Box<HExpr>,
         scrut_slot: u32,
         arms: Vec<HArm>,
+    },
+    /// One `PERFORM` of an exact manifest operation. The receiver of
+    /// a VM control operation is the first argument.
+    Perform {
+        op: u32,
+        args: Vec<HExpr>,
+    },
+    /// A first-class operation value, for example `sys.io.Print`.
+    OpConst(u32),
+    /// A policy-table edit intrinsic on a table handle.
+    TableEdit {
+        action: TableAction,
+        kind: TargetKind,
+        slot: u32,
+        table: Box<HExpr>,
+        /// The handler closure of a `mock` edit.
+        mock: Option<Box<HExpr>>,
+    },
+    /// `request.as_call(op)` with a compile-time operation identity.
+    AsCall {
+        request: Box<HExpr>,
+        op: u32,
+    },
+    /// `call.args()` on a typed pending call.
+    CallArgs {
+        call: Box<HExpr>,
+    },
+    /// `fault.code()` on a fault value.
+    FaultCodeGet {
+        fault: Box<HExpr>,
     },
 }
 

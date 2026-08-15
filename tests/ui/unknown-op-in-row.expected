@@ -1,0 +1,2 @@
+error[E1050]: `Io.Blast` is not an operation or group in the operation manifest
+  --> tests/ui/unknown-op-in-row.lm:1:14

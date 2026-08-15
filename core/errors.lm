@@ -1,0 +1,14 @@
+# Core: portable operation errors.
+#
+# Week 4 ships the one error enum that a shipped operation reply
+# names. Later weeks add the other portable error enums here.
+
+enum IoError
+  Failed(message: String)
+
+  def message(self): String
+    case self
+    in Failed(m) then m
+    end
+  end
+end

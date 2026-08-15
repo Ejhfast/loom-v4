@@ -8,8 +8,10 @@
 pub mod oracle;
 
 use lm_source::SourceFile;
-use lm_vm::{Vm, VmConfig};
+use lm_vm::{RecordingHost, Vm, VmConfig, World};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 /// Compile source text to decoded bytecode. `name` appears in
 /// diagnostics. `Err` holds the fully rendered diagnostic.
@@ -33,6 +35,33 @@ pub fn run_text(name: &str, text: &str, config: VmConfig) -> Result<String, Stri
     let mut vm = Vm::new(&loaded, config);
     let outcome = vm.run();
     Ok(vm.show_outcome(&outcome))
+}
+
+/// Compile and run one program in a world with root grants and the
+/// deterministic recording host. Return the outcome text and the
+/// shared host for inspection.
+pub fn run_world(
+    name: &str,
+    text: &str,
+    allow: &[&str],
+    config: VmConfig,
+) -> Result<(String, Rc<RefCell<RecordingHost>>), String> {
+    let bytes = compile_to_bytes(name, text)?;
+    let loaded = lm_vm::load_bytes(&bytes).map_err(|e| format!("load error: {e}"))?;
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    let mut world = World::new(&loaded, config, Box::new(host.clone()));
+    for grant in allow {
+        world
+            .allow(grant)
+            .map_err(|e| format!("allow error: {e}"))?;
+    }
+    let outcome = world.run_root();
+    Ok((world.show_outcome(&outcome), host))
+}
+
+/// `run_world` with the default limits, returning the outcome text.
+pub fn run_allowed(name: &str, text: &str, allow: &[&str]) -> Result<String, String> {
+    run_world(name, text, allow, VmConfig::default()).map(|(out, _)| out)
 }
 
 /// The repository root, two levels above this crate.

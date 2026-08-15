@@ -2,17 +2,19 @@
 //!
 //! Subcommands:
 //! - `lm check <file>`: parse and type-check one module.
-//! - `lm run [--show-result] <file>`: compile, verify, and run.
+//! - `lm run [--show-result] [--allow LIST] <file>`: compile, verify,
+//!   and run with an explicit root policy.
 //! - `lm disasm <file>`: print the lowered bytecode listing.
 //! - `lm inspect --live <file>`: run, then dump the live machine state.
 
 use lm_source::SourceFile;
-use lm_vm::{Vm, VmConfig};
+use lm_vm::{VmConfig, World};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
   lm check <file>
-  lm run [--show-result] [--fuel N] [--max-frames N] [--heap-bytes N] <file>
+  lm run [--show-result] [--allow Op1,Group2,...] [--rand-seed N]
+         [--fuel N] [--max-frames N] [--heap-bytes N] <file>
   lm disasm <file>
   lm inspect --live [--fuel N] [--max-frames N] [--heap-bytes N] <file>";
 
@@ -45,9 +47,15 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             let module = compile(&source)?;
             let loaded = lm_vm::load(module)
                 .map_err(|e| format!("error: the verifier rejected the module: {e}\n"))?;
-            let mut vm = Vm::new(&loaded, options.config);
-            let outcome = vm.run();
-            let text = vm.show_outcome(&outcome);
+            let host = Box::new(lm_host::CliHost::new(options.rand_seed));
+            let mut world = World::new(&loaded, options.config, host);
+            for grant in &options.allow {
+                world
+                    .allow(grant)
+                    .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
+            }
+            let outcome = world.run_root();
+            let text = world.show_outcome(&outcome);
             if options.show_result {
                 println!("{text}");
             } else if matches!(outcome, lm_vm::Outcome::Fault(_)) {
@@ -77,9 +85,15 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             let module = compile(&source)?;
             let loaded = lm_vm::load(module)
                 .map_err(|e| format!("error: the verifier rejected the module: {e}\n"))?;
-            let mut vm = Vm::new(&loaded, options.config);
-            let outcome = vm.run();
-            print!("{}", vm.dump_live(&outcome));
+            let host = Box::new(lm_host::CliHost::new(options.rand_seed));
+            let mut world = World::new(&loaded, options.config, host);
+            for grant in &options.allow {
+                world
+                    .allow(grant)
+                    .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
+            }
+            let outcome = world.run_root();
+            print!("{}", world.dump_live(&outcome));
             Ok(ExitCode::SUCCESS)
         }
         other => Err(format!("error: unknown command `{other}`\n{USAGE}\n")),
@@ -90,6 +104,8 @@ struct Options {
     file: String,
     show_result: bool,
     live: bool,
+    allow: Vec<String>,
+    rand_seed: u64,
     config: VmConfig,
 }
 
@@ -97,12 +113,21 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut file = None;
     let mut show_result = false;
     let mut live = false;
+    let mut allow = Vec::new();
+    let mut rand_seed = 1;
     let mut config = VmConfig::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--show-result" => show_result = true,
             "--live" => live = true,
+            "--allow" => {
+                let list = iter
+                    .next()
+                    .ok_or_else(|| "error: `--allow` needs a list of grants\n".to_string())?;
+                allow.extend(list.split(',').map(|s| s.trim().to_string()));
+            }
+            "--rand-seed" => rand_seed = flag_value(&mut iter, "--rand-seed")?,
             "--fuel" => config.fuel = flag_value(&mut iter, "--fuel")?,
             "--max-frames" => config.max_frames = flag_value(&mut iter, "--max-frames")?,
             "--heap-bytes" => config.heap_bytes = flag_value(&mut iter, "--heap-bytes")?,
@@ -121,6 +146,8 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         file,
         show_result,
         live,
+        allow,
+        rand_seed,
         config,
     })
 }

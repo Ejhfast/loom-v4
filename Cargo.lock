@@ -3,15 +3,24 @@
 version = 4
 
 [[package]]
+name = "lm-abi"
+version = "0.1.0"
+
+[[package]]
 name = "lm-bytecode"
 version = "0.1.0"
+dependencies = [
+ "lm-abi",
+]
 
 [[package]]
 name = "lm-cli"
 version = "0.1.0"
 dependencies = [
+ "lm-abi",
  "lm-bytecode",
  "lm-hir",
+ "lm-host",
  "lm-source",
  "lm-types",
  "lm-value",
@@ -23,9 +32,18 @@ dependencies = [
 name = "lm-hir"
 version = "0.1.0"
 dependencies = [
+ "lm-abi",
  "lm-bytecode",
  "lm-source",
  "lm-types",
+]
+
+[[package]]
+name = "lm-host"
+version = "0.1.0"
+dependencies = [
+ "lm-abi",
+ "lm-vm",
 ]
 
 [[package]]
@@ -36,6 +54,7 @@ version = "0.1.0"
 name = "lm-testkit"
 version = "0.1.0"
 dependencies = [
+ "lm-abi",
  "lm-bytecode",
  "lm-hir",
  "lm-source",
@@ -48,6 +67,9 @@ dependencies = [
 [[package]]
 name = "lm-types"
 version = "0.1.0"
+dependencies = [
+ "lm-abi",
+]
 
 [[package]]
 name = "lm-value"
@@ -57,6 +79,7 @@ version = "0.1.0"
 name = "lm-verify"
 version = "0.1.0"
 dependencies = [
+ "lm-abi",
  "lm-bytecode",
 ]
 
@@ -64,6 +87,7 @@ dependencies = [
 name = "lm-vm"
 version = "0.1.0"
 dependencies = [
+ "lm-abi",
  "lm-bytecode",
  "lm-value",
  "lm-verify",

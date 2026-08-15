@@ -28,6 +28,10 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/range.lm"),
     "\n",
+    include_str!("../../../core/errors.lm"),
+    "\n",
+    include_str!("../../../core/vm.lm"),
+    "\n",
 );
 
 /// The type names the prelude places into unqualified scope.
@@ -276,6 +280,17 @@ pub(crate) fn resolve_type(
             ))
         }
         ast::TypeExprKind::Apply(name, args) => match name.as_str() {
+            "Vm" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1024",
+                        format!("`Vm` takes 1 type argument, found {}", args.len()),
+                        ty.span,
+                    ));
+                }
+                let result = resolve_type(ctx, env, &args[0])?;
+                Ok(ctx.store.intern(Type::Vm(result)))
+            }
             "List" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
@@ -374,6 +389,11 @@ pub(crate) fn resolve_row(
             row.push(RowElem::Var(pos as u32));
             continue;
         }
+        if lm_abi::row_name_valid(&item.name) {
+            let idx = ctx.store.intern_row_name(&item.name);
+            row.push(RowElem::Op(idx));
+            continue;
+        }
         let starts_upper = item
             .name
             .chars()
@@ -381,9 +401,14 @@ pub(crate) fn resolve_row(
             .map(|c| c.is_ascii_uppercase())
             .unwrap_or(false);
         if item.name.contains('.') || starts_upper {
-            let idx = ctx.store.intern_row_name(&item.name);
-            row.push(RowElem::Op(idx));
-            continue;
+            return Err(Diagnostic::new(
+                "E1050",
+                format!(
+                    "`{}` is not an operation or group in the operation manifest",
+                    item.name
+                ),
+                item.span,
+            ));
         }
         return Err(Diagnostic::new(
             "E1046",
@@ -562,8 +587,8 @@ pub fn check_module_with(
         .last()
         .map(|s| s.span)
         .unwrap_or(Span::new(0, 0));
-    let checker = FnChecker::top_level(RetKind::Entry, TyEnv::default(), vec![]);
-    let (body, entry_ty, _mutable, locals) =
+    let checker = FnChecker::entry_collect(TyEnv::default());
+    let (body, entry_ty, _mutable, locals, entry_row) =
         checker.check_entry(&mut ctx, &module.entry, entry_span)?;
     let entry_ty = if entry_ty == NEVER { UNIT } else { entry_ty };
     ctx.funcs[entry_idx] = Some(HirFunc {
@@ -572,7 +597,7 @@ pub fn check_module_with(
         effect_params: 0,
         params: vec![],
         ret: entry_ty,
-        row: vec![],
+        row: entry_row,
         captures: vec![],
         locals,
         body,

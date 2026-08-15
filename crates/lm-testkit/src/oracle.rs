@@ -437,8 +437,19 @@ impl<'m> Oracle<'m> {
                         return self.run_block(&arm.body, frame, depth, true);
                     }
                 }
-                Err(Stop::Fault("BadCast"))
+                // The same backstop code the VM emits behind a proven
+                // exhaustive `case`.
+                Err(Stop::Fault("UnreachableCode"))
             }
+            HExprKind::Perform { .. }
+            | HExprKind::OpConst(_)
+            | HExprKind::TableEdit { .. }
+            | HExprKind::AsCall { .. }
+            | HExprKind::CallArgs { .. }
+            | HExprKind::FaultCodeGet { .. } => Err(Stop::Limit(
+                "the oracle models the pure subset only; programs with performs \
+                 are outside the oracle",
+            )),
         }
     }
 

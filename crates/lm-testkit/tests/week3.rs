@@ -212,9 +212,19 @@ fn pattern_rules() {
         code_of("case 1\nin true then 1\nin _ then 2\nend\n"),
         "E1041"
     );
-    // Class constructor patterns stay outside this slice.
+    // Week 4: class constructor patterns destructure the scrutinee
+    // class in declaration order.
     assert_eq!(
-        code_of("class C\n  x: Int = 0\nend\ncase C()\nin C(x) then x\nend\n"),
+        runs("class C\n  x: Int = 7\nend\ncase C()\nin C(x) then x\nend\n"),
+        "Done(7)"
+    );
+    // The pattern must name the scrutinee class with full arity.
+    assert_eq!(
+        code_of("class C\n  x: Int = 0\nend\nclass D\nend\ncase C()\nin D() then 1\nend\n"),
+        "E1041"
+    );
+    assert_eq!(
+        code_of("class C\n  x: Int = 0\nend\ncase C()\nin C() then 1\nend\n"),
         "E1041"
     );
     // The qualifier must name the scrutinee enum.
@@ -342,10 +352,14 @@ fn row_rules() {
         code_of("def go() with Io\nend\ndef narrow() with Io.Print\n  go()\nend\n1\n"),
         "E1046"
     );
-    // The entry expression must be pure.
-    assert_eq!(code_of("def go() with Io.Print\nend\ngo()\n"), "E1046");
-    // Closures declare rows; calling charges the closure row.
-    assert_eq!(code_of("f = do || with Io.Print 1 end\nf()\n"), "E1046");
+    // Week 4: the entry collects its row instead of rejecting; the
+    // policy table decides at run time. An unmocked, unpassed
+    // operation faults `PolicyDenied` when performed; here nothing
+    // performs, so the program completes.
+    assert_eq!(runs("def go() with Io.Print\nend\ngo()\n"), "Done(())");
+    // Closures declare rows; calling charges the closure row into
+    // the collected entry row.
+    assert_eq!(runs("f = do || with Io.Print 1 end\nf()\n"), "Done(1)");
     assert_eq!(
         runs(
             "def hold(f: () -> Int with Io.Print): Int\n  1\nend\n\
@@ -380,13 +394,21 @@ fn row_rules() {
     );
     // An unknown effect name is rejected.
     assert_eq!(code_of("def f() with e\nend\n1\n"), "E1046");
-    // `init` rows charge construction.
+    // `init` rows charge construction. A pure function cannot
+    // construct the class; the entry collects the charge.
     assert_eq!(
         code_of(
             "class C\n  x: Int\n  def init(mut self) with Io.Print\n    self.x = 1\n  \
-                 end\nend\nc = C()\nc.x\n"
+                 end\nend\ndef make(): Int\n  C().x\nend\nmake()\n"
         ),
         "E1046"
+    );
+    assert_eq!(
+        runs(
+            "class C\n  x: Int\n  def init(mut self) with Io.Print\n    self.x = 1\n  \
+                 end\nend\nc = C()\nc.x\n"
+        ),
+        "Done(1)"
     );
     // Overrides may narrow but not widen; the widening case is the UI
     // test `row-widening-override.lm`. Narrowing compiles.
@@ -396,9 +418,13 @@ fn row_rules() {
          class B < A\n  def f(self): Int with Io.Print\n    2\n  end\nend\n1\n",
     )
     .is_ok());
-    // Calling the effectful method from the pure entry is rejected.
+    // Calling the effectful method from a pure function is rejected;
+    // the entry collects the charge instead.
     assert_eq!(
-        code_of("class A\n  def f(self): Int with Io.Print\n    1\n  end\nend\nA().f()\n"),
+        code_of(
+            "class A\n  def f(self): Int with Io.Print\n    1\n  end\nend\n\
+             def pure(): Int\n  A().f()\nend\npure()\n"
+        ),
         "E1046"
     );
 }
