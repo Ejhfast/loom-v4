@@ -955,11 +955,13 @@ impl<'m> World<'m> {
             return false;
         }
         if self.machines[target as usize].state != MachineState::Asked {
+            // The machine has no pending request, so the caller's
+            // token is consumed or stale (specification 12.3).
             self.fault_caller(
                 vm,
                 op,
-                FaultCode::InvalidVmState,
-                "the machine is not asked",
+                FaultCode::InvalidRequestToken,
+                "the request token is consumed or stale",
             );
             return false;
         }

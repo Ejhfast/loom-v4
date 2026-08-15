@@ -155,6 +155,24 @@ future escape fails with an allocation error instead of host memory
 exhaustion. The guides record the rule: never size an allocation from
 an untrusted length field before a bounds check.
 
+## Review fixes
+
+An independent review confirmed one defect and one documentation gap.
+
+- A continuation method with a consumed token faulted the caller
+  with `InvalidVmState`, because the asked-state check ran before
+  the token logic. A machine without a pending request means the
+  token is consumed or stale, so the fault is now
+  `InvalidRequestToken` (specification 12.3). Run and step on an
+  asked machine, and a second load of an aliased `EmptyVm`, stay
+  `InvalidVmState`.
+- The stable code `BadOperationReply` is not produced in this
+  slice, and that gap was undocumented. The checker and the
+  verifier tie every `answer` value to the typed `PendingCall`
+  reply type, and the runtime binds the token to the live pending
+  operation, so a wrong-typed reply is unreachable. The code
+  arrives when a dynamic reply path exists.
+
 ## Simplifications inside the slice
 
 - `Rand.Bytes` is cut: its reply needs the `Bytes` type, which is not

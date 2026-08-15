@@ -422,8 +422,9 @@ fn asked_rejects_run_and_step_and_recovers_tokens_through_drive() {
 
 #[test]
 fn continuation_methods_need_an_asked_machine() {
-    // dispatch with a consumed token: after the answer the machine is
-    // ready, so the second continuation faults InvalidVmState.
+    // dispatch with a consumed token: after the answer the machine
+    // has no pending request, so the second continuation faults
+    // InvalidRequestToken (specification 12.3).
     let source = "def go(): Int with Vm\n  \
         vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q)\n    \
@@ -431,7 +432,7 @@ fn continuation_methods_need_an_asked_machine() {
         vm.answer(call, 7)\n      vm.dispatch(q)\n      1\n    \
         in None then 2\n    end\n  \
         in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\ngo()\n";
-    assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidVmState)");
+    assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidRequestToken)");
 }
 
 #[test]
