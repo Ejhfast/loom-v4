@@ -872,13 +872,13 @@ fn a_stale_pin_fails_to_link() {
     // Rebuild the units from the cache files and move one pin.
     let mut link_env = LinkEnv::new();
     let mut units = Vec::new();
+    let mut seen = Vec::new();
     for (path, file) in [
         ("mathlib.matrix", "mathlib/src/matrix.lm"),
         ("app.greeting", "app/src/greeting.lm"),
         ("app.main", "app/src/main.lm"),
     ] {
-        let unit = compile_one(&tree, path, file);
-        units.push(unit);
+        units.push(compile_one(&tree, path, file, &mut seen));
     }
     // The greeting module pins the interface of `mathlib.matrix`.
     let mut stale = units[1].clone();
@@ -906,21 +906,18 @@ fn a_stale_pin_fails_to_link() {
 
 /// Compile one module of a temporary workspace with the interfaces
 /// the earlier modules produced.
-fn compile_one(tree: &TempTree, path: &str, file: &str) -> lm_compiler::CompiledModule {
+fn compile_one(
+    tree: &TempTree,
+    path: &str,
+    file: &str,
+    seen: &mut Vec<lm_bytecode::interface::Interface>,
+) -> lm_compiler::CompiledModule {
     use lm_compiler::{compile_module, CompileEnv};
     use lm_source::SourceFile;
-    use std::sync::Mutex;
-    // The interfaces of the modules this helper already produced.
-    static SEEN: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
     let text = std::fs::read_to_string(tree.path(file)).expect("reads");
     let mut env = CompileEnv::new();
-    {
-        let seen = SEEN.lock().expect("the lock holds");
-        for (_, bytes) in seen.iter() {
-            let interface =
-                lm_bytecode::interface::decode_interface(bytes).expect("the interface decodes");
-            env.bind_interface(interface).expect("binds");
-        }
+    for interface in seen.iter() {
+        env.bind_interface(interface.clone()).expect("binds");
     }
     env.bind_root("mathlib", "mathlib").expect("binds");
     env.bind_root("greeting", "app.greeting").expect("binds");
@@ -928,9 +925,7 @@ fn compile_one(tree: &TempTree, path: &str, file: &str) -> lm_compiler::Compiled
     let source = SourceFile::new(file, text);
     let compiled = compile_module(path, &source, &env.freeze(), path.ends_with(".main"))
         .expect("the module compiles");
-    SEEN.lock()
-        .expect("the lock holds")
-        .push((path.to_string(), compiled.interface_bytes.clone()));
+    seen.push(compiled.interface.clone());
     compiled
 }
 
