@@ -75,6 +75,10 @@ pub struct HirModule {
     pub exports: Vec<HirExport>,
     /// The import slots, in slot order.
     pub imports: Vec<HirImport>,
+    /// The named function bindings of the declared functions, the
+    /// methods, and the initializers. Lowering appends one binding per
+    /// generated constructor.
+    pub bindings: Vec<lm_bytecode::FuncBinding>,
 }
 
 /// How instances of one class are constructed.

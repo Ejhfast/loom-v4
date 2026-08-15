@@ -334,6 +334,7 @@ fn regenerate_fuzz_corpus() {
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
+            bindings: vec![],
         },
     );
     // Week-3 finding 2: `CastType` between two instantiations of one
@@ -382,6 +383,7 @@ fn regenerate_fuzz_corpus() {
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
+            bindings: vec![],
         },
     );
     // Week-4 finding class: a perform outside the claimed row, and a
@@ -432,6 +434,7 @@ fn regenerate_fuzz_corpus() {
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
+            bindings: vec![],
         };
         let mut bytes = lm_bytecode::encode(&module);
         // The semantic region starts after the 30-byte header. Its

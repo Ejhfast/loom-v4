@@ -483,6 +483,7 @@ mod tests {
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
+            bindings: vec![],
         })
         .unwrap()
     }
@@ -562,6 +563,7 @@ mod tests {
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
+            bindings: vec![],
         };
         assert!(load(module).is_err());
     }
@@ -606,6 +608,7 @@ mod tests {
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
+            bindings: vec![],
         };
         let loaded = load(module).unwrap();
         let mut vm = Vm::new(&loaded, VmConfig::default());

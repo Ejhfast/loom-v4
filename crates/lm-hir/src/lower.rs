@@ -242,6 +242,21 @@ pub fn lower_module(hir: &HirModule) -> Module {
             },
         })
         .collect();
+    // The generated constructor of a class takes a binding derived
+    // from the qualified key of that class. The class structural hash
+    // covers no constructor, because the constructor is a function
+    // value of its own. The binding is what makes two providers of one
+    // class key with two constructors a rejection instead of a merge.
+    let mut bindings = hir.bindings.clone();
+    for (cidx, class) in hir.classes.iter().enumerate() {
+        if class.imported {
+            continue;
+        }
+        bindings.push(lm_bytecode::FuncBinding {
+            key: lm_bytecode::ctor_binding_key(&class.key),
+            func: new_base + cidx as u32,
+        });
+    }
     Module {
         strings: m.strings,
         types: m.types,
@@ -253,6 +268,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
         funcs,
         entry: hir.entry as u32,
         exports,
+        bindings,
     }
 }
 
@@ -1735,6 +1751,12 @@ pub fn dump_cfg(module: &Module) -> String {
             row,
             generics
         );
+        // Every name that points at this function value. Two modules
+        // with equal bodies share one code object and keep two names,
+        // so the listing must print them all.
+        for binding in module.bindings.iter().filter(|b| b.func == fidx as u32) {
+            let _ = writeln!(out, "  binding {}", binding.key);
+        }
         if !func.captures.is_empty() {
             let caps: Vec<String> = func
                 .captures

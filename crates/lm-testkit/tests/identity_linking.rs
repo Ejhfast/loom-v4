@@ -251,6 +251,308 @@ fn a_method_body_edit_keeps_the_key_and_moves_the_hash() {
 }
 
 // ---------------------------------------------------------------
+// Section 5: function bindings and function code.
+// ---------------------------------------------------------------
+
+/// The binding key of one function value in a compiled module.
+fn binding_of(module: &Module, key: &str) -> Option<u32> {
+    module
+        .bindings
+        .iter()
+        .find(|b| b.key == key)
+        .map(|b| b.func)
+}
+
+/// Give one class of a compiled module the qualified key of another
+/// provider, as a stale build-cache entry does. The rewrite keeps the
+/// module self-consistent: the declaration name and every binding of
+/// that class move with the key, because a key is
+/// `<module path>.<name>`.
+fn rekey_class(unit: &mut lm_compiler::CompiledModule, from: &str, to: &str, name: &str) {
+    for class in &mut unit.module.classes {
+        if class.key == from {
+            class.key = to.to_string();
+            class.name = name.to_string();
+        }
+    }
+    let prefix = format!("{from}.");
+    for binding in &mut unit.module.bindings {
+        if let Some(rest) = binding.key.strip_prefix(&prefix) {
+            binding.key = format!("{to}.{rest}");
+        }
+    }
+}
+
+/// Two providers of one class key. The second module declares a class
+/// with the same qualified key and a different constructor.
+fn two_providers_of_one_class_key(first: &str, second: &str) -> Vec<lm_compiler::CompiledModule> {
+    let shapes = compile_one("app.shapes", first, &[], false);
+    let mut main = compile_one(
+        "app.main",
+        second,
+        std::slice::from_ref(&shapes.interface),
+        true,
+    );
+    rekey_class(&mut main, "app.main.Spot", "app.shapes.Dot", "Dot");
+    vec![shapes, main]
+}
+
+/// The measured gap: a class structural hash covers no constructor.
+///
+/// A field default is inlined into the generated `<new>` function, and
+/// an `init` body is reached through it. Neither enters `class_bytes`,
+/// so two classes that differ only there share one class structural
+/// hash. The constructor binding is what separates them.
+#[test]
+fn a_class_structural_hash_covers_no_constructor() {
+    let defaults = "class Zero\n  x: Int = 0\nend\nclass Seven\n  x: Int = 7\nend\n\
+                    Zero().x + Seven().x\n";
+    let (module, identity) = identity_of(defaults);
+    assert_eq!(
+        class_hash(&module, &identity, "Zero"),
+        class_hash(&module, &identity, "Seven"),
+        "a field default must stay outside the class structural hash"
+    );
+    assert_ne!(
+        func_hash(&module, &identity, "<new Zero>"),
+        func_hash(&module, &identity, "<new Seven>"),
+        "a field default must reach the constructor structural hash"
+    );
+    let inits = "class A\n  x: Int = 0\n\n  def init(mut self, n: Int)\n    self.x = n\n  end\n\
+                 end\nclass B\n  x: Int = 0\n\n  def init(mut self, n: Int)\n    self.x = n + 1\n \
+                 end\nend\nA(1).x + B(1).x\n";
+    let (module, identity) = identity_of(inits);
+    assert_eq!(
+        class_hash(&module, &identity, "A"),
+        class_hash(&module, &identity, "B"),
+        "an `init` body must stay outside the class structural hash"
+    );
+    assert_ne!(
+        func_hash(&module, &identity, "<new A>"),
+        func_hash(&module, &identity, "<new B>"),
+        "an `init` body must reach the constructor structural hash"
+    );
+}
+
+/// Row 2 of the function binding table: two providers of one class key
+/// whose field defaults differ reject.
+///
+/// The two classes share one structural hash, so the class table
+/// merges them. Their constructors carry one binding key and two
+/// structural hashes, and the binding table rejects.
+#[test]
+fn two_providers_of_one_key_with_two_field_defaults_reject() {
+    let units = two_providers_of_one_class_key(
+        "class Dot\n  x: Int = 0\nend\ndef make(): Dot\n  Dot()\nend\n",
+        "use shapes\nclass Spot\n  x: Int = 7\nend\n\
+         d = shapes.make()\ns = Spot()\nd.x + s.x\n",
+    );
+    // The class table alone cannot separate the two providers.
+    let hash_of = |unit: &lm_compiler::CompiledModule| {
+        let id = module_identity(&unit.module).expect("hashes");
+        let idx = unit
+            .module
+            .classes
+            .iter()
+            .position(|c| c.key == "app.shapes.Dot")
+            .expect("the class exists");
+        id.class_hashes[idx]
+    };
+    assert_eq!(
+        hash_of(&units[0]),
+        hash_of(&units[1]),
+        "the probe needs one class key with one structural hash"
+    );
+    let error = link_units(&units).expect_err("two constructors of one key must reject");
+    assert!(error.contains("app.shapes.Dot.<new>"), "{error}");
+    assert!(error.contains("two implementations"), "{error}");
+    assert!(error.contains("app.shapes"), "{error}");
+    assert!(error.contains("app.main"), "{error}");
+    assert!(error.contains("rebuild"), "{error}");
+}
+
+/// Row 2 again, with two `init` bodies. An `init` is not a method, so
+/// it enters no class structural hash either.
+#[test]
+fn two_providers_of_one_key_with_two_init_bodies_reject() {
+    let units = two_providers_of_one_class_key(
+        "class Dot\n  x: Int = 0\n\n  def init(mut self, n: Int)\n    self.x = n\n  end\nend\n\
+         def make(): Dot\n  Dot(1)\nend\n",
+        "use shapes\nclass Spot\n  x: Int = 0\n\n  def init(mut self, n: Int)\n    \
+         self.x = n + 1\n  end\nend\nd = shapes.make()\ns = Spot(1)\nd.x + s.x\n",
+    );
+    let hash_of = |unit: &lm_compiler::CompiledModule| {
+        let id = module_identity(&unit.module).expect("hashes");
+        let idx = unit
+            .module
+            .classes
+            .iter()
+            .position(|c| c.key == "app.shapes.Dot")
+            .expect("the class exists");
+        id.class_hashes[idx]
+    };
+    assert_eq!(
+        hash_of(&units[0]),
+        hash_of(&units[1]),
+        "the probe needs one class key with one structural hash"
+    );
+    let error = link_units(&units).expect_err("two initializers of one key must reject");
+    assert!(error.contains("app.shapes.Dot."), "{error}");
+    assert!(error.contains("two implementations"), "{error}");
+    assert!(error.contains("rebuild"), "{error}");
+}
+
+/// A constructor binding is derived from the class key, so the linker
+/// checks the derivation. A module that renames a class and keeps the
+/// old constructor binding is not self-consistent and rejects.
+#[test]
+fn a_class_without_its_constructor_binding_rejects() {
+    let mut units = two_module_program();
+    let spot = units[1]
+        .module
+        .classes
+        .iter()
+        .position(|c| c.key == "app.main.Spot")
+        .expect("the class exists");
+    units[1].module.classes[spot].key = "app.shapes.Dot".to_string();
+    let error = link_units(&units).expect_err("an unbound constructor must reject");
+    assert!(error.contains("app.shapes.Dot.<new>"), "{error}");
+    assert!(error.contains("rebuild"), "{error}");
+}
+
+/// Row 3 of the function binding table: two names with one structural
+/// hash keep both bindings and share one code object.
+///
+/// This is the provenance rule. Content merging alone would drop the
+/// second name, and the listing would report the first name where the
+/// source wrote the second.
+#[test]
+fn two_equal_bodies_share_one_code_object_and_keep_two_bindings() {
+    let shapes = compile_one(
+        "app.shapes",
+        "def bump(n: Int): Int\n  n + 1\nend\n",
+        &[],
+        false,
+    );
+    let main = compile_one(
+        "app.main",
+        "use shapes\ndef increment(n: Int): Int\n  n + 1\nend\n\
+         shapes.bump(1) + increment(2)\n",
+        std::slice::from_ref(&shapes.interface),
+        true,
+    );
+    let program = link_units(&[shapes, main]).expect("links");
+    let first = binding_of(&program.module, "app.shapes.bump").expect("the first name survives");
+    let second =
+        binding_of(&program.module, "app.main.increment").expect("the second name survives");
+    assert_eq!(
+        first, second,
+        "two equal bodies must share one function value"
+    );
+    let listing = lm_hir::dump_cfg(&program.module);
+    assert!(listing.contains("binding app.shapes.bump"), "{listing}");
+    assert!(listing.contains("binding app.main.increment"), "{listing}");
+}
+
+/// Row 1 of the function binding table: one binding key with one
+/// structural hash is one binding. Every module embeds the core, so
+/// every core binding arrives once per module and survives once.
+#[test]
+fn every_binding_key_appears_once_in_the_merged_program() {
+    let program = link_units(&two_module_program()).expect("links");
+    let mut keys: Vec<&str> = program
+        .module
+        .bindings
+        .iter()
+        .map(|b| b.key.as_str())
+        .collect();
+    let total = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(total, keys.len(), "the merged program holds one key twice");
+    assert!(
+        keys.contains(&"core.Option.<new>"),
+        "the core lost a binding"
+    );
+    assert!(
+        keys.contains(&"core.Option.is_some"),
+        "the core lost a method"
+    );
+    assert!(
+        keys.contains(&"app.shapes.make"),
+        "a user binding is missing"
+    );
+}
+
+/// Every function a module names carries one binding. The set with no
+/// binding is exactly the entry and the closure bodies, and no source
+/// name reaches either. A generated definition that escapes both the
+/// class structural hash and the binding table would appear here.
+#[test]
+fn every_named_function_carries_one_binding() {
+    let source = "class Counter\n  value: Int = 1\n\n  def init(mut self, n: Int)\n    \
+                  self.value = n\n  end\n\n  def add(mut self, n: Int): Int\n    \
+                  self.value = self.value + n\n    self.value\n  end\nend\n\
+                  enum Shape\n  Dot\n  Line(n: Int)\nend\n\
+                  def twice(n: Int): Int\n  n * 2\nend\n\
+                  add_one = do |x: Int|: Int x + 1 end\n\
+                  c = Counter(2)\ntwice(c.add(1)) + add_one(1)\n";
+    let module = compile_text("t.lm", source).expect("compiles");
+    let bound: Vec<u32> = module.bindings.iter().map(|b| b.func).collect();
+    for (idx, func) in module.funcs.iter().enumerate() {
+        if bound.contains(&(idx as u32)) {
+            continue;
+        }
+        assert!(
+            func.name == "<entry>" || func.name.starts_with("<closure "),
+            "the function `{}` carries no binding",
+            func.name
+        );
+    }
+    let keys: Vec<&str> = module.bindings.iter().map(|b| b.key.as_str()).collect();
+    for key in [
+        "twice",
+        "Counter.add",
+        "Counter.init",
+        "Counter.<new>",
+        "Shape.<new>",
+        "Shape.Dot.<new>",
+        "Shape.Line.<new>",
+    ] {
+        assert!(keys.contains(&key), "the binding `{key}` is missing");
+    }
+}
+
+/// A binding key is a name, so it enters no structural hash. It enters
+/// the module semantic hash, because a module that binds other names
+/// is another module.
+#[test]
+fn a_binding_key_never_enters_a_structural_hash() {
+    let (mut module, identity) = identity_of("def f(n: Int): Int\n  n + 1\nend\nf(1)\n");
+    for binding in &mut module.bindings {
+        binding.key = format!("z{}", binding.key);
+    }
+    let renamed = module_identity(&module).expect("hashes");
+    assert_eq!(
+        identity.func_hashes, renamed.func_hashes,
+        "a binding key moved a function structural hash"
+    );
+    assert_eq!(
+        identity.class_hashes, renamed.class_hashes,
+        "a binding key moved a class structural hash"
+    );
+    assert_ne!(
+        identity.semantic_hash, renamed.semantic_hash,
+        "a module that binds other names must hash differently"
+    );
+    assert_eq!(
+        lm_vm::verified_key(&module),
+        lm_vm::verified_key(&identity_of("def f(n: Int): Int\n  n + 1\nend\nf(1)\n").0),
+        "a binding key must not reach the verifier"
+    );
+}
+
+// ---------------------------------------------------------------
 // Sections 6 and 7: order-invariant labeling and symmetric members.
 // ---------------------------------------------------------------
 
@@ -382,6 +684,7 @@ fn chain_cycle(n: usize) -> Module {
         funcs,
         entry: 0,
         exports: vec![],
+        bindings: vec![],
     }
 }
 

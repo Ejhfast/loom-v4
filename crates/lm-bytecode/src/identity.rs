@@ -23,7 +23,10 @@
 //!
 //! A declaration name never enters its own structural hash. The
 //! qualified key of a class is its nominal identity, and it stays
-//! beside the structural hash instead of inside it.
+//! beside the structural hash instead of inside it. A named function
+//! binding is a name too: it maps a qualified name to a function
+//! value, it stays in the export section, and it enters the module
+//! semantic hash only.
 //!
 //! Mutually recursive definitions form strongly connected components
 //! found with an iterative Tarjan walk (pinned traversal: roots in
@@ -63,10 +66,10 @@ use std::collections::HashMap;
 /// the lowering ABI. The operation manifest is covered separately by
 /// `lm_abi::manifest_digest()`, which every definition hash includes.
 ///
-/// Version 3 takes the declaration name out of every structural hash,
-/// names a referenced class by qualified key, and labels the members
-/// of a component by structural refinement.
-pub const COMPILER_ABI_VERSION: u32 = 3;
+/// Version 4 adds the named function bindings to the module semantic
+/// hash. A binding key stays outside every structural hash: a name
+/// points at an identity and is never a part of it.
+pub const COMPILER_ABI_VERSION: u32 = 4;
 
 /// The refinement work budget of one component.
 ///
@@ -365,6 +368,16 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             )));
         }
         claimed[at] = true;
+    }
+    // A named function binding points at a function value. The decoder
+    // checks the same bound; a hand-built module reaches identity
+    // without a decoder.
+    for (idx, binding) in module.bindings.iter().enumerate() {
+        if binding.func as usize >= s.funcs {
+            return Err(fail(format!(
+                "binding {idx} names a function index out of range"
+            )));
+        }
     }
     Ok(())
 }
@@ -1814,8 +1827,8 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         .collect();
     // The module semantic hash: format version, compiler ABI, the
     // operation manifest, the explicit empty import set, the export
-    // table (name to definition hash, name-sorted), and the entry
-    // definition hash.
+    // table (name to definition hash, name-sorted), the named function
+    // bindings, and the entry definition hash.
     let mut out = Vec::new();
     out.extend_from_slice(TAG_MODULE);
     out.extend_from_slice(&VERSION.to_le_bytes());
@@ -1851,6 +1864,21 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
     for (kind, name, hash) in &exports {
         out.push(*kind);
         write_str(&mut out, name);
+        out.extend_from_slice(hash);
+    }
+    // The named function bindings, sorted by key and then by the
+    // structural hash of the function each key names. A binding is a
+    // name, so it belongs to the module hash and to no definition
+    // hash.
+    let mut bindings: Vec<(&str, [u8; 32])> = module
+        .bindings
+        .iter()
+        .map(|b| (b.key.as_str(), func_hashes[b.func as usize]))
+        .collect();
+    bindings.sort();
+    out.extend_from_slice(&(bindings.len() as u32).to_le_bytes());
+    for (key, hash) in &bindings {
+        write_str(&mut out, key);
         out.extend_from_slice(hash);
     }
     out.extend_from_slice(&func_hashes[module.entry as usize]);

@@ -1422,6 +1422,27 @@ impl<'m> World<'m> {
         }
     }
 
+    /// The report label of one function value: every name that binds
+    /// it, or the code label when no name binds it.
+    ///
+    /// Two modules with equal bodies share one function value, so a
+    /// single label would hide one of the two names. A closure body
+    /// and the entry take no binding and keep their code label.
+    fn func_label(&self, func: u32) -> String {
+        let keys: Vec<&str> = self
+            .module
+            .bindings
+            .iter()
+            .filter(|b| b.func == func)
+            .map(|b| b.key.as_str())
+            .collect();
+        if keys.is_empty() {
+            self.module.funcs[func as usize].name.clone()
+        } else {
+            keys.join(", ")
+        }
+    }
+
     /// Render the live root-machine state: outcome, heap statistics,
     /// frame count, and every live object in slot order.
     pub fn dump_live(&self, outcome: &Outcome) -> String {
@@ -1437,11 +1458,12 @@ impl<'m> World<'m> {
         );
         let _ = writeln!(out, "frames: {} active", m.frames.len());
         for frame in &m.frames {
-            let func = &self.module.funcs[frame.func as usize];
             let _ = writeln!(
                 out,
                 "  frame {} block {} ip {}",
-                func.name, frame.block, frame.ip
+                self.func_label(frame.func),
+                frame.block,
+                frame.ip
             );
         }
         let _ = writeln!(out, "objects:");
@@ -1514,6 +1536,7 @@ mod tests {
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
+            bindings: vec![],
         })
         .expect("the trivial module verifies")
     }

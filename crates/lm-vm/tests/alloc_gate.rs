@@ -75,6 +75,7 @@ fn loop_module() -> Module {
         core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
         entry: 0,
         exports: vec![],
+        bindings: vec![],
     }
 }
 

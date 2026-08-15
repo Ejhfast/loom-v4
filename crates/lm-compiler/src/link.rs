@@ -10,13 +10,16 @@
 //! - **Slot resolution.** An import slot names a providing module and
 //!   an export. The linker finds that export and rejects a provider
 //!   whose interface hash differs from the pinned one.
-//! - **Definition sharing.** The linker compares two classes on their
+//! - **Class merging.** The linker compares two classes on their
 //!   qualified key and their structural hash, and it implements all
-//!   four rows of the table in specification 3.6. Two functions with
-//!   one structural hash are one function, because a function carries
-//!   no qualified key. This is how the embedded core copies of every
-//!   module become one core: a core value that crosses a module
-//!   boundary keeps its class.
+//!   four rows of the class table in specification 3.6. This is how
+//!   the embedded core copies of every module become one core: a core
+//!   value that crosses a module boundary keeps its class.
+//! - **Function code sharing and binding resolution.** Two functions
+//!   with one structural hash are one function value. A named binding
+//!   maps a qualified name to a function value, and the linker keeps
+//!   every binding. One binding key with two structural hashes is a
+//!   rejection: two providers of one name never coexist in silence.
 //! - **Relocation.** Every module-global index is renumbered into the
 //!   merged tables. Strings, types, selectors, and applications
 //!   intern by content, so the merged tables stay canonical.
@@ -145,9 +148,17 @@ struct Merged {
     /// module that first provided it. A second version of one key is
     /// a rejection, and the message names both providers.
     class_version: HashMap<String, ([u8; 32], String)>,
-    /// Structural hash to merged function index. A function carries no
-    /// qualified key, so content alone decides.
+    /// Structural hash to merged function index. A function value is
+    /// identified by its structural hash, so content alone decides
+    /// which code objects merge.
     func_by_hash: HashMap<[u8; 32], u32>,
+    /// The named function bindings of the merged program, in link
+    /// order. Several bindings may name one function value.
+    bindings: Vec<lm_bytecode::FuncBinding>,
+    /// The one structural hash every binding key carries, and the
+    /// module that first provided it. A second version of one key is a
+    /// rejection, and the message names both providers.
+    binding_version: HashMap<String, ([u8; 32], String)>,
     /// (module path, export name) to the merged class index.
     class_exports: HashMap<(String, String), u32>,
     /// (module path, export name) to the merged function index.
@@ -175,6 +186,8 @@ impl Default for Merged {
             class_by_def: HashMap::new(),
             class_version: HashMap::new(),
             func_by_hash: HashMap::new(),
+            bindings: Vec::new(),
+            binding_version: HashMap::new(),
             class_exports: HashMap::new(),
             func_exports: HashMap::new(),
             ctor_exports: HashMap::new(),
@@ -267,6 +280,7 @@ pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError>
         funcs: merged.funcs,
         entry,
         exports: Vec::new(),
+        bindings: merged.bindings,
     };
     // The merged program meets the whole verifier before it runs.
     lm_verify::verify_module(&module)
@@ -336,6 +350,7 @@ fn relocate(
     identity: &ModuleIdentity,
     path: &str,
 ) -> Result<Reloc, LinkError> {
+    check_ctor_bindings(module, path)?;
     let strings: Vec<u32> = module.strings.iter().map(|s| merged.string(s)).collect();
     let selectors: Vec<u32> = module
         .selectors
@@ -548,7 +563,96 @@ fn relocate(
             )));
         }
     }
+    merge_bindings(merged, module, identity, path, &reloc)?;
     Ok(reloc)
+}
+
+/// Prove that every class a module defines declares its constructor
+/// binding under the qualified key of that class.
+///
+/// The rule ties the two export-section tables together. A module that
+/// names a class one way and its constructor another way is not
+/// self-consistent, and the constructor merge rule would then read no
+/// class key at all. The compiler derives the binding from the key, so
+/// every module it writes passes.
+fn check_ctor_bindings(module: &Module, path: &str) -> Result<(), LinkError> {
+    let extern_classes = module.extern_classes();
+    let mut keys: Vec<&str> = module.bindings.iter().map(|b| b.key.as_str()).collect();
+    keys.sort_unstable();
+    for (idx, class) in module.classes.iter().enumerate() {
+        if extern_classes[idx] {
+            continue;
+        }
+        let want = lm_bytecode::ctor_binding_key(&class.key);
+        if keys.binary_search(&want.as_str()).is_err() {
+            return Err(fail(format!(
+                "the module `{path}` defines the class `{}` and declares no \
+                 constructor binding `{want}`; rebuild the module",
+                class.key
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Merge the named function bindings of one module (specification
+/// 3.6). The table is exhaustive:
+///
+/// | Binding key | StructuralHash | Result |
+/// | --- | --- | --- |
+/// | same | same | share the binding and the code |
+/// | same | different | reject: conflicting providers |
+/// | different | same | keep both bindings, share the code |
+/// | different | different | keep both bindings and both code objects |
+///
+/// Row 2 is the rule the generated constructor needs. A class
+/// structural hash covers no constructor, so two providers of one
+/// class key with two different constructors merge into one class.
+/// Their constructors carry one binding key and two structural
+/// hashes, and this rule rejects them.
+fn merge_bindings(
+    merged: &mut Merged,
+    module: &Module,
+    identity: &ModuleIdentity,
+    path: &str,
+    reloc: &Reloc,
+) -> Result<(), LinkError> {
+    let extern_funcs = module.extern_funcs();
+    for binding in &module.bindings {
+        let local = binding.func as usize;
+        if local >= module.funcs.len() {
+            return Err(fail(format!(
+                "the binding `{}` of `{path}` names a function outside the module",
+                binding.key
+            )));
+        }
+        if extern_funcs[local] {
+            // An imported declaration carries no body, so the module
+            // that declares it is not a provider of that name.
+            continue;
+        }
+        let hash = identity.func_hashes[local];
+        match merged.binding_version.get(&binding.key) {
+            Some((seen, provider)) if *seen != hash => {
+                return Err(fail(format!(
+                    "the function `{}` arrives with two implementations, from \
+                     `{provider}` and from `{path}`; rebuild both against one version",
+                    binding.key
+                )));
+            }
+            Some(_) => continue,
+            None => {
+                merged
+                    .binding_version
+                    .insert(binding.key.clone(), (hash, path.to_string()));
+            }
+        }
+        merged.bindings.push(lm_bytecode::FuncBinding {
+            key: binding.key.clone(),
+            func: reloc.funcs[local],
+        });
+    }
+    Ok(())
 }
 
 /// Resolve one class import slot against the provided definitions.

@@ -136,9 +136,10 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                         hex(&lm_bytecode::identity::container_hash(&bytes))
                     );
                     println!(
-                        "classes {} functions {} entry fn{}",
+                        "classes {} functions {} bindings {} entry fn{}",
                         module.classes.len(),
                         module.funcs.len(),
+                        module.bindings.len(),
                         module.entry
                     );
                     Ok(ExitCode::SUCCESS)

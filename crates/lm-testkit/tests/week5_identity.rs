@@ -238,6 +238,7 @@ fn a_deep_definition_chain_hashes_on_a_bounded_stack() {
         core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
         entry: 0,
         exports: vec![],
+        bindings: vec![],
     };
     let identity = std::thread::Builder::new()
         .stack_size(256 * 1024)

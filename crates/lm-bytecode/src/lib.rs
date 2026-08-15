@@ -480,6 +480,36 @@ impl ExportKind {
     }
 }
 
+/// One named function binding.
+///
+/// A name is a temporary reference to an identity, never a part of
+/// it. A binding maps a qualified name to a function value, and the
+/// function value carries its own structural hash. Several bindings
+/// may name one function value: two modules with equal bodies share
+/// one code object and keep two bindings.
+///
+/// The binding table lives in the export section, so a binding key
+/// never enters the semantic region and never enters a structural
+/// hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuncBinding {
+    /// The fully qualified binding name. A free function takes
+    /// `<module path>.<name>`. A method or an `init` takes
+    /// `<class key>.<name>`. A generated constructor takes
+    /// `<class key>.<new>`.
+    pub key: String,
+    /// The function value this name points at.
+    pub func: u32,
+}
+
+/// The name segment of a generated construction function.
+pub const CTOR_SEGMENT: &str = "<new>";
+
+/// The binding key of the construction function of one class.
+pub fn ctor_binding_key(class_key: &str) -> String {
+    format!("{class_key}.{CTOR_SEGMENT}")
+}
+
 /// The sentinel for an export without a construction function.
 pub const NO_CTOR: u32 = u32::MAX;
 
@@ -526,6 +556,11 @@ pub struct Module {
     /// The exported top-level definitions. The export section holds
     /// this table, so it stays outside the semantic region.
     pub exports: Vec<Export>,
+    /// The named function bindings. Each entry maps a qualified name
+    /// to a function value. The export section holds this table too,
+    /// so a binding key never reaches the verifier and never enters a
+    /// structural hash.
+    pub bindings: Vec<FuncBinding>,
 }
 
 impl Module {
@@ -570,11 +605,11 @@ const MAGIC: &[u8; 4] = b"LMBC";
 
 /// The container format version.
 ///
-/// Version 8 adds the class qualified keys to the export section, and
-/// it writes an explicit count before every `mut` marker vector. The
-/// second change makes the semantic region self-describing: a reader
-/// no longer takes the marker count from the parameter table.
-pub const VERSION: u16 = 8;
+/// Version 9 adds the named function bindings to the export section.
+/// A binding maps a qualified name to a function value, so the linker
+/// keeps every name a program declares while it shares one code
+/// object between equal bodies.
+pub const VERSION: u16 = 9;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -689,8 +724,9 @@ const KIND_CASE: u8 = 2;
 ///
 /// The container holds the magic and version header, a section
 /// table, the semantic region, the export section with the
-/// definition names, and an empty reserved debug section. The
-/// semantic bytes of a definition do not contain its own name.
+/// definition names and the function bindings, and an empty reserved
+/// debug section. The semantic bytes of a definition do not contain
+/// its own name.
 pub fn encode(module: &Module) -> Vec<u8> {
     let semantic = encode_semantic(module);
     let exports = encode_exports(module);
@@ -829,6 +865,11 @@ fn encode_exports(module: &Module) -> Vec<u8> {
     write_u32(&mut out, module.funcs.len() as u32);
     for func in &module.funcs {
         write_bytes(&mut out, func.name.as_bytes());
+    }
+    write_u32(&mut out, module.bindings.len() as u32);
+    for binding in &module.bindings {
+        write_bytes(&mut out, binding.key.as_bytes());
+        write_u32(&mut out, binding.func);
     }
     write_u32(&mut out, module.exports.len() as u32);
     for export in &module.exports {
@@ -1151,6 +1192,8 @@ pub enum DecodeError {
     /// An export entry names an unknown kind or an index outside the
     /// definition tables.
     BadExport,
+    /// A function binding names a function outside the function table.
+    BadBinding,
     /// An import slot names an index outside the definition tables.
     BadImport,
     /// A `mut` marker vector does not hold one marker per parameter.
@@ -1181,6 +1224,9 @@ impl fmt::Display for DecodeError {
                 write!(f, "the export names do not match the definition counts")
             }
             DecodeError::BadExport => write!(f, "an export entry is out of range"),
+            DecodeError::BadBinding => {
+                write!(f, "a function binding names a function out of range")
+            }
             DecodeError::BadImport => write!(f, "an import slot is out of range"),
             DecodeError::MutMarkerCount => {
                 write!(f, "a mut marker vector does not match its parameter count")
@@ -1310,9 +1356,9 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     Ok(module)
 }
 
-/// Decode the export section: the definition names and the exported
-/// top-level definitions. Every index is checked against the tables
-/// the semantic region already produced.
+/// Decode the export section: the definition names, the function
+/// bindings, and the exported top-level definitions. Every index is
+/// checked against the tables the semantic region already produced.
 fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> {
     let mut cur = Cursor { bytes, pos: 0 };
     let class_count = cur.len()?;
@@ -1330,6 +1376,17 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     for func in &mut module.funcs {
         func.name = cur.string()?;
     }
+    let binding_count = cur.len()?;
+    let mut bindings = Vec::with_capacity(binding_count);
+    for _ in 0..binding_count {
+        let key = cur.string()?;
+        let func = cur.u32()?;
+        if func as usize >= module.funcs.len() {
+            return Err(DecodeError::BadBinding);
+        }
+        bindings.push(FuncBinding { key, func });
+    }
+    module.bindings = bindings;
     let export_count = cur.len()?;
     let mut exports = Vec::with_capacity(export_count);
     for _ in 0..export_count {
@@ -1567,6 +1624,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         funcs,
         entry,
         exports: Vec::new(),
+        bindings: Vec::new(),
     })
 }
 
@@ -1831,7 +1889,28 @@ mod tests {
             core_roles: [NO_ROLE; CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
+            bindings: vec![
+                FuncBinding {
+                    key: "Counter.add".to_string(),
+                    func: 1,
+                },
+                FuncBinding {
+                    key: "main".to_string(),
+                    func: 0,
+                },
+            ],
         }
+    }
+
+    #[test]
+    fn a_binding_outside_the_function_table_is_rejected() {
+        let mut module = sample_module();
+        module.bindings = vec![FuncBinding {
+            key: "gone".to_string(),
+            func: 7,
+        }];
+        let bytes = encode(&module);
+        assert!(matches!(decode(&bytes), Err(DecodeError::BadBinding)));
     }
 
     #[test]
@@ -1974,6 +2053,7 @@ mod tests {
             core_roles: [NO_ROLE; CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
+            bindings: vec![],
         };
         let mut bytes = encode(&module);
         // The single type tag sits directly after the string count

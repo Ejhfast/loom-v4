@@ -981,7 +981,14 @@ pub fn check_module_with(
         locals,
         body,
     });
-    assemble(ctx, own_defaults, entry_idx, exports, &options.module_path)
+    assemble(
+        ctx,
+        own_defaults,
+        entry_idx,
+        exports,
+        &options.module_path,
+        module.funcs.len(),
+    )
 }
 
 /// Collect the exported top-level definitions of the source module,
@@ -1044,12 +1051,16 @@ fn core_defect(d: Diagnostic) -> Diagnostic {
     );
 }
 
+/// Build the checked module. `source_funcs` is the number of
+/// top-level functions the source declares. Those take the first
+/// function indices, so the binding pass reads exactly them.
 fn assemble(
     ctx: Ctx,
     own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>>,
     entry_idx: usize,
     exports: Vec<HirExport>,
     module_path: &str,
+    source_funcs: usize,
 ) -> Result<HirModule, Diagnostic> {
     let keys: Vec<String> = {
         let naming = crate::iface::Naming {
@@ -1137,6 +1148,38 @@ fn assemble(
         .into_iter()
         .map(|f| f.expect("every reserved function is checked"))
         .collect();
+    // The named function bindings this module declares. A name points
+    // at a function value; it is never a part of that value. A free
+    // function takes the module path as its root, and a class member
+    // takes the qualified key of its class, so an embedded core copy
+    // binds the same names in every module.
+    let mut bindings: Vec<lm_bytecode::FuncBinding> = Vec::new();
+    for (idx, func) in funcs.iter().enumerate().take(source_funcs) {
+        if func.imported {
+            continue;
+        }
+        bindings.push(lm_bytecode::FuncBinding {
+            key: lm_bytecode::qualified_key(module_path, &func.name),
+            func: idx as u32,
+        });
+    }
+    for class in &hir_classes {
+        if class.imported {
+            continue;
+        }
+        for (name, func) in &class.methods {
+            bindings.push(lm_bytecode::FuncBinding {
+                key: format!("{}.{name}", class.key),
+                func: *func,
+            });
+        }
+        if let Some(func) = class.init {
+            bindings.push(lm_bytecode::FuncBinding {
+                key: format!("{}.init", class.key),
+                func,
+            });
+        }
+    }
     Ok(HirModule {
         store: ctx.store,
         classes: hir_classes,
@@ -1146,6 +1189,7 @@ fn assemble(
         core_roles,
         exports,
         imports: ctx.imports,
+        bindings,
     })
 }
 
