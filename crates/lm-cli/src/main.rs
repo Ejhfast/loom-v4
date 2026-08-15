@@ -270,7 +270,7 @@ fn load_program(path: &str) -> Result<lm_vm::LoadedModule, String> {
 /// Admit one decoded artifact through the persistent verified-code
 /// store.
 ///
-/// A hit skips the verifier pass and the identity pass. The key comes
+/// A hit skips the verifier pass. The key comes
 /// from the decoded content on every load, so no stored value enters
 /// it, and `lm_vm::load_with_record` rejects a record filed under any
 /// other key.

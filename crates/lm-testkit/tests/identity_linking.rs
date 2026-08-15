@@ -327,6 +327,24 @@ fn symmetric_members_share_one_structural_hash() {
     assert_eq!(vm.show_outcome(&outcome), "Done(0)");
 }
 
+/// A closure body inside a component takes part in the refinement and
+/// enters the component hash. Two functions that differ only inside a
+/// nested closure must therefore receive different structural hashes.
+#[test]
+fn a_nested_closure_body_reaches_the_structural_hash() {
+    let one =
+        "def f(n: Int): Int\n  g = do |x: Int|: Int\n    f(x - 1)\n  end\n  g(n)\nend\nf(3)\n";
+    let two =
+        "def f(n: Int): Int\n  g = do |x: Int|: Int\n    f(x - 2)\n  end\n  g(n)\nend\nf(3)\n";
+    let (ma, ia) = identity_of(one);
+    let (mb, ib) = identity_of(two);
+    assert_ne!(
+        func_hash(&ma, &ia, "f"),
+        func_hash(&mb, &ib, "f"),
+        "an edit inside a nested closure moved no structural hash"
+    );
+}
+
 /// A hand-built cycle whose members differ only far away: member zero
 /// carries one extra instruction, and every other member is equal.
 /// Refinement must reach every member, one round per step.

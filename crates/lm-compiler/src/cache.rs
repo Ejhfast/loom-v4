@@ -11,7 +11,7 @@
 //!
 //! Stage 1 removes a compiler run. Stage 2 removes a link run and the
 //! verification of the merged program. Stage 3 removes the verifier
-//! pass and the identity pass of a load.
+//! pass of a load.
 //!
 //! No stage is a trust boundary. Every entry decodes through the
 //! ordinary decoder, and a damaged file is a miss, not a trust hole.

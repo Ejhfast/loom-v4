@@ -1055,3 +1055,18 @@ load path. `week6_store.rs` (10 cases) covers stage 2 and stage 3.
 - A user-cache location for stage 3 that survives a `HOME` with no
   write permission. The store falls back to `.lm-cache` in the current
   directory, which is a working directory, not a user directory.
+
+### One defect the self-review found
+
+The first version of the refinement emitted only the definition
+members into the component hash. A member names an in-component
+closure body by colour, so the bytes of that closure reached no hash.
+Two functions that differ only inside a nested closure then shared one
+structural hash, and the linker would have rejected the program for
+two definitions under one hash.
+
+The component hash covers every refinement member now, closure bodies
+included. The probe
+`a_nested_closure_body_reaches_the_structural_hash` failed before the
+fix and passes after it. The core pins did not move, because the core
+image holds no closure inside a component.

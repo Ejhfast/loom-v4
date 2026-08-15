@@ -1692,12 +1692,13 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         let (colours, rounds) = refine_colours(&base, &member_refs)?;
         max_refine_rounds = max_refine_rounds.max(rounds);
         // Serialize the members again, now with the final colours, and
-        // hash the component. The definition members emit in ascending
-        // colour order; two members with one colour emit equal bytes,
-        // so the order inside a colour is not observable.
-        let mut order: Vec<usize> = (0..refine.len())
-            .filter(|i| refine[*i].0 != KIND_BODY)
-            .collect();
+        // hash the component. Every refinement member emits, closure
+        // bodies included: a member names an in-component closure by
+        // colour, so the component hash must carry the bytes of that
+        // closure. The order is ascending colour; two members with one
+        // colour emit equal bytes, so the order inside a colour is not
+        // observable.
+        let mut order: Vec<usize> = (0..refine.len()).collect();
         order.sort_by_key(|i| colours[*i]);
         let mut comp_bytes = Vec::new();
         comp_bytes.extend_from_slice(TAG_COMPONENT);
@@ -1731,8 +1732,14 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         for &node in comp {
             state.comp_hash[node as usize] = comp_hash;
         }
+        // A closure body takes its hash from its parent identity and
+        // its occurrence index, so only a definition member takes a
+        // member hash here.
         for i in &order {
             let (kind, idx, _) = refine[*i];
+            if kind == KIND_BODY {
+                continue;
+            }
             let mut bytes = Vec::new();
             bytes.extend_from_slice(TAG_MEMBER);
             bytes.extend_from_slice(&comp_hash);
