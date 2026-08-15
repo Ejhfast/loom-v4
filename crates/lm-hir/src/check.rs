@@ -218,6 +218,9 @@ impl<'a> FnChecker<'a> {
             }
             // A diverging tail satisfies any expected type.
             StmtKind::Return { .. } | StmtKind::Break | StmtKind::Continue => self.check_stmt(stmt),
+            // A statement tail has the value `()`, so it satisfies an
+            // expected unit type.
+            _ if expected == UNIT => self.check_stmt(stmt),
             _ => Err(self.mismatch(expected, UNIT, stmt.span)),
         }
     }
@@ -522,15 +525,13 @@ impl<'a> FnChecker<'a> {
                 return Err(self.mismatch(expected, UNIT, span));
             }
         }
-        let branch_mode = match expected {
-            Some(t) if t != UNIT => BlockMode::Value(t),
-            Some(_) => BlockMode::Stmt,
-            None => match else_body {
-                Some(_) => BlockMode::Synth,
-                // Without `else` the value is `()`, so branch values
-                // are discarded.
-                None => BlockMode::Stmt,
-            },
+        let branch_mode = match (expected, else_body) {
+            (Some(t), _) => BlockMode::Value(t),
+            (None, Some(_)) => BlockMode::Synth,
+            // Without `else` the `if` value is `()`. Each branch must
+            // also produce `()`. A non-unit branch value is an error,
+            // not a silent discard.
+            (None, None) => BlockMode::Value(UNIT),
         };
         let mut checked_arms = Vec::new();
         let mut branch_types: Vec<(TypeId, Span)> = Vec::new();

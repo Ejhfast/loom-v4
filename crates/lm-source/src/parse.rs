@@ -9,16 +9,28 @@ use crate::scan::scan;
 use crate::span::Span;
 use crate::token::{Tok, Token};
 
+/// The maximum nesting depth for expressions and statements.
+///
+/// The parser and the checker recurse on the Rust stack. This limit
+/// keeps deep input inside the available stack and rejects deeper
+/// input with a diagnostic.
+pub const MAX_NEST_DEPTH: usize = 300;
+
 /// Scan and parse one module.
 pub fn parse(text: &str) -> Result<Module, Diagnostic> {
     let tokens = scan(text)?;
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     parser.module()
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -205,6 +217,13 @@ impl Parser {
     }
 
     fn stmt(&mut self) -> Result<Stmt, Diagnostic> {
+        self.enter_nesting()?;
+        let result = self.stmt_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn stmt_inner(&mut self) -> Result<Stmt, Diagnostic> {
         self.reject_reserved()?;
         match self.peek() {
             Tok::KwDef => Err(self.error(
@@ -293,8 +312,23 @@ impl Parser {
         }
     }
 
+    /// Record one more nesting level, or reject input that is too deep.
+    fn enter_nesting(&mut self) -> Result<(), Diagnostic> {
+        self.depth += 1;
+        if self.depth > MAX_NEST_DEPTH {
+            return Err(self.error(
+                "E1022",
+                format!("the nesting is deeper than the limit of {MAX_NEST_DEPTH} levels"),
+            ));
+        }
+        Ok(())
+    }
+
     fn expr(&mut self) -> Result<Expr, Diagnostic> {
-        self.or_expr()
+        self.enter_nesting()?;
+        let result = self.or_expr();
+        self.depth -= 1;
+        result
     }
 
     fn or_expr(&mut self) -> Result<Expr, Diagnostic> {
@@ -421,6 +455,13 @@ impl Parser {
     }
 
     fn unary_expr(&mut self) -> Result<Expr, Diagnostic> {
+        self.enter_nesting()?;
+        let result = self.unary_expr_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn unary_expr_inner(&mut self) -> Result<Expr, Diagnostic> {
         match self.peek() {
             Tok::KwNot => {
                 let token = self.next();

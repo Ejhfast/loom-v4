@@ -42,6 +42,25 @@ and the deferred work.
   is the program result. This matches the week-1 example programs.
 - `lm check` prints nothing on success and one diagnostic on failure.
 
+## Review fixes
+
+An independent review found two defects. Both are fixed.
+
+- The parser and the checker had no recursion depth limit. A small
+  file with deep nesting could overflow the Rust stack and stop the
+  process. The parser now counts grammar nesting levels and rejects
+  input above `MAX_NEST_DEPTH` (300) with `E1022`. The counter
+  increments for each statement, expression, and unary level, so the
+  effective source nesting limit is near 100 levels. The parser bound
+  also protects the checker and the lowering pass, because they
+  recurse over the bounded AST.
+- An `if` without `else` in a value position gave the value `()` and
+  discarded the branch value. This broke specification section 7.1
+  and the no-silent-fallback rule. Each branch of an `if` without
+  `else` must now produce `()`. A branch that ends with a statement,
+  for example an assignment, is valid. A branch that produces a
+  non-unit value is an `E1004` error.
+
 ## Deferred work
 
 - CI workflow files for Linux, macOS, and Windows.
