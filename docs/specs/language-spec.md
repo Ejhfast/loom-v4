@@ -917,9 +917,11 @@ snake_case form of its descriptor name: `sys.io.print` performs
 `Io.Print`, and `sys.io.read_line` performs `Io.ReadLine`. The
 mapping is mechanical. Descriptors keep initial capitals, and they
 appear wherever code names, grants, mocks, or matches an operation.
-The one capitalized `sys` member family is a constructor that
-returns an object, such as `sys.vm.Vm()`. The rule of thumb:
-lowercase performs the operation; a capitalized name talks about it.
+Exactly one `sys` member is capitalized: the machine constructor
+`sys.vm.Vm()`, whose name is the constructed type. Every other
+member is a snake_case verb, including members that return objects,
+such as `sys.reflect.mirror(obj)`. The rule of thumb: lowercase
+performs the operation; a capitalized name talks about it.
 
 ### 11.2 Perform
 
