@@ -324,9 +324,20 @@ must not read a source name.
 
 ## 9. The verification hash and its ordering constraint
 
-VerificationHash covers every resolved verifier input. Today that set
-includes the definition names, because the core layout resolves by
-label and the verifier reads the core layout.
+VerificationHash covers every resolved verifier input. Section 8 has
+landed, so that set is the semantic region and the operation manifest,
+and nothing else. The names have left the hash: an artifact declares
+its own core role table, the verifier proves the shape of every filled
+slot, and no name-derived value reaches the verifier.
+
+One name still moves the hash, and it is not a declaration name. A
+selector name lives in the semantic region, so a selector rename moves
+VerificationHash. A class key, a definition name, and a function
+binding all live in the export section, which the verifier never
+reads.
+
+The ordering constraint below is met. It stays recorded, because it
+governs any future change that moves a name back into the verifier.
 
 **Constraint: keep the names inside VerificationHash until section 8
 lands.** A name may leave VerificationHash only after the verifier

@@ -1279,13 +1279,15 @@ impl<'a> Cursor<'a> {
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
-    /// Read a table length and reject counts the input cannot contain.
-    /// Each counted element needs at least one byte.
     /// The bytes left to read.
     fn remaining(&self) -> usize {
         self.bytes.len().saturating_sub(self.pos)
     }
 
+    /// Read a table length and reject counts the input cannot contain.
+    /// Each counted element needs at least one byte. A table whose
+    /// element is larger must check `remaining` against the real cost
+    /// before it sizes an allocation.
     fn len(&mut self) -> Result<usize, DecodeError> {
         let count = self.u32()? as usize;
         if count > self.bytes.len().saturating_sub(self.pos) {

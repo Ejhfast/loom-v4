@@ -1084,3 +1084,232 @@ fn measure_load_path() {
         bytes.len()
     );
 }
+
+// ---------------------------------------------------------------
+// Review regressions: the constructor binding must name the
+// construction function of its own class, and nothing else.
+//
+// A key check on its own proved nothing about the target. A binding
+// then named an import slot, a decoy with a matching hash, or an
+// ordinary function, and two providers of one class key merged into
+// one class with two live constructors.
+// ---------------------------------------------------------------
+
+/// The two providers of `app.shapes.Dot`, with one field default each.
+/// Unmutated, this pair must reject.
+fn dot_providers() -> Vec<lm_compiler::CompiledModule> {
+    two_providers_of_one_class_key(
+        "class Dot\n  x: Int = 0\nend\n",
+        "use shapes\n\nclass Spot\n  x: Int = 7\nend\n\
+         d = shapes.Dot()\ns = Spot()\nd.x + s.x\n",
+    )
+}
+
+/// The control: the honest conflict still rejects.
+#[test]
+fn two_providers_of_one_key_still_reject() {
+    let units = dot_providers();
+    assert!(
+        link_units(&units).is_err(),
+        "two providers of one class key linked"
+    );
+}
+
+/// A constructor binding that names an imported declaration rejects.
+/// `merge_bindings` skips an imported target, so a binding parked
+/// there switched the conflict rule off for the exact case it catches.
+#[test]
+fn a_constructor_binding_on_an_import_slot_rejects() {
+    let mut units = dot_providers();
+    let extern_funcs = units[1].module.extern_funcs();
+    let Some(slot) = extern_funcs.iter().position(|e| *e) else {
+        panic!("the module imports nothing");
+    };
+    let binding = units[1]
+        .module
+        .bindings
+        .iter_mut()
+        .find(|b| b.key == "app.shapes.Dot.<new>")
+        .expect("the constructor binding exists");
+    binding.func = slot as u32;
+    let error = link_units(&units).expect_err("the crafted module linked");
+    assert!(
+        error.contains("imported declaration"),
+        "unexpected message: {error}"
+    );
+}
+
+/// A constructor binding that names any other function rejects, even
+/// when that function's structural hash matches the honest one.
+#[test]
+fn a_constructor_binding_on_another_function_rejects() {
+    let mut units = dot_providers();
+    let extern_funcs = units[1].module.extern_funcs();
+    let bound = units[1]
+        .module
+        .bindings
+        .iter()
+        .find(|b| b.key == "app.shapes.Dot.<new>")
+        .map(|b| b.func)
+        .expect("the constructor binding exists");
+    let target = (0..units[1].module.funcs.len() as u32)
+        .find(|f| *f != bound && !extern_funcs[*f as usize])
+        .expect("the module holds another local function");
+    let binding = units[1]
+        .module
+        .bindings
+        .iter_mut()
+        .find(|b| b.key == "app.shapes.Dot.<new>")
+        .expect("the constructor binding exists");
+    binding.func = target;
+    let error = link_units(&units).expect_err("the crafted module linked");
+    assert!(
+        error.contains("construction function") || error.contains("needs the key"),
+        "unexpected message: {error}"
+    );
+}
+
+/// Two constructor bindings for one class reject.
+#[test]
+fn two_constructor_bindings_for_one_class_reject() {
+    let mut units = dot_providers();
+    let copy = units[1]
+        .module
+        .bindings
+        .iter()
+        .find(|b| b.key == "app.shapes.Dot.<new>")
+        .cloned()
+        .expect("the constructor binding exists");
+    units[1].module.bindings.push(copy);
+    let error = link_units(&units).expect_err("the crafted module linked");
+    assert!(
+        error.contains("two constructor bindings"),
+        "unexpected message: {error}"
+    );
+}
+
+/// A constructor binding on an imported class rejects. A module binds
+/// the constructor of a class it defines, never one it imports.
+#[test]
+fn a_constructor_binding_on_an_imported_class_rejects() {
+    let mut units = dot_providers();
+    let extern_classes = units[1].module.extern_classes();
+    let Some(imported) = extern_classes.iter().position(|e| *e) else {
+        panic!("the module imports no class");
+    };
+    let key = units[1].module.classes[imported].key.clone();
+    let func = units[1]
+        .module
+        .bindings
+        .iter()
+        .find(|b| b.class != lm_bytecode::NO_CLASS)
+        .map(|b| b.func)
+        .expect("a constructor binding exists");
+    units[1].module.bindings.push(lm_bytecode::FuncBinding {
+        key: lm_bytecode::ctor_binding_key(&key),
+        func,
+        class: imported as u32,
+    });
+    let error = link_units(&units).expect_err("the crafted module linked");
+    assert!(
+        error.contains("imported class"),
+        "unexpected message: {error}"
+    );
+}
+
+/// An export whose construction function differs from the binding
+/// rejects. A caller reaches the export, so the two must agree.
+#[test]
+fn an_export_and_a_binding_that_disagree_reject() {
+    let mut units = dot_providers();
+    let other = units[0]
+        .module
+        .funcs
+        .len()
+        .checked_sub(1)
+        .expect("the module has a function") as u32;
+    let export = units[0]
+        .module
+        .exports
+        .iter_mut()
+        .find(|e| e.kind.is_class() && e.ctor != lm_bytecode::NO_CTOR)
+        .expect("the module exports a class with a constructor");
+    assert_ne!(export.ctor, other, "pick a different function");
+    export.ctor = other;
+    let error = link_units(&units).expect_err("the crafted module linked");
+    assert!(
+        error.contains("construction function"),
+        "unexpected message: {error}"
+    );
+}
+
+/// A hand-built module reaches identity and the linker without a
+/// decoder. A class index out of range must reject, never panic.
+#[test]
+fn a_binding_class_index_out_of_range_rejects() {
+    let mut module = compile_text("t.lm", "class A\n  x: Int = 0\nend\na = A()\na.x\n").unwrap();
+    module.bindings.push(lm_bytecode::FuncBinding {
+        key: "t.Z.<new>".to_string(),
+        func: 0,
+        class: 9_000_000,
+    });
+    let result = std::panic::catch_unwind(|| module_identity(&module));
+    assert!(result.is_ok(), "identity panicked on a bad class index");
+    let error = result.unwrap().expect_err("a bad class index was accepted");
+    assert!(
+        error.to_string().contains("class index out of range"),
+        "unexpected message: {error}"
+    );
+}
+
+/// The binding table declares its own count. One entry needs twelve
+/// bytes, and the general length rule bounds a count at one byte per
+/// entry, so the decoder checks the real cost before it reserves.
+#[test]
+fn an_impossible_binding_count_rejects_before_the_reserve() {
+    let module = compile_text("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(1)\n").unwrap();
+    let good = lm_bytecode::encode(&module);
+    assert!(lm_bytecode::decode(&good).is_ok(), "the sample must decode");
+    // Every four-byte window: a forged count must never reserve past
+    // the input. A rejection or an unrelated success both hold; a
+    // panic or an allocation failure does not.
+    for at in 0..good.len().saturating_sub(4) {
+        let mut bad = good.clone();
+        bad[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let result = std::panic::catch_unwind(|| lm_bytecode::decode(&bad));
+        assert!(result.is_ok(), "the decoder panicked at offset {at}");
+    }
+}
+
+/// A selector name lives in the semantic region, so a selector rename
+/// moves the verification hash. A class rename and a function rename
+/// do not.
+#[test]
+fn a_selector_rename_moves_the_verification_hash() {
+    use lm_bytecode::identity::verification_hash;
+    let foo = compile_text(
+        "t.lm",
+        "class C\n  def foo(self): Int\n    1\n  end\nend\nC().foo()\n",
+    )
+    .unwrap();
+    let bar = compile_text(
+        "t.lm",
+        "class C\n  def bar(self): Int\n    1\n  end\nend\nC().bar()\n",
+    )
+    .unwrap();
+    assert_ne!(
+        verification_hash(&foo),
+        verification_hash(&bar),
+        "a selector rename must move the verification hash"
+    );
+    let renamed = compile_text(
+        "t.lm",
+        "class D\n  def foo(self): Int\n    1\n  end\nend\nD().foo()\n",
+    )
+    .unwrap();
+    assert_eq!(
+        verification_hash(&foo),
+        verification_hash(&renamed),
+        "a class rename must hold the verification hash"
+    );
+}

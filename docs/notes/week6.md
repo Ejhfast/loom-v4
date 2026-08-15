@@ -1493,3 +1493,33 @@ Four findings, all confirmed and fixed.
   A stale paragraph in `identity.rs` also said definition names enter
   the verification hash, one paragraph above the text that says the
   opposite. The stale paragraph is gone.
+
+### Regressions for the second pass
+
+The second pass landed its fixes with no test of its own. Nine cases
+now hold them. Each one was checked against a tree with its fix
+disabled, and each one fails there:
+
+- a constructor binding on an import slot rejects;
+- a constructor binding on another function rejects;
+- two constructor bindings for one class reject;
+- a constructor binding on an imported class rejects;
+- an export and a binding that name two construction functions
+  reject;
+- a class index out of range rejects at identity, and never panics;
+- an impossible binding count rejects before the reserve;
+- a selector rename moves the verification hash, and a class rename
+  holds it;
+- the honest two-provider conflict still rejects.
+
+The last case stays green with the constructor check disabled, which
+is correct: `merge_bindings` catches the honest conflict through row 2
+of the function table. The two mechanisms are separate, and both carry
+a test.
+
+Three documentation defects went with them. Specification 3.7 said a
+class keeps its own hash and then said the hash moves, one sentence
+apart. Section 9 of `identity-and-linking.md` still described the
+verification hash as covering the definition names, which section 8
+ended. The `len` doc comment in the decoder had attached itself to
+`remaining`.
