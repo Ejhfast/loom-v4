@@ -71,7 +71,9 @@ fn loop_module() -> Module {
                 vec![Instr::LoadLocal(0), Instr::Return],
             ],
         }],
+        imports: vec![],
         entry: 0,
+        exports: vec![],
     }
 }
 

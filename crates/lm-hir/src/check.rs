@@ -296,6 +296,8 @@ pub(crate) struct Ctx {
     pub(crate) sigs: Vec<FnSig>,
     pub(crate) funcs: Vec<Option<HirFunc>>,
     pub(crate) core: CoreIds,
+    /// The import slots the module needs, in slot order.
+    pub(crate) imports: Vec<HirImport>,
     /// The `use` bindings of the module, by bound name. They resolve
     /// below locals and module definitions. They never grant
     /// authority and never change a row.
@@ -644,6 +646,7 @@ pub fn check_module_with(
             none_class: 0,
         },
         uses: resolve_uses(&module.uses)?,
+        imports: Vec::new(),
     };
     // Pass 1: predeclare all type names. User definitions come first,
     // so their class indices do not depend on the core.
@@ -759,6 +762,7 @@ pub fn check_module_with(
     let (body, entry_ty, _mutable, locals, entry_row) =
         checker.check_entry(&mut ctx, &module.entry, entry_span)?;
     let entry_ty = if entry_ty == NEVER { UNIT } else { entry_ty };
+    let exports = collect_exports(&ctx, module)?;
     ctx.funcs[entry_idx] = Some(HirFunc {
         name: "<entry>".to_string(),
         type_params: 0,
@@ -771,7 +775,53 @@ pub fn check_module_with(
         locals,
         body,
     });
-    assemble(ctx, own_defaults, entry_idx)
+    assemble(ctx, own_defaults, entry_idx, exports)
+}
+
+/// Collect the exported top-level definitions of the source module,
+/// in declaration order. The embedded core and every imported
+/// declaration stay out: a module exports only what it defines.
+fn collect_exports(ctx: &Ctx, module: &ast::Module) -> Result<Vec<HirExport>, Diagnostic> {
+    let mut out = Vec::new();
+    let class_index = |name: &str| -> u32 {
+        *ctx.user_types
+            .get(name)
+            .expect("every user class name registers")
+    };
+    for class in &module.classes {
+        out.push(HirExport {
+            kind: lm_bytecode::ExportKind::Class,
+            name: class.name.clone(),
+            def: class_index(&class.name),
+        });
+    }
+    for enum_def in &module.enums {
+        let parent = class_index(&enum_def.name);
+        out.push(HirExport {
+            kind: lm_bytecode::ExportKind::Enum,
+            name: enum_def.name.clone(),
+            def: parent,
+        });
+        for arm in &enum_def.arms {
+            let full = format!("{}.{}", enum_def.name, arm.name);
+            let idx = ctx
+                .find_arm(parent, &arm.name)
+                .expect("every declared arm registers");
+            out.push(HirExport {
+                kind: lm_bytecode::ExportKind::EnumCase,
+                name: full,
+                def: idx,
+            });
+        }
+    }
+    for func in &module.funcs {
+        out.push(HirExport {
+            kind: lm_bytecode::ExportKind::Function,
+            name: func.name.clone(),
+            def: ctx.func_index[&func.name],
+        });
+    }
+    Ok(out)
 }
 
 /// A defect in the pinned core sources is an implementation defect,
@@ -787,6 +837,7 @@ fn assemble(
     ctx: Ctx,
     own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>>,
     entry_idx: usize,
+    exports: Vec<HirExport>,
 ) -> Result<HirModule, Diagnostic> {
     let mut hir_classes: Vec<HirClass> = Vec::new();
     for (idx, info) in ctx.classes.iter().enumerate() {
@@ -855,6 +906,8 @@ fn assemble(
         funcs,
         entry: entry_idx,
         core: ctx.core,
+        exports,
+        imports: ctx.imports,
     })
 }
 

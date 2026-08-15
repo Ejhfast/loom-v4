@@ -266,6 +266,19 @@ fn load_inner(
     module: Module,
     cache: Option<&mut VerifiedCache>,
 ) -> Result<LoadedModule, VerifyError> {
+    // Only a linked module executes. An import slot names a definition
+    // another module provides, so an unfulfilled slot has no body to
+    // run. The linker resolves every slot and produces a module with
+    // an empty import table.
+    if !module.imports.is_empty() {
+        return Err(VerifyError {
+            func: u32::MAX,
+            message: format!(
+                "the module has {} unresolved import slot(s); link it before it runs",
+                module.imports.len()
+            ),
+        });
+    }
     // The identity is computed from the decoded content, never read
     // from the input. An unhashable module is a rejection.
     let compute = |module: &Module| -> Result<VerifiedFacts, VerifyError> {
@@ -438,7 +451,9 @@ mod tests {
                 local_types: vec![2],
                 blocks,
             }],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         })
         .unwrap()
     }
@@ -514,7 +529,9 @@ mod tests {
                 local_types: vec![],
                 blocks: vec![vec![Jump(9)]],
             }],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         };
         assert!(load(module).is_err());
     }
@@ -554,7 +571,9 @@ mod tests {
                 local_types: vec![],
                 blocks: vec![vec![New(0), LoadField(0), Return]],
             }],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         };
         let loaded = load(module).unwrap();
         let mut vm = Vm::new(&loaded, VmConfig::default());

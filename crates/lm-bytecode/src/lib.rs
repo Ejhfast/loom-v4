@@ -354,6 +354,121 @@ impl Func {
     }
 }
 
+/// The kind of one import slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    /// A class or enum declaration. `def` is a class index.
+    Class,
+    /// The construction function of an imported class. `def` is a
+    /// function index.
+    Ctor,
+    /// One method of an imported class. `def` is a function index.
+    Method,
+    /// A top-level function. `def` is a function index.
+    Func,
+}
+
+impl ImportKind {
+    fn tag(self) -> u8 {
+        match self {
+            ImportKind::Class => 0,
+            ImportKind::Ctor => 1,
+            ImportKind::Method => 2,
+            ImportKind::Func => 3,
+        }
+    }
+
+    /// True when the slot declares a function, not a class.
+    pub fn is_func(self) -> bool {
+        !matches!(self, ImportKind::Class)
+    }
+}
+
+/// One named import slot.
+///
+/// A slot declares a definition that another module provides. The
+/// local definition it names carries the signature only: an imported
+/// function has no blocks, and an imported class has no method
+/// bodies. The pinned hash is the interface hash of the provider
+/// export. The linker resolves the slot by module path and name, and
+/// rejects a provider whose interface hash differs from the pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    /// The providing module path, for example `mathlib.matrix`.
+    pub module: String,
+    /// The exported name, for example `Matrix` or `Matrix.scale`.
+    pub name: String,
+    pub kind: ImportKind,
+    /// The local class or function index this slot declares.
+    pub def: u32,
+    /// The pinned interface hash of the provider export.
+    pub hash: [u8; 32],
+}
+
+/// The kind of one export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    Function,
+    Class,
+    Enum,
+    EnumCase,
+}
+
+impl ExportKind {
+    pub fn tag(self) -> u8 {
+        match self {
+            ExportKind::Function => 0,
+            ExportKind::Class => 1,
+            ExportKind::Enum => 2,
+            ExportKind::EnumCase => 3,
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Option<ExportKind> {
+        match tag {
+            0 => Some(ExportKind::Function),
+            1 => Some(ExportKind::Class),
+            2 => Some(ExportKind::Enum),
+            3 => Some(ExportKind::EnumCase),
+            _ => None,
+        }
+    }
+
+    pub fn text(self) -> &'static str {
+        match self {
+            ExportKind::Function => "fn",
+            ExportKind::Class => "class",
+            ExportKind::Enum => "enum",
+            ExportKind::EnumCase => "case",
+        }
+    }
+
+    /// True when the export names a class-like definition.
+    pub fn is_class(self) -> bool {
+        !matches!(self, ExportKind::Function)
+    }
+}
+
+/// The sentinel for an export without a construction function.
+pub const NO_CTOR: u32 = u32::MAX;
+
+/// One exported top-level definition of the source module.
+///
+/// The table names the definitions another module may import. It
+/// excludes the embedded core copy and every imported declaration, so
+/// the linker never resolves an import to a definition the module did
+/// not define.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    pub kind: ExportKind,
+    pub name: String,
+    /// The class index or the function index.
+    pub def: u32,
+    /// The construction function index of a class export, or
+    /// `NO_CTOR`.
+    pub ctor: u32,
+}
+
 /// One decoded module.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
@@ -364,18 +479,61 @@ pub struct Module {
     /// Type applications referenced by generic call and allocation
     /// sites.
     pub apps: Vec<TypeApp>,
+    /// The import slots, in declaration order. An empty table marks a
+    /// linked module, which is the only kind the loader admits.
+    pub imports: Vec<Import>,
     pub classes: Vec<BcClass>,
     pub funcs: Vec<Func>,
     /// Index of the entry function.
     pub entry: u32,
+    /// The exported top-level definitions. The export section holds
+    /// this table, so it stays outside the semantic region.
+    pub exports: Vec<Export>,
+}
+
+impl Module {
+    /// The import slot of one class, when the class is imported.
+    pub fn class_import(&self, class: u32) -> Option<&Import> {
+        self.imports
+            .iter()
+            .find(|i| i.kind == ImportKind::Class && i.def == class)
+    }
+
+    /// The import slot of one function, when the function is imported.
+    pub fn func_import(&self, func: u32) -> Option<&Import> {
+        self.imports
+            .iter()
+            .find(|i| i.kind.is_func() && i.def == func)
+    }
+
+    /// The imported class flags, one per class.
+    pub fn extern_classes(&self) -> Vec<bool> {
+        let mut out = vec![false; self.classes.len()];
+        for import in &self.imports {
+            if import.kind == ImportKind::Class && (import.def as usize) < out.len() {
+                out[import.def as usize] = true;
+            }
+        }
+        out
+    }
+
+    /// The imported function flags, one per function.
+    pub fn extern_funcs(&self) -> Vec<bool> {
+        let mut out = vec![false; self.funcs.len()];
+        for import in &self.imports {
+            if import.kind.is_func() && (import.def as usize) < out.len() {
+                out[import.def as usize] = true;
+            }
+        }
+        out
+    }
 }
 
 const MAGIC: &[u8; 4] = b"LMBC";
 
-/// The container format version. Version 6 is the sectioned
-/// container: a semantic region, an export section with the
-/// definition names, and a reserved debug section.
-pub const VERSION: u16 = 6;
+/// The container format version. Version 7 adds the import table to
+/// the semantic region and the export table to the export section.
+pub const VERSION: u16 = 7;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -548,6 +706,14 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
             encode_row(&mut out, row);
         }
     }
+    write_u32(&mut out, module.imports.len() as u32);
+    for import in &module.imports {
+        write_bytes(&mut out, import.module.as_bytes());
+        write_bytes(&mut out, import.name.as_bytes());
+        out.push(import.kind.tag());
+        write_u32(&mut out, import.def);
+        out.extend_from_slice(&import.hash);
+    }
     write_u32(&mut out, module.classes.len() as u32);
     for class in &module.classes {
         write_u32(&mut out, class.parent);
@@ -604,7 +770,8 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
 }
 
 /// Encode the export section: the definition names in definition
-/// index order, classes first, then functions.
+/// index order, classes first, then functions, and then the exported
+/// top-level definitions.
 fn encode_exports(module: &Module) -> Vec<u8> {
     let mut out = Vec::new();
     write_u32(&mut out, module.classes.len() as u32);
@@ -614,6 +781,13 @@ fn encode_exports(module: &Module) -> Vec<u8> {
     write_u32(&mut out, module.funcs.len() as u32);
     for func in &module.funcs {
         write_bytes(&mut out, func.name.as_bytes());
+    }
+    write_u32(&mut out, module.exports.len() as u32);
+    for export in &module.exports {
+        out.push(export.kind.tag());
+        write_bytes(&mut out, export.name.as_bytes());
+        write_u32(&mut out, export.def);
+        write_u32(&mut out, export.ctor);
     }
     out
 }
@@ -923,6 +1097,11 @@ pub enum DecodeError {
     /// The export-section name counts do not equal the semantic
     /// definition counts.
     ExportCountMismatch,
+    /// An export entry names an unknown kind or an index outside the
+    /// definition tables.
+    BadExport,
+    /// An import slot names an index outside the definition tables.
+    BadImport,
 }
 
 impl fmt::Display for DecodeError {
@@ -945,6 +1124,8 @@ impl fmt::Display for DecodeError {
             DecodeError::ExportCountMismatch => {
                 write!(f, "the export names do not match the definition counts")
             }
+            DecodeError::BadExport => write!(f, "an export entry is out of range"),
+            DecodeError::BadImport => write!(f, "an import slot is out of range"),
         }
     }
 }
@@ -1069,7 +1250,9 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     Ok(module)
 }
 
-/// Decode the export section and fill the definition names.
+/// Decode the export section: the definition names and the exported
+/// top-level definitions. Every index is checked against the tables
+/// the semantic region already produced.
 fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> {
     let mut cur = Cursor { bytes, pos: 0 };
     let class_count = cur.len()?;
@@ -1086,6 +1269,35 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     for func in &mut module.funcs {
         func.name = cur.string()?;
     }
+    let export_count = cur.len()?;
+    let mut exports = Vec::with_capacity(export_count);
+    for _ in 0..export_count {
+        let kind = ExportKind::from_tag(cur.u8()?).ok_or(DecodeError::BadExport)?;
+        let name = cur.string()?;
+        let def = cur.u32()?;
+        let ctor = cur.u32()?;
+        let limit = if kind.is_class() {
+            module.classes.len()
+        } else {
+            module.funcs.len()
+        };
+        if def as usize >= limit {
+            return Err(DecodeError::BadExport);
+        }
+        if ctor != NO_CTOR && ctor as usize >= module.funcs.len() {
+            return Err(DecodeError::BadExport);
+        }
+        if !kind.is_class() && ctor != NO_CTOR {
+            return Err(DecodeError::BadExport);
+        }
+        exports.push(Export {
+            kind,
+            name,
+            def,
+            ctor,
+        });
+    }
+    module.exports = exports;
     if cur.pos != bytes.len() {
         return Err(DecodeError::TrailingBytes);
     }
@@ -1127,6 +1339,29 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         apps.push(TypeApp {
             types: app_types,
             rows,
+        });
+    }
+    let import_count = cur.len()?;
+    let mut imports = Vec::with_capacity(import_count);
+    for _ in 0..import_count {
+        let module_path = cur.string()?;
+        let name = cur.string()?;
+        let kind = match cur.u8()? {
+            0 => ImportKind::Class,
+            1 => ImportKind::Ctor,
+            2 => ImportKind::Method,
+            3 => ImportKind::Func,
+            _ => return Err(DecodeError::BadImport),
+        };
+        let def = cur.u32()?;
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(cur.take(32)?);
+        imports.push(Import {
+            module: module_path,
+            name,
+            kind,
+            def,
+            hash,
         });
     }
     let class_count = cur.len()?;
@@ -1218,14 +1453,33 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     if cur.pos != bytes.len() {
         return Err(DecodeError::TrailingBytes);
     }
+    // Every import slot must name a definition of its own kind, and
+    // each definition takes at most one slot. The check runs here, so
+    // no later pass reads a slot index it did not validate.
+    let mut claimed_classes = vec![false; classes.len()];
+    let mut claimed_funcs = vec![false; funcs.len()];
+    for import in &imports {
+        let claimed = if import.kind.is_func() {
+            &mut claimed_funcs
+        } else {
+            &mut claimed_classes
+        };
+        let idx = import.def as usize;
+        if idx >= claimed.len() || claimed[idx] {
+            return Err(DecodeError::BadImport);
+        }
+        claimed[idx] = true;
+    }
     Ok(Module {
         strings,
         types,
         selectors,
         apps,
+        imports,
         classes,
         funcs,
         entry,
+        exports: Vec::new(),
     })
 }
 
@@ -1480,7 +1734,9 @@ mod tests {
                     blocks: vec![vec![Instr::LoadLocal(1), Instr::Return]],
                 },
             ],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         }
     }
 
@@ -1620,7 +1876,9 @@ mod tests {
             apps: vec![],
             classes: vec![],
             funcs: vec![],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         };
         let mut bytes = encode(&module);
         // The single type tag sits directly after the string count

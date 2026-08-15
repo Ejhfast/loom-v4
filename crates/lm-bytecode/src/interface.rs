@@ -9,34 +9,7 @@ use crate::{BcRow, BcType, DecodeError, Module};
 const MAGIC: &[u8; 4] = b"LMIF";
 const VERSION: u16 = 1;
 
-/// The kind of one export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportKind {
-    Function,
-    Class,
-    Enum,
-    EnumCase,
-}
-
-impl ExportKind {
-    fn tag(self) -> u8 {
-        match self {
-            ExportKind::Function => 0,
-            ExportKind::Class => 1,
-            ExportKind::Enum => 2,
-            ExportKind::EnumCase => 3,
-        }
-    }
-
-    fn text(self) -> &'static str {
-        match self {
-            ExportKind::Function => "fn",
-            ExportKind::Class => "class",
-            ExportKind::Enum => "enum",
-            ExportKind::EnumCase => "case",
-        }
-    }
-}
+pub use crate::ExportKind;
 
 /// One export: the name, the kind, the rendered full signature, and
 /// the definition hash.

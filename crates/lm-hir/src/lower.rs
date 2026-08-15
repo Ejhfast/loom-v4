@@ -210,14 +210,47 @@ pub fn lower_module(hir: &HirModule) -> Module {
                 .collect(),
         })
         .collect();
+    // The construction function of class `c` sits at `new_base + c`.
+    let new_base = hir.funcs.len() as u32;
+    let imports = hir
+        .imports
+        .iter()
+        .map(|i| lm_bytecode::Import {
+            module: i.module.clone(),
+            name: i.name.clone(),
+            kind: i.kind,
+            def: match i.def {
+                crate::hir::HirImportDef::Class(c) => c,
+                crate::hir::HirImportDef::Func(f) => f,
+                crate::hir::HirImportDef::Ctor(c) => new_base + c,
+            },
+            hash: i.hash,
+        })
+        .collect();
+    let exports = hir
+        .exports
+        .iter()
+        .map(|e| lm_bytecode::Export {
+            kind: e.kind,
+            name: e.name.clone(),
+            def: e.def,
+            ctor: if e.kind.is_class() {
+                new_base + e.def
+            } else {
+                lm_bytecode::NO_CTOR
+            },
+        })
+        .collect();
     Module {
         strings: m.strings,
         types: m.types,
         selectors: m.selectors,
         apps: m.apps,
+        imports,
         classes,
         funcs,
         entry: hir.entry as u32,
+        exports,
     }
 }
 

@@ -26,6 +26,37 @@ pub struct CoreIds {
     pub none_class: u32,
 }
 
+/// One exported top-level definition of the source module.
+pub struct HirExport {
+    pub kind: lm_bytecode::ExportKind,
+    pub name: String,
+    /// The class index for a class-like export, the function index
+    /// otherwise.
+    pub def: u32,
+}
+
+/// The definition one import slot declares. The lowering pass turns
+/// it into a bytecode index; a constructor index follows the function
+/// table, so only the lowering knows it.
+#[derive(Debug, Clone, Copy)]
+pub enum HirImportDef {
+    Class(u32),
+    Func(u32),
+    /// The construction function of the given class.
+    Ctor(u32),
+}
+
+/// One import slot the module needs.
+#[derive(Debug, Clone)]
+pub struct HirImport {
+    pub module: String,
+    pub name: String,
+    pub kind: lm_bytecode::ImportKind,
+    pub def: HirImportDef,
+    /// The pinned interface hash of the provider export.
+    pub hash: [u8; 32],
+}
+
 /// A checked module. The entry statements form one function.
 pub struct HirModule {
     pub store: TypeStore,
@@ -35,6 +66,10 @@ pub struct HirModule {
     pub entry: usize,
     /// Pinned core definition indices.
     pub core: CoreIds,
+    /// The exported top-level definitions, in declaration order.
+    pub exports: Vec<HirExport>,
+    /// The import slots, in slot order.
+    pub imports: Vec<HirImport>,
 }
 
 /// How instances of one class are constructed.

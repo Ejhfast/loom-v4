@@ -1507,7 +1507,9 @@ mod tests {
                 local_types: vec![],
                 blocks: vec![vec![Instr::ConstInt(1), Instr::Return]],
             }],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         })
         .expect("the trivial module verifies")
     }

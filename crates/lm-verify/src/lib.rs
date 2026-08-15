@@ -473,7 +473,13 @@ pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
 /// through the pinned definition hashes.
 pub fn verify_with_layout(module: &Module, core: CoreLayout) -> Result<(), VerifyError> {
     let ctx = verify_structure(module, core)?;
+    let imported = module.extern_funcs();
     for (idx, func) in module.funcs.iter().enumerate() {
+        // An imported function has no body to check. The structural
+        // pass already proved it carries a signature only.
+        if imported[idx] {
+            continue;
+        }
         verify_func(&ctx, func, idx as u32)?;
     }
     Ok(())
@@ -729,9 +735,53 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             }
         }
     }
+    // Validate the import slots. Each slot names one definition of its
+    // own kind, and no definition takes two slots. An imported
+    // definition carries a signature and no body: the linker replaces
+    // it with the provider definition, and the loader admits a module
+    // only when the import table is empty.
+    let extern_classes = module.extern_classes();
+    let extern_funcs = module.extern_funcs();
+    {
+        let mut claimed_classes = vec![false; module.classes.len()];
+        let mut claimed_funcs = vec![false; module.funcs.len()];
+        for (idx, import) in module.imports.iter().enumerate() {
+            let ierr = |message: String| terr(format!("import {idx}: {message}"));
+            if import.module.is_empty() || import.name.is_empty() {
+                return Err(ierr("the slot needs a module path and a name".to_string()));
+            }
+            let claimed = if import.kind.is_func() {
+                &mut claimed_funcs
+            } else {
+                &mut claimed_classes
+            };
+            let at = import.def as usize;
+            if at >= claimed.len() {
+                return Err(ierr("the definition index is out of range".to_string()));
+            }
+            if claimed[at] {
+                return Err(ierr(
+                    "the definition already has an import slot".to_string(),
+                ));
+            }
+            claimed[at] = true;
+        }
+    }
+    if extern_funcs.get(module.entry as usize) == Some(&true) {
+        return Err(terr("the entry function cannot be imported".to_string()));
+    }
     // Validate classes.
     for (cidx, class) in module.classes.iter().enumerate() {
         let cerr = |message: String| terr(format!("class {cidx}: {message}"));
+        if extern_classes[cidx] {
+            if let Some(p) = class.parent() {
+                if !extern_classes[p as usize] {
+                    return Err(cerr(
+                        "an imported class cannot inherit a local class".to_string(),
+                    ));
+                }
+            }
+        }
         match class.kind {
             BcClassKind::Abstract => {
                 if class.parent().is_some() {
@@ -825,6 +875,12 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             if *func as usize >= module.funcs.len() {
                 return Err(cerr(format!("method function {func} does not exist")));
             }
+            if extern_funcs[*func as usize] != extern_classes[cidx] {
+                return Err(cerr(format!(
+                    "method function {func} does not follow the import state of \
+                     its class"
+                )));
+            }
             let f = &module.funcs[*func as usize];
             if !f.captures.is_empty() {
                 return Err(cerr("a method function must not have captures".to_string()));
@@ -883,6 +939,25 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
     // it: entries must be valid types, the parameter prefix must
     // equal the signature, and every variable must be in scope.
     for (fidx, func) in module.funcs.iter().enumerate() {
+        if extern_funcs[fidx] {
+            // An imported function is a declaration: a signature with
+            // no body, no captures, and no extra local slots.
+            if !func.blocks.is_empty() {
+                return Err(err(fidx as u32, "an imported function must have no body"));
+            }
+            if !func.captures.is_empty() {
+                return Err(err(
+                    fidx as u32,
+                    "an imported function must have no captures",
+                ));
+            }
+            if func.local_types.len() != func.params.len() {
+                return Err(err(
+                    fidx as u32,
+                    "an imported function must declare only its parameter slots",
+                ));
+            }
+        }
         if func.param_muts.len() != func.params.len() {
             return Err(err(
                 fidx as u32,
@@ -2088,7 +2163,9 @@ mod tests {
             apps: vec![],
             classes: vec![],
             funcs: vec![plain_func("main", vec![], TY_INT, blocks)],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         }
     }
 
@@ -2119,7 +2196,9 @@ mod tests {
                     vec![vec![LoadLocal(0), LoadField(0), Return]],
                 ),
             ],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         }
     }
 
@@ -2175,7 +2254,9 @@ mod tests {
                     ]],
                 },
             ],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         }
     }
 
@@ -2800,7 +2881,9 @@ mod tests {
                     vec![Pop, ConstUnit, Return],
                 ],
             }],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         };
         assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
     }

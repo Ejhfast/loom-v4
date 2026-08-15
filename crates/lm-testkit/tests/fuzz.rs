@@ -271,7 +271,9 @@ fn regenerate_fuzz_corpus() {
                     Instr::Return,
                 ]],
             }],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         },
     );
     // Week-3 finding 2: `CastType` between two instantiations of one
@@ -315,7 +317,9 @@ fn regenerate_fuzz_corpus() {
                     Instr::Return,
                 ]],
             }],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         },
     );
     // Week-4 finding class: a perform outside the claimed row, and a
@@ -362,7 +366,9 @@ fn regenerate_fuzz_corpus() {
                 local_types: vec![],
                 blocks: vec![vec![Instr::ConstInt(1), Instr::Return]],
             }],
+            imports: vec![],
             entry: 0,
+            exports: vec![],
         };
         let mut bytes = lm_bytecode::encode(&module);
         // The semantic region starts after the 30-byte header. Its

@@ -313,6 +313,28 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
     if module.entry as usize >= s.funcs {
         return Err(fail("the entry index is out of range"));
     }
+    // Import slots: each names a definition of its own kind, and each
+    // definition takes at most one slot. The decoder checks the same
+    // rule; a hand-built module reaches identity without a decoder.
+    let mut claimed_classes = vec![false; s.classes];
+    let mut claimed_funcs = vec![false; s.funcs];
+    for (idx, import) in module.imports.iter().enumerate() {
+        let claimed = if import.kind.is_func() {
+            &mut claimed_funcs
+        } else {
+            &mut claimed_classes
+        };
+        let at = import.def as usize;
+        if at >= claimed.len() {
+            return Err(fail(format!("import {idx}: definition index out of range")));
+        }
+        if claimed[at] {
+            return Err(fail(format!(
+                "import {idx}: the definition already has an import slot"
+            )));
+        }
+        claimed[at] = true;
+    }
     Ok(())
 }
 
@@ -482,6 +504,11 @@ struct Graph {
     /// The case-class indices per class, in class-index (arm) order.
     /// Only an abstract enum parent has entries.
     arms: Vec<Vec<u32>>,
+    /// True for an imported class. An imported definition is an
+    /// identity leaf: its hash is the pin, not a computed digest.
+    extern_class: Vec<bool>,
+    /// True for an imported function.
+    extern_func: Vec<bool>,
 }
 
 impl Graph {
@@ -490,7 +517,14 @@ impl Graph {
         let mut succ: Vec<Vec<u32>> = vec![Vec::new(); s.total()];
         let mut made_closure = vec![false; s.funcs];
         let mut called = vec![false; s.funcs];
+        let extern_class = module.extern_classes();
+        let extern_func = module.extern_funcs();
         for (cidx, class) in module.classes.iter().enumerate() {
+            if extern_class[cidx] {
+                // An imported class takes its identity from the pinned
+                // interface hash, so it references nothing.
+                continue;
+            }
             let node = s.class_node(cidx as u32);
             if class.parent != NO_PARENT {
                 succ[node as usize].push(s.class_node(class.parent));
@@ -510,12 +544,20 @@ impl Graph {
         // identical arms and families.
         let mut arms: Vec<Vec<u32>> = vec![Vec::new(); s.classes];
         for (cidx, class) in module.classes.iter().enumerate() {
-            if class.kind == BcClassKind::Case && class.parent != NO_PARENT {
+            if extern_class[cidx] || class.parent == NO_PARENT {
+                continue;
+            }
+            if class.kind == BcClassKind::Case && !extern_class[class.parent as usize] {
                 succ[class.parent as usize].push(s.class_node(cidx as u32));
                 arms[class.parent as usize].push(cidx as u32);
             }
         }
         for (fidx, func) in module.funcs.iter().enumerate() {
+            if extern_func[fidx] {
+                // An imported function takes its identity from the
+                // pinned interface hash.
+                continue;
+            }
             let node = s.func_node(fidx as u32);
             let list = &mut succ[node as usize];
             for t in func
@@ -603,13 +645,15 @@ impl Graph {
             }
         }
         let closure_body: Vec<bool> = (0..s.funcs)
-            .map(|f| made_closure[f] && !called[f])
+            .map(|f| made_closure[f] && !called[f] && !extern_func[f])
             .collect();
         Graph {
             space: s,
             succ,
             closure_body,
             arms,
+            extern_class,
+            extern_func,
         }
     }
 }
@@ -1340,8 +1384,34 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
     // The empty overlays of the final all-hash view.
     let empty_ordinals: HashMap<u32, u32> = HashMap::new();
     let empty_digests: HashMap<u32, [u8; 32]> = HashMap::new();
+    // An imported definition takes the pinned interface hash as its
+    // identity. It references nothing, so it is a singleton component
+    // and every hash schedule reaches it before any user of it.
+    for import in &module.imports {
+        let node = if import.kind.is_func() {
+            state.func_hash[import.def as usize] = Some(import.hash);
+            s.func_node(import.def)
+        } else {
+            state.class_hash[import.def as usize] = Some(import.hash);
+            s.class_node(import.def)
+        };
+        state.comp_hash[node as usize] = import.hash;
+    }
     for (comp_idx, comp) in comps.iter().enumerate() {
         let comp_idx = comp_idx as u32;
+        // An imported definition carries its pin, so the component
+        // encoding never runs for it.
+        if comp.len() == 1 {
+            let node = comp[0] as usize;
+            if node < s.classes && graph.extern_class[node] {
+                continue;
+            }
+            if (s.classes..s.classes + s.funcs).contains(&node)
+                && graph.extern_func[node - s.classes]
+            {
+                continue;
+            }
+        }
         // Partition the component nodes, each list ascending.
         let mut classes: Vec<u32> = Vec::new();
         let mut member_funcs: Vec<u32> = Vec::new();
@@ -1566,8 +1636,22 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&COMPILER_ABI_VERSION.to_le_bytes());
     out.extend_from_slice(&manifest);
-    // Imports: none yet. Week 6 extends this explicit empty set.
-    out.extend_from_slice(&0u32.to_le_bytes());
+    // The import set, sorted by module path, then name, then kind.
+    // The sort keeps the hash independent of the order in which the
+    // compiler discovered the slots.
+    let mut imports: Vec<(&str, &str, u8, [u8; 32])> = module
+        .imports
+        .iter()
+        .map(|i| (i.module.as_str(), i.name.as_str(), i.kind.tag(), i.hash))
+        .collect();
+    imports.sort();
+    out.extend_from_slice(&(imports.len() as u32).to_le_bytes());
+    for (path, name, kind, hash) in &imports {
+        write_str(&mut out, path);
+        write_str(&mut out, name);
+        out.push(*kind);
+        out.extend_from_slice(hash);
+    }
     let mut exports: Vec<(u8, &str, [u8; 32])> = Vec::new();
     for (c, class) in module.classes.iter().enumerate() {
         exports.push((0, &class.name, class_hashes[c]));
