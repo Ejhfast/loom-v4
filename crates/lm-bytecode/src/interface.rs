@@ -182,8 +182,8 @@ pub struct IfaceClass {
 /// The exported surface of one definition.
 ///
 /// The two variants differ in size. An interface item is build-time
-/// data that the tool reads once per export, so the extra allocation
-/// of a box would cost more than the unused bytes.
+/// data, and the tool reads one item once per export. The extra
+/// allocation of a box would cost more than the unused bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum IfaceItem {

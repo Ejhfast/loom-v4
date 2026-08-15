@@ -307,7 +307,7 @@ fn load_inner(
             // The key therefore fixes every verifier input, so a hit
             // skips every pass, not only the function dataflow. The
             // identity, the core layout, and the dispatch rows below
-            // are pure functions of the same inputs, so a hit replays
+            // are pure functions of the same inputs. A hit replays
             // them instead of recomputing them.
             let key = (
                 lm_bytecode::identity::verification_hash(&module),

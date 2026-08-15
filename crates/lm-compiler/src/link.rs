@@ -18,9 +18,9 @@
 //!   merged tables. Strings, types, selectors, and applications
 //!   intern by content, so the merged tables stay canonical.
 //!
-//! The merged module passes the whole verifier before it runs, so a
-//! wrong pin or a wrong resolution can never produce executable code
-//! that the verifier did not admit.
+//! The merged module passes the whole verifier before it runs. A
+//! wrong pin or a wrong resolution therefore produces no executable
+//! code that the verifier did not admit.
 
 use crate::env::FrozenLinkEnv;
 use lm_bytecode::identity::{module_identity, ModuleIdentity};
@@ -321,8 +321,9 @@ fn relocate(
     let mut apps: Vec<u32> = vec![u32::MAX; module.apps.len()];
     // The local classes take merged indices in ascending order, so a
     // parent keeps a lower index than its child. A class body needs
-    // the type map, and a type may name a class, so the indices are
-    // assigned first and the bodies fill after the types relocate.
+    // the type map, and a type may name a class. The indices are
+    // therefore assigned first, and the bodies fill after the types
+    // relocate.
     let mut created_classes: Vec<u32> = Vec::new();
     let mut shared_classes: Vec<u32> = Vec::new();
     for idx in 0..module.classes.len() as u32 {
