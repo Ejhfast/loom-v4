@@ -1,0 +1,13 @@
+class Shape
+end
+class Circle < Shape
+  r: Int = 2
+end
+def size(s: Shape): Int
+  if s is Circle
+    (s as Circle).r
+  else
+    0
+  end
+end
+size(Circle()) + size(Shape())

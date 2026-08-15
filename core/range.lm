@@ -1,0 +1,25 @@
+# Core: Range.
+#
+# A half-open integer range `[start, stop)`.
+
+class Range
+  start: Int
+  stop: Int
+
+  def init(mut self, start: Int, stop: Int)
+    self.start = start
+    self.stop = stop
+  end
+
+  def len(self): Int
+    if self.stop > self.start
+      self.stop - self.start
+    else
+      0
+    end
+  end
+
+  def has(self, value: Int): Bool
+    value >= self.start and value < self.stop
+  end
+end

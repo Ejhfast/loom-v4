@@ -1,0 +1,29 @@
+# Core: Option[T].
+#
+# Absence is a value. There is no nil.
+
+enum Option[T]
+  Some(v: T)
+  None
+
+  def is_some(self): Bool
+    case self
+    in Some(_) then true
+    in None    then false
+    end
+  end
+
+  def is_none(self): Bool
+    case self
+    in Some(_) then false
+    in None    then true
+    end
+  end
+
+  def value_or(self, fallback: T): T
+    case self
+    in Some(v) then v
+    in None    then fallback
+    end
+  end
+end

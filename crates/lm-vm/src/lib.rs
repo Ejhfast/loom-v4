@@ -14,7 +14,7 @@ mod heap;
 
 pub use heap::{Heap, HeapStats, Object, ShapeDesc};
 
-use lm_bytecode::{DecodeError, Instr, Module};
+use lm_bytecode::{BcClassKind, BcType, DecodeError, Instr, Module};
 use lm_value::{ObjRef, Value};
 use lm_verify::VerifyError;
 use std::fmt;
@@ -368,11 +368,12 @@ impl<'m> Vm<'m> {
                     let a = self.pop_obj();
                     self.push(Value::Bool(a != b))?;
                 }
-                Instr::Call(callee) => {
+                Instr::Call(callee) | Instr::CallG { func: callee, .. } => {
                     let argc = self.module.funcs[callee as usize].params.len();
                     self.push_frame(callee, argc, None)?;
                 }
-                Instr::CallVirtual { selector, argc } => {
+                Instr::CallVirtual { selector, argc }
+                | Instr::CallVirtualG { selector, argc, .. } => {
                     let argc = argc as usize;
                     let recv = self.operands[self.operands.len() - 1 - argc];
                     let class = match self.heap.get(recv.as_obj().expect("verified receiver")) {
@@ -412,13 +413,39 @@ impl<'m> Vm<'m> {
                     };
                     self.push(value)?;
                 }
-                Instr::New(class) => {
+                Instr::New(class) | Instr::NewG { class, .. } => {
                     let field_count = self.module.classes[class as usize].fields.len();
                     let value = self.alloc(Object::Instance {
                         class,
                         fields: vec![Value::Uninit; field_count],
                     })?;
                     self.push(value)?;
+                }
+                Instr::TupleNew { count, .. } => {
+                    let split = self.operands.len() - count as usize;
+                    let items: Vec<Value> = self.operands.split_off(split);
+                    let value = self.alloc(Object::Tuple { items })?;
+                    self.push(value)?;
+                }
+                Instr::TupleGet(index) => {
+                    let r = self.pop_obj();
+                    let value = match self.heap.get(r) {
+                        Object::Tuple { items } => items[index as usize],
+                        _ => unreachable!("verified tuple shape"),
+                    };
+                    self.push(value)?;
+                }
+                Instr::IsType(ty) => {
+                    let r = self.pop_obj();
+                    let matches = self.instance_matches(r, ty);
+                    self.push(Value::Bool(matches))?;
+                }
+                Instr::CastType(ty) => {
+                    let r = self.pop_obj();
+                    if !self.instance_matches(r, ty) {
+                        return Err(FaultCode::BadCast);
+                    }
+                    self.push(Value::Obj(r))?;
                 }
                 Instr::LoadField(field) => {
                     let r = self.pop_obj();
@@ -657,6 +684,28 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Return true when the instance class equals or extends the
+    /// class named by the target type index.
+    fn instance_matches(&self, r: ObjRef, ty: u32) -> bool {
+        let target = match &self.module.types[ty as usize] {
+            BcType::Class(c) | BcType::Inst(c, _) => *c,
+            _ => unreachable!("verified type-test target"),
+        };
+        let mut class = match self.heap.get(r) {
+            Object::Instance { class, .. } => *class,
+            _ => unreachable!("verified type-test operand"),
+        };
+        loop {
+            if class == target {
+                return true;
+            }
+            match self.module.classes[class as usize].parent() {
+                Some(p) => class = p,
+                None => return false,
+            }
+        }
+    }
+
     /// Append text to a string builder with a growth reservation.
     fn sb_append(&mut self, sb: ObjRef, text: &str) -> Result<(), FaultCode> {
         self.reserve(text.len(), &[Value::Obj(sb)])?;
@@ -816,23 +865,52 @@ impl<'m> Vm<'m> {
                         visited.pop();
                         format!("{{{}}}", parts.join(", "))
                     }
+                    Object::Tuple { items } => {
+                        visited.push(r);
+                        let parts: Vec<String> = items
+                            .iter()
+                            .map(|v| self.show_value_inner(*v, depth + 1, visited))
+                            .collect();
+                        visited.pop();
+                        if parts.len() == 1 {
+                            format!("({},)", parts[0])
+                        } else {
+                            format!("({})", parts.join(", "))
+                        }
+                    }
                     Object::Instance { class, fields } => {
                         visited.push(r);
                         let bc = &self.module.classes[*class as usize];
-                        let parts: Vec<String> = bc
-                            .fields
-                            .iter()
-                            .zip(fields.iter())
-                            .map(|((name, _), v)| {
-                                format!(
-                                    "{}: {}",
-                                    name,
-                                    self.show_value_inner(*v, depth + 1, visited)
-                                )
-                            })
-                            .collect();
+                        let text = if bc.kind == BcClassKind::Case {
+                            // A case instance prints in constructor
+                            // form with its short arm name.
+                            let short = bc.name.rsplit('.').next().unwrap_or(&bc.name);
+                            if fields.is_empty() {
+                                short.to_string()
+                            } else {
+                                let parts: Vec<String> = fields
+                                    .iter()
+                                    .map(|v| self.show_value_inner(*v, depth + 1, visited))
+                                    .collect();
+                                format!("{}({})", short, parts.join(", "))
+                            }
+                        } else {
+                            let parts: Vec<String> = bc
+                                .fields
+                                .iter()
+                                .zip(fields.iter())
+                                .map(|((name, _), v)| {
+                                    format!(
+                                        "{}: {}",
+                                        name,
+                                        self.show_value_inner(*v, depth + 1, visited)
+                                    )
+                                })
+                                .collect();
+                            format!("{}{{{}}}", bc.name, parts.join(", "))
+                        };
                         visited.pop();
-                        format!("{}{{{}}}", bc.name, parts.join(", "))
+                        text
                     }
                     Object::Closure { func, .. } => {
                         format!("<closure {}>", self.module.funcs[*func as usize].name)
@@ -915,11 +993,15 @@ mod tests {
             strings: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
+            apps: vec![],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
+                type_params: 0,
+                effect_params: 0,
                 params: vec![],
                 ret: 2,
+                row: vec![],
                 captures: vec![],
                 local_count: 1,
                 blocks,
@@ -986,11 +1068,15 @@ mod tests {
             strings: vec![],
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
+            apps: vec![],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
+                type_params: 0,
+                effect_params: 0,
                 params: vec![],
                 ret: 2,
+                row: vec![],
                 captures: vec![],
                 local_count: 0,
                 blocks: vec![vec![Jump(9)]],
@@ -1014,16 +1100,22 @@ mod tests {
                 BcType::Class(0),
             ],
             selectors: vec![],
+            apps: vec![],
             classes: vec![lm_bytecode::BcClass {
                 name: "Point".to_string(),
                 parent: lm_bytecode::NO_PARENT,
+                type_params: 0,
+                kind: BcClassKind::Normal,
                 fields: vec![("x".to_string(), 2)],
                 methods: vec![],
             }],
             funcs: vec![Func {
                 name: "main".to_string(),
+                type_params: 0,
+                effect_params: 0,
                 params: vec![],
                 ret: 2,
+                row: vec![],
                 captures: vec![],
                 local_count: 0,
                 blocks: vec![vec![New(0), LoadField(0), Return]],

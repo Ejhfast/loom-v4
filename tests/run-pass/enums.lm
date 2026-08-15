@@ -1,0 +1,14 @@
+enum Signal
+  Red
+  Yellow
+  Green
+
+  def rank(self): Int
+    case self
+    in Red    then 0
+    in Yellow then 1
+    in Green  then 2
+    end
+  end
+end
+Signal.Red.rank() + Yellow.rank() * 10 + Green.rank() * 100

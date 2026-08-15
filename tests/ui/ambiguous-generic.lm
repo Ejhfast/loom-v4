@@ -1,0 +1,6 @@
+def make[T](): [T]
+  []
+end
+
+items = make()
+items

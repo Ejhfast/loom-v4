@@ -1,0 +1,2 @@
+error[E1004]: expected [Animal], found [Dog]
+  --> tests/ui/invariant-list.lm:12:6

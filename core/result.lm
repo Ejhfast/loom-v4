@@ -1,0 +1,29 @@
+# Core: Result[T, E].
+#
+# Ordinary failure is a value, not a fault.
+
+enum Result[T, E]
+  Ok(v: T)
+  Err(error: E)
+
+  def is_ok(self): Bool
+    case self
+    in Ok(_)  then true
+    in Err(_) then false
+    end
+  end
+
+  def is_err(self): Bool
+    case self
+    in Ok(_)  then false
+    in Err(_) then true
+    end
+  end
+
+  def value_or(self, fallback: T): T
+    case self
+    in Ok(v)  then v
+    in Err(_) then fallback
+    end
+  end
+end

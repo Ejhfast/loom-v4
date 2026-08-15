@@ -1,0 +1,11 @@
+def half(n: Int): Result[Int, String]
+  if n % 2 == 0
+    Ok(n / 2)
+  else
+    Err("odd")
+  end
+end
+case half(10)
+in Ok(v)      then v + half(3).value_or(100)
+in Err(_)     then -1
+end

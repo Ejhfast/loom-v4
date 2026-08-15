@@ -1,0 +1,12 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+def herd(animals: [Animal]): Int
+  animals.len()
+end
+
+dogs = [Dog()]
+herd(dogs)

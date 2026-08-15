@@ -1,0 +1,2 @@
+error[E1043]: this arm is unreachable; an earlier arm covers it
+  --> tests/ui/unreachable-arm.lm:5:3

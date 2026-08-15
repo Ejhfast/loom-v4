@@ -5,6 +5,8 @@
 //! `.expected` file that holds the exact outcome line, for example
 //! `Done(4950)`.
 
+pub mod oracle;
+
 use lm_source::SourceFile;
 use lm_vm::{Vm, VmConfig};
 use std::path::{Path, PathBuf};

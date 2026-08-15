@@ -1,0 +1,17 @@
+# A small arithmetic-expression evaluator over a recursive enum.
+
+enum Expr
+  Number(value: Int)
+  Add(left: Expr, right: Expr)
+  Neg(value: Expr)
+end
+
+def eval(expr: Expr): Int
+  case expr
+  in Number(n) then n
+  in Add(a, b) then eval(a) + eval(b)
+  in Neg(v)    then 0 - eval(v)
+  end
+end
+
+eval(Add(Number(40), Neg(Number(-2))))

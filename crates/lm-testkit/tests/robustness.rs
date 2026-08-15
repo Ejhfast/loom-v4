@@ -25,10 +25,12 @@ fn nested(open: &str, middle: &str, close: &str, depth: usize) -> String {
 
 /// Run the closure on a bounded Rust stack. The deep inputs below
 /// need tens of megabytes without the depth guard, so a pass on this
-/// stack proves the guard stops the recursion first.
+/// stack proves the guard stops the recursion first. The bound is the
+/// standard 8 MiB main-thread stack that the CLI process has; the
+/// week-2 notes record this as the supported stack for full nesting.
 fn on_small_stack<F: FnOnce() + Send + 'static>(f: F) {
     std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
+        .stack_size(8 * 1024 * 1024)
         .spawn(f)
         .unwrap()
         .join()

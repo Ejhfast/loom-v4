@@ -2,14 +2,16 @@
 //!
 //! Each expression leaves exactly one value on the operand stack.
 //! Each statement leaves the stack unchanged. Every block ends with a
-//! terminator. The pass interns strings, types, and selectors in
-//! first-encounter order, so the output is deterministic. It also
-//! synthesizes one construction function for each class.
+//! terminator. The pass interns strings, types, selectors, and type
+//! applications in first-encounter order, so the output is
+//! deterministic. It also synthesizes one construction function for
+//! each class, and expands `case` patterns and the non-faulting `get`
+//! methods into ordinary instructions with scratch locals.
 
 use crate::hir::*;
-use lm_bytecode::{BcClass, BcType, Func, Instr, Module, NO_PARENT};
+use lm_bytecode::{BcClass, BcClassKind, BcRow, BcType, Func, Instr, Module, TypeApp, NO_PARENT};
 use lm_source::ast::BinOp;
-use lm_types::{Type, TypeId, TypeStore, BOOL, INT, NEVER, STRING, UNIT};
+use lm_types::{ClassKind, Row, RowElem, Type, TypeId, TypeStore, BOOL, INT, NEVER, STRING, UNIT};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -22,8 +24,12 @@ struct ModLowerer<'m> {
     type_index: HashMap<BcType, u32>,
     selectors: Vec<String>,
     selector_index: HashMap<String, u32>,
+    apps: Vec<TypeApp>,
+    app_index: HashMap<(Vec<u32>, Vec<Vec<BcRow>>), u32>,
     /// The function index of the first synthesized `<new>` function.
     new_base: u32,
+    /// Pinned core indices for the `get` expansions.
+    core: CoreIds,
 }
 
 impl<'m> ModLowerer<'m> {
@@ -47,6 +53,38 @@ impl<'m> ModLowerer<'m> {
         idx
     }
 
+    /// Convert a checker row into the bytecode row form. Operation
+    /// names intern into the string table.
+    fn bc_row(&mut self, row: &Row) -> Vec<BcRow> {
+        row.iter()
+            .map(|elem| match elem {
+                RowElem::Op(name) => {
+                    let text = self.store.row_name(*name).to_string();
+                    BcRow::Op(self.intern_string(&text))
+                }
+                RowElem::Var(v) => BcRow::Var(*v),
+            })
+            .collect()
+    }
+
+    fn intern_app(&mut self, types: Vec<u32>, rows: Vec<Vec<BcRow>>) -> u32 {
+        let key = (types.clone(), rows.clone());
+        if let Some(idx) = self.app_index.get(&key) {
+            return *idx;
+        }
+        let idx = self.apps.len() as u32;
+        self.apps.push(TypeApp { types, rows });
+        self.app_index.insert(key, idx);
+        idx
+    }
+
+    /// Build a type application from checker types and rows.
+    fn app_of(&mut self, targs: &[TypeId], rowargs: &[Row]) -> u32 {
+        let types: Vec<u32> = targs.iter().map(|t| self.bc_ty(*t)).collect();
+        let rows: Vec<Vec<BcRow>> = rowargs.iter().map(|r| self.bc_row(r)).collect();
+        self.intern_app(types, rows)
+    }
+
     /// Convert an interned checker type to a type-table index.
     /// `Never` types occupy unreachable value positions only, so they
     /// share the unit entry.
@@ -59,6 +97,10 @@ impl<'m> ModLowerer<'m> {
             Type::StringBuilder => self.intern_type(BcType::StringBuilder),
             Type::ByteBuffer => self.intern_type(BcType::ByteBuffer),
             Type::Class(c) => self.intern_type(BcType::Class(c.0)),
+            Type::Inst(c, args) => {
+                let args: Vec<u32> = args.iter().map(|a| self.bc_ty(*a)).collect();
+                self.intern_type(BcType::Inst(c.0, args))
+            }
             Type::List(e) => {
                 let e = self.bc_ty(e);
                 self.intern_type(BcType::List(e))
@@ -68,11 +110,17 @@ impl<'m> ModLowerer<'m> {
                 let v = self.bc_ty(v);
                 self.intern_type(BcType::Map(k, v))
             }
-            Type::Fn(params, ret) => {
+            Type::Tuple(elems) => {
+                let elems: Vec<u32> = elems.iter().map(|e| self.bc_ty(*e)).collect();
+                self.intern_type(BcType::Tuple(elems))
+            }
+            Type::Fn(params, ret, row) => {
                 let params: Vec<u32> = params.iter().map(|p| self.bc_ty(*p)).collect();
                 let ret = self.bc_ty(ret);
-                self.intern_type(BcType::Fn(params, ret))
+                let row = self.bc_row(&row);
+                self.intern_type(BcType::Fn(params, ret, row))
             }
+            Type::Var(i) => self.intern_type(BcType::Var(i)),
         }
     }
 
@@ -97,7 +145,10 @@ pub fn lower_module(hir: &HirModule) -> Module {
         type_index: HashMap::new(),
         selectors: Vec::new(),
         selector_index: HashMap::new(),
+        apps: Vec::new(),
+        app_index: HashMap::new(),
         new_base: hir.funcs.len() as u32,
+        core: hir.core,
     };
     // The canonical primitive prefix required by the verifier.
     m.intern_type(BcType::Unit);
@@ -123,6 +174,12 @@ pub fn lower_module(hir: &HirModule) -> Module {
         .map(|class| BcClass {
             name: class.name.clone(),
             parent: class.parent.unwrap_or(NO_PARENT),
+            type_params: class.type_params,
+            kind: match class.kind {
+                ClassKind::Normal => BcClassKind::Normal,
+                ClassKind::EnumParent => BcClassKind::Abstract,
+                ClassKind::EnumCase => BcClassKind::Case,
+            },
             fields: class
                 .field_names
                 .iter()
@@ -140,6 +197,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
         strings: m.strings,
         types: m.types,
         selectors: m.selectors,
+        apps: m.apps,
         classes,
         funcs,
         entry: hir.entry as u32,
@@ -152,15 +210,18 @@ struct Lowerer<'a, 'm> {
     cur: usize,
     /// Stack of `(continue_target, break_target)` blocks.
     loops: Vec<(u32, u32)>,
+    /// The next free scratch local slot.
+    next_scratch: u32,
 }
 
 impl<'a, 'm> Lowerer<'a, 'm> {
-    fn new(m: &'a mut ModLowerer<'m>) -> Lowerer<'a, 'm> {
+    fn new(m: &'a mut ModLowerer<'m>, local_base: u32) -> Lowerer<'a, 'm> {
         Lowerer {
             m,
             blocks: vec![Vec::new()],
             cur: 0,
             loops: Vec::new(),
+            next_scratch: local_base,
         }
     }
 
@@ -175,6 +236,13 @@ impl<'a, 'm> Lowerer<'a, 'm> {
 
     fn switch_to(&mut self, block: u32) {
         self.cur = block as usize;
+    }
+
+    /// Allocate one scratch local slot.
+    fn scratch(&mut self) -> u32 {
+        let slot = self.next_scratch;
+        self.next_scratch += 1;
+        slot
     }
 
     /// Close every open block and return the block list.
@@ -287,10 +355,21 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         }
     }
 
+    /// Emit a direct call, generic when arguments are present.
+    fn emit_call(&mut self, func: u32, targs: &[TypeId], rowargs: &[Row]) {
+        if targs.is_empty() && rowargs.is_empty() {
+            self.emit(Instr::Call(func));
+        } else {
+            let app = self.m.app_of(targs, rowargs);
+            self.emit(Instr::CallG { func, app });
+        }
+    }
+
     /// Lower an expression. Exactly one value is pushed unless the
     /// expression cannot complete.
     fn lower_expr(&mut self, expr: &HExpr) {
         match &expr.kind {
+            HExprKind::Unit => self.emit(Instr::ConstUnit),
             HExprKind::Int(v) => self.emit(Instr::ConstInt(*v)),
             HExprKind::Bool(v) => self.emit(Instr::ConstBool(*v)),
             HExprKind::Str(v) => {
@@ -341,22 +420,29 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::Jump(join_b));
                 self.switch_to(join_b);
             }
-            HExprKind::Call { func, args } => {
+            HExprKind::Call {
+                func,
+                targs,
+                rowargs,
+                args,
+            } => {
                 for arg in args {
                     self.lower_expr(arg);
                 }
-                self.emit(Instr::Call(*func));
+                self.emit_call(*func, targs, rowargs);
             }
-            HExprKind::Construct { class, args } => {
+            HExprKind::Construct { class, targs, args } => {
                 for arg in args {
                     self.lower_expr(arg);
                 }
                 let target = self.m.new_base + *class;
-                self.emit(Instr::Call(target));
+                self.emit_call(target, targs, &[]);
             }
             HExprKind::MethodCall {
                 recv,
                 selector,
+                own_targs,
+                own_rowargs,
                 args,
             } => {
                 self.lower_expr(recv);
@@ -364,10 +450,20 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.lower_expr(arg);
                 }
                 let sel = self.m.selector(selector);
-                self.emit(Instr::CallVirtual {
-                    selector: sel,
-                    argc: args.len() as u32,
-                });
+                let generic_recv = matches!(self.m.store.get(recv.ty), Type::Inst(_, _));
+                if generic_recv || !own_targs.is_empty() || !own_rowargs.is_empty() {
+                    let app = self.m.app_of(own_targs, own_rowargs);
+                    self.emit(Instr::CallVirtualG {
+                        selector: sel,
+                        argc: args.len() as u32,
+                        app,
+                    });
+                } else {
+                    self.emit(Instr::CallVirtual {
+                        selector: sel,
+                        argc: args.len() as u32,
+                    });
+                }
             }
             HExprKind::FieldGet { recv, field } => {
                 self.lower_expr(recv);
@@ -394,6 +490,30 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     argc: args.len() as u32,
                 });
             }
+            HExprKind::TupleLit(items) => {
+                for item in items {
+                    self.lower_expr(item);
+                }
+                let ty = self.m.bc_ty(expr.ty);
+                self.emit(Instr::TupleNew {
+                    ty,
+                    count: items.len() as u32,
+                });
+            }
+            HExprKind::TupleGet { tuple, index } => {
+                self.lower_expr(tuple);
+                self.emit(Instr::TupleGet(*index));
+            }
+            HExprKind::IsType { value, ty } => {
+                self.lower_expr(value);
+                let ty = self.m.bc_ty(*ty);
+                self.emit(Instr::IsType(ty));
+            }
+            HExprKind::CastType { value, ty } => {
+                self.lower_expr(value);
+                let ty = self.m.bc_ty(*ty);
+                self.emit(Instr::CastType(ty));
+            }
             HExprKind::ListLit(items) => {
                 for item in items {
                     self.lower_expr(item);
@@ -415,6 +535,14 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     count: entries.len() as u32,
                 });
             }
+            HExprKind::Native {
+                op: NativeOp::ListGet,
+                args,
+            } => self.lower_list_get(expr, args),
+            HExprKind::Native {
+                op: NativeOp::MapGet,
+                args,
+            } => self.lower_map_get(expr, args),
             HExprKind::Native { op, args } => {
                 for arg in args {
                     self.lower_expr(arg);
@@ -441,6 +569,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     NativeOp::BbLen => Instr::BbLen,
                     NativeOp::BbBuild => Instr::BbBuild,
                     NativeOp::Freeze => Instr::Freeze,
+                    NativeOp::ListGet | NativeOp::MapGet => unreachable!("handled above"),
                 };
                 self.emit(instr);
             }
@@ -486,6 +615,176 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 }
                 self.switch_to(join_b);
             }
+            HExprKind::Case {
+                scrut,
+                scrut_slot,
+                arms,
+            } => self.lower_case(scrut, *scrut_slot, arms),
+        }
+    }
+
+    /// Lower `list.get(i)` into a bounds test around `ListAt` plus a
+    /// call of the pinned core `Option` constructors.
+    fn lower_list_get(&mut self, expr: &HExpr, args: &[HExpr]) {
+        let elem = self.option_arg(expr.ty);
+        let list_slot = self.scratch();
+        let idx_slot = self.scratch();
+        self.lower_expr(&args[0]);
+        self.emit(Instr::StoreLocal(list_slot));
+        self.lower_expr(&args[1]);
+        self.emit(Instr::StoreLocal(idx_slot));
+        let none_b = self.new_block();
+        let join_b = self.new_block();
+        self.emit(Instr::LoadLocal(idx_slot));
+        self.emit(Instr::ConstInt(0));
+        self.emit(Instr::GeInt);
+        self.emit(Instr::JumpIfFalse(none_b));
+        self.emit(Instr::LoadLocal(idx_slot));
+        self.emit(Instr::LoadLocal(list_slot));
+        self.emit(Instr::ListLen);
+        self.emit(Instr::LtInt);
+        self.emit(Instr::JumpIfFalse(none_b));
+        self.emit(Instr::LoadLocal(list_slot));
+        self.emit(Instr::LoadLocal(idx_slot));
+        self.emit(Instr::ListAt);
+        let some_new = self.m.new_base + self.m.core.some_class;
+        self.emit_call(some_new, &[elem], &[]);
+        self.emit(Instr::Jump(join_b));
+        self.switch_to(none_b);
+        let none_new = self.m.new_base + self.m.core.none_class;
+        self.emit_call(none_new, &[elem], &[]);
+        self.emit(Instr::Jump(join_b));
+        self.switch_to(join_b);
+    }
+
+    /// Lower `map.get(k)` into `MapHas`/`MapAt` plus a call of the
+    /// pinned core `Option` constructors.
+    fn lower_map_get(&mut self, expr: &HExpr, args: &[HExpr]) {
+        let value_ty = self.option_arg(expr.ty);
+        let map_slot = self.scratch();
+        let key_slot = self.scratch();
+        self.lower_expr(&args[0]);
+        self.emit(Instr::StoreLocal(map_slot));
+        self.lower_expr(&args[1]);
+        self.emit(Instr::StoreLocal(key_slot));
+        let none_b = self.new_block();
+        let join_b = self.new_block();
+        self.emit(Instr::LoadLocal(map_slot));
+        self.emit(Instr::LoadLocal(key_slot));
+        self.emit(Instr::MapHas);
+        self.emit(Instr::JumpIfFalse(none_b));
+        self.emit(Instr::LoadLocal(map_slot));
+        self.emit(Instr::LoadLocal(key_slot));
+        self.emit(Instr::MapAt);
+        let some_new = self.m.new_base + self.m.core.some_class;
+        self.emit_call(some_new, &[value_ty], &[]);
+        self.emit(Instr::Jump(join_b));
+        self.switch_to(none_b);
+        let none_new = self.m.new_base + self.m.core.none_class;
+        self.emit_call(none_new, &[value_ty], &[]);
+        self.emit(Instr::Jump(join_b));
+        self.switch_to(join_b);
+    }
+
+    /// The argument of a core `Option[T]` result type.
+    fn option_arg(&self, ty: TypeId) -> TypeId {
+        match self.m.store.get(ty) {
+            Type::Inst(_, args) => args[0],
+            _ => unreachable!("get results are Option instances"),
+        }
+    }
+
+    /// Lower one `case` expression. The scrutinee is stored first;
+    /// each arm tests the pattern, binds, runs its body, and jumps to
+    /// the join with one value. The checker proved exhaustiveness, so
+    /// the last arm destructures without tests.
+    fn lower_case(&mut self, scrut: &HExpr, scrut_slot: u32, arms: &[HArm]) {
+        self.lower_expr(scrut);
+        self.emit(Instr::StoreLocal(scrut_slot));
+        let join_b = self.new_block();
+        let last = arms.len() - 1;
+        for (aidx, arm) in arms.iter().enumerate() {
+            if aidx == last {
+                self.lower_pattern(&arm.pattern, scrut_slot, None);
+                let pushed = self.lower_block_value(&arm.body);
+                if pushed {
+                    self.emit(Instr::Jump(join_b));
+                }
+            } else {
+                let next_b = self.new_block();
+                self.lower_pattern(&arm.pattern, scrut_slot, Some(next_b));
+                let pushed = self.lower_block_value(&arm.body);
+                if pushed {
+                    self.emit(Instr::Jump(join_b));
+                }
+                self.switch_to(next_b);
+            }
+        }
+        self.switch_to(join_b);
+    }
+
+    /// Lower one pattern over the value in `src`. With `fail` the
+    /// tests jump there on a mismatch; without it the pattern only
+    /// destructures, because the checker proved it must match.
+    fn lower_pattern(&mut self, pattern: &HPattern, src: u32, fail: Option<u32>) {
+        match pattern {
+            HPattern::Wildcard => {}
+            HPattern::Bind(slot) => {
+                self.emit(Instr::LoadLocal(src));
+                self.emit(Instr::StoreLocal(*slot));
+            }
+            HPattern::Int(v) => {
+                if let Some(fail) = fail {
+                    self.emit(Instr::LoadLocal(src));
+                    self.emit(Instr::ConstInt(*v));
+                    self.emit(Instr::EqInt);
+                    self.emit(Instr::JumpIfFalse(fail));
+                }
+            }
+            HPattern::Bool(v) => {
+                if let Some(fail) = fail {
+                    self.emit(Instr::LoadLocal(src));
+                    if *v {
+                        self.emit(Instr::JumpIfFalse(fail));
+                    } else {
+                        self.emit(Instr::JumpIfTrue(fail));
+                    }
+                }
+            }
+            HPattern::Str(v) => {
+                if let Some(fail) = fail {
+                    self.emit(Instr::LoadLocal(src));
+                    let idx = self.m.intern_string(v);
+                    self.emit(Instr::ConstStr(idx));
+                    self.emit(Instr::EqStr);
+                    self.emit(Instr::JumpIfFalse(fail));
+                }
+            }
+            HPattern::Ctor { ty, args, .. } => {
+                let bc = self.m.bc_ty(*ty);
+                if let Some(fail) = fail {
+                    self.emit(Instr::LoadLocal(src));
+                    self.emit(Instr::IsType(bc));
+                    self.emit(Instr::JumpIfFalse(fail));
+                }
+                let needs_fields = args.iter().any(|a| !matches!(a, HPattern::Wildcard));
+                if needs_fields {
+                    let cast_slot = self.scratch();
+                    self.emit(Instr::LoadLocal(src));
+                    self.emit(Instr::CastType(bc));
+                    self.emit(Instr::StoreLocal(cast_slot));
+                    for (fidx, sub) in args.iter().enumerate() {
+                        if matches!(sub, HPattern::Wildcard) {
+                            continue;
+                        }
+                        let field_slot = self.scratch();
+                        self.emit(Instr::LoadLocal(cast_slot));
+                        self.emit(Instr::LoadField(fidx as u32));
+                        self.emit(Instr::StoreLocal(field_slot));
+                        self.lower_pattern(sub, field_slot, fail);
+                    }
+                }
+            }
         }
     }
 
@@ -504,6 +803,152 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         if pushed {
             self.emit(Instr::Jump(join_b));
         }
+    }
+}
+
+/// Shift every local slot reference in a default expression by
+/// `base`, and record one past the highest shifted slot in `max`.
+fn shift_locals_expr(expr: &HExpr, base: u32, max: &mut u32) -> HExpr {
+    let mut out = expr.clone();
+    shift_expr_in_place(&mut out, base, max);
+    out
+}
+
+fn shift_slot(slot: &mut u32, base: u32, max: &mut u32) {
+    *max = (*max).max(*slot + 1);
+    *slot += base;
+}
+
+fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
+    match &mut expr.kind {
+        HExprKind::Local(slot) => shift_slot(slot, base, max),
+        HExprKind::Unit
+        | HExprKind::Int(_)
+        | HExprKind::Str(_)
+        | HExprKind::Bool(_)
+        | HExprKind::Capture(_) => {}
+        HExprKind::Not(inner) | HExprKind::Neg(inner) => shift_expr_in_place(inner, base, max),
+        HExprKind::Binary { left, right, .. }
+        | HExprKind::And(left, right)
+        | HExprKind::Or(left, right) => {
+            shift_expr_in_place(left, base, max);
+            shift_expr_in_place(right, base, max);
+        }
+        HExprKind::Call { args, .. } | HExprKind::Construct { args, .. } => {
+            for a in args {
+                shift_expr_in_place(a, base, max);
+            }
+        }
+        HExprKind::MethodCall { recv, args, .. } => {
+            shift_expr_in_place(recv, base, max);
+            for a in args {
+                shift_expr_in_place(a, base, max);
+            }
+        }
+        HExprKind::FieldGet { recv, .. } => shift_expr_in_place(recv, base, max),
+        HExprKind::MakeClosure { captures, .. } => {
+            for c in captures {
+                shift_expr_in_place(c, base, max);
+            }
+        }
+        HExprKind::CallValue { callee, args } => {
+            shift_expr_in_place(callee, base, max);
+            for a in args {
+                shift_expr_in_place(a, base, max);
+            }
+        }
+        HExprKind::TupleLit(items) | HExprKind::ListLit(items) => {
+            for i in items {
+                shift_expr_in_place(i, base, max);
+            }
+        }
+        HExprKind::TupleGet { tuple, .. } => shift_expr_in_place(tuple, base, max),
+        HExprKind::IsType { value, .. } | HExprKind::CastType { value, .. } => {
+            shift_expr_in_place(value, base, max)
+        }
+        HExprKind::MapLit(entries) => {
+            for (k, v) in entries {
+                shift_expr_in_place(k, base, max);
+                shift_expr_in_place(v, base, max);
+            }
+        }
+        HExprKind::Native { args, .. } => {
+            for a in args {
+                shift_expr_in_place(a, base, max);
+            }
+        }
+        HExprKind::Interp(parts) => {
+            for part in parts {
+                if let HInterpPart::Expr(e) = part {
+                    shift_expr_in_place(e, base, max);
+                }
+            }
+        }
+        HExprKind::If { arms, else_body } => {
+            for (cond, body) in arms {
+                shift_expr_in_place(cond, base, max);
+                for s in body {
+                    shift_stmt_in_place(s, base, max);
+                }
+            }
+            if let Some(body) = else_body {
+                for s in body {
+                    shift_stmt_in_place(s, base, max);
+                }
+            }
+        }
+        HExprKind::Case {
+            scrut,
+            scrut_slot,
+            arms,
+        } => {
+            shift_expr_in_place(scrut, base, max);
+            shift_slot(scrut_slot, base, max);
+            for arm in arms {
+                shift_pattern_in_place(&mut arm.pattern, base, max);
+                for s in &mut arm.body {
+                    shift_stmt_in_place(s, base, max);
+                }
+            }
+        }
+    }
+}
+
+fn shift_pattern_in_place(pattern: &mut HPattern, base: u32, max: &mut u32) {
+    match pattern {
+        HPattern::Bind(slot) => shift_slot(slot, base, max),
+        HPattern::Ctor { args, .. } => {
+            for a in args {
+                shift_pattern_in_place(a, base, max);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shift_stmt_in_place(stmt: &mut HStmt, base: u32, max: &mut u32) {
+    match stmt {
+        HStmt::Assign { slot, value } => {
+            shift_slot(slot, base, max);
+            shift_expr_in_place(value, base, max);
+        }
+        HStmt::AssignField { recv, value, .. } => {
+            shift_expr_in_place(recv, base, max);
+            shift_expr_in_place(value, base, max);
+        }
+        HStmt::While { cond, body } => {
+            shift_expr_in_place(cond, base, max);
+            for s in body {
+                shift_stmt_in_place(s, base, max);
+            }
+        }
+        HStmt::Return { value } => {
+            if let Some(v) = value {
+                shift_expr_in_place(v, base, max);
+            }
+        }
+        HStmt::Break | HStmt::Continue => {}
+        HStmt::Expr(e) => shift_expr_in_place(e, base, max),
     }
 }
 
@@ -536,8 +981,9 @@ fn binary_instr(op: BinOp, operand_ty: TypeId) -> Instr {
 fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
     let params: Vec<u32> = func.params.iter().map(|t| m.bc_ty(*t)).collect();
     let ret = m.bc_ty(func.ret);
+    let row = m.bc_row(&func.row);
     let captures: Vec<u32> = func.captures.iter().map(|t| m.bc_ty(*t)).collect();
-    let mut lowerer = Lowerer::new(m);
+    let mut lowerer = Lowerer::new(m, func.locals.len() as u32);
     let unit_ret = func.ret == UNIT;
     let pushed = if unit_ret {
         let diverged = lowerer.lower_block_stmt(&func.body);
@@ -548,49 +994,107 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
     } else {
         lowerer.lower_block_value(&func.body)
     };
+    let local_count = lowerer.next_scratch;
     let blocks = lowerer.finish(pushed);
     Func {
         name: func.name.clone(),
+        type_params: func.type_params,
+        effect_params: func.effect_params,
         params,
         ret,
+        row,
         captures,
-        local_count: func.locals.len() as u32,
+        local_count,
         blocks,
     }
 }
 
 /// Synthesize the `<new>` construction function for one class:
-/// allocate, evaluate defaults, run `init`, and return the instance.
+/// allocate, evaluate defaults, run `init` or store the case fields,
+/// and return the instance.
 fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
+    if class.kind == ClassKind::EnumParent {
+        // An abstract enum parent is never constructed. Its `<new>`
+        // slot only keeps the index arithmetic dense.
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            ret: m.intern_type(BcType::Unit),
+            row: vec![],
+            captures: vec![],
+            local_count: 0,
+            blocks: vec![vec![Instr::ConstUnit, Instr::Return]],
+        };
+    }
     let params: Vec<u32> = class.ctor_params.iter().map(|t| m.bc_ty(*t)).collect();
-    let ret = m.intern_type(BcType::Class(cidx));
+    let type_params = class.type_params;
+    let vars: Vec<TypeId> = Vec::new();
+    let _ = vars;
+    let (self_bc, app) = if type_params == 0 {
+        (m.intern_type(BcType::Class(cidx)), None)
+    } else {
+        let var_tys: Vec<u32> = (0..type_params)
+            .map(|i| m.intern_type(BcType::Var(i)))
+            .collect();
+        let inst = m.intern_type(BcType::Inst(cidx, var_tys.clone()));
+        let app = m.intern_app(var_tys, vec![]);
+        (inst, Some(app))
+    };
+    let row = m.bc_row(&class.ctor_row);
     let self_slot = params.len() as u32;
-    let mut lowerer = Lowerer::new(m);
-    lowerer.emit(Instr::New(cidx));
+    let mut lowerer = Lowerer::new(m, self_slot + 1);
+    match app {
+        None => lowerer.emit(Instr::New(cidx)),
+        Some(app) => lowerer.emit(Instr::NewG { class: cidx, app }),
+    }
     lowerer.emit(Instr::StoreLocal(self_slot));
-    for (fidx, default) in class.defaults.iter().enumerate() {
-        if let Some(expr) = default {
+    if class.ctor_kind == CtorKind::CaseFields {
+        for fidx in 0..class.ctor_params.len() {
             lowerer.emit(Instr::LoadLocal(self_slot));
-            lowerer.lower_expr(expr);
+            lowerer.emit(Instr::LoadLocal(fidx as u32));
             lowerer.emit(Instr::StoreField(fidx as u32));
         }
-    }
-    if let Some(init) = class.init {
-        lowerer.emit(Instr::LoadLocal(self_slot));
-        for i in 0..self_slot {
-            lowerer.emit(Instr::LoadLocal(i));
+    } else {
+        for (fidx, default) in class.defaults.iter().enumerate() {
+            if let Some(expr) = default {
+                // A default was checked in its own local space. Move
+                // its temporary slots into fresh scratch slots of the
+                // `<new>` function.
+                let base = lowerer.next_scratch;
+                let mut max_slot = 0;
+                let shifted = shift_locals_expr(expr, base, &mut max_slot);
+                lowerer.next_scratch = lowerer.next_scratch.max(max_slot);
+                lowerer.emit(Instr::LoadLocal(self_slot));
+                lowerer.lower_expr(&shifted);
+                lowerer.emit(Instr::StoreField(fidx as u32));
+            }
         }
-        lowerer.emit(Instr::Call(init));
-        lowerer.emit(Instr::Pop);
+        if let Some(init) = class.init {
+            lowerer.emit(Instr::LoadLocal(self_slot));
+            for i in 0..self_slot {
+                lowerer.emit(Instr::LoadLocal(i));
+            }
+            match app {
+                None => lowerer.emit(Instr::Call(init)),
+                Some(app) => lowerer.emit(Instr::CallG { func: init, app }),
+            }
+            lowerer.emit(Instr::Pop);
+        }
     }
     lowerer.emit(Instr::LoadLocal(self_slot));
+    let local_count = lowerer.next_scratch;
     let blocks = lowerer.finish(true);
     Func {
         name: format!("<new {}>", class.name),
+        type_params,
+        effect_params: 0,
         params,
-        ret,
+        ret: self_bc,
+        row,
         captures: vec![],
-        local_count: self_slot + 1,
+        local_count,
         blocks,
     }
 }
@@ -605,6 +1109,7 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::LoadLocal(_)
         | Instr::LoadCapture(_)
         | Instr::New(_)
+        | Instr::NewG { .. }
         | Instr::SbNew
         | Instr::BbNew => (0, 1),
         Instr::StoreLocal(_) | Instr::Pop => (1, 0),
@@ -628,6 +1133,9 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::Neg
         | Instr::Not
         | Instr::LoadField(_)
+        | Instr::TupleGet(_)
+        | Instr::IsType(_)
+        | Instr::CastType(_)
         | Instr::ListLen
         | Instr::MapLen
         | Instr::SbBuild
@@ -644,10 +1152,10 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::SbAppendBool
         | Instr::BbAppend => (2, 1),
         Instr::MapPut => (3, 1),
-        Instr::ListNew { count, .. } => (*count as usize, 1),
+        Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
         Instr::MapNew { count, .. } => (2 * *count as usize, 1),
         Instr::MakeClosure { captures, .. } => (*captures as usize, 1),
-        Instr::Call(idx) => {
+        Instr::Call(idx) | Instr::CallG { func: idx, .. } => {
             let argc = module
                 .funcs
                 .get(*idx as usize)
@@ -655,7 +1163,9 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
                 .unwrap_or(0);
             (argc, 1)
         }
-        Instr::CallVirtual { argc, .. } => (*argc as usize + 1, 1),
+        Instr::CallVirtual { argc, .. } | Instr::CallVirtualG { argc, .. } => {
+            (*argc as usize + 1, 1)
+        }
         Instr::CallValue { argc } => (*argc as usize + 1, 1),
         Instr::Jump(_) => (0, 0),
         Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => (1, 0),
@@ -692,17 +1202,28 @@ fn instr_text(instr: &Instr) -> String {
         Instr::EqRef => "EqRef".to_string(),
         Instr::NeRef => "NeRef".to_string(),
         Instr::Call(idx) => format!("Call fn{idx}"),
+        Instr::CallG { func, app } => format!("CallG fn{func} app{app}"),
         Instr::CallVirtual { selector, argc } => {
             format!("CallVirtual sel{selector} argc {argc}")
         }
+        Instr::CallVirtualG {
+            selector,
+            argc,
+            app,
+        } => format!("CallVirtualG sel{selector} argc {argc} app{app}"),
         Instr::CallValue { argc } => format!("CallValue argc {argc}"),
         Instr::MakeClosure { func, captures } => {
             format!("MakeClosure fn{func} captures {captures}")
         }
         Instr::LoadCapture(idx) => format!("LoadCapture {idx}"),
         Instr::New(class) => format!("New class{class}"),
+        Instr::NewG { class, app } => format!("NewG class{class} app{app}"),
         Instr::LoadField(field) => format!("LoadField {field}"),
         Instr::StoreField(field) => format!("StoreField {field}"),
+        Instr::TupleNew { ty, count } => format!("TupleNew ty{ty} count {count}"),
+        Instr::TupleGet(index) => format!("TupleGet {index}"),
+        Instr::IsType(ty) => format!("IsType ty{ty}"),
+        Instr::CastType(ty) => format!("CastType ty{ty}"),
         Instr::ListNew { ty, count } => format!("ListNew ty{ty} count {count}"),
         Instr::ListLen => "ListLen".to_string(),
         Instr::ListAt => "ListAt".to_string(),
@@ -729,6 +1250,21 @@ fn instr_text(instr: &Instr) -> String {
     }
 }
 
+fn row_text(module: &Module, row: &[BcRow]) -> String {
+    let parts: Vec<String> = row
+        .iter()
+        .map(|elem| match elem {
+            BcRow::Op(idx) => module
+                .strings
+                .get(*idx as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("s{idx}")),
+            BcRow::Var(v) => format!("e{v}"),
+        })
+        .collect();
+    parts.join(", ")
+}
+
 fn type_text(module: &Module, idx: u32) -> String {
     match &module.types[idx as usize] {
         BcType::Unit => "()".to_string(),
@@ -742,14 +1278,37 @@ fn type_text(module: &Module, idx: u32) -> String {
             .get(*c as usize)
             .map(|cl| cl.name.clone())
             .unwrap_or_else(|| format!("class{c}")),
+        BcType::Inst(c, args) => {
+            let name = module
+                .classes
+                .get(*c as usize)
+                .map(|cl| cl.name.clone())
+                .unwrap_or_else(|| format!("class{c}"));
+            let parts: Vec<String> = args.iter().map(|a| type_text(module, *a)).collect();
+            format!("{}[{}]", name, parts.join(", "))
+        }
         BcType::List(e) => format!("[{}]", type_text(module, *e)),
         BcType::Map(k, v) => {
             format!("{{{}: {}}}", type_text(module, *k), type_text(module, *v))
         }
-        BcType::Fn(params, ret) => {
-            let parts: Vec<String> = params.iter().map(|p| type_text(module, *p)).collect();
-            format!("({}) -> {}", parts.join(", "), type_text(module, *ret))
+        BcType::Tuple(elems) => {
+            let parts: Vec<String> = elems.iter().map(|e| type_text(module, *e)).collect();
+            if parts.len() == 1 {
+                format!("({},)", parts[0])
+            } else {
+                format!("({})", parts.join(", "))
+            }
         }
+        BcType::Fn(params, ret, row) => {
+            let parts: Vec<String> = params.iter().map(|p| type_text(module, *p)).collect();
+            let mut out = format!("({}) -> {}", parts.join(", "), type_text(module, *ret));
+            if !row.is_empty() {
+                out.push_str(" with ");
+                out.push_str(&row_text(module, row));
+            }
+            out
+        }
+        BcType::Var(i) => format!("${i}"),
     }
 }
 
@@ -768,12 +1327,40 @@ pub fn dump_cfg(module: &Module) -> String {
     for (sidx, s) in module.selectors.iter().enumerate() {
         let _ = writeln!(out, "selector sel{sidx} = {s}");
     }
+    for (aidx, app) in module.apps.iter().enumerate() {
+        let types: Vec<String> = app.types.iter().map(|t| type_text(module, *t)).collect();
+        let rows: Vec<String> = app
+            .rows
+            .iter()
+            .map(|r| format!("{{{}}}", row_text(module, r)))
+            .collect();
+        let _ = writeln!(
+            out,
+            "app app{aidx} = [{}] rows [{}]",
+            types.join(", "),
+            rows.join(", ")
+        );
+    }
     for (cidx, class) in module.classes.iter().enumerate() {
         let parent = class
             .parent()
             .map(|p| format!(" < {}", module.classes[p as usize].name))
             .unwrap_or_default();
-        let _ = writeln!(out, "class class{cidx} {}{parent}", class.name);
+        let kind = match class.kind {
+            BcClassKind::Normal => "",
+            BcClassKind::Abstract => " abstract",
+            BcClassKind::Case => " case",
+        };
+        let generics = if class.type_params > 0 {
+            format!(" params {}", class.type_params)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            "class class{cidx} {}{kind}{generics}{parent}",
+            class.name
+        );
         for (fidx, (name, ty)) in class.fields.iter().enumerate() {
             let _ = writeln!(out, "  field {fidx} {name}: {}", type_text(module, *ty));
         }
@@ -783,13 +1370,25 @@ pub fn dump_cfg(module: &Module) -> String {
     }
     for (fidx, func) in module.funcs.iter().enumerate() {
         let params: Vec<String> = func.params.iter().map(|p| type_text(module, *p)).collect();
+        let generics = if func.type_params > 0 || func.effect_params > 0 {
+            format!(" generics {}+{}", func.type_params, func.effect_params)
+        } else {
+            String::new()
+        };
+        let row = if func.row.is_empty() {
+            String::new()
+        } else {
+            format!(" with {}", row_text(module, &func.row))
+        };
         let _ = writeln!(
             out,
-            "\nfn{} {}({}) -> {}",
+            "\nfn{} {}({}) -> {}{}{}",
             fidx,
             func.name,
             params.join(", "),
-            type_text(module, func.ret)
+            type_text(module, func.ret),
+            row,
+            generics
         );
         if !func.captures.is_empty() {
             let caps: Vec<String> = func

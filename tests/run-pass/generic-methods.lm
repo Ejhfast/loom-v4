@@ -1,0 +1,20 @@
+class Box[T]
+  value: T
+
+  def init(mut self, value: T)
+    self.value = value
+  end
+
+  def replace[U](self, other: U): Box[U]
+    Box(other)
+  end
+
+  def combine[U, effect e](self, f: (T) -> U with e): U with e
+    f(self.value)
+  end
+end
+
+b = Box(21)
+c = b.replace("x")
+d = b.replace[Bool](true)
+(b.combine(do |n: Int|: Int n * 2 end), c.value, d.value)

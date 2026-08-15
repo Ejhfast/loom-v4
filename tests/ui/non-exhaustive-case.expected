@@ -1,0 +1,2 @@
+error[E1042]: the case does not cover every value of Signal; add the missing arms or a `_` arm
+  --> tests/ui/non-exhaustive-case.lm:8:3

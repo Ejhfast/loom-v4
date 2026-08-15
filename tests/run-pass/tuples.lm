@@ -1,0 +1,10 @@
+def min_max(a: Int, b: Int): (Int, Int)
+  if a < b
+    (a, b)
+  else
+    (b, a)
+  end
+end
+pair = min_max(9, 4)
+single = ("only",)
+(pair[0], pair[1], single[0])

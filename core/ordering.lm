@@ -1,0 +1,41 @@
+# Core: Ordering.
+#
+# The three-way comparison result.
+
+enum Ordering
+  Less
+  Equal
+  Greater
+
+  def is_less(self): Bool
+    case self
+    in Less    then true
+    in Equal   then false
+    in Greater then false
+    end
+  end
+
+  def is_equal(self): Bool
+    case self
+    in Less    then false
+    in Equal   then true
+    in Greater then false
+    end
+  end
+
+  def is_greater(self): Bool
+    case self
+    in Less    then false
+    in Equal   then false
+    in Greater then true
+    end
+  end
+
+  def reverse(self): Ordering
+    case self
+    in Less    then Greater
+    in Equal   then Equal
+    in Greater then Less
+    end
+  end
+end

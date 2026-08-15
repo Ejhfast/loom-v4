@@ -1,0 +1,7 @@
+# Generic argument inference over the pinned core Option.
+
+def choose[T](value: Option[T], fallback: T): T
+  value.value_or(fallback)
+end
+
+(choose(Some("yes"), "no"), choose(None, "no"))

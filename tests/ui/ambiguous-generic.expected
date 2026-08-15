@@ -1,0 +1,2 @@
+error[E1045]: cannot infer the type argument `T` of `make`; give explicit type arguments
+  --> tests/ui/ambiguous-generic.lm:5:9

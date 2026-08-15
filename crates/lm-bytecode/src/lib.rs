@@ -1,16 +1,38 @@
-//! Bytecode formats for the week-2 language slice.
+//! Bytecode formats for the week-3 language slice.
 //!
 //! This crate defines two forms:
 //! - a compact serialized byte format for storage and transfer;
 //! - a fixed-size decoded instruction form for the verifier and the VM.
 //!
 //! The decoder validates structure only. The independent verifier in
-//! `lm-verify` validates tables, types, jumps, calls, and stack shapes.
+//! `lm-verify` validates tables, types, rows, type applications,
+//! jumps, calls, and stack shapes.
+
+pub mod hash;
 
 use std::fmt;
 
 /// The sentinel that encodes "no parent class".
 pub const NO_PARENT: u32 = u32::MAX;
+
+/// One element of an effect row in the serialized module.
+///
+/// `Op` names an operation or group through the module string table.
+/// `Var` names one effect parameter of the enclosing function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BcRow {
+    Op(u32),
+    Var(u32),
+}
+
+/// One type application: the generic arguments of a call site or an
+/// allocation site. `types` aligns with the callee type parameters.
+/// `rows` aligns with the callee effect parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeApp {
+    pub types: Vec<u32>,
+    pub rows: Vec<Vec<BcRow>>,
+}
 
 /// One entry in the module type table.
 ///
@@ -22,16 +44,34 @@ pub enum BcType {
     Bool,
     Int,
     Str,
-    /// A class instance type. The index names a class-table entry.
+    /// An instance type of a class without generic parameters.
     Class(u32),
+    /// An instance type of a generic class applied to arguments.
+    Inst(u32, Vec<u32>),
     /// A list type with one element type index.
     List(u32),
     /// A map type with a key type index and a value type index.
     Map(u32, u32),
-    /// A function value type with parameter type indices and a result.
-    Fn(Vec<u32>, u32),
+    /// A tuple type with element type indices.
+    Tuple(Vec<u32>),
+    /// A function value type: parameters, result, and effect row.
+    Fn(Vec<u32>, u32, Vec<BcRow>),
+    /// One type parameter of the enclosing generic function.
+    Var(u32),
     StringBuilder,
     ByteBuffer,
+}
+
+/// The declaration kind of one class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BcClassKind {
+    /// An ordinary class.
+    Normal,
+    /// The abstract closed parent of one enum family. It cannot be
+    /// allocated.
+    Abstract,
+    /// One final case class of an enum family. It cannot be a parent.
+    Case,
 }
 
 /// One class-table entry. Fields hold the full layout: inherited
@@ -41,6 +81,9 @@ pub struct BcClass {
     pub name: String,
     /// Parent class index, or `NO_PARENT`.
     pub parent: u32,
+    /// The number of generic type parameters.
+    pub type_params: u32,
+    pub kind: BcClassKind,
     /// Full field layout: `(name, type index)`.
     pub fields: Vec<(String, u32)>,
     /// Own method table: `(selector index, function index)`.
@@ -104,13 +147,25 @@ pub enum Instr {
     /// Reference identity equality for heap objects.
     EqRef,
     NeRef,
-    /// Direct call of a function by table index.
+    /// Direct call of a non-generic function by table index.
     Call(u32),
+    /// Direct call of a generic function with a type application.
+    CallG {
+        func: u32,
+        app: u32,
+    },
     /// Virtual call: pop `argc` arguments over one receiver, select
     /// the method through the runtime class and the selector slot.
     CallVirtual {
         selector: u32,
         argc: u32,
+    },
+    /// Virtual call with a type application for the receiver class
+    /// arguments plus the method's own generic arguments.
+    CallVirtualG {
+        selector: u32,
+        argc: u32,
+        app: u32,
     },
     /// Call a closure value: pop `argc` arguments over the closure.
     CallValue {
@@ -123,12 +178,32 @@ pub enum Instr {
     },
     /// Push one captured value of the active closure.
     LoadCapture(u32),
-    /// Allocate an instance of a class. Fields start without a value.
+    /// Allocate an instance of a non-generic class. Fields start
+    /// without a value.
     New(u32),
+    /// Allocate an instance of a generic class with a type application.
+    NewG {
+        class: u32,
+        app: u32,
+    },
     /// Pop an instance and push one field value.
     LoadField(u32),
     /// Pop a value and an instance, then write the field.
     StoreField(u32),
+    /// Allocate a tuple of the given tuple type from `count` popped
+    /// values. Tuples are born frozen.
+    TupleNew {
+        ty: u32,
+        count: u32,
+    },
+    /// Pop a tuple and push the element at a fixed position.
+    TupleGet(u32),
+    /// Pop an instance and push whether its class matches the target
+    /// type or extends it.
+    IsType(u32),
+    /// Pop an instance. Fault `BadCast` unless its class matches the
+    /// target type or extends it. Push the instance at the target type.
+    CastType(u32),
     /// Allocate a list of the given list type from `count` popped values.
     ListNew {
         ty: u32,
@@ -195,10 +270,17 @@ impl Instr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Func {
     pub name: String,
+    /// The number of generic type parameters. Type entries `Var(i)`
+    /// with `i` below this count may appear in the body and signature.
+    pub type_params: u32,
+    /// The number of effect parameters available to row `Var` elements.
+    pub effect_params: u32,
     /// Parameter types as type-table indices.
     pub params: Vec<u32>,
     /// Result type as a type-table index.
     pub ret: u32,
+    /// The declared effect row in canonical order.
+    pub row: Vec<BcRow>,
     /// Capture types as type-table indices. Only a closure body has
     /// captures. A direct or virtual call target must have none.
     pub captures: Vec<u32>,
@@ -214,6 +296,9 @@ pub struct Module {
     pub types: Vec<BcType>,
     /// Global selector names in first-encounter order.
     pub selectors: Vec<String>,
+    /// Type applications referenced by generic call and allocation
+    /// sites.
+    pub apps: Vec<TypeApp>,
     pub classes: Vec<BcClass>,
     pub funcs: Vec<Func>,
     /// Index of the entry function.
@@ -221,7 +306,7 @@ pub struct Module {
 }
 
 const MAGIC: &[u8; 4] = b"LMBC";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 
 // Opcode bytes for the serialized form.
 const OP_CONST_UNIT: u8 = 0x00;
@@ -281,6 +366,13 @@ const OP_BB_APPEND: u8 = 0x56;
 const OP_BB_LEN: u8 = 0x57;
 const OP_BB_BUILD: u8 = 0x58;
 const OP_FREEZE: u8 = 0x59;
+const OP_CALL_G: u8 = 0x60;
+const OP_CALL_VIRTUAL_G: u8 = 0x61;
+const OP_NEW_G: u8 = 0x62;
+const OP_TUPLE_NEW: u8 = 0x63;
+const OP_TUPLE_GET: u8 = 0x64;
+const OP_IS_TYPE: u8 = 0x65;
+const OP_CAST_TYPE: u8 = 0x66;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -293,6 +385,18 @@ const TY_MAP: u8 = 6;
 const TY_FN: u8 = 7;
 const TY_SB: u8 = 8;
 const TY_BB: u8 = 9;
+const TY_INST: u8 = 10;
+const TY_TUPLE: u8 = 11;
+const TY_VAR: u8 = 12;
+
+// Row element tags.
+const ROW_OP: u8 = 0;
+const ROW_VAR: u8 = 1;
+
+// Class kind tags.
+const KIND_NORMAL: u8 = 0;
+const KIND_ABSTRACT: u8 = 1;
+const KIND_CASE: u8 = 2;
 
 /// Encode a module into the compact serialized form.
 pub fn encode(module: &Module) -> Vec<u8> {
@@ -311,10 +415,27 @@ pub fn encode(module: &Module) -> Vec<u8> {
     for s in &module.selectors {
         write_bytes(&mut out, s.as_bytes());
     }
+    write_u32(&mut out, module.apps.len() as u32);
+    for app in &module.apps {
+        write_u32(&mut out, app.types.len() as u32);
+        for t in &app.types {
+            write_u32(&mut out, *t);
+        }
+        write_u32(&mut out, app.rows.len() as u32);
+        for row in &app.rows {
+            encode_row(&mut out, row);
+        }
+    }
     write_u32(&mut out, module.classes.len() as u32);
     for class in &module.classes {
         write_bytes(&mut out, class.name.as_bytes());
         write_u32(&mut out, class.parent);
+        write_u32(&mut out, class.type_params);
+        out.push(match class.kind {
+            BcClassKind::Normal => KIND_NORMAL,
+            BcClassKind::Abstract => KIND_ABSTRACT,
+            BcClassKind::Case => KIND_CASE,
+        });
         write_u32(&mut out, class.fields.len() as u32);
         for (name, ty) in &class.fields {
             write_bytes(&mut out, name.as_bytes());
@@ -329,11 +450,14 @@ pub fn encode(module: &Module) -> Vec<u8> {
     write_u32(&mut out, module.funcs.len() as u32);
     for func in &module.funcs {
         write_bytes(&mut out, func.name.as_bytes());
+        write_u32(&mut out, func.type_params);
+        write_u32(&mut out, func.effect_params);
         write_u32(&mut out, func.params.len() as u32);
         for p in &func.params {
             write_u32(&mut out, *p);
         }
         write_u32(&mut out, func.ret);
+        encode_row(&mut out, &func.row);
         write_u32(&mut out, func.captures.len() as u32);
         for c in &func.captures {
             write_u32(&mut out, *c);
@@ -351,6 +475,22 @@ pub fn encode(module: &Module) -> Vec<u8> {
     out
 }
 
+fn encode_row(out: &mut Vec<u8>, row: &[BcRow]) {
+    write_u32(out, row.len() as u32);
+    for elem in row {
+        match elem {
+            BcRow::Op(idx) => {
+                out.push(ROW_OP);
+                write_u32(out, *idx);
+            }
+            BcRow::Var(idx) => {
+                out.push(ROW_VAR);
+                write_u32(out, *idx);
+            }
+        }
+    }
+}
+
 fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
     match ty {
         BcType::Unit => out.push(TY_UNIT),
@@ -361,6 +501,14 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
             out.push(TY_CLASS);
             write_u32(out, *c);
         }
+        BcType::Inst(c, args) => {
+            out.push(TY_INST);
+            write_u32(out, *c);
+            write_u32(out, args.len() as u32);
+            for a in args {
+                write_u32(out, *a);
+            }
+        }
         BcType::List(e) => {
             out.push(TY_LIST);
             write_u32(out, *e);
@@ -370,13 +518,25 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
             write_u32(out, *k);
             write_u32(out, *v);
         }
-        BcType::Fn(params, ret) => {
+        BcType::Tuple(elems) => {
+            out.push(TY_TUPLE);
+            write_u32(out, elems.len() as u32);
+            for e in elems {
+                write_u32(out, *e);
+            }
+        }
+        BcType::Fn(params, ret, row) => {
             out.push(TY_FN);
             write_u32(out, params.len() as u32);
             for p in params {
                 write_u32(out, *p);
             }
             write_u32(out, *ret);
+            encode_row(out, row);
+        }
+        BcType::Var(i) => {
+            out.push(TY_VAR);
+            write_u32(out, *i);
         }
         BcType::StringBuilder => out.push(TY_SB),
         BcType::ByteBuffer => out.push(TY_BB),
@@ -439,10 +599,25 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             out.push(OP_CALL);
             write_u32(out, *idx);
         }
+        Instr::CallG { func, app } => {
+            out.push(OP_CALL_G);
+            write_u32(out, *func);
+            write_u32(out, *app);
+        }
         Instr::CallVirtual { selector, argc } => {
             out.push(OP_CALL_VIRTUAL);
             write_u32(out, *selector);
             write_u32(out, *argc);
+        }
+        Instr::CallVirtualG {
+            selector,
+            argc,
+            app,
+        } => {
+            out.push(OP_CALL_VIRTUAL_G);
+            write_u32(out, *selector);
+            write_u32(out, *argc);
+            write_u32(out, *app);
         }
         Instr::CallValue { argc } => {
             out.push(OP_CALL_VALUE);
@@ -461,6 +636,11 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             out.push(OP_NEW);
             write_u32(out, *class);
         }
+        Instr::NewG { class, app } => {
+            out.push(OP_NEW_G);
+            write_u32(out, *class);
+            write_u32(out, *app);
+        }
         Instr::LoadField(field) => {
             out.push(OP_LOAD_FIELD);
             write_u32(out, *field);
@@ -468,6 +648,23 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::StoreField(field) => {
             out.push(OP_STORE_FIELD);
             write_u32(out, *field);
+        }
+        Instr::TupleNew { ty, count } => {
+            out.push(OP_TUPLE_NEW);
+            write_u32(out, *ty);
+            write_u32(out, *count);
+        }
+        Instr::TupleGet(index) => {
+            out.push(OP_TUPLE_GET);
+            write_u32(out, *index);
+        }
+        Instr::IsType(ty) => {
+            out.push(OP_IS_TYPE);
+            write_u32(out, *ty);
+        }
+        Instr::CastType(ty) => {
+            out.push(OP_CAST_TYPE);
+            write_u32(out, *ty);
         }
         Instr::ListNew { ty, count } => {
             out.push(OP_LIST_NEW);
@@ -521,6 +718,8 @@ pub enum DecodeError {
     BadVersion(u16),
     BadOpcode(u8),
     BadTypeTag(u8),
+    BadRowTag(u8),
+    BadClassKind(u8),
     BadUtf8,
     /// A table length field is larger than the remaining input allows.
     BadLength,
@@ -536,6 +735,8 @@ impl fmt::Display for DecodeError {
             DecodeError::BadVersion(v) => write!(f, "unsupported bytecode version {v}"),
             DecodeError::BadOpcode(op) => write!(f, "unknown opcode byte 0x{op:02x}"),
             DecodeError::BadTypeTag(t) => write!(f, "unknown type tag {t}"),
+            DecodeError::BadRowTag(t) => write!(f, "unknown row element tag {t}"),
+            DecodeError::BadClassKind(t) => write!(f, "unknown class kind tag {t}"),
             DecodeError::BadUtf8 => write!(f, "a string is not valid UTF-8"),
             DecodeError::BadLength => write!(f, "a length field exceeds the input size"),
             DecodeError::TrailingBytes => write!(f, "extra bytes follow the module"),
@@ -597,6 +798,21 @@ impl<'a> Cursor<'a> {
     }
 }
 
+fn decode_row(cur: &mut Cursor<'_>) -> Result<Vec<BcRow>, DecodeError> {
+    let count = cur.len()?;
+    let mut row = Vec::with_capacity(count);
+    for _ in 0..count {
+        let tag = cur.u8()?;
+        let elem = match tag {
+            ROW_OP => BcRow::Op(cur.u32()?),
+            ROW_VAR => BcRow::Var(cur.u32()?),
+            other => return Err(DecodeError::BadRowTag(other)),
+        };
+        row.push(elem);
+    }
+    Ok(row)
+}
+
 /// Decode a serialized module. This checks structure only.
 pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     let mut cur = Cursor { bytes, pos: 0 };
@@ -622,11 +838,36 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     for _ in 0..selector_count {
         selectors.push(cur.string()?);
     }
+    let app_count = cur.len()?;
+    let mut apps = Vec::with_capacity(app_count);
+    for _ in 0..app_count {
+        let ty_count = cur.len()?;
+        let mut app_types = Vec::with_capacity(ty_count);
+        for _ in 0..ty_count {
+            app_types.push(cur.u32()?);
+        }
+        let row_count = cur.len()?;
+        let mut rows = Vec::with_capacity(row_count);
+        for _ in 0..row_count {
+            rows.push(decode_row(&mut cur)?);
+        }
+        apps.push(TypeApp {
+            types: app_types,
+            rows,
+        });
+    }
     let class_count = cur.len()?;
     let mut classes = Vec::with_capacity(class_count);
     for _ in 0..class_count {
         let name = cur.string()?;
         let parent = cur.u32()?;
+        let type_params = cur.u32()?;
+        let kind = match cur.u8()? {
+            KIND_NORMAL => BcClassKind::Normal,
+            KIND_ABSTRACT => BcClassKind::Abstract,
+            KIND_CASE => BcClassKind::Case,
+            other => return Err(DecodeError::BadClassKind(other)),
+        };
         let field_count = cur.len()?;
         let mut fields = Vec::with_capacity(field_count);
         for _ in 0..field_count {
@@ -644,6 +885,8 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
         classes.push(BcClass {
             name,
             parent,
+            type_params,
+            kind,
             fields,
             methods,
         });
@@ -652,12 +895,15 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     let mut funcs = Vec::with_capacity(func_count);
     for _ in 0..func_count {
         let name = cur.string()?;
+        let type_params = cur.u32()?;
+        let effect_params = cur.u32()?;
         let param_count = cur.len()?;
         let mut params = Vec::with_capacity(param_count);
         for _ in 0..param_count {
             params.push(cur.u32()?);
         }
         let ret = cur.u32()?;
+        let row = decode_row(&mut cur)?;
         let capture_count = cur.len()?;
         let mut captures = Vec::with_capacity(capture_count);
         for _ in 0..capture_count {
@@ -676,8 +922,11 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
         }
         funcs.push(Func {
             name,
+            type_params,
+            effect_params,
             params,
             ret,
+            row,
             captures,
             local_count,
             blocks,
@@ -691,6 +940,7 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
         strings,
         types,
         selectors,
+        apps,
         classes,
         funcs,
         entry,
@@ -705,8 +955,25 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_INT => BcType::Int,
         TY_STR => BcType::Str,
         TY_CLASS => BcType::Class(cur.u32()?),
+        TY_INST => {
+            let class = cur.u32()?;
+            let count = cur.len()?;
+            let mut args = Vec::with_capacity(count);
+            for _ in 0..count {
+                args.push(cur.u32()?);
+            }
+            BcType::Inst(class, args)
+        }
         TY_LIST => BcType::List(cur.u32()?),
         TY_MAP => BcType::Map(cur.u32()?, cur.u32()?),
+        TY_TUPLE => {
+            let count = cur.len()?;
+            let mut elems = Vec::with_capacity(count);
+            for _ in 0..count {
+                elems.push(cur.u32()?);
+            }
+            BcType::Tuple(elems)
+        }
         TY_FN => {
             let count = cur.len()?;
             let mut params = Vec::with_capacity(count);
@@ -714,8 +981,10 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
                 params.push(cur.u32()?);
             }
             let ret = cur.u32()?;
-            BcType::Fn(params, ret)
+            let row = decode_row(cur)?;
+            BcType::Fn(params, ret, row)
         }
+        TY_VAR => BcType::Var(cur.u32()?),
         TY_SB => BcType::StringBuilder,
         TY_BB => BcType::ByteBuffer,
         other => return Err(DecodeError::BadTypeTag(other)),
@@ -753,9 +1022,18 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_EQ_REF => Instr::EqRef,
         OP_NE_REF => Instr::NeRef,
         OP_CALL => Instr::Call(cur.u32()?),
+        OP_CALL_G => Instr::CallG {
+            func: cur.u32()?,
+            app: cur.u32()?,
+        },
         OP_CALL_VIRTUAL => Instr::CallVirtual {
             selector: cur.u32()?,
             argc: cur.u32()?,
+        },
+        OP_CALL_VIRTUAL_G => Instr::CallVirtualG {
+            selector: cur.u32()?,
+            argc: cur.u32()?,
+            app: cur.u32()?,
         },
         OP_CALL_VALUE => Instr::CallValue { argc: cur.u32()? },
         OP_MAKE_CLOSURE => Instr::MakeClosure {
@@ -764,8 +1042,19 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         },
         OP_LOAD_CAPTURE => Instr::LoadCapture(cur.u32()?),
         OP_NEW => Instr::New(cur.u32()?),
+        OP_NEW_G => Instr::NewG {
+            class: cur.u32()?,
+            app: cur.u32()?,
+        },
         OP_LOAD_FIELD => Instr::LoadField(cur.u32()?),
         OP_STORE_FIELD => Instr::StoreField(cur.u32()?),
+        OP_TUPLE_NEW => Instr::TupleNew {
+            ty: cur.u32()?,
+            count: cur.u32()?,
+        },
+        OP_TUPLE_GET => Instr::TupleGet(cur.u32()?),
+        OP_IS_TYPE => Instr::IsType(cur.u32()?),
+        OP_CAST_TYPE => Instr::CastType(cur.u32()?),
         OP_LIST_NEW => Instr::ListNew {
             ty: cur.u32()?,
             count: cur.u32()?,
@@ -804,9 +1093,23 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
 mod tests {
     use super::*;
 
+    fn plain_func(name: &str, ret: u32, blocks: Vec<Vec<Instr>>) -> Func {
+        Func {
+            name: name.to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            ret,
+            row: vec![],
+            captures: vec![],
+            local_count: 1,
+            blocks,
+        }
+    }
+
     fn sample_module() -> Module {
         Module {
-            strings: vec!["hello".to_string()],
+            strings: vec!["hello".to_string(), "Io.Print".to_string()],
             types: vec![
                 BcType::Unit,
                 BcType::Int,
@@ -814,35 +1117,54 @@ mod tests {
                 BcType::Class(0),
                 BcType::List(1),
                 BcType::Map(2, 1),
-                BcType::Fn(vec![1], 1),
+                BcType::Fn(vec![1], 1, vec![BcRow::Op(1)]),
                 BcType::StringBuilder,
                 BcType::ByteBuffer,
+                BcType::Var(0),
+                BcType::Inst(1, vec![1]),
+                BcType::Tuple(vec![1, 2]),
             ],
             selectors: vec!["add".to_string()],
-            classes: vec![BcClass {
-                name: "Counter".to_string(),
-                parent: NO_PARENT,
-                fields: vec![("value".to_string(), 1)],
-                methods: vec![(0, 1)],
+            apps: vec![TypeApp {
+                types: vec![1],
+                rows: vec![vec![BcRow::Op(1), BcRow::Var(0)]],
             }],
+            classes: vec![
+                BcClass {
+                    name: "Counter".to_string(),
+                    parent: NO_PARENT,
+                    type_params: 0,
+                    kind: BcClassKind::Normal,
+                    fields: vec![("value".to_string(), 1)],
+                    methods: vec![(0, 1)],
+                },
+                BcClass {
+                    name: "Box".to_string(),
+                    parent: NO_PARENT,
+                    type_params: 1,
+                    kind: BcClassKind::Normal,
+                    fields: vec![("value".to_string(), 9)],
+                    methods: vec![],
+                },
+            ],
             funcs: vec![
-                Func {
-                    name: "main".to_string(),
-                    params: vec![],
-                    ret: 1,
-                    captures: vec![],
-                    local_count: 1,
-                    blocks: vec![vec![
+                plain_func(
+                    "main",
+                    1,
+                    vec![vec![
                         Instr::ConstInt(41),
                         Instr::ConstInt(1),
                         Instr::Add,
                         Instr::Return,
                     ]],
-                },
+                ),
                 Func {
                     name: "add".to_string(),
+                    type_params: 0,
+                    effect_params: 1,
                     params: vec![3, 1],
                     ret: 1,
+                    row: vec![BcRow::Op(1), BcRow::Var(0)],
                     captures: vec![],
                     local_count: 2,
                     blocks: vec![vec![Instr::LoadLocal(1), Instr::Return]],
@@ -879,9 +1201,15 @@ mod tests {
             Instr::EqRef,
             Instr::NeRef,
             Instr::Call(0),
+            Instr::CallG { func: 0, app: 0 },
             Instr::CallVirtual {
                 selector: 0,
                 argc: 1,
+            },
+            Instr::CallVirtualG {
+                selector: 0,
+                argc: 1,
+                app: 0,
             },
             Instr::CallValue { argc: 2 },
             Instr::MakeClosure {
@@ -890,8 +1218,13 @@ mod tests {
             },
             Instr::LoadCapture(0),
             Instr::New(0),
+            Instr::NewG { class: 1, app: 0 },
             Instr::LoadField(0),
             Instr::StoreField(0),
+            Instr::TupleNew { ty: 11, count: 2 },
+            Instr::TupleGet(1),
+            Instr::IsType(3),
+            Instr::CastType(3),
             Instr::ListNew { ty: 4, count: 2 },
             Instr::ListLen,
             Instr::ListAt,
@@ -947,9 +1280,9 @@ mod tests {
     #[test]
     fn old_version_is_rejected() {
         let mut bytes = encode(&sample_module());
-        bytes[4] = 1;
+        bytes[4] = 2;
         bytes[5] = 0;
-        assert_eq!(decode(&bytes), Err(DecodeError::BadVersion(1)));
+        assert_eq!(decode(&bytes), Err(DecodeError::BadVersion(2)));
     }
 
     #[test]
@@ -973,6 +1306,7 @@ mod tests {
             strings: vec![],
             types: vec![BcType::Unit],
             selectors: vec![],
+            apps: vec![],
             classes: vec![],
             funcs: vec![],
             entry: 0,
@@ -983,6 +1317,44 @@ mod tests {
         assert_eq!(bytes[pos], TY_UNIT);
         bytes[pos] = 0xee;
         assert_eq!(decode(&bytes), Err(DecodeError::BadTypeTag(0xee)));
+    }
+
+    #[test]
+    fn bad_row_tag_is_rejected() {
+        let module = sample_module();
+        let bytes = encode(&module);
+        // Find the app row element tag: it follows the app tables.
+        // Corrupt every ROW_OP tag candidate and require at least one
+        // rejection with BadRowTag.
+        let mut rejected = false;
+        for pos in 0..bytes.len() {
+            if bytes[pos] != ROW_OP && bytes[pos] != ROW_VAR {
+                continue;
+            }
+            let mut corrupt = bytes.clone();
+            corrupt[pos] = 0x77;
+            if decode(&corrupt) == Err(DecodeError::BadRowTag(0x77)) {
+                rejected = true;
+                break;
+            }
+        }
+        assert!(rejected, "no row tag rejection was observed");
+    }
+
+    #[test]
+    fn bad_class_kind_is_rejected() {
+        let module = sample_module();
+        let bytes = encode(&module);
+        let mut rejected = false;
+        for pos in 0..bytes.len() {
+            let mut corrupt = bytes.clone();
+            corrupt[pos] = 0x99;
+            if decode(&corrupt) == Err(DecodeError::BadClassKind(0x99)) {
+                rejected = true;
+                break;
+            }
+        }
+        assert!(rejected, "no class kind rejection was observed");
     }
 
     #[test]

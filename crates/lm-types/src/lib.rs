@@ -1,10 +1,13 @@
-//! Interned types for the week-2 language slice.
+//! Interned types for the week-3 language slice.
 //!
-//! The store interns primitive, class, collection, and function types.
-//! Type identity is a dense `TypeId`, so equality checks compare one
-//! integer. The store also records the class table (name and parent),
-//! so subtype queries and joins need no other context.
+//! The store interns primitive, class, generic-application, tuple,
+//! collection, and function types. Type identity is a dense `TypeId`,
+//! so equality checks compare one integer. The store also records the
+//! class table (name, parent, generic arity, kind), a precomputed
+//! nominal ancestor table, and interned effect-row names. Subtype
+//! queries are memoized structural recursion with no backtracking.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -31,6 +34,30 @@ pub const STRING_BUILDER: TypeId = TypeId(5);
 /// The `ByteBuffer` native type.
 pub const BYTE_BUFFER: TypeId = TypeId(6);
 
+/// One element of an effect row.
+///
+/// `Op` names an exact operation or a group by an interned row-name
+/// index. `Var` names one effect parameter of the enclosing callable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RowElem {
+    Op(u32),
+    Var(u32),
+}
+
+/// A canonical effect row: sorted, without duplicates.
+pub type Row = Vec<RowElem>;
+
+/// The declaration kind of one class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassKind {
+    /// An ordinary class.
+    Normal,
+    /// The abstract closed parent of one enum family.
+    EnumParent,
+    /// One final case class of an enum family.
+    EnumCase,
+}
+
 /// The structure of one type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
@@ -41,21 +68,31 @@ pub enum Type {
     Never,
     StringBuilder,
     ByteBuffer,
-    /// A class instance type.
+    /// An instance type of a class without generic parameters.
     Class(ClassId),
+    /// An instance type of a generic class applied to arguments.
+    /// Applications are invariant.
+    Inst(ClassId, Vec<TypeId>),
     /// A list type with one invariant element type.
     List(TypeId),
     /// A map type with invariant key and value types.
     Map(TypeId, TypeId),
-    /// A function type with parameter types and one result type.
-    Fn(Vec<TypeId>, TypeId),
+    /// A fixed-arity structural tuple with covariant elements.
+    Tuple(Vec<TypeId>),
+    /// A function type with parameter types, a result, and a row.
+    Fn(Vec<TypeId>, TypeId, Row),
+    /// One type parameter of the enclosing generic definition.
+    Var(u32),
 }
 
-/// The registered name and parent of one class.
+/// The registered metadata of one class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassMeta {
     pub name: String,
     pub parent: Option<ClassId>,
+    /// The number of generic type parameters.
+    pub type_params: u32,
+    pub kind: ClassKind,
 }
 
 /// An interning store for types plus the class table.
@@ -63,6 +100,10 @@ pub struct TypeStore {
     types: Vec<Type>,
     index: HashMap<Type, TypeId>,
     classes: Vec<ClassMeta>,
+    row_names: Vec<String>,
+    row_name_index: HashMap<String, u32>,
+    /// Memoized subtype answers keyed by `(expected, found)`.
+    subtype_cache: RefCell<HashMap<(TypeId, TypeId), bool>>,
 }
 
 impl Default for TypeStore {
@@ -77,6 +118,9 @@ impl TypeStore {
             types: Vec::new(),
             index: HashMap::new(),
             classes: Vec::new(),
+            row_names: Vec::new(),
+            row_name_index: HashMap::new(),
+            subtype_cache: RefCell::new(HashMap::new()),
         };
         // Keep this order aligned with the public constants.
         store.intern(Type::Unit);
@@ -101,27 +145,93 @@ impl TypeStore {
     }
 
     /// Intern a function type.
-    pub fn intern_fn(&mut self, params: Vec<TypeId>, ret: TypeId) -> TypeId {
-        self.intern(Type::Fn(params, ret))
+    pub fn intern_fn(&mut self, params: Vec<TypeId>, ret: TypeId, row: Row) -> TypeId {
+        self.intern(Type::Fn(params, ret, row))
     }
 
     pub fn get(&self, id: TypeId) -> &Type {
         &self.types[id.0 as usize]
     }
 
+    /// Intern an effect row name, for example `Io.Print` or `Io`.
+    pub fn intern_row_name(&mut self, name: &str) -> u32 {
+        if let Some(idx) = self.row_name_index.get(name) {
+            return *idx;
+        }
+        let idx = self.row_names.len() as u32;
+        self.row_names.push(name.to_string());
+        self.row_name_index.insert(name.to_string(), idx);
+        idx
+    }
+
+    pub fn row_name(&self, idx: u32) -> &str {
+        &self.row_names[idx as usize]
+    }
+
+    /// Sort a row into canonical order and remove duplicates.
+    /// Operations sort by name text; variables sort by index.
+    pub fn canonical_row(&self, mut row: Row) -> Row {
+        row.sort_by_key(|elem| self.row_elem_key(*elem));
+        row.dedup();
+        row
+    }
+
+    fn row_elem_key(&self, elem: RowElem) -> (u8, String, u32) {
+        match elem {
+            RowElem::Op(n) => (0, self.row_names[n as usize].clone(), 0),
+            RowElem::Var(v) => (1, String::new(), v),
+        }
+    }
+
+    /// Return true when every element of `sub` is included in `sup`.
+    /// An exact operation `G.Op` is included when `sup` holds it or
+    /// holds its group `G`. A variable is included only when `sup`
+    /// holds the same variable.
+    pub fn row_included(&self, sub: &[RowElem], sup: &[RowElem]) -> bool {
+        sub.iter().all(|elem| self.row_elem_included(*elem, sup))
+    }
+
+    fn row_elem_included(&self, elem: RowElem, sup: &[RowElem]) -> bool {
+        match elem {
+            RowElem::Var(v) => sup.contains(&RowElem::Var(v)),
+            RowElem::Op(n) => {
+                let name = &self.row_names[n as usize];
+                sup.iter().any(|s| match s {
+                    RowElem::Op(m) => {
+                        let sup_name = &self.row_names[*m as usize];
+                        sup_name == name
+                            || name
+                                .split_once('.')
+                                .map(|(group, _)| group == sup_name)
+                                .unwrap_or(false)
+                    }
+                    RowElem::Var(_) => false,
+                })
+            }
+        }
+    }
+
     /// Register a class. The parent can be set later, before any
     /// subtype query that involves the class.
-    pub fn register_class(&mut self, name: impl Into<String>) -> ClassId {
+    pub fn register_class(
+        &mut self,
+        name: impl Into<String>,
+        type_params: u32,
+        kind: ClassKind,
+    ) -> ClassId {
         let id = ClassId(self.classes.len() as u32);
         self.classes.push(ClassMeta {
             name: name.into(),
             parent: None,
+            type_params,
+            kind,
         });
         id
     }
 
     pub fn set_class_parent(&mut self, class: ClassId, parent: ClassId) {
         self.classes[class.0 as usize].parent = Some(parent);
+        self.subtype_cache.borrow_mut().clear();
     }
 
     pub fn class_meta(&self, class: ClassId) -> &ClassMeta {
@@ -159,35 +269,85 @@ impl TypeStore {
     /// Return true when a value of type `found` is valid where the
     /// checker expects type `expected`. `Never` is valid everywhere.
     /// A subclass instance is valid at a superclass type. Generic
-    /// applications are invariant.
+    /// applications are invariant. Tuples are covariant element-wise.
+    /// Functions are contravariant in parameters, covariant in the
+    /// result, and covariant in the row by inclusion.
     pub fn compatible(&self, expected: TypeId, found: TypeId) -> bool {
         if found == expected || found == NEVER {
             return true;
         }
-        match (self.get(found), self.get(expected)) {
-            (Type::Class(a), Type::Class(b)) => self.class_extends(*a, *b),
-            _ => false,
+        let key = (expected, found);
+        if let Some(hit) = self.subtype_cache.borrow().get(&key) {
+            return *hit;
         }
+        let answer = match (self.get(found), self.get(expected)) {
+            (Type::Class(a), Type::Class(b)) => self.class_extends(*a, *b),
+            (Type::Inst(a, xs), Type::Inst(b, ys)) => self.class_extends(*a, *b) && xs == ys,
+            (Type::Tuple(xs), Type::Tuple(ys)) => {
+                xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(ys.iter())
+                        .all(|(x, y)| self.compatible(*y, *x))
+            }
+            (Type::Fn(fp, fr, frow), Type::Fn(ep, er, erow)) => {
+                fp.len() == ep.len()
+                    && fp
+                        .iter()
+                        .zip(ep.iter())
+                        .all(|(f, e)| self.compatible(*f, *e))
+                    && self.compatible(*er, *fr)
+                    && self.row_included(frow, erow)
+            }
+            _ => false,
+        };
+        self.subtype_cache.borrow_mut().insert(key, answer);
+        answer
     }
 
-    /// Join two branch types. Classes join at their nearest common
-    /// ancestor. `None` marks unrelated types.
-    pub fn join(&self, a: TypeId, b: TypeId) -> Option<TypeId> {
+    /// Join two branch types. Classes and generic applications join at
+    /// their nearest common ancestor. Tuples join element-wise.
+    /// `None` marks unrelated types.
+    pub fn join(&mut self, a: TypeId, b: TypeId) -> Option<TypeId> {
         if self.compatible(b, a) {
             return Some(b);
         }
         if self.compatible(a, b) {
             return Some(a);
         }
-        if let (Type::Class(ca), Type::Class(cb)) = (self.get(a), self.get(b)) {
-            let (ca, cb) = (*ca, *cb);
-            let mut anc = Some(ca);
-            while let Some(c) = anc {
-                if self.class_extends(cb, c) {
-                    return self.index.get(&Type::Class(c)).copied();
-                }
-                anc = self.classes[c.0 as usize].parent;
+        match (self.get(a).clone(), self.get(b).clone()) {
+            (Type::Class(ca), Type::Class(cb)) => {
+                let common = self.common_ancestor(ca, cb)?;
+                Some(self.intern(Type::Class(common)))
             }
+            (Type::Inst(ca, xs), Type::Inst(cb, ys)) => {
+                if xs != ys {
+                    return None;
+                }
+                let common = self.common_ancestor(ca, cb)?;
+                Some(self.intern(Type::Inst(common, xs)))
+            }
+            (Type::Tuple(xs), Type::Tuple(ys)) => {
+                if xs.len() != ys.len() {
+                    return None;
+                }
+                let mut elems = Vec::with_capacity(xs.len());
+                for (x, y) in xs.iter().zip(ys.iter()) {
+                    elems.push(self.join(*x, *y)?);
+                }
+                Some(self.intern(Type::Tuple(elems)))
+            }
+            _ => None,
+        }
+    }
+
+    fn common_ancestor(&self, a: ClassId, b: ClassId) -> Option<ClassId> {
+        let mut anc = Some(a);
+        while let Some(c) = anc {
+            if self.class_extends(b, c) {
+                return Some(c);
+            }
+            anc = self.classes[c.0 as usize].parent;
         }
         None
     }
@@ -200,10 +360,99 @@ impl TypeStore {
                 | Type::StringBuilder
                 | Type::ByteBuffer
                 | Type::Class(_)
+                | Type::Inst(_, _)
                 | Type::List(_)
                 | Type::Map(_, _)
-                | Type::Fn(_, _)
+                | Type::Tuple(_)
+                | Type::Fn(_, _, _)
         )
+    }
+
+    /// Substitute type variables and effect variables in `ty`.
+    /// `targs[i]` replaces `Var(i)`. `rowargs[i]` replaces the row
+    /// variable `i`. Missing entries keep the variable.
+    pub fn substitute(&mut self, ty: TypeId, targs: &[TypeId], rowargs: &[Row]) -> TypeId {
+        if targs.is_empty() && rowargs.is_empty() {
+            return ty;
+        }
+        match self.get(ty).clone() {
+            Type::Var(i) => targs.get(i as usize).copied().unwrap_or(ty),
+            Type::Inst(c, args) => {
+                let args: Vec<TypeId> = args
+                    .iter()
+                    .map(|a| self.substitute(*a, targs, rowargs))
+                    .collect();
+                self.intern(Type::Inst(c, args))
+            }
+            Type::List(e) => {
+                let e = self.substitute(e, targs, rowargs);
+                self.intern(Type::List(e))
+            }
+            Type::Map(k, v) => {
+                let k = self.substitute(k, targs, rowargs);
+                let v = self.substitute(v, targs, rowargs);
+                self.intern(Type::Map(k, v))
+            }
+            Type::Tuple(elems) => {
+                let elems: Vec<TypeId> = elems
+                    .iter()
+                    .map(|e| self.substitute(*e, targs, rowargs))
+                    .collect();
+                self.intern(Type::Tuple(elems))
+            }
+            Type::Fn(params, ret, row) => {
+                let params: Vec<TypeId> = params
+                    .iter()
+                    .map(|p| self.substitute(*p, targs, rowargs))
+                    .collect();
+                let ret = self.substitute(ret, targs, rowargs);
+                let row = self.substitute_row(&row, rowargs);
+                self.intern(Type::Fn(params, ret, row))
+            }
+            _ => ty,
+        }
+    }
+
+    /// Substitute effect variables in one row and re-canonicalize.
+    pub fn substitute_row(&self, row: &[RowElem], rowargs: &[Row]) -> Row {
+        let mut out = Vec::new();
+        for elem in row {
+            match elem {
+                RowElem::Var(i) => match rowargs.get(*i as usize) {
+                    Some(replacement) => out.extend_from_slice(replacement),
+                    None => out.push(*elem),
+                },
+                RowElem::Op(_) => out.push(*elem),
+            }
+        }
+        self.canonical_row(out)
+    }
+
+    /// Return true when the type contains a type variable.
+    pub fn contains_var(&self, ty: TypeId) -> bool {
+        match self.get(ty) {
+            Type::Var(_) => true,
+            Type::Inst(_, args) => args.iter().any(|a| self.contains_var(*a)),
+            Type::List(e) => self.contains_var(*e),
+            Type::Map(k, v) => self.contains_var(*k) || self.contains_var(*v),
+            Type::Tuple(elems) => elems.iter().any(|e| self.contains_var(*e)),
+            Type::Fn(params, ret, _) => {
+                params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
+            }
+            _ => false,
+        }
+    }
+
+    /// Render one row for diagnostics.
+    pub fn display_row(&self, row: &[RowElem]) -> String {
+        let parts: Vec<String> = row
+            .iter()
+            .map(|e| match e {
+                RowElem::Op(n) => self.row_names[*n as usize].clone(),
+                RowElem::Var(v) => format!("e{v}"),
+            })
+            .collect();
+        parts.join(", ")
     }
 
     /// Render one type name for diagnostics.
@@ -217,9 +466,21 @@ impl TypeStore {
             Type::StringBuilder => "StringBuilder".to_string(),
             Type::ByteBuffer => "ByteBuffer".to_string(),
             Type::Class(c) => self.classes[c.0 as usize].name.clone(),
+            Type::Inst(c, args) => {
+                let parts: Vec<String> = args.iter().map(|a| self.display(*a)).collect();
+                format!("{}[{}]", self.classes[c.0 as usize].name, parts.join(", "))
+            }
             Type::List(e) => format!("[{}]", self.display(*e)),
             Type::Map(k, v) => format!("{{{}: {}}}", self.display(*k), self.display(*v)),
-            Type::Fn(params, ret) => {
+            Type::Tuple(elems) => {
+                let parts: Vec<String> = elems.iter().map(|e| self.display(*e)).collect();
+                if parts.len() == 1 {
+                    format!("({},)", parts[0])
+                } else {
+                    format!("({})", parts.join(", "))
+                }
+            }
+            Type::Fn(params, ret, row) => {
                 let mut out = String::from("(");
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {
@@ -229,8 +490,13 @@ impl TypeStore {
                 }
                 out.push_str(") -> ");
                 out.push_str(&self.display(*ret));
+                if !row.is_empty() {
+                    out.push_str(" with ");
+                    out.push_str(&self.display_row(row));
+                }
                 out
             }
+            Type::Var(i) => format!("${i}"),
         }
     }
 }
@@ -248,6 +514,10 @@ impl fmt::Debug for TypeStore {
 mod tests {
     use super::*;
 
+    fn class(store: &mut TypeStore, name: &str) -> ClassId {
+        store.register_class(name, 0, ClassKind::Normal)
+    }
+
     #[test]
     fn primitives_have_stable_ids() {
         let store = TypeStore::new();
@@ -263,26 +533,36 @@ mod tests {
     #[test]
     fn interning_is_idempotent() {
         let mut store = TypeStore::new();
-        let a = store.intern_fn(vec![INT, BOOL], STRING);
-        let b = store.intern_fn(vec![INT, BOOL], STRING);
-        let c = store.intern_fn(vec![INT], STRING);
+        let a = store.intern_fn(vec![INT, BOOL], STRING, vec![]);
+        let b = store.intern_fn(vec![INT, BOOL], STRING, vec![]);
+        let c = store.intern_fn(vec![INT], STRING, vec![]);
         assert_eq!(a, b);
         assert_ne!(a, c);
         let l1 = store.intern(Type::List(INT));
         let l2 = store.intern(Type::List(INT));
         assert_eq!(l1, l2);
+        let t1 = store.intern(Type::Tuple(vec![INT, BOOL]));
+        let t2 = store.intern(Type::Tuple(vec![INT, BOOL]));
+        assert_eq!(t1, t2);
     }
 
     #[test]
     fn display_is_readable() {
         let mut store = TypeStore::new();
-        let f = store.intern_fn(vec![INT, STRING], BOOL);
+        let f = store.intern_fn(vec![INT, STRING], BOOL, vec![]);
         assert_eq!(store.display(f), "(Int, String) -> Bool");
         assert_eq!(store.display(UNIT), "()");
         let l = store.intern(Type::List(INT));
         assert_eq!(store.display(l), "[Int]");
         let m = store.intern(Type::Map(STRING, INT));
         assert_eq!(store.display(m), "{String: Int}");
+        let t = store.intern(Type::Tuple(vec![INT, STRING]));
+        assert_eq!(store.display(t), "(Int, String)");
+        let one = store.intern(Type::Tuple(vec![INT]));
+        assert_eq!(store.display(one), "(Int,)");
+        let io = store.intern_row_name("Io.Print");
+        let f2 = store.intern_fn(vec![], UNIT, vec![RowElem::Op(io)]);
+        assert_eq!(store.display(f2), "() -> () with Io.Print");
     }
 
     #[test]
@@ -296,8 +576,8 @@ mod tests {
     #[test]
     fn subclass_is_compatible_with_ancestor() {
         let mut store = TypeStore::new();
-        let animal = store.register_class("Animal");
-        let dog = store.register_class("Dog");
+        let animal = class(&mut store, "Animal");
+        let dog = class(&mut store, "Dog");
         store.set_class_parent(dog, animal);
         let t_animal = store.intern(Type::Class(animal));
         let t_dog = store.intern(Type::Class(dog));
@@ -308,8 +588,8 @@ mod tests {
     #[test]
     fn generic_applications_are_invariant() {
         let mut store = TypeStore::new();
-        let animal = store.register_class("Animal");
-        let dog = store.register_class("Dog");
+        let animal = class(&mut store, "Animal");
+        let dog = class(&mut store, "Dog");
         store.set_class_parent(dog, animal);
         let t_animal = store.intern(Type::Class(animal));
         let t_dog = store.intern(Type::Class(dog));
@@ -317,14 +597,82 @@ mod tests {
         let l_dog = store.intern(Type::List(t_dog));
         assert!(!store.compatible(l_animal, l_dog));
         assert!(!store.compatible(l_dog, l_animal));
+        // User generic applications are also invariant.
+        let boxc = store.register_class("Box", 1, ClassKind::Normal);
+        let b_animal = store.intern(Type::Inst(boxc, vec![t_animal]));
+        let b_dog = store.intern(Type::Inst(boxc, vec![t_dog]));
+        assert!(!store.compatible(b_animal, b_dog));
+        assert!(!store.compatible(b_dog, b_animal));
+    }
+
+    #[test]
+    fn tuples_are_covariant() {
+        let mut store = TypeStore::new();
+        let animal = class(&mut store, "Animal");
+        let dog = class(&mut store, "Dog");
+        store.set_class_parent(dog, animal);
+        let t_animal = store.intern(Type::Class(animal));
+        let t_dog = store.intern(Type::Class(dog));
+        let tup_animal = store.intern(Type::Tuple(vec![t_animal, INT]));
+        let tup_dog = store.intern(Type::Tuple(vec![t_dog, INT]));
+        assert!(store.compatible(tup_animal, tup_dog));
+        assert!(!store.compatible(tup_dog, tup_animal));
+    }
+
+    #[test]
+    fn functions_are_contravariant_in_parameters() {
+        let mut store = TypeStore::new();
+        let animal = class(&mut store, "Animal");
+        let dog = class(&mut store, "Dog");
+        store.set_class_parent(dog, animal);
+        let t_animal = store.intern(Type::Class(animal));
+        let t_dog = store.intern(Type::Class(dog));
+        let takes_animal = store.intern_fn(vec![t_animal], INT, vec![]);
+        let takes_dog = store.intern_fn(vec![t_dog], INT, vec![]);
+        // A function of Animal serves where a function of Dog is expected.
+        assert!(store.compatible(takes_dog, takes_animal));
+        assert!(!store.compatible(takes_animal, takes_dog));
+        // Results are covariant.
+        let ret_animal = store.intern_fn(vec![], t_animal, vec![]);
+        let ret_dog = store.intern_fn(vec![], t_dog, vec![]);
+        assert!(store.compatible(ret_animal, ret_dog));
+        assert!(!store.compatible(ret_dog, ret_animal));
+    }
+
+    #[test]
+    fn function_rows_are_covariant_by_inclusion() {
+        let mut store = TypeStore::new();
+        let io_print = store.intern_row_name("Io.Print");
+        let io = store.intern_row_name("Io");
+        let pure_fn = store.intern_fn(vec![], UNIT, vec![]);
+        let print_fn = store.intern_fn(vec![], UNIT, vec![RowElem::Op(io_print)]);
+        let io_fn = store.intern_fn(vec![], UNIT, vec![RowElem::Op(io)]);
+        assert!(store.compatible(print_fn, pure_fn));
+        assert!(store.compatible(io_fn, print_fn));
+        assert!(!store.compatible(pure_fn, print_fn));
+        assert!(!store.compatible(print_fn, io_fn));
+    }
+
+    #[test]
+    fn row_inclusion_uses_groups() {
+        let mut store = TypeStore::new();
+        let io_print = store.intern_row_name("Io.Print");
+        let io = store.intern_row_name("Io");
+        let fs = store.intern_row_name("Fs");
+        assert!(store.row_included(&[], &[RowElem::Op(io_print)]));
+        assert!(store.row_included(&[RowElem::Op(io_print)], &[RowElem::Op(io)]));
+        assert!(!store.row_included(&[RowElem::Op(io)], &[RowElem::Op(io_print)]));
+        assert!(!store.row_included(&[RowElem::Op(io_print)], &[RowElem::Op(fs)]));
+        assert!(store.row_included(&[RowElem::Var(0)], &[RowElem::Var(0)]));
+        assert!(!store.row_included(&[RowElem::Var(0)], &[RowElem::Op(io)]));
     }
 
     #[test]
     fn join_finds_the_common_ancestor() {
         let mut store = TypeStore::new();
-        let animal = store.register_class("Animal");
-        let dog = store.register_class("Dog");
-        let cat = store.register_class("Cat");
+        let animal = class(&mut store, "Animal");
+        let dog = class(&mut store, "Dog");
+        let cat = class(&mut store, "Cat");
         store.set_class_parent(dog, animal);
         store.set_class_parent(cat, animal);
         let t_animal = store.intern(Type::Class(animal));
@@ -335,5 +683,62 @@ mod tests {
         assert_eq!(store.join(t_dog, t_dog), Some(t_dog));
         assert_eq!(store.join(INT, BOOL), None);
         assert_eq!(store.join(INT, NEVER), Some(INT));
+    }
+
+    #[test]
+    fn join_covers_generic_applications_and_tuples() {
+        let mut store = TypeStore::new();
+        let parent = store.register_class("Option", 1, ClassKind::EnumParent);
+        let some = store.register_class("Option.Some", 1, ClassKind::EnumCase);
+        let none = store.register_class("Option.None", 1, ClassKind::EnumCase);
+        store.set_class_parent(some, parent);
+        store.set_class_parent(none, parent);
+        let some_int = store.intern(Type::Inst(some, vec![INT]));
+        let none_int = store.intern(Type::Inst(none, vec![INT]));
+        let opt_int = store.intern(Type::Inst(parent, vec![INT]));
+        assert_eq!(store.join(some_int, none_int), Some(opt_int));
+        let none_str = store.intern(Type::Inst(none, vec![STRING]));
+        assert_eq!(store.join(some_int, none_str), None);
+        let ta = store.intern(Type::Tuple(vec![some_int]));
+        let tb = store.intern(Type::Tuple(vec![none_int]));
+        let tj = store.intern(Type::Tuple(vec![opt_int]));
+        assert_eq!(store.join(ta, tb), Some(tj));
+    }
+
+    #[test]
+    fn substitution_replaces_variables() {
+        let mut store = TypeStore::new();
+        let v0 = store.intern(Type::Var(0));
+        let list_v0 = store.intern(Type::List(v0));
+        let list_int = store.intern(Type::List(INT));
+        assert_eq!(store.substitute(list_v0, &[INT], &[]), list_int);
+        let f = store.intern_fn(vec![v0], v0, vec![RowElem::Var(0)]);
+        let io = store.intern_row_name("Io");
+        let got = store.substitute(f, &[STRING], &[vec![RowElem::Op(io)]]);
+        let want = store.intern_fn(vec![STRING], STRING, vec![RowElem::Op(io)]);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn canonical_row_sorts_and_dedups() {
+        let mut store = TypeStore::new();
+        let io = store.intern_row_name("Io");
+        let fs = store.intern_row_name("Fs");
+        let row = store.canonical_row(vec![
+            RowElem::Var(1),
+            RowElem::Op(io),
+            RowElem::Op(fs),
+            RowElem::Op(io),
+            RowElem::Var(0),
+        ]);
+        assert_eq!(
+            row,
+            vec![
+                RowElem::Op(fs),
+                RowElem::Op(io),
+                RowElem::Var(0),
+                RowElem::Var(1)
+            ]
+        );
     }
 }

@@ -1,0 +1,9 @@
+def pick(n: Int): Int
+  x = if n > 0
+    n
+  else
+    return 0 - n
+  end
+  x * 2
+end
+pick(21) + pick(-8)

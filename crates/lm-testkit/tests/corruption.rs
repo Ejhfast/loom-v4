@@ -2,7 +2,7 @@
 //! execution, by the decoder or by the independent verifier. The
 //! cases cover the week-2 table and instruction surfaces.
 
-use lm_bytecode::{BcType, Instr};
+use lm_bytecode::{BcClassKind, BcRow, BcType, Instr};
 use lm_testkit::compile_to_bytes;
 use lm_vm::LoadError;
 
@@ -52,8 +52,50 @@ sb.append(\"{d.speak()} {f(1)} {counts.len()}\")
 sb.build()
 ";
 
+/// A program that exercises the week-3 surfaces: generics, type
+/// applications, enums, case metadata, tuples, casts, and rows.
+const WEEK3_SOURCE: &str = "enum Shape
+  Circle(r: Int)
+  Square(side: Int)
+
+  def area10(self): Int
+    case self
+    in Circle(r) then 3 * r * r
+    in Square(s) then s * s
+    end
+  end
+end
+
+class Box[T]
+  value: T
+
+  def init(mut self, value: T)
+    self.value = value
+  end
+
+  def get(self): T
+    self.value
+  end
+end
+
+def loud() with Fs, Io.Print
+end
+
+def id[T](x: T): T
+  x
+end
+
+s: Shape = Square(3)
+t = (id(1), Box(\"a\").get(), s.area10())
+t[2]
+";
+
 fn valid_bytes() -> Vec<u8> {
     compile_to_bytes("corrupt.lm", SOURCE).unwrap()
+}
+
+fn week3_bytes() -> Vec<u8> {
+    compile_to_bytes("corrupt.lm", WEEK3_SOURCE).unwrap()
 }
 
 fn object_bytes() -> Vec<u8> {
@@ -292,8 +334,206 @@ fn entry_with_captures_is_rejected() {
 }
 
 #[test]
+fn valid_week3_bytes_load_and_run() {
+    let loaded = lm_vm::load_bytes(&week3_bytes()).unwrap();
+    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(9)");
+}
+
+#[test]
+fn app_arity_mismatch_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    assert!(!module.apps.is_empty(), "the sample has applications");
+    module.apps[0].types.push(0);
+    expect_verify_reject(&lm_bytecode::encode(&module), "arity");
+}
+
+#[test]
+fn app_with_invalid_type_index_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let bad = module.types.len() as u32 + 9;
+    module.apps[0].types[0] = bad;
+    expect_verify_reject(&lm_bytecode::encode(&module), "invalid type index");
+}
+
+#[test]
+fn non_canonical_declared_row_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let target = module
+        .funcs
+        .iter()
+        .position(|f| f.row.len() == 2)
+        .expect("`loud` declares a two-element row");
+    module.funcs[target].row.reverse();
+    expect_verify_reject(&lm_bytecode::encode(&module), "canonical");
+}
+
+#[test]
+fn row_variable_outside_the_arity_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let target = module
+        .funcs
+        .iter()
+        .position(|f| f.row.len() == 2)
+        .expect("`loud` declares a row");
+    module.funcs[target].row = vec![BcRow::Var(4)];
+    expect_verify_reject(&lm_bytecode::encode(&module), "effect variable");
+}
+
+#[test]
+fn widened_callee_row_is_rejected() {
+    // Give the pure `id` function a claimed row. Its generic caller
+    // has the empty row, so the call must fail row inclusion.
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let target = module
+        .funcs
+        .iter()
+        .position(|f| f.name == "id")
+        .expect("the sample defines `id`");
+    let op = module
+        .strings
+        .iter()
+        .position(|s| s == "Io.Print")
+        .expect("the row name is interned");
+    module.funcs[target].row = vec![BcRow::Op(op as u32)];
+    expect_verify_reject(&lm_bytecode::encode(&module), "row");
+}
+
+#[test]
+fn case_class_with_normal_parent_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let parent = module
+        .classes
+        .iter()
+        .position(|c| c.kind == BcClassKind::Abstract)
+        .expect("the sample has an enum parent");
+    module.classes[parent].kind = BcClassKind::Normal;
+    expect_verify_reject(&lm_bytecode::encode(&module), "case class");
+}
+
+#[test]
+fn allocation_of_an_abstract_parent_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let parent = module
+        .classes
+        .iter()
+        .position(|c| c.kind == BcClassKind::Abstract)
+        .expect("the sample has an enum parent") as u32;
+    let mut patched = false;
+    'outer: for func in &mut module.funcs {
+        for block in &mut func.blocks {
+            for instr in block.iter_mut() {
+                if let Instr::New(class) = instr {
+                    *class = parent;
+                    patched = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+    assert!(patched, "the sample allocates an instance");
+    expect_verify_reject(&lm_bytecode::encode(&module), "abstract");
+}
+
+#[test]
+fn tuple_get_out_of_range_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut patched = false;
+    'outer: for func in &mut module.funcs {
+        for block in &mut func.blocks {
+            for instr in block.iter_mut() {
+                if let Instr::TupleGet(index) = instr {
+                    *index = 99;
+                    patched = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+    assert!(patched, "the sample reads a tuple");
+    expect_verify_reject(&lm_bytecode::encode(&module), "tuple index");
+}
+
+#[test]
+fn tuple_new_count_mismatch_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut patched = false;
+    'outer: for func in &mut module.funcs {
+        for block in &mut func.blocks {
+            for instr in block.iter_mut() {
+                if let Instr::TupleNew { count, .. } = instr {
+                    *count += 1;
+                    patched = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+    assert!(patched, "the sample builds a tuple");
+    let bytes = lm_bytecode::encode(&module);
+    assert!(matches!(
+        lm_vm::load_bytes(&bytes),
+        Err(LoadError::Verify(_))
+    ));
+}
+
+#[test]
+fn cast_between_unrelated_classes_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    // Retarget the first IsType/CastType at the Box class, which is
+    // unrelated to the Shape family.
+    let boxc = module
+        .classes
+        .iter()
+        .position(|c| c.name == "Box")
+        .expect("the sample defines Box") as u32;
+    module.types.push(BcType::Var(9));
+    let var_idx = module.types.len() as u32 - 1;
+    module.types.push(BcType::Inst(boxc, vec![var_idx]));
+    let unrelated = module.types.len() as u32 - 1;
+    let mut patched = false;
+    'outer: for func in &mut module.funcs {
+        for block in &mut func.blocks {
+            for instr in block.iter_mut() {
+                match instr {
+                    Instr::IsType(ty) | Instr::CastType(ty) => {
+                        *ty = unrelated;
+                        patched = true;
+                        break 'outer;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(patched, "the sample tests a case class");
+    let bytes = lm_bytecode::encode(&module);
+    assert!(matches!(
+        lm_vm::load_bytes(&bytes),
+        Err(LoadError::Verify(_))
+    ));
+}
+
+#[test]
+fn class_arity_flip_is_rejected() {
+    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let boxc = module
+        .classes
+        .iter()
+        .position(|c| c.name == "Box")
+        .expect("the sample defines Box");
+    module.classes[boxc].type_params = 2;
+    let bytes = lm_bytecode::encode(&module);
+    assert!(matches!(
+        lm_vm::load_bytes(&bytes),
+        Err(LoadError::Verify(_))
+    ));
+}
+
+#[test]
 fn every_truncated_stream_is_rejected_by_the_decoder() {
-    for bytes in [valid_bytes(), object_bytes()] {
+    for bytes in [valid_bytes(), object_bytes(), week3_bytes()] {
         for len in 0..bytes.len() {
             match lm_vm::load_bytes(&bytes[..len]) {
                 Err(LoadError::Decode(_)) => {}

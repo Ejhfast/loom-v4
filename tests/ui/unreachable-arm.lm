@@ -1,0 +1,9 @@
+def label(o: Option[Int]): Int
+  case o
+  in Some(_) then 1
+  in _       then 2
+  in None    then 3
+  end
+end
+
+label(None)

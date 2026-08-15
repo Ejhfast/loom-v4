@@ -1,0 +1,17 @@
+enum Msg
+  Line(text: String)
+  Data(v: Option[Int])
+end
+def read(m: Msg): String
+  case m
+  in Line(t)          then t
+  in Data(Some(1))    then "one"
+  in Data(Some(n))    then "n={n}"
+  in Data(None)       then "none"
+  end
+end
+a = read(Line("hi"))
+b = read(Data(Some(1)))
+c = read(Data(Some(7)))
+d = read(Data(None))
+"{a} {b} {c} {d}"

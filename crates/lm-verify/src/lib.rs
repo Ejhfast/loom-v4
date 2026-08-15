@@ -2,18 +2,25 @@
 //!
 //! The verifier receives a decoded module and rejects it unless every
 //! table and every function is well formed. It validates the type,
-//! selector, and class tables first. It then reconstructs the
-//! operand-stack types and the local-slot types at each block entry
-//! with a worklist, and it checks jumps, calls, field access, closure
-//! creation, and collection operations. It shares no code with the
-//! source checker.
+//! selector, type-application, and class tables first. It then
+//! reconstructs the operand-stack types and the local-slot types at
+//! each block entry with a worklist, and it checks jumps, calls,
+//! generic substitution, claimed effect rows, field access, closure
+//! creation, tuples, casts, and collection operations. A generic
+//! function body is verified once with its type variables opaque;
+//! call sites substitute the callee signature through the type
+//! application. The verifier shares no code with the source checker.
 
-use lm_bytecode::{BcType, Func, Instr, Module};
+use lm_bytecode::{BcClassKind, BcRow, BcType, Func, Instr, Module};
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
 /// The largest operand-stack depth the verifier accepts for one function.
 const MAX_STATIC_STACK: usize = 4096;
+
+/// The largest portable tuple arity.
+const MAX_TUPLE_ARITY: usize = 16;
 
 /// Canonical type-table indices for the primitive types. Every module
 /// must begin its type table with these entries in this order.
@@ -42,26 +49,50 @@ fn err(func: u32, message: impl Into<String>) -> VerifyError {
     }
 }
 
-/// The abstract state at one program point. Types are type-table
-/// indices. `None` marks a local slot without a known value.
+/// The abstract state at one program point. Types are indices into
+/// the extended type universe. `None` marks a local slot without a
+/// known value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct State {
     locals: Vec<Option<u32>>,
     stack: Vec<u32>,
 }
 
+/// The extended type universe: the module table plus the types
+/// created by substitution during verification.
+struct Universe {
+    types: Vec<BcType>,
+    index: HashMap<BcType, u32>,
+}
+
+impl Universe {
+    fn intern(&mut self, ty: BcType) -> u32 {
+        if let Some(idx) = self.index.get(&ty) {
+            return *idx;
+        }
+        let idx = self.types.len() as u32;
+        self.types.push(ty.clone());
+        self.index.insert(ty, idx);
+        idx
+    }
+}
+
 /// Shared lookup context for one module.
 struct Ctx<'m> {
     module: &'m Module,
-    /// Class index to the type-table index of `Class(index)`.
+    /// Class index to the type index of its `Class` entry, when the
+    /// module contains one.
     class_ty: Vec<Option<u32>>,
-    /// Structural type to its table index.
-    type_index: HashMap<&'m BcType, u32>,
+    uni: RefCell<Universe>,
 }
 
 impl<'m> Ctx<'m> {
-    fn ty(&self, idx: u32) -> &'m BcType {
-        &self.module.types[idx as usize]
+    fn ty(&self, idx: u32) -> BcType {
+        self.uni.borrow().types[idx as usize].clone()
+    }
+
+    fn intern(&self, ty: BcType) -> u32 {
+        self.uni.borrow_mut().intern(ty)
     }
 
     /// Return true when class `child` equals `ancestor` or inherits it.
@@ -77,6 +108,100 @@ impl<'m> Ctx<'m> {
         }
     }
 
+    /// The sort key of one row element, for canonical order checks.
+    fn row_key(&self, elem: &BcRow) -> (u8, String, u32) {
+        match elem {
+            BcRow::Op(idx) => (
+                0,
+                self.module
+                    .strings
+                    .get(*idx as usize)
+                    .cloned()
+                    .unwrap_or_default(),
+                0,
+            ),
+            BcRow::Var(v) => (1, String::new(), *v),
+        }
+    }
+
+    /// Return true when the row is sorted and has no duplicate.
+    fn row_canonical(&self, row: &[BcRow]) -> bool {
+        row.windows(2)
+            .all(|w| self.row_key(&w[0]) < self.row_key(&w[1]))
+    }
+
+    /// Return true when every element of `sub` is included in `sup`.
+    fn row_included(&self, sub: &[BcRow], sup: &[BcRow]) -> bool {
+        sub.iter().all(|elem| match elem {
+            BcRow::Var(v) => sup.contains(&BcRow::Var(*v)),
+            BcRow::Op(n) => {
+                let name = &self.module.strings[*n as usize];
+                sup.iter().any(|s| match s {
+                    BcRow::Op(m) => {
+                        let sup_name = &self.module.strings[*m as usize];
+                        sup_name == name
+                            || name
+                                .split_once('.')
+                                .map(|(group, _)| group == sup_name)
+                                .unwrap_or(false)
+                    }
+                    BcRow::Var(_) => false,
+                })
+            }
+        })
+    }
+
+    /// Substitute effect variables in a row and re-canonicalize.
+    fn row_subst(&self, row: &[BcRow], rows: &[Vec<BcRow>]) -> Vec<BcRow> {
+        let mut out: Vec<BcRow> = Vec::new();
+        for elem in row {
+            match elem {
+                BcRow::Var(v) => match rows.get(*v as usize) {
+                    Some(replacement) => out.extend_from_slice(replacement),
+                    None => out.push(*elem),
+                },
+                BcRow::Op(_) => out.push(*elem),
+            }
+        }
+        out.sort_by_key(|e| self.row_key(e));
+        out.dedup();
+        out
+    }
+
+    /// Substitute type variables and effect variables in one type.
+    fn subst(&self, ty: u32, targs: &[u32], rows: &[Vec<BcRow>]) -> u32 {
+        if targs.is_empty() && rows.is_empty() {
+            return ty;
+        }
+        match self.ty(ty) {
+            BcType::Var(i) => targs.get(i as usize).copied().unwrap_or(ty),
+            BcType::Inst(c, args) => {
+                let args: Vec<u32> = args.iter().map(|a| self.subst(*a, targs, rows)).collect();
+                self.intern(BcType::Inst(c, args))
+            }
+            BcType::List(e) => {
+                let e = self.subst(e, targs, rows);
+                self.intern(BcType::List(e))
+            }
+            BcType::Map(k, v) => {
+                let k = self.subst(k, targs, rows);
+                let v = self.subst(v, targs, rows);
+                self.intern(BcType::Map(k, v))
+            }
+            BcType::Tuple(elems) => {
+                let elems: Vec<u32> = elems.iter().map(|e| self.subst(*e, targs, rows)).collect();
+                self.intern(BcType::Tuple(elems))
+            }
+            BcType::Fn(params, ret, row) => {
+                let params: Vec<u32> = params.iter().map(|p| self.subst(*p, targs, rows)).collect();
+                let ret = self.subst(ret, targs, rows);
+                let row = self.row_subst(&row, rows);
+                self.intern(BcType::Fn(params, ret, row))
+            }
+            _ => ty,
+        }
+    }
+
     /// Return true when a value of type `found` is valid where the
     /// code expects type `expected`.
     fn is_subtype(&self, found: u32, expected: u32) -> bool {
@@ -84,7 +209,24 @@ impl<'m> Ctx<'m> {
             return true;
         }
         match (self.ty(found), self.ty(expected)) {
-            (BcType::Class(a), BcType::Class(b)) => self.class_extends(*a, *b),
+            (BcType::Class(a), BcType::Class(b)) => self.class_extends(a, b),
+            (BcType::Inst(a, xs), BcType::Inst(b, ys)) => self.class_extends(a, b) && xs == ys,
+            (BcType::Tuple(xs), BcType::Tuple(ys)) => {
+                xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(ys.iter())
+                        .all(|(x, y)| self.is_subtype(*x, *y))
+            }
+            (BcType::Fn(fp, fr, frow), BcType::Fn(ep, er, erow)) => {
+                fp.len() == ep.len()
+                    && fp
+                        .iter()
+                        .zip(ep.iter())
+                        .all(|(f, e)| self.is_subtype(*e, *f))
+                    && self.is_subtype(fr, er)
+                    && self.row_included(&frow, &erow)
+            }
             _ => false,
         }
     }
@@ -98,14 +240,39 @@ impl<'m> Ctx<'m> {
         if self.is_subtype(b, a) {
             return Some(a);
         }
-        if let (BcType::Class(ca), BcType::Class(cb)) = (self.ty(a), self.ty(b)) {
-            let mut anc = Some(*ca);
-            while let Some(c) = anc {
-                if self.class_extends(*cb, c) {
-                    return self.class_ty[c as usize];
-                }
-                anc = self.module.classes[c as usize].parent();
+        match (self.ty(a), self.ty(b)) {
+            (BcType::Class(ca), BcType::Class(cb)) => {
+                let common = self.common_ancestor(ca, cb)?;
+                Some(self.intern(BcType::Class(common)))
             }
+            (BcType::Inst(ca, xs), BcType::Inst(cb, ys)) => {
+                if xs != ys {
+                    return None;
+                }
+                let common = self.common_ancestor(ca, cb)?;
+                Some(self.intern(BcType::Inst(common, xs)))
+            }
+            (BcType::Tuple(xs), BcType::Tuple(ys)) => {
+                if xs.len() != ys.len() {
+                    return None;
+                }
+                let mut elems = Vec::with_capacity(xs.len());
+                for (x, y) in xs.iter().zip(ys.iter()) {
+                    elems.push(self.join(*x, *y)?);
+                }
+                Some(self.intern(BcType::Tuple(elems)))
+            }
+            _ => None,
+        }
+    }
+
+    fn common_ancestor(&self, a: u32, b: u32) -> Option<u32> {
+        let mut anc = Some(a);
+        while let Some(c) = anc {
+            if self.class_extends(b, c) {
+                return Some(c);
+            }
+            anc = self.module.classes[c as usize].parent();
         }
         None
     }
@@ -126,18 +293,56 @@ impl<'m> Ctx<'m> {
         }
     }
 
+    /// The nominal class and arguments of one instance type.
+    fn as_instance(&self, ty: u32) -> Option<(u32, Vec<u32>)> {
+        match self.ty(ty) {
+            BcType::Class(c) => Some((c, vec![])),
+            BcType::Inst(c, args) => Some((c, args)),
+            _ => None,
+        }
+    }
+
     /// Return true when the type is a heap object type.
     fn is_heap(&self, idx: u32) -> bool {
         matches!(
             self.ty(idx),
             BcType::Str
                 | BcType::Class(_)
+                | BcType::Inst(_, _)
                 | BcType::List(_)
                 | BcType::Map(_, _)
-                | BcType::Fn(_, _)
+                | BcType::Tuple(_)
+                | BcType::Fn(_, _, _)
                 | BcType::StringBuilder
                 | BcType::ByteBuffer
         )
+    }
+
+    /// Check that every type variable inside `ty` is below `limit`
+    /// and every row variable is below `elimit`.
+    fn vars_bounded(&self, ty: u32, limit: u32, elimit: u32) -> bool {
+        match self.ty(ty) {
+            BcType::Var(i) => i < limit,
+            BcType::Inst(_, args) => args.iter().all(|a| self.vars_bounded(*a, limit, elimit)),
+            BcType::List(e) => self.vars_bounded(e, limit, elimit),
+            BcType::Map(k, v) => {
+                self.vars_bounded(k, limit, elimit) && self.vars_bounded(v, limit, elimit)
+            }
+            BcType::Tuple(elems) => elems.iter().all(|e| self.vars_bounded(*e, limit, elimit)),
+            BcType::Fn(params, ret, row) => {
+                params.iter().all(|p| self.vars_bounded(*p, limit, elimit))
+                    && self.vars_bounded(ret, limit, elimit)
+                    && self.row_vars_bounded(&row, elimit)
+            }
+            _ => true,
+        }
+    }
+
+    fn row_vars_bounded(&self, row: &[BcRow], elimit: u32) -> bool {
+        row.iter().all(|e| match e {
+            BcRow::Var(v) => *v < elimit,
+            BcRow::Op(_) => true,
+        })
     }
 }
 
@@ -155,17 +360,21 @@ pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
             ),
         ));
     }
-    if !module.funcs[entry].params.is_empty() {
+    let entry_func = &module.funcs[entry];
+    if !entry_func.params.is_empty() {
         return Err(err(
             module.entry,
             "the entry function must not have parameters",
         ));
     }
-    if !module.funcs[entry].captures.is_empty() {
+    if !entry_func.captures.is_empty() {
         return Err(err(
             module.entry,
             "the entry function must not have captures",
         ));
+    }
+    if entry_func.type_params != 0 || entry_func.effect_params != 0 {
+        return Err(err(module.entry, "the entry function must not be generic"));
     }
     for (idx, func) in module.funcs.iter().enumerate() {
         verify_func(&ctx, func, idx as u32)?;
@@ -173,7 +382,8 @@ pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
     Ok(())
 }
 
-/// Validate the type, selector, class, and function tables.
+/// Validate the type, selector, application, class, and function
+/// tables.
 fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
     let terr = |message: String| VerifyError {
         func: u32::MAX,
@@ -186,9 +396,9 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
             "the type table does not start with Unit, Bool, Int, String".to_string(),
         ));
     }
-    let mut type_index: HashMap<&BcType, u32> = HashMap::new();
+    let mut index: HashMap<BcType, u32> = HashMap::new();
     for (idx, ty) in module.types.iter().enumerate() {
-        if type_index.insert(ty, idx as u32).is_some() {
+        if index.insert(ty.clone(), idx as u32).is_some() {
             return Err(terr(format!("type {idx} duplicates an earlier type entry")));
         }
         let check_ref = |child: u32| -> Result<(), VerifyError> {
@@ -202,11 +412,33 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
         match ty {
             BcType::Unit | BcType::Bool | BcType::Int | BcType::Str => {}
             BcType::StringBuilder | BcType::ByteBuffer => {}
+            BcType::Var(_) => {}
             BcType::Class(c) => {
                 if *c as usize >= module.classes.len() {
                     return Err(terr(format!(
                         "type {idx} names class {c}, which does not exist"
                     )));
+                }
+                if module.classes[*c as usize].type_params != 0 {
+                    return Err(terr(format!(
+                        "type {idx} names the generic class {c} without arguments"
+                    )));
+                }
+            }
+            BcType::Inst(c, args) => {
+                if *c as usize >= module.classes.len() {
+                    return Err(terr(format!(
+                        "type {idx} names class {c}, which does not exist"
+                    )));
+                }
+                let arity = module.classes[*c as usize].type_params;
+                if arity == 0 || args.len() != arity as usize {
+                    return Err(terr(format!(
+                        "type {idx} applies class {c} with the wrong argument count"
+                    )));
+                }
+                for a in args {
+                    check_ref(*a)?;
                 }
             }
             BcType::List(e) => check_ref(*e)?,
@@ -222,11 +454,31 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
                     )));
                 }
             }
-            BcType::Fn(params, ret) => {
+            BcType::Tuple(elems) => {
+                if elems.is_empty() || elems.len() > MAX_TUPLE_ARITY {
+                    return Err(terr(format!(
+                        "type {idx} is a tuple with an invalid arity {}",
+                        elems.len()
+                    )));
+                }
+                for e in elems {
+                    check_ref(*e)?;
+                }
+            }
+            BcType::Fn(params, ret, row) => {
                 for p in params {
                     check_ref(*p)?;
                 }
                 check_ref(*ret)?;
+                for elem in row {
+                    if let BcRow::Op(s) = elem {
+                        if *s as usize >= module.strings.len() {
+                            return Err(terr(format!(
+                                "type {idx} has a row with an invalid string index"
+                            )));
+                        }
+                    }
+                }
             }
         }
     }
@@ -240,17 +492,90 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
     let ctx = Ctx {
         module,
         class_ty,
-        type_index,
+        uni: RefCell::new(Universe {
+            types: module.types.clone(),
+            index,
+        }),
     };
+    // Row canonicality inside function types.
+    for (idx, ty) in module.types.iter().enumerate() {
+        if let BcType::Fn(_, _, row) = ty {
+            if !ctx.row_canonical(row) {
+                return Err(terr(format!("type {idx} has a non-canonical row")));
+            }
+        }
+    }
+    // Validate the type applications.
+    for (aidx, app) in module.apps.iter().enumerate() {
+        for t in &app.types {
+            if *t as usize >= module.types.len() {
+                return Err(terr(format!(
+                    "application {aidx} references an invalid type index"
+                )));
+            }
+        }
+        for row in &app.rows {
+            for elem in row {
+                if let BcRow::Op(s) = elem {
+                    if *s as usize >= module.strings.len() {
+                        return Err(terr(format!(
+                            "application {aidx} has a row with an invalid string index"
+                        )));
+                    }
+                }
+            }
+            if !ctx.row_canonical(row) {
+                return Err(terr(format!("application {aidx} has a non-canonical row")));
+            }
+        }
+    }
     // Validate classes.
     for (cidx, class) in module.classes.iter().enumerate() {
         let cerr = |message: String| terr(format!("class {cidx}: {message}"));
+        match class.kind {
+            BcClassKind::Abstract => {
+                if class.parent().is_some() {
+                    return Err(cerr("an abstract enum parent cannot inherit".to_string()));
+                }
+            }
+            BcClassKind::Case => {
+                let Some(p) = class.parent() else {
+                    return Err(cerr("a case class needs its enum parent".to_string()));
+                };
+                if p as usize >= cidx {
+                    return Err(cerr(format!("parent {p} is not an earlier class entry")));
+                }
+                if module.classes[p as usize].kind != BcClassKind::Abstract {
+                    return Err(cerr(
+                        "a case class parent must be an abstract enum parent".to_string(),
+                    ));
+                }
+                if module.classes[p as usize].type_params != class.type_params {
+                    return Err(cerr(
+                        "a case class must keep the family type arity".to_string(),
+                    ));
+                }
+            }
+            BcClassKind::Normal => {}
+        }
         if let Some(p) = class.parent() {
             if p as usize >= cidx {
                 return Err(cerr(format!("parent {p} is not an earlier class entry")));
             }
-            // The field layout must extend the parent layout exactly.
             let parent = &module.classes[p as usize];
+            if class.kind != BcClassKind::Case {
+                if parent.kind != BcClassKind::Normal {
+                    return Err(cerr(
+                        "only a case class may inherit a sealed enum class".to_string(),
+                    ));
+                }
+                if parent.type_params != 0 || class.type_params != 0 {
+                    return Err(cerr(
+                        "a generic class cannot take part in inheritance".to_string(),
+                    ));
+                }
+            }
+            // The field layout must extend the parent layout exactly.
             if class.fields.len() < parent.fields.len()
                 || class.fields[..parent.fields.len()] != parent.fields[..]
             {
@@ -263,8 +588,31 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
             if *fty as usize >= module.types.len() {
                 return Err(cerr(format!("field `{fname}` has an invalid type index")));
             }
+            if !ctx.vars_bounded(*fty, class.type_params, 0) {
+                return Err(cerr(format!(
+                    "field `{fname}` uses a type variable outside the class arity"
+                )));
+            }
         }
-        let own_ty = ctx.class_ty[cidx];
+        // The canonical self type of the class.
+        let own_ty = if class.type_params == 0 {
+            ctx.class_ty[cidx]
+        } else {
+            let vars: Vec<u32> = (0..class.type_params)
+                .map(|i| ctx.uni.borrow().index.get(&BcType::Var(i)).copied())
+                .collect::<Option<Vec<u32>>>()
+                .unwrap_or_default()
+                .to_vec();
+            if vars.len() == class.type_params as usize {
+                ctx.uni
+                    .borrow()
+                    .index
+                    .get(&BcType::Inst(cidx as u32, vars))
+                    .copied()
+            } else {
+                None
+            }
+        };
         let mut seen = Vec::new();
         for (sel, func) in &class.methods {
             if *sel as usize >= module.selectors.len() {
@@ -280,6 +628,11 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
             let f = &module.funcs[*func as usize];
             if !f.captures.is_empty() {
                 return Err(cerr("a method function must not have captures".to_string()));
+            }
+            if f.type_params < class.type_params {
+                return Err(cerr(format!(
+                    "method function {func} does not carry the class type arity"
+                )));
             }
             let self_ok = match (f.params.first(), own_ty) {
                 (Some(p0), Some(t)) => *p0 == t,
@@ -299,9 +652,19 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
                             "override of selector {sel} changes the parameter types"
                         )));
                     }
+                    if base.type_params != f.type_params || base.effect_params != f.effect_params {
+                        return Err(cerr(format!(
+                            "override of selector {sel} changes the generic arity"
+                        )));
+                    }
                     if !ctx.is_subtype(f.ret, base.ret) {
                         return Err(cerr(format!(
                             "override of selector {sel} widens the result type"
+                        )));
+                    }
+                    if !ctx.row_included(&f.row, &base.row) {
+                        return Err(cerr(format!(
+                            "override of selector {sel} widens the effect row"
                         )));
                     }
                 }
@@ -322,9 +685,79 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
                     "the signature references an invalid type index",
                 ));
             }
+            if !ctx.vars_bounded(*t, func.type_params, func.effect_params) {
+                return Err(err(
+                    fidx as u32,
+                    "the signature uses a variable outside the declared generic arity",
+                ));
+            }
+        }
+        for elem in &func.row {
+            match elem {
+                BcRow::Op(s) => {
+                    if *s as usize >= module.strings.len() {
+                        return Err(err(
+                            fidx as u32,
+                            "the declared row references an invalid string index",
+                        ));
+                    }
+                }
+                BcRow::Var(v) => {
+                    if *v >= func.effect_params {
+                        return Err(err(
+                            fidx as u32,
+                            "the declared row uses an effect variable outside the arity",
+                        ));
+                    }
+                }
+            }
+        }
+        if !ctx.row_canonical(&func.row) {
+            return Err(err(fidx as u32, "the declared row is not canonical"));
         }
     }
     Ok(ctx)
+}
+
+/// Validate one type application against a callee's generic arity and
+/// the caller's variable scope.
+fn check_app(
+    ctx: &Ctx<'_>,
+    caller: &Func,
+    fidx: u32,
+    at: &dyn Fn(&str) -> String,
+    app_idx: u32,
+    want_types: u32,
+    want_rows: u32,
+) -> Result<(), VerifyError> {
+    let app = ctx
+        .module
+        .apps
+        .get(app_idx as usize)
+        .ok_or_else(|| err(fidx, at("type application index out of range")))?;
+    if app.types.len() != want_types as usize {
+        return Err(err(fidx, at("type application arity mismatch")));
+    }
+    if app.rows.len() != want_rows as usize {
+        return Err(err(fidx, at("type application row arity mismatch")));
+    }
+    for t in &app.types {
+        if !ctx.vars_bounded(*t, caller.type_params, caller.effect_params) {
+            return Err(err(
+                fidx,
+                at("type application uses a variable outside the caller scope"),
+            ));
+        }
+    }
+    for row in &app.rows {
+        if !ctx.row_vars_bounded(row, caller.effect_params) {
+            return Err(err(
+                fidx,
+                at("type application row uses a variable outside the caller scope"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError> {
@@ -355,6 +788,7 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                 ));
             }
             let at = |what: &str| format!("block {bidx}, instruction {iidx}: {what}");
+            let at_dyn: &dyn Fn(&str) -> String = &at;
             match instr {
                 Instr::ConstStr(idx) => {
                     if *idx as usize >= module.strings.len() {
@@ -367,24 +801,55 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                     }
                 }
                 Instr::Call(callee) => {
-                    if *callee as usize >= module.funcs.len() {
+                    let Some(target) = module.funcs.get(*callee as usize) else {
                         return Err(err(fidx, at("call target out of range")));
-                    }
-                    if !module.funcs[*callee as usize].captures.is_empty() {
+                    };
+                    if !target.captures.is_empty() {
                         return Err(err(fidx, at("direct call to a function with captures")));
                     }
+                    if target.type_params != 0 || target.effect_params != 0 {
+                        return Err(err(fidx, at("a generic callee needs a type application")));
+                    }
                 }
-                Instr::CallVirtual { selector, .. } => {
+                Instr::CallG { func: callee, app } => {
+                    let Some(target) = module.funcs.get(*callee as usize) else {
+                        return Err(err(fidx, at("call target out of range")));
+                    };
+                    if !target.captures.is_empty() {
+                        return Err(err(fidx, at("direct call to a function with captures")));
+                    }
+                    if target.type_params == 0 && target.effect_params == 0 {
+                        return Err(err(fidx, at("a type application on a non-generic callee")));
+                    }
+                    check_app(
+                        ctx,
+                        func,
+                        fidx,
+                        at_dyn,
+                        *app,
+                        target.type_params,
+                        target.effect_params,
+                    )?;
+                }
+                Instr::CallVirtual { selector, .. } | Instr::CallVirtualG { selector, .. } => {
                     if *selector as usize >= module.selectors.len() {
                         return Err(err(fidx, at("selector index out of range")));
                     }
                 }
                 Instr::MakeClosure { func: f, captures } => {
-                    if *f as usize >= module.funcs.len() {
+                    let Some(target) = module.funcs.get(*f as usize) else {
                         return Err(err(fidx, at("closure function out of range")));
-                    }
-                    if module.funcs[*f as usize].captures.len() != *captures as usize {
+                    };
+                    if target.captures.len() != *captures as usize {
                         return Err(err(fidx, at("closure capture count mismatch")));
+                    }
+                    if target.type_params != func.type_params
+                        || target.effect_params != func.effect_params
+                    {
+                        return Err(err(
+                            fidx,
+                            at("a closure body must keep the enclosing generic arity"),
+                        ));
                     }
                 }
                 Instr::LoadCapture(idx) => {
@@ -393,11 +858,33 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                     }
                 }
                 Instr::New(class) => {
-                    if *class as usize >= module.classes.len() {
+                    let Some(c) = module.classes.get(*class as usize) else {
                         return Err(err(fidx, at("class index out of range")));
+                    };
+                    if c.kind == BcClassKind::Abstract {
+                        return Err(err(fidx, at("cannot allocate an abstract enum parent")));
+                    }
+                    if c.type_params != 0 {
+                        return Err(err(fidx, at("a generic class needs a type application")));
                     }
                 }
-                Instr::ListNew { ty, .. } | Instr::MapNew { ty, .. } => {
+                Instr::NewG { class, app } => {
+                    let Some(c) = module.classes.get(*class as usize) else {
+                        return Err(err(fidx, at("class index out of range")));
+                    };
+                    if c.kind == BcClassKind::Abstract {
+                        return Err(err(fidx, at("cannot allocate an abstract enum parent")));
+                    }
+                    if c.type_params == 0 {
+                        return Err(err(fidx, at("a type application on a non-generic class")));
+                    }
+                    check_app(ctx, func, fidx, at_dyn, *app, c.type_params, 0)?;
+                }
+                Instr::ListNew { ty, .. }
+                | Instr::MapNew { ty, .. }
+                | Instr::TupleNew { ty, .. }
+                | Instr::IsType(ty)
+                | Instr::CastType(ty) => {
                     if *ty as usize >= module.types.len() {
                         return Err(err(fidx, at("type index out of range")));
                     }
@@ -548,14 +1035,24 @@ fn step(
     };
     let as_list = |ty: u32| -> Result<u32, VerifyError> {
         match ctx.ty(ty) {
-            BcType::List(e) => Ok(*e),
+            BcType::List(e) => Ok(e),
             _ => Err(fail(format!("expected a list type, found type {ty}"))),
         }
     };
     let as_map = |ty: u32| -> Result<(u32, u32), VerifyError> {
         match ctx.ty(ty) {
-            BcType::Map(k, v) => Ok((*k, *v)),
+            BcType::Map(k, v) => Ok((k, v)),
             _ => Err(fail(format!("expected a map type, found type {ty}"))),
+        }
+    };
+    // The claimed row of a call must sit inside the caller's row.
+    let charge_row = |row: &[BcRow]| -> Result<(), VerifyError> {
+        if ctx.row_included(row, &func.row) {
+            Ok(())
+        } else {
+            Err(fail(
+                "the callee row is not inside the caller's declared row".to_string(),
+            ))
         }
     };
     match instr {
@@ -606,10 +1103,8 @@ fn step(
         Instr::EqRef | Instr::NeRef => {
             let b = pop(state)?;
             let a = pop(state)?;
-            let heap_ok = ctx.is_heap(a)
-                && ctx.is_heap(b)
-                && ctx.ty(a) != &BcType::Str
-                && ctx.ty(b) != &BcType::Str;
+            let excluded = |t: u32| matches!(ctx.ty(t), BcType::Str | BcType::Tuple(_));
+            let heap_ok = ctx.is_heap(a) && ctx.is_heap(b) && !excluded(a) && !excluded(b);
             if !heap_ok || !(ctx.is_subtype(a, b) || ctx.is_subtype(b, a)) {
                 return Err(fail(format!(
                     "reference equality needs related object types, found {a} and {b}"
@@ -619,8 +1114,23 @@ fn step(
         }
         Instr::Call(callee) => {
             let sig = &module.funcs[*callee as usize];
+            charge_row(&sig.row)?;
             pop_args(state, &sig.params)?;
             push(state, sig.ret)?;
+        }
+        Instr::CallG { func: callee, app } => {
+            let sig = &module.funcs[*callee as usize];
+            let app = &module.apps[*app as usize];
+            let row = ctx.row_subst(&sig.row, &app.rows);
+            charge_row(&row)?;
+            let params: Vec<u32> = sig
+                .params
+                .iter()
+                .map(|p| ctx.subst(*p, &app.types, &app.rows))
+                .collect();
+            pop_args(state, &params)?;
+            let ret = ctx.subst(sig.ret, &app.types, &app.rows);
+            push(state, ret)?;
         }
         Instr::CallVirtual { selector, argc } => {
             let argc = *argc as usize;
@@ -629,10 +1139,11 @@ fn step(
             }
             let recv_ty = state.stack[state.stack.len() - 1 - argc];
             let class = match ctx.ty(recv_ty) {
-                BcType::Class(c) => *c,
+                BcType::Class(c) => c,
                 _ => {
                     return Err(fail(format!(
-                        "virtual call receiver type {recv_ty} is not a class"
+                        "virtual call receiver type {recv_ty} needs the generic form \
+                         or is not a class"
                     )));
                 }
             };
@@ -640,6 +1151,12 @@ fn step(
                 .find_method(class, *selector)
                 .ok_or_else(|| fail(format!("selector {selector} is not a class method")))?;
             let sig = &module.funcs[target as usize];
+            if sig.type_params != 0 || sig.effect_params != 0 {
+                return Err(fail(
+                    "a generic method call needs a type application".to_string(),
+                ));
+            }
+            charge_row(&sig.row)?;
             if sig.params.len() != argc + 1 {
                 return Err(fail("virtual call argument count mismatch".to_string()));
             }
@@ -647,20 +1164,65 @@ fn step(
             pop_expect(state, sig.params[0])?;
             push(state, sig.ret)?;
         }
+        Instr::CallVirtualG {
+            selector,
+            argc,
+            app,
+        } => {
+            let argc = *argc as usize;
+            if state.stack.len() < argc + 1 {
+                return Err(fail("virtual call on a short stack".to_string()));
+            }
+            let recv_ty = state.stack[state.stack.len() - 1 - argc];
+            let Some((class, class_args)) = ctx.as_instance(recv_ty) else {
+                return Err(fail(format!(
+                    "virtual call receiver type {recv_ty} is not a class"
+                )));
+            };
+            let target = ctx
+                .find_method(class, *selector)
+                .ok_or_else(|| fail(format!("selector {selector} is not a class method")))?;
+            let sig = &module.funcs[target as usize];
+            let app = &module.apps[*app as usize];
+            let mut targs = class_args;
+            targs.extend_from_slice(&app.types);
+            if sig.type_params as usize != targs.len()
+                || sig.effect_params as usize != app.rows.len()
+            {
+                return Err(fail(
+                    "virtual call type application arity mismatch".to_string(),
+                ));
+            }
+            let row = ctx.row_subst(&sig.row, &app.rows);
+            charge_row(&row)?;
+            if sig.params.len() != argc + 1 {
+                return Err(fail("virtual call argument count mismatch".to_string()));
+            }
+            let params: Vec<u32> = sig
+                .params
+                .iter()
+                .map(|p| ctx.subst(*p, &targs, &app.rows))
+                .collect();
+            pop_args(state, &params[1..])?;
+            pop_expect(state, params[0])?;
+            let ret = ctx.subst(sig.ret, &targs, &app.rows);
+            push(state, ret)?;
+        }
         Instr::CallValue { argc } => {
             let argc = *argc as usize;
             if state.stack.len() < argc + 1 {
                 return Err(fail("closure call on a short stack".to_string()));
             }
             let callee_ty = state.stack[state.stack.len() - 1 - argc];
-            let (params, ret) = match ctx.ty(callee_ty) {
-                BcType::Fn(params, ret) => (params.clone(), *ret),
+            let (params, ret, row) = match ctx.ty(callee_ty) {
+                BcType::Fn(params, ret, row) => (params, ret, row),
                 _ => {
                     return Err(fail(format!(
                         "closure call target type {callee_ty} is not a function type"
                     )));
                 }
             };
+            charge_row(&row)?;
             if params.len() != argc {
                 return Err(fail("closure call argument count mismatch".to_string()));
             }
@@ -671,11 +1233,16 @@ fn step(
         Instr::MakeClosure { func: f, .. } => {
             let target = &module.funcs[*f as usize];
             pop_args(state, &target.captures)?;
-            let fn_ty = BcType::Fn(target.params.clone(), target.ret);
-            let idx = ctx.type_index.get(&fn_ty).ok_or_else(|| {
+            let fn_ty = BcType::Fn(target.params.clone(), target.ret, target.row.clone());
+            let idx = {
+                let uni = ctx.uni.borrow();
+                uni.index.get(&fn_ty).copied()
+            };
+            let idx = idx.filter(|i| (*i as usize) < module.types.len());
+            let idx = idx.ok_or_else(|| {
                 fail("the closure function type is not in the type table".to_string())
             })?;
-            push(state, *idx)?;
+            push(state, idx)?;
         }
         Instr::LoadCapture(idx) => {
             let ty = func.captures[*idx as usize];
@@ -686,33 +1253,80 @@ fn step(
                 .ok_or_else(|| fail("the class type is not in the type table".to_string()))?;
             push(state, ty)?;
         }
+        Instr::NewG { class, app } => {
+            let app = &module.apps[*app as usize];
+            let ty = ctx.intern(BcType::Inst(*class, app.types.clone()));
+            push(state, ty)?;
+        }
         Instr::LoadField(field) => {
             let recv = pop(state)?;
-            let class = match ctx.ty(recv) {
-                BcType::Class(c) => *c,
-                _ => return Err(fail(format!("field load on non-class type {recv}"))),
+            let Some((class, class_args)) = ctx.as_instance(recv) else {
+                return Err(fail(format!("field load on non-class type {recv}")));
             };
             let fields = &module.classes[class as usize].fields;
             let (_, fty) = fields
                 .get(*field as usize)
                 .ok_or_else(|| fail("field index out of range".to_string()))?;
-            push(state, *fty)?;
+            let fty = ctx.subst(*fty, &class_args, &[]);
+            push(state, fty)?;
         }
         Instr::StoreField(field) => {
             let value = pop(state)?;
             let recv = pop(state)?;
-            let class = match ctx.ty(recv) {
-                BcType::Class(c) => *c,
-                _ => return Err(fail(format!("field store on non-class type {recv}"))),
+            let Some((class, class_args)) = ctx.as_instance(recv) else {
+                return Err(fail(format!("field store on non-class type {recv}")));
             };
             let fields = &module.classes[class as usize].fields;
             let (_, fty) = fields
                 .get(*field as usize)
                 .ok_or_else(|| fail("field index out of range".to_string()))?;
-            if !ctx.is_subtype(value, *fty) {
+            let fty = ctx.subst(*fty, &class_args, &[]);
+            if !ctx.is_subtype(value, fty) {
                 return Err(fail(format!(
                     "field store expects type {fty}, found type {value}"
                 )));
+            }
+        }
+        Instr::TupleNew { ty, count } => {
+            let elems = match ctx.ty(*ty) {
+                BcType::Tuple(elems) => elems,
+                _ => return Err(fail(format!("expected a tuple type, found type {ty}"))),
+            };
+            if elems.len() != *count as usize {
+                return Err(fail("tuple arity does not match its type".to_string()));
+            }
+            for want in elems.iter().rev() {
+                pop_expect(state, *want)?;
+            }
+            push(state, *ty)?;
+        }
+        Instr::TupleGet(index) => {
+            let t = pop(state)?;
+            let elems = match ctx.ty(t) {
+                BcType::Tuple(elems) => elems,
+                _ => return Err(fail(format!("tuple read on non-tuple type {t}"))),
+            };
+            let elem = elems
+                .get(*index as usize)
+                .ok_or_else(|| fail("tuple index out of range".to_string()))?;
+            push(state, *elem)?;
+        }
+        Instr::IsType(ty) | Instr::CastType(ty) => {
+            let value = pop(state)?;
+            let Some((vc, _)) = ctx.as_instance(value) else {
+                return Err(fail(format!("type test on non-instance type {value}")));
+            };
+            let Some((tc, _)) = ctx.as_instance(*ty) else {
+                return Err(fail(format!(
+                    "type test target {ty} is not an instance type"
+                )));
+            };
+            if !(ctx.class_extends(tc, vc) || ctx.class_extends(vc, tc)) {
+                return Err(fail("type test between unrelated classes".to_string()));
+            }
+            match instr {
+                Instr::IsType(_) => push(state, TY_BOOL)?,
+                _ => push(state, *ty)?,
             }
         }
         Instr::ListNew { ty, count } => {
@@ -786,11 +1400,13 @@ fn step(
             push(state, TY_UNIT)?;
         }
         Instr::SbNew => {
-            let idx = ctx
-                .type_index
-                .get(&BcType::StringBuilder)
-                .ok_or_else(|| fail("StringBuilder is not in the type table".to_string()))?;
-            push(state, *idx)?;
+            let idx = {
+                let uni = ctx.uni.borrow();
+                uni.index.get(&BcType::StringBuilder).copied()
+            };
+            let idx =
+                idx.ok_or_else(|| fail("StringBuilder is not in the type table".to_string()))?;
+            push(state, idx)?;
         }
         Instr::SbAppendStr | Instr::SbAppendInt | Instr::SbAppendBool => {
             let want = match instr {
@@ -800,43 +1416,44 @@ fn step(
             };
             pop_expect(state, want)?;
             let sb = pop(state)?;
-            if ctx.ty(sb) != &BcType::StringBuilder {
+            if ctx.ty(sb) != BcType::StringBuilder {
                 return Err(fail(format!("append on non-builder type {sb}")));
             }
             push(state, sb)?;
         }
         Instr::SbBuild => {
             let sb = pop(state)?;
-            if ctx.ty(sb) != &BcType::StringBuilder {
+            if ctx.ty(sb) != BcType::StringBuilder {
                 return Err(fail(format!("build on non-builder type {sb}")));
             }
             push(state, TY_STR)?;
         }
         Instr::BbNew => {
-            let idx = ctx
-                .type_index
-                .get(&BcType::ByteBuffer)
-                .ok_or_else(|| fail("ByteBuffer is not in the type table".to_string()))?;
-            push(state, *idx)?;
+            let idx = {
+                let uni = ctx.uni.borrow();
+                uni.index.get(&BcType::ByteBuffer).copied()
+            };
+            let idx = idx.ok_or_else(|| fail("ByteBuffer is not in the type table".to_string()))?;
+            push(state, idx)?;
         }
         Instr::BbAppend => {
             pop_expect(state, TY_INT)?;
             let bb = pop(state)?;
-            if ctx.ty(bb) != &BcType::ByteBuffer {
+            if ctx.ty(bb) != BcType::ByteBuffer {
                 return Err(fail(format!("append on non-buffer type {bb}")));
             }
             push(state, bb)?;
         }
         Instr::BbLen => {
             let bb = pop(state)?;
-            if ctx.ty(bb) != &BcType::ByteBuffer {
+            if ctx.ty(bb) != BcType::ByteBuffer {
                 return Err(fail(format!("len on non-buffer type {bb}")));
             }
             push(state, TY_INT)?;
         }
         Instr::BbBuild => {
             let bb = pop(state)?;
-            if ctx.ty(bb) != &BcType::ByteBuffer {
+            if ctx.ty(bb) != BcType::ByteBuffer {
                 return Err(fail(format!("build on non-buffer type {bb}")));
             }
             push(state, TY_STR)?;
@@ -865,10 +1482,24 @@ fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lm_bytecode::{BcClass, Func, Instr::*, Module, NO_PARENT};
+    use lm_bytecode::{BcClass, Func, Instr::*, Module, TypeApp, NO_PARENT};
 
     fn base_types() -> Vec<BcType> {
         vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str]
+    }
+
+    fn plain_func(name: &str, params: Vec<u32>, ret: u32, blocks: Vec<Vec<Instr>>) -> Func {
+        Func {
+            name: name.to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params,
+            ret,
+            row: vec![],
+            captures: vec![],
+            local_count: 2,
+            blocks,
+        }
     }
 
     fn module_with(blocks: Vec<Vec<Instr>>) -> Module {
@@ -876,15 +1507,9 @@ mod tests {
             strings: vec!["s".to_string()],
             types: base_types(),
             selectors: vec![],
+            apps: vec![],
             classes: vec![],
-            funcs: vec![Func {
-                name: "main".to_string(),
-                params: vec![],
-                ret: TY_INT,
-                captures: vec![],
-                local_count: 1,
-                blocks,
-            }],
+            funcs: vec![plain_func("main", vec![], TY_INT, blocks)],
             entry: 0,
         }
     }
@@ -898,28 +1523,77 @@ mod tests {
             strings: vec![],
             types,
             selectors: vec!["bump".to_string()],
+            apps: vec![],
             classes: vec![BcClass {
                 name: "Counter".to_string(),
                 parent: NO_PARENT,
+                type_params: 0,
+                kind: BcClassKind::Normal,
                 fields: vec![("value".to_string(), TY_INT)],
                 methods: vec![(0, 1)],
             }],
             funcs: vec![
-                Func {
-                    name: "main".to_string(),
-                    params: vec![],
-                    ret: TY_INT,
-                    captures: vec![],
-                    local_count: 1,
-                    blocks: entry_blocks,
+                plain_func("main", vec![], TY_INT, entry_blocks),
+                plain_func(
+                    "bump",
+                    vec![4],
+                    TY_INT,
+                    vec![vec![LoadLocal(0), LoadField(0), Return]],
+                ),
+            ],
+            entry: 0,
+        }
+    }
+
+    /// A generic module: `Box[T] { value: T }`, its `<new>` function,
+    /// and an entry that builds `Box[Int]` and reads the field.
+    fn generic_module(entry_blocks: Vec<Vec<Instr>>) -> Module {
+        let mut types = base_types();
+        types.push(BcType::Var(0)); // 4
+        types.push(BcType::Inst(0, vec![4])); // 5 Box[$0]
+        types.push(BcType::Inst(0, vec![TY_INT])); // 6 Box[Int]
+        Module {
+            strings: vec![],
+            types,
+            selectors: vec![],
+            apps: vec![
+                TypeApp {
+                    types: vec![TY_INT],
+                    rows: vec![],
                 },
+                TypeApp {
+                    types: vec![4],
+                    rows: vec![],
+                },
+            ],
+            classes: vec![BcClass {
+                name: "Box".to_string(),
+                parent: NO_PARENT,
+                type_params: 1,
+                kind: BcClassKind::Normal,
+                fields: vec![("value".to_string(), 4)],
+                methods: vec![],
+            }],
+            funcs: vec![
+                plain_func("main", vec![], TY_INT, entry_blocks),
                 Func {
-                    name: "bump".to_string(),
+                    name: "<new Box>".to_string(),
+                    type_params: 1,
+                    effect_params: 0,
                     params: vec![4],
-                    ret: TY_INT,
+                    ret: 5,
+                    row: vec![],
                     captures: vec![],
-                    local_count: 1,
-                    blocks: vec![vec![LoadLocal(0), LoadField(0), Return]],
+                    local_count: 2,
+                    blocks: vec![vec![
+                        NewG { class: 0, app: 1 },
+                        StoreLocal(1),
+                        LoadLocal(1),
+                        LoadLocal(0),
+                        StoreField(0),
+                        LoadLocal(1),
+                        Return,
+                    ]],
                 },
             ],
             entry: 0,
@@ -948,6 +1622,53 @@ mod tests {
             Return,
         ]]);
         assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
+    }
+
+    #[test]
+    fn accepts_generic_construction_and_field_read() {
+        let m = generic_module(vec![vec![
+            ConstInt(41),
+            CallG { func: 1, app: 0 },
+            LoadField(0),
+            Return,
+        ]]);
+        assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
+    }
+
+    #[test]
+    fn rejects_generic_call_with_wrong_result_use() {
+        // Box[Int].value is Int; using it as Bool must fail.
+        let m = generic_module(vec![vec![
+            ConstInt(41),
+            CallG { func: 1, app: 0 },
+            LoadField(0),
+            Not,
+            Pop,
+            ConstInt(0),
+            Return,
+        ]]);
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("expected type"), "{e}");
+    }
+
+    #[test]
+    fn rejects_generic_call_without_application() {
+        let m = generic_module(vec![vec![ConstInt(41), Call(1), LoadField(0), Return]]);
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("type application"), "{e}");
+    }
+
+    #[test]
+    fn rejects_application_arity_mismatch() {
+        let mut m = generic_module(vec![vec![
+            ConstInt(41),
+            CallG { func: 1, app: 0 },
+            LoadField(0),
+            Return,
+        ]]);
+        m.apps[0].types.push(TY_INT);
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("arity"), "{e}");
     }
 
     #[test]
@@ -1020,6 +1741,160 @@ mod tests {
     }
 
     #[test]
+    fn rejects_overlong_tuple_type() {
+        let mut m = module_with(vec![vec![ConstInt(1), Return]]);
+        m.types.push(BcType::Tuple(vec![TY_INT; 17]));
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("arity"), "{e}");
+    }
+
+    #[test]
+    fn rejects_tuple_get_out_of_range() {
+        let mut m = module_with(vec![vec![
+            ConstInt(1),
+            ConstInt(2),
+            TupleNew { ty: 4, count: 2 },
+            TupleGet(5),
+            Return,
+        ]]);
+        m.types.push(BcType::Tuple(vec![TY_INT, TY_INT]));
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("tuple index"), "{e}");
+    }
+
+    #[test]
+    fn rejects_tuple_new_count_mismatch() {
+        let mut m = module_with(vec![vec![
+            ConstInt(1),
+            TupleNew { ty: 4, count: 1 },
+            TupleGet(0),
+            Return,
+        ]]);
+        m.types.push(BcType::Tuple(vec![TY_INT, TY_INT]));
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("arity"), "{e}");
+    }
+
+    #[test]
+    fn rejects_new_on_abstract_class() {
+        let mut m = class_module(vec![vec![New(1), Pop, ConstInt(0), Return]]);
+        m.classes.push(BcClass {
+            name: "Opt".to_string(),
+            parent: NO_PARENT,
+            type_params: 0,
+            kind: BcClassKind::Abstract,
+            fields: vec![],
+            methods: vec![],
+        });
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("abstract"), "{e}");
+    }
+
+    #[test]
+    fn rejects_subclass_of_case_class() {
+        let mut m = class_module(vec![vec![ConstInt(0), Return]]);
+        m.classes.push(BcClass {
+            name: "Opt".to_string(),
+            parent: NO_PARENT,
+            type_params: 0,
+            kind: BcClassKind::Abstract,
+            fields: vec![],
+            methods: vec![],
+        });
+        m.classes.push(BcClass {
+            name: "Opt.None".to_string(),
+            parent: 1,
+            type_params: 0,
+            kind: BcClassKind::Case,
+            fields: vec![],
+            methods: vec![],
+        });
+        m.classes.push(BcClass {
+            name: "Bad".to_string(),
+            parent: 2,
+            type_params: 0,
+            kind: BcClassKind::Normal,
+            fields: vec![],
+            methods: vec![],
+        });
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("case"), "{e}");
+    }
+
+    #[test]
+    fn rejects_type_test_between_unrelated_classes() {
+        let mut m = class_module(vec![vec![New(0), IsType(5), Pop, ConstInt(0), Return]]);
+        m.types.push(BcType::Class(1)); // 5
+        m.classes.push(BcClass {
+            name: "Other".to_string(),
+            parent: NO_PARENT,
+            type_params: 0,
+            kind: BcClassKind::Normal,
+            fields: vec![],
+            methods: vec![],
+        });
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("unrelated"), "{e}");
+    }
+
+    #[test]
+    fn rejects_row_not_inside_caller() {
+        // Callee claims Io.Print; caller declares the empty row.
+        let mut m = module_with(vec![vec![Call(1), Return]]);
+        m.strings = vec!["Io.Print".to_string()];
+        m.funcs.push(Func {
+            name: "printer".to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            ret: TY_INT,
+            row: vec![BcRow::Op(0)],
+            captures: vec![],
+            local_count: 0,
+            blocks: vec![vec![ConstInt(1), Return]],
+        });
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("row"), "{e}");
+    }
+
+    #[test]
+    fn accepts_row_inside_caller_with_group() {
+        // Caller declares Io; callee claims Io.Print.
+        let mut m = module_with(vec![vec![Call(1), Return]]);
+        m.strings = vec!["Io.Print".to_string(), "Io".to_string()];
+        m.funcs[0].row = vec![BcRow::Op(1)];
+        m.funcs.push(Func {
+            name: "printer".to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            ret: TY_INT,
+            row: vec![BcRow::Op(0)],
+            captures: vec![],
+            local_count: 0,
+            blocks: vec![vec![ConstInt(1), Return]],
+        });
+        assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
+    }
+
+    #[test]
+    fn rejects_non_canonical_declared_row() {
+        let mut m = module_with(vec![vec![ConstInt(1), Return]]);
+        m.strings = vec!["Io".to_string(), "Fs".to_string()];
+        m.funcs[0].row = vec![BcRow::Op(0), BcRow::Op(1)]; // Io before Fs
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("canonical"), "{e}");
+    }
+
+    #[test]
+    fn rejects_row_var_outside_arity() {
+        let mut m = module_with(vec![vec![ConstInt(1), Return]]);
+        m.funcs[0].row = vec![BcRow::Var(0)];
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("effect variable"), "{e}");
+    }
+
+    #[test]
     fn rejects_field_index_out_of_range() {
         let m = class_module(vec![vec![New(0), LoadField(9), Return]]);
         let e = verify_module(&m).unwrap_err();
@@ -1085,19 +1960,47 @@ mod tests {
         m.classes.push(BcClass {
             name: "Fast".to_string(),
             parent: 0,
+            type_params: 0,
+            kind: BcClassKind::Normal,
+            fields: vec![("value".to_string(), TY_INT)],
+            methods: vec![(0, 2)],
+        });
+        m.funcs.push(plain_func(
+            "bump2",
+            vec![5, TY_INT],
+            TY_INT,
+            vec![vec![ConstInt(1), Return]],
+        ));
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("parameter types"), "{e}");
+    }
+
+    #[test]
+    fn rejects_override_that_widens_the_row() {
+        let mut m = class_module(vec![vec![ConstInt(0), Return]]);
+        m.strings = vec!["Io.Print".to_string()];
+        m.types.push(BcType::Class(1)); // 5
+        m.classes.push(BcClass {
+            name: "Loud".to_string(),
+            parent: 0,
+            type_params: 0,
+            kind: BcClassKind::Normal,
             fields: vec![("value".to_string(), TY_INT)],
             methods: vec![(0, 2)],
         });
         m.funcs.push(Func {
             name: "bump2".to_string(),
-            params: vec![5, TY_INT],
+            type_params: 0,
+            effect_params: 0,
+            params: vec![5],
             ret: TY_INT,
+            row: vec![BcRow::Op(0)],
             captures: vec![],
-            local_count: 2,
+            local_count: 1,
             blocks: vec![vec![ConstInt(1), Return]],
         });
         let e = verify_module(&m).unwrap_err();
-        assert!(e.message.contains("parameter types"), "{e}");
+        assert!(e.message.contains("widens the effect row"), "{e}");
     }
 
     #[test]
@@ -1107,6 +2010,8 @@ mod tests {
         m.classes.push(BcClass {
             name: "Bad".to_string(),
             parent: 0,
+            type_params: 0,
+            kind: BcClassKind::Normal,
             fields: vec![("other".to_string(), TY_BOOL)],
             methods: vec![],
         });
@@ -1119,8 +2024,11 @@ mod tests {
         let mut m = module_with(vec![vec![Call(1), Return]]);
         m.funcs.push(Func {
             name: "closure".to_string(),
+            type_params: 0,
+            effect_params: 0,
             params: vec![],
             ret: TY_INT,
+            row: vec![],
             captures: vec![TY_INT],
             local_count: 0,
             blocks: vec![vec![LoadCapture(0), Return]],
@@ -1143,8 +2051,11 @@ mod tests {
         ]]);
         m.funcs.push(Func {
             name: "closure".to_string(),
+            type_params: 0,
+            effect_params: 0,
             params: vec![],
             ret: TY_INT,
+            row: vec![],
             captures: vec![TY_INT],
             local_count: 0,
             blocks: vec![vec![LoadCapture(0), Return]],
@@ -1165,16 +2076,46 @@ mod tests {
             CallValue { argc: 1 },
             Return,
         ]]);
-        m.types.push(BcType::Fn(vec![TY_INT], TY_INT));
+        m.types.push(BcType::Fn(vec![TY_INT], TY_INT, vec![]));
         m.funcs.push(Func {
             name: "closure".to_string(),
+            type_params: 0,
+            effect_params: 0,
             params: vec![TY_INT],
             ret: TY_INT,
+            row: vec![],
             captures: vec![TY_INT],
             local_count: 1,
             blocks: vec![vec![LoadCapture(0), LoadLocal(0), Add, Return]],
         });
         assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
+    }
+
+    #[test]
+    fn rejects_call_value_row_outside_caller() {
+        let mut m = module_with(vec![vec![
+            MakeClosure {
+                func: 1,
+                captures: 0,
+            },
+            CallValue { argc: 0 },
+            Return,
+        ]]);
+        m.strings = vec!["Io.Print".to_string()];
+        m.types.push(BcType::Fn(vec![], TY_INT, vec![BcRow::Op(0)]));
+        m.funcs.push(Func {
+            name: "printer".to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            ret: TY_INT,
+            row: vec![BcRow::Op(0)],
+            captures: vec![],
+            local_count: 0,
+            blocks: vec![vec![ConstInt(1), Return]],
+        });
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("row"), "{e}");
     }
 
     #[test]
@@ -1222,6 +2163,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_generic_entry() {
+        let mut m = module_with(vec![vec![ConstInt(1), Return]]);
+        m.funcs[0].type_params = 1;
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("generic"), "{e}");
+    }
+
+    #[test]
     fn joins_subclass_stacks_at_merge_points() {
         // Both branches push a different subclass of Animal. The join
         // must settle at the common ancestor.
@@ -1229,21 +2178,11 @@ mod tests {
         types.push(BcType::Class(0)); // 4 Animal
         types.push(BcType::Class(1)); // 5 Dog
         types.push(BcType::Class(2)); // 6 Cat
-        let animal = BcClass {
-            name: "Animal".to_string(),
-            parent: NO_PARENT,
-            fields: vec![],
-            methods: vec![],
-        };
-        let dog = BcClass {
-            name: "Dog".to_string(),
-            parent: 0,
-            fields: vec![],
-            methods: vec![],
-        };
-        let cat = BcClass {
-            name: "Cat".to_string(),
-            parent: 0,
+        let class = |name: &str, parent: u32| BcClass {
+            name: name.to_string(),
+            parent,
+            type_params: 0,
+            kind: BcClassKind::Normal,
             fields: vec![],
             methods: vec![],
         };
@@ -1251,11 +2190,15 @@ mod tests {
             strings: vec![],
             types,
             selectors: vec![],
-            classes: vec![animal, dog, cat],
+            apps: vec![],
+            classes: vec![class("Animal", NO_PARENT), class("Dog", 0), class("Cat", 0)],
             funcs: vec![Func {
                 name: "main".to_string(),
+                type_params: 0,
+                effect_params: 0,
                 params: vec![],
                 ret: TY_UNIT,
+                row: vec![],
                 captures: vec![],
                 local_count: 0,
                 blocks: vec![

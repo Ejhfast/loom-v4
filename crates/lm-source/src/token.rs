@@ -44,8 +44,16 @@ pub enum Tok {
     KwSelf,
     KwSuper,
     KwMut,
+    KwEnum,
+    KwCase,
+    KwIn,
+    KwThen,
+    KwWith,
+    KwEffect,
+    KwIs,
+    KwAs,
 
-    /// A reserved keyword outside the week-2 slice.
+    /// A reserved keyword outside the current language slice.
     KwReserved(&'static str),
 
     // Punctuation.
@@ -106,6 +114,14 @@ impl fmt::Display for Tok {
             Tok::KwSelf => "`self`",
             Tok::KwSuper => "`super`",
             Tok::KwMut => "`mut`",
+            Tok::KwEnum => "`enum`",
+            Tok::KwCase => "`case`",
+            Tok::KwIn => "`in`",
+            Tok::KwThen => "`then`",
+            Tok::KwWith => "`with`",
+            Tok::KwEffect => "`effect`",
+            Tok::KwIs => "`is`",
+            Tok::KwAs => "`as`",
             Tok::KwReserved(name) => return write!(f, "`{name}`"),
             Tok::LParen => "`(`",
             Tok::RParen => "`)`",

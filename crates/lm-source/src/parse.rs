@@ -1,4 +1,4 @@
-//! Recursive-descent parser for the week-2 language slice.
+//! Recursive-descent parser for the week-3 language slice.
 //!
 //! The parser rejects all constructs outside the slice with a
 //! precise diagnostic. It never accepts a silent fallback form.
@@ -9,12 +9,16 @@ use crate::scan::scan;
 use crate::span::Span;
 use crate::token::{StrPiece, Tok, Token};
 
-/// The maximum nesting depth for expressions, statements, and types.
+/// The maximum nesting depth for expressions, statements, types, and
+/// patterns.
 ///
 /// The parser and the checker recurse on the Rust stack. This limit
 /// keeps deep input inside the available stack and rejects deeper
 /// input with a diagnostic.
 pub const MAX_NEST_DEPTH: usize = 300;
+
+/// The maximum portable tuple arity.
+pub const MAX_TUPLE_ARITY: usize = 16;
 
 /// Scan and parse one module.
 pub fn parse(text: &str) -> Result<Module, Diagnostic> {
@@ -86,6 +90,7 @@ impl Parser {
 
     fn module(&mut self) -> Result<Module, Diagnostic> {
         let mut classes = Vec::new();
+        let mut enums = Vec::new();
         let mut funcs = Vec::new();
         let mut entry = Vec::new();
         loop {
@@ -93,6 +98,7 @@ impl Parser {
             match self.peek() {
                 Tok::Eof => break,
                 Tok::KwClass => classes.push(self.class_def()?),
+                Tok::KwEnum => enums.push(self.enum_def()?),
                 Tok::KwDef => funcs.push(self.func_def()?),
                 _ => {
                     let stmt = self.stmt()?;
@@ -103,6 +109,7 @@ impl Parser {
         }
         Ok(Module {
             classes,
+            enums,
             funcs,
             entry,
         })
@@ -116,7 +123,7 @@ impl Parser {
                 self.pos += 1;
                 Ok(())
             }
-            Tok::Eof | Tok::KwEnd | Tok::KwElse | Tok::KwElsif => Ok(()),
+            Tok::Eof | Tok::KwEnd | Tok::KwElse | Tok::KwElsif | Tok::KwIn => Ok(()),
             other => Err(self.error(
                 "E1001",
                 format!("expected the end of the statement, found {other}"),
@@ -124,9 +131,92 @@ impl Parser {
         }
     }
 
+    /// Parse an optional `[T, U, effect e]` generic parameter list.
+    fn generic_params(&mut self) -> Result<Vec<GenericParam>, Diagnostic> {
+        if !matches!(self.peek(), Tok::LBracket) {
+            return Ok(Vec::new());
+        }
+        self.pos += 1;
+        let mut params = Vec::new();
+        loop {
+            let is_effect = if matches!(self.peek(), Tok::KwEffect) {
+                self.pos += 1;
+                true
+            } else {
+                false
+            };
+            let (name, span) = self.ident("a generic parameter name")?;
+            if params.iter().any(|p: &GenericParam| p.name == name) {
+                return Err(Diagnostic::new(
+                    "E1014",
+                    format!("duplicate generic parameter name `{name}`"),
+                    span,
+                ));
+            }
+            params.push(GenericParam {
+                name,
+                is_effect,
+                span,
+            });
+            if matches!(self.peek(), Tok::Comma) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        self.expect(Tok::RBracket, "`]` to complete the generic parameter list")?;
+        Ok(params)
+    }
+
+    /// Parse an optional `with` effect row. In a comma-separated outer
+    /// context an element followed by `:` belongs to the outer list,
+    /// so the parser backs off before it.
+    fn row_clause(&mut self) -> Result<Vec<RowItem>, Diagnostic> {
+        if !matches!(self.peek(), Tok::KwWith) {
+            return Ok(Vec::new());
+        }
+        self.pos += 1;
+        let mut items = Vec::new();
+        let first = self.row_item()?;
+        items.push(first);
+        loop {
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            let save = self.pos;
+            self.pos += 1; // consume the comma
+            if !matches!(self.peek(), Tok::Ident(_)) {
+                self.pos = save;
+                break;
+            }
+            let item = self.row_item()?;
+            if matches!(self.peek(), Tok::Colon) {
+                // The name belongs to the outer parameter list.
+                self.pos = save;
+                break;
+            }
+            items.push(item);
+        }
+        Ok(items)
+    }
+
+    /// Parse one row element: `Name`, `Group.Op`, or an effect name.
+    fn row_item(&mut self) -> Result<RowItem, Diagnostic> {
+        let (mut name, mut span) = self.ident("an operation, group, or effect name")?;
+        while matches!(self.peek(), Tok::Dot) {
+            self.pos += 1;
+            let (part, part_span) = self.ident("an operation name after `.`")?;
+            name.push('.');
+            name.push_str(&part);
+            span = span.to(part_span);
+        }
+        Ok(RowItem { name, span })
+    }
+
     fn class_def(&mut self) -> Result<ClassDef, Diagnostic> {
         let class_tok = self.expect(Tok::KwClass, "`class`")?;
         let (name, name_span) = self.ident("a class name")?;
+        let generics = self.generic_params()?;
         let parent = if matches!(self.peek(), Tok::Lt) {
             self.pos += 1;
             Some(self.ident("a parent class name")?)
@@ -176,6 +266,7 @@ impl Parser {
         Ok(ClassDef {
             name,
             name_span,
+            generics,
             parent,
             fields,
             methods,
@@ -183,9 +274,108 @@ impl Parser {
         })
     }
 
+    fn enum_def(&mut self) -> Result<EnumDef, Diagnostic> {
+        let enum_tok = self.expect(Tok::KwEnum, "`enum`")?;
+        let (name, name_span) = self.ident("an enum name")?;
+        let generics = self.generic_params()?;
+        self.expect_terminator()?;
+        let mut arms: Vec<ArmDef> = Vec::new();
+        let mut methods = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::KwEnd => break,
+                Tok::KwDef => methods.push(self.method_def()?),
+                Tok::Ident(_) if methods.is_empty() => {
+                    arms.push(self.enum_arm()?);
+                }
+                Tok::Ident(_) => {
+                    return Err(self.error("E1040", "enum arms must come before the enum methods"));
+                }
+                Tok::Eof => {
+                    return Err(self.error("E1003", "expected `end`, found end of file"));
+                }
+                other => {
+                    return Err(self.error(
+                        "E1003",
+                        format!("expected an arm, a method, or `end`, found {other}"),
+                    ));
+                }
+            }
+        }
+        if arms.is_empty() {
+            return Err(Diagnostic::new(
+                "E1040",
+                "an enum needs at least one arm",
+                name_span,
+            ));
+        }
+        let end_tok = self.expect(Tok::KwEnd, "`end`")?;
+        self.expect_terminator()?;
+        Ok(EnumDef {
+            name,
+            name_span,
+            generics,
+            arms,
+            methods,
+            span: enum_tok.span.to(end_tok.span),
+        })
+    }
+
+    fn enum_arm(&mut self) -> Result<ArmDef, Diagnostic> {
+        self.enter_nesting()?;
+        let result = self.enum_arm_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn enum_arm_inner(&mut self) -> Result<ArmDef, Diagnostic> {
+        let (name, name_span) = self.ident("an arm name")?;
+        let mut fields = Vec::new();
+        let mut span = name_span;
+        if matches!(self.peek(), Tok::LParen) {
+            self.pos += 1;
+            if matches!(self.peek(), Tok::RParen) {
+                return Err(self.error(
+                    "E1040",
+                    "an arm with `()` needs at least one field; \
+                     write the arm name alone for a field-less arm",
+                ));
+            }
+            loop {
+                let (fname, fspan) = self.ident("a field name")?;
+                if fields.iter().any(|(n, _)| *n == fname) {
+                    return Err(Diagnostic::new(
+                        "E1040",
+                        format!("the arm already has a field named `{fname}`"),
+                        fspan,
+                    ));
+                }
+                self.expect(Tok::Colon, "`:` and a field type")?;
+                let ty = self.type_expr()?;
+                fields.push((fname, ty));
+                if matches!(self.peek(), Tok::Comma) {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            let close = self.expect(Tok::RParen, "`)` to complete the arm fields")?;
+            span = span.to(close.span);
+        }
+        self.expect_terminator()?;
+        Ok(ArmDef {
+            name,
+            name_span,
+            fields,
+            span,
+        })
+    }
+
     fn method_def(&mut self) -> Result<MethodDef, Diagnostic> {
         let def_tok = self.expect(Tok::KwDef, "`def`")?;
         let (name, name_span) = self.ident("a method name")?;
+        let generics = self.generic_params()?;
         self.expect(Tok::LParen, "`(`")?;
         let mut_self = match self.peek() {
             Tok::KwSelf => {
@@ -215,15 +405,18 @@ impl Parser {
         } else {
             None
         };
+        let row = self.row_clause()?;
         let body = self.block(&[Tok::KwEnd])?;
         let end_tok = self.expect(Tok::KwEnd, "`end`")?;
         self.expect_terminator()?;
         Ok(MethodDef {
             name,
             name_span,
+            generics,
             mut_self,
             params,
             ret,
+            row,
             body,
             span: def_tok.span.to(end_tok.span),
         })
@@ -232,6 +425,7 @@ impl Parser {
     fn func_def(&mut self) -> Result<FuncDef, Diagnostic> {
         let def_tok = self.expect(Tok::KwDef, "`def`")?;
         let (name, name_span) = self.ident("a function name")?;
+        let generics = self.generic_params()?;
         self.expect(Tok::LParen, "`(`")?;
         if matches!(self.peek(), Tok::KwSelf)
             || (matches!(self.peek(), Tok::KwMut) && matches!(self.peek_at(1), Tok::KwSelf))
@@ -250,14 +444,17 @@ impl Parser {
         } else {
             None
         };
+        let row = self.row_clause()?;
         let body = self.block(&[Tok::KwEnd])?;
         let end_tok = self.expect(Tok::KwEnd, "`end`")?;
         self.expect_terminator()?;
         Ok(FuncDef {
             name,
             name_span,
+            generics,
             params,
             ret,
+            row,
             body,
             span: def_tok.span.to(end_tok.span),
         })
@@ -363,11 +560,16 @@ impl Parser {
             Tok::LParen => {
                 let open = self.next();
                 let mut params = Vec::new();
+                let mut trailing_comma = false;
                 if !matches!(self.peek(), Tok::RParen) {
                     loop {
                         params.push(self.type_expr()?);
                         if matches!(self.peek(), Tok::Comma) {
                             self.pos += 1;
+                            if matches!(self.peek(), Tok::RParen) {
+                                trailing_comma = true;
+                                break;
+                            }
                         } else {
                             break;
                         }
@@ -377,9 +579,11 @@ impl Parser {
                 if matches!(self.peek(), Tok::Arrow) {
                     self.pos += 1;
                     let ret = self.type_expr()?;
-                    let span = open.span.to(ret.span);
+                    let row = self.row_clause()?;
+                    let hi = row.last().map(|r| r.span).unwrap_or(ret.span);
+                    let span = open.span.to(hi);
                     Ok(TypeExpr {
-                        kind: TypeExprKind::Fn(params, Box::new(ret)),
+                        kind: TypeExprKind::Fn(params, Box::new(ret), row),
                         span,
                     })
                 } else if params.is_empty() {
@@ -387,8 +591,26 @@ impl Parser {
                         kind: TypeExprKind::Unit,
                         span: open.span.to(close.span),
                     })
+                } else if params.len() >= 2 || trailing_comma {
+                    if params.len() > MAX_TUPLE_ARITY {
+                        return Err(Diagnostic::new(
+                            "E1048",
+                            format!(
+                                "a tuple has a maximum arity of {MAX_TUPLE_ARITY}; \
+                                 use a class for a larger record"
+                            ),
+                            open.span.to(close.span),
+                        ));
+                    }
+                    Ok(TypeExpr {
+                        kind: TypeExprKind::Tuple(params),
+                        span: open.span.to(close.span),
+                    })
                 } else {
-                    Err(self.error("E1003", "expected `->` to complete the function type"))
+                    Err(self.error(
+                        "E1003",
+                        "expected `->` for a function type, or `,` for a tuple type",
+                    ))
                 }
             }
             other => Err(self.error("E1003", format!("expected a type, found {other}"))),
@@ -430,10 +652,19 @@ impl Parser {
                 "E1002",
                 "a `class` is only valid at the top level of a module",
             )),
+            Tok::KwEnum => Err(self.error(
+                "E1002",
+                "an `enum` is only valid at the top level of a module",
+            )),
             Tok::KwReturn => {
                 let ret_tok = self.next();
                 let value = match self.peek() {
-                    Tok::Newline | Tok::Eof | Tok::KwEnd | Tok::KwElse | Tok::KwElsif => None,
+                    Tok::Newline
+                    | Tok::Eof
+                    | Tok::KwEnd
+                    | Tok::KwElse
+                    | Tok::KwElsif
+                    | Tok::KwIn => None,
                     _ => Some(self.expr()?),
                 };
                 let span = match &value {
@@ -585,25 +816,55 @@ impl Parser {
         Ok(left)
     }
 
+    /// Equality, `is`, and `as` share one precedence level.
     fn eq_expr(&mut self) -> Result<Expr, Diagnostic> {
         let mut left = self.ord_expr()?;
         loop {
-            let op = match self.peek() {
-                Tok::EqEq => BinOp::Eq,
-                Tok::NotEq => BinOp::Ne,
+            match self.peek() {
+                Tok::EqEq | Tok::NotEq => {
+                    let op = if matches!(self.peek(), Tok::EqEq) {
+                        BinOp::Eq
+                    } else {
+                        BinOp::Ne
+                    };
+                    self.pos += 1;
+                    let right = self.ord_expr()?;
+                    let span = left.span.to(right.span);
+                    left = Expr {
+                        kind: ExprKind::Binary {
+                            op,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        span,
+                    };
+                }
+                Tok::KwIs => {
+                    self.pos += 1;
+                    let ty = self.type_expr()?;
+                    let span = left.span.to(ty.span);
+                    left = Expr {
+                        kind: ExprKind::Is {
+                            value: Box::new(left),
+                            ty,
+                        },
+                        span,
+                    };
+                }
+                Tok::KwAs => {
+                    self.pos += 1;
+                    let ty = self.type_expr()?;
+                    let span = left.span.to(ty.span);
+                    left = Expr {
+                        kind: ExprKind::Cast {
+                            value: Box::new(left),
+                            ty,
+                        },
+                        span,
+                    };
+                }
                 _ => break,
-            };
-            self.pos += 1;
-            let right = self.ord_expr()?;
-            let span = left.span.to(right.span);
-            left = Expr {
-                kind: ExprKind::Binary {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                span,
-            };
+            }
         }
         Ok(left)
     }
@@ -711,55 +972,64 @@ impl Parser {
         }
     }
 
+    /// Try to parse `[Type, ...]` followed by `(`. Return `None` and
+    /// restore the position when the brackets are not type arguments.
+    fn try_type_args(&mut self) -> Option<Vec<TypeExpr>> {
+        let save_pos = self.pos;
+        let save_depth = self.depth;
+        let result = self.type_args_inner();
+        match result {
+            Ok(args) if matches!(self.peek(), Tok::LParen) => Some(args),
+            _ => {
+                self.pos = save_pos;
+                self.depth = save_depth;
+                None
+            }
+        }
+    }
+
+    fn type_args_inner(&mut self) -> Result<Vec<TypeExpr>, Diagnostic> {
+        self.expect(Tok::LBracket, "`[`")?;
+        let mut args = Vec::new();
+        loop {
+            args.push(self.type_expr()?);
+            if matches!(self.peek(), Tok::Comma) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        self.expect(Tok::RBracket, "`]`")?;
+        Ok(args)
+    }
+
     fn postfix_expr(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.primary_expr()?;
         loop {
             match self.peek() {
                 Tok::LParen => {
-                    self.pos += 1; // consume `(`
-                    let mut args = Vec::new();
-                    if !matches!(self.peek(), Tok::RParen) {
-                        loop {
-                            args.push(self.expr()?);
-                            if matches!(self.peek(), Tok::Comma) {
-                                self.pos += 1;
-                            } else {
-                                break;
-                            }
+                    let (args, close_span) = self.call_args()?;
+                    let span = expr.span.to(close_span);
+                    expr = self.make_call(expr, Vec::new(), args, span)?;
+                }
+                Tok::LBracket
+                    if matches!(expr.kind, ExprKind::Name(_) | ExprKind::Field { .. }) =>
+                {
+                    // Either explicit generic call arguments or an
+                    // index expression. Try type arguments first.
+                    match self.try_type_args() {
+                        Some(type_args) => {
+                            let (args, close_span) = self.call_args()?;
+                            let span = expr.span.to(close_span);
+                            expr = self.make_call(expr, type_args, args, span)?;
+                        }
+                        None => {
+                            expr = self.index_expr(expr)?;
                         }
                     }
-                    let close = self.expect(Tok::RParen, "`)` to complete the call")?;
-                    let span = expr.span.to(close.span);
-                    expr = match expr.kind {
-                        ExprKind::Name(name) => Expr {
-                            kind: ExprKind::Call {
-                                name,
-                                name_span: expr.span,
-                                args,
-                            },
-                            span,
-                        },
-                        ExprKind::Field {
-                            recv,
-                            name,
-                            name_span,
-                        } => Expr {
-                            kind: ExprKind::MethodCall {
-                                recv,
-                                name,
-                                name_span,
-                                args,
-                            },
-                            span,
-                        },
-                        _ => Expr {
-                            kind: ExprKind::CallExpr {
-                                callee: Box::new(expr),
-                                args,
-                            },
-                            span,
-                        },
-                    };
+                }
+                Tok::LBracket => {
+                    expr = self.index_expr(expr)?;
                 }
                 Tok::Dot => {
                     self.pos += 1;
@@ -774,23 +1044,83 @@ impl Parser {
                         span,
                     };
                 }
-                Tok::LBracket => {
-                    self.pos += 1;
-                    let index = self.expr()?;
-                    let close = self.expect(Tok::RBracket, "`]` to complete the index")?;
-                    let span = expr.span.to(close.span);
-                    expr = Expr {
-                        kind: ExprKind::Index {
-                            recv: Box::new(expr),
-                            index: Box::new(index),
-                        },
-                        span,
-                    };
-                }
                 _ => break,
             }
         }
         Ok(expr)
+    }
+
+    /// Parse `(arg, ...)` and return the arguments and the span of `)`.
+    fn call_args(&mut self) -> Result<(Vec<Expr>, Span), Diagnostic> {
+        self.expect(Tok::LParen, "`(`")?;
+        let mut args = Vec::new();
+        if !matches!(self.peek(), Tok::RParen) {
+            loop {
+                args.push(self.expr()?);
+                if matches!(self.peek(), Tok::Comma) {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        let close = self.expect(Tok::RParen, "`)` to complete the call")?;
+        Ok((args, close.span))
+    }
+
+    /// Build the call node for a callee expression.
+    fn make_call(
+        &self,
+        callee: Expr,
+        type_args: Vec<TypeExpr>,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Result<Expr, Diagnostic> {
+        let kind = match callee.kind {
+            ExprKind::Name(name) => ExprKind::Call {
+                name,
+                name_span: callee.span,
+                type_args,
+                args,
+            },
+            ExprKind::Field {
+                recv,
+                name,
+                name_span,
+            } => ExprKind::MethodCall {
+                recv,
+                name,
+                name_span,
+                type_args,
+                args,
+            },
+            _ if type_args.is_empty() => ExprKind::CallExpr {
+                callee: Box::new(callee),
+                args,
+            },
+            _ => {
+                return Err(Diagnostic::new(
+                    "E1003",
+                    "type arguments are only valid on a named call",
+                    span,
+                ));
+            }
+        };
+        Ok(Expr { kind, span })
+    }
+
+    fn index_expr(&mut self, recv: Expr) -> Result<Expr, Diagnostic> {
+        self.expect(Tok::LBracket, "`[`")?;
+        let index = self.expr()?;
+        let close = self.expect(Tok::RBracket, "`]` to complete the index")?;
+        let span = recv.span.to(close.span);
+        Ok(Expr {
+            kind: ExprKind::Index {
+                recv: Box::new(recv),
+                index: Box::new(index),
+            },
+            span,
+        })
     }
 
     fn primary_expr(&mut self) -> Result<Expr, Diagnostic> {
@@ -907,15 +1237,42 @@ impl Parser {
                 })
             }
             Tok::LParen => {
-                self.pos += 1;
-                let inner = self.expr()?;
+                let open = self.next();
+                if matches!(self.peek(), Tok::RParen) {
+                    let close = self.next();
+                    return Ok(Expr {
+                        kind: ExprKind::Unit,
+                        span: open.span.to(close.span),
+                    });
+                }
+                let first = self.expr()?;
                 if matches!(self.peek(), Tok::Comma) {
-                    return Err(
-                        self.error("E1002", "tuples are not supported in this language slice")
-                    );
+                    let mut items = vec![first];
+                    while matches!(self.peek(), Tok::Comma) {
+                        self.pos += 1;
+                        if matches!(self.peek(), Tok::RParen) {
+                            break;
+                        }
+                        items.push(self.expr()?);
+                    }
+                    let close = self.expect(Tok::RParen, "`)` to complete the tuple")?;
+                    if items.len() > MAX_TUPLE_ARITY {
+                        return Err(Diagnostic::new(
+                            "E1048",
+                            format!(
+                                "a tuple has a maximum arity of {MAX_TUPLE_ARITY}; \
+                                 use a class for a larger record"
+                            ),
+                            open.span.to(close.span),
+                        ));
+                    }
+                    return Ok(Expr {
+                        kind: ExprKind::TupleLit(items),
+                        span: open.span.to(close.span),
+                    });
                 }
                 self.expect(Tok::RParen, "`)`")?;
-                Ok(inner)
+                Ok(first)
             }
             Tok::LBracket => {
                 let open = self.next();
@@ -960,6 +1317,7 @@ impl Parser {
             }
             Tok::KwDo => self.closure_expr(),
             Tok::KwIf => self.if_expr(),
+            Tok::KwCase => self.case_expr(),
             other => Err(self.error("E1001", format!("expected an expression, found {other}"))),
         }
     }
@@ -979,10 +1337,16 @@ impl Parser {
         } else {
             None
         };
+        let row = self.row_clause()?;
         let body = self.block(&[Tok::KwEnd])?;
         let end_tok = self.expect(Tok::KwEnd, "`end`")?;
         Ok(Expr {
-            kind: ExprKind::Closure { params, ret, body },
+            kind: ExprKind::Closure {
+                params,
+                ret,
+                row,
+                body,
+            },
             span: do_tok.span.to(end_tok.span),
         })
     }
@@ -1015,6 +1379,195 @@ impl Parser {
             kind: ExprKind::If { arms, else_body },
             span: if_tok.span.to(end_tok.span),
         })
+    }
+
+    fn case_expr(&mut self) -> Result<Expr, Diagnostic> {
+        let case_tok = self.expect(Tok::KwCase, "`case`")?;
+        let scrut = self.expr()?;
+        let mut arms = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::KwIn => {
+                    let in_tok = self.next();
+                    let pattern = self.pattern()?;
+                    let (body, hi) = if matches!(self.peek(), Tok::KwThen) {
+                        self.pos += 1;
+                        let value = self.expr()?;
+                        let hi = value.span;
+                        let span = value.span;
+                        (
+                            vec![Stmt {
+                                kind: StmtKind::Expr(value),
+                                span,
+                            }],
+                            hi,
+                        )
+                    } else {
+                        self.expect_terminator()?;
+                        let body = self.block(&[Tok::KwIn, Tok::KwEnd])?;
+                        let hi = body.last().map(|s| s.span).unwrap_or(pattern.span);
+                        (body, hi)
+                    };
+                    arms.push(CaseArm {
+                        span: in_tok.span.to(hi),
+                        pattern,
+                        body,
+                    });
+                }
+                Tok::KwEnd => break,
+                Tok::Eof => {
+                    return Err(self.error("E1003", "expected `end`, found end of file"));
+                }
+                other => {
+                    return Err(self.error(
+                        "E1003",
+                        format!("expected `in` or `end` in the case, found {other}"),
+                    ));
+                }
+            }
+        }
+        if arms.is_empty() {
+            return Err(Diagnostic::new(
+                "E1041",
+                "a case needs at least one `in` arm",
+                case_tok.span,
+            ));
+        }
+        let end_tok = self.expect(Tok::KwEnd, "`end`")?;
+        Ok(Expr {
+            kind: ExprKind::Case {
+                scrut: Box::new(scrut),
+                arms,
+            },
+            span: case_tok.span.to(end_tok.span),
+        })
+    }
+
+    fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
+        self.enter_nesting()?;
+        let result = self.pattern_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn pattern_inner(&mut self) -> Result<Pattern, Diagnostic> {
+        self.reject_reserved()?;
+        match self.peek() {
+            Tok::Int(_) => {
+                let token = self.next();
+                match token.tok {
+                    Tok::Int(v) => Ok(Pattern {
+                        kind: PatternKind::Int(v),
+                        span: token.span,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
+            Tok::Minus => {
+                let minus = self.next();
+                match self.peek() {
+                    Tok::Int(_) => {
+                        let token = self.next();
+                        match token.tok {
+                            Tok::Int(v) => Ok(Pattern {
+                                kind: PatternKind::Int(-v),
+                                span: minus.span.to(token.span),
+                            }),
+                            _ => unreachable!(),
+                        }
+                    }
+                    other => Err(self.error(
+                        "E1041",
+                        format!("expected an integer literal after `-`, found {other}"),
+                    )),
+                }
+            }
+            Tok::KwTrue => {
+                let token = self.next();
+                Ok(Pattern {
+                    kind: PatternKind::Bool(true),
+                    span: token.span,
+                })
+            }
+            Tok::KwFalse => {
+                let token = self.next();
+                Ok(Pattern {
+                    kind: PatternKind::Bool(false),
+                    span: token.span,
+                })
+            }
+            Tok::Str(_) => {
+                let token = self.next();
+                match token.tok {
+                    Tok::Str(v) => Ok(Pattern {
+                        kind: PatternKind::Str(v),
+                        span: token.span,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
+            Tok::StrInterp(_) => {
+                Err(self.error("E1041", "an interpolated string is not a valid pattern"))
+            }
+            Tok::Ident(_) => {
+                let (name, span) = self.ident("a pattern")?;
+                if name == "_" {
+                    return Ok(Pattern {
+                        kind: PatternKind::Wildcard,
+                        span,
+                    });
+                }
+                let (qualifier, ctor_name, mut hi) = if matches!(self.peek(), Tok::Dot) {
+                    self.pos += 1;
+                    let (arm, arm_span) = self.ident("an arm name after `.`")?;
+                    (Some(name), arm, arm_span)
+                } else {
+                    (None, name, span)
+                };
+                if matches!(self.peek(), Tok::LParen) {
+                    self.pos += 1;
+                    let mut args = Vec::new();
+                    if !matches!(self.peek(), Tok::RParen) {
+                        loop {
+                            args.push(self.pattern()?);
+                            if matches!(self.peek(), Tok::Comma) {
+                                self.pos += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    let close = self.expect(Tok::RParen, "`)` to complete the pattern")?;
+                    hi = close.span;
+                    return Ok(Pattern {
+                        kind: PatternKind::Ctor {
+                            qualifier,
+                            name: ctor_name,
+                            args,
+                            has_parens: true,
+                        },
+                        span: span.to(hi),
+                    });
+                }
+                if qualifier.is_some() {
+                    return Ok(Pattern {
+                        kind: PatternKind::Ctor {
+                            qualifier,
+                            name: ctor_name,
+                            args: Vec::new(),
+                            has_parens: false,
+                        },
+                        span: span.to(hi),
+                    });
+                }
+                Ok(Pattern {
+                    kind: PatternKind::Name(ctor_name),
+                    span,
+                })
+            }
+            other => Err(self.error("E1041", format!("expected a pattern, found {other}"))),
+        }
     }
 }
 
@@ -1123,14 +1676,145 @@ mod tests {
 
     #[test]
     fn rejects_reserved_keyword() {
-        let err = parse("enum Color\nend\n").unwrap_err();
+        let err = parse("loop do\nend\n").unwrap_err();
         assert_eq!(err.code, "E1002");
-        assert!(err.message.contains("`enum`"));
+        assert!(err.message.contains("`loop`"));
     }
 
     #[test]
-    fn rejects_tuple_literal() {
-        assert_eq!(parse("(1, 2)\n").unwrap_err().code, "E1002");
+    fn parses_tuple_literals() {
+        let module = parse("(1, 2)\n(\"only\",)\n()\n").unwrap();
+        assert_eq!(module.entry.len(), 3);
+        match &module.entry[0].kind {
+            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::TupleLit(_))),
+            other => panic!("expected a tuple, got {other:?}"),
+        }
+        match &module.entry[1].kind {
+            StmtKind::Expr(e) => match &e.kind {
+                ExprKind::TupleLit(items) => assert_eq!(items.len(), 1),
+                other => panic!("expected a one-element tuple, got {other:?}"),
+            },
+            other => panic!("expected an expression, got {other:?}"),
+        }
+        match &module.entry[2].kind {
+            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Unit)),
+            other => panic!("expected the unit literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_tuple_types() {
+        let module = parse("p: (Int, String) = (1, \"a\")\nq: (Int,) = (2,)\np\n").unwrap();
+        assert_eq!(module.entry.len(), 3);
+    }
+
+    #[test]
+    fn rejects_overlong_tuples() {
+        let items: Vec<String> = (0..17).map(|i| i.to_string()).collect();
+        let text = format!("({})\n", items.join(", "));
+        assert_eq!(parse(&text).unwrap_err().code, "E1048");
+    }
+
+    #[test]
+    fn parses_enum_with_methods() {
+        let source = "enum Option[T]\n  Some(v: T)\n  None\n\n  def is_some(self): Bool\n    \
+                      case self\n    in Some(_) then true\n    in None    then false\n    \
+                      end\n  end\nend\n1\n";
+        let module = parse(source).unwrap();
+        assert_eq!(module.enums.len(), 1);
+        let e = &module.enums[0];
+        assert_eq!(e.arms.len(), 2);
+        assert_eq!(e.arms[0].fields.len(), 1);
+        assert_eq!(e.methods.len(), 1);
+        assert_eq!(e.generics.len(), 1);
+    }
+
+    #[test]
+    fn parses_case_with_nested_patterns() {
+        let source = "case x\nin Pair(Some(a), None)\n  a\nin _\n  0\nend\n";
+        let module = parse(source).unwrap();
+        match &module.entry[0].kind {
+            StmtKind::Expr(e) => match &e.kind {
+                ExprKind::Case { arms, .. } => {
+                    assert_eq!(arms.len(), 2);
+                    match &arms[0].pattern.kind {
+                        PatternKind::Ctor { name, args, .. } => {
+                            assert_eq!(name, "Pair");
+                            assert_eq!(args.len(), 2);
+                        }
+                        other => panic!("expected a constructor pattern, got {other:?}"),
+                    }
+                }
+                other => panic!("expected a case, got {other:?}"),
+            },
+            other => panic!("expected an expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_qualified_constructor_patterns() {
+        let source = "case x\nin Option.Some(v) then v\nin Option.None then 0\nend\n";
+        let module = parse(source).unwrap();
+        match &module.entry[0].kind {
+            StmtKind::Expr(e) => match &e.kind {
+                ExprKind::Case { arms, .. } => match &arms[1].pattern.kind {
+                    PatternKind::Ctor {
+                        qualifier, name, ..
+                    } => {
+                        assert_eq!(qualifier.as_deref(), Some("Option"));
+                        assert_eq!(name, "None");
+                    }
+                    other => panic!("expected a qualified pattern, got {other:?}"),
+                },
+                other => panic!("expected a case, got {other:?}"),
+            },
+            other => panic!("expected an expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_generic_def_with_row() {
+        let source = "def apply[T, U, effect e](x: T, f: (T) -> U with e): U with e\n  \
+                      f(x)\nend\n1\n";
+        let module = parse(source).unwrap();
+        let f = &module.funcs[0];
+        assert_eq!(f.generics.len(), 3);
+        assert!(f.generics[2].is_effect);
+        assert_eq!(f.row.len(), 1);
+        assert_eq!(f.row[0].name, "e");
+        match &f.params[1].ty.kind {
+            TypeExprKind::Fn(_, _, row) => assert_eq!(row.len(), 1),
+            other => panic!("expected a function type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_explicit_generic_call_arguments() {
+        let module = parse("choose[String](a, b)\nxs[0]\n").unwrap();
+        match &module.entry[0].kind {
+            StmtKind::Expr(e) => match &e.kind {
+                ExprKind::Call { type_args, .. } => assert_eq!(type_args.len(), 1),
+                other => panic!("expected a generic call, got {other:?}"),
+            },
+            other => panic!("expected an expression, got {other:?}"),
+        }
+        match &module.entry[1].kind {
+            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Index { .. })),
+            other => panic!("expected an index, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_is_and_as() {
+        let module = parse("a is Dog\na as Dog\n").unwrap();
+        match &module.entry[0].kind {
+            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Is { .. })),
+            other => panic!("expected `is`, got {other:?}"),
+        }
+        match &module.entry[1].kind {
+            StmtKind::Expr(e) => assert!(matches!(e.kind, ExprKind::Cast { .. })),
+            other => panic!("expected `as`, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1171,5 +1855,13 @@ mod tests {
         let source = "def f(): Int\n  return 1\nend\ndef g()\n  return\nend\n1\n";
         let module = parse(source).unwrap();
         assert_eq!(module.funcs.len(), 2);
+    }
+
+    #[test]
+    fn row_backs_off_before_a_parameter_name() {
+        let source = "def f(g: (Int) -> Int with e, h: Int): Int\n  h\nend\n1\n";
+        let module = parse(source).unwrap();
+        assert_eq!(module.funcs[0].params.len(), 2);
+        assert_eq!(module.funcs[0].params[1].name, "h");
     }
 }

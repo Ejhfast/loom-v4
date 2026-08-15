@@ -1,0 +1,13 @@
+class Quiet
+  def ping(self): Int
+    1
+  end
+end
+
+class Loud < Quiet
+  def ping(self): Int with Io.Print
+    2
+  end
+end
+
+Loud().ping()

@@ -32,6 +32,8 @@ pub enum Object {
     List { items: Vec<Value> },
     /// A map with entries in insertion order.
     Map { entries: Vec<(Value, Value)> },
+    /// A fixed-arity immutable tuple. Born frozen.
+    Tuple { items: Vec<Value> },
     /// A closure: code index plus captured values. Born frozen.
     Closure { func: u32, captures: Vec<Value> },
     /// A string builder.
@@ -72,6 +74,11 @@ const SHAPE_MAP: ShapeDesc = ShapeDesc {
     has_refs: true,
     born_frozen: false,
 };
+const SHAPE_TUPLE: ShapeDesc = ShapeDesc {
+    name: "Tuple",
+    has_refs: true,
+    born_frozen: true,
+};
 const SHAPE_CLOSURE: ShapeDesc = ShapeDesc {
     name: "Closure",
     has_refs: true,
@@ -96,6 +103,7 @@ impl Object {
             Object::Instance { .. } => &SHAPE_INSTANCE,
             Object::List { .. } => &SHAPE_LIST,
             Object::Map { .. } => &SHAPE_MAP,
+            Object::Tuple { .. } => &SHAPE_TUPLE,
             Object::Closure { .. } => &SHAPE_CLOSURE,
             Object::StrBuilder(_) => &SHAPE_SB,
             Object::ByteBuf(_) => &SHAPE_BB,
@@ -110,6 +118,7 @@ impl Object {
                 Object::Instance { fields, .. } => fields.len() * VALUE_COST,
                 Object::List { items } => items.len() * VALUE_COST,
                 Object::Map { entries } => entries.len() * ENTRY_COST,
+                Object::Tuple { items } => items.len() * VALUE_COST,
                 Object::Closure { captures, .. } => captures.len() * VALUE_COST,
                 Object::StrBuilder(s) => s.len(),
                 Object::ByteBuf(b) => b.len(),
@@ -127,7 +136,7 @@ impl Object {
         match self {
             Object::Str(_) | Object::StrBuilder(_) | Object::ByteBuf(_) => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
-            Object::List { items } => items.iter().for_each(&mut visit),
+            Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
             Object::Map { entries } => {
                 for (k, v) in entries {
                     visit(k);
@@ -326,17 +335,19 @@ impl Heap {
     }
 
     /// Deeply freeze the graph under `root`. The walk is iterative and
-    /// preserves cycles and sharing. Freezing is monotonic: an already
-    /// frozen object is complete, so the walk does not enter it again.
+    /// preserves cycles and sharing. A born-frozen container such as a
+    /// tuple or a closure can hold mutable children, so the walk uses
+    /// a visited set instead of the frozen bit for termination.
     pub fn freeze(&mut self, root: ObjRef) {
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut work = vec![root];
         while let Some(r) = work.pop() {
+            if !visited.insert(r.slot) {
+                continue;
+            }
             let entry = self.entry_mut(r.slot);
             assert_eq!(entry.generation, r.generation, "stale object reference");
             let (header, object) = entry.live.as_mut().expect("live object");
-            if header.frozen {
-                continue;
-            }
             header.frozen = true;
             object.trace_children(&mut work);
         }

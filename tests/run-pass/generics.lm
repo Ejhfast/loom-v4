@@ -1,0 +1,16 @@
+class Stack[T]
+  items: [T] = []
+
+  def push_top(mut self, value: T)
+    self.items.push(value)
+  end
+
+  def top_or(self, fallback: T): T
+    self.items.get(self.items.len() - 1).value_or(fallback)
+  end
+end
+s = Stack[Int]()
+s.push_top(4)
+s.push_top(9)
+t = Stack[String]()
+(s.top_or(0), t.top_or("empty"))

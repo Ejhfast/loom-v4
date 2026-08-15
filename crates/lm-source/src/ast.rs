@@ -1,16 +1,35 @@
-//! Abstract syntax tree for the week-2 language slice.
+//! Abstract syntax tree for the week-3 language slice.
 
 use crate::span::Span;
 use std::fmt::Write as _;
 
-/// A parsed module: classes, top-level functions, and entry statements.
+/// A parsed module: classes, enums, top-level functions, and entry
+/// statements.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub classes: Vec<ClassDef>,
+    pub enums: Vec<EnumDef>,
     pub funcs: Vec<FuncDef>,
     /// Top-level statements. The value of the last expression statement
     /// becomes the program result.
     pub entry: Vec<Stmt>,
+}
+
+/// One generic parameter: a type parameter, or an effect parameter
+/// declared with `effect`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenericParam {
+    pub name: String,
+    pub is_effect: bool,
+    pub span: Span,
+}
+
+/// One element of a declared effect row: an operation or group name
+/// such as `Io.Print` or `Io`, or an effect-parameter name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowItem {
+    pub name: String,
+    pub span: Span,
 }
 
 /// A `class` declaration.
@@ -18,9 +37,31 @@ pub struct Module {
 pub struct ClassDef {
     pub name: String,
     pub name_span: Span,
+    pub generics: Vec<GenericParam>,
     pub parent: Option<(String, Span)>,
     pub fields: Vec<FieldDef>,
     pub methods: Vec<MethodDef>,
+    pub span: Span,
+}
+
+/// An `enum` declaration: arms first, then optional methods.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDef {
+    pub name: String,
+    pub name_span: Span,
+    pub generics: Vec<GenericParam>,
+    pub arms: Vec<ArmDef>,
+    pub methods: Vec<MethodDef>,
+    pub span: Span,
+}
+
+/// One enum arm: a final case with zero or more typed fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArmDef {
+    pub name: String,
+    pub name_span: Span,
+    /// Field name, field type.
+    pub fields: Vec<(String, TypeExpr)>,
     pub span: Span,
 }
 
@@ -34,17 +75,19 @@ pub struct FieldDef {
     pub span: Span,
 }
 
-/// One method declaration inside a class. `init` is a method named
-/// `init` with `mut self`.
+/// One method declaration inside a class or an enum. `init` is a
+/// method named `init` with `mut self`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDef {
     pub name: String,
     pub name_span: Span,
+    pub generics: Vec<GenericParam>,
     /// True when the receiver is `mut self`.
     pub mut_self: bool,
     pub params: Vec<Param>,
     /// `None` means the unit result type `()`.
     pub ret: Option<TypeExpr>,
+    pub row: Vec<RowItem>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }
@@ -54,9 +97,11 @@ pub struct MethodDef {
 pub struct FuncDef {
     pub name: String,
     pub name_span: Span,
+    pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     /// `None` means the unit result type `()`.
     pub ret: Option<TypeExpr>,
+    pub row: Vec<RowItem>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }
@@ -79,18 +124,20 @@ pub struct TypeExpr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeExprKind {
-    /// A named type such as `Int` or a class name.
+    /// A named type such as `Int`, a class name, or a type parameter.
     Name(String),
     /// The unit type `()`.
     Unit,
-    /// A generic application such as `List[Int]` or `Map[String, Int]`.
+    /// A generic application such as `List[Int]` or `Box[T]`.
     Apply(String, Vec<TypeExpr>),
     /// List shorthand `[T]`.
     ListShort(Box<TypeExpr>),
     /// Map shorthand `{K: V}`.
     MapShort(Box<TypeExpr>, Box<TypeExpr>),
-    /// A function type `(A, B) -> R`.
-    Fn(Vec<TypeExpr>, Box<TypeExpr>),
+    /// A tuple type `(T, U)` or `(T,)`.
+    Tuple(Vec<TypeExpr>),
+    /// A function type `(A, B) -> R with row`.
+    Fn(Vec<TypeExpr>, Box<TypeExpr>, Vec<RowItem>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +223,43 @@ pub enum InterpPart {
     Expr(Expr),
 }
 
+/// One `case` arm: a pattern and a body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseArm {
+    pub pattern: Pattern,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// One pattern inside a `case` arm.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatternKind {
+    /// `_` matches any value and binds nothing.
+    Wildcard,
+    /// A bare name: a binding, or a zero-field constructor when the
+    /// name resolves to an arm of the scrutinee enum.
+    Name(String),
+    /// A constructor pattern. `qualifier` holds the enum name for a
+    /// canonical qualified form such as `Option.Some`. `has_parens`
+    /// records whether an argument list appeared.
+    Ctor {
+        qualifier: Option<String>,
+        name: String,
+        args: Vec<Pattern>,
+        has_parens: bool,
+    },
+    /// Supported literal patterns.
+    Int(i64),
+    Bool(bool),
+    Str(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Int(i64),
@@ -183,6 +267,8 @@ pub enum ExprKind {
     /// An interpolated string literal.
     Interp(Vec<InterpPart>),
     Bool(bool),
+    /// The unit literal `()`.
+    Unit,
     Name(String),
     /// The method receiver `self`.
     SelfRef,
@@ -198,11 +284,23 @@ pub enum ExprKind {
     And(Box<Expr>, Box<Expr>),
     /// Short-circuit `or`.
     Or(Box<Expr>, Box<Expr>),
-    /// A call of a name: a function, a class constructor, or a
-    /// closure-typed local. The checker selects the meaning.
+    /// `value is Type`: a pure nominal type test.
+    Is {
+        value: Box<Expr>,
+        ty: TypeExpr,
+    },
+    /// `value as Type`: a cast that faults `BadCast` on failure.
+    Cast {
+        value: Box<Expr>,
+        ty: TypeExpr,
+    },
+    /// A call of a name: a function, a class constructor, an enum
+    /// constructor, or a closure-typed local. The checker selects the
+    /// meaning. `type_args` holds explicit generic arguments.
     Call {
         name: String,
         name_span: Span,
+        type_args: Vec<TypeExpr>,
         args: Vec<Expr>,
     },
     /// A call of a non-name callee expression: a closure value.
@@ -221,6 +319,7 @@ pub enum ExprKind {
         recv: Box<Expr>,
         name: String,
         name_span: Span,
+        type_args: Vec<TypeExpr>,
         args: Vec<Expr>,
     },
     /// `super.method(args)` or `super.init(args)`.
@@ -234,15 +333,18 @@ pub enum ExprKind {
         recv: Box<Expr>,
         index: Box<Expr>,
     },
+    /// A tuple literal `(a, b)` or `(a,)`.
+    TupleLit(Vec<Expr>),
     /// A list literal `[a, b]`.
     ListLit(Vec<Expr>),
     /// A map literal `{k: v}`.
     MapLit(Vec<(Expr, Expr)>),
-    /// A closure literal `do |x: Int|: Int ... end`.
+    /// A closure literal `do |x: Int|: Int with Row ... end`.
     Closure {
         params: Vec<Param>,
         /// `None` requests result inference from the body.
         ret: Option<TypeExpr>,
+        row: Vec<RowItem>,
         body: Vec<Stmt>,
     },
     /// `if ... elsif ... else ... end` as an expression.
@@ -251,6 +353,11 @@ pub enum ExprKind {
         arms: Vec<(Expr, Vec<Stmt>)>,
         else_body: Option<Vec<Stmt>>,
     },
+    /// `case scrutinee in pattern then|body ... end` as an expression.
+    Case {
+        scrut: Box<Expr>,
+        arms: Vec<CaseArm>,
+    },
 }
 
 /// Render a module as an indented, stable, human-readable tree.
@@ -258,12 +365,13 @@ pub fn dump_module(module: &Module) -> String {
     let mut out = String::new();
     out.push_str("module\n");
     for class in &module.classes {
+        let generics = dump_generics(&class.generics);
         match &class.parent {
             Some((parent, _)) => {
-                let _ = writeln!(out, "  class {} < {}", class.name, parent);
+                let _ = writeln!(out, "  class {}{generics} < {}", class.name, parent);
             }
             None => {
-                let _ = writeln!(out, "  class {}", class.name);
+                let _ = writeln!(out, "  class {}{generics}", class.name);
             }
         }
         for field in &class.fields {
@@ -273,26 +381,33 @@ pub fn dump_module(module: &Module) -> String {
             }
         }
         for method in &class.methods {
-            let recv = if method.mut_self { "mut self" } else { "self" };
-            let _ = writeln!(
-                out,
-                "    def {}({recv}{}): {}",
-                method.name,
-                dump_params(&method.params, true),
-                dump_ret(&method.ret)
-            );
-            for stmt in &method.body {
-                dump_stmt(&mut out, stmt, 3);
-            }
+            dump_method(&mut out, method);
+        }
+    }
+    for enum_def in &module.enums {
+        let generics = dump_generics(&enum_def.generics);
+        let _ = writeln!(out, "  enum {}{generics}", enum_def.name);
+        for arm in &enum_def.arms {
+            let fields: Vec<String> = arm
+                .fields
+                .iter()
+                .map(|(name, ty)| format!("{name}: {}", dump_type(ty)))
+                .collect();
+            let _ = writeln!(out, "    arm {}({})", arm.name, fields.join(", "));
+        }
+        for method in &enum_def.methods {
+            dump_method(&mut out, method);
         }
     }
     for func in &module.funcs {
         let _ = writeln!(
             out,
-            "  def {}({}): {}",
+            "  def {}{}({}): {}{}",
             func.name,
+            dump_generics(&func.generics),
             dump_params(&func.params, false),
-            dump_ret(&func.ret)
+            dump_ret(&func.ret),
+            dump_row(&func.row)
         );
         for stmt in &func.body {
             dump_stmt(&mut out, stmt, 2);
@@ -303,6 +418,47 @@ pub fn dump_module(module: &Module) -> String {
         dump_stmt(&mut out, stmt, 2);
     }
     out
+}
+
+fn dump_method(out: &mut String, method: &MethodDef) {
+    let recv = if method.mut_self { "mut self" } else { "self" };
+    let _ = writeln!(
+        out,
+        "    def {}{}({recv}{}): {}{}",
+        method.name,
+        dump_generics(&method.generics),
+        dump_params(&method.params, true),
+        dump_ret(&method.ret),
+        dump_row(&method.row)
+    );
+    for stmt in &method.body {
+        dump_stmt(out, stmt, 3);
+    }
+}
+
+fn dump_generics(generics: &[GenericParam]) -> String {
+    if generics.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = generics
+        .iter()
+        .map(|g| {
+            if g.is_effect {
+                format!("effect {}", g.name)
+            } else {
+                g.name.clone()
+            }
+        })
+        .collect();
+    format!("[{}]", parts.join(", "))
+}
+
+fn dump_row(row: &[RowItem]) -> String {
+    if row.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = row.iter().map(|r| r.name.clone()).collect();
+    format!(" with {}", parts.join(", "))
 }
 
 fn dump_params(params: &[Param], leading_comma: bool) -> String {
@@ -335,10 +491,51 @@ fn dump_type(ty: &TypeExpr) -> String {
         }
         TypeExprKind::ListShort(elem) => format!("[{}]", dump_type(elem)),
         TypeExprKind::MapShort(k, v) => format!("{{{}: {}}}", dump_type(k), dump_type(v)),
-        TypeExprKind::Fn(params, ret) => {
-            let parts: Vec<String> = params.iter().map(dump_type).collect();
-            format!("({}) -> {}", parts.join(", "), dump_type(ret))
+        TypeExprKind::Tuple(elems) => {
+            let parts: Vec<String> = elems.iter().map(dump_type).collect();
+            if parts.len() == 1 {
+                format!("({},)", parts[0])
+            } else {
+                format!("({})", parts.join(", "))
+            }
         }
+        TypeExprKind::Fn(params, ret, row) => {
+            let parts: Vec<String> = params.iter().map(dump_type).collect();
+            format!(
+                "({}) -> {}{}",
+                parts.join(", "),
+                dump_type(ret),
+                dump_row(row)
+            )
+        }
+    }
+}
+
+fn dump_pattern(pattern: &Pattern) -> String {
+    match &pattern.kind {
+        PatternKind::Wildcard => "_".to_string(),
+        PatternKind::Name(name) => name.clone(),
+        PatternKind::Ctor {
+            qualifier,
+            name,
+            args,
+            has_parens,
+        } => {
+            let mut out = String::new();
+            if let Some(q) = qualifier {
+                out.push_str(q);
+                out.push('.');
+            }
+            out.push_str(name);
+            if *has_parens {
+                let parts: Vec<String> = args.iter().map(dump_pattern).collect();
+                let _ = write!(out, "({})", parts.join(", "));
+            }
+            out
+        }
+        PatternKind::Int(v) => v.to_string(),
+        PatternKind::Bool(v) => v.to_string(),
+        PatternKind::Str(v) => format!("{v:?}"),
     }
 }
 
@@ -419,6 +616,7 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
         ExprKind::Bool(v) => {
             let _ = writeln!(out, "bool {v}");
         }
+        ExprKind::Unit => out.push_str("unit\n"),
         ExprKind::Name(name) => {
             let _ = writeln!(out, "name {name}");
         }
@@ -446,8 +644,26 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
             dump_expr(out, left, depth + 1);
             dump_expr(out, right, depth + 1);
         }
-        ExprKind::Call { name, args, .. } => {
-            let _ = writeln!(out, "call {name}");
+        ExprKind::Is { value, ty } => {
+            let _ = writeln!(out, "is {}", dump_type(ty));
+            dump_expr(out, value, depth + 1);
+        }
+        ExprKind::Cast { value, ty } => {
+            let _ = writeln!(out, "as {}", dump_type(ty));
+            dump_expr(out, value, depth + 1);
+        }
+        ExprKind::Call {
+            name,
+            type_args,
+            args,
+            ..
+        } => {
+            if type_args.is_empty() {
+                let _ = writeln!(out, "call {name}");
+            } else {
+                let parts: Vec<String> = type_args.iter().map(dump_type).collect();
+                let _ = writeln!(out, "call {name}[{}]", parts.join(", "));
+            }
             for arg in args {
                 dump_expr(out, arg, depth + 1);
             }
@@ -464,9 +680,18 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
             dump_expr(out, recv, depth + 1);
         }
         ExprKind::MethodCall {
-            recv, name, args, ..
+            recv,
+            name,
+            type_args,
+            args,
+            ..
         } => {
-            let _ = writeln!(out, "method-call {name}");
+            if type_args.is_empty() {
+                let _ = writeln!(out, "method-call {name}");
+            } else {
+                let parts: Vec<String> = type_args.iter().map(dump_type).collect();
+                let _ = writeln!(out, "method-call {name}[{}]", parts.join(", "));
+            }
             dump_expr(out, recv, depth + 1);
             for arg in args {
                 dump_expr(out, arg, depth + 1);
@@ -483,6 +708,12 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
             dump_expr(out, recv, depth + 1);
             dump_expr(out, index, depth + 1);
         }
+        ExprKind::TupleLit(items) => {
+            out.push_str("tuple\n");
+            for item in items {
+                dump_expr(out, item, depth + 1);
+            }
+        }
         ExprKind::ListLit(items) => {
             out.push_str("list\n");
             for item in items {
@@ -496,12 +727,18 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
                 dump_expr(out, v, depth + 1);
             }
         }
-        ExprKind::Closure { params, ret, body } => {
+        ExprKind::Closure {
+            params,
+            ret,
+            row,
+            body,
+        } => {
             let _ = writeln!(
                 out,
-                "closure |{}|: {}",
+                "closure |{}|: {}{}",
                 dump_params(params, false),
-                dump_ret(ret)
+                dump_ret(ret),
+                dump_row(row)
             );
             for stmt in body {
                 dump_stmt(out, stmt, depth + 1);
@@ -521,6 +758,17 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
                 indent(out, depth + 1);
                 out.push_str("else\n");
                 for s in body {
+                    dump_stmt(out, s, depth + 2);
+                }
+            }
+        }
+        ExprKind::Case { scrut, arms } => {
+            out.push_str("case\n");
+            dump_expr(out, scrut, depth + 1);
+            for arm in arms {
+                indent(out, depth + 1);
+                let _ = writeln!(out, "in {}", dump_pattern(&arm.pattern));
+                for s in &arm.body {
                     dump_stmt(out, s, depth + 2);
                 }
             }

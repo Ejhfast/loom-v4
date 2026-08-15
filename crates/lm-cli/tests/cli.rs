@@ -96,6 +96,33 @@ fn run_closures_prints_done_42() {
 }
 
 #[test]
+fn run_expr_example_prints_done_42() {
+    let out = lm(&["run", "--show-result", "examples/03-types/expr.lm"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(42)\n");
+}
+
+#[test]
+fn run_generics_example_prints_the_tuple() {
+    let out = lm(&["run", "--show-result", "examples/03-types/generics.lm"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done((\"yes\", \"no\"))\n");
+}
+
+#[test]
+fn disasm_covers_week3_surfaces() {
+    let out = lm(&["disasm", "examples/03-types/generics.lm"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("class"), "{text}");
+    assert!(text.contains("abstract"), "{text}");
+    assert!(text.contains("case"), "{text}");
+    assert!(text.contains("app app0"), "{text}");
+    assert!(text.contains("CallG"), "{text}");
+    assert!(text.contains("TupleNew"), "{text}");
+}
+
+#[test]
 fn inspect_live_dumps_heap_objects_and_stats() {
     let out = lm(&["inspect", "--live", "examples/02-objects/counter.lm"]);
     assert!(out.status.success(), "{}", stderr(&out));
