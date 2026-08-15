@@ -331,6 +331,17 @@ resolution, or a crafted artifact can only produce a merged module
 that the verifier then rejects. The pin check exists to give a
 precise error before that, not to keep the program safe.
 
+A per-module artifact is never verified alone on a cache hit, and it
+never needs to be: it does not execute. The merged program is
+verified at link time and again at load time. The second run is a
+deliberate duplication: the link step wants a precise error, and the
+loader never trusts an input, whatever produced it.
+
+The verified-code cache still has no production consumer inside one
+`lm` invocation, because the tool loads one program once. It is the
+in-process cache a multi-load path needs, and the build cache is what
+makes the developer loop fast.
+
 ## Simplifications inside the slice
 
 - A `use` of a module imports the whole export set of that module.
@@ -396,16 +407,17 @@ precise error before that, not to keep the program safe.
 
 ## New tests
 
-`week6.rs` (25 cases) covers the build loop end to end on real
+`week6.rs` (28 cases) covers the build loop end to end on real
 package trees: the two-package workspace, the cache hit, the two
 rebuild gates, the stale caller, the damaged cache entry, the closed
 program artifact, the shared core, the imported enum, the imported
-generics, the imported mutable method, the inheritance rejection,
-authority, the scaffold, a build from a subdirectory, the
-dependency-name collision, the unknown root, the module tree from
-directories, the library package, the manifest subset, program
-determinism across two build directories, the hand-driven typed
-environments, and the stale-pin link rejection.
+generics, the imported mutable method, the imported effect
+parameter, the transitive type, the inheritance rejection, the
+self-import cycle, authority, the scaffold, a build from a
+subdirectory, the dependency-name collision, the unknown root, the
+module tree from directories, the library package, the manifest
+subset, program determinism across two build directories, the
+hand-driven typed environments, and the stale-pin link rejection.
 
 `week6_interface.rs` (7 cases) covers the structural signature, the
 two hashes, the readable dump, determinism, every truncation and bad

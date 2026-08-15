@@ -462,6 +462,91 @@ fn an_imported_class_holds_its_mutable_methods() {
     assert_eq!(output, "4\n");
 }
 
+/// A module that names a definition of another module inherits the
+/// types that signature names, even without a `use` line for the
+/// module that defines them.
+#[test]
+fn a_transitive_type_materializes_without_its_own_use_line() {
+    let tree = TempTree::new("transitive");
+    workspace(&tree);
+    // `main` drops `use mathlib.matrix` and still calls
+    // `greeting.report`, whose parameter is a `mathlib` class.
+    tree.write(
+        "app/src/main.lm",
+        "use sys.io.print\n\
+         use greeting\n\
+         \n\
+         def run() with Io.Print\n\
+         \x20 line = greeting.greet(\"Ada\")\n\
+         \x20 print(\"{line}\\n\")\n\
+         end\n\
+         \n\
+         run()\n",
+    );
+    let report = tree.build("app").expect("builds");
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    assert_eq!(output, "Hello Ada!\n");
+    // The main module still pins the transitive class, because its
+    // own import of `report` names it.
+    let bytes = std::fs::read(report.program.unwrap()).unwrap();
+    let module = lm_bytecode::decode(&bytes).expect("decodes");
+    assert!(module.imports.is_empty());
+}
+
+/// An exported effect-polymorphic function keeps its effect
+/// parameter through the interface, and the caller still charges the
+/// row of the closure it passes.
+#[test]
+fn an_imported_effect_parameter_survives_the_interface() {
+    let tree = TempTree::new("effect-var");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/apply.lm",
+        "def twice[effect e](f: () -> Int with e): Int with e\n\
+         \x20 f() + f()\n\
+         end\n",
+    );
+    tree.write(
+        "prog/lm.package",
+        "[package]\nname = \"prog\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "prog/src/main.lm",
+        "use sys.io.print\n\
+         use lib.apply\n\
+         \n\
+         def run() with Io.Print\n\
+         \x20 total = apply.twice(do ||: Int with Io.Print\n\
+         \x20   print(\"tick\\n\")\n\
+         \x20   3\n\
+         \x20 end)\n\
+         \x20 print(\"{total}\\n\")\n\
+         end\n\
+         \n\
+         run()\n",
+    );
+    let report = tree.build("prog").expect("builds");
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    assert_eq!(output, "tick\ntick\n6\n");
+}
+
+/// A module that imports itself is an import cycle.
+#[test]
+fn a_module_cannot_import_itself() {
+    let tree = TempTree::new("self-import");
+    workspace(&tree);
+    tree.write(
+        "app/src/greeting.lm",
+        "use greeting\n\ndef greet(name: String): String\n  name\nend\n",
+    );
+    let error = tree.build("app").expect_err("the cycle must reject");
+    assert!(error.contains("imports itself"), "{error}");
+}
+
 /// A class cannot inherit an imported class, and the diagnostic names
 /// the fix.
 #[test]

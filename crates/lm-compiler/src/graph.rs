@@ -374,6 +374,12 @@ pub fn module_order(package: &Package) -> Result<Vec<usize>, String> {
         state[idx] = 1;
         stack.push((idx, true));
         for need in needs(&package.modules[idx]) {
+            if need == idx {
+                return Err(format!(
+                    "error: the module `{}` of `{}` imports itself\n",
+                    package.modules[idx].relative, package.name
+                ));
+            }
             if state[need] == 1 {
                 return Err(format!(
                     "error: the modules `{}` and `{}` of `{}` import each other\n",
