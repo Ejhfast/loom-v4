@@ -39,17 +39,17 @@ fn rows_validate_against_the_manifest() {
 #[test]
 fn direct_performs_charge_the_exact_operation() {
     // Perform without the row.
-    assert_eq!(code_of("def f()\n  sys.io.Print(\"x\")\nend\n1\n"), "E1046");
+    assert_eq!(code_of("def f()\n  sys.io.print(\"x\")\nend\n1\n"), "E1046");
     // The exact row admits the perform; the group admits it too.
     assert!(compile_text(
         "t.lm",
-        "def f() with Io.Print\n  sys.io.Print(\"x\")\nend\n1\n"
+        "def f() with Io.Print\n  sys.io.print(\"x\")\nend\n1\n"
     )
     .is_ok());
-    assert!(compile_text("t.lm", "def f() with Io\n  sys.io.Print(\"x\")\nend\n1\n").is_ok());
+    assert!(compile_text("t.lm", "def f() with Io\n  sys.io.print(\"x\")\nend\n1\n").is_ok());
     // A sibling exact operation does not admit it.
     assert_eq!(
-        code_of("def f() with Io.Error\n  sys.io.Print(\"x\")\nend\n1\n"),
+        code_of("def f() with Io.Error\n  sys.io.print(\"x\")\nend\n1\n"),
         "E1046"
     );
 }
@@ -60,7 +60,7 @@ fn sys_misuse_is_precise() {
     assert_eq!(code_of("x = sys.io\n1\n"), "E1051");
     assert_eq!(code_of("x = sys.web\n1\n"), "E1051");
     assert_eq!(
-        code_of("def f() with Io\n  sys.io.Blast(\"x\")\nend\n1\n"),
+        code_of("def f() with Io\n  sys.io.blast(\"x\")\nend\n1\n"),
         "E1051"
     );
     // A VM control operation is not a first-class value.
@@ -73,24 +73,24 @@ fn sys_misuse_is_precise() {
 fn first_class_operation_values_carry_their_identity() {
     // Storing and calling through a variable charges the identity.
     assert_eq!(
-        code_of("def f()\n  p = sys.io.Print\n  p(\"x\")\nend\n1\n"),
+        code_of("def f()\n  p = sys.io.print\n  p(\"x\")\nend\n1\n"),
         "E1046"
     );
     assert!(compile_text(
         "t.lm",
-        "def f() with Io.Print\n  p = sys.io.Print\n  p(\"x\")\nend\n1\n"
+        "def f() with Io.Print\n  p = sys.io.print\n  p(\"x\")\nend\n1\n"
     )
     .is_ok());
     // Passing the value as an argument: the parameter type is the
     // identity-indexed Op type, which no plain function type accepts.
     assert_eq!(
-        code_of("def call_it(g: (String) -> ()): ()\n  g(\"x\")\nend\ncall_it(sys.io.Print)\n"),
+        code_of("def call_it(g: (String) -> ()): ()\n  g(\"x\")\nend\ncall_it(sys.io.print)\n"),
         "E1004"
     );
     // The perform through the value reaches the host.
     let (out, host) = run_world(
         "t.lm",
-        "def f() with Io.Print\n  p = sys.io.Print\n  p(\"one\")\n  p(\"two\")\nend\nf()\n",
+        "def f() with Io.Print\n  p = sys.io.print\n  p(\"one\")\n  p(\"two\")\nend\nf()\n",
         &["Io.Print"],
         VmConfig::default(),
     )
@@ -105,7 +105,7 @@ fn effect_variables_bind_from_explicitly_rowed_closures() {
     // higher-order callee; the caller is charged the bound row.
     let source = "def apply[T, U, effect e](x: T, f: (T) -> U with e): U with e\n  f(x)\nend\n\
                   def go(): Int with Io.Print\n  \
-                  apply(1, do |n: Int|: Int with Io.Print\n    sys.io.Print(\"n\\n\")\n    n\n  end)\n\
+                  apply(1, do |n: Int|: Int with Io.Print\n    sys.io.print(\"n\\n\")\n    n\n  end)\n\
                   end\ngo()\n";
     let (out, host) = run_world("t.lm", source, &["Io.Print"], VmConfig::default()).unwrap();
     assert_eq!(out, "Done(1)");
@@ -115,7 +115,7 @@ fn effect_variables_bind_from_explicitly_rowed_closures() {
         code_of(
             "def apply[T, U, effect e](x: T, f: (T) -> U with e): U with e\n  f(x)\nend\n\
              def go(): Int\n  \
-             apply(1, do |n: Int|: Int with Io.Print\n    sys.io.Print(\"n\\n\")\n    n\n  end)\n\
+             apply(1, do |n: Int|: Int with Io.Print\n    sys.io.print(\"n\\n\")\n    n\n  end)\n\
              end\n1\n"
         ),
         "E1046"
@@ -179,16 +179,26 @@ fn typed_answer_mismatch_is_static() {
     assert_eq!(
         code_of(
             "def bad(vm: Vm[Int]) with Vm\n  case vm.drive()\n  in Asked(q)\n    \
-             case q.as_call(sys.io.Print)\n    in Some(call) then vm.answer(call, 5)\n    \
+             case q.as_call(Io.Print)\n    in Some(call) then vm.answer(call, 5)\n    \
              in None then ()\n    end\n  in Done(_) then ()\n  in Fault(_) then ()\n  end\nend\n1\n"
         ),
         "E1004"
     );
-    // `as_call` needs an identity-indexed operation value.
+    // `as_call` needs an exact operation descriptor; a function value
+    // is rejected.
     assert_eq!(
         code_of(
             "def bad(vm: Vm[Int], g: (String) -> ()) with Vm\n  case vm.drive()\n  in Asked(q)\n    \
              q.as_call(g)\n    ()\n  in Done(_) then ()\n  in Fault(_) then ()\n  end\nend\n1\n"
+        ),
+        "E1051"
+    );
+    // The old callable-argument form names the exact rewrite.
+    assert_eq!(
+        code_of(
+            "def bad(vm: Vm[Int]) with Vm\n  case vm.drive()\n  in Asked(q)\n    \
+             q.as_call(sys.io.print)\n    ()\n  in Done(_) then ()\n  in Fault(_) then ()\n  \
+             end\nend\n1\n"
         ),
         "E1004"
     );
@@ -240,7 +250,7 @@ fn class_constructor_patterns_destructure_core_pair() {
 
 #[test]
 fn default_deny_blocks_at_the_root() {
-    let source = "def f() with Io.Print\n  sys.io.Print(\"x\")\nend\nf()\n";
+    let source = "def f() with Io.Print\n  sys.io.print(\"x\")\nend\nf()\n";
     assert_eq!(allowed(source, &[]), "Fault(PolicyDenied)");
     assert_eq!(allowed(source, &["Io.Print"]), "Done(())");
     // A group grant covers the exact operation.
@@ -250,7 +260,7 @@ fn default_deny_blocks_at_the_root() {
 }
 
 const CHILD_PRINT: &str = "def spawn_print(): Vm[()] with Vm\n  \
-    sys.vm.Vm().from_object(do || with Io.Print\n    sys.io.Print(\"c\\n\")\n  end, args: ())\n\
+    sys.vm.Vm().from_object(do || with Io.Print\n    sys.io.print(\"c\\n\")\n  end, args: ())\n\
     end\n";
 
 #[test]
@@ -291,7 +301,7 @@ fn pass_chain_reaches_the_root_and_fails_closed() {
     // Grandchild -> child -> root: every level passes Io.
     let source = "def go(): String with Vm, Io\n  \
         vm = sys.vm.Vm().from_object(do || with Vm, Io\n    \
-        inner = sys.vm.Vm().from_object(do || with Io.Print\n      sys.io.Print(\"deep\\n\")\n    end, args: ())\n    \
+        inner = sys.vm.Vm().from_object(do || with Io.Print\n      sys.io.print(\"deep\\n\")\n    end, args: ())\n    \
         inner.table().pass(Io)\n    \
         case inner.run()\n    in Done(_) then \"done\"\n    in Fault(f) then f.code()\n    end\n  end, args: ())\n  \
         vm.table().pass(Io)\n  vm.table().pass(Vm)\n  \
@@ -306,26 +316,26 @@ fn pass_chain_reaches_the_root_and_fails_closed() {
 #[test]
 fn mock_runs_pure_and_bounded() {
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now() + 1\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int 41 end)\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(42)");
     // A faulting mock faults the controlled guest with HostFault.
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now() + 1\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int 1 / 0 end)\n  \
         case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"HostFault\")");
     // A mock that exhausts its work budget faults the guest too.
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now() + 1\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int\n    while true\n    end\n    1\n  end)\n  \
         case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"HostFault\")");
     // A mock with captures uses the frozen captured values.
     let source = "def go(): Int with Vm\n  \
         base = 40\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now() + 2\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now() + 2\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int base end)\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(42)");
@@ -337,7 +347,7 @@ fn live_table_edits_affect_future_lookups() {
     // first and second print. The second perform faults.
     let source = "def go(): String with Vm, Io\n  \
         vm = sys.vm.Vm().from_object(do || with Io.Print\n    \
-        sys.io.Print(\"a\\n\")\n    sys.io.Print(\"b\\n\")\n  end, args: ())\n  \
+        sys.io.print(\"a\\n\")\n    sys.io.print(\"b\\n\")\n  end, args: ())\n  \
         vm.table().pass(Io)\n  \
         steps = 0\n  \
         revoked = false\n  \
@@ -390,7 +400,7 @@ fn terminal_execution_calls_are_idempotent() {
 fn asked_rejects_run_and_step_and_recovers_tokens_through_drive() {
     // run() while asked faults the caller.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q)\n    \
         case vm.run()\n    in Done(_) then 1\n    in Fault(_) then 2\n    end\n  \
         in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\ngo()\n";
@@ -398,9 +408,9 @@ fn asked_rejects_run_and_step_and_recovers_tokens_through_drive() {
     // Token recovery: a second drive mints a fresh token; the stale
     // call token faults the caller with InvalidRequestToken.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q1)\n    \
-        case q1.as_call(sys.clock.Now)\n    in Some(stale)\n      \
+        case q1.as_call(Clock.Now)\n    in Some(stale)\n      \
         case vm.drive()\n      in Asked(q2)\n        vm.answer(stale, 9)\n        1\n      \
         in Done(_) then 2\n      in Fault(_) then 3\n      end\n    \
         in None then 4\n    end\n  \
@@ -408,10 +418,10 @@ fn asked_rejects_run_and_step_and_recovers_tokens_through_drive() {
     assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidRequestToken)");
     // The fresh token answers.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q1)\n    \
         case vm.drive()\n    in Asked(q2)\n      \
-        case q2.as_call(sys.clock.Now)\n      in Some(call)\n        \
+        case q2.as_call(Clock.Now)\n      in Some(call)\n        \
         vm.answer(call, 40)\n        \
         case vm.run()\n        in Done(v) then v + 2\n        in Fault(_) then 0 - 1\n        end\n      \
         in None then 0 - 2\n      end\n    \
@@ -426,9 +436,9 @@ fn continuation_methods_need_an_asked_machine() {
     // has no pending request, so the second continuation faults
     // InvalidRequestToken (specification 12.3).
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q)\n    \
-        case q.as_call(sys.clock.Now)\n    in Some(call)\n      \
+        case q.as_call(Clock.Now)\n    in Some(call)\n      \
         vm.answer(call, 7)\n      vm.dispatch(q)\n      1\n    \
         in None then 2\n    end\n  \
         in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\ngo()\n";
@@ -438,12 +448,12 @@ fn continuation_methods_need_an_asked_machine() {
 #[test]
 fn cross_vm_tokens_fault_safely() {
     let source = "def spawn_now(): Vm[Int] with Vm\n  \
-        sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now()\n  end, args: ())\nend\n\
+        sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\nend\n\
         def go(): Int with Vm\n  \
         a = spawn_now()\n  b = spawn_now()\n  \
         case a.drive()\n  in Asked(qa)\n    \
         case b.drive()\n    in Asked(qb)\n      \
-        case qa.as_call(sys.clock.Now)\n      in Some(call_a)\n        \
+        case qa.as_call(Clock.Now)\n      in Some(call_a)\n        \
         b.answer(call_a, 1)\n        1\n      \
         in None then 2\n      end\n    \
         in Done(_) then 3\n    in Fault(_) then 4\n    end\n  \
@@ -451,7 +461,7 @@ fn cross_vm_tokens_fault_safely() {
     assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidRequestToken)");
     // A request token of one machine cannot dispatch another.
     let source = "def spawn_now(): Vm[Int] with Vm\n  \
-        sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now()\n  end, args: ())\nend\n\
+        sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\nend\n\
         def go(): Int with Vm\n  \
         a = spawn_now()\n  b = spawn_now()\n  \
         case a.drive()\n  in Asked(qa)\n    \
@@ -464,8 +474,8 @@ fn cross_vm_tokens_fault_safely() {
 #[test]
 fn reject_installs_the_supplied_fault() {
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now()\n  end, args: ())\n  \
-        blocked = sys.vm.Vm().from_object(do || with Io.Print\n    sys.io.Print(\"x\")\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
+        blocked = sys.vm.Vm().from_object(do || with Io.Print\n    sys.io.print(\"x\")\n  end, args: ())\n  \
         case blocked.run()\n  in Done(_) then \"no-fault\"\n  in Fault(fault)\n    \
         case vm.drive()\n    in Asked(q)\n      \
         vm.reject(q, fault)\n      \
@@ -478,7 +488,7 @@ fn reject_installs_the_supplied_fault() {
 #[test]
 fn dispatch_applies_the_controlled_table() {
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.Now() + 1\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int 10 end)\n  \
         case vm.drive()\n  in Asked(q)\n    \
         vm.dispatch(q)\n    \
@@ -491,7 +501,7 @@ fn dispatch_applies_the_controlled_table() {
 fn run_step_and_drive_agree_on_one_program() {
     let program = "do || with Clock.Now\n    \
         total = 0\n    i = 0\n    while i < 3\n      \
-        total = total + sys.clock.Now()\n      i = i + 1\n    end\n    total\n  end";
+        total = total + sys.clock.now()\n      i = i + 1\n    end\n    total\n  end";
     // run() with a mocked clock.
     let by_run = format!(
         "def go(): Int with Vm\n  vm = sys.vm.Vm().from_object({program}, args: ())\n  \
@@ -514,7 +524,7 @@ fn run_step_and_drive_agree_on_one_program() {
          guard = 0\n  \
          while guard < 100000\n    guard = guard + 1\n    \
          case vm.drive()\n    in Asked(q)\n      \
-         case q.as_call(sys.clock.Now)\n      in Some(call) then vm.answer(call, 5)\n      \
+         case q.as_call(Clock.Now)\n      in Some(call) then vm.answer(call, 5)\n      \
          in None then vm.dispatch(q)\n      end\n    \
          in Done(v)\n      return v\n    in Fault(_)\n      return 0 - 1\n    end\n  end\n  \
          0 - 2\nend\ngo()\n"
@@ -531,7 +541,7 @@ fn waiting_state_appears_through_step_and_completes() {
     // completes it, and the machine continues to its terminal.
     let source = "def go(): Int with Vm, Clock.Sleep\n  \
         vm = sys.vm.Vm().from_object(do || with Clock.Sleep\n    \
-        sys.clock.Sleep(5)\n    27\n  end, args: ())\n  \
+        sys.clock.sleep(5)\n    27\n  end, args: ())\n  \
         vm.table().pass(Clock.Sleep)\n  \
         waits = 0\n  \
         guard = 0\n  \
@@ -551,7 +561,7 @@ fn waiting_state_appears_through_step_and_completes() {
     // run() waits out the completion without holder involvement.
     let source = "def go(): Int with Vm, Clock.Sleep\n  \
         vm = sys.vm.Vm().from_object(do || with Clock.Sleep\n    \
-        sys.clock.Sleep(5)\n    27\n  end, args: ())\n  \
+        sys.clock.sleep(5)\n    27\n  end, args: ())\n  \
         vm.table().pass(Clock.Sleep)\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm", "Clock.Sleep"]), "Done(27)");
@@ -620,7 +630,7 @@ fn nested_towers_stay_off_the_rust_stack() {
 #[test]
 fn read_line_reply_uses_the_pinned_core_result() {
     let source = "def go(): String with Io.ReadLine\n  \
-        case sys.io.ReadLine()\n  in Ok(line)\n    \
+        case sys.io.read_line()\n  in Ok(line)\n    \
         case line\n    in Some(text) then text\n    in None then \"<eof>\"\n    end\n  \
         in Err(e) then e.message()\n  end\nend\ngo()\n";
     let (out, host) = run_world("t.lm", source, &["Io.ReadLine"], VmConfig::default()).unwrap();
@@ -643,11 +653,11 @@ fn read_line_reply_uses_the_pinned_core_result() {
 #[test]
 fn rand_int_is_deterministic_and_validated() {
     let source = "def go(): Bool with Rand.Int\n  \
-        a = sys.rand.Int(0, 10)\n  \
-        b = sys.rand.Int(0, 10)\n  \
+        a = sys.rand.int(0, 10)\n  \
+        b = sys.rand.int(0, 10)\n  \
         a >= 0 and a < 10 and b >= 0 and b < 10\nend\ngo()\n";
     assert_eq!(allowed(source, &["Rand.Int"]), "Done(true)");
-    let source = "def go(): Int with Rand.Int\n  sys.rand.Int(5, 5)\nend\ngo()\n";
+    let source = "def go(): Int with Rand.Int\n  sys.rand.int(5, 5)\nend\ngo()\n";
     assert_eq!(allowed(source, &["Rand.Int"]), "Fault(HostFault)");
 }
 

@@ -1,5 +1,5 @@
 def whisper(text: String)
-  sys.io.Print(text)
+  sys.io.print(text)
 end
 
 whisper("quiet")

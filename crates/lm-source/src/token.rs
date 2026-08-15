@@ -53,6 +53,7 @@ pub enum Tok {
     KwIs,
     KwAs,
     KwLoop,
+    KwUse,
 
     /// A reserved keyword outside the current language slice.
     KwReserved(&'static str),
@@ -124,6 +125,7 @@ impl fmt::Display for Tok {
             Tok::KwIs => "`is`",
             Tok::KwAs => "`as`",
             Tok::KwLoop => "`loop`",
+            Tok::KwUse => "`use`",
             Tok::KwReserved(name) => return write!(f, "`{name}`"),
             Tok::LParen => "`(`",
             Tok::RParen => "`)`",

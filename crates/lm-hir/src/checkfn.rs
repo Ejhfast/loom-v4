@@ -9,7 +9,10 @@
 //! constructors. It stops at the first error and returns one precise
 //! diagnostic.
 
-use crate::check::{check_key_type, resolve_row, resolve_type, Ctx, FnSig, TyEnv};
+use crate::check::{
+    camel_member, check_key_type, resolve_row, resolve_type, snake_member, sys_group_name, Ctx,
+    FnSig, TyEnv, UseBinding,
+};
 use crate::exhaust::{useful, APat, PatMeta};
 use crate::hir::*;
 use lm_source::ast::{self, BinOp, ExprKind, PatternKind, StmtKind};
@@ -139,6 +142,14 @@ enum Callee {
     ListCtor(TypeId),
     /// `Map[K, V]()` with explicit arguments.
     MapCtor(TypeId, TypeId),
+    /// A `use`-bound callable `sys` member, for example `print` after
+    /// `use sys.io.print`.
+    SysMember {
+        group: &'static str,
+        member: String,
+    },
+    /// A `use`-bound `sys` group object, which is not callable.
+    SysGroup(&'static str),
 }
 
 /// The output of one polymorphic call check.
@@ -992,9 +1003,26 @@ impl<'o> FnChecker<'o> {
                 if name == "sys" {
                     return Err(Diagnostic::new(
                         "E1051",
-                        "`sys` is not a value; use `sys.<group>.<Operation>`",
+                        "`sys` is not a value; use `sys.<group>.<operation>`",
                         expr.span,
                     ));
+                }
+                match self.use_binding(ctx, name)? {
+                    Some(UseBinding::SysMember { group, member }) => {
+                        return self.check_sys_value(ctx, group, &member, expr.span);
+                    }
+                    Some(UseBinding::SysGroup(group)) => {
+                        return Err(Diagnostic::new(
+                            "E1051",
+                            format!(
+                                "`{name}` is the `sys.{}` group object and not a \
+                                 value; name an operation such as `{name}.<operation>`",
+                                group.to_ascii_lowercase()
+                            ),
+                            expr.span,
+                        ));
+                    }
+                    None => {}
                 }
                 if ctx.func_index.contains_key(name) {
                     return Err(Diagnostic::new(
@@ -1543,6 +1571,21 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::MapLit(vec![]),
                 })
             }
+            Callee::SysMember { group, member } => {
+                // A `use`-bound callable member: the same operation
+                // call rule as the qualified `sys` path. The alias
+                // grants nothing and the row charge is identical.
+                self.check_sys_call(ctx, group, &member, name_span, type_args, args, span)
+            }
+            Callee::SysGroup(group) => Err(Diagnostic::new(
+                "E1051",
+                format!(
+                    "`{name}` is the `sys.{}` group object and not callable; \
+                     name an operation such as `{name}.<operation>`",
+                    group.to_ascii_lowercase()
+                ),
+                name_span,
+            )),
         }
     }
 
@@ -1620,6 +1663,15 @@ impl<'o> FnChecker<'o> {
         }
         if let Some(arm) = self.resolve_ctor(ctx, None, name, expected, span, false)? {
             return Ok(Callee::Ctor { arm });
+        }
+        match self.use_binding(ctx, name)? {
+            Some(UseBinding::SysMember { group, member }) => {
+                return Ok(Callee::SysMember { group, member });
+            }
+            Some(UseBinding::SysGroup(group)) => {
+                return Ok(Callee::SysGroup(group));
+            }
+            None => {}
         }
         Err(Diagnostic::new(
             "E1005",
@@ -1975,7 +2027,7 @@ impl<'o> FnChecker<'o> {
                     "E1051",
                     format!(
                         "`sys.{name}` is not a value; name an operation such as \
-                         `sys.{name}.<Operation>`"
+                         `sys.{name}.<operation>`"
                     ),
                     name_span,
                 ));
@@ -2619,18 +2671,7 @@ impl<'o> FnChecker<'o> {
 
     /// Map a surface `sys` member name to its manifest group name.
     fn sys_group(name: &str) -> Option<&'static str> {
-        match name {
-            "io" => Some("Io"),
-            "fs" => Some("Fs"),
-            "clock" => Some("Clock"),
-            "rand" => Some("Rand"),
-            "net" => Some("Net"),
-            "proc" => Some("Proc"),
-            "vm" => Some("Vm"),
-            "compiler" => Some("Compiler"),
-            "reflect" => Some("Reflect"),
-            _ => None,
-        }
+        sys_group_name(name)
     }
 
     /// True when the bare name `sys` means the ABI root object here.
@@ -2638,20 +2679,43 @@ impl<'o> FnChecker<'o> {
         Ok(self.resolve_name("sys")?.is_none())
     }
 
-    /// Read `sys.<group>` out of a receiver expression.
+    /// Resolve a name to its `use` binding. Locals, module functions,
+    /// and module types shadow a `use` binding, per the resolution
+    /// order.
+    fn use_binding(&mut self, ctx: &Ctx, name: &str) -> Result<Option<UseBinding>, Diagnostic> {
+        if self.env.core_scope
+            || self.resolve_name(name)?.is_some()
+            || ctx.func_index.contains_key(name)
+            || ctx.lookup_type(name, &self.env).is_some()
+        {
+            return Ok(None);
+        }
+        Ok(ctx.uses.get(name).cloned())
+    }
+
+    /// Read `sys.<group>` out of a receiver expression: the qualified
+    /// form, or a `use`-bound group alias.
     fn sys_group_of(
         &mut self,
         ctx: &Ctx,
         recv: &ast::Expr,
     ) -> Result<Option<&'static str>, Diagnostic> {
-        let _ = ctx;
-        if let ExprKind::Field {
-            recv: inner, name, ..
-        } = &recv.kind
-        {
-            if matches!(inner.kind, ExprKind::Name(ref n) if n == "sys") && self.sys_in_scope()? {
-                return Ok(Self::sys_group(name));
+        match &recv.kind {
+            ExprKind::Field {
+                recv: inner, name, ..
+            } => {
+                if matches!(inner.kind, ExprKind::Name(ref n) if n == "sys")
+                    && self.sys_in_scope()?
+                {
+                    return Ok(Self::sys_group(name));
+                }
             }
+            ExprKind::Name(name) => {
+                if let Some(UseBinding::SysGroup(group)) = self.use_binding(ctx, name)? {
+                    return Ok(Some(group));
+                }
+            }
+            _ => {}
         }
         Ok(None)
     }
@@ -2756,13 +2820,7 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
-        let Some(op) = lm_abi::fixed_member(group, member) else {
-            return Err(Diagnostic::new(
-                "E1051",
-                format!("the group `{group}` has no operation named `{member}`"),
-                name_span,
-            ));
-        };
+        let op = Self::resolve_sys_member(group, member, name_span)?;
         let def = lm_abi::op(op);
         let params: Vec<TypeId> = def
             .params
@@ -2780,7 +2838,43 @@ impl<'o> FnChecker<'o> {
         })
     }
 
-    /// Check a first-class operation value `sys.<group>.<Member>`.
+    /// Resolve one surface member name inside a group to its fixed
+    /// operation slot. The surface form is snake_case; a capitalized
+    /// spelling of a real operation gets the casing rule.
+    fn resolve_sys_member(group: &str, member: &str, name_span: Span) -> Result<u32, Diagnostic> {
+        let starts_upper = member
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_uppercase())
+            .unwrap_or(false);
+        if starts_upper {
+            if lm_abi::fixed_member(group, member).is_some() {
+                return Err(Diagnostic::new(
+                    "E1051",
+                    format!(
+                        "callable `sys` members use snake_case; write `sys.{}.{}`",
+                        group.to_ascii_lowercase(),
+                        snake_member(member)
+                    ),
+                    name_span,
+                ));
+            }
+            return Err(Diagnostic::new(
+                "E1051",
+                format!("the group `{group}` has no operation named `{member}`"),
+                name_span,
+            ));
+        }
+        lm_abi::fixed_member(group, &camel_member(member)).ok_or_else(|| {
+            Diagnostic::new(
+                "E1051",
+                format!("the group `{group}` has no operation named `{member}`"),
+                name_span,
+            )
+        })
+    }
+
+    /// Check a first-class operation value `sys.<group>.<member>`.
     fn check_sys_value(
         &mut self,
         ctx: &mut Ctx,
@@ -2788,16 +2882,14 @@ impl<'o> FnChecker<'o> {
         member: &str,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
-        let Some(op) = lm_abi::fixed_member(group, member) else {
+        if group == "Vm" && member == "Vm" {
             return Err(Diagnostic::new(
                 "E1051",
-                format!(
-                    "`sys.{}.{member}` is not a first-class operation value",
-                    group.to_ascii_lowercase()
-                ),
+                "`sys.vm.Vm` is not a value; call `sys.vm.Vm()` to create a machine",
                 span,
             ));
-        };
+        }
+        let op = Self::resolve_sys_member(group, member, span)?;
         let fn_ty = Self::op_fn_type(ctx, op);
         let ty = ctx.store.intern(Type::Op(op, fn_ty));
         Ok(HExpr {
@@ -2807,11 +2899,69 @@ impl<'o> FnChecker<'o> {
         })
     }
 
+    /// Resolve the `as_call` argument: an exact `Operation` descriptor
+    /// such as `Io.Print`. The compiler supplies the typed signature
+    /// from the manifest. The old callable-argument form gets a
+    /// precise migration diagnostic.
+    fn as_call_descriptor(&mut self, ctx: &mut Ctx, expr: &ast::Expr) -> Result<u32, Diagnostic> {
+        match self.resolve_descriptor_for(expr, "the `as_call` argument") {
+            Ok((TargetKind::Exact, slot, name)) => {
+                if lm_abi::op(slot).kind != lm_abi::OpKind::Fixed {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`as_call` needs a fixed host operation; `{name}` is a \
+                             machine control operation"
+                        ),
+                        expr.span,
+                    ));
+                }
+                Ok(slot)
+            }
+            Ok((TargetKind::Group, _, name)) => Err(Diagnostic::new(
+                "E1004",
+                format!(
+                    "`as_call` needs an exact operation descriptor such as \
+                     `{name}.<Operation>`; `{name}` is a group"
+                ),
+                expr.span,
+            )),
+            Err(descriptor_err) => {
+                // The argument is not a descriptor. When it is the old
+                // callable form, name the exact rewrite.
+                if let Ok(value) = self.synth_expr(ctx, expr) {
+                    if let Type::Op(op, _) = ctx.store.get(value.ty) {
+                        return Err(Diagnostic::new(
+                            "E1004",
+                            format!(
+                                "`as_call` takes the operation descriptor, not the \
+                                 callable; write `as_call({})`",
+                                lm_abi::op_name(*op)
+                            ),
+                            expr.span,
+                        ));
+                    }
+                }
+                Err(descriptor_err)
+            }
+        }
+    }
+
     /// Resolve a policy-target descriptor expression: a group name
     /// such as `Io`, or an exact name such as `Clock.Now`.
     fn resolve_descriptor(
         &self,
         expr: &ast::Expr,
+    ) -> Result<(TargetKind, u32, String), Diagnostic> {
+        self.resolve_descriptor_for(expr, "a policy target")
+    }
+
+    /// Resolve a descriptor expression with a context word for the
+    /// shape diagnostic.
+    fn resolve_descriptor_for(
+        &self,
+        expr: &ast::Expr,
+        what: &str,
     ) -> Result<(TargetKind, u32, String), Diagnostic> {
         match &expr.kind {
             ExprKind::Name(name) => {
@@ -2838,13 +2988,13 @@ impl<'o> FnChecker<'o> {
                 }
                 Err(Diagnostic::new(
                     "E1051",
-                    "a policy target must be a group name or an exact operation name",
+                    format!("{what} must be a group name or an exact operation name"),
                     expr.span,
                 ))
             }
             _ => Err(Diagnostic::new(
                 "E1051",
-                "a policy target must be a group name or an exact operation name",
+                format!("{what} must be a group name or an exact operation name"),
                 expr.span,
             )),
         }
@@ -3124,18 +3274,7 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let op_value = self.synth_expr(ctx, &args[0])?;
-                let Type::Op(op, _) = ctx.store.get(op_value.ty).clone() else {
-                    return Err(Diagnostic::new(
-                        "E1004",
-                        format!(
-                            "`as_call` needs an identity-indexed operation value \
-                             such as `sys.io.Print`, found {}",
-                            ctx.store.display(op_value.ty)
-                        ),
-                        args[0].span,
-                    ));
-                };
+                let op = self.as_call_descriptor(ctx, &args[0])?;
                 let args_ty = Self::op_args_type(ctx, op);
                 let def = lm_abi::op(op);
                 let reply_ty = Self::abi_type_id(ctx, def.reply);

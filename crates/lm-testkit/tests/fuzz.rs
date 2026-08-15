@@ -310,7 +310,7 @@ fn regenerate_fuzz_corpus() {
     );
     // Week-4 finding class: a perform outside the claimed row, and a
     // first-class operation type with a forged signature.
-    let source = "def greet(name: String) with Io.Print\n  sys.io.Print(name)\nend\ngreet(\"x\")\n";
+    let source = "def greet(name: String) with Io.Print\n  sys.io.print(name)\nend\ngreet(\"x\")\n";
     let mut module = lm_testkit::compile_text("seed.lm", source).expect("seed compiles");
     let greet = module
         .funcs
@@ -319,7 +319,7 @@ fn regenerate_fuzz_corpus() {
         .expect("greet exists");
     module.funcs[greet].row.clear();
     write("perform-outside-claimed-row.lmbc", &module);
-    let source = "def f() with Io.Print\n  p = sys.io.Print\n  p(\"x\")\nend\nf()\n";
+    let source = "def f() with Io.Print\n  p = sys.io.print\n  p(\"x\")\nend\nf()\n";
     let mut module = lm_testkit::compile_text("seed.lm", source).expect("seed compiles");
     for ty in &mut module.types {
         if let BcType::Op(_, f) = ty {
@@ -378,7 +378,7 @@ fn regenerate_fuzz_corpus() {
     .expect("writes");
     std::fs::write(
         dir.join("unterminated-block.lm"),
-        "f = do || with Io.Print\n  sys.io.Print(\"x\n",
+        "f = do || with Io.Print\n  sys.io.print(\"x\n",
     )
     .expect("writes");
 }

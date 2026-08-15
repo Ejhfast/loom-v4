@@ -89,10 +89,20 @@ impl Parser {
     }
 
     fn module(&mut self) -> Result<Module, Diagnostic> {
+        let mut uses = Vec::new();
         let mut classes = Vec::new();
         let mut enums = Vec::new();
         let mut funcs = Vec::new();
         let mut entry = Vec::new();
+        // The `use` lines come first, before any definition or entry
+        // statement.
+        loop {
+            self.skip_newlines();
+            if !matches!(self.peek(), Tok::KwUse) {
+                break;
+            }
+            uses.push(self.use_decl()?);
+        }
         loop {
             self.skip_newlines();
             match self.peek() {
@@ -100,6 +110,12 @@ impl Parser {
                 Tok::KwClass => classes.push(self.class_def()?),
                 Tok::KwEnum => enums.push(self.enum_def()?),
                 Tok::KwDef => funcs.push(self.func_def()?),
+                Tok::KwUse => {
+                    return Err(self.error(
+                        "E1052",
+                        "a `use` line must come before every definition and statement",
+                    ));
+                }
                 _ => {
                     let stmt = self.stmt()?;
                     entry.push(stmt);
@@ -108,10 +124,34 @@ impl Parser {
             }
         }
         Ok(Module {
+            uses,
             classes,
             enums,
             funcs,
             entry,
+        })
+    }
+
+    /// Parse one `use` line: `use` plus one dotted path. The last
+    /// segment becomes the bound name.
+    fn use_decl(&mut self) -> Result<UseDecl, Diagnostic> {
+        let start = self.peek_span();
+        self.expect(Tok::KwUse, "`use`")?;
+        let (first, first_span) = self.ident("a path segment after `use`")?;
+        let mut path = vec![first];
+        let mut name_span = first_span;
+        while matches!(self.peek(), Tok::Dot) {
+            self.pos += 1;
+            let (segment, segment_span) = self.ident("a path segment after `.`")?;
+            path.push(segment);
+            name_span = segment_span;
+        }
+        let span = start.to(name_span);
+        self.expect_terminator()?;
+        Ok(UseDecl {
+            path,
+            span,
+            name_span,
         })
     }
 

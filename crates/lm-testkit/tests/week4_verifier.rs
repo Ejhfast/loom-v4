@@ -23,7 +23,7 @@ fn assert_rejected(module: &Module, needle: &str) {
 }
 
 const GREET: &str =
-    "def greet(name: String) with Io.Print\n  sys.io.Print(name)\nend\ngreet(\"x\")\n";
+    "def greet(name: String) with Io.Print\n  sys.io.print(name)\nend\ngreet(\"x\")\n";
 
 /// Find the index of the one function whose name matches.
 fn func_index(module: &Module, name: &str) -> usize {
@@ -97,7 +97,7 @@ fn a_perform_against_a_widened_target_row_is_rejected() {
     assert_rejected(&module, "not inside the claimed row");
 }
 
-const OP_VALUE: &str = "def f() with Io.Print\n  p = sys.io.Print\n  p(\"x\")\nend\nf()\n";
+const OP_VALUE: &str = "def f() with Io.Print\n  p = sys.io.print\n  p(\"x\")\nend\nf()\n";
 
 #[test]
 fn an_operation_type_with_a_forged_signature_is_rejected() {
@@ -179,7 +179,7 @@ fn table_edit_forgeries_are_rejected() {
 #[test]
 fn as_call_of_a_vm_control_slot_is_rejected() {
     let source = "def f(vm: Vm[Int]): Int with Vm\n  case vm.drive()\n  in Asked(q)\n    \
-        case q.as_call(sys.clock.Now)\n    in Some(call) then 1\n    in None then 2\n    end\n  \
+        case q.as_call(Clock.Now)\n    in Some(call) then 1\n    in None then 2\n    end\n  \
         in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\n1\n";
     let mut module = compile(source);
     let f = func_index(&module, "f");

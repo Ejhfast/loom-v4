@@ -7,12 +7,25 @@ use std::fmt::Write as _;
 /// statements.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
+    /// The `use` lines. They come before every definition.
+    pub uses: Vec<UseDecl>,
     pub classes: Vec<ClassDef>,
     pub enums: Vec<EnumDef>,
     pub funcs: Vec<FuncDef>,
     /// Top-level statements. The value of the last expression statement
     /// becomes the program result.
     pub entry: Vec<Stmt>,
+}
+
+/// One `use` line: a dotted path whose last segment becomes the bound
+/// name, for example `use sys.io.print`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseDecl {
+    /// The path segments, in source order.
+    pub path: Vec<String>,
+    pub span: Span,
+    /// The span of the last segment, which is the bound name.
+    pub name_span: Span,
 }
 
 /// One generic parameter: a type parameter, or an effect parameter
@@ -371,6 +384,9 @@ pub enum ExprKind {
 pub fn dump_module(module: &Module) -> String {
     let mut out = String::new();
     out.push_str("module\n");
+    for use_decl in &module.uses {
+        let _ = writeln!(out, "  use {}", use_decl.path.join("."));
+    }
     for class in &module.classes {
         let generics = dump_generics(&class.generics);
         match &class.parent {

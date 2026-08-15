@@ -3,7 +3,7 @@
 
 def run_blocked(): String with Vm
   vm = sys.vm.Vm().from_object(do || with Io.Print
-    sys.io.Print("hi\n")
+    sys.io.print("hi\n")
   end, args: ())
   case vm.run()
   in Done(_)  then "done"

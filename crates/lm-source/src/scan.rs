@@ -411,6 +411,7 @@ impl<'a> Scanner<'a> {
             "then" => Tok::KwThen,
             "with" => Tok::KwWith,
             "loop" => Tok::KwLoop,
+            "use" => Tok::KwUse,
             _ => Tok::Ident(word.to_string()),
         };
         // Track statement blocks, so a block body inside `(`, `[`, or

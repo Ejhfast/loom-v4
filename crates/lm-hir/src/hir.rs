@@ -317,7 +317,7 @@ pub enum HExprKind {
         op: u32,
         args: Vec<HExpr>,
     },
-    /// A first-class operation value, for example `sys.io.Print`.
+    /// A first-class operation value, for example `sys.io.print`.
     OpConst(u32),
     /// A policy-table edit intrinsic on a table handle.
     TableEdit {

@@ -1,2 +1,2 @@
 f = do || with Io.Print
-  sys.io.Print("x
+  sys.io.print("x

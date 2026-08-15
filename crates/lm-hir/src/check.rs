@@ -119,6 +119,162 @@ pub(crate) struct ClassInfo {
     pub(crate) arm_short: String,
 }
 
+/// One resolved `use` binding. Week 5 supports the fixed `sys` paths
+/// only; module imports arrive with packages in week 6.
+#[derive(Clone)]
+pub(crate) enum UseBinding {
+    /// A `sys` group object, by manifest group name (`Io`).
+    SysGroup(&'static str),
+    /// A callable `sys` member: the manifest group name plus the
+    /// surface member name (`print`, `read_line`, or `Vm`).
+    SysMember { group: &'static str, member: String },
+}
+
+/// Map a surface `sys` member name to its manifest group name.
+pub(crate) fn sys_group_name(name: &str) -> Option<&'static str> {
+    match name {
+        "io" => Some("Io"),
+        "fs" => Some("Fs"),
+        "clock" => Some("Clock"),
+        "rand" => Some("Rand"),
+        "net" => Some("Net"),
+        "proc" => Some("Proc"),
+        "vm" => Some("Vm"),
+        "compiler" => Some("Compiler"),
+        "reflect" => Some("Reflect"),
+        _ => None,
+    }
+}
+
+/// The manifest member name of one surface member:
+/// `read_line` becomes `ReadLine`. The mapping is mechanical.
+pub(crate) fn camel_member(surface: &str) -> String {
+    surface
+        .split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// The surface name of one manifest member: `ReadLine` becomes
+/// `read_line`.
+pub(crate) fn snake_member(member: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in member.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Resolve the `use` lines of one module into named bindings.
+fn resolve_uses(uses: &[ast::UseDecl]) -> Result<HashMap<String, UseBinding>, Diagnostic> {
+    let mut out: HashMap<String, UseBinding> = HashMap::new();
+    for decl in uses {
+        let path = decl.path.join(".");
+        if decl.path[0] != "sys" {
+            return Err(Diagnostic::new(
+                "E1052",
+                format!(
+                    "`use {path}` names a module import; module imports arrive \
+                     with packages, and only fixed `sys` paths bind here"
+                ),
+                decl.span,
+            ));
+        }
+        let binding = match decl.path.len() {
+            1 => {
+                return Err(Diagnostic::new(
+                    "E1052",
+                    "`use sys` binds nothing; name a group or an operation, \
+                     for example `use sys.io` or `use sys.io.print`",
+                    decl.span,
+                ));
+            }
+            2 => {
+                let Some(group) = sys_group_name(&decl.path[1]) else {
+                    return Err(Diagnostic::new(
+                        "E1052",
+                        format!("`sys` has no group named `{}`", decl.path[1]),
+                        decl.name_span,
+                    ));
+                };
+                UseBinding::SysGroup(group)
+            }
+            3 => {
+                let Some(group) = sys_group_name(&decl.path[1]) else {
+                    return Err(Diagnostic::new(
+                        "E1052",
+                        format!("`sys` has no group named `{}`", decl.path[1]),
+                        decl.span,
+                    ));
+                };
+                let member = decl.path[2].clone();
+                let starts_upper = member
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false);
+                let is_ctor = group == "Vm" && member == "Vm";
+                if starts_upper && !is_ctor {
+                    if lm_abi::fixed_member(group, &member).is_some() {
+                        return Err(Diagnostic::new(
+                            "E1052",
+                            format!(
+                                "callable `sys` members use snake_case; write \
+                                 `use sys.{}.{}`",
+                                decl.path[1],
+                                snake_member(&member)
+                            ),
+                            decl.name_span,
+                        ));
+                    }
+                    return Err(Diagnostic::new(
+                        "E1052",
+                        format!("the group `{group}` has no operation named `{member}`"),
+                        decl.name_span,
+                    ));
+                }
+                if !is_ctor && lm_abi::fixed_member(group, &camel_member(&member)).is_none() {
+                    return Err(Diagnostic::new(
+                        "E1052",
+                        format!("the group `{group}` has no operation named `{member}`"),
+                        decl.name_span,
+                    ));
+                }
+                UseBinding::SysMember { group, member }
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "E1052",
+                    "a fixed `sys` binding has at most three path segments",
+                    decl.span,
+                ));
+            }
+        };
+        let bound = decl.path.last().expect("a use path has segments").clone();
+        if out.insert(bound.clone(), binding).is_some() {
+            return Err(Diagnostic::new(
+                "E1052",
+                format!("the name `{bound}` already has a `use` binding"),
+                decl.name_span,
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// The lexical resolution scope of the code being checked.
 #[derive(Clone, Default)]
 pub(crate) struct TyEnv {
@@ -140,6 +296,10 @@ pub(crate) struct Ctx {
     pub(crate) sigs: Vec<FnSig>,
     pub(crate) funcs: Vec<Option<HirFunc>>,
     pub(crate) core: CoreIds,
+    /// The `use` bindings of the module, by bound name. They resolve
+    /// below locals and module definitions. They never grant
+    /// authority and never change a row.
+    pub(crate) uses: HashMap<String, UseBinding>,
 }
 
 impl Ctx {
@@ -483,6 +643,7 @@ pub fn check_module_with(
             some_class: 0,
             none_class: 0,
         },
+        uses: resolve_uses(&module.uses)?,
     };
     // Pass 1: predeclare all type names. User definitions come first,
     // so their class indices do not depend on the core.
