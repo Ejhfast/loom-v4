@@ -145,8 +145,8 @@ error, never a silent pick.
 A `use` of a module binds every export of that module under the
 bound name, so `matrix.Matrix` and `matrix.describe` resolve through
 the qualified name. A `use` of one export binds the short name
-directly, and a name the module already defines is an error with the
-module form as the stated fix.
+directly. A name the module already defines is an error, and the
+module form is the stated fix.
 
 ## 9. What week 6 left open
 

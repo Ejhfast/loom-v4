@@ -1,9 +1,13 @@
 # Week 6 Status
 
-This note records what landed in week 6, the identity decision with
-its justification and the rejected alternatives, the two caches and
-their trust boundaries, the simplifications inside the slice, the
-changed tests, and the deferred work.
+This note records the week 6 work. It covers:
+
+- what landed;
+- the identity decision, its justification, and the rejected
+  alternatives;
+- the two caches and their trust boundaries;
+- the simplifications inside the slice;
+- the changed tests and the deferred work.
 
 Bytecode format version 7 carries the import table and the export
 table. The compiler ABI version is 2. The core image pin moved to
@@ -24,11 +28,11 @@ The new crate `lm-compiler` holds the developer loop, above
   and the inline dependency table `{ path = "..." }`. There is no
   array, no nested table, no escape sequence, and no number or
   boolean literal. Every rejection names the line and the fix.
-- `graph` turns `src/**/*.lm` into the module tree
-  (`src/geometry/shapes.lm` is `geometry.shapes` inside its package
-  and `<package>.geometry.shapes` across packages), loads the
-  dependency closure, and orders the packages and the modules of each
-  package topologically. A cycle rejects at either level.
+- `graph` turns `src/**/*.lm` into the module tree. The file
+  `src/geometry/shapes.lm` is `geometry.shapes` inside its package
+  and `<package>.geometry.shapes` across packages. The layer also
+  loads the dependency closure and orders the packages and the
+  modules of each package. A cycle rejects at either level.
 - `env` holds the explicit typed `CompileEnv` and `LinkEnv` builders.
   Both freeze before use, so no build step mutates an environment
   another step reads.
@@ -61,37 +65,44 @@ The checker materializes an import in two phases, because it fills
 the class table in index order:
 
 - phase A reserves the class indices over the transitive closure of
-  the classes an interface names, before any signature resolves, so a
-  user signature may name an imported type;
+  the classes an interface names. It runs before any signature
+  resolves, so a user signature may name an imported type;
 - phase B fills the declarations, creates the imported functions, and
-  records the slots, after the core classes land, so an imported
-  signature may name a core type.
+  records the slots. It runs after the core classes land, so an
+  imported signature may name a core type.
 
 An imported definition lowers to a signature with no body. Every one
 takes an import slot: `Class`, `Ctor` (the construction function),
 `Method`, or `Func`. The slot names the providing module, the export
 name, the kind, and the pinned interface hash. The verifier proves
-the slot map is injective, that an imported function has no body, no
-captures, and no extra local slot, and that a class and its methods
-share one import state. The loader admits a module only with an empty
-import table, so an unfulfilled slot never executes.
+three rules:
+
+- the map from slot to definition is injective;
+- an imported function carries no body, no capture, and no extra
+  local slot;
+- a class and its methods share one import state.
+
+The loader admits a module only with an empty import table, so an
+unfulfilled slot never executes.
 
 ### The interface (`.lmi` version 2)
 
 An interface entry holds the export name, the kind, the full
 structural signature, the interface hash, and the definition hash.
-A signature names a class by qualified name (`mathlib.matrix.Matrix`,
-or the empty module path for a core class), so the file is
-position-independent and a compiler needs nothing else to check an
-importing module. The entry carries what the checker needs and the
-bytecode module does not: the declared parameter names, the fields
-that carry a default, the `init` signature, the arm names, and the
-own-field start of the layout.
+A signature names a class by qualified name, for example
+`mathlib.matrix.Matrix`. The empty module path names a core class.
+The file is therefore position-independent, and a compiler needs
+nothing else to check an importing module.
 
-The decoder caps the type nesting depth at 32 and bounds every length
-against the remaining input, so a crafted file rejects instead of
-growing the host stack. `lm inspect file.lmi` dumps the whole
-interface, methods included.
+The entry carries what the checker needs and the bytecode module does
+not: the declared parameter names, the fields that carry a default,
+the `init` signature, the arm names, and the own-field start of the
+layout.
+
+The decoder caps the type nesting depth at 32. It also bounds every
+length against the remaining input. A crafted file therefore rejects
+instead of growing the host stack. `lm inspect file.lmi` dumps the
+whole interface, methods included.
 
 ### The linker
 
@@ -100,10 +111,10 @@ artifact with an empty import table. It installs no global name,
 performs no host operation, and reads no file. Three rules do the
 work:
 
-- **slot resolution**: a slot resolves by module path and export name
-  against the exports the provider registered, and a provider whose
-  interface hash differs from the pin rejects with "rebuild the
-  importing module";
+- **slot resolution**: a slot resolves by module path and export
+  name, against the exports the provider registered. A provider whose
+  interface hash differs from the pin rejects, and the message names
+  the rebuild;
 - **definition sharing**: two definitions with one definition hash
   are one definition in the merged program;
 - **relocation**: every module-global index is renumbered, and
@@ -116,32 +127,36 @@ linked `examples/05-modules/app` program holds 27 classes, which is
 the 26-class core plus `Matrix`; three unmerged cores would hold 78.
 Sharing is not an optimization here, it is the semantics: an
 `Option[Int]` a dependency builds must match a `case` in the
-importer. A merge failure is not silent, because the merged artifact
-meets the whole verifier before it runs: two distinct `Option.Some`
-classes would fail the type rules of the call site.
+importer. A merge failure is never silent. The merged artifact meets
+the whole verifier before it runs, and two distinct `Option.Some`
+classes fail the type rules of the call site.
 
 The shared-definition rule compares the relocated definitions and
 rejects a hash that covers two different definitions. Function names
-stay out of the comparison, because function identity excludes the
-name: the generated constructor stubs of the abstract enum parents
-are all `unit; return` and legitimately share one definition.
+stay out of that comparison, because function identity excludes the
+name. The generated constructor stubs of the abstract enum parents
+are all `unit; return`, and they share one definition by design.
 
 ### The build directory and the rebuild gate
 
 `build/cache/modules/<key>.lma` and `.lmi` hold one compiled module.
-The key covers the container format version, the compiler ABI
-version, the verifier version, the operation manifest digest, the
-module path, the entry flag, the exact source bytes, the root set,
-and the **interface identity** of every visible module. An interface
-identity covers the export names, kinds, and interface hashes, and no
-definition hash.
+The key covers:
 
-That is the rebuild gate: an edit to an exported body moves the
-definition hash and the module semantic hash, and moves no interface
-hash, so the key of every dependent module is unchanged and only the
-edited module recompiles. The program still relinks, because the
-program contains the new body. An edit to an exported signature moves
-the interface hash and recompiles the dependents, where a stale call
+- the container format version, the compiler ABI version, the
+  verifier version, and the operation manifest digest;
+- the module path and the entry flag;
+- the exact source bytes and the root set;
+- the **interface identity** of every visible module.
+
+An interface identity covers the export names, the kinds, and the
+interface hashes. It covers no definition hash.
+
+That is the rebuild gate. An edit to an exported body moves the
+definition hash and the module semantic hash. It moves no interface
+hash, so the key of every dependent module holds and only the edited
+module recompiles. The program still relinks, because the program
+contains the new body. An edit to an exported signature moves the
+interface hash and recompiles the dependents. A stale call then
 becomes an ordinary type error.
 
 `lm build`, `lm run`, and `lm new` work on packages:
@@ -162,23 +177,23 @@ Hello Ada!
 ```
 
 A second build reports `cached` for every module. The report line per
-module replaces the per-package sketch in the build order, because a
-module is the unit the cache keys on and the unit a user edits.
+module replaces the per-package sketch in the build order. A module
+is the unit the cache keys on, and the unit a user edits.
 
 ## The identity decision
 
-Week 5 left the class-identity question open, and week 6 had to
-settle it, because import slots are the first real consumer of the
-hashes. The decision, in one line: **class identity is nominal,
-function identity stays anonymous, and a second identity — the
-interface hash — carries what import slots pin.**
+Week 5 left the class-identity question open. Week 6 had to settle
+it, because import slots are the first real consumer of the hashes.
+The decision, in one line: **class identity is nominal, function
+identity stays anonymous, and a second identity, the interface hash,
+carries what import slots pin.**
 
 ### What moved
 
 1. `class_bytes` writes the class name first. Two classes with
    different names are different definitions, whatever their shape.
 2. A new interface hash (`lm-iface-v1`) covers the export name, the
-   kind, and the full structural signature, with the compiler ABI
+   kind, and the full structural signature. It adds the compiler ABI
    version and the operation manifest digest. It covers no body.
 3. The core pin resolves by the pair `(label, hash)`, and the lowest
    matching class index wins.
@@ -205,15 +220,15 @@ The decisive consumer is not the core pin, though. It is the linker.
 The linker merges two definitions with one hash into one definition,
 and a merged class keeps one name. Under structural identity,
 `mathlib.Vec2 {x: Int, y: Int}` and `app.Point {x: Int, y: Int}`
-would merge into one class with one name, and the name is
-observable: `--show-result`, the value display, and every future
-reflective surface print it. Nominal identity removes that class of
-defect at the root instead of guarding one lookup.
+would merge into one class. The name is observable: `--show-result`,
+the value display, and every future reflective surface print it.
+Nominal identity removes that class of defect at the root, instead of
+guarding one lookup.
 
 Function identity stays anonymous. Nothing consumes a function name
-as identity: a caller references a callee by hash, the linker
-compares bodies without names, and the rename-invariance guarantee of
-week 5 is worth keeping. The asymmetry is now normative in
+as identity. A caller references a callee by hash, and the linker
+compares bodies without names. The rename-invariance guarantee of
+week 5 therefore holds. The asymmetry is now normative in
 specification 3.7.
 
 ### Why the interface hash exists, and why the four-way split does not
@@ -229,29 +244,29 @@ of the four boundaries and folds the rest in:
   the hash level, and `a_body_edit_rebuilds_only_the_edited_package`
   at the build level.
 - **NominalTypeId as a separate value: rejected.** The name is folded
-  into both hashes instead. A third identity would need a third bump
-  rule and a third place to keep in sync, and no consumer needs a
-  name-only identity: the linker needs nominal *plus* structural, and
-  the type checker never compares hashes at all, because it works on
-  class indices inside one module.
-- **ClassCodeHash as a separate value: rejected.** The existing class
-  definition hash already is the implementation identity: it covers
+  into both hashes instead. A third identity needs a third bump rule
+  and a third place to keep in sync. No consumer needs a name-only
+  identity. The linker needs nominal *plus* structural, and the type
+  checker never compares hashes: it works on class indices inside one
+  module.
+- **ClassCodeHash as a separate value: rejected.** The class
+  definition hash already is the implementation identity. It covers
   the fields, the selector names, and the implementing function
-  identities. Splitting a second hash out of it would add a bump rule
-  with no consumer, because the only user of the implementation
-  identity is the linker, which wants the whole class.
+  identities. A second hash split out of it adds a bump rule with no
+  consumer. The only user of the implementation identity is the
+  linker, and the linker wants the whole class.
 - **MethodHash: already present.** A method takes part in the class
-  identity as the pair of the selector name and the implementing
-  function identity, and that function has its own definition hash.
+  identity as one pair: the selector name and the implementing
+  function identity. That function carries its own definition hash.
   A method body hash never serves as selector identity. The property
   is unchanged and now normative in specification 3.7.
 
-The interface hash is deliberately cheap: it hashes the bytes the
+The interface hash is deliberately cheap. It hashes the bytes the
 `.lmi` publishes for one export, with class references by qualified
 name. It does not repeat the strongly-connected-component machinery
-in a second domain. That is sound because every referenced definition
-is separately pinned: a module that materializes `Matrix` also
-materializes every class `Matrix` names, and each of them takes its
+in a second domain. That is sound, because every referenced
+definition is separately pinned. A module that materializes `Matrix`
+also materializes every class `Matrix` names. Each of them takes its
 own slot with its own pin. A drift two levels deep therefore fails
 the pin of the definition that drifted.
 
@@ -265,11 +280,11 @@ location-independent, so content identity is unaffected.
 
 ### What the decision does not fix
 
-A definition hash is still not injective over source programs: two
+A definition hash is still not injective over source programs. Two
 classes with one name and one shape share a hash, and no rule makes
-class names unique inside a module. The specification now states this
-and requires a deterministic tie rule at every lookup that must
-choose. `corepin` states one (the lowest index), and the choice is
+class names unique inside a module. The specification states this
+now. It requires a deterministic tie rule at every lookup that must
+choose. `corepin` states one: the lowest index wins. The choice is
 unobservable, because such classes are the same definition.
 
 ### The verification-hash coupling
@@ -281,14 +296,16 @@ verifier rule and no identity rule reads one; the week-5 test
 `a_rename_does_not_move_the_verification_hash` renames a function and
 still holds.
 
-That closure has a second effect: the key now fixes every input of
+That closure has a second effect. The key now fixes every input of
 `module_identity` as well, so a cache hit may replay the identity
 instead of recomputing it. The cache stores the definition hashes and
 the core layout beside the admission, and `cache.identities` proves
-the skip. The loaded module no longer exposes a module semantic hash,
-because the key does not cover the function names and the export
-table does: a replayed semantic hash would be stale after a rename.
-`LoadedModule` exposes `class_hash` and `func_hash` instead.
+the skip.
+
+The loaded module no longer exposes a module semantic hash. The key
+does not cover the function names, and the export table does, so a
+replayed semantic hash would be stale after a rename. `LoadedModule`
+exposes `class_hash` and `func_hash` instead.
 
 ## The caches and the trust boundary
 
@@ -306,11 +323,12 @@ The boundary, restated for week 6:
   no hash stored in an artifact enters it, and the container stores
   no hash at all;
 - the key fixes every verifier input, so a hit skips every verifier
-  pass, and it fixes every identity input, so a hit replays the
+  pass;
+- the key fixes every identity input too, so a hit replays the
   definition hashes and the core layout;
-- the import table is inside the semantic region, so an added slot or
-  a moved pin misses the cache and meets the verifier and the loader
-  rule;
+- the import table is inside the semantic region. An added slot or a
+  moved pin therefore misses the cache, and meets the verifier and
+  the loader rule;
 - a rejected module never enters the cache;
 - the remaining assumption is SHA-256 collision resistance.
 
@@ -408,16 +426,22 @@ makes the developer loop fast.
 ## New tests
 
 `week6.rs` (28 cases) covers the build loop end to end on real
-package trees: the two-package workspace, the cache hit, the two
-rebuild gates, the stale caller, the damaged cache entry, the closed
-program artifact, the shared core, the imported enum, the imported
-generics, the imported mutable method, the imported effect
-parameter, the transitive type, the inheritance rejection, the
-self-import cycle, authority, the scaffold, a build from a
-subdirectory, the dependency-name collision, the unknown root, the
-module tree from directories, the library package, the manifest
-subset, program determinism across two build directories, the
-hand-driven typed environments, and the stale-pin link rejection.
+package trees:
+
+- the two-package workspace, the cache hit, and the two rebuild
+  gates;
+- the stale caller, the damaged cache entry, and the stale-pin link
+  rejection;
+- the closed program artifact, the shared core, and program
+  determinism across two build directories;
+- the imported enum, the imported generics, the imported mutable
+  method, the imported effect parameter, and the transitive type;
+- the inheritance rejection, the self-import cycle, and authority;
+- the scaffold, a build from a subdirectory, and the module tree from
+  directories;
+- the dependency-name collision, the unknown root, the library
+  package, and the manifest subset;
+- the hand-driven typed environments.
 
 `week6_interface.rs` (7 cases) covers the structural signature, the
 two hashes, the readable dump, determinism, every truncation and bad
@@ -434,22 +458,21 @@ A pass over the import surface with probe tests found three defects.
 Each probe failed first and passes now.
 
 - **The imported parent never reached the type store.** The
-  materializer set the parent inside the checker class record and not
-  in `lm_types::TypeStore`, which answers every subtype question. An
-  imported enum arm was therefore not a subtype of its family, and
-  `name(Dot())` rejected with a type mismatch. Phase A now calls
-  `set_class_parent` as soon as it reserves the parent.
+  materializer set the parent inside the checker class record only.
+  `lm_types::TypeStore` answers every subtype question, and it held
+  no parent. An imported enum arm was therefore not a subtype of its
+  family, and `name(Dot())` rejected with a type mismatch. Phase A
+  now calls `set_class_parent` as soon as it reserves the parent.
 - **A field default that named an imported class panicked the
-  checker.** Phase B ran after the default pass, so the default saw a
-  class index the checker record did not hold yet. Phase B now runs
-  before every body and every default, and the default table takes
-  the imported entries after the user and the core entries, so the
-  index alignment holds.
-- **Inheritance from an imported class gave a misleading
-  diagnostic.** The old message asked the user to declare the parent
-  earlier, which no edit can do. The rule is now explicit: a class
-  cannot inherit an imported class, and the message names the field
-  alternative.
+  checker.** Phase B ran after the default pass. The default
+  therefore saw a class index the checker record did not hold yet.
+  Phase B now runs before every body and every default. The default
+  table takes the imported entries last, so the index alignment
+  holds.
+- **Inheritance from an imported class misled the user.** The old
+  message asked for the parent declaration earlier in the file. No
+  edit can do that. The rule is explicit now: a class cannot inherit
+  an imported class. The message names the field alternative.
 
 The `lm run <package>` report moved to standard error in the same
 pass, so the program output stays clean on standard output.
