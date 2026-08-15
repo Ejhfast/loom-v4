@@ -216,7 +216,7 @@ carries what import slots pin.**
    version and the operation manifest digest. It covers no body.
 3. The core pin resolves by the pair `(label, hash)`, and the lowest
    matching class index wins.
-4. The class names enter the verification hash.
+4. Every definition name enters the verification hash.
 
 ### Why nominal class identity
 
@@ -244,11 +244,13 @@ the value display, and every future reflective surface print it.
 Nominal identity removes that class of defect at the root, instead of
 guarding one lookup.
 
-Function identity stays anonymous. Nothing consumes a function name
-as identity. A caller references a callee by hash, and the linker
-compares bodies without names. The rename-invariance guarantee of
-week 5 therefore holds. The asymmetry is now normative in
-specification 3.7.
+Function identity stays anonymous, with one week-5 exception. A
+function hash never covers its own name, a caller references a callee
+by hash, and the linker compares bodies without names. Inside a
+cyclic component the canonical member order sorts by name. A rename
+there moves the member ordinals, and therefore the member hashes of
+that component. Week 5 recorded the exception and the specification did
+not; specification 3.7 states both halves now.
 
 ### Why the interface hash exists, and why the four-way split does not
 
