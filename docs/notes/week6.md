@@ -586,6 +586,79 @@ here, one was already fixed, and one is a corrected sentence.
   module path only when the signature names a class of that module.
   The section above states the condition.
 
+## Open questions
+
+These need a decision. They are not defects with an obvious fix.
+
+### Rename invariance inside a cyclic component
+
+Specification 3.7 says a rename inside a cyclic component moves every
+member hash of that component. The implementation moves a hash only
+when the rename changes the canonical member order. Measured on the
+`even`/`odd` component:
+
+```text
+even -> evenx  even_moved=false  odd_moved=false
+even -> aaa    even_moved=false  odd_moved=false
+even -> zzz    even_moved=true   odd_moved=true
+```
+
+Do not read this as "the specification is wrong". The specification is
+normative, so the question is which behavior Loom must promise. Four
+positions:
+
+1. **Keep the specification as a conservative bound.** State that a
+   rename inside a cycle MAY move every member hash, and let the
+   implementation invalidate less. This promises nothing about the
+   ordering mechanism, so a future change to the canonical order stays
+   legal. The current implementation already satisfies this reading.
+2. **Describe the mechanism.** State the order rule exactly, as the
+   implementation behaves. This is precise, but it commits the
+   specification to sorting by name, and it makes the user-visible
+   rule strange: `even` to `evenx` is free, and `even` to `zzz`
+   rebuilds the component and everything downstream.
+3. **Change the implementation to match the text.** Always invalidate
+   the component on a rename inside it. This is predictable and costs
+   cache hits.
+4. **Remove the name from the canonical member order.** Order cyclic
+   members by a stable generated ID instead. Then a rename never moves
+   a definition hash, inside a cycle or outside one, and the
+   specification gets one uniform rule with no special case. There is
+   precedent: a closure inside a component with named definitions
+   already orders by its generated ID. The cost is that the component
+   hash no longer separates members that differ only by name, which
+   may be acceptable, because a function hash already excludes its own
+   name.
+
+Position 4 gives users the simplest story and deletes a special case.
+Position 2 is the weakest: it turns a guarantee into an implementation
+description and makes rebuild cost depend on alphabetical order.
+
+### The `mut` flag vectors inside the semantic section
+
+`encode_semantic` and the `BcType::Fn` arm of `encode_type` write the
+`mut` flags with no count, and take the count from the parameter
+table. `semantic_section` is the main input of `verification_hash`, so
+the injectivity of the cache key rests on it. `decode_semantic` reads
+`params.len()` flags, so a module that arrives as bytes is always
+consistent. The exposure is `lm_vm::load_cached(module)` with a
+hand-built `Module`: on a hit the loader replays the cached facts and
+skips `preflight`, which is the only rule that rejects
+`param_muts.len() != params.len()`. The independent review could not
+build a concrete collision, because every field after the flags is
+fixed-width or count-prefixed.
+
+Three fixes, which are not equivalent:
+
+1. Write the counts in the encoder. This closes the ambiguity for
+   every reader of `semantic_section`, but it changes artifact bytes,
+   so it needs a format version bump and a core re-pin.
+2. Add the counts to `verification_hash` only. This changes no
+   artifact, and closes the key injectivity alone.
+3. Run `preflight` on every load. This rejects the malformed module
+   instead of only separating it, and it restores the rule that a
+   cached load and an uncached load agree.
+
 ## Deferred work
 
 - Per-definition pruning of unused import slots.

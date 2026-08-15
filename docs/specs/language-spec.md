@@ -286,7 +286,7 @@ Canonical bytecode is a dedicated identity encoding, not the loading encoding. I
 
 Names enter identity by definition kind:
 
-- A **function** definition hash excludes its own name. A function rename outside a cyclic component moves the module hash through the export table, and moves no definition hash. Inside a cyclic component the canonical member order sorts by name. A rename that changes that order moves the member ordinals, and therefore every member hash of the component.
+- A **function** definition hash excludes its own name. A function rename outside a cyclic component moves the module hash through the export table, and moves no definition hash. Inside a cyclic component the canonical member order sorts by name, so a rename there moves the member ordinals and therefore every member hash of that component.
 - A **class** definition hash includes its own name. A class is a nominal type (5.3, 8.6), so two classes with different names are different definitions whatever their shape. A class rename moves that class hash, every hash that references it, and the module hash.
 
 *Implementation note.* The name-ordered member rule makes every definition name an input of identity. A host that caches a verified admission must therefore cover the names in its cache key, because the core-image resolution below reads identity. A content-ordered member rule would remove the function names from identity; it needs a canonical order over isomorphic members and is not defined here.
