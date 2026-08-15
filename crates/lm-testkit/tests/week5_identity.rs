@@ -466,7 +466,7 @@ fn a_cached_load_and_an_uncached_load_always_agree() {
     // when it applied. `stable` states whether the module semantic
     // hash must survive the mutation.
     type Mutation = fn(&mut Module) -> bool;
-    let cases: [(&str, &str, Mutation, bool); 5] = [
+    let cases: [(&str, &str, Mutation, bool); 7] = [
         (
             "selector",
             class_src,
@@ -527,6 +527,46 @@ fn a_cached_load_and_an_uncached_load_always_agree() {
                 let a = m.classes.iter().position(|c| c.name == "A").unwrap() as u32;
                 let b = m.classes.iter().position(|c| c.name == "B").unwrap() as u32;
                 point_new(m, a, b)
+            },
+            false,
+        ),
+        // Week 6: an import slot turns a definition into a
+        // declaration. The slot is inside the semantic region, so the
+        // module hash and the verification hash both move, and the
+        // loader rejects the module for its unresolved slot.
+        (
+            "import slot",
+            str_src,
+            |m: &mut Module| {
+                let target = m.funcs.iter().position(|f| f.name == "label").unwrap() as u32;
+                m.imports.push(lm_bytecode::Import {
+                    module: "other".to_string(),
+                    name: "label".to_string(),
+                    kind: lm_bytecode::ImportKind::Func,
+                    def: target,
+                    hash: [3u8; 32],
+                });
+                true
+            },
+            false,
+        ),
+        // A moved pin is a different import requirement, so the hash
+        // moves with it.
+        (
+            "moved pin",
+            str_src,
+            |m: &mut Module| {
+                let target = m.funcs.iter().position(|f| f.name == "label").unwrap() as u32;
+                m.funcs[target as usize].blocks.clear();
+                m.funcs[target as usize].local_types = m.funcs[target as usize].params.clone();
+                m.imports.push(lm_bytecode::Import {
+                    module: "other".to_string(),
+                    name: "label".to_string(),
+                    kind: lm_bytecode::ImportKind::Func,
+                    def: target,
+                    hash: [9u8; 32],
+                });
+                true
             },
             false,
         ),

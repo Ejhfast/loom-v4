@@ -422,6 +422,44 @@ fn a_library_module_carries_no_entry_expression() {
     assert!(error.contains("src/main.lm"), "{error}");
 }
 
+/// The file tree under `src` is the module tree:
+/// `src/geometry/shapes.lm` is the module `geometry.shapes`.
+#[test]
+fn a_directory_becomes_a_module_path() {
+    let tree = TempTree::new("tree");
+    tree.write(
+        "pkg/lm.package",
+        "[package]\nname = \"pkg\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "pkg/src/geometry/shapes.lm",
+        "class Dot\n\
+         \x20 size: Int = 2\n\
+         \n\
+         \x20 def area(self): Int\n\
+         \x20   self.size * self.size\n\
+         \x20 end\n\
+         end\n",
+    );
+    tree.write(
+        "pkg/src/main.lm",
+        "use sys.io.print\n\
+         use geometry.shapes\n\
+         \n\
+         def run() with Io.Print\n\
+         \x20 d = shapes.Dot()\n\
+         \x20 print(\"{d.area()}\\n\")\n\
+         end\n\
+         \n\
+         run()\n",
+    );
+    let report = tree.build("pkg").expect("builds");
+    let paths: Vec<&str> = report.modules.iter().map(|m| m.path.as_str()).collect();
+    assert!(paths.contains(&"pkg.geometry.shapes"), "{paths:?}");
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    assert_eq!(output, "4\n");
+}
+
 /// A package without `src/main.lm` is a library: it builds every
 /// module and produces no program.
 #[test]
@@ -445,6 +483,164 @@ fn the_manifest_subset_is_strict() {
     let error = tree.build("pkg").expect_err("the key must reject");
     assert!(error.contains("authors"), "{error}");
     assert!(error.contains("`[package]` key"), "{error}");
+}
+
+/// Two builds in two build directories produce the same program
+/// bytes, so the build loop depends on the sources only.
+#[test]
+fn the_program_bytes_are_deterministic() {
+    let tree = TempTree::new("determinism");
+    workspace(&tree);
+    let first = build_package(&tree.path("app"), &tree.path("build-a")).expect("builds");
+    let second = build_package(&tree.path("app"), &tree.path("build-b")).expect("builds");
+    assert_eq!(first.compiled(), 3);
+    assert_eq!(second.compiled(), 3, "the second directory reused an entry");
+    let a = std::fs::read(first.program.unwrap()).unwrap();
+    let b = std::fs::read(second.program.unwrap()).unwrap();
+    assert_eq!(a, b, "the program bytes are not reproducible");
+}
+
+// ---------------------------------------------------------------
+// The explicit environments, driven by hand.
+// ---------------------------------------------------------------
+
+/// The `CompileEnv` and `LinkEnv` path without a package on disk: bind
+/// an interface, compile a module against it, link the program,
+/// request the typed entry, and run it.
+#[test]
+fn the_typed_environments_compile_link_and_run_by_hand() {
+    use lm_compiler::{compile_module, link, CompileEnv, LinkEnv, LinkUnit};
+    use lm_source::SourceFile;
+
+    // The provider module compiles against an empty environment.
+    let library = compile_module(
+        "lib.math",
+        &SourceFile::new(
+            "lib/math.lm",
+            "def twice(n: Int): Int\n  n * 2\nend\n".to_string(),
+        ),
+        &CompileEnv::new().freeze(),
+        false,
+    )
+    .expect("the library compiles");
+
+    // The program binds the interface under the root name `lib`.
+    let mut env = CompileEnv::new();
+    env.bind_interface(library.interface.clone())
+        .expect("the interface binds");
+    env.bind_root("lib", "lib").expect("the root binds");
+    let program = compile_module(
+        "app.main",
+        &SourceFile::new(
+            "app/main.lm",
+            "use lib.math\n\ndef run(): Int\n  math.twice(21)\nend\n\nrun()\n".to_string(),
+        ),
+        &env.freeze(),
+        true,
+    )
+    .expect("the program compiles");
+    // The program artifact carries the import slot and never loads.
+    assert!(!program.module.imports.is_empty());
+    assert!(lm_vm::load(program.module.clone()).is_err());
+
+    let mut link_env = LinkEnv::new();
+    for unit in [&library, &program] {
+        link_env
+            .bind(LinkUnit {
+                path: unit.path.clone(),
+                module: unit.module.clone(),
+                interface: unit.interface.clone(),
+            })
+            .expect("the module binds");
+    }
+    let linked = link("app.main", &link_env.freeze()).expect("links");
+    // The typed entry: the result type and the empty row.
+    linked
+        .entry()
+        .expect(&lm_bytecode::BcType::Int, &[])
+        .expect("the entry matches");
+    assert!(linked
+        .entry()
+        .expect(&lm_bytecode::BcType::Str, &[])
+        .is_err());
+    let loaded = lm_vm::load_bytes(&linked.artifact).expect("the program loads");
+    let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(42)");
+}
+
+/// A pin that no longer matches the provider is a link error, and the
+/// message names the rebuild as the fix.
+#[test]
+fn a_stale_pin_fails_to_link() {
+    use lm_compiler::{link, LinkEnv, LinkUnit};
+    let tree = TempTree::new("stale-pin");
+    workspace(&tree);
+    let report = tree.build("app").expect("builds");
+    let _ = report;
+    // Rebuild the units from the cache files and move one pin.
+    let mut link_env = LinkEnv::new();
+    let mut units = Vec::new();
+    for (path, file) in [
+        ("mathlib.matrix", "mathlib/src/matrix.lm"),
+        ("app.greeting", "app/src/greeting.lm"),
+        ("app.main", "app/src/main.lm"),
+    ] {
+        let unit = compile_one(&tree, path, file);
+        units.push(unit);
+    }
+    // The greeting module pins the interface of `mathlib.matrix`.
+    let mut stale = units[1].clone();
+    let slot = stale
+        .module
+        .imports
+        .iter_mut()
+        .find(|i| i.module == "mathlib.matrix")
+        .expect("the greeting module imports the matrix module");
+    slot.hash[0] ^= 0xff;
+    for (idx, unit) in units.iter().enumerate() {
+        let unit = if idx == 1 { &stale } else { unit };
+        link_env
+            .bind(LinkUnit {
+                path: unit.path.clone(),
+                module: unit.module.clone(),
+                interface: unit.interface.clone(),
+            })
+            .expect("binds");
+    }
+    let error = link("app.main", &link_env.freeze()).expect_err("the stale pin must reject");
+    assert!(error.0.contains("no longer provides"), "{error}");
+    assert!(error.0.contains("rebuild"), "{error}");
+}
+
+/// Compile one module of a temporary workspace with the interfaces
+/// the earlier modules produced.
+fn compile_one(tree: &TempTree, path: &str, file: &str) -> lm_compiler::CompiledModule {
+    use lm_compiler::{compile_module, CompileEnv};
+    use lm_source::SourceFile;
+    use std::sync::Mutex;
+    // The interfaces of the modules this helper already produced.
+    static SEEN: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
+    let text = std::fs::read_to_string(tree.path(file)).expect("reads");
+    let mut env = CompileEnv::new();
+    {
+        let seen = SEEN.lock().expect("the lock holds");
+        for (_, bytes) in seen.iter() {
+            let interface =
+                lm_bytecode::interface::decode_interface(bytes).expect("the interface decodes");
+            env.bind_interface(interface).expect("binds");
+        }
+    }
+    env.bind_root("mathlib", "mathlib").expect("binds");
+    env.bind_root("greeting", "app.greeting").expect("binds");
+    env.bind_root("main", "app.main").expect("binds");
+    let source = SourceFile::new(file, text);
+    let compiled = compile_module(path, &source, &env.freeze(), path.ends_with(".main"))
+        .expect("the module compiles");
+    SEEN.lock()
+        .expect("the lock holds")
+        .push((path.to_string(), compiled.interface_bytes.clone()));
+    compiled
 }
 
 // ---------------------------------------------------------------

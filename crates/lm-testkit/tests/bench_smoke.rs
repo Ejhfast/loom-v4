@@ -149,6 +149,65 @@ fn perform_group_pass_smoke() {
     timed_world("perform_group_pass_20k", source, &["Clock"], "Done(20000)");
 }
 
+/// The week-6 build path: identity, the linker, and the cached load.
+/// The printed timings document the shape of the load path, where
+/// identity now runs once per distinct module instead of once per
+/// load.
+#[test]
+fn build_and_link_smoke() {
+    use lm_compiler::{compile_module, link, CompileEnv, LinkEnv, LinkUnit};
+    use lm_source::SourceFile;
+    let library =
+        "class Cell\n  value: Int = 0\n  def get(self): Int\n    self.value\n  end\nend\n\
+                   def make(n: Int): Cell\n  c = Cell()\n  c\nend\n";
+    let program = "use lib.cell\n\ndef run(): Int\n  c = cell.make(1)\n  c.get()\nend\n\nrun()\n";
+    let start = Instant::now();
+    let lib = compile_module(
+        "lib.cell",
+        &SourceFile::new("cell.lm", library.to_string()),
+        &CompileEnv::new().freeze(),
+        false,
+    )
+    .expect("compiles");
+    let mut env = CompileEnv::new();
+    env.bind_interface(lib.interface.clone()).expect("binds");
+    env.bind_root("lib", "lib").expect("binds");
+    let main = compile_module(
+        "app.main",
+        &SourceFile::new("main.lm", program.to_string()),
+        &env.freeze(),
+        true,
+    )
+    .expect("compiles");
+    let compiled = start.elapsed();
+    let start = Instant::now();
+    let mut link_env = LinkEnv::new();
+    for unit in [&lib, &main] {
+        link_env
+            .bind(LinkUnit {
+                path: unit.path.clone(),
+                module: unit.module.clone(),
+                interface: unit.interface.clone(),
+            })
+            .expect("binds");
+    }
+    let linked = link("app.main", &link_env.freeze()).expect("links");
+    let linked_time = start.elapsed();
+    let start = Instant::now();
+    let mut cache = lm_vm::VerifiedCache::new();
+    for _ in 0..20 {
+        lm_vm::load_bytes_cached(&linked.artifact, &mut cache).expect("loads");
+    }
+    let loads = start.elapsed();
+    assert_eq!(cache.verifications, 1);
+    assert_eq!(cache.identities, 1, "a cache hit recomputed the identity");
+    eprintln!(
+        "bench-smoke build_2_modules: {compiled:?} link: {linked_time:?} \
+         20_cached_loads: {loads:?} bytes: {}",
+        linked.artifact.len()
+    );
+}
+
 #[test]
 fn perform_block_smoke() {
     // Each child performs one blocked operation; the holder observes

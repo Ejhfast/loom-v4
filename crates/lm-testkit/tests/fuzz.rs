@@ -176,6 +176,64 @@ fn mutated_sources_never_panic_the_scanner_checker_or_lowering() {
     });
 }
 
+/// The interface decoder is a new byte surface. A mutated interface
+/// must reject or decode without a panic, and a decoded interface
+/// must re-encode to bytes that decode again.
+#[test]
+fn mutated_interfaces_never_panic_the_decoder() {
+    use lm_bytecode::interface::{decode_interface, encode_interface};
+    on_supported_stack(|| {
+        let mut prng = Prng(SEED ^ 0x1face);
+        let source = "class Point\n  x: Int = 0\n  def sum(self): Int\n    self.x\n  end\nend\n\
+                      enum Shape\n  Dot\n  Line(len: Int)\nend\n\
+                      def area(s: Shape): Int\n  case s\n  in Dot then 0\n  \
+                      in Line(l) then l\n  end\nend\n";
+        let compiled = lm_compiler::compile_module(
+            "seed.shapes",
+            &lm_source::SourceFile::new("seed.lm", source.to_string()),
+            &lm_compiler::CompileEnv::new().freeze(),
+            false,
+        )
+        .expect("the seed compiles");
+        let base = compiled.interface_bytes;
+        for _ in 0..ROUNDS {
+            let mut bytes = base.clone();
+            for _ in 0..=prng.below(3) {
+                mutate(&mut bytes, &mut prng);
+            }
+            assert!(bytes.len() <= MAX_CASE_BYTES, "a mutation grew the input");
+            if let Ok(interface) = decode_interface(&bytes) {
+                let again = encode_interface(&interface);
+                assert!(
+                    decode_interface(&again).is_ok(),
+                    "a decoded interface did not re-encode"
+                );
+            }
+        }
+    });
+}
+
+/// The manifest parser is a new text surface. Every mutation must
+/// produce a manifest or a diagnostic, never a panic.
+#[test]
+fn mutated_manifests_never_panic_the_parser() {
+    on_supported_stack(|| {
+        let mut prng = Prng(SEED ^ 0x504b47);
+        let base = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+                    [dependencies]\nmathlib = { path = \"../mathlib\" }\n"
+            .as_bytes()
+            .to_vec();
+        for _ in 0..ROUNDS {
+            let mut bytes = base.clone();
+            for _ in 0..=prng.below(3) {
+                mutate(&mut bytes, &mut prng);
+            }
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let _ = lm_compiler::parse_manifest(&text);
+        }
+    });
+}
+
 #[test]
 fn the_regression_corpus_replays() {
     on_supported_stack(|| {
