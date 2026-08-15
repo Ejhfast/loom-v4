@@ -55,8 +55,11 @@ pub enum BcType {
     Map(u32, u32),
     /// A tuple type with element type indices.
     Tuple(Vec<u32>),
-    /// A function value type: parameters, result, and effect row.
-    Fn(Vec<u32>, u32, Vec<BcRow>),
+    /// A function value type: parameters, parameter `mut` markers,
+    /// result, and effect row. The marker vector length equals the
+    /// parameter vector length by construction of the decoder; the
+    /// verifier checks hand-built modules.
+    Fn(Vec<u32>, Vec<bool>, u32, Vec<BcRow>),
     /// One type parameter of the enclosing generic function.
     Var(u32),
     StringBuilder,
@@ -325,6 +328,8 @@ pub struct Func {
     pub effect_params: u32,
     /// Parameter types as type-table indices.
     pub params: Vec<u32>,
+    /// Parameter `mut` markers, aligned with `params`.
+    pub param_muts: Vec<bool>,
     /// Result type as a type-table index.
     pub ret: u32,
     /// The declared effect row in canonical order.
@@ -332,9 +337,19 @@ pub struct Func {
     /// Capture types as type-table indices. Only a closure body has
     /// captures. A direct or virtual call target must have none.
     pub captures: Vec<u32>,
-    /// Total local slot count. Parameters use the first slots.
-    pub local_count: u32,
+    /// The declared type of every local slot, as type-table indices.
+    /// Parameters use the first slots, so the prefix must equal
+    /// `params`. The verifier validates the table; store and load
+    /// checks use the declared slot type.
+    pub local_types: Vec<u32>,
     pub blocks: Vec<Vec<Instr>>,
+}
+
+impl Func {
+    /// The total local slot count of the function.
+    pub fn local_count(&self) -> u32 {
+        self.local_types.len() as u32
+    }
 }
 
 /// One decoded module.
@@ -354,7 +369,7 @@ pub struct Module {
 }
 
 const MAGIC: &[u8; 4] = b"LMBC";
-const VERSION: u16 = 4;
+const VERSION: u16 = 5;
 
 // Opcode bytes for the serialized form.
 const OP_CONST_UNIT: u8 = 0x00;
@@ -519,13 +534,21 @@ pub fn encode(module: &Module) -> Vec<u8> {
         for p in &func.params {
             write_u32(&mut out, *p);
         }
+        // One `mut` flag byte per parameter; the count comes from the
+        // parameter table.
+        for m in &func.param_muts {
+            out.push(u8::from(*m));
+        }
         write_u32(&mut out, func.ret);
         encode_row(&mut out, &func.row);
         write_u32(&mut out, func.captures.len() as u32);
         for c in &func.captures {
             write_u32(&mut out, *c);
         }
-        write_u32(&mut out, func.local_count);
+        write_u32(&mut out, func.local_types.len() as u32);
+        for t in &func.local_types {
+            write_u32(&mut out, *t);
+        }
         write_u32(&mut out, func.blocks.len() as u32);
         for block in &func.blocks {
             write_u32(&mut out, block.len() as u32);
@@ -588,11 +611,14 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
                 write_u32(out, *e);
             }
         }
-        BcType::Fn(params, ret, row) => {
+        BcType::Fn(params, muts, ret, row) => {
             out.push(TY_FN);
             write_u32(out, params.len() as u32);
             for p in params {
                 write_u32(out, *p);
+            }
+            for m in muts {
+                out.push(u8::from(*m));
             }
             write_u32(out, *ret);
             encode_row(out, row);
@@ -827,6 +853,8 @@ pub enum DecodeError {
     BadTypeTag(u8),
     BadRowTag(u8),
     BadClassKind(u8),
+    /// A `mut` flag byte is not 0 or 1.
+    BadFlag(u8),
     BadUtf8,
     /// A table length field is larger than the remaining input allows.
     BadLength,
@@ -844,6 +872,7 @@ impl fmt::Display for DecodeError {
             DecodeError::BadTypeTag(t) => write!(f, "unknown type tag {t}"),
             DecodeError::BadRowTag(t) => write!(f, "unknown row element tag {t}"),
             DecodeError::BadClassKind(t) => write!(f, "unknown class kind tag {t}"),
+            DecodeError::BadFlag(v) => write!(f, "invalid flag byte {v}"),
             DecodeError::BadUtf8 => write!(f, "a string is not valid UTF-8"),
             DecodeError::BadLength => write!(f, "a length field exceeds the input size"),
             DecodeError::TrailingBytes => write!(f, "extra bytes follow the module"),
@@ -902,6 +931,15 @@ impl<'a> Cursor<'a> {
         let len = self.u32()? as usize;
         let bytes = self.take(len)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::BadUtf8)
+    }
+
+    /// Read one `mut` flag byte. Only 0 and 1 are valid.
+    fn flag(&mut self) -> Result<bool, DecodeError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            other => Err(DecodeError::BadFlag(other)),
+        }
     }
 }
 
@@ -1009,6 +1047,10 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
         for _ in 0..param_count {
             params.push(cur.u32()?);
         }
+        let mut param_muts = Vec::with_capacity(param_count);
+        for _ in 0..param_count {
+            param_muts.push(cur.flag()?);
+        }
         let ret = cur.u32()?;
         let row = decode_row(&mut cur)?;
         let capture_count = cur.len()?;
@@ -1016,7 +1058,13 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
         for _ in 0..capture_count {
             captures.push(cur.u32()?);
         }
-        let local_count = cur.u32()?;
+        // The local-type table count passes the length guard, so the
+        // allocation is bounded by the input size.
+        let local_count = cur.len()?;
+        let mut local_types = Vec::with_capacity(local_count);
+        for _ in 0..local_count {
+            local_types.push(cur.u32()?);
+        }
         let block_count = cur.len()?;
         let mut blocks = Vec::with_capacity(block_count);
         for _ in 0..block_count {
@@ -1032,10 +1080,11 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
             type_params,
             effect_params,
             params,
+            param_muts,
             ret,
             row,
             captures,
-            local_count,
+            local_types,
             blocks,
         });
     }
@@ -1087,9 +1136,13 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
             for _ in 0..count {
                 params.push(cur.u32()?);
             }
+            let mut muts = Vec::with_capacity(count);
+            for _ in 0..count {
+                muts.push(cur.flag()?);
+            }
             let ret = cur.u32()?;
             let row = decode_row(cur)?;
-            BcType::Fn(params, ret, row)
+            BcType::Fn(params, muts, ret, row)
         }
         TY_VAR => BcType::Var(cur.u32()?),
         TY_SB => BcType::StringBuilder,
@@ -1228,10 +1281,11 @@ mod tests {
             type_params: 0,
             effect_params: 0,
             params: vec![],
+            param_muts: vec![],
             ret,
             row: vec![],
             captures: vec![],
-            local_count: 1,
+            local_types: vec![0],
             blocks,
         }
     }
@@ -1246,7 +1300,7 @@ mod tests {
                 BcType::Class(0),
                 BcType::List(1),
                 BcType::Map(2, 1),
-                BcType::Fn(vec![1], 1, vec![BcRow::Op(1)]),
+                BcType::Fn(vec![1], vec![false], 1, vec![BcRow::Op(1)]),
                 BcType::StringBuilder,
                 BcType::ByteBuffer,
                 BcType::Var(0),
@@ -1292,10 +1346,11 @@ mod tests {
                     type_params: 0,
                     effect_params: 1,
                     params: vec![3, 1],
+                    param_muts: vec![false, false],
                     ret: 1,
                     row: vec![BcRow::Op(1), BcRow::Var(0)],
                     captures: vec![],
-                    local_count: 2,
+                    local_types: vec![3, 1],
                     blocks: vec![vec![Instr::LoadLocal(1), Instr::Return]],
                 },
             ],

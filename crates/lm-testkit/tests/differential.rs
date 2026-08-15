@@ -104,6 +104,20 @@ fn oracle_agrees_on_the_feature_corpus() {
         "rows = [(1, \"a\"), (2, \"b\")]\ntotal = 0\nnames = StringBuilder()\ni = 0\n\
          while i < rows.len()\n  total = total + rows.at(i)[0]\n  \
          names.append(rows.at(i)[1])\n  i = i + 1\nend\n(total, names.build())\n",
+        // Labeled arguments reorder to declaration order.
+        "def mix(a: Int, b: Int, c: Int): Int\n  a * 100 + b * 10 + c\nend\n\
+         mix(1, c: 3, b: 2) + mix(c: 3, b: 2, a: 1)\n",
+        // Sibling inference in literals and branch joins.
+        "xs = [Some(1), None]\nm = {1: Some(\"one\"), 2: None}\n\
+         o = if xs.len() > 1\n  None\nelse\n  Some(5)\nend\n\
+         (xs.at(1).is_none(), m.at(2).is_none(), o.is_none())\n",
+        // Nested sibling inference.
+        "xs = [Some(None), Some(Some(1)), None]\ncase xs.at(1)\nin Some(Some(v)) then v\n\
+         in Some(None) then 8\nin None then 9\nend\n",
+        // A mutable closure parameter with a mutable argument.
+        "xs: [Int] = [1]\nf = do |mut ys: [Int]|: () ys.push(2) end\nf(xs)\nxs.len()\n",
+        // A nested exact-arm scrutinee is exhaustive.
+        "s = Some(Some(3))\ncase s\nin Some(Some(v)) then v\nend\n",
     ];
     for (idx, text) in corpus.iter().enumerate() {
         compare(&format!("corpus[{idx}]"), text);

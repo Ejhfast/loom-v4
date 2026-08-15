@@ -246,10 +246,11 @@ fn regenerate_fuzz_corpus() {
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
+                param_muts: vec![],
                 ret: 2,
                 row: vec![],
                 captures: vec![],
-                local_count: 0,
+                local_types: vec![],
                 blocks: vec![vec![
                     Instr::New(0),
                     Instr::CallVirtualG {
@@ -292,10 +293,11 @@ fn regenerate_fuzz_corpus() {
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
+                param_muts: vec![],
                 ret: 2,
                 row: vec![],
                 captures: vec![],
-                local_count: 0,
+                local_types: vec![],
                 blocks: vec![vec![
                     Instr::NewG { class: 0, app: 0 },
                     Instr::CastType(6),
@@ -325,12 +327,14 @@ fn regenerate_fuzz_corpus() {
         }
     }
     write("op-type-signature-forgery.lmbc", &module);
-    // The overflow found by this harness: a forged `local_count`
+    // The overflow found by this harness: a forged local slot count
     // sized a multi-gigabyte allocation in the verifier dataflow and
-    // in the initial frame before any bound applied. The verifier now
-    // rejects the count before it sizes anything.
-    write("local-count-bomb.lmbc", &{
-        let mut module = Module {
+    // in the initial frame before any bound applied. The count is now
+    // the local-type table length, so the seed patches the encoded
+    // count field; the decoder length guard rejects it before any
+    // allocation.
+    {
+        let module = Module {
             strings: vec![],
             types: base_types(),
             selectors: vec![],
@@ -341,17 +345,31 @@ fn regenerate_fuzz_corpus() {
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
+                param_muts: vec![],
                 ret: 2,
                 row: vec![],
                 captures: vec![],
-                local_count: 0x7fff_ffff,
+                local_types: vec![],
                 blocks: vec![vec![Instr::ConstInt(1), Instr::Return]],
             }],
             entry: 0,
         };
-        module.funcs[0].local_count = 0x7fff_ffff;
-        module
-    });
+        let mut bytes = lm_bytecode::encode(&module);
+        let pos = bytes
+            .windows(4)
+            .position(|w| w == b"main")
+            .expect("the function name is in the encoding");
+        // After the name: type_params, effect_params, the parameter
+        // count, the result type, the row count, and the capture
+        // count. The local-type table count follows.
+        let count_at = pos + 4 + 4 * 6;
+        bytes[count_at..count_at + 4].copy_from_slice(&0x7fff_ffffu32.to_le_bytes());
+        assert!(
+            lm_bytecode::decode(&bytes).is_err(),
+            "the forged local count must be rejected"
+        );
+        std::fs::write(dir.join("local-count-bomb.lmbc"), bytes).expect("corpus writes");
+    }
     // Source seeds: shapes that stressed the scanner and parser.
     std::fs::write(
         dir.join("deep-parens.lm"),

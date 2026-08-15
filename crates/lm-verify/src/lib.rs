@@ -204,11 +204,11 @@ impl<'m> Ctx<'m> {
                 let elems: Vec<u32> = elems.iter().map(|e| self.subst(*e, targs, rows)).collect();
                 self.intern(BcType::Tuple(elems))
             }
-            BcType::Fn(params, ret, row) => {
+            BcType::Fn(params, muts, ret, row) => {
                 let params: Vec<u32> = params.iter().map(|p| self.subst(*p, targs, rows)).collect();
                 let ret = self.subst(ret, targs, rows);
                 let row = self.row_subst(&row, rows);
-                self.intern(BcType::Fn(params, ret, row))
+                self.intern(BcType::Fn(params, muts, ret, row))
             }
             BcType::Vm(t) => {
                 let t = self.subst(t, targs, rows);
@@ -239,12 +239,15 @@ impl<'m> Ctx<'m> {
                         .zip(ys.iter())
                         .all(|(x, y)| self.is_subtype(*x, *y))
             }
-            (BcType::Fn(fp, fr, frow), BcType::Fn(ep, er, erow)) => {
+            (BcType::Fn(fp, fm, fr, frow), BcType::Fn(ep, em, er, erow)) => {
+                // A function that needs a `mut` argument is not valid
+                // where the expected type promises a read-only call.
                 fp.len() == ep.len()
                     && fp
                         .iter()
                         .zip(ep.iter())
                         .all(|(f, e)| self.is_subtype(*e, *f))
+                    && fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
                     && self.is_subtype(fr, er)
                     && self.row_included(&frow, &erow)
             }
@@ -334,7 +337,7 @@ impl<'m> Ctx<'m> {
                 | BcType::List(_)
                 | BcType::Map(_, _)
                 | BcType::Tuple(_)
-                | BcType::Fn(_, _, _)
+                | BcType::Fn(_, _, _, _)
                 | BcType::StringBuilder
                 | BcType::ByteBuffer
                 | BcType::Fault
@@ -357,7 +360,7 @@ impl<'m> Ctx<'m> {
                 self.vars_bounded(k, limit, elimit) && self.vars_bounded(v, limit, elimit)
             }
             BcType::Tuple(elems) => elems.iter().all(|e| self.vars_bounded(*e, limit, elimit)),
-            BcType::Fn(params, ret, row) => {
+            BcType::Fn(params, _, ret, row) => {
                 params.iter().all(|p| self.vars_bounded(*p, limit, elimit))
                     && self.vars_bounded(ret, limit, elimit)
                     && self.row_vars_bounded(&row, elimit)
@@ -421,7 +424,8 @@ impl<'m> Ctx<'m> {
             params.push(self.abi_ty(*p)?);
         }
         let ret = self.abi_ty(def.reply)?;
-        Ok(self.intern(BcType::Fn(params, ret, vec![])))
+        let muts = vec![false; params.len()];
+        Ok(self.intern(BcType::Fn(params, muts, ret, vec![])))
     }
 
     /// The argument-view type of one fixed operation: unit for a
@@ -568,7 +572,13 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
                     check_ref(*e)?;
                 }
             }
-            BcType::Fn(params, ret, row) => {
+            BcType::Fn(params, muts, ret, row) => {
+                if muts.len() != params.len() {
+                    return Err(terr(format!(
+                        "type {idx} has a function type whose mut markers do \
+                         not align with the parameters"
+                    )));
+                }
                 for p in params {
                     check_ref(*p)?;
                 }
@@ -626,7 +636,7 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
     };
     // Row canonicality inside function types.
     for (idx, ty) in module.types.iter().enumerate() {
-        if let BcType::Fn(_, _, row) = ty {
+        if let BcType::Fn(_, _, _, row) = ty {
             if !ctx.row_canonical(row) {
                 return Err(terr(format!("type {idx} has a non-canonical row")));
             }
@@ -799,6 +809,13 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
                             "override of selector {sel} changes the parameter types"
                         )));
                     }
+                    // `get` keeps a malformed marker vector from
+                    // panicking before the signature validation runs.
+                    if base.param_muts.get(1..) != f.param_muts.get(1..) {
+                        return Err(cerr(format!(
+                            "override of selector {sel} changes the parameter mut markers"
+                        )));
+                    }
                     if base.type_params != f.type_params || base.effect_params != f.effect_params {
                         return Err(cerr(format!(
                             "override of selector {sel} changes the generic arity"
@@ -818,12 +835,31 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
             }
         }
     }
-    // Validate function signatures.
+    // Validate function signatures and the declared local-type
+    // tables. The verifier validates the table instead of trusting
+    // it: entries must be valid types, the parameter prefix must
+    // equal the signature, and every variable must be in scope.
     for (fidx, func) in module.funcs.iter().enumerate() {
+        if func.param_muts.len() != func.params.len() {
+            return Err(err(
+                fidx as u32,
+                "the parameter mut markers do not align with the parameters",
+            ));
+        }
+        if func.local_types.len() < func.params.len() {
+            return Err(err(fidx as u32, "more parameters than local slots"));
+        }
+        if func.local_types[..func.params.len()] != func.params[..] {
+            return Err(err(
+                fidx as u32,
+                "the local-type table prefix does not equal the parameter types",
+            ));
+        }
         for t in func
             .params
             .iter()
             .chain(func.captures.iter())
+            .chain(func.local_types.iter())
             .chain([&func.ret])
         {
             if *t as usize >= module.types.len() {
@@ -938,23 +974,20 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
     // Reject a forged slot count before any allocation is sized from
     // it. The dataflow pass allocates one state cell per block and
     // local, so both bounds run first.
-    if func.local_count > MAX_LOCAL_SLOTS {
+    if func.local_count() > MAX_LOCAL_SLOTS {
         return Err(err(
             fidx,
             format!(
                 "the local slot count {} exceeds the portable limit {MAX_LOCAL_SLOTS}",
-                func.local_count
+                func.local_count()
             ),
         ));
     }
-    if (func.blocks.len() as u64) * (func.local_count as u64 + 1) > MAX_DATAFLOW_CELLS {
+    if (func.blocks.len() as u64) * (func.local_count() as u64 + 1) > MAX_DATAFLOW_CELLS {
         return Err(err(
             fidx,
             "the function exceeds the verifier state budget; split it",
         ));
-    }
-    if func.params.len() > func.local_count as usize {
-        return Err(err(fidx, "more parameters than local slots"));
     }
     if func.blocks.is_empty() {
         return Err(err(fidx, "the function has no blocks"));
@@ -987,7 +1020,7 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                     }
                 }
                 Instr::LoadLocal(slot) | Instr::StoreLocal(slot) => {
-                    if *slot >= func.local_count {
+                    if *slot >= func.local_count() {
                         return Err(err(fidx, at("local slot out of range")));
                     }
                 }
@@ -1157,7 +1190,7 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
     }
     // Dataflow pass: reconstruct types at every reachable block entry.
     let mut states: Vec<Option<State>> = vec![None; func.blocks.len()];
-    let mut locals = vec![None; func.local_count as usize];
+    let mut locals = vec![None; func.local_count() as usize];
     for (i, p) in func.params.iter().enumerate() {
         locals[i] = Some(*p);
     }
@@ -1323,8 +1356,20 @@ fn step(
             push(state, ty)?;
         }
         Instr::StoreLocal(slot) => {
+            // The declared local-type table is the typing judgment:
+            // a store must fit the declared slot type, and the slot
+            // holds the declared type afterwards. This keeps a
+            // widened local at its declared type instead of the
+            // concrete stored type.
             let ty = pop(state)?;
-            state.locals[*slot as usize] = Some(ty);
+            let declared = func.local_types[*slot as usize];
+            if !ctx.is_subtype(ty, declared) {
+                return Err(fail(format!(
+                    "store to local {slot} expects the declared type {declared}, \
+                     found type {ty}"
+                )));
+            }
+            state.locals[*slot as usize] = Some(declared);
         }
         Instr::Pop => {
             pop(state)?;
@@ -1472,7 +1517,7 @@ fn step(
             }
             let callee_ty = state.stack[state.stack.len() - 1 - argc];
             let (params, ret, row) = match ctx.ty(callee_ty) {
-                BcType::Fn(params, ret, row) => (params, ret, row),
+                BcType::Fn(params, _, ret, row) => (params, ret, row),
                 _ => {
                     return Err(fail(format!(
                         "closure call target type {callee_ty} is not a function type"
@@ -1490,7 +1535,12 @@ fn step(
         Instr::MakeClosure { func: f, .. } => {
             let target = &module.funcs[*f as usize];
             pop_args(state, &target.captures)?;
-            let fn_ty = BcType::Fn(target.params.clone(), target.ret, target.row.clone());
+            let fn_ty = BcType::Fn(
+                target.params.clone(),
+                target.param_muts.clone(),
+                target.ret,
+                target.row.clone(),
+            );
             let idx = {
                 let uni = ctx.uni.borrow();
                 uni.index.get(&fn_ty).copied()
@@ -1784,7 +1834,7 @@ fn step(
                                     "`Vm.FromObject` needs an EmptyVm receiver".to_string(),
                                 ));
                             }
-                            let BcType::Fn(params, ret, _) = ctx.ty(fn_ty) else {
+                            let BcType::Fn(params, _, ret, _) = ctx.ty(fn_ty) else {
                                 return Err(fail(
                                     "`Vm.FromObject` needs a function value".to_string(),
                                 ));
@@ -1878,7 +1928,7 @@ fn step(
                     "the perform of `{name}` is not inside the claimed row"
                 )));
             }
-            let BcType::Fn(params, ret, _) = ctx.ty(fn_ty) else {
+            let BcType::Fn(params, _, ret, _) = ctx.ty(fn_ty) else {
                 unreachable!("a verified Op type embeds a function type");
             };
             if params.len() != argc {
@@ -1973,11 +2023,16 @@ mod tests {
             name: name.to_string(),
             type_params: 0,
             effect_params: 0,
+            param_muts: vec![false; params.len()],
+            local_types: {
+                let mut locals = params.clone();
+                locals.resize(2, TY_INT);
+                locals
+            },
             params,
             ret,
             row: vec![],
             captures: vec![],
-            local_count: 2,
             blocks,
         }
     }
@@ -2061,10 +2116,11 @@ mod tests {
                     type_params: 1,
                     effect_params: 0,
                     params: vec![4],
+                    param_muts: vec![false],
                     ret: 5,
                     row: vec![],
                     captures: vec![],
-                    local_count: 2,
+                    local_types: vec![4, 5],
                     blocks: vec![vec![
                         NewG { class: 0, app: 1 },
                         StoreLocal(1),
@@ -2088,7 +2144,7 @@ mod tests {
 
     #[test]
     fn accepts_class_construction_and_virtual_call() {
-        let m = class_module(vec![vec![
+        let mut m = class_module(vec![vec![
             New(0),
             StoreLocal(0),
             LoadLocal(0),
@@ -2101,6 +2157,9 @@ mod tests {
             },
             Return,
         ]]);
+        // The entry stores a Counter into local 0, so the declared
+        // slot type must accept it.
+        m.funcs[0].local_types = vec![4, TY_INT];
         assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
     }
 
@@ -2327,10 +2386,11 @@ mod tests {
             type_params: 0,
             effect_params: 0,
             params: vec![],
+            param_muts: vec![],
             ret: TY_INT,
             row: vec![BcRow::Op(0)],
             captures: vec![],
-            local_count: 0,
+            local_types: vec![],
             blocks: vec![vec![ConstInt(1), Return]],
         });
         let e = verify_module(&m).unwrap_err();
@@ -2348,10 +2408,11 @@ mod tests {
             type_params: 0,
             effect_params: 0,
             params: vec![],
+            param_muts: vec![],
             ret: TY_INT,
             row: vec![BcRow::Op(0)],
             captures: vec![],
-            local_count: 0,
+            local_types: vec![],
             blocks: vec![vec![ConstInt(1), Return]],
         });
         assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
@@ -2473,10 +2534,11 @@ mod tests {
             type_params: 0,
             effect_params: 0,
             params: vec![5],
+            param_muts: vec![false],
             ret: TY_INT,
             row: vec![BcRow::Op(0)],
             captures: vec![],
-            local_count: 1,
+            local_types: vec![5],
             blocks: vec![vec![ConstInt(1), Return]],
         });
         let e = verify_module(&m).unwrap_err();
@@ -2507,10 +2569,11 @@ mod tests {
             type_params: 0,
             effect_params: 0,
             params: vec![],
+            param_muts: vec![],
             ret: TY_INT,
             row: vec![],
             captures: vec![TY_INT],
-            local_count: 0,
+            local_types: vec![],
             blocks: vec![vec![LoadCapture(0), Return]],
         });
         let e = verify_module(&m).unwrap_err();
@@ -2534,10 +2597,11 @@ mod tests {
             type_params: 0,
             effect_params: 0,
             params: vec![],
+            param_muts: vec![],
             ret: TY_INT,
             row: vec![],
             captures: vec![TY_INT],
-            local_count: 0,
+            local_types: vec![],
             blocks: vec![vec![LoadCapture(0), Return]],
         });
         let e = verify_module(&m).unwrap_err();
@@ -2556,16 +2620,18 @@ mod tests {
             CallValue { argc: 1 },
             Return,
         ]]);
-        m.types.push(BcType::Fn(vec![TY_INT], TY_INT, vec![]));
+        m.types
+            .push(BcType::Fn(vec![TY_INT], vec![false], TY_INT, vec![]));
         m.funcs.push(Func {
             name: "closure".to_string(),
             type_params: 0,
             effect_params: 0,
             params: vec![TY_INT],
+            param_muts: vec![false],
             ret: TY_INT,
             row: vec![],
             captures: vec![TY_INT],
-            local_count: 1,
+            local_types: vec![TY_INT],
             blocks: vec![vec![LoadCapture(0), LoadLocal(0), Add, Return]],
         });
         assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
@@ -2582,16 +2648,18 @@ mod tests {
             Return,
         ]]);
         m.strings = vec!["Io.Print".to_string()];
-        m.types.push(BcType::Fn(vec![], TY_INT, vec![BcRow::Op(0)]));
+        m.types
+            .push(BcType::Fn(vec![], vec![], TY_INT, vec![BcRow::Op(0)]));
         m.funcs.push(Func {
             name: "printer".to_string(),
             type_params: 0,
             effect_params: 0,
             params: vec![],
+            param_muts: vec![],
             ret: TY_INT,
             row: vec![BcRow::Op(0)],
             captures: vec![],
-            local_count: 0,
+            local_types: vec![],
             blocks: vec![vec![ConstInt(1), Return]],
         });
         let e = verify_module(&m).unwrap_err();
@@ -2637,7 +2705,8 @@ mod tests {
     fn rejects_entry_with_parameters() {
         let mut m = module_with(vec![vec![ConstInt(1), Return]]);
         m.funcs[0].params = vec![TY_INT];
-        m.funcs[0].local_count = 1;
+        m.funcs[0].param_muts = vec![false];
+        m.funcs[0].local_types = vec![TY_INT, TY_INT];
         let e = verify_module(&m).unwrap_err();
         assert!(e.message.contains("entry function"), "{e}");
     }
@@ -2677,10 +2746,11 @@ mod tests {
                 type_params: 0,
                 effect_params: 0,
                 params: vec![],
+                param_muts: vec![],
                 ret: TY_UNIT,
                 row: vec![],
                 captures: vec![],
-                local_count: 0,
+                local_types: vec![],
                 blocks: vec![
                     vec![ConstBool(true), JumpIfFalse(1), New(1), Jump(2)],
                     vec![New(2), Jump(2)],

@@ -244,7 +244,7 @@ fn collect_vars(ctx: &Ctx, ty: TypeId, out: &mut HashSet<u32>) {
                 collect_vars(ctx, e, out);
             }
         }
-        Type::Fn(params, ret, _) => {
+        Type::Fn(params, _, ret, _) => {
             let ret = *ret;
             for p in params.clone() {
                 collect_vars(ctx, p, out);
@@ -323,7 +323,7 @@ fn unify(
                 }
             }
         }
-        (Type::Fn(dp, dr, drow), Type::Fn(ap, ar, arow)) => {
+        (Type::Fn(dp, _, dr, drow), Type::Fn(ap, _, ar, arow)) => {
             if dp.len() == ap.len() {
                 for (d, a) in dp.iter().zip(ap.iter()) {
                     unify(ctx, *d, *a, targs, rowargs, false);
@@ -555,7 +555,7 @@ impl<'o> FnChecker<'o> {
                 body,
             } => {
                 let expected_ret = match (ret, ctx.store.get(expected)) {
-                    (None, Type::Fn(_, r, _)) => Some(*r),
+                    (None, Type::Fn(_, _, r, _)) => Some(*r),
                     _ => None,
                 };
                 let found =
@@ -587,6 +587,7 @@ impl<'o> FnChecker<'o> {
                     expr.span,
                 )?;
                 self.expect_compatible(ctx, expected, found, expr.span)
+                    .map_err(|d| note_ctor_collision(ctx, d, name, expected))
             }
             ExprKind::MethodCall {
                 recv,
@@ -1103,26 +1104,15 @@ impl<'o> FnChecker<'o> {
                 })
             }
             ExprKind::ListLit(items) => {
-                let mut checked: Vec<HExpr> = Vec::new();
-                let mut elem: Option<TypeId> = None;
-                for item in items {
-                    let h = self.synth_expr(ctx, item)?;
-                    elem = Some(match elem {
-                        None => h.ty,
-                        Some(prev) => ctx
-                            .store
-                            .join(prev, h.ty)
-                            .ok_or_else(|| self.mismatch(ctx, prev, h.ty, item.span))?,
-                    });
-                    checked.push(h);
-                }
-                let elem = elem.ok_or_else(|| {
-                    Diagnostic::new(
+                if items.is_empty() {
+                    return Err(Diagnostic::new(
                         "E1037",
                         "an empty list literal needs an expected type",
                         expr.span,
-                    )
-                })?;
+                    ));
+                }
+                let elems: Vec<&ast::Expr> = items.iter().collect();
+                let (checked, elem) = self.synth_join_elems(ctx, &elems)?;
                 let ty = ctx.store.intern(Type::List(elem));
                 Ok(HExpr {
                     ty,
@@ -1131,10 +1121,16 @@ impl<'o> FnChecker<'o> {
                 })
             }
             ExprKind::MapLit(entries) => {
-                let mut checked = Vec::new();
+                if entries.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1037",
+                        "an empty map literal needs an expected type",
+                        expr.span,
+                    ));
+                }
+                let mut keys = Vec::new();
                 let mut key_ty: Option<TypeId> = None;
-                let mut val_ty: Option<TypeId> = None;
-                for (key, value) in entries {
+                for (key, _) in entries {
                     let k = self.synth_expr(ctx, key)?;
                     check_key_type(ctx, k.ty, key.span)?;
                     key_ty = Some(match key_ty {
@@ -1144,23 +1140,12 @@ impl<'o> FnChecker<'o> {
                             .join(prev, k.ty)
                             .ok_or_else(|| self.mismatch(ctx, prev, k.ty, key.span))?,
                     });
-                    let v = self.synth_expr(ctx, value)?;
-                    val_ty = Some(match val_ty {
-                        None => v.ty,
-                        Some(prev) => ctx
-                            .store
-                            .join(prev, v.ty)
-                            .ok_or_else(|| self.mismatch(ctx, prev, v.ty, value.span))?,
-                    });
-                    checked.push((k, v));
+                    keys.push(k);
                 }
-                let (Some(k), Some(v)) = (key_ty, val_ty) else {
-                    return Err(Diagnostic::new(
-                        "E1037",
-                        "an empty map literal needs an expected type",
-                        expr.span,
-                    ));
-                };
+                let values: Vec<&ast::Expr> = entries.iter().map(|(_, v)| v).collect();
+                let (checked_values, v) = self.synth_join_elems(ctx, &values)?;
+                let k = key_ty.expect("the literal has entries");
+                let checked: Vec<(HExpr, HExpr)> = keys.into_iter().zip(checked_values).collect();
                 let ty = ctx.store.intern(Type::Map(k, v));
                 Ok(HExpr {
                     ty,
@@ -1181,8 +1166,8 @@ impl<'o> FnChecker<'o> {
             ExprKind::Labeled { label, .. } => Err(Diagnostic::new(
                 "E1006",
                 format!(
-                    "the argument label `{label}:` is only valid on the `args` \
-                     argument of `from_object`"
+                    "the argument label `{label}:` is not valid here; a label \
+                     names a declared parameter of the called function"
                 ),
                 expr.span,
             )),
@@ -1365,6 +1350,7 @@ impl<'o> FnChecker<'o> {
         let info = &ctx.classes[arm as usize];
         let type_names = info.type_params.clone();
         let field_tys = info.field_tys.clone();
+        let field_names = info.field_names.clone();
         let ret = info.self_ty;
         let short = info.arm_short.clone();
         let muts = vec![false; field_tys.len()];
@@ -1379,6 +1365,7 @@ impl<'o> FnChecker<'o> {
             explicit,
             &field_tys,
             &muts,
+            &field_names,
             ret,
             &[],
             args,
@@ -1434,6 +1421,7 @@ impl<'o> FnChecker<'o> {
                     type_args,
                     &sig.params,
                     &sig.param_muts,
+                    &sig.param_names,
                     sig.ret,
                     &sig.row,
                     args,
@@ -1454,13 +1442,14 @@ impl<'o> FnChecker<'o> {
                 let info = &ctx.classes[class as usize];
                 let type_names = info.type_params.clone();
                 let ret = info.self_ty;
-                let (params, muts, row) = match &info.init {
+                let (params, muts, names, row) = match &info.init {
                     Some(init) => (
                         init.params.clone(),
                         init.param_muts.clone(),
+                        init.param_names.clone(),
                         init.row.clone(),
                     ),
-                    None => (vec![], vec![], vec![]),
+                    None => (vec![], vec![], vec![], vec![]),
                 };
                 let out = self.check_poly_call(
                     ctx,
@@ -1473,6 +1462,7 @@ impl<'o> FnChecker<'o> {
                     type_args,
                     &params,
                     &muts,
+                    &names,
                     ret,
                     &row,
                     args,
@@ -1651,12 +1641,12 @@ impl<'o> FnChecker<'o> {
         // operation. The row charge follows the identity in the type.
         if let Type::Op(op, fn_ty) = ctx.store.get(callee.ty).clone() {
             let (params, ret) = match ctx.store.get(fn_ty) {
-                Type::Fn(params, ret, _) => (params.clone(), *ret),
+                Type::Fn(params, _, ret, _) => (params.clone(), *ret),
                 _ => unreachable!("an Op type embeds a function type"),
             };
             self.charge_op(ctx, op, span)?;
             let muts = vec![false; params.len()];
-            let args = self.check_args_simple(ctx, args, &params, &muts, "operation", span)?;
+            let args = self.check_args_simple(ctx, args, &params, &muts, &[], "operation", span)?;
             return Ok(HExpr {
                 ty: ret,
                 mutable: true,
@@ -1666,8 +1656,8 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
-        let (params, ret, row) = match ctx.store.get(callee.ty) {
-            Type::Fn(params, ret, row) => (params.clone(), *ret, row.clone()),
+        let (params, muts, ret, row) = match ctx.store.get(callee.ty) {
+            Type::Fn(params, muts, ret, row) => (params.clone(), muts.clone(), *ret, row.clone()),
             _ => {
                 return Err(Diagnostic::new(
                     "E1032",
@@ -1680,8 +1670,9 @@ impl<'o> FnChecker<'o> {
             }
         };
         self.charge_row(ctx, &row, span)?;
-        let muts = vec![false; params.len()];
-        let args = self.check_args_simple(ctx, args, &params, &muts, "closure", span)?;
+        // The function type carries the `mut` markers, so a call
+        // through a value needs mutable capability at mut positions.
+        let args = self.check_args_simple(ctx, args, &params, &muts, &[], "closure", span)?;
         Ok(HExpr {
             ty: ret,
             mutable: true,
@@ -1693,12 +1684,14 @@ impl<'o> FnChecker<'o> {
     }
 
     /// Check arguments against concrete parameter types.
+    #[allow(clippy::too_many_arguments)]
     fn check_args_simple(
         &mut self,
         ctx: &mut Ctx,
         args: &[ast::Expr],
         params: &[TypeId],
         param_muts: &[bool],
+        param_names: &[String],
         what: &str,
         span: Span,
     ) -> Result<Vec<HExpr>, Diagnostic> {
@@ -1713,6 +1706,7 @@ impl<'o> FnChecker<'o> {
                 span,
             ));
         }
+        let args = arrange_args(args, param_names, what)?;
         let mut checked = Vec::new();
         for ((arg, param), is_mut) in args.iter().zip(params.iter()).zip(param_muts.iter()) {
             let h = self.check_expr(ctx, arg, *param)?;
@@ -1801,6 +1795,7 @@ impl<'o> FnChecker<'o> {
         explicit: &[ast::TypeExpr],
         decl_params: &[TypeId],
         param_muts: &[bool],
+        param_names: &[String],
         decl_ret: TypeId,
         decl_row: &[lm_types::RowElem],
         args: &[ast::Expr],
@@ -1817,6 +1812,7 @@ impl<'o> FnChecker<'o> {
                 span,
             ));
         }
+        let args = arrange_args(args, param_names, what)?;
         let mut targs: Vec<Option<TypeId>> = pre_bound;
         debug_assert_eq!(targs.len(), type_names.len());
         let mut rowargs: Vec<Option<Row>> = vec![None; effect_count];
@@ -1846,7 +1842,7 @@ impl<'o> FnChecker<'o> {
         // explicitly rowed function argument binds the effect
         // variable of a higher-order callee.
         let mut pre: Vec<Option<HExpr>> = Vec::with_capacity(args.len());
-        for (arg, decl) in args.iter().zip(decl_params.iter()) {
+        for (arg, decl) in args.iter().copied().zip(decl_params.iter()) {
             let part = self.partial_substitute(ctx, *decl, &targs, &rowargs);
             if (ctx.store.contains_var(part) || ctx.store.contains_effect_var(part))
                 && self.can_synth(ctx, arg)
@@ -1878,6 +1874,7 @@ impl<'o> FnChecker<'o> {
         let mut checked = Vec::with_capacity(args.len());
         for ((arg, decl), (h, is_mut)) in args
             .iter()
+            .copied()
             .zip(decl_params.iter())
             .zip(pre.into_iter().zip(param_muts.iter()))
         {
@@ -2116,6 +2113,7 @@ impl<'o> FnChecker<'o> {
                     type_args,
                     &sig.params,
                     &sig.param_muts,
+                    &sig.param_names,
                     sig.ret,
                     &sig.row,
                     args,
@@ -2210,7 +2208,7 @@ impl<'o> FnChecker<'o> {
         }
         let muts = vec![false; params.len()];
         let mut all_args = vec![recv_h];
-        let checked = self.check_args_simple(ctx, args, &params, &muts, name, span)?;
+        let checked = self.check_args_simple(ctx, args, &params, &muts, &[], name, span)?;
         all_args.extend(checked);
         // Element reads keep the receiver capability.
         let mutable = match op {
@@ -2280,6 +2278,7 @@ impl<'o> FnChecker<'o> {
                 args,
                 &parent_init.params,
                 &parent_init.param_muts,
+                &parent_init.param_names,
                 "super.init",
                 span,
             )?;
@@ -2329,6 +2328,7 @@ impl<'o> FnChecker<'o> {
             &[],
             &sig.params,
             &sig.param_muts,
+            &sig.param_names,
             sig.ret,
             &sig.row,
             args,
@@ -2582,12 +2582,14 @@ impl<'o> FnChecker<'o> {
             .collect();
         child.outer = None;
         let name = format!("<closure {}>", ctx.funcs.len());
+        let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
         let func = ctx.push_func(
             HirFunc {
                 name,
                 type_params: type_param_count,
                 effect_params: effect_param_count,
                 params: ptys.clone(),
+                param_muts: pmuts.clone(),
                 ret: body_ty,
                 row: declared_row.clone(),
                 captures: capture_tys,
@@ -2598,12 +2600,13 @@ impl<'o> FnChecker<'o> {
                 type_params: env.type_names.clone(),
                 effect_params: env.effect_names.clone(),
                 params: ptys.clone(),
-                param_muts: pmuts,
+                param_muts: pmuts.clone(),
+                param_names,
                 ret: body_ty,
                 row: declared_row.clone(),
             },
         );
-        let fn_ty = ctx.store.intern_fn(ptys, body_ty, declared_row);
+        let fn_ty = ctx.store.intern_fn(ptys, pmuts, body_ty, declared_row);
         Ok(HExpr {
             ty: fn_ty,
             mutable: true,
@@ -2683,7 +2686,8 @@ impl<'o> FnChecker<'o> {
             .map(|p| Self::abi_type_id(ctx, *p))
             .collect();
         let ret = Self::abi_type_id(ctx, def.reply);
-        ctx.store.intern_fn(params, ret, vec![])
+        ctx.store
+            .intern_fn(params.clone(), vec![false; params.len()], ret, vec![])
     }
 
     /// The argument-view type of one fixed operation: `()` for a
@@ -2766,7 +2770,7 @@ impl<'o> FnChecker<'o> {
             .map(|p| Self::abi_type_id(ctx, *p))
             .collect();
         let muts = vec![false; params.len()];
-        let checked = self.check_args_simple(ctx, args, &params, &muts, member, span)?;
+        let checked = self.check_args_simple(ctx, args, &params, &muts, &[], member, span)?;
         self.charge_op(ctx, op, span)?;
         let ret = Self::abi_type_id(ctx, def.reply);
         Ok(HExpr {
@@ -2958,7 +2962,7 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 let program = self.synth_expr(ctx, &args[0])?;
-                let Type::Fn(params, ret, _) = ctx.store.get(program.ty).clone() else {
+                let Type::Fn(params, _, ret, _) = ctx.store.get(program.ty).clone() else {
                     return Err(Diagnostic::new(
                         "E1004",
                         format!(
@@ -3392,6 +3396,58 @@ impl<'o> FnChecker<'o> {
         }
     }
 
+    /// Check one branch body inside a fresh scope with an optional
+    /// flow refinement, after a constructor-state reset to the fork
+    /// entry.
+    fn check_branch_body(
+        &mut self,
+        ctx: &mut Ctx,
+        body: &[ast::Stmt],
+        mode: BlockMode,
+        refinement: Option<(u32, String, TypeId)>,
+        entry_state: &Option<CtorState>,
+        span: Span,
+    ) -> Result<(Vec<HStmt>, TypeId, bool), Diagnostic> {
+        if let (Some(c), Some(entry)) = (self.ctor.as_mut(), entry_state) {
+            c.state = entry.clone();
+        }
+        self.scopes.push(HashMap::new());
+        let shadow_init =
+            refinement.map(|(slot, name, target)| self.bind_refinement(slot, name, target));
+        let result = self.check_block(ctx, body, mode, span);
+        self.scopes.pop();
+        let (mut body_h, ty, mutable) = result?;
+        if let Some(init) = shadow_init {
+            body_h.insert(0, init);
+        }
+        Ok((body_h, ty, mutable))
+    }
+
+    /// The sibling hint for deferred branches: the family-widened
+    /// join of the branch types that resolved alone. `None` when no
+    /// branch resolved.
+    fn branch_hint(
+        &mut self,
+        ctx: &mut Ctx,
+        resolved: &[(TypeId, Span)],
+    ) -> Result<Option<TypeId>, Diagnostic> {
+        let mut hint: Option<TypeId> = None;
+        for (ty, span) in resolved {
+            if *ty == NEVER {
+                continue;
+            }
+            let wide = deep_widen(ctx, *ty);
+            hint = Some(match hint {
+                None => wide,
+                Some(prev) => ctx
+                    .store
+                    .join(prev, wide)
+                    .ok_or_else(|| self.mismatch(ctx, prev, wide, *span))?,
+            });
+        }
+        Ok(hint)
+    }
+
     /// Check an `if` expression. `expected` is `Some` in check mode.
     fn check_if(
         &mut self,
@@ -3414,65 +3470,115 @@ impl<'o> FnChecker<'o> {
             // not a silent discard.
             (None, None) => BlockMode::Value(UNIT),
         };
-        let mut checked_arms = Vec::new();
-        let mut branch_types: Vec<(TypeId, bool, Span)> = Vec::new();
-        // Constructor states fork per branch and merge afterwards.
-        let mut branch_states: Vec<(CtorState, bool)> = Vec::new();
+        let synth_join = matches!(branch_mode, BlockMode::Synth);
+        // Check every condition first. A later condition runs only
+        // when the earlier bodies were skipped, so it checks against
+        // the fork entry state, not a branch state.
+        let mut conds: Vec<HExpr> = Vec::new();
+        let mut refinements: Vec<Option<(u32, String, TypeId)>> = Vec::new();
         let mut ctor_entry: Option<CtorState> = None;
-        for (aidx, (cond, body)) in arms.iter().enumerate() {
-            // Condition effects flow into every later branch, so the
-            // fork snapshot follows the first condition.
+        for (aidx, (cond, _)) in arms.iter().enumerate() {
             let cond = self.check_expr(ctx, cond, BOOL)?;
             if aidx == 0 {
                 ctor_entry = self.ctor.as_ref().map(|c| c.state.clone());
-            } else if let (Some(c), Some(entry)) = (self.ctor.as_mut(), &ctor_entry) {
-                c.state = entry.clone();
             }
-            // Apply the flow refinement of `local is Type` inside the
-            // true branch only: the branch scope shadows the name
-            // with a narrowed local behind a checked cast.
-            let refinement = self.refinement_of(ctx, &cond);
-            self.scopes.push(HashMap::new());
-            let shadow_init =
-                refinement.map(|(slot, name, target)| self.bind_refinement(slot, name, target));
-            let result = self.check_block(ctx, body, branch_mode, span);
-            self.scopes.pop();
-            let (mut body_h, ty, mutable) = result?;
-            if let Some(init) = shadow_init {
-                body_h.insert(0, init);
+            refinements.push(self.refinement_of(ctx, &cond));
+            conds.push(cond);
+        }
+        // The branch bodies in order; the `else` body is the last
+        // entry when present.
+        type BranchBody<'b> = (&'b Vec<ast::Stmt>, Option<(u32, String, TypeId)>);
+        let mut bodies: Vec<BranchBody<'_>> = Vec::new();
+        for ((_, body), refinement) in arms.iter().zip(refinements.into_iter()) {
+            bodies.push((body, refinement));
+        }
+        if let Some(body) = else_body {
+            bodies.push((body, None));
+        }
+        // Pass 1: check each body. In synthesis mode a branch with an
+        // unresolved constructor (`E1045`) is deferred for the
+        // sibling hint. Each result records the constructor state
+        // after its body.
+        type BranchOut = (Vec<HStmt>, TypeId, bool, Option<CtorState>);
+        let mut results: Vec<Option<BranchOut>> = Vec::new();
+        let mut gap: Option<Diagnostic> = None;
+        for (body, refinement) in &bodies {
+            match self.check_branch_body(
+                ctx,
+                body,
+                branch_mode,
+                refinement.clone(),
+                &ctor_entry,
+                span,
+            ) {
+                Ok((body_h, ty, mutable)) => {
+                    let state = self.ctor.as_ref().map(|c| c.state.clone());
+                    results.push(Some((body_h, ty, mutable, state)));
+                }
+                Err(d) if synth_join && is_inference_gap(&d) => {
+                    if gap.is_none() {
+                        gap = Some(d);
+                    }
+                    results.push(None);
+                }
+                Err(d) => return Err(d),
             }
+        }
+        // Pass 2: with a gap, every branch checks against the sibling
+        // hint, so nested constructor arguments adopt one shared
+        // instantiation.
+        let mut hinted: Option<TypeId> = None;
+        if let Some(gap) = gap {
+            let resolved: Vec<(TypeId, Span)> = bodies
+                .iter()
+                .zip(results.iter())
+                .filter_map(|((body, _), r)| {
+                    r.as_ref()
+                        .map(|(_, ty, _, _)| (*ty, body.last().map(|s| s.span).unwrap_or(span)))
+                })
+                .collect();
+            let Some(hint) = self.branch_hint(ctx, &resolved)? else {
+                return Err(gap);
+            };
+            results.clear();
+            for (body, refinement) in &bodies {
+                let (body_h, ty, mutable) = self.check_branch_body(
+                    ctx,
+                    body,
+                    BlockMode::Value(hint),
+                    refinement.clone(),
+                    &ctor_entry,
+                    span,
+                )?;
+                let state = self.ctor.as_ref().map(|c| c.state.clone());
+                results.push(Some((body_h, ty, mutable, state)));
+            }
+            hinted = Some(hint);
+        }
+        // Collect the branch results, states, and types in order.
+        let mut branch_types: Vec<(TypeId, bool, Span)> = Vec::new();
+        let mut branch_states: Vec<(CtorState, bool)> = Vec::new();
+        let mut final_bodies: Vec<Vec<HStmt>> = Vec::new();
+        for ((body, _), out) in bodies.iter().zip(results.into_iter()) {
+            let (body_h, ty, mutable, state) = out.expect("every branch resolved");
             let diverged = body_h.last().map(HStmt::diverges).unwrap_or(false);
-            if let Some(c) = &self.ctor {
-                branch_states.push((c.state.clone(), diverged));
+            if let Some(state) = state {
+                branch_states.push((state, diverged));
             }
             let branch_span = body.last().map(|s| s.span).unwrap_or(span);
             branch_types.push((ty, mutable, branch_span));
-            checked_arms.push((cond, body_h));
+            final_bodies.push(body_h);
         }
-        let else_h = match else_body {
-            Some(body) => {
-                if let (Some(c), Some(entry)) = (self.ctor.as_mut(), &ctor_entry) {
-                    c.state = entry.clone();
-                }
-                self.scopes.push(HashMap::new());
-                let result = self.check_block(ctx, body, branch_mode, span);
-                self.scopes.pop();
-                let (body_h, ty, mutable) = result?;
-                let diverged = body_h.last().map(HStmt::diverges).unwrap_or(false);
-                if let Some(c) = &self.ctor {
-                    branch_states.push((c.state.clone(), diverged));
-                }
-                let branch_span = body.last().map(|s| s.span).unwrap_or(span);
-                branch_types.push((ty, mutable, branch_span));
-                Some(body_h)
+        let else_h = if else_body.is_some() {
+            final_bodies.pop()
+        } else {
+            // Without `else` the fork can skip every branch.
+            if let Some(entry) = &ctor_entry {
+                branch_states.push((entry.clone(), false));
             }
-            None => {
-                if let Some(entry) = &ctor_entry {
-                    branch_states.push((entry.clone(), false));
-                }
-                None
-            }
+            None
         };
+        let checked_arms: Vec<(HExpr, Vec<HStmt>)> = conds.into_iter().zip(final_bodies).collect();
         // Merge constructor states across the non-diverging branches.
         self.merge_ctor_states(ctor_entry, branch_states, span)?;
         let (ty, mutable) = match expected {
@@ -3484,7 +3590,10 @@ impl<'o> FnChecker<'o> {
                 if else_h.is_none() {
                     (UNIT, true)
                 } else {
-                    let ty = self.join_branches(ctx, &branch_types)?;
+                    let ty = match hinted {
+                        Some(hint) => self.join_branches(ctx, &branch_types).unwrap_or(hint),
+                        None => self.join_branches(ctx, &branch_types)?,
+                    };
                     let mutable = branch_types.iter().all(|(_, m, _)| *m);
                     (ty, mutable)
                 }
@@ -3519,27 +3628,60 @@ impl<'o> FnChecker<'o> {
             Some(t) => BlockMode::Value(t),
             None => BlockMode::Synth,
         };
+        let synth_join = matches!(branch_mode, BlockMode::Synth);
+        let ctor_entry = self.ctor.as_ref().map(|c| c.state.clone());
+        // Pass 1: check each arm. In synthesis mode an arm body with
+        // an unresolved constructor (`E1045`) is deferred for the
+        // sibling hint.
+        type ArmOut = (HPattern, Vec<HStmt>, TypeId, bool, Option<CtorState>);
+        let mut results: Vec<Option<ArmOut>> = Vec::new();
+        let mut gap: Option<Diagnostic> = None;
+        for arm in arms {
+            match self.check_case_arm(ctx, arm, scrut_ty, scrut_mut, branch_mode, &ctor_entry) {
+                Ok(out) => results.push(Some(out)),
+                Err(d) if synth_join && is_inference_gap(&d) => {
+                    if gap.is_none() {
+                        gap = Some(d);
+                    }
+                    results.push(None);
+                }
+                Err(d) => return Err(d),
+            }
+        }
+        // Pass 2: with a gap, every arm checks against the sibling
+        // hint.
+        let mut hinted: Option<TypeId> = None;
+        if let Some(gap) = gap {
+            let resolved: Vec<(TypeId, Span)> = arms
+                .iter()
+                .zip(results.iter())
+                .filter_map(|(arm, r)| r.as_ref().map(|(_, _, ty, _, _)| (*ty, arm.span)))
+                .collect();
+            let Some(hint) = self.branch_hint(ctx, &resolved)? else {
+                return Err(gap);
+            };
+            results.clear();
+            for arm in arms {
+                let out = self.check_case_arm(
+                    ctx,
+                    arm,
+                    scrut_ty,
+                    scrut_mut,
+                    BlockMode::Value(hint),
+                    &ctor_entry,
+                )?;
+                results.push(Some(out));
+            }
+            hinted = Some(hint);
+        }
         let mut checked_arms: Vec<HArm> = Vec::new();
         let mut branch_types: Vec<(TypeId, bool, Span)> = Vec::new();
         let mut branch_states: Vec<(CtorState, bool)> = Vec::new();
-        let ctor_entry = self.ctor.as_ref().map(|c| c.state.clone());
-        for arm in arms {
-            if let (Some(c), Some(entry)) = (self.ctor.as_mut(), &ctor_entry) {
-                c.state = entry.clone();
-            }
-            self.scopes.push(HashMap::new());
-            let mut binds: Vec<String> = Vec::new();
-            let pat = self.check_pattern(ctx, &arm.pattern, scrut_ty, scrut_mut, &mut binds);
-            let result = pat.and_then(|hpat| {
-                let (body_h, ty, mutable) =
-                    self.check_block(ctx, &arm.body, branch_mode, arm.span)?;
-                Ok((hpat, body_h, ty, mutable))
-            });
-            self.scopes.pop();
-            let (hpat, body_h, ty, mutable) = result?;
+        for (arm, out) in arms.iter().zip(results.into_iter()) {
+            let (hpat, body_h, ty, mutable, state) = out.expect("every arm resolved");
             let diverged = body_h.last().map(HStmt::diverges).unwrap_or(false);
-            if let Some(c) = &self.ctor {
-                branch_states.push((c.state.clone(), diverged));
+            if let Some(state) = state {
+                branch_states.push((state, diverged));
             }
             branch_types.push((ty, mutable, arm.span));
             checked_arms.push(HArm {
@@ -3555,7 +3697,10 @@ impl<'o> FnChecker<'o> {
                 (t, mutable)
             }
             None => {
-                let ty = self.join_branches(ctx, &branch_types)?;
+                let ty = match hinted {
+                    Some(hint) => self.join_branches(ctx, &branch_types).unwrap_or(hint),
+                    None => self.join_branches(ctx, &branch_types)?,
+                };
                 let mutable = branch_types.iter().all(|(_, m, _)| *m);
                 (ty, mutable)
             }
@@ -3569,6 +3714,34 @@ impl<'o> FnChecker<'o> {
                 arms: checked_arms,
             },
         })
+    }
+
+    /// Check one `case` arm: the pattern and the body share a fresh
+    /// scope, after a constructor-state reset to the fork entry.
+    #[allow(clippy::type_complexity)]
+    fn check_case_arm(
+        &mut self,
+        ctx: &mut Ctx,
+        arm: &ast::CaseArm,
+        scrut_ty: TypeId,
+        scrut_mut: bool,
+        mode: BlockMode,
+        entry_state: &Option<CtorState>,
+    ) -> Result<(HPattern, Vec<HStmt>, TypeId, bool, Option<CtorState>), Diagnostic> {
+        if let (Some(c), Some(entry)) = (self.ctor.as_mut(), entry_state) {
+            c.state = entry.clone();
+        }
+        self.scopes.push(HashMap::new());
+        let mut binds: Vec<String> = Vec::new();
+        let pat = self.check_pattern(ctx, &arm.pattern, scrut_ty, scrut_mut, &mut binds);
+        let result = pat.and_then(|hpat| {
+            let (body_h, ty, mutable) = self.check_block(ctx, &arm.body, mode, arm.span)?;
+            Ok((hpat, body_h, ty, mutable))
+        });
+        self.scopes.pop();
+        let (hpat, body_h, ty, mutable) = result?;
+        let state = self.ctor.as_ref().map(|c| c.state.clone());
+        Ok((hpat, body_h, ty, mutable, state))
     }
 
     /// Prove exhaustiveness and reject unreachable arms.
@@ -3622,19 +3795,12 @@ impl<'o> FnChecker<'o> {
                 ));
             }
         }
-        // For an arm-typed scrutinee the sibling arms cannot occur, so
-        // they count as covered.
+        // Values outside the static scrutinee type cannot occur, so
+        // they count as covered. The injection is recursive: an
+        // arm-typed position at any depth excludes its sibling arms.
         let mut matrix = rows;
-        if let Some((class, _)) = class_of(ctx, scrut_ty) {
-            if ctx.classes[class as usize].kind == ClassKind::EnumCase {
-                let family = ctx.classes[class as usize].family.expect("case has family");
-                for sibling in &ctx.classes[family as usize].arms {
-                    if *sibling != class {
-                        let arity = ctx.classes[*sibling as usize].field_tys.len();
-                        matrix.push(vec![APat::Ctor(*sibling, vec![APat::Wild; arity])]);
-                    }
-                }
-            }
+        for pat in impossible_patterns(ctx, scrut_ty) {
+            matrix.push(vec![pat]);
         }
         let missing =
             useful(&meta, &matrix, &[APat::Wild], &mut budget).map_err(|_| budget_err(span))?;
@@ -3768,14 +3934,17 @@ impl<'o> FnChecker<'o> {
                         ));
                     }
                     let mut sub = Vec::with_capacity(args.len());
+                    let mut sub_tys = Vec::with_capacity(args.len());
                     for (arg, field_ty) in args.iter().zip(field_tys.iter()) {
                         let sub_ty = ctx.store.substitute(*field_ty, &class_args, &[]);
                         sub.push(self.check_pattern(ctx, arg, sub_ty, scrut_mut, binds)?);
+                        sub_tys.push(sub_ty);
                     }
                     return Ok(HPattern::Ctor {
                         class,
                         ty: scrut_ty,
                         args: sub,
+                        field_tys: sub_tys,
                     });
                 };
                 if let Some(q) = qualifier {
@@ -3866,9 +4035,11 @@ impl<'o> FnChecker<'o> {
             ));
         }
         let mut sub = Vec::with_capacity(args.len());
+        let mut sub_tys = Vec::with_capacity(args.len());
         for (arg, field_ty) in args.iter().zip(field_tys.iter()) {
             let sub_ty = ctx.store.substitute(*field_ty, class_args, &[]);
             sub.push(self.check_pattern(ctx, arg, sub_ty, scrut_mut, binds)?);
+            sub_tys.push(sub_ty);
         }
         let arm_self = ctx.classes[arm as usize].self_ty;
         let arm_ty = ctx.store.substitute(arm_self, class_args, &[]);
@@ -3876,6 +4047,7 @@ impl<'o> FnChecker<'o> {
             class: arm,
             ty: arm_ty,
             args: sub,
+            field_tys: sub_tys,
         })
     }
 
@@ -3888,6 +4060,83 @@ impl<'o> FnChecker<'o> {
             ),
             span,
         )
+    }
+
+    /// Synthesize sibling expressions of one collection position and
+    /// join their types.
+    ///
+    /// An element whose constructor cannot resolve its type arguments
+    /// alone (`E1045`, for example a bare `None`) adopts the unique
+    /// solution from its siblings: the family-widened join of the
+    /// elements that synthesize. Without such a sibling, the original
+    /// error stands. The pass never invents a type and never searches.
+    fn synth_join_elems(
+        &mut self,
+        ctx: &mut Ctx,
+        items: &[&ast::Expr],
+    ) -> Result<(Vec<HExpr>, TypeId), Diagnostic> {
+        let mut first: Vec<Option<HExpr>> = Vec::with_capacity(items.len());
+        let mut gap: Option<Diagnostic> = None;
+        for item in items {
+            match self.synth_expr(ctx, item) {
+                Ok(h) => first.push(Some(h)),
+                Err(d) if is_inference_gap(&d) => {
+                    if gap.is_none() {
+                        gap = Some(d);
+                    }
+                    first.push(None);
+                }
+                Err(d) => return Err(d),
+            }
+        }
+        if let Some(gap) = gap {
+            // The hint is the family-widened join of the elements
+            // that resolved alone.
+            let mut hint: Option<TypeId> = None;
+            for (h, item) in first.iter().zip(items.iter()) {
+                let Some(h) = h else { continue };
+                let wide = deep_widen(ctx, h.ty);
+                hint = Some(match hint {
+                    None => wide,
+                    Some(prev) => ctx
+                        .store
+                        .join(prev, wide)
+                        .ok_or_else(|| self.mismatch(ctx, prev, wide, item.span))?,
+                });
+            }
+            let Some(hint) = hint else {
+                return Err(gap);
+            };
+            // Check every element against the sibling hint, so nested
+            // constructor arguments adopt one shared instantiation.
+            let mut checked = Vec::with_capacity(items.len());
+            let mut joined: Option<TypeId> = None;
+            for item in items {
+                let h = self.check_expr(ctx, item, hint)?;
+                joined = Some(match joined {
+                    None => h.ty,
+                    Some(prev) => ctx.store.join(prev, h.ty).unwrap_or(hint),
+                });
+                checked.push(h);
+            }
+            let ty = joined.unwrap_or(hint);
+            return Ok((checked, ty));
+        }
+        let mut checked = Vec::with_capacity(items.len());
+        let mut joined: Option<TypeId> = None;
+        for (h, item) in first.into_iter().zip(items.iter()) {
+            let h = h.expect("every element resolved");
+            joined = Some(match joined {
+                None => h.ty,
+                Some(prev) => ctx
+                    .store
+                    .join(prev, h.ty)
+                    .ok_or_else(|| self.mismatch(ctx, prev, h.ty, item.span))?,
+            });
+            checked.push(h);
+        }
+        let ty = joined.expect("the caller rejects empty literals");
+        Ok((checked, ty))
     }
 
     /// Join branch types. `Never` branches do not contribute.
@@ -3914,6 +4163,188 @@ impl<'o> FnChecker<'o> {
         }
         Ok(joined.unwrap_or(NEVER))
     }
+}
+
+/// True when the diagnostic reports unresolved constructor type
+/// arguments that a sibling type can bind.
+fn is_inference_gap(d: &Diagnostic) -> bool {
+    d.code == "E1045"
+}
+
+/// Widen every arm-typed nominal position to its enum family, at the
+/// top level and inside collection, tuple, and application arguments.
+/// The result serves as the sibling inference hint: it is the type
+/// every sibling of a literal or branch join can adopt.
+fn deep_widen(ctx: &mut Ctx, ty: TypeId) -> TypeId {
+    match ctx.store.get(ty).clone() {
+        Type::Class(c) => match ctx.family_of(c.0) {
+            Some(f) if f != c.0 => ctx.store.intern(Type::Class(ClassId(f))),
+            _ => ty,
+        },
+        Type::Inst(c, args) => {
+            let args: Vec<TypeId> = args.iter().map(|a| deep_widen(ctx, *a)).collect();
+            let class = ctx.family_of(c.0).unwrap_or(c.0);
+            ctx.store.intern(Type::Inst(ClassId(class), args))
+        }
+        Type::List(e) => {
+            let e = deep_widen(ctx, e);
+            ctx.store.intern(Type::List(e))
+        }
+        Type::Map(k, v) => {
+            let k = deep_widen(ctx, k);
+            let v = deep_widen(ctx, v);
+            ctx.store.intern(Type::Map(k, v))
+        }
+        Type::Tuple(elems) => {
+            let elems: Vec<TypeId> = elems.iter().map(|e| deep_widen(ctx, *e)).collect();
+            ctx.store.intern(Type::Tuple(elems))
+        }
+        _ => ty,
+    }
+}
+
+/// Extend a call mismatch when the constructor name collides with an
+/// arm of the expected enum. The unqualified name resolved against a
+/// different family, so the note names the qualified form.
+fn note_ctor_collision(ctx: &Ctx, mut d: Diagnostic, name: &str, expected: TypeId) -> Diagnostic {
+    if d.code != "E1004" {
+        return d;
+    }
+    let Some((class, _)) = class_of(ctx, expected) else {
+        return d;
+    };
+    let Some(family) = ctx.family_of(class) else {
+        return d;
+    };
+    if ctx.find_arm(family, name).is_none() {
+        return d;
+    }
+    let family_name = &ctx.classes[family as usize].name;
+    d.message.push_str(&format!(
+        "; the enum `{family_name}` has an arm named `{name}`; write \
+         `{family_name}.{name}(...)` to select it"
+    ));
+    d
+}
+
+/// The patterns that cover every value OUTSIDE the static type `ty`.
+///
+/// An arm-typed position excludes its sibling arms, at the top level
+/// and inside every arm-typed field position. A family-typed or
+/// non-nominal position excludes nothing. The recursion follows the
+/// finite type tree, so it terminates.
+fn impossible_patterns(ctx: &Ctx, ty: TypeId) -> Vec<APat> {
+    let Some((class, class_args)) = class_of(ctx, ty) else {
+        return Vec::new();
+    };
+    if ctx.classes[class as usize].kind != ClassKind::EnumCase {
+        return Vec::new();
+    }
+    let family = ctx.classes[class as usize].family.expect("case has family");
+    let mut out = Vec::new();
+    for sibling in &ctx.classes[family as usize].arms {
+        if *sibling != class {
+            let arity = ctx.classes[*sibling as usize].field_tys.len();
+            out.push(APat::Ctor(*sibling, vec![APat::Wild; arity]));
+        }
+    }
+    let field_tys = ctx.classes[class as usize].field_tys.clone();
+    for (fidx, field_ty) in field_tys.iter().enumerate() {
+        // The stored field types are in the family variable space;
+        // the class arguments instantiate them.
+        let sub_ty = subst_ro(ctx, *field_ty, &class_args);
+        for inner in impossible_patterns(ctx, sub_ty) {
+            let mut args = vec![APat::Wild; field_tys.len()];
+            args[fidx] = inner;
+            out.push(APat::Ctor(class, args));
+        }
+    }
+    out
+}
+
+/// Substitute class arguments without mutable store access. The
+/// exhaustiveness pass runs with a shared context, so this helper
+/// resolves already-interned substitutions only and keeps a variable
+/// when the result type was never interned.
+fn subst_ro(ctx: &Ctx, ty: TypeId, args: &[TypeId]) -> TypeId {
+    if args.is_empty() {
+        return ty;
+    }
+    match ctx.store.get(ty) {
+        Type::Var(i) => args.get(*i as usize).copied().unwrap_or(ty),
+        _ => ty,
+    }
+}
+
+/// Arrange call arguments against the declared parameter names.
+///
+/// Labels follow the positional arguments and match declared names in
+/// any order. The result unwraps the labels and orders the arguments
+/// by parameter declaration. Labels change nothing in the call ABI.
+/// The caller checks the argument count first.
+fn arrange_args<'a>(
+    args: &'a [ast::Expr],
+    param_names: &[String],
+    what: &str,
+) -> Result<Vec<&'a ast::Expr>, Diagnostic> {
+    if args
+        .iter()
+        .all(|a| !matches!(a.kind, ExprKind::Labeled { .. }))
+    {
+        return Ok(args.iter().collect());
+    }
+    let mut slots: Vec<Option<&ast::Expr>> = vec![None; args.len()];
+    let mut positional = 0usize;
+    let mut in_labels = false;
+    for arg in args {
+        match &arg.kind {
+            ExprKind::Labeled { label, value } => {
+                in_labels = true;
+                let Some(pos) = param_names.iter().position(|n| n == label) else {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`{what}` does not declare a parameter named `{label}`"),
+                        arg.span,
+                    ));
+                };
+                if pos < positional {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "the label `{label}:` names a parameter that a \
+                             positional argument already fills"
+                        ),
+                        arg.span,
+                    ));
+                }
+                if slots[pos].is_some() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("the argument label `{label}:` appears more than one time"),
+                        arg.span,
+                    ));
+                }
+                slots[pos] = Some(value.as_ref());
+            }
+            _ => {
+                if in_labels {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        "a positional argument cannot follow a labeled argument",
+                        arg.span,
+                    ));
+                }
+                slots[positional] = Some(arg);
+                positional += 1;
+            }
+        }
+    }
+    // The count check passed and no slot was filled twice, so every
+    // slot holds one argument.
+    Ok(slots
+        .into_iter()
+        .map(|s| s.expect("every parameter is filled"))
+        .collect())
 }
 
 fn hpat_to_apat(pat: &HPattern) -> APat {

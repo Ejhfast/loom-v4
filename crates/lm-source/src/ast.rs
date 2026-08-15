@@ -136,8 +136,9 @@ pub enum TypeExprKind {
     MapShort(Box<TypeExpr>, Box<TypeExpr>),
     /// A tuple type `(T, U)` or `(T,)`.
     Tuple(Vec<TypeExpr>),
-    /// A function type `(A, B) -> R with row`.
-    Fn(Vec<TypeExpr>, Box<TypeExpr>, Vec<RowItem>),
+    /// A function type `(A, mut B) -> R with row`. The `bool` list
+    /// marks the `mut` parameters and aligns with the parameter list.
+    Fn(Vec<TypeExpr>, Vec<bool>, Box<TypeExpr>, Vec<RowItem>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -505,8 +506,18 @@ fn dump_type(ty: &TypeExpr) -> String {
                 format!("({})", parts.join(", "))
             }
         }
-        TypeExprKind::Fn(params, ret, row) => {
-            let parts: Vec<String> = params.iter().map(dump_type).collect();
+        TypeExprKind::Fn(params, muts, ret, row) => {
+            let parts: Vec<String> = params
+                .iter()
+                .zip(muts.iter())
+                .map(|(p, m)| {
+                    if *m {
+                        format!("mut {}", dump_type(p))
+                    } else {
+                        dump_type(p)
+                    }
+                })
+                .collect();
             format!(
                 "({}) -> {}{}",
                 parts.join(", "),

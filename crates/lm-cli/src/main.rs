@@ -36,9 +36,14 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
     };
     match command.as_str() {
         "check" => {
+            // `check` runs the full admission path: parse, check,
+            // lower, and verify. A success means `run` accepts the
+            // program.
             let options = parse_options(rest)?;
             let source = read_source(&options.file)?;
-            compile(&source)?;
+            let module = compile(&source)?;
+            lm_verify::verify_module(&module)
+                .map_err(|e| format!("error: the verifier rejected the module: {e}\n"))?;
             Ok(ExitCode::SUCCESS)
         }
         "run" => {

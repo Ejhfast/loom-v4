@@ -87,8 +87,10 @@ pub enum Type {
     Map(TypeId, TypeId),
     /// A fixed-arity structural tuple with covariant elements.
     Tuple(Vec<TypeId>),
-    /// A function type with parameter types, a result, and a row.
-    Fn(Vec<TypeId>, TypeId, Row),
+    /// A function type with parameter types, parameter `mut` markers,
+    /// a result, and a row. The marker vector length equals the
+    /// parameter vector length.
+    Fn(Vec<TypeId>, Vec<bool>, TypeId, Row),
     /// One type parameter of the enclosing generic definition.
     Var(u32),
     /// The frozen machine `Fault` value type.
@@ -172,9 +174,17 @@ impl TypeStore {
         id
     }
 
-    /// Intern a function type.
-    pub fn intern_fn(&mut self, params: Vec<TypeId>, ret: TypeId, row: Row) -> TypeId {
-        self.intern(Type::Fn(params, ret, row))
+    /// Intern a function type. `muts` marks the `mut` parameters and
+    /// must have one entry per parameter.
+    pub fn intern_fn(
+        &mut self,
+        params: Vec<TypeId>,
+        muts: Vec<bool>,
+        ret: TypeId,
+        row: Row,
+    ) -> TypeId {
+        debug_assert_eq!(params.len(), muts.len());
+        self.intern(Type::Fn(params, muts, ret, row))
     }
 
     pub fn get(&self, id: TypeId) -> &Type {
@@ -322,12 +332,15 @@ impl TypeStore {
                         .zip(ys.iter())
                         .all(|(x, y)| self.compatible(*y, *x))
             }
-            (Type::Fn(fp, fr, frow), Type::Fn(ep, er, erow)) => {
+            (Type::Fn(fp, fm, fr, frow), Type::Fn(ep, em, er, erow)) => {
+                // A function that needs a `mut` argument is not valid
+                // where the expected type promises a read-only call.
                 fp.len() == ep.len()
                     && fp
                         .iter()
                         .zip(ep.iter())
                         .all(|(f, e)| self.compatible(*f, *e))
+                    && fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
                     && self.compatible(*er, *fr)
                     && self.row_included(frow, erow)
             }
@@ -397,7 +410,7 @@ impl TypeStore {
                 | Type::List(_)
                 | Type::Map(_, _)
                 | Type::Tuple(_)
-                | Type::Fn(_, _, _)
+                | Type::Fn(_, _, _, _)
                 | Type::Fault
                 | Type::Request
                 | Type::PolicyTable
@@ -439,14 +452,14 @@ impl TypeStore {
                     .collect();
                 self.intern(Type::Tuple(elems))
             }
-            Type::Fn(params, ret, row) => {
+            Type::Fn(params, muts, ret, row) => {
                 let params: Vec<TypeId> = params
                     .iter()
                     .map(|p| self.substitute(*p, targs, rowargs))
                     .collect();
                 let ret = self.substitute(ret, targs, rowargs);
                 let row = self.substitute_row(&row, rowargs);
-                self.intern(Type::Fn(params, ret, row))
+                self.intern(Type::Fn(params, muts, ret, row))
             }
             Type::Vm(t) => {
                 let t = self.substitute(t, targs, rowargs);
@@ -484,7 +497,7 @@ impl TypeStore {
             Type::List(e) => self.contains_var(*e),
             Type::Map(k, v) => self.contains_var(*k) || self.contains_var(*v),
             Type::Tuple(elems) => elems.iter().any(|e| self.contains_var(*e)),
-            Type::Fn(params, ret, _) => {
+            Type::Fn(params, _, ret, _) => {
                 params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
             }
             Type::Vm(t) => self.contains_var(*t),
@@ -501,7 +514,7 @@ impl TypeStore {
             Type::List(e) => self.contains_effect_var(*e),
             Type::Map(k, v) => self.contains_effect_var(*k) || self.contains_effect_var(*v),
             Type::Tuple(elems) => elems.iter().any(|e| self.contains_effect_var(*e)),
-            Type::Fn(params, ret, row) => {
+            Type::Fn(params, _, ret, row) => {
                 row.iter().any(|e| matches!(e, RowElem::Var(_)))
                     || params.iter().any(|p| self.contains_effect_var(*p))
                     || self.contains_effect_var(*ret)
@@ -549,11 +562,14 @@ impl TypeStore {
                     format!("({})", parts.join(", "))
                 }
             }
-            Type::Fn(params, ret, row) => {
+            Type::Fn(params, muts, ret, row) => {
                 let mut out = String::from("(");
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
+                    }
+                    if muts.get(i).copied().unwrap_or(false) {
+                        out.push_str("mut ");
                     }
                     out.push_str(&self.display(*p));
                 }
@@ -613,9 +629,9 @@ mod tests {
     #[test]
     fn interning_is_idempotent() {
         let mut store = TypeStore::new();
-        let a = store.intern_fn(vec![INT, BOOL], STRING, vec![]);
-        let b = store.intern_fn(vec![INT, BOOL], STRING, vec![]);
-        let c = store.intern_fn(vec![INT], STRING, vec![]);
+        let a = store.intern_fn(vec![INT, BOOL], vec![false; 2], STRING, vec![]);
+        let b = store.intern_fn(vec![INT, BOOL], vec![false; 2], STRING, vec![]);
+        let c = store.intern_fn(vec![INT], vec![false], STRING, vec![]);
         assert_eq!(a, b);
         assert_ne!(a, c);
         let l1 = store.intern(Type::List(INT));
@@ -629,7 +645,7 @@ mod tests {
     #[test]
     fn display_is_readable() {
         let mut store = TypeStore::new();
-        let f = store.intern_fn(vec![INT, STRING], BOOL, vec![]);
+        let f = store.intern_fn(vec![INT, STRING], vec![false; 2], BOOL, vec![]);
         assert_eq!(store.display(f), "(Int, String) -> Bool");
         assert_eq!(store.display(UNIT), "()");
         let l = store.intern(Type::List(INT));
@@ -641,7 +657,7 @@ mod tests {
         let one = store.intern(Type::Tuple(vec![INT]));
         assert_eq!(store.display(one), "(Int,)");
         let io = store.intern_row_name("Io.Print");
-        let f2 = store.intern_fn(vec![], UNIT, vec![RowElem::Op(io)]);
+        let f2 = store.intern_fn(vec![], vec![], UNIT, vec![RowElem::Op(io)]);
         assert_eq!(store.display(f2), "() -> () with Io.Print");
     }
 
@@ -707,14 +723,14 @@ mod tests {
         store.set_class_parent(dog, animal);
         let t_animal = store.intern(Type::Class(animal));
         let t_dog = store.intern(Type::Class(dog));
-        let takes_animal = store.intern_fn(vec![t_animal], INT, vec![]);
-        let takes_dog = store.intern_fn(vec![t_dog], INT, vec![]);
+        let takes_animal = store.intern_fn(vec![t_animal], vec![false], INT, vec![]);
+        let takes_dog = store.intern_fn(vec![t_dog], vec![false], INT, vec![]);
         // A function of Animal serves where a function of Dog is expected.
         assert!(store.compatible(takes_dog, takes_animal));
         assert!(!store.compatible(takes_animal, takes_dog));
         // Results are covariant.
-        let ret_animal = store.intern_fn(vec![], t_animal, vec![]);
-        let ret_dog = store.intern_fn(vec![], t_dog, vec![]);
+        let ret_animal = store.intern_fn(vec![], vec![], t_animal, vec![]);
+        let ret_dog = store.intern_fn(vec![], vec![], t_dog, vec![]);
         assert!(store.compatible(ret_animal, ret_dog));
         assert!(!store.compatible(ret_dog, ret_animal));
     }
@@ -724,9 +740,9 @@ mod tests {
         let mut store = TypeStore::new();
         let io_print = store.intern_row_name("Io.Print");
         let io = store.intern_row_name("Io");
-        let pure_fn = store.intern_fn(vec![], UNIT, vec![]);
-        let print_fn = store.intern_fn(vec![], UNIT, vec![RowElem::Op(io_print)]);
-        let io_fn = store.intern_fn(vec![], UNIT, vec![RowElem::Op(io)]);
+        let pure_fn = store.intern_fn(vec![], vec![], UNIT, vec![]);
+        let print_fn = store.intern_fn(vec![], vec![], UNIT, vec![RowElem::Op(io_print)]);
+        let io_fn = store.intern_fn(vec![], vec![], UNIT, vec![RowElem::Op(io)]);
         assert!(store.compatible(print_fn, pure_fn));
         assert!(store.compatible(io_fn, print_fn));
         assert!(!store.compatible(pure_fn, print_fn));
@@ -792,10 +808,10 @@ mod tests {
         let list_v0 = store.intern(Type::List(v0));
         let list_int = store.intern(Type::List(INT));
         assert_eq!(store.substitute(list_v0, &[INT], &[]), list_int);
-        let f = store.intern_fn(vec![v0], v0, vec![RowElem::Var(0)]);
+        let f = store.intern_fn(vec![v0], vec![false], v0, vec![RowElem::Var(0)]);
         let io = store.intern_row_name("Io");
         let got = store.substitute(f, &[STRING], &[vec![RowElem::Op(io)]]);
-        let want = store.intern_fn(vec![STRING], STRING, vec![RowElem::Op(io)]);
+        let want = store.intern_fn(vec![STRING], vec![false], STRING, vec![RowElem::Op(io)]);
         assert_eq!(got, want);
     }
 

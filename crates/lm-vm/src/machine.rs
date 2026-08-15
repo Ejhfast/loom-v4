@@ -176,7 +176,7 @@ impl Machine {
         args: Vec<Value>,
         closure: Option<ObjRef>,
     ) {
-        let local_count = module.funcs[func as usize].local_count as usize;
+        let local_count = module.funcs[func as usize].local_count() as usize;
         if local_count > self.config.max_stack_values as usize {
             self.set_fault(
                 FaultCode::StackLimit,
@@ -815,7 +815,7 @@ impl Machine {
         let func = &module.funcs[callee as usize];
         let base_local = self.locals.len() as u32;
         let arg_start = self.operands.len() - consume;
-        let new_locals = self.locals.len() + func.local_count as usize;
+        let new_locals = self.locals.len() + func.local_count() as usize;
         if new_locals + self.operands.len() > self.config.max_stack_values as usize {
             return Err(FaultCode::StackLimit);
         }

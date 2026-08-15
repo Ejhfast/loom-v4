@@ -63,12 +63,18 @@ pub struct HirClass {
     /// Default expressions aligned with the layout. `None` marks a
     /// required field.
     pub defaults: Vec<Option<HExpr>>,
+    /// The checker local-slot types of each default expression,
+    /// aligned with `defaults`. Lowering moves these temporaries into
+    /// scratch slots of the `<new>` function and needs their types.
+    pub default_locals: Vec<Vec<TypeId>>,
     /// Own method table: `(selector name, function index)`.
     pub methods: Vec<(String, u32)>,
     /// The `init` function index, when declared.
     pub init: Option<u32>,
     /// Constructor parameter types, without `self`.
     pub ctor_params: Vec<TypeId>,
+    /// Constructor parameter `mut` markers, aligned with `ctor_params`.
+    pub ctor_param_muts: Vec<bool>,
     /// The row charged by construction (the `init` row).
     pub ctor_row: Row,
 }
@@ -82,6 +88,8 @@ pub struct HirFunc {
     /// Parameter types. Parameters use the first local slots. A method
     /// receives `self` as parameter zero.
     pub params: Vec<TypeId>,
+    /// Parameter `mut` markers, aligned with `params`.
+    pub param_muts: Vec<bool>,
     pub ret: TypeId,
     /// The declared effect row in canonical order.
     pub row: Row,
@@ -186,10 +194,14 @@ pub enum HPattern {
     Str(String),
     /// Tests the final case class and destructures its fields. `ty`
     /// is the instantiated case type used by the test and the cast.
+    /// `field_tys` holds the instantiated field types, aligned with
+    /// `args`; lowering types the destructuring scratch slots with
+    /// them.
     Ctor {
         class: u32,
         ty: TypeId,
         args: Vec<HPattern>,
+        field_tys: Vec<TypeId>,
     },
 }
 

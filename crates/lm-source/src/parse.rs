@@ -560,9 +560,22 @@ impl Parser {
             Tok::LParen => {
                 let open = self.next();
                 let mut params = Vec::new();
+                let mut muts = Vec::new();
+                let mut first_mut_span = None;
                 let mut trailing_comma = false;
                 if !matches!(self.peek(), Tok::RParen) {
                     loop {
+                        // A `mut` marker is valid only in a function
+                        // type parameter list. The check runs after
+                        // the arrow decides the form.
+                        let is_mut = matches!(self.peek(), Tok::KwMut);
+                        if is_mut {
+                            let tok = self.next();
+                            if first_mut_span.is_none() {
+                                first_mut_span = Some(tok.span);
+                            }
+                        }
+                        muts.push(is_mut);
                         params.push(self.type_expr()?);
                         if matches!(self.peek(), Tok::Comma) {
                             self.pos += 1;
@@ -583,9 +596,16 @@ impl Parser {
                     let hi = row.last().map(|r| r.span).unwrap_or(ret.span);
                     let span = open.span.to(hi);
                     Ok(TypeExpr {
-                        kind: TypeExprKind::Fn(params, Box::new(ret), row),
+                        kind: TypeExprKind::Fn(params, muts, Box::new(ret), row),
                         span,
                     })
+                } else if let Some(span) = first_mut_span {
+                    Err(Diagnostic::new(
+                        "E1001",
+                        "`mut` is only valid before a parameter type in a \
+                         function type",
+                        span,
+                    ))
                 } else if params.is_empty() {
                     Ok(TypeExpr {
                         kind: TypeExprKind::Unit,
@@ -1825,7 +1845,7 @@ mod tests {
         assert_eq!(f.row.len(), 1);
         assert_eq!(f.row[0].name, "e");
         match &f.params[1].ty.kind {
-            TypeExprKind::Fn(_, _, row) => assert_eq!(row.len(), 1),
+            TypeExprKind::Fn(_, _, _, row) => assert_eq!(row.len(), 1),
             other => panic!("expected a function type, got {other:?}"),
         }
     }

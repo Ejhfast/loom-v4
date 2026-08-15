@@ -72,6 +72,9 @@ pub(crate) struct FnSig {
     pub(crate) effect_params: Vec<String>,
     pub(crate) params: Vec<TypeId>,
     pub(crate) param_muts: Vec<bool>,
+    /// Declared parameter names for labeled arguments. A method holds
+    /// `self` at position zero.
+    pub(crate) param_names: Vec<String>,
     pub(crate) ret: TypeId,
     pub(crate) row: Row,
 }
@@ -84,6 +87,8 @@ pub(crate) struct MethodSig {
     pub(crate) mut_self: bool,
     pub(crate) params: Vec<TypeId>,
     pub(crate) param_muts: Vec<bool>,
+    /// Declared parameter names, without `self`.
+    pub(crate) param_names: Vec<String>,
     pub(crate) ret: TypeId,
     pub(crate) row: Row,
     pub(crate) own_type_params: Vec<String>,
@@ -365,14 +370,14 @@ pub(crate) fn resolve_type(
             }
             Ok(ctx.store.intern(Type::Tuple(resolved)))
         }
-        ast::TypeExprKind::Fn(params, ret, row) => {
+        ast::TypeExprKind::Fn(params, muts, ret, row) => {
             let mut ptys = Vec::new();
             for p in params {
                 ptys.push(resolve_type(ctx, env, p)?);
             }
             let ret = resolve_type(ctx, env, ret)?;
             let row = resolve_row(ctx, env, row)?;
-            Ok(ctx.store.intern_fn(ptys, ret, row))
+            Ok(ctx.store.intern_fn(ptys, muts.clone(), ret, row))
         }
     }
 }
@@ -531,6 +536,7 @@ pub fn check_module_with(
         effect_params: vec![],
         params: vec![],
         param_muts: vec![],
+        param_names: vec![],
         ret: UNIT,
         row: vec![],
     });
@@ -538,7 +544,7 @@ pub fn check_module_with(
     // indices follow the entry.
     resolve_all_classes(&mut ctx, core, true).map_err(core_defect)?;
     // Pass 3: check field defaults.
-    let mut own_defaults: Vec<Vec<Option<HExpr>>> = Vec::new();
+    let mut own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>> = Vec::new();
     check_defaults(&mut ctx, module, false, &mut own_defaults)?;
     check_defaults(&mut ctx, core, true, &mut own_defaults).map_err(core_defect)?;
     // Pass 4: check top-level function bodies.
@@ -571,6 +577,7 @@ pub fn check_module_with(
             type_params: sig.type_params.len() as u32,
             effect_params: sig.effect_params.len() as u32,
             params: sig.params.clone(),
+            param_muts: sig.param_muts.clone(),
             ret: sig.ret,
             row: sig.row.clone(),
             captures: vec![],
@@ -596,6 +603,7 @@ pub fn check_module_with(
         type_params: 0,
         effect_params: 0,
         params: vec![],
+        param_muts: vec![],
         ret: entry_ty,
         row: entry_row,
         captures: vec![],
@@ -616,16 +624,23 @@ fn core_defect(d: Diagnostic) -> Diagnostic {
 
 fn assemble(
     ctx: Ctx,
-    own_defaults: Vec<Vec<Option<HExpr>>>,
+    own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>>,
     entry_idx: usize,
 ) -> Result<HirModule, Diagnostic> {
     let mut hir_classes: Vec<HirClass> = Vec::new();
     for (idx, info) in ctx.classes.iter().enumerate() {
-        let mut defaults: Vec<Option<HExpr>> = match info.parent {
-            Some(p) => hir_classes[p as usize].defaults.clone(),
-            None => Vec::new(),
-        };
-        defaults.extend(own_defaults[idx].iter().cloned());
+        let (mut defaults, mut default_locals): (Vec<Option<HExpr>>, Vec<Vec<TypeId>>) =
+            match info.parent {
+                Some(p) => (
+                    hir_classes[p as usize].defaults.clone(),
+                    hir_classes[p as usize].default_locals.clone(),
+                ),
+                None => (Vec::new(), Vec::new()),
+            };
+        for (expr, locals) in &own_defaults[idx] {
+            defaults.push(expr.clone());
+            default_locals.push(locals.clone());
+        }
         debug_assert_eq!(defaults.len(), info.field_tys.len());
         let ctor_kind = if info.kind == ClassKind::EnumCase {
             CtorKind::CaseFields
@@ -634,10 +649,13 @@ fn assemble(
         } else {
             CtorKind::Defaults
         };
-        let ctor_params = match (&info.init, info.kind) {
-            (_, ClassKind::EnumCase) => info.field_tys.clone(),
-            (Some(init), _) => init.params.clone(),
-            (None, _) => vec![],
+        let (ctor_params, ctor_param_muts) = match (&info.init, info.kind) {
+            (_, ClassKind::EnumCase) => {
+                let count = info.field_tys.len();
+                (info.field_tys.clone(), vec![false; count])
+            }
+            (Some(init), _) => (init.params.clone(), init.param_muts.clone()),
+            (None, _) => (vec![], vec![]),
         };
         let ctor_row = info
             .init
@@ -653,6 +671,7 @@ fn assemble(
             field_names: info.field_names.clone(),
             field_tys: info.field_tys.clone(),
             defaults,
+            default_locals,
             methods: info
                 .methods
                 .iter()
@@ -660,6 +679,7 @@ fn assemble(
                 .collect(),
             init: info.init.as_ref().map(|m| m.func),
             ctor_params,
+            ctor_param_muts,
             ctor_row,
         });
     }
@@ -861,9 +881,11 @@ fn resolve_sig(
 ) -> Result<FnSig, Diagnostic> {
     let mut ptys = Vec::new();
     let mut muts = Vec::new();
+    let mut names = Vec::new();
     if let Some((ty, mutable)) = self_ty {
         ptys.push(ty);
         muts.push(mutable);
+        names.push("self".to_string());
     }
     let mut seen: Vec<&str> = Vec::new();
     for param in params {
@@ -877,6 +899,7 @@ fn resolve_sig(
         seen.push(&param.name);
         ptys.push(resolve_type(ctx, env, &param.ty)?);
         muts.push(param.mutable);
+        names.push(param.name.clone());
     }
     let ret = match ret {
         Some(ty) => resolve_type(ctx, env, ty)?,
@@ -888,6 +911,7 @@ fn resolve_sig(
         effect_params,
         params: ptys,
         param_muts: muts,
+        param_names: names,
         ret,
         row,
     })
@@ -947,6 +971,7 @@ fn resolve_method_sig(
         mut_self: method.mut_self,
         params: sig.params[1..].to_vec(),
         param_muts: sig.param_muts[1..].to_vec(),
+        param_names: sig.param_names[1..].to_vec(),
         ret: if is_init { UNIT } else { sig.ret },
         row: sig.row,
         own_type_params: own_type,
@@ -1244,7 +1269,7 @@ fn check_defaults(
     ctx: &mut Ctx,
     module: &ast::Module,
     is_core: bool,
-    own_defaults: &mut Vec<Vec<Option<HExpr>>>,
+    own_defaults: &mut Vec<Vec<(Option<HExpr>, Vec<TypeId>)>>,
 ) -> Result<(), Diagnostic> {
     for class in &module.classes {
         let map = if is_core {
@@ -1266,9 +1291,14 @@ fn check_defaults(
                         core_scope: is_core,
                     };
                     let mut checker = FnChecker::top_level(RetKind::Entry, env, vec![]);
-                    Some(checker.check_expr(ctx, expr, field_ty)?)
+                    let expr = checker.check_expr(ctx, expr, field_ty)?;
+                    // The temporary slot types of the default follow
+                    // it into lowering, so the `<new>` scratch slots
+                    // keep their declared types.
+                    let locals: Vec<TypeId> = checker.locals.iter().map(|(t, _)| *t).collect();
+                    (Some(expr), locals)
                 }
-                None => None,
+                None => (None, Vec::new()),
             };
             defaults.push(checked);
         }
@@ -1279,7 +1309,7 @@ fn check_defaults(
         // The parent has no fields; each arm has required fields.
         own_defaults.push(Vec::new());
         for arm in &enum_def.arms {
-            own_defaults.push(vec![None; arm.fields.len()]);
+            own_defaults.push(vec![(None, Vec::new()); arm.fields.len()]);
         }
     }
     Ok(())
@@ -1374,6 +1404,7 @@ fn check_method(
         type_params: sig.type_params.len() as u32,
         effect_params: sig.effect_params.len() as u32,
         params: sig.params.clone(),
+        param_muts: sig.param_muts.clone(),
         ret: sig.ret,
         row: sig.row.clone(),
         captures: vec![],

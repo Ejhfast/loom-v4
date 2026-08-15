@@ -114,11 +114,11 @@ impl<'m> ModLowerer<'m> {
                 let elems: Vec<u32> = elems.iter().map(|e| self.bc_ty(*e)).collect();
                 self.intern_type(BcType::Tuple(elems))
             }
-            Type::Fn(params, ret, row) => {
+            Type::Fn(params, muts, ret, row) => {
                 let params: Vec<u32> = params.iter().map(|p| self.bc_ty(*p)).collect();
                 let ret = self.bc_ty(ret);
                 let row = self.bc_row(&row);
-                self.intern_type(BcType::Fn(params, ret, row))
+                self.intern_type(BcType::Fn(params, muts, ret, row))
             }
             Type::Var(i) => self.intern_type(BcType::Var(i)),
             Type::Fault => self.intern_type(BcType::Fault),
@@ -227,18 +227,20 @@ struct Lowerer<'a, 'm> {
     cur: usize,
     /// Stack of `(continue_target, break_target)` blocks.
     loops: Vec<(u32, u32)>,
-    /// The next free scratch local slot.
-    next_scratch: u32,
+    /// The declared type of every local slot so far. The checker
+    /// types come first; scratch slots append their true types. The
+    /// slot count is the vector length.
+    local_types: Vec<u32>,
 }
 
 impl<'a, 'm> Lowerer<'a, 'm> {
-    fn new(m: &'a mut ModLowerer<'m>, local_base: u32) -> Lowerer<'a, 'm> {
+    fn new(m: &'a mut ModLowerer<'m>, local_types: Vec<u32>) -> Lowerer<'a, 'm> {
         Lowerer {
             m,
             blocks: vec![Vec::new()],
             cur: 0,
             loops: Vec::new(),
-            next_scratch: local_base,
+            local_types,
         }
     }
 
@@ -255,11 +257,17 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         self.cur = block as usize;
     }
 
-    /// Allocate one scratch local slot.
-    fn scratch(&mut self) -> u32 {
-        let slot = self.next_scratch;
-        self.next_scratch += 1;
+    /// Allocate one scratch local slot with its declared type.
+    fn scratch(&mut self, ty: u32) -> u32 {
+        let slot = self.local_types.len() as u32;
+        self.local_types.push(ty);
         slot
+    }
+
+    /// Allocate one scratch slot for a checker type.
+    fn scratch_of(&mut self, ty: TypeId) -> u32 {
+        let bc = self.m.bc_ty(ty);
+        self.scratch(bc)
     }
 
     /// Emit a structural comparison of the tuples in the locals `a`
@@ -286,8 +294,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         let join_b = self.new_block();
         for (i, elem) in &tested {
             if matches!(self.m.store.get(*elem), Type::Tuple(_)) {
-                let sa = self.scratch();
-                let sb = self.scratch();
+                let sa = self.scratch_of(*elem);
+                let sb = self.scratch_of(*elem);
                 self.emit(Instr::LoadLocal(a));
                 self.emit(Instr::TupleGet(*i as u32));
                 self.emit(Instr::StoreLocal(sa));
@@ -463,10 +471,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     && matches!(self.m.store.get(*operand_ty), Type::Tuple(_))
                 {
                     self.lower_expr(left);
-                    let a = self.scratch();
+                    let a = self.scratch_of(*operand_ty);
                     self.emit(Instr::StoreLocal(a));
                     self.lower_expr(right);
-                    let b = self.scratch();
+                    let b = self.scratch_of(*operand_ty);
                     self.emit(Instr::StoreLocal(b));
                     self.lower_tuple_eq(a, b, *operand_ty);
                     if matches!(op, BinOp::Ne) {
@@ -774,8 +782,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     /// call of the pinned core `Option` constructors.
     fn lower_list_get(&mut self, expr: &HExpr, args: &[HExpr]) {
         let elem = self.option_arg(expr.ty);
-        let list_slot = self.scratch();
-        let idx_slot = self.scratch();
+        let list_slot = self.scratch_of(args[0].ty);
+        let idx_slot = self.scratch_of(INT);
         self.lower_expr(&args[0]);
         self.emit(Instr::StoreLocal(list_slot));
         self.lower_expr(&args[1]);
@@ -808,8 +816,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     /// pinned core `Option` constructors.
     fn lower_map_get(&mut self, expr: &HExpr, args: &[HExpr]) {
         let value_ty = self.option_arg(expr.ty);
-        let map_slot = self.scratch();
-        let key_slot = self.scratch();
+        let map_slot = self.scratch_of(args[0].ty);
+        let key_slot = self.scratch_of(args[1].ty);
         self.lower_expr(&args[0]);
         self.emit(Instr::StoreLocal(map_slot));
         self.lower_expr(&args[1]);
@@ -914,7 +922,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.emit(Instr::JumpIfFalse(fail));
                 }
             }
-            HPattern::Ctor { ty, args, .. } => {
+            HPattern::Ctor {
+                ty,
+                args,
+                field_tys,
+                ..
+            } => {
                 let bc = self.m.bc_ty(*ty);
                 if let Some(fail) = fail {
                     self.emit(Instr::LoadLocal(src));
@@ -923,7 +936,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 }
                 let needs_fields = args.iter().any(|a| !matches!(a, HPattern::Wildcard));
                 if needs_fields {
-                    let cast_slot = self.scratch();
+                    let cast_slot = self.scratch(bc);
                     self.emit(Instr::LoadLocal(src));
                     self.emit(Instr::CastType(bc));
                     self.emit(Instr::StoreLocal(cast_slot));
@@ -931,7 +944,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                         if matches!(sub, HPattern::Wildcard) {
                             continue;
                         }
-                        let field_slot = self.scratch();
+                        let field_slot = self.scratch_of(field_tys[fidx]);
                         self.emit(Instr::LoadLocal(cast_slot));
                         self.emit(Instr::LoadField(fidx as u32));
                         self.emit(Instr::StoreLocal(field_slot));
@@ -1152,7 +1165,10 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
     let ret = m.bc_ty(func.ret);
     let row = m.bc_row(&func.row);
     let captures: Vec<u32> = func.captures.iter().map(|t| m.bc_ty(*t)).collect();
-    let mut lowerer = Lowerer::new(m, func.locals.len() as u32);
+    // The declared checker types of every local slot seed the table;
+    // scratch slots append their true types during lowering.
+    let base_types: Vec<u32> = func.locals.iter().map(|t| m.bc_ty(*t)).collect();
+    let mut lowerer = Lowerer::new(m, base_types);
     let unit_ret = func.ret == UNIT;
     let pushed = if unit_ret {
         let diverged = lowerer.lower_block_stmt(&func.body);
@@ -1163,17 +1179,18 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
     } else {
         lowerer.lower_block_value(&func.body)
     };
-    let local_count = lowerer.next_scratch;
+    let local_types = lowerer.local_types.clone();
     let blocks = lowerer.finish(pushed);
     Func {
         name: func.name.clone(),
         type_params: func.type_params,
         effect_params: func.effect_params,
         params,
+        param_muts: func.param_muts.clone(),
         ret,
         row,
         captures,
-        local_count,
+        local_types,
         blocks,
     }
 }
@@ -1190,10 +1207,11 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             type_params: 0,
             effect_params: 0,
             params: vec![],
+            param_muts: vec![],
             ret: m.intern_type(BcType::Unit),
             row: vec![],
             captures: vec![],
-            local_count: 0,
+            local_types: vec![],
             blocks: vec![vec![Instr::ConstUnit, Instr::Return]],
         };
     }
@@ -1213,7 +1231,11 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
     };
     let row = m.bc_row(&class.ctor_row);
     let self_slot = params.len() as u32;
-    let mut lowerer = Lowerer::new(m, self_slot + 1);
+    // The slot table starts with the constructor parameters and the
+    // `self` scratch slot.
+    let mut base_types = params.clone();
+    base_types.push(self_bc);
+    let mut lowerer = Lowerer::new(m, base_types);
     match app {
         None => lowerer.emit(Instr::New(cidx)),
         Some(app) => lowerer.emit(Instr::NewG { class: cidx, app }),
@@ -1230,13 +1252,16 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             if let Some(expr) = default {
                 // A default was checked in its own local space. Move
                 // its temporary slots into fresh scratch slots of the
-                // `<new>` function.
-                let base = lowerer.next_scratch;
+                // `<new>` function, with their checker-declared types.
+                let base = lowerer.local_types.len() as u32;
                 let mut max_slot = 0;
                 let shifted = shift_locals_expr(expr, base, &mut max_slot);
                 // The shifted temporaries occupy `base .. base + max_slot`,
                 // because `max_slot` counts in the pre-shift space.
-                lowerer.next_scratch = base + max_slot;
+                let default_types = &class.default_locals[fidx];
+                for ty in default_types.iter().take(max_slot as usize) {
+                    lowerer.scratch_of(*ty);
+                }
                 lowerer.emit(Instr::LoadLocal(self_slot));
                 lowerer.lower_expr(&shifted);
                 lowerer.emit(Instr::StoreField(fidx as u32));
@@ -1255,17 +1280,18 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
         }
     }
     lowerer.emit(Instr::LoadLocal(self_slot));
-    let local_count = lowerer.next_scratch;
+    let local_types = lowerer.local_types.clone();
     let blocks = lowerer.finish(true);
     Func {
         name: format!("<new {}>", class.name),
         type_params,
         effect_params: 0,
         params,
+        param_muts: class.ctor_param_muts.clone(),
         ret: self_bc,
         row,
         captures: vec![],
-        local_count,
+        local_types,
         blocks,
     }
 }
@@ -1520,8 +1546,18 @@ fn type_text(module: &Module, idx: u32) -> String {
                 format!("({})", parts.join(", "))
             }
         }
-        BcType::Fn(params, ret, row) => {
-            let parts: Vec<String> = params.iter().map(|p| type_text(module, *p)).collect();
+        BcType::Fn(params, muts, ret, row) => {
+            let parts: Vec<String> = params
+                .iter()
+                .zip(muts.iter())
+                .map(|(p, m)| {
+                    if *m {
+                        format!("mut {}", type_text(module, *p))
+                    } else {
+                        type_text(module, *p)
+                    }
+                })
+                .collect();
             let mut out = format!("({}) -> {}", parts.join(", "), type_text(module, *ret));
             if !row.is_empty() {
                 out.push_str(" with ");
@@ -1630,7 +1666,7 @@ pub fn dump_cfg(module: &Module) -> String {
                 .collect();
             let _ = writeln!(out, "  captures {}", caps.join(", "));
         }
-        let _ = writeln!(out, "  locals {}", func.local_count);
+        let _ = writeln!(out, "  locals {}", func.local_count());
         for (bidx, block) in func.blocks.iter().enumerate() {
             let _ = writeln!(out, "  b{bidx}:");
             for instr in block {

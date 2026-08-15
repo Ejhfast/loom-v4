@@ -105,7 +105,7 @@ fn an_operation_type_with_a_forged_signature_is_rejected() {
     let forged = module
         .types
         .iter()
-        .position(|t| matches!(t, BcType::Fn(params, _, _) if params.len() == 1))
+        .position(|t| matches!(t, BcType::Fn(params, _, _, _) if params.len() == 1))
         .expect("a one-parameter function type exists") as u32;
     let mut hit = false;
     for ty in &mut module.types {

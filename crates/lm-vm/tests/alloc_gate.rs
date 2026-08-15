@@ -47,10 +47,11 @@ fn loop_module() -> Module {
             type_params: 0,
             effect_params: 0,
             params: vec![],
+            param_muts: vec![],
             ret: 2,
             row: vec![],
             captures: vec![],
-            local_count: 1,
+            local_types: vec![2],
             blocks: vec![
                 vec![Instr::ConstInt(0), Instr::StoreLocal(0), Instr::Jump(1)],
                 vec![
