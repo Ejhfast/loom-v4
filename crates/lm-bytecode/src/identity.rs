@@ -80,6 +80,18 @@ pub const COMPILER_ABI_VERSION: u32 = 4;
 /// rejects with a clear diagnostic; no source program reaches it.
 const REFINE_WORK_BUDGET: u64 = 1 << 24;
 
+/// The refinement work budget of one module.
+///
+/// The component budget bounds one component. A module holds many
+/// components, and their cost adds up, so the module carries its own
+/// budget over the sum. Without it a crafted module reaches any cost
+/// through many components that each stay inside the component
+/// budget. The value is twice the component budget: a module may
+/// legitimately hold more than one component, and the bound stays
+/// close to the cost of the largest single component. No source
+/// program reaches it.
+const MODULE_REFINE_WORK_BUDGET: u64 = 1 << 25;
+
 /// A failure to compute identity: the module structure is not
 /// hashable. The verifier rejects every such module too.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1395,19 +1407,29 @@ fn rank(values: &[&[u8]]) -> (Vec<u32>, usize) {
 /// A round only splits colours, so the loop stops as soon as the
 /// distinct count stops growing.
 ///
-/// Two symmetric members keep one colour through every round. That is
-/// a property of graph automorphism, so they share one structural
-/// hash, and their qualified keys keep them apart.
-fn refine_colours(base: &[Vec<u8>], refs: &[Vec<u32>]) -> Result<(Vec<u32>, u32), IdentityError> {
+/// Two members that refinement never separates are bisimilar. They
+/// share one structural hash, and their qualified keys keep them apart
+/// wherever distinctness is observable.
+///
+/// `remaining` is the module budget left. The effective round bound is
+/// the smaller of the component budget and the module budget, so a
+/// module of many components pays for all of them. The result carries
+/// the work this component used.
+fn refine_colours(
+    base: &[Vec<u8>],
+    refs: &[Vec<u32>],
+    remaining: u64,
+) -> Result<(Vec<u32>, u32, u64), IdentityError> {
     let n = base.len();
     if n <= 1 {
-        return Ok((vec![0; n], 0));
+        return Ok((vec![0; n], 0, 0));
     }
     let slices: Vec<&[u8]> = base.iter().map(|b| b.as_slice()).collect();
     let (mut colours, mut distinct) = rank(&slices);
     let edges: usize = refs.iter().map(|r| r.len()).sum();
     let per_round = (n + edges).max(1) as u64;
-    let budget_rounds = (REFINE_WORK_BUDGET / per_round).max(1);
+    let component_rounds = (REFINE_WORK_BUDGET / per_round).max(1);
+    let module_rounds = remaining / per_round;
     let mut buf: Vec<u8> = Vec::new();
     let mut ends: Vec<usize> = Vec::with_capacity(n);
     let mut used = 0u32;
@@ -1415,9 +1437,14 @@ fn refine_colours(base: &[Vec<u8>], refs: &[Vec<u32>]) -> Result<(Vec<u32>, u32)
         if distinct == n {
             break;
         }
-        if round as u64 >= budget_rounds {
+        if round as u64 >= component_rounds {
             return Err(fail(
                 "the component needs more refinement rounds than the budget allows",
+            ));
+        }
+        if round as u64 >= module_rounds {
+            return Err(fail(
+                "the module needs more refinement work than the budget allows",
             ));
         }
         used = round as u32 + 1;
@@ -1443,7 +1470,7 @@ fn refine_colours(base: &[Vec<u8>], refs: &[Vec<u32>]) -> Result<(Vec<u32>, u32)
         }
         distinct = next_distinct;
     }
-    Ok((colours, used))
+    Ok((colours, used, used as u64 * per_round))
 }
 
 /// Compute the closure body digests of the given closure functions,
@@ -1546,6 +1573,8 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
     };
     let manifest = lm_abi::manifest_digest();
     let mut max_refine_rounds = 0u32;
+    // The module refinement budget, spent component by component.
+    let mut refine_budget = MODULE_REFINE_WORK_BUDGET;
     // The empty overlays of the final all-hash view.
     let empty_members: HashMap<u32, u32> = HashMap::new();
     let empty_digests: HashMap<u32, [u8; 32]> = HashMap::new();
@@ -1702,8 +1731,9 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             base.push(bytes);
             member_refs.push(record.into_inner());
         }
-        let (colours, rounds) = refine_colours(&base, &member_refs)?;
+        let (colours, rounds, work) = refine_colours(&base, &member_refs, refine_budget)?;
         max_refine_rounds = max_refine_rounds.max(rounds);
+        refine_budget -= work.min(refine_budget);
         // Serialize the members again, now with the final colours, and
         // hash the component. Every refinement member emits, closure
         // bodies included: a member names an in-component closure by

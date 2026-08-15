@@ -762,6 +762,71 @@ fn a_component_past_the_refinement_budget_rejects() {
     assert!(error.0.contains("budget"), "{error}");
 }
 
+/// Several independent components, each one cycle of `per` members.
+/// Every member repeats its one call `repeats` times, so one round
+/// costs more and the module budget binds at a readable size.
+fn many_chains(count: usize, per: usize, repeats: usize) -> Module {
+    let mut funcs = Vec::with_capacity(count * per);
+    for c in 0..count {
+        let base = c * per;
+        for i in 0..per {
+            let next = (base + (i + 1) % per) as u32;
+            let mut block = Vec::with_capacity(2 * repeats + 2);
+            for _ in 0..repeats {
+                block.push(Instr::Call(next));
+                block.push(Instr::Pop);
+            }
+            // One member of each cycle differs, so refinement
+            // separates one more member in every round.
+            block.push(Instr::ConstInt(if i == 0 { c as i64 + 1 } else { 0 }));
+            block.push(Instr::Return);
+            funcs.push(Func {
+                name: format!("f{c}_{i}"),
+                type_params: 0,
+                effect_params: 0,
+                params: vec![],
+                param_muts: vec![],
+                ret: 2,
+                row: vec![],
+                captures: vec![],
+                local_types: vec![],
+                blocks: vec![block],
+            });
+        }
+    }
+    Module {
+        strings: vec![],
+        types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
+        selectors: vec![],
+        apps: vec![],
+        imports: vec![],
+        core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+        classes: vec![],
+        funcs,
+        entry: 0,
+        exports: vec![],
+        bindings: vec![],
+    }
+}
+
+/// The component budget bounds one component. A module holds many
+/// components, and their cost adds up, so the module carries its own
+/// budget over the sum. Without it a crafted module reaches any cost
+/// through many components that each stay inside the component budget.
+///
+/// One component of this shape stays inside the component budget, and
+/// three of them pass the module budget.
+#[test]
+fn a_module_past_the_module_refinement_budget_rejects() {
+    const PER: usize = 512;
+    const REPEATS: usize = 62;
+    module_identity(&many_chains(1, PER, REPEATS)).expect("one component stays inside the budget");
+    let error =
+        module_identity(&many_chains(3, PER, REPEATS)).expect_err("the module budget must reject");
+    assert!(error.0.contains("module"), "{error}");
+    assert!(error.0.contains("budget"), "{error}");
+}
+
 /// Measure the refinement cost on a wide hostile component. Run it
 /// with:
 ///
@@ -793,6 +858,24 @@ fn measure_refinement_on_a_wide_component() {
             "symmetric-{n}: {bytes} bytes, rounds {}, identity {:?}",
             identity.max_refine_rounds,
             start.elapsed()
+        );
+    }
+    // The module budget over several worst-case components. The
+    // component budget bounds each one; the module budget bounds the
+    // sum, so the cost of one module stays bounded.
+    for count in [1usize, 2, 4, 5, 8, 64] {
+        let module = many_chains(count, 2048, 1);
+        let bytes = lm_bytecode::encode(&module).len();
+        let start = std::time::Instant::now();
+        let result = module_identity(&module);
+        let took = start.elapsed();
+        let verdict = match result {
+            Ok(id) => format!("accepted, rounds {}", id.max_refine_rounds),
+            Err(e) => format!("rejected: {}", e.0),
+        };
+        println!(
+            "{count} x chain-2048: {bytes} bytes ({:.1} MiB), {took:?}, {verdict}",
+            bytes as f64 / (1024.0 * 1024.0)
         );
     }
 }
