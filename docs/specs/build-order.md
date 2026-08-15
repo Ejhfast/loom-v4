@@ -307,7 +307,7 @@ Negative UI examples show non-exhaustive enums, escaping uninitialized `self`, i
 
 ```lm
 def greet(name: String) with Io.Print
-  sys.io.Print("Hello {name}!\n")
+  sys.io.print("Hello {name}!\n")
 end
 
 greet("Ada")
@@ -320,21 +320,21 @@ Hello Ada!
 
 ```lm
 vm = sys.vm.Vm().from_object(do || with Io.Print, Clock.Now
-  sys.io.Print("tick\n")
-  sys.clock.Now()
+  sys.io.print("tick\n")
+  sys.clock.now()
 end, args: ())
 
 captured: [String] = []
 loop do
   case vm.drive()
   in Asked(q)
-    case q.as_call(sys.io.Print)
+    case q.as_call(Io.Print)
     in Some(call)
       (text,) = call.args()
       captured.push(text)
       vm.answer(call, ())
     in None
-      case q.as_call(sys.clock.Now)
+      case q.as_call(Clock.Now)
       in Some(call) then vm.answer(call, 123)
       in None       then vm.dispatch(q)
       end
@@ -366,30 +366,62 @@ A blocked-print example terminates with `PolicyDenied`; a mock-clock example run
 
 ## Week 5 — Deterministic artifacts, interfaces, linking, and packages
 
+The developer ergonomics of this week follow `docs/specs/packages.md`:
+the package layout, the minimal TOML manifest with path dependencies,
+modules from files, and the `use` declaration.
+
 ### Land
 
+- The agreed surface amendments, before new code accumulates: callable
+  `sys` members move to snake_case (`sys.io.print`, `sys.clock.now`;
+  `sys.vm.Vm()` stays the one capitalized constructor), `use` becomes
+  a keyword, and `Request.as_call` takes an exact `Operation`
+  descriptor.
 - Canonical artifact/interface containers, definition/module/container hashes, SCC hashing for mutually recursive definitions, debug sections, and atomic writes.
-- Explicit `CompileEnv` and `LinkEnv` typed builders; import slots with signatures/rows/pinned hashes; typed `LinkedEntry[A,R]`; dynamic access only through `DynValue`.
+- Hash linking replaces the week-4 name-based `corelink`: core and
+  cross-module references resolve by pinned definition hash, and the
+  positional per-module core copy retires.
+- Explicit `CompileEnv` and `LinkEnv` typed builders; import slots with signatures/rows/pinned hashes; typed `LinkedEntry[A,R]`; dynamic access deferred with `DynValue` (week 12).
 - Pure linker, code/class load tables, verified-code cache keyed by semantic hash plus ABI/verifier version.
-- `lm build`, artifact execution, interface emission, package manifest reader, dependency DAG, and content-addressed build directory.
+- The package loop from `packages.md`: `lm new` scaffolds a package;
+  the `lm.package` TOML manifest declares path dependencies; the file
+  tree under `src/` is the module tree; `use` binds fixed-binding
+  aliases and compiles cross-package paths to import slots that the
+  build graph fulfills.
+- `lm build`, artifact execution, interface emission, dependency DAG, and content-addressed build directory.
 - Corruption-focused byte readers shared by artifact/snapshot work.
 
 ### Runnable outputs
 
 ```text
-examples/05-modules/
-  lm.package
-  src/main.lm
-  src/greeter.lm
+$ lm new hello
+$ cat hello/lm.package
+[package]
+name = "hello"
+version = "0.1.0"
 ```
 
-`greeter.lm` exports `Greeter`; `main.lm` receives its pinned interface through the build graph and returns a closure.
+A two-package workspace shows the loop end to end:
 
 ```text
-$ lm build examples/05-modules
-built Greeter  2cf4…
+examples/05-modules/
+  mathlib/
+    lm.package
+    src/matrix.lm
+  app/
+    lm.package          # mathlib = { path = "../mathlib" }
+    src/main.lm         # use mathlib.matrix
+```
+
+`matrix.lm` exports ordinary definitions; `main.lm` binds them with
+`use mathlib.matrix` and the build graph fulfills the import slot
+from the pinned interface.
+
+```text
+$ lm build examples/05-modules/app
+built mathlib  2cf4…
 built app      91ab…
-$ lm run build/debug/app.lma --allow Io.Print
+$ lm run examples/05-modules/app --allow Io.Print
 Hello Ada!
 ```
 
@@ -404,6 +436,10 @@ A runtime-compilation example binds a frozen `Config` with `CompileEnv.bind`, co
 - Linking installs no global names and performs no host operation.
 - Verified code is never re-verified under the same hash/ABI cache key.
 - Build-cache and verified-code-cache responsibilities remain separate.
+- Core references resolve by hash; no name-based or positional core
+  lookup survives in the verifier or the VM.
+- The `use` declaration never grants authority and never changes an
+  effect row.
 
 ---
 
@@ -440,7 +476,7 @@ def sandbox(program: () -> Int with Clock.Now): RunResult[Int] with Vm
   vm.run()
 end
 
-sandbox(do || with Clock.Now sys.clock.Now() + 1 end)
+sandbox(do || with Clock.Now sys.clock.now() + 1 end)
 ```
 
 ```text
@@ -489,7 +525,7 @@ $ lm run --show-result examples/07-snapshots/branch.lm --allow Vm
 Done((Done(42), Done(42)))
 ```
 
-A self-checkpoint example requests `sys.vm.Snapshot()`, receives a `SnapshotImage`, writes its bytes through an explicitly granted file wrapper, and resumes. A manual-drive snapshot captured in `asked` restores to the same operation and typed reply expectation; its holder calls `drive()` to mint a fresh request token before answering.
+A self-checkpoint example requests `sys.vm.snapshot()`, receives a `SnapshotImage`, writes its bytes through an explicitly granted file wrapper, and resumes. A manual-drive snapshot captured in `asked` restores to the same operation and typed reply expectation; its holder calls `drive()` to mint a fresh request token before answering.
 
 ```text
 $ lm snapshot verify checkpoints/asked.lms
@@ -562,7 +598,7 @@ A logger example drains messages after close. A sandbox-service example launches
 
 - Full initial operation manifest for I/O, filesystem, clock, random, TCP, and optional process environment/current-directory operations.
 - Platform adapters for Unix and Windows with ordinary portable error enums and inert snapshot descriptors.
-- Pure `std/path`; explicit `File`/TCP wrappers; `read_exact`, `read_all`, `write_all`, text helpers; durations/instants; random selection/shuffle.
+- Pure `std/path`; explicit `File`/TCP wrappers; `read_exact`, `read_all`, `write_all`, text helpers; durations/instants; random selection/shuffle. `std` ships with the toolchain, needs no manifest entry, and its names enter a module only through `use` lines (`docs/specs/packages.md` section 5).
 - Cancellation and async completion behavior for blocking reads, sleeps, connects, accepts, and proc pause.
 - Root CLI policy profiles with explicit grants and finite limits.
 
