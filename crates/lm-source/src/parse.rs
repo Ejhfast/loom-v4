@@ -748,9 +748,9 @@ impl Parser {
                         }),
                         ExprKind::Index { .. } => Err(Diagnostic::new(
                             "E1002",
-                            "index assignment is not supported in this language slice; \
-                             for a map, use the `put` method; a list has no element \
-                             write in this slice",
+                            "index assignment is not supported in this language slice. \
+                             For a map, use the `put` method. A list has no element \
+                             write in this slice.",
                             expr.span,
                         )),
                         _ => Err(Diagnostic::new(

@@ -556,3 +556,121 @@ fn unknown_opcode_is_rejected_by_the_decoder() {
         Err(LoadError::Decode(_))
     ));
 }
+
+/// Source with a generic virtual call and an enum-arm cast, for the
+/// review-fix attacks on `CallVirtualG` and `CastType`.
+const REVIEW_SOURCE: &str = "
+o: Option[Int] = Some(1)
+p: Option[String] = Some(\"x\")
+b = Box(2)
+n = case o
+in Some(v) then v + b.get()
+in None    then 0
+end
+n
+
+class Box[T]
+  value: T
+
+  def init(mut self, value: T)
+    self.value = value
+  end
+
+  def get(self): T
+    self.value
+  end
+end
+";
+
+fn review_bytes() -> Vec<u8> {
+    compile_to_bytes("corrupt.lm", REVIEW_SOURCE).unwrap()
+}
+
+#[test]
+fn valid_review_bytes_load_and_run() {
+    let loaded = lm_vm::load_bytes(&review_bytes()).unwrap();
+    let mut vm = lm_vm::Vm::new(&loaded, lm_vm::VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(3)");
+}
+
+#[test]
+fn virtual_call_app_out_of_range_is_rejected_not_a_panic() {
+    let mut module = lm_bytecode::decode(&review_bytes()).unwrap();
+    let mut hit = false;
+    for func in &mut module.funcs {
+        for block in &mut func.blocks {
+            for instr in block.iter_mut() {
+                if let lm_bytecode::Instr::CallVirtualG { app, .. } = instr {
+                    *app = 999_999;
+                    hit = true;
+                }
+            }
+        }
+    }
+    assert!(hit, "the sample contains a generic virtual call");
+    expect_verify_reject(
+        &lm_bytecode::encode(&module),
+        "type application index out of range",
+    );
+}
+
+#[test]
+fn cast_that_changes_generic_arguments_is_rejected() {
+    let mut module = lm_bytecode::decode(&review_bytes()).unwrap();
+    // Find one type-test instruction and the instance entry it names.
+    let mut target: Option<(usize, Vec<u32>)> = None;
+    'search: for func in &module.funcs {
+        for block in &func.blocks {
+            for instr in block {
+                let ty = match instr {
+                    lm_bytecode::Instr::CastType(ty) | lm_bytecode::Instr::IsType(ty) => *ty,
+                    _ => continue,
+                };
+                if let lm_bytecode::BcType::Inst(class, args) = &module.types[ty as usize] {
+                    if !args.is_empty() {
+                        target = Some((*class as usize, args.clone()));
+                        break 'search;
+                    }
+                }
+            }
+        }
+    }
+    let (class, args) = target.expect("the sample contains a generic type test");
+    // Forge a sibling instantiation: the same class with one argument
+    // replaced by a different existing type entry.
+    let other = (0..module.types.len() as u32)
+        .find(|c| {
+            *c != args[0]
+                && matches!(
+                    module.types[*c as usize],
+                    lm_bytecode::BcType::Int | lm_bytecode::BcType::Str | lm_bytecode::BcType::Bool
+                )
+        })
+        .expect("a different scalar entry exists");
+    let mut forged_args = args.clone();
+    forged_args[0] = other;
+    let forged = module.types.len() as u32;
+    module
+        .types
+        .push(lm_bytecode::BcType::Inst(class as u32, forged_args));
+    for func in &mut module.funcs {
+        for block in &mut func.blocks {
+            for instr in block.iter_mut() {
+                match instr {
+                    lm_bytecode::Instr::CastType(ty) | lm_bytecode::Instr::IsType(ty) => {
+                        if matches!(&module.types[*ty as usize], lm_bytecode::BcType::Inst(c, a) if *c as usize == class && *a == args)
+                        {
+                            *ty = forged;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    expect_verify_reject(
+        &lm_bytecode::encode(&module),
+        "changes the generic arguments",
+    );
+}

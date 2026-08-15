@@ -132,8 +132,8 @@ fn tuple_indexing_rules() {
     // Out-of-range literal index.
     assert_eq!(code_of("t = (1, 2)\nt[2]\n"), "E1048");
     assert_eq!(code_of("t = (1, 2)\nt[-1]\n"), "E1048");
-    // Tuple equality is not defined.
-    assert_eq!(code_of("(1,) == (1,)\n"), "E1017");
+    // Tuple equality is structural (specification 6.4).
+    assert_eq!(runs("(1,) == (1,)\n"), "Done(true)");
     // Tuples are covariant; lists are not.
     assert_eq!(
         runs(
@@ -547,4 +547,49 @@ fn moderate_new_nesting_compiles_and_runs() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn tuple_equality_is_structural() {
+    // Specification 6.4: equal static tuple types, element pairs
+    // compared under the rules for their declared element types.
+    assert_eq!(runs("(1, \"x\", true) == (1, \"x\", true)\n"), "Done(true)");
+    assert_eq!(runs("(1, \"x\") == (2, \"x\")\n"), "Done(false)");
+    assert_eq!(runs("(1, \"x\") != (2, \"x\")\n"), "Done(true)");
+    // Nested tuples recurse.
+    assert_eq!(runs("((1, 2), 3) == ((1, 2), 3)\n"), "Done(true)");
+    assert_eq!(runs("((1, 2), 3) == ((1, 9), 3)\n"), "Done(false)");
+    // A heap element compares by reference identity.
+    assert_eq!(runs("xs = [1]\n(xs, 1) == (xs, 1)\n"), "Done(true)");
+    assert_eq!(runs("xs = [1]\n(xs, 1) == ([1], 1)\n"), "Done(false)");
+    // Unit elements are always equal.
+    assert_eq!(runs("def u()\nend\n(u(), 1) == (u(), 1)\n"), "Done(true)");
+}
+
+#[test]
+fn tuple_equality_static_rules() {
+    // The sides need equal static tuple types.
+    assert_eq!(code_of("(1, 2) == (1, \"x\")\n"), "E1004");
+    // A type-variable element has no equality rule in a shared body.
+    assert_eq!(
+        code_of("def f[T](x: (T, Int)): Bool\n  x == x\nend\nf((1, 2))\n"),
+        "E1017"
+    );
+}
+
+#[test]
+fn field_default_with_case_temporaries_runs() {
+    // Review regression: the shifted temporaries of a field default
+    // must move `next_scratch` past their new slots.
+    assert_eq!(
+        runs(
+            "class C\n  a: Int = case 41 in x then x + 1 end\n  \
+              b: Int = case (1, 2) in p then p[0] + p[1] end\nend\nc = C()\nc.a + c.b\n"
+        ),
+        "Done(45)"
+    );
+    assert_eq!(
+        runs("class D\n  a: Int = case 6 in _ then 7 end\nend\nD().a\n"),
+        "Done(7)"
+    );
 }

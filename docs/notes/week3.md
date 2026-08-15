@@ -152,6 +152,45 @@ the changed tests, and the deferred work.
   nesting; the larger week-3 AST pushed the guarded worst case past
   the old 4 MiB test threads.
 
+## Review fixes
+
+An independent review confirmed three defects. All three are fixed.
+
+- A field default with checker temporaries (a `case` expression)
+  compiled to bytecode with a local slot past `local_count`, and the
+  verifier rejected the module. The scratch counter now advances to
+  `base + max_slot`, because the shift records the highest slot in
+  the pre-shift space. Run tests now cover defaults with `case`.
+- The verifier read a `CallVirtualG` type-application index before
+  any range check, so a crafted module was a host panic instead of a
+  rejection. The structural pass now bounds the index and the
+  variable scopes; the arity check stays in the dataflow pass.
+- The verifier compared only the classes in `IsType` and `CastType`,
+  so a crafted module held a cast from one generic instantiation to
+  another. The verifier now requires equal argument vectors; every
+  legal nominal relation in this slice keeps the argument vector.
+  Corruption tests now attack both verifier rules.
+
+The review also recorded three accepted observations. A `case` has
+no runtime no-arm backstop; the static exhaustiveness proof is the
+single guard, and a hardening fault is planned with the week 4
+format work. Sibling-arm injection is top level only, so a nested
+arm-typed scrutinee can report a spurious `E1042`. An explicit row
+on a closure argument does not bind an effect variable; performs
+arrive in week 4 and the binding rule lands there.
+
+## Tuple equality
+
+The user decided structural tuple equality, and specification
+section 6.4 now defines it. The implementation landed with the
+review fixes. Equal static tuple types are required. Elements
+compare under the rules for their declared element types: scalars
+and strings by value, heap references by identity, nested tuples
+structurally, and unit elements always equal. A type-variable
+element has no rule inside a shared generic body and is an `E1017`
+error. The oracle implements the same rule, so the differential
+suite covers it.
+
 ## Changed tests
 
 Existing expectations changed only where a construct moved from

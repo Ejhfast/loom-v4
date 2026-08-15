@@ -831,9 +831,37 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         target.effect_params,
                     )?;
                 }
-                Instr::CallVirtual { selector, .. } | Instr::CallVirtualG { selector, .. } => {
+                Instr::CallVirtual { selector, .. } => {
                     if *selector as usize >= module.selectors.len() {
                         return Err(err(fidx, at("selector index out of range")));
+                    }
+                }
+                Instr::CallVirtualG { selector, app, .. } => {
+                    if *selector as usize >= module.selectors.len() {
+                        return Err(err(fidx, at("selector index out of range")));
+                    }
+                    // The full arity check needs the receiver type and
+                    // runs in the dataflow pass. The structural pass
+                    // bounds the index and the variable scopes, so the
+                    // dataflow pass can index the table safely.
+                    let Some(a) = module.apps.get(*app as usize) else {
+                        return Err(err(fidx, at("type application index out of range")));
+                    };
+                    for t in &a.types {
+                        if !ctx.vars_bounded(*t, func.type_params, func.effect_params) {
+                            return Err(err(
+                                fidx,
+                                at("type application uses a variable outside the caller scope"),
+                            ));
+                        }
+                    }
+                    for row in &a.rows {
+                        if !ctx.row_vars_bounded(row, func.effect_params) {
+                            return Err(err(
+                                fidx,
+                                at("type application row uses a variable outside the caller scope"),
+                            ));
+                        }
                     }
                 }
                 Instr::MakeClosure { func: f, captures } => {
@@ -1313,16 +1341,22 @@ fn step(
         }
         Instr::IsType(ty) | Instr::CastType(ty) => {
             let value = pop(state)?;
-            let Some((vc, _)) = ctx.as_instance(value) else {
+            let Some((vc, va)) = ctx.as_instance(value) else {
                 return Err(fail(format!("type test on non-instance type {value}")));
             };
-            let Some((tc, _)) = ctx.as_instance(*ty) else {
+            let Some((tc, ta)) = ctx.as_instance(*ty) else {
                 return Err(fail(format!(
                     "type test target {ty} is not an instance type"
                 )));
             };
             if !(ctx.class_extends(tc, vc) || ctx.class_extends(vc, tc)) {
                 return Err(fail("type test between unrelated classes".to_string()));
+            }
+            // Class arguments are invariant, and every legal nominal
+            // relation in this slice keeps the argument vector. A test
+            // that changes an argument would forge a generic type.
+            if va != ta {
+                return Err(fail("type test changes the generic arguments".to_string()));
             }
             match instr {
                 Instr::IsType(_) => push(state, TY_BOOL)?,

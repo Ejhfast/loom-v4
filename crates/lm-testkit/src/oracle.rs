@@ -532,6 +532,37 @@ impl<'m> Oracle<'m> {
         }
     }
 
+    /// Structural tuple equality: element pairs compare under the
+    /// rules for their declared element types.
+    fn tuple_eq(&self, a: &OV, b: &OV, ty: lm_types::TypeId) -> bool {
+        let elems = match self.m.store.get(ty) {
+            lm_types::Type::Tuple(elems) => elems.clone(),
+            _ => return false,
+        };
+        let (OV::Obj(xa), OV::Obj(xb)) = (a, b) else {
+            return false;
+        };
+        let xa = xa.borrow();
+        let xb = xb.borrow();
+        let (OKind::Tuple(ia), OKind::Tuple(ib)) = (&xa.kind, &xb.kind) else {
+            return false;
+        };
+        elems.iter().enumerate().all(|(i, e)| {
+            if *e == lm_types::UNIT {
+                return true;
+            }
+            if matches!(self.m.store.get(*e), lm_types::Type::Tuple(_)) {
+                return self.tuple_eq(&ia[i], &ib[i], *e);
+            }
+            match (&ia[i], &ib[i]) {
+                (OV::Int(x), OV::Int(y)) => x == y,
+                (OV::Bool(x), OV::Bool(y)) => x == y,
+                (OV::Str(x), OV::Str(y)) if *e == lm_types::STRING => x == y,
+                _ => self.ref_eq(&ia[i], &ib[i]),
+            }
+        })
+    }
+
     fn binary(&self, op: BinOp, operand_ty: lm_types::TypeId, l: OV, r: OV) -> EResult {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
@@ -566,11 +597,16 @@ impl<'m> Oracle<'m> {
                 }))
             }
             BinOp::Eq | BinOp::Ne => {
-                let equal = match (&l, &r) {
-                    (OV::Int(a), OV::Int(b)) => a == b,
-                    (OV::Bool(a), OV::Bool(b)) => a == b,
-                    (OV::Str(a), OV::Str(b)) if operand_ty == lm_types::STRING => a == b,
-                    _ => self.ref_eq(&l, &r),
+                let is_tuple = matches!(self.m.store.get(operand_ty), lm_types::Type::Tuple(_));
+                let equal = if is_tuple {
+                    self.tuple_eq(&l, &r, operand_ty)
+                } else {
+                    match (&l, &r) {
+                        (OV::Int(a), OV::Int(b)) => a == b,
+                        (OV::Bool(a), OV::Bool(b)) => a == b,
+                        (OV::Str(a), OV::Str(b)) if operand_ty == lm_types::STRING => a == b,
+                        _ => self.ref_eq(&l, &r),
+                    }
                 };
                 Ok(OV::Bool(if op == BinOp::Eq { equal } else { !equal }))
             }

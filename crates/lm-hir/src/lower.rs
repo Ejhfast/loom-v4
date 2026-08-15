@@ -245,6 +245,56 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         slot
     }
 
+    /// Emit a structural comparison of the tuples in the locals `a`
+    /// and `b`. The expansion leaves one `Bool` on the operand stack.
+    /// Unit elements are always equal, so they emit no test.
+    fn lower_tuple_eq(&mut self, a: u32, b: u32, ty: TypeId) {
+        let elems = match self.m.store.get(ty) {
+            Type::Tuple(elems) => elems.clone(),
+            _ => unreachable!("tuple equality on a non-tuple type"),
+        };
+        let tested: Vec<(usize, TypeId)> = elems
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, e)| *e != UNIT)
+            .collect();
+        if tested.is_empty() {
+            // Every element is unit, so the result is a constant and
+            // a failure block would have no predecessor.
+            self.emit(Instr::ConstBool(true));
+            return;
+        }
+        let false_b = self.new_block();
+        let join_b = self.new_block();
+        for (i, elem) in &tested {
+            if matches!(self.m.store.get(*elem), Type::Tuple(_)) {
+                let sa = self.scratch();
+                let sb = self.scratch();
+                self.emit(Instr::LoadLocal(a));
+                self.emit(Instr::TupleGet(*i as u32));
+                self.emit(Instr::StoreLocal(sa));
+                self.emit(Instr::LoadLocal(b));
+                self.emit(Instr::TupleGet(*i as u32));
+                self.emit(Instr::StoreLocal(sb));
+                self.lower_tuple_eq(sa, sb, *elem);
+            } else {
+                self.emit(Instr::LoadLocal(a));
+                self.emit(Instr::TupleGet(*i as u32));
+                self.emit(Instr::LoadLocal(b));
+                self.emit(Instr::TupleGet(*i as u32));
+                self.emit(binary_instr(BinOp::Eq, *elem));
+            }
+            self.emit(Instr::JumpIfFalse(false_b));
+        }
+        self.emit(Instr::ConstBool(true));
+        self.emit(Instr::Jump(join_b));
+        self.switch_to(false_b);
+        self.emit(Instr::ConstBool(false));
+        self.emit(Instr::Jump(join_b));
+        self.switch_to(join_b);
+    }
+
     /// Close every open block and return the block list.
     fn finish(mut self, pushed: bool) -> Vec<Vec<Instr>> {
         if pushed {
@@ -392,9 +442,24 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 left,
                 right,
             } => {
-                self.lower_expr(left);
-                self.lower_expr(right);
-                self.emit(binary_instr(*op, *operand_ty));
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && matches!(self.m.store.get(*operand_ty), Type::Tuple(_))
+                {
+                    self.lower_expr(left);
+                    let a = self.scratch();
+                    self.emit(Instr::StoreLocal(a));
+                    self.lower_expr(right);
+                    let b = self.scratch();
+                    self.emit(Instr::StoreLocal(b));
+                    self.lower_tuple_eq(a, b, *operand_ty);
+                    if matches!(op, BinOp::Ne) {
+                        self.emit(Instr::Not);
+                    }
+                } else {
+                    self.lower_expr(left);
+                    self.lower_expr(right);
+                    self.emit(binary_instr(*op, *operand_ty));
+                }
             }
             HExprKind::And(left, right) => {
                 self.lower_expr(left);
@@ -1065,7 +1130,9 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 let base = lowerer.next_scratch;
                 let mut max_slot = 0;
                 let shifted = shift_locals_expr(expr, base, &mut max_slot);
-                lowerer.next_scratch = lowerer.next_scratch.max(max_slot);
+                // The shifted temporaries occupy `base .. base + max_slot`,
+                // because `max_slot` counts in the pre-shift space.
+                lowerer.next_scratch = base + max_slot;
                 lowerer.emit(Instr::LoadLocal(self_slot));
                 lowerer.lower_expr(&shifted);
                 lowerer.emit(Instr::StoreField(fidx as u32));

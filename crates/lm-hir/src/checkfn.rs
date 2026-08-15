@@ -2556,16 +2556,42 @@ impl<'o> FnChecker<'o> {
                 }
                 let operand_ty = if l.ty == NEVER { r.ty } else { l.ty };
                 if matches!(ctx.store.get(operand_ty), Type::Tuple(_)) {
-                    return Err(Diagnostic::new(
-                        "E1017",
-                        format!(
-                            "cannot compare {} values with `{}`; tuple equality \
-                             is not defined",
-                            ctx.store.display(operand_ty),
-                            op.text()
-                        ),
-                        left.span,
-                    ));
+                    // Tuple equality is structural and needs equal
+                    // static tuple types (specification 6.4).
+                    if l.ty != r.ty && l.ty != NEVER && r.ty != NEVER {
+                        return Err(Diagnostic::new(
+                            "E1017",
+                            format!(
+                                "tuple equality needs equal static tuple types; \
+                                 the sides are {} and {}",
+                                ctx.store.display(l.ty),
+                                ctx.store.display(r.ty)
+                            ),
+                            left.span,
+                        ));
+                    }
+                    if !tuple_comparable(&ctx.store, operand_ty) {
+                        return Err(Diagnostic::new(
+                            "E1017",
+                            format!(
+                                "cannot compare {} values with `{}`; a tuple \
+                                 element does not support equality",
+                                ctx.store.display(operand_ty),
+                                op.text()
+                            ),
+                            left.span,
+                        ));
+                    }
+                    return Ok(HExpr {
+                        ty: BOOL,
+                        mutable: true,
+                        kind: HExprKind::Binary {
+                            op,
+                            operand_ty,
+                            left: Box::new(l),
+                            right: Box::new(r),
+                        },
+                    });
                 }
                 let comparable =
                     matches!(operand_ty, INT | BOOL | STRING) || ctx.store.is_heap(operand_ty);
@@ -3219,4 +3245,23 @@ fn reposition(mut d: Diagnostic, span: Span) -> Diagnostic {
         d.span = span;
     }
     d
+}
+
+/// True when every element of the tuple type supports `==` under the
+/// structural tuple rule.
+fn tuple_comparable(store: &lm_types::TypeStore, ty: TypeId) -> bool {
+    match store.get(ty) {
+        Type::Tuple(elems) => {
+            let elems = elems.clone();
+            elems.iter().all(|e| match store.get(*e) {
+                Type::Tuple(_) => tuple_comparable(store, *e),
+                _ => {
+                    *e == lm_types::UNIT
+                        || matches!(*e, lm_types::INT | lm_types::BOOL | lm_types::STRING)
+                        || store.is_heap(*e)
+                }
+            })
+        }
+        _ => false,
+    }
 }
