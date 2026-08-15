@@ -1,6 +1,6 @@
 # Packages and Modules
 
-Status: draft for review. Week 5 implements the base. Week 11
+Status: draft for review. Weeks 5 and 6 implement the base. Week 12
 completes the tooling.
 
 This document defines the ordinary developer loop: how a project
@@ -103,7 +103,7 @@ are no ambient standard-library names. The core prelude (`Option`,
   under the given policy grants. `lm run <path>.lma` executes a
   prebuilt artifact directly, with no package or source present.
 - `lm test` — build and run the package tests (full harness in
-  week 11).
+  week 12).
 
 The `.lma` artifact is the deployment and sandbox unit. It is the
 same container the runtime compiler produces and the linker

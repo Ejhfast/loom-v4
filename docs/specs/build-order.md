@@ -364,32 +364,92 @@ A blocked-print example terminates with `PolicyDenied`; a mock-clock example run
 
 # Part II — Closed artifacts and machine state as data
 
-## Week 5 — Deterministic artifacts, interfaces, linking, and packages
+## Week 5 — Deterministic artifacts, hashes, and linking
 
-The developer ergonomics of this week follow `docs/specs/packages.md`:
-the package layout, the minimal TOML manifest with path dependencies,
-modules from files, and the `use` declaration.
+This week builds code and artifact identity on the single-file
+pipeline. Packages and the multi-file build loop follow in week 6.
 
 ### Land
 
 - The agreed surface amendments, before new code accumulates: callable
   `sys` members move to snake_case (`sys.io.print`, `sys.clock.now`;
   `sys.vm.Vm()` stays the one capitalized constructor), `use` becomes
-  a keyword, and `Request.as_call` takes an exact `Operation`
-  descriptor.
-- Canonical artifact/interface containers, definition/module/container hashes, SCC hashing for mutually recursive definitions, debug sections, and atomic writes.
-- Hash linking replaces the week-4 name-based `corelink`: core and
-  cross-module references resolve by pinned definition hash, and the
-  positional per-module core copy retires.
-- Explicit `CompileEnv` and `LinkEnv` typed builders; import slots with signatures/rows/pinned hashes; typed `LinkedEntry[A,R]`; dynamic access deferred with `DynValue` (week 12).
-- Pure linker, code/class load tables, verified-code cache keyed by semantic hash plus ABI/verifier version.
-- The package loop from `packages.md`: `lm new` scaffolds a package;
-  the `lm.package` TOML manifest declares path dependencies; the file
-  tree under `src/` is the module tree; `use` binds fixed-binding
-  aliases and compiles cross-package paths to import slots that the
-  build graph fulfills.
-- `lm build`, artifact execution, interface emission, dependency DAG, and content-addressed build directory.
+  a keyword with the fixed-binding alias form (`use sys.vm`), and
+  `Request.as_call` takes an exact `Operation` descriptor.
+- The sectioned artifact container: a semantic region (code,
+  constants, signatures, rows, types), an export section, and a debug
+  section, with atomic writes. The container hash covers exact bytes;
+  the module semantic hash covers the semantic region only.
+- Definition hashes per specification 3.7: canonical bytecode and
+  constants, full signature and row, referenced definition
+  identities, and the compiler ABI version. SCC hashing for mutually
+  recursive definitions: canonical order, one component hash,
+  domain-separated member hashes.
+- Interface emission: exports with signatures and definition hashes.
+- Hash linking replaces the week-4 name-based `corelink`: core
+  references resolve by pinned definition hash in the verifier and
+  the VM, and the positional per-module core copy retires.
+- Verified-code cache keyed by semantic hash plus ABI/verifier
+  version.
+- `lm build file.lm` emits the artifact and interface with printed
+  hashes; `lm run <path>.lma` executes a prebuilt artifact.
 - Corruption-focused byte readers shared by artifact/snapshot work.
+
+### Runnable outputs
+
+```text
+$ lm build examples/01-basics/factorial.lm
+built factorial  sem=2cf4… container=91ab…
+$ lm run build/debug/factorial.lma --show-result
+Done(3628800)
+```
+
+The artifact is the deployment and sandbox unit and runs with no
+source present. Editing only a comment changes the container hash
+and leaves every semantic definition/module hash unchanged; the
+demonstration prints both hash sets before and after the edit.
+
+A rebuild with unchanged inputs reports a verified-code cache hit
+and skips re-verification.
+
+### Gates
+
+- Truncated, overlong, duplicate, reordered, hash-mismatched, and type-incompatible artifacts reject before allocation-heavy work.
+- Reproducible artifact bytes across builds and hosts.
+- Semantic hashes ignore comments, formatting, and debug sections;
+  the container hash covers exact bytes.
+- Verified code is never re-verified under the same hash/ABI cache key.
+- Core references resolve by hash; no name-based or positional core
+  lookup survives in the verifier or the VM.
+- The `use` alias form never grants authority and never changes an
+  effect row.
+
+---
+
+## Week 6 — Packages, modules, and the build loop
+
+The developer ergonomics of this week follow `docs/specs/packages.md`:
+the package layout, the minimal TOML manifest with path dependencies,
+modules from files, and the `use` declaration over interfaces.
+
+### Land
+
+- The module tree from files: `src/geometry/shapes.lm` is the module
+  `geometry.shapes`; per-module compilation against dependency
+  interfaces; `src/main.lm` holds the program entry.
+- `use` for own modules and dependency packages: each cross-package
+  path compiles to a named import slot that the build graph fulfills
+  from the pinned interfaces.
+- The `lm.package` manifest: a strict hand-written TOML subset
+  (documented), path dependencies only, the dependency key as the
+  local name.
+- `lm new` scaffolding; the dependency DAG; the content-addressed
+  build directory with cache hits; `lm build`/`lm run` on packages.
+- Explicit `CompileEnv` and `LinkEnv` typed builders; import slots
+  with signatures/rows/pinned hashes; a pure linker; typed
+  `LinkedEntry[A,R]`; dynamic access deferred with `DynValue`
+  (week 13). The build tool constructs the environments; ordinary
+  development never touches them.
 
 ### Runnable outputs
 
@@ -423,46 +483,38 @@ built mathlib  2cf4…
 built app      91ab…
 $ lm run examples/05-modules/app --allow Io.Print
 Hello Ada!
-```
-
-`lm build` writes the linked program artifact to
-`build/debug/app.lma` beside the content-addressed store. The
-artifact runs directly, with no package or source present:
-
-```text
 $ lm run build/debug/app.lma --allow Io.Print
 Hello Ada!
 ```
 
-The artifact is the deployment and sandbox unit. `lm run <package>`
-is sugar for build plus artifact execution; both paths admit code
-through the same verifier.
+`lm run <package>` is sugar for build plus artifact execution; both
+paths admit code through the same verifier. A second build with
+unchanged inputs reports cache hits.
 
-A second build with unchanged inputs reports cache hits. Editing only a comment leaves semantic definition/module hashes unchanged while the exact source/input cache key changes appropriately.
-
-A runtime-compilation example binds a frozen `Config` with `CompileEnv.bind`, compiles a module, links it with `LinkEnv`, requests a typed entry, and runs it.
+A runtime-compilation example binds a frozen `Config` with
+`CompileEnv.bind`, compiles a module, links it with `LinkEnv`,
+requests a typed entry, and runs it.
 
 ### Gates
 
-- Truncated, overlong, duplicate, reordered, hash-mismatched, and type-incompatible artifacts reject before allocation-heavy work.
-- Reproducible artifact bytes across CI hosts.
 - Linking installs no global names and performs no host operation.
-- Verified code is never re-verified under the same hash/ABI cache key.
 - Build-cache and verified-code-cache responsibilities remain separate.
-- Core references resolve by hash; no name-based or positional core
-  lookup survives in the verifier or the VM.
+- A dependency-name collision is a compile error with the manifest
+  rename as the stated fix; resolution never picks silently.
 - The `use` declaration never grants authority and never changes an
   effect row.
+- Editing one module rebuilds only the packages whose interfaces
+  change.
 
 ---
 
-## Week 6 — One graph engine, boundaries, freezing, and nested sandboxes
+## Week 7 — One graph engine, boundaries, freezing, and nested sandboxes
 
 ### Land
 
 - Iterative graph engine and native shape table for mark, freeze, frozen verification, transfer/copy, canonical digest, detached inspection, and later snapshot encoding.
 - Cycle/sharing preservation, canonical traversal ordinals, bounded work tables, digest cache on frozen objects, and stable map semantics.
-- Transfer versus control-envelope modes; sendability checks; code/classes by hash; holder-local VM/table handles; typed proc handles reserved for Week 8; inert resource descriptors.
+- Transfer versus control-envelope modes; sendability checks; code/classes by hash; holder-local VM/table handles; typed proc handles reserved for Week 9; inert resource descriptors.
 - `Vm.from_object` and terminal publication fully routed through the codec.
 - Nested VM authority chains and resource reservation from parent budgets.
 
@@ -509,7 +561,7 @@ A boundary-negative example attempts to return a mutable list from a child VM an
 
 ---
 
-## Week 7 — Snapshots, restore, inspection, and branching execution
+## Week 8 — Snapshots, restore, inspection, and branching execution
 
 ### Land
 
@@ -555,7 +607,7 @@ valid: state=asked op=Clock.Now frames=2 objects=37
 
 ---
 
-## Week 8 — Typed procs, mailboxes, supervision, and live revocation
+## Week 9 — Typed procs, mailboxes, supervision, and live revocation
 
 ### Land
 
@@ -603,9 +655,9 @@ A logger example drains messages after close. A sandbox-service example launches
 
 ---
 
-# Part III — A practical distribution by Week 12
+# Part III — A practical distribution by Week 13
 
-## Week 9 — Files, paths, console, time, random, and TCP
+## Week 10 — Files, paths, console, time, random, and TCP
 
 ### Land
 
@@ -641,7 +693,7 @@ A TCP echo client/server pair runs in separate procs with explicit `Net.*` and `
 
 ---
 
-## Week 10 — Full minimal core/standard library
+## Week 11 — Full minimal core/standard library
 
 ### Land
 
@@ -682,7 +734,7 @@ A CSV-to-JSON command-line example combines strings, lists, maps, files, and JSO
 
 ---
 
-## Week 11 — Package/build loop, test runner, and developer tooling
+## Week 12 — Package/build loop, test runner, and developer tooling
 
 ### Land
 
@@ -722,7 +774,7 @@ A three-package application rebuild shows only the changed package and dependent
 
 ---
 
-## Week 12 — Reified compiler, typed linker, reflection, and dynamic programs
+## Week 13 — Reified compiler, typed linker, reflection, and dynamic programs
 
 ### Land
 
@@ -751,13 +803,13 @@ A reflection example prints class/field/code metadata without acquiring a callab
 - Dynamic access requires an explicit `DynValue`; normal typed paths do not widen.
 - Reflection cannot invoke a selector, mutate code, or bypass frozen/boundary rules.
 - Compiler operation can be blocked independently and has deterministic ordinary errors.
-- By the end of Week 12, every version 0.2 surface area has at least one executable example on the production path.
+- By the end of Week 13, every version 0.2 surface area has at least one executable example on the production path.
 
 ---
 
 # Part IV — Close the semantics by invariant, not by adding isolated features
 
-## Week 13 — Static-semantics closure
+## Week 14 — Static-semantics closure
 
 ### Land
 
@@ -790,7 +842,7 @@ The cyclic-graph program also exercises `Option`, higher-order rows, freeze, and
 
 ---
 
-## Week 14 — VM/state-machine closure
+## Week 15 — VM/state-machine closure
 
 ### Land
 
@@ -821,7 +873,7 @@ The tower constructs five nested machines and grants only `Vm`; the transition s
 
 ---
 
-## Week 15 — Artifact, snapshot, boundary, and security closure
+## Week 16 — Artifact, snapshot, boundary, and security closure
 
 ### Land
 
@@ -855,7 +907,7 @@ A sandbox example consumes intentionally hostile source/artifact/snapshot inputs
 
 ---
 
-## Week 16 — Library/API closure and example-driven redesign
+## Week 17 — Library/API closure and example-driven redesign
 
 ### Land
 
@@ -897,7 +949,7 @@ $ cargo xtask examples --release
 
 # Part V — Self-host the compiler in four weekly cuts
 
-## Week 17 — Self-hosted source, parser, and resolver
+## Week 18 — Self-hosted source, parser, and resolver
 
 ### Land
 
@@ -923,7 +975,7 @@ The self-hosted parser successfully parses core, std, compiler sources, and ever
 
 ---
 
-## Week 18 — Self-hosted types, initialization, and effects
+## Week 19 — Self-hosted types, initialization, and effects
 
 ### Land
 
@@ -948,7 +1000,7 @@ A deliberate row-understatement, invalid constructor, and ambiguous generic call
 
 ---
 
-## Week 19 — Self-hosted lowering, bytecode, artifacts, and interfaces
+## Week 20 — Self-hosted lowering, bytecode, artifacts, and interfaces
 
 ### Land
 
@@ -974,7 +1026,7 @@ The self-hosted compiler builds core, std, the example corpus, and its own sourc
 
 ---
 
-## Week 20 — Bootstrap closure and reproducible stages
+## Week 21 — Bootstrap closure and reproducible stages
 
 ### Land
 
@@ -1008,7 +1060,7 @@ The stage-2 compiler builds and runs all examples/tests without invoking the Rus
 
 # Part VI — Production engineering driven by measurement and adversarial testing
 
-## Week 21 — Profile and tighten the interpreter/compiler hot paths
+## Week 22 — Profile and tighten the interpreter/compiler hot paths
 
 ### Land
 
@@ -1038,7 +1090,7 @@ All prior examples remain byte-for-byte or semantically identical as appropriate
 
 ---
 
-## Week 22 — Heap, GC, collection, and graph performance
+## Week 23 — Heap, GC, collection, and graph performance
 
 ### Land
 
@@ -1066,7 +1118,7 @@ Large JSON, CSV, proc-message, and deep/cyclic graph workloads run under the sam
 
 ---
 
-## Week 23 — Incremental compilation and build-cache precision
+## Week 24 — Incremental compilation and build-cache precision
 
 ### Land
 
@@ -1096,7 +1148,7 @@ A scripted edit sequence demonstrates no-op rebuild, private implementation rebu
 
 ---
 
-## Week 24 — Continuous fuzzing and differential execution
+## Week 25 — Continuous fuzzing and differential execution
 
 ### Land
 
@@ -1127,7 +1179,7 @@ Generated pure programs run through all execution oracles and print a compact se
 
 ---
 
-## Week 25 — Cross-platform runtime and embedding
+## Week 26 — Cross-platform runtime and embedding
 
 ### Land
 
@@ -1158,7 +1210,7 @@ The Rust embedder registers `Telemetry.Emit`, manually drives a guest, and recor
 
 ---
 
-## Week 26 — Security and reliability release candidate
+## Week 27 — Security and reliability release candidate
 
 ### Land
 
@@ -1189,7 +1241,7 @@ The full sandbox-service example runs for an extended soak with bounded memory a
 
 ---
 
-## Week 27 — Documentation, examples, and migration-quality diagnostics
+## Week 28 — Documentation, examples, and migration-quality diagnostics
 
 ### Land
 
@@ -1216,7 +1268,7 @@ A new user can clone, bootstrap, build a multi-module program, add a test, inspe
 
 ---
 
-## Week 28 — Version 0.2 release
+## Week 29 — Version 0.2 release
 
 ### Land
 
