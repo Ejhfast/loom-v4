@@ -498,7 +498,7 @@ makes the developer loop fast.
 
 ## New tests
 
-`week6.rs` (30 cases) covers the build loop end to end on real
+`week6.rs` (31 cases) covers the build loop end to end on real
 package trees:
 
 - the two-package workspace, the cache hit, and the two rebuild
@@ -509,7 +509,8 @@ package trees:
   and program determinism across two build directories;
 - the imported enum, the imported generics, the imported mutable
   method, the imported effect parameter, and the transitive type;
-- the inheritance rejection, the self-import cycle, and authority;
+- the inheritance rejection, the self-import cycle, the symbolic
+  link, and authority;
 - the scaffold, a build from a subdirectory, and the module tree from
   directories;
 - the dependency-name collision, the unknown root, the library
@@ -519,7 +520,9 @@ package trees:
 `week6_interface.rs` (7 cases) covers the structural signature, the
 two hashes, the readable dump, determinism, every truncation and bad
 tag, and the depth cap. `week6_imports.rs` (7 cases) covers the
-import slot inside the artifact. `week6_identity.rs` (3 cases) covers
+import slot inside the artifact. `week6_names.rs` (3 cases) covers
+the definition names as verifier inputs and the core family rule.
+`week6_identity.rs` (3 cases) covers
 nominal identity, the core slot, and the identity replay on a cache
 hit. `fuzz.rs` gains the interface decoder and the manifest parser.
 `tests/ui/` gains two `use` diagnostics. `bench_smoke.rs` times the
