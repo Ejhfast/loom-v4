@@ -276,7 +276,7 @@ Missing, extra, incompatible, or mutable bindings produce `LinkErrors` in the tr
 
 Linking a program merges its modules into one closed artifact with an empty import table. The merge is pure: it installs no global name, performs no host operation, and reads no file. A module with an unresolved import slot never executes: the loader admits an artifact only with an empty import table. The merged artifact meets the whole verifier before it runs.
 
-The linker compares two classes on QualifiedKey and StructuralHash (3.7, 8.6). The table is exhaustive:
+**The class table.** The linker compares two classes on QualifiedKey and StructuralHash (3.7, 8.6). The table is exhaustive:
 
 | QualifiedKey | StructuralHash | Result |
 | --- | --- | --- |
@@ -285,15 +285,36 @@ The linker compares two classes on QualifiedKey and StructuralHash (3.7, 8.6). T
 | different | same | keep distinct |
 | different | different | keep distinct |
 
-The second row rejects two implementation versions of one qualified name. The rejection names both providers and the rebuild. The third row keeps `mathlib.Vec2` and `app.Point` distinct although their structures are equal.
+The second row rejects two implementation versions of one qualified name. The rejection names both providers and the rebuild. The third row keeps `mathlib.Vec2` and `app.Point` distinct although their structures are equal. Row 3 keeps two class slots, because two class keys need two runtime classes.
 
-Two functions with one StructuralHash are one function in the merged program. A function carries no QualifiedKey, so content decides. The core image every module carries therefore becomes one core, and a core value keeps its class across a module boundary.
+**The function table.** A function value is identified by StructuralHash (3.7). A named function binding maps a qualified name to a function value, and several bindings may name one function value. The linker compares the binding key and the StructuralHash of the function each key names:
+
+| Binding key | StructuralHash | Result |
+| --- | --- | --- |
+| same | same | share the binding and the code |
+| same | different | reject: conflicting providers |
+| different | same | keep both bindings, share the code |
+| different | different | keep both bindings and both code objects |
+
+The two tables differ in row 3 only, and the difference is the whole reason a function needs no QualifiedKey. Two equal bodies are one function value, so the core image every module carries becomes one core, the generated constructor stubs of the abstract enum parents share one code object, and a core value keeps its class across a module boundary. The two bindings stay, so a report names the function the source named.
+
+A generated construction function takes the binding `<class key>.<new>`. A class StructuralHash covers no constructor, because a constructor is a function value of its own, and a field default and an `init` body live inside it. Row 2 of the function table is therefore the rule that rejects two providers of one class key whose constructors differ.
 
 ### 3.7 Definition and module identity
 
 Four identities answer four questions about one definition: **QualifiedKey**, **StructuralHash**, **InterfaceHash**, and **VerificationHash**. Section 8.6 states them for a class. Each consumer names the one it needs, and no consumer reads a value another consumer owns.
 
-A **QualifiedKey** is the fully qualified declaration path of a class, for example `mathlib.geometry.Point`. The package name of the manifest supplies the root, never the dependency key. Two classes are the same nominal class when their QualifiedKey values are equal. A function carries no QualifiedKey: a function is identified by content alone.
+Three rules govern how a name meets an identity. A name sits on the left of the arrow: it is a binding that points at an identity, and it is never a part of that identity.
+
+> **QualifiedKey is the nominal identity of a class.**
+>
+> **A function value is identified by StructuralHash.**
+>
+> **A named function binding maps a qualified name to a function value.**
+
+A **QualifiedKey** is the fully qualified declaration path of a class, for example `mathlib.geometry.Point`. The package name of the manifest supplies the root, never the dependency key. Two classes are the same nominal class when their QualifiedKey values are equal. A single source file has no module path, so its declarations carry one-segment keys.
+
+A **named function binding** is a pair of a qualified name and a function value. A free function takes the binding `<module path>.<name>`, a method and an `init` take `<class key>.<name>`, and a generated construction function takes `<class key>.<new>`. A closure body and the entry take no binding. Several bindings may name one function value, so `a.first` and `b.second` stay two names of one shared code object. A binding key never enters a StructuralHash. It lives beside the code, and the linker reads both (3.6).
 
 A **StructuralHash** covers canonical bytecode and constants, full signature and effect row, referenced definition identities, import requirements and pinned hashes, compiler ABI version, and intrinsic semantics version. It never covers the definition's own name.
 
@@ -312,7 +333,9 @@ For mutually recursive definitions, the compiler finds strongly connected compon
 
 The set of components is a property of the graph, so the emission order of the component walk is invisible in every hash. A rename therefore moves no definition hash, inside a cyclic component or outside one.
 
-Structural refinement cannot always give each member a unique label. Two mutually recursive definitions with equal bodies stay symmetric through every round. This is a property of graph automorphism, not a defect of the rule: no order-invariant rule separates such members without an external identity. Symmetric members share one StructuralHash, and their QualifiedKey values keep them distinct wherever distinctness is observable.
+Structural refinement cannot always give each member a unique label. The stable partition of this rule is bisimulation: two members keep one label exactly when they are bisimilar. Bisimulation is coarser than isomorphism, so the rule may give one label to two members an isomorphism test separates. One label stays sound, because a member is a deterministic system with ordered successors: two bisimilar members have identical unfoldings, so they compute the same thing. Members with one label share one StructuralHash, and their QualifiedKey values keep them distinct wherever distinctness is observable.
+
+Refinement runs on untrusted input before the verifier, so its work is bounded twice: once per component and once per module. A component or a module past its bound rejects with a clear diagnostic. The bound is large enough that no source program reaches it.
 
 A **method** takes part in its class identity as the pair of the selector name and the implementing function identity. Selector identity is therefore name-based and independent of any method body. An override with a different body keeps the selector name.
 
@@ -859,7 +882,7 @@ A call selector is fixed at compile time; the runtime class selects the sealed i
 A class value is frozen. Four identities answer four questions about one class. Each consumer names the one it needs.
 
 - **QualifiedKey** — the nominal identity. The value is the fully qualified declaration path, for example `mathlib.geometry.Point`. Two classes are the same nominal class when their QualifiedKey values are equal. The linker uses this value. The type checker never compares it, because it works on class indices inside one module.
-- **StructuralHash** — the name-free content identity. It covers the kind, the generic arity, the parent identity, the normalized field layout, the selector set, the method signatures, the implementing function identities, and the native intrinsic identifier where applicable. It never covers the class's own name. Section 3.7 states how a reference to another class enters it.
+- **StructuralHash** — the name-free content identity. It covers the kind, the generic arity, the parent identity, the normalized field layout, the selector set, the method signatures, the implementing function identities, and the native intrinsic identifier where applicable. It never covers the class's own name. It covers no construction function: a constructor is a function value with its own StructuralHash, and the binding `<class key>.<new>` ties it to the class (3.6). A field default and an `init` body therefore reach the constructor identity and no class identity. Section 3.7 states how a reference to another class enters it.
 - **InterfaceHash** — the named public API identity of one export. It covers the export name, the kind, the full structural signature with class references by qualified name, the field defaults, the arm names, and the initializer signature. An import slot pins it. A rename moves it.
 - **VerificationHash** — the exact resolved input of the verifier. It answers whether the verifier approved this exact representation.
 
@@ -1329,7 +1352,7 @@ These methods are invalid in other states. Calling `step` or `run` while `asked`
 
 A control method on a currently `running` VM, or from guest code executing inside that same VM, faults. Execution and inspection methods also fault while `proc_owned`. `table()` and edits through an already obtained table handle are the explicit synchronized exception, permitting live revocation.
 
-`stack()` is valid only while not running or proc-owned and returns deep-frozen `FrameView` values: function identity/name, PC, source location if present, locals as `ValueView`, and a bounded operand summary. No live guest reference escapes.
+`stack()` is valid only while not running or proc-owned and returns deep-frozen `FrameView` values: function identity/name, PC, source location if present, locals as `ValueView`, and a bounded operand summary. No live guest reference escapes. The name of a frame is the set of names that bind its function value (3.7), because two equal bodies share one code object and keep both names.
 
 At most one host thread owns execution. Guest execution remains one logical thread.
 

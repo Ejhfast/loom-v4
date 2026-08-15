@@ -1070,3 +1070,308 @@ included. The probe
 `a_nested_closure_body_reaches_the_structural_hash` failed before the
 fix and passes after it. The core pins did not move, because the core
 image holds no closure inside a component.
+
+## The function binding layer and three review fixes
+
+This section records the work that follows the independent review of
+the identity, linking, and build-store rework. It covers four defects
+and the design that resolves two of them.
+
+Bytecode format version 9 carries the named function bindings. The
+compiler ABI version is 4. The verifier version stays 3, because the
+verifier reads no binding. The core image pin moved to
+`1c73861d0cf6b4043446554cd34940d756870d157f490503bf947f1ed8ca102d`
+and `core/pinned-core-defs.txt` holds the twenty regenerated core
+structural hashes.
+
+### The model
+
+The governing principle:
+
+```text
+Source binding     "A"   -> NominalTypeId
+Method selector    "foo" -> SelectorId
+Implementation     SelectorId -> MethodHash
+```
+
+A name sits on the left of the arrow. It is a binding that points at
+an identity, and it is never a component of that identity. The tree
+gave a class a QualifiedKey and gave a function none. That was right
+for identity and wrong as a complete account: it confused binding
+identity with code storage. A function still has a named binding.
+
+Two layers now:
+
+```text
+FunctionBinding { qualified_name, code_index }
+FunctionCode    { structural_hash, signature, body }
+```
+
+Several bindings may point at one code object. `lm_bytecode::Module`
+carries `bindings: Vec<FuncBinding>` in the export section, so a
+binding key never reaches the semantic region, never reaches the
+verifier, and never enters a structural hash. The keys:
+
+- a free function takes `<module path>.<name>`;
+- a method and an `init` take `<class key>.<name>`;
+- a generated construction function takes `<class key>.<new>`;
+- a closure body and the entry take no binding.
+
+A class member takes the class key as its root, never the module path.
+The embedded core copy of every module therefore binds one set of
+names, and `core.Option.is_some` is one binding key in every module.
+
+### The two merge tables
+
+The class table and the function table differ in row 3, so one table
+cannot serve both kinds.
+
+| Binding key | StructuralHash | Result |
+| --- | --- | --- |
+| same | same | share the binding and the code |
+| same | different | reject: conflicting providers |
+| different | same | keep both bindings, share the code |
+| different | different | keep both bindings and both code objects |
+
+For a class, row 3 keeps two class slots, because two class keys need
+two runtime classes. For a function, row 3 keeps two bindings and one
+code object.
+
+`docs/specs/identity-and-linking.md` section 5 is now 5.0 (the three
+rules), 5.1 (class identity and class-slot merging), and 5.2 (function
+binding resolution and code sharing). Specification 3.6 carries both
+tables, and 3.7 states the three rules. The sentence at 3.6 that read
+"a function carries no QualifiedKey, so content decides" disagreed
+with the four mandatory rows of section 5. The narrowing above settles
+it: a function value carries no key, and a function *binding* does.
+
+### Defect 3: the class structural hash and the generated constructor
+
+`Resolver::class_bytes` writes the kind, the arity, the parent key, the
+fields, the methods, and the arm set. It writes nothing about the
+constructor. Measured with no crafting: `class Zero { x: Int = 0 }` and
+`class Seven { x: Int = 7 }` produce one class structural hash and two
+`<new>` hashes. Two classes whose `init` bodies differ do the same.
+`InterfaceHash` covers `has_default: bool` and no default value.
+
+Two providers of one class key therefore merged under row 1 into one
+class with two live constructors. A probe measured `Done(7)`, that is
+`0 + 7`, because each caller reached its own initializer.
+
+**The complete escape list, verified.** A class owns these generated
+or class-scoped definitions:
+
+- **`<new C>`, the generated construction function** — escapes the
+  class structural hash. The field default expressions are inlined
+  into its body (`crates/lm-hir/src/lower.rs`, the defaults loop), so
+  a default value escapes with it. A closure inside a default is a
+  `MakeClosure` target of `<new C>` and reaches its body digest.
+- **`init`** — escapes the class structural hash. `resolve_class`
+  keeps `init` out of `class.methods`, so no selector pair names it.
+  `<new C>` calls it, so the constructor hash covers it transitively.
+
+Nothing else escapes. The kind, the generic arity, the parent key, the
+field names and types, the selector set, the implementing function
+identities, and the closed arm set of an abstract enum parent are all
+inside `class_bytes`. The test
+`every_named_function_carries_one_binding` holds the list closed: it
+proves that the only functions of a compiled module with no binding
+are the entry and the closure bodies.
+
+**The fix.** Each constructor takes the binding `<class key>.<new>`,
+and each `init` takes `<class key>.init`. Row 2 of the function table
+rejects one binding key with two structural hashes, and the message
+names both providers and the rebuild. The linker also proves that a
+module derives its constructor bindings from its class keys: every
+class a module defines declares the binding `<class key>.<new>`. A
+module that names a class one way and its constructor another way is
+not self-consistent and rejects.
+
+Three probes hold it:
+`two_providers_of_one_key_with_two_field_defaults_reject`,
+`two_providers_of_one_key_with_two_init_bodies_reject`, and
+`a_class_without_its_constructor_binding_rejects`. Each one asserts
+first that the two class structural hashes are equal, so the class
+table alone cannot separate the providers.
+`a_class_structural_hash_covers_no_constructor` records the gap itself
+as measured behavior.
+
+### Defect 4: content merging discarded the second binding name
+
+`link.rs` merged functions on the structural hash alone and kept
+`name: module.funcs[idx].name.clone()` from the first module it saw.
+Measured: `app.shapes.bump` and `app.main.increment`, both `n + 1`,
+merged, and the linked program held only `bump`.
+
+This was a provenance defect, not an argument for giving a function a
+key. The binding layer is the fix: the linked program keeps both
+bindings and one code object (row 3).
+
+The live surfaces:
+
+- `lm disasm` prints one `binding <key>` line per name of a function
+  value. The listing now names both `app.shapes.bump` and
+  `app.main.increment`.
+- the `lm inspect --live` frame dump prints every name that binds the
+  frame function, and it falls back to the code label for a closure
+  body and the entry.
+- the closure value display `<closure NAME>` still prints the code
+  label. A closure body takes no binding, so there is no name to
+  print.
+- `lm inspect <file>.lma` reports the binding count.
+
+The `stack()` and `FrameView` surface of `language-spec.md` section
+10 is **not implemented anywhere in the Rust tree**, so that part
+stays latent. The specification sentence now states that a frame name
+is the set of names that bind its function value.
+
+The same loss never applied to a class name, because a class merge
+needs equal keys and a source key is `<module path>.<name>`.
+
+### Defect 5: the single-file module path
+
+`lm check` and `lm run <file>.lm` used the default `module_path: ""`.
+`lm build <file>.lm` used the file stem. Measured on one source: the
+`lm check` key was `Point` and the `lm build` key was
+`factorial.Point`, and the two semantic hashes differed.
+
+**The rule, applied to all three commands:**
+
+> A single source file has no module path.
+
+A module path comes from a package: the manifest supplies the root and
+the directory tree supplies the rest. One file outside a package has
+neither. `lm check`, `lm run <file>.lm`, `lm build <file>.lm`, and
+`lm disasm <file>.lm` now share one function, `compile_file`, so the
+agreement holds by construction and not by convention. The `lm check`
+doc comment is true again.
+
+Why the empty path and not the file stem:
+
+- a file name is not a module name. Many source files in this tree
+  hold a hyphen (`manual-drive.lm`), which no module name may hold.
+  The stem rule would invent a qualified key no source could name;
+- a file name may be `core`, which the core image reserves.
+  `lm build core.lm` rejected with E0290 while `lm check core.lm`
+  succeeded. Under the empty rule a file named `core.lm` carries no
+  module path, so it takes no core key and all three commands accept
+  it;
+- `lm_testkit::compile_text` and every library caller already use the
+  empty default. The stem rule would have reintroduced a second
+  disagreement in the place the review found the first one.
+
+The cost is real and accepted: a single-file class carries a
+one-segment key such as `Point`. Two single-file programs never link
+together, so two one-segment keys never meet. A package module keeps
+its full path.
+
+The two tests are `every_single_file_command_compiles_one_module`,
+which compares the `lm disasm` listing of the source with the listing
+of the artifact `lm build` wrote, and
+`a_file_named_core_compiles_through_every_single_file_command`.
+
+### Defect 6: the refinement budget bounded one component
+
+`REFINE_WORK_BUDGET` caps `rounds * (members + references)` at 2^24
+per strongly connected component. The check was correct and
+incremental, and it bounded one component only. A file with 64 chains
+of 2048 members is 7.2 MiB, and each chain stayed inside the component
+budget, so `lm inspect` cost 6.1 s.
+
+`MODULE_REFINE_WORK_BUDGET` now caps the sum over the whole module at
+2^25. The value is twice the component budget: a module may hold more
+than one component, and the bound stays close to the cost of the
+largest single component. `module_identity` spends the module budget
+component by component, and the effective round bound of a component
+is the smaller of the two budgets. Each budget has its own diagnostic.
+
+Measured, release build:
+
+```text
+1 x chain-2048:  0.1 MiB   379 ms  accepted (2046 rounds)
+2 x chain-2048:  0.3 MiB   189 ms  accepted
+4 x chain-2048:  0.5 MiB   379 ms  accepted
+5 x chain-2048:  0.6 MiB   378 ms  rejected: module budget
+8 x chain-2048:  1.0 MiB   380 ms  rejected: module budget
+64 x chain-2048: 8.4 MiB   388 ms  rejected: module budget
+```
+
+**The new bound: about 0.38 s of refinement per module, whatever the
+module size.** End to end, `lm inspect` on the 7.2 MiB hostile
+artifact the review built costs 415 ms and rejects with a clear
+diagnostic, against 6.1 s before. The largest module the budget
+accepts is four worst-case components, which costs 379 ms.
+
+No source program reaches either budget. The largest component of a
+real program has a handful of members and settles in one or two
+rounds.
+
+### Specification accuracy: bisimulation, not automorphism
+
+Section 7 of `identity-and-linking.md` justified the collapse of
+symmetric members by graph automorphism, and it claimed that no
+order-invariant rule separates such members. Both claims were too
+strong. The implementation is 1-dimensional colour refinement, whose
+stable partition is bisimulation. Bisimulation is coarser than
+isomorphism in general, so the rule may give one label to two members
+an isomorphism test separates.
+
+Merging stays sound, and the corrected text states why: a member is a
+deterministic system with ordered successors, so two bisimilar members
+have identical unfoldings and compute the same thing. Section 7 is now
+"Members that refinement never separates", and `language-spec.md` 3.7
+carries the same correction.
+
+### Moved hashes
+
+- the core image pin:
+  `df377f94ffbf8cc9e4a6358f02146611448455e228bc029e0181a22f8dc68657`
+  to
+  `1c73861d0cf6b4043446554cd34940d756870d157f490503bf947f1ed8ca102d`;
+- every one of the twenty core structural hashes in
+  `core/pinned-core-defs.txt`, regenerated with the ignored test
+  `regenerate_core_pins`. The compiler ABI version enters every
+  component hash, so the bump alone moves them. `StepEvent.Ran` and
+  `StepEvent.Waiting` still hold one value, and so do the three
+  `Ordering` arms;
+- every definition hash of every module, for the same reason;
+- every module semantic hash, which now covers the binding table;
+- `examples/01-basics/factorial.lm` moved to semantic
+  `c785f607843e167703eae5177b42698a3a155cd43d23de2e711fffed4c9427aa`
+  and container
+  `6b58e7d1ea2693727dd3bce917114ce41389d7607b24520579f0ef758fbb619b`;
+- `examples/05-modules/app` moved to semantic
+  `1e362237b7421b8f0fbde4eec716c5dcede402417aadf633ace8f37424d39cec`
+  and container
+  `7b55b7e6e34e8b356e1b02c00a13d0c30156aff764659b7c5155745b324a05f5`;
+- every fuzz corpus module, regenerated with the ignored test
+  `regenerate_fuzz_corpus` for container format version 9.
+
+One value did **not** move: the verification hash of a module. It
+covers the semantic region and the operation manifest digest, and
+version 9 changes the export section only. The verified-code key still
+moves, because it carries the compiler ABI version.
+
+Definition sharing holds: the linked `examples/05-modules/app` program
+still carries 27 classes. It carries 45 function values and 50
+bindings, so five names share a code object with another name.
+
+### New tests
+
+`identity_linking.rs` gains nine cases: the class structural hash gap,
+the two constructor rejections, the constructor binding derivation,
+row 3 of the function table with the listing check, row 1 over the
+merged program, the closed escape list, the binding key outside every
+structural hash, and the module refinement budget. The ignored
+measurement case now reports the module budget boundary.
+`lm-bytecode` gains a decoder case for a binding outside the function
+table. `cli.rs` gains the two single-file module path cases.
+
+### Deferred
+
+- A `stack()` and `FrameView` implementation, which is the one
+  provenance surface the specification describes and the tree does not
+  have.
+- Per-definition pruning of unused import slots, unchanged.
+- The iterated-hash form of the labels in specification section 6,
+  unchanged.

@@ -48,6 +48,13 @@ and the implementation:
 - for a function: the signature, the effect row, the local table, and
   the instruction stream.
 
+A class StructuralHash covers no construction function. A constructor
+is a function value with its own StructuralHash, and section 5.2 ties
+it to the class through the binding `<class key>.<new>`. A field
+default is inlined into that constructor, and an `init` body is
+reached through it, so both reach the constructor identity and no
+class identity.
+
 A declaration name never enters its own StructuralHash. Section 4
 defines how a reference to a nominal type enters it.
 
@@ -86,7 +93,8 @@ this hash.
 Use this rule, and no shorter form of it:
 
 > A declaration name never enters a structural definition hash. A name
-> may enter an interface hash, a namespace hash, or a qualified key.
+> may enter an interface hash, a namespace hash, a qualified key, or a
+> function binding.
 
 The shorter claim "no name in any hash" is wrong. Interface hashes
 must contain names, because an importer agrees with a named API.
@@ -126,17 +134,53 @@ implementation note. Reject design 1 only in the note, and state the
 cost you measured. If design 2 fails a test that design 1 passes,
 adopt design 1 and record the failing case.
 
-## 5. The linker merge rule
+## 5. The linker merge rules
 
-The linker compares two definitions with this table. The table is
+### 5.0 The three rules
+
+A name is a temporary reference to an identity. A name sits on the
+left of the arrow. It is a binding that points at an identity, and it
+is never a component of that identity:
+
+```text
+Source binding     "A"   -> NominalTypeId
+Method selector    "foo" -> SelectorId
+Implementation     SelectorId -> MethodHash
+```
+
+Three rules follow, and the rest of this section applies them:
+
+> **QualifiedKey is the nominal identity of a class.**
+>
+> **A function value is identified by StructuralHash.**
+>
+> **A named function binding maps a qualified name to a function
+> value.**
+
+A function therefore has two layers:
+
+```text
+FunctionBinding { qualified_name, code_index }
+FunctionCode    { structural_hash, signature, body }
+```
+
+Several bindings may point at one code object. A binding key never
+enters a StructuralHash.
+
+### 5.1 Class identity and class-slot merging
+
+The linker compares two classes with this table. The table is
 exhaustive, and the linker must implement all four rows.
 
 | QualifiedKey | StructuralHash | Result |
 | --- | --- | --- |
-| same | same | merge into one definition |
+| same | same | merge into one class slot |
 | same | different | reject: conflicting implementations |
-| different | same | keep distinct |
-| different | different | keep distinct |
+| different | same | keep both class slots |
+| different | different | keep both class slots |
+
+Row 3 must keep the definitions distinct, because two class keys need
+two runtime class slots.
 
 Consequences the tests must hold:
 
@@ -154,6 +198,51 @@ cached module produced a program with a split core, and the fix added
 the core source digest to the compile key. The second row rejects that
 class of defect at the link step, on principle rather than by one key
 field.
+
+### 5.2 Function binding resolution and code sharing
+
+A named function binding maps a qualified name to a function value.
+The linker compares the binding key and the StructuralHash of the
+function each key names:
+
+| Binding key | StructuralHash | Result |
+| --- | --- | --- |
+| same | same | share the binding and the code |
+| same | different | reject: conflicting providers |
+| different | same | keep both bindings, share the code |
+| different | different | keep both bindings and both code objects |
+
+The two tables differ in row 3 only, so one table cannot serve both
+kinds. Two class keys need two class slots; two function names may
+share one code object.
+
+The binding keys:
+
+- a free function takes `<module path>.<name>`;
+- a method and an `init` take `<class key>.<name>`;
+- a generated construction function takes `<class key>.<new>`;
+- a closure body and the entry take no binding.
+
+A class member takes the class key as its root, never the module path,
+so the embedded core copy of every module binds one set of names.
+
+Consequences the tests must hold:
+
+- `a.first` and `b.second` stay two distinct bindings of one shared
+  code object, and every report names both.
+- Identical bodies share one code object. The generated constructor
+  stubs of the abstract enum parents are all `unit; return`, and they
+  share one code object under many binding keys.
+- Function equality stays content-based, and imports still resolve
+  through qualified names.
+- A class StructuralHash covers no construction function. Row 2 of
+  this table is therefore the only rule that separates two providers
+  of one class key whose field defaults or `init` bodies differ.
+
+The linker also proves that a module derives its constructor bindings
+from its class keys: every class a module defines declares the binding
+`<class key>.<new>`. A module that names a class one way and its
+constructor another way is not self-consistent and rejects.
 
 ## 6. Order-invariant component labeling
 
@@ -183,18 +272,38 @@ cost on a wide hostile component. Exit as soon as the partition is
 stable. Report the measured round count and the cost in the
 implementation note.
 
-## 7. Symmetric members
+Bound the work twice. One budget bounds one component. A second budget
+bounds the whole module, because a module holds many components and
+their cost adds up: a budget on one component alone lets a crafted
+module reach any cost through many components that each stay inside
+it. A component or a module past its budget rejects with a clear
+diagnostic that names which budget it passed. Report both measured
+bounds in the implementation note.
+
+## 7. Members that refinement never separates
 
 Structural refinement cannot always give each member a unique label.
-Two mutually recursive definitions with equal bodies stay symmetric
-through every round. This is a property of graph automorphism, not a
-defect of the algorithm. No order-invariant algorithm separates them
-without an external identity.
+Two mutually recursive definitions with equal bodies keep one label
+through every round.
 
-Symmetric members therefore share one StructuralHash. Their
+Name the property exactly. Section 6 is 1-dimensional colour
+refinement. Its stable partition is **bisimulation**: two members keep
+one label exactly when they are bisimilar. Bisimulation is coarser
+than isomorphism in general, so the rule may give one label to two
+members an isomorphism test separates. An earlier version of this
+document claimed graph automorphism and claimed that no
+order-invariant rule separates such members. Both claims were too
+strong, and this section replaces them.
+
+One label stays sound. A member is a deterministic system with
+ordered successors, so two bisimilar members have identical
+unfoldings. Two definitions with identical unfoldings compute the same
+thing, and merging them changes no program behavior.
+
+Members with one label therefore share one StructuralHash. Their
 QualifiedKey values keep them distinct wherever distinctness is
-observable. The linker table of section 5 reads both values, so two
-symmetric members with different qualified names never merge.
+observable. The class table of section 5.1 reads both values, so two
+such classes with different qualified names never merge.
 
 ## 8. Slot resolution
 
@@ -299,6 +408,13 @@ identity rule.
   it states a `may` bound for a rename inside a cyclic component.
   Section 6 deletes the name order. Replace both statements with the
   refinement rule, and delete the cyclic special case.
+- **Section 3.7** must state the three rules of section 5.0, and it
+  must define a named function binding. **Section 3.6** must carry
+  both merge tables of section 5. The earlier text stated one table
+  over "definitions" and one sentence that a function carries no key.
+  The two disagreed, and section 5.2 settles the disagreement.
+- **Section 8.6** must state that a class StructuralHash covers no
+  construction function.
 - Record every hash domain change and bump `COMPILER_ABI_VERSION`.
   Regenerate `core/pinned-core-defs.txt` with the ignored test
   `regenerate_core_pins`.
@@ -324,3 +440,18 @@ Use these as the baseline. Re-measure and report each one.
   artifact builds one cache, loads once, and drops it.
 - `module_identity` costs 138 us on a 6.9 KiB module, and the full
   verifier costs 159 us. Identity runs on every load.
+
+## 15. The single-file module path
+
+A module path comes from a package: the manifest supplies the root and
+the directory tree supplies the rest. One source file outside a
+package has neither.
+
+> **A single source file has no module path.**
+
+Every single-file command applies this one rule, so one file gives one
+set of qualified keys, one semantic hash, and one admission answer. A
+file name never becomes a module path: a file name may hold characters
+a module name cannot, and it may be `core`, which the core image
+reserves.
+
