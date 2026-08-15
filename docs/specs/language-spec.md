@@ -81,7 +81,7 @@ A line comment starts with `#` and extends to the newline. There are no block co
 
 ```text
 and as break case class continue def do effect else elsif end enum
-false if in loop mut not or return self super then true while with
+false if in loop mut not or return self super then true use while with
 ```
 
 `sys` is a prebound ordinary value, not a keyword.
@@ -200,6 +200,8 @@ The following require no ordinary import slot:
 
 The standard library is not ambient. A package or explicit compile environment supplies every `std/*` module it uses. Every other free name must be defined by the module or supplied in the explicit compile environment.
 
+The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name, and a `use` of another package compiles to a named import slot that the build tool fulfills. `use` never grants authority. The package layout, the manifest, and the resolution roots are defined in `docs/specs/packages.md`.
+
 ### 3.4 Primitive compile operation
 
 The primitive compiler API uses a typed heterogeneous environment object rather than `{String: Any}`:
@@ -210,7 +212,7 @@ assert(env.bind("Json", Json).is_ok())
 assert(env.bind("Config", config.freeze()).is_ok())
 
 env = env.freeze()
-result = sys.compiler.Compile(source, env, CompileOptions())
+result = sys.compiler.compile(source, env, CompileOptions())
 ```
 
 Conceptually:
@@ -232,7 +234,7 @@ Linking evaluates the trailing expression to construct the entry value, so that 
 
 ```lm
 do || with Io.Print
-  sys.io.Print("started\n")
+  sys.io.print("started\n")
 end
 ```
 
@@ -622,7 +624,7 @@ increment = do |x: Int|: Int
 end
 
 printer = do |text: String| with Io.Print
-  sys.io.Print(text)
+  sys.io.print(text)
 end
 
 thunk = do || 42 end
@@ -722,7 +724,7 @@ class Hello
   end
 
   def say_name(self) with Io.Print
-    sys.io.Print("Hello {self.name}!")
+    sys.io.print("Hello {self.name}!")
   end
 end
 ```
@@ -908,12 +910,21 @@ sys.reflect
 
 The ABI also supplies effect/policy descriptor constants `Io`, `Fs`, `Clock`, `Rand`, `Net`, `Proc`, `Vm`, `Compiler`, and `Reflect`, plus exact constants such as `Io.Print` and `Clock.Now`.
 
-A group constant is an `OperationGroup`; an exact constant is an `Operation`. `sys.io.Print` is the callable `Op[Io.Print, (String) -> ()]` corresponding to descriptor `Io.Print`. Scope grants nothing.
+A group constant is an `OperationGroup`; an exact constant is an `Operation`. `sys.io.print` is the callable `Op[Io.Print, (String) -> ()]` corresponding to descriptor `Io.Print`. Scope grants nothing.
+
+Casing separates the two roles. A callable member of `sys` uses the
+snake_case form of its descriptor name: `sys.io.print` performs
+`Io.Print`, and `sys.io.read_line` performs `Io.ReadLine`. The
+mapping is mechanical. Descriptors keep initial capitals, and they
+appear wherever code names, grants, mocks, or matches an operation.
+The one capitalized `sys` member family is a constructor that
+returns an object, such as `sys.vm.Vm()`. The rule of thumb:
+lowercase performs the operation; a capitalized name talks about it.
 
 ### 11.2 Perform
 
 ```lm
-sys.io.Print("Hello")
+sys.io.print("Hello")
 ```
 
 Calling an operation object executes one `PERFORM`. The VM records exact identity, arguments, expected reply type, destination, and continuation PC, then either dispatches automatically or exposes the request to a manual driver. No other guest mechanism reaches host semantics.
@@ -924,7 +935,7 @@ A row is a comma-separated set of exact identities, groups, and effect variables
 
 ```lm
 def print_name(self) with Io.Print
-  sys.io.Print(self.name)
+  sys.io.print(self.name)
 end
 
 def copy(src: String, dst: String) with Fs
@@ -946,8 +957,8 @@ An override may not widen its row. Therefore a virtual call through a supertype 
 
 ```lm
 routes: {String: () -> () with Io} = {
-  "health": do || sys.io.Print("ok") end,
-  "help": do || sys.io.Print("help") end
+  "health": do || sys.io.print("ok") end,
+  "help": do || sys.io.print("help") end
 }
 
 routes[route]()
@@ -1217,7 +1228,7 @@ q.reply_type(): TypeView
 To read arguments or answer, the holder matches the request against an exact typed operation object:
 
 ```lm
-case q.as_call(sys.io.Print)
+case q.as_call(Io.Print)
 in Some(call)
   (text,) = call.args()       # (String,)
   captured.push(text)
@@ -1227,7 +1238,7 @@ in None
 end
 ```
 
-`Request.as_call(op)` has a narrow compiler-known type rule. If `op` has type `Op[id, (A...) -> R]`, the result is `Option[PendingCall[(A...), R]]`. `PendingCall[A,R]` exposes:
+`Request.as_call(op)` has a narrow compiler-known type rule. Its argument is an exact `Operation` descriptor known to the checker, such as `Io.Print`. If the manifest signature of that descriptor is `(A...) -> R`, the result is `Option[PendingCall[(A...), R]]`. The callable `sys` member is not used here: matching is descriptor work, and the compiler supplies the typed signature from the manifest. `PendingCall[A,R]` exposes:
 
 ```text
 args(self) -> A
@@ -1371,7 +1382,7 @@ snap = vm.snapshot()
 vm2 = sys.vm.Vm().restore(snap)
 ```
 
-The surface spellings lower to distinct exact identities `Vm.SnapshotHeld` and `Vm.SnapshotSelf`. `vm.snapshot()` serializes a paused held `Vm[T]` and returns `Snapshot[T]`. `sys.vm.Snapshot()` is receiverless and snapshots the machine performing that operation; because an independently compiled function cannot know the enclosing root machine's terminal type, it returns `SnapshotImage`, a frozen trusted image carrying a hidden result `TypeId` rather than `Any` or `DynValue`. External bytes first pass through `sys.vm.LoadSnapshot(bytes)`, which performs the one-time load verification and also returns `Result[SnapshotImage,SnapshotError]`.
+The surface spellings lower to distinct exact identities `Vm.SnapshotHeld` and `Vm.SnapshotSelf`. `vm.snapshot()` serializes a paused held `Vm[T]` and returns `Snapshot[T]`. `sys.vm.snapshot()` is receiverless and snapshots the machine performing that operation; because an independently compiled function cannot know the enclosing root machine's terminal type, it returns `SnapshotImage`, a frozen trusted image carrying a hidden result `TypeId` rather than `Any` or `DynValue`. External bytes first pass through `sys.vm.load_snapshot(bytes)`, which performs the one-time load verification and also returns `Result[SnapshotImage,SnapshotError]`.
 
 ```text
 SnapshotImage.result_type(self) -> TypeView
@@ -1453,7 +1464,7 @@ vm = sys.vm.Vm().from_object(program, args: ("Ada",))
 vm.table().pass(Io.Print)
 vm.table().mock(Clock.Now, do || 0 end)
 
-h: Handle[Never, ()] = sys.proc.Run(vm)
+h: Handle[Never, ()] = sys.proc.run(vm)
 ```
 
 `Proc.Run` with no mailbox argument chooses `M = Never`. The mailbox-bearing native form accepts an explicit `MailboxType[M]` created by proc-class lowering. `Proc.Run` atomically transfers execution ownership to the scheduler. The original VM handle becomes dormant; execution/inspection through it faults until `pause()` returns ownership. These methods are operations and therefore carry their exact `Proc.*` rows; table edits remain legal for revocation.
@@ -1547,7 +1558,7 @@ A spawn payload is already a code hash plus a typed tuple of sendable values, an
 ## 19. Reflection
 
 ```lm
-mirror = sys.reflect.Mirror(obj)
+mirror = sys.reflect.mirror(obj)
 ```
 
 `Mirror` returns frozen structural views: runtime class identity, declared fields and values, code/signature metadata, and permitted frame information. It never yields writable references into the inspected heap.
@@ -1564,7 +1575,7 @@ Reflection is an ordinary operation, appears in rows, and is table-gated. There 
 src = """
 class Greeter
   def greet(self, name: String) with Io.Print
-    sys.io.Print("Hello {name}!")
+    sys.io.print("Hello {name}!")
   end
 end
 
@@ -1574,7 +1585,7 @@ end
 """
 
 env = CompileEnv().freeze()
-result = sys.compiler.Compile(src, env, CompileOptions())
+result = sys.compiler.compile(src, env, CompileOptions())
 ```
 
 `Compiler.Compile` is one deterministic operation whose ordinary result is `Result[Artifact, CompileErrors]`. It depends only on source bytes, compile-environment interfaces/hashes, options, compiler semantic hash, core-image hash, and operation/intrinsic ABI versions. Blocking it prevents runtime code minting.
@@ -2241,7 +2252,7 @@ def answer_print[T](
   request: Request,
   mut captured: [String]
 ): Bool with Vm.Answer
-  case request.as_call(sys.io.Print)
+  case request.as_call(Io.Print)
   in Some(call)
     (text,) = call.args()
     captured.push(text)
@@ -2622,13 +2633,13 @@ def supervise(
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(sys.io.Print)
+      case q.as_call(Io.Print)
       in Some(call)
         (text,) = call.args()
         captured.push(text)
         vm.answer(call, ())
       in None
-        case q.as_call(sys.clock.Now)
+        case q.as_call(Clock.Now)
         in Some(call)
           vm.answer(call, 1_700_000_000)
         in None
@@ -2636,7 +2647,7 @@ def supervise(
         end
       end
     in Done(value)
-      sys.io.Print("captured {captured.len()} writes\n")
+      sys.io.print("captured {captured.len()} writes\n")
       return Done(value)
     in Fault(fault)
       return Fault(fault)
