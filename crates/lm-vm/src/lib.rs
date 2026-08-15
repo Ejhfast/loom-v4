@@ -125,17 +125,40 @@ impl fmt::Display for LoadError {
 /// The sentinel for an empty dispatch-table entry.
 const NO_METHOD: u32 = u32::MAX;
 
+/// The sealed dispatch row of one class: a dense table over the
+/// selector range the class answers.
+///
+/// A virtual call stays an indexed load chain: subtract the base and
+/// index the table. Positions inside the range without a method hold
+/// the sentinel; verified code never selects them, because the
+/// verifier proves every virtual call resolves on the receiver class.
+#[derive(Debug, Clone, Default)]
+pub struct DispatchRow {
+    /// The first selector slot the class answers.
+    base: u32,
+    /// Function indices for the selectors `base..base + len`.
+    table: Vec<u32>,
+}
+
+impl DispatchRow {
+    /// The method for one selector. Verified calls always resolve.
+    #[inline]
+    pub(crate) fn method(&self, selector: u32) -> u32 {
+        self.table[(selector - self.base) as usize]
+    }
+}
+
 /// A module that passed the independent verifier, plus the resolved
 /// dispatch tables.
 ///
 /// Construction through `load` is the only path, so every executed
 /// function has passed verification. The dispatch table maps
-/// `(class slot, selector slot)` to a function index with two indexed
+/// `(class slot, selector slot)` to a function index with indexed
 /// loads and no name lookup.
 #[derive(Debug)]
 pub struct LoadedModule {
     module: Module,
-    dispatch: Vec<Vec<u32>>,
+    dispatch: Vec<DispatchRow>,
 }
 
 impl LoadedModule {
@@ -143,26 +166,49 @@ impl LoadedModule {
         &self.module
     }
 
-    pub(crate) fn dispatch(&self) -> &[Vec<u32>] {
+    pub(crate) fn dispatch(&self) -> &[DispatchRow] {
         &self.dispatch
+    }
+
+    /// The total dispatch-table cell count, for the memory gates.
+    pub fn dispatch_cells(&self) -> usize {
+        self.dispatch.iter().map(|row| row.table.len()).sum()
     }
 }
 
 /// Verify a decoded module and admit it for execution.
 pub fn load(module: Module) -> Result<LoadedModule, VerifyError> {
     lm_verify::verify_module(&module)?;
-    // Build the sealed per-class selector tables. A child row starts
-    // as a copy of the parent row; own methods override entries.
-    // Parents precede children in the verified class table.
-    let mut dispatch: Vec<Vec<u32>> = Vec::with_capacity(module.classes.len());
+    // Build the sealed per-class selector tables. A child inherits
+    // the resolved parent methods; own methods override entries.
+    // Parents precede children in the verified class table. Each row
+    // spans only the selector range its class answers, so the table
+    // memory follows the methods, not classes times selectors.
+    let mut resolved: Vec<Vec<(u32, u32)>> = Vec::with_capacity(module.classes.len());
+    let mut dispatch: Vec<DispatchRow> = Vec::with_capacity(module.classes.len());
     for class in &module.classes {
-        let mut row = match class.parent() {
-            Some(p) => dispatch[p as usize].clone(),
-            None => vec![NO_METHOD; module.selectors.len()],
+        let mut methods: Vec<(u32, u32)> = match class.parent() {
+            Some(p) => resolved[p as usize].clone(),
+            None => Vec::new(),
         };
         for (sel, func) in &class.methods {
-            row[*sel as usize] = *func;
+            match methods.iter_mut().find(|(s, _)| s == sel) {
+                Some(entry) => entry.1 = *func,
+                None => methods.push((*sel, *func)),
+            }
         }
+        let row = match methods.iter().map(|(s, _)| *s).min() {
+            Some(base) => {
+                let top = methods.iter().map(|(s, _)| *s).max().expect("non-empty");
+                let mut table = vec![NO_METHOD; (top - base + 1) as usize];
+                for (sel, func) in &methods {
+                    table[(*sel - base) as usize] = *func;
+                }
+                DispatchRow { base, table }
+            }
+            None => DispatchRow::default(),
+        };
+        resolved.push(methods);
         dispatch.push(row);
     }
     Ok(LoadedModule { module, dispatch })

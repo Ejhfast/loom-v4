@@ -174,10 +174,12 @@ An independent review confirmed three defects. All three are fixed.
 The review also recorded three accepted observations. A `case` has
 no runtime no-arm backstop; the static exhaustiveness proof is the
 single guard, and a hardening fault is planned with the week 4
-format work. Sibling-arm injection is top level only, so a nested
-arm-typed scrutinee can report a spurious `E1042`. An explicit row
-on a closure argument does not bind an effect variable; performs
-arrive in week 4 and the binding rule lands there.
+format work. Sibling-arm injection was top level only, so a nested
+arm-typed scrutinee reported a spurious `E1042`; the post-week-4 fix
+set made the injection recursive (docs/notes/fixes-post-week4.md).
+An explicit row on a closure argument does not bind an effect
+variable; performs arrive in week 4 and the binding rule lands
+there.
 
 ## Tuple equality
 

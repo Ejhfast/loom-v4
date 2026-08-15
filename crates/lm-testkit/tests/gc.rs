@@ -41,7 +41,7 @@ keep = head.value
 head = Node(0)
 j = 0
 while j < 60000
-  s = \"garbage garbage garbage garbage\"
+  s = [j]
   j = j + 1
 end
 keep
@@ -109,11 +109,13 @@ fn object_table_returns_to_baseline_after_a_collection() {
 
 #[test]
 fn reachable_data_stays_correct_across_many_collections() {
-    // The map stays live while string garbage churns under a small
-    // cap. Every collection must keep the map graph intact.
+    // The map stays live while list garbage churns under a small
+    // cap. Every collection must keep the map graph intact. The
+    // churn uses list literals, because string literals intern.
     let source = "counts: {String: Int} = {}\ncounts.put(\"red\", 0)\n\
                   counts.put(\"blue\", 0)\ni = 0\nwhile i < 20000\n  \
                   word = if i % 2 == 0\n    \"red\"\n  else\n    \"blue\"\n  end\n  \
+                  junk = [i, i]\n  \
                   counts.put(word, counts.at(word) + 1)\n  i = i + 1\nend\ncounts\n";
     let config = VmConfig {
         heap_bytes: 32 * 1024,
@@ -129,7 +131,7 @@ fn closure_captures_survive_collections() {
     // The captured list is only reachable through the closure object
     // after the outer local rebinds.
     let source = "xs = [40, 2]\nf = do ||: Int xs.at(0) + xs.at(1) end\nxs = [0]\n\
-                  i = 0\nwhile i < 20000\n  s = \"garbage garbage\"\n  i = i + 1\nend\nf()\n";
+                  i = 0\nwhile i < 20000\n  s = [i, i]\n  i = i + 1\nend\nf()\n";
     let config = VmConfig {
         heap_bytes: 16 * 1024,
         ..VmConfig::default()

@@ -72,7 +72,7 @@ pub enum RootEvent {
 /// The world: the loaded code plus every machine.
 pub struct World<'m> {
     module: &'m Module,
-    dispatch: &'m [Vec<u32>],
+    dispatch: &'m [crate::DispatchRow],
     core: CoreLayout,
     machines: Vec<Machine>,
     host: Box<dyn Host>,
@@ -1209,11 +1209,14 @@ impl<'m> World<'m> {
                     Object::List { items } => Object::List {
                         items: items.iter().map(|v| map_value(*v)).collect(),
                     },
-                    Object::Map { entries } => Object::Map {
+                    Object::Map { entries, .. } => Object::Map {
                         entries: entries
                             .iter()
                             .map(|(k, v)| (map_value(*k), map_value(*v)))
                             .collect(),
+                        // The destination index rebuilds on the first
+                        // lookup over the copied keys.
+                        index: crate::heap::MapIndex::default(),
                     },
                     Object::Instance { class, fields } => Object::Instance {
                         class: *class,
@@ -1265,8 +1268,9 @@ fn shell_of(object: &Object) -> Object {
         Object::List { items } => Object::List {
             items: vec![Value::Unit; items.len()],
         },
-        Object::Map { entries } => Object::Map {
+        Object::Map { entries, .. } => Object::Map {
             entries: vec![(Value::Unit, Value::Unit); entries.len()],
+            index: crate::heap::MapIndex::default(),
         },
         Object::Instance { class, fields } => Object::Instance {
             class: *class,
@@ -1332,7 +1336,7 @@ impl<'m> World<'m> {
                         visited.pop();
                         format!("[{}]", parts.join(", "))
                     }
-                    Object::Map { entries } => {
+                    Object::Map { entries, .. } => {
                         visited.push(r);
                         let parts: Vec<String> = entries
                             .iter()

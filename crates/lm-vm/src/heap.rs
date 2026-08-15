@@ -20,6 +20,30 @@ const VALUE_COST: usize = 16;
 /// Logical byte cost of one map entry (key and value).
 const ENTRY_COST: usize = 2 * VALUE_COST;
 
+/// A derived lookup index for one map: key hash to entry indices.
+///
+/// The index is a cache over the insertion-ordered entries: `built`
+/// counts the indexed prefix, and lookups extend it on demand.
+/// Iteration, display, equality, and digest semantics never read it.
+/// It holds no object references, so the tracer and the freezer skip
+/// it by design, and the logical entry cost covers it: the index
+/// grows by one bounded bucket entry per map entry.
+#[derive(Debug, Clone, Default)]
+pub struct MapIndex {
+    /// The number of entries the table already indexes.
+    pub(crate) built: usize,
+    /// Key hash to the entry indices with that hash.
+    pub(crate) table: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+impl PartialEq for MapIndex {
+    /// The index is derived data, so it never takes part in object
+    /// equality.
+    fn eq(&self, _: &MapIndex) -> bool {
+        true
+    }
+}
+
 /// The payload of one heap object.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Object {
@@ -30,8 +54,12 @@ pub enum Object {
     Instance { class: u32, fields: Vec<Value> },
     /// A growable list.
     List { items: Vec<Value> },
-    /// A map with entries in insertion order.
-    Map { entries: Vec<(Value, Value)> },
+    /// A map with entries in insertion order plus a derived lookup
+    /// index.
+    Map {
+        entries: Vec<(Value, Value)>,
+        index: MapIndex,
+    },
     /// A fixed-arity immutable tuple. Born frozen.
     Tuple { items: Vec<Value> },
     /// A closure: code index plus captured values. Born frozen.
@@ -163,7 +191,7 @@ impl Object {
                 Object::Str(s) => s.len(),
                 Object::Instance { fields, .. } => fields.len() * VALUE_COST,
                 Object::List { items } => items.len() * VALUE_COST,
-                Object::Map { entries } => entries.len() * ENTRY_COST,
+                Object::Map { entries, .. } => entries.len() * ENTRY_COST,
                 Object::Tuple { items } => items.len() * VALUE_COST,
                 Object::Closure { captures, .. } => captures.len() * VALUE_COST,
                 Object::StrBuilder(s) => s.len(),
@@ -195,7 +223,9 @@ impl Object {
             | Object::NativeFault { .. } => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
-            Object::Map { entries } => {
+            Object::Map { entries, .. } => {
+                // The index holds hashes and positions only, never an
+                // object reference, so the walk covers the entries.
                 for (k, v) in entries {
                     visit(k);
                     visit(v);

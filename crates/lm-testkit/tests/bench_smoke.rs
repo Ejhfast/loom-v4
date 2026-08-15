@@ -52,6 +52,75 @@ fn allocation_and_collection_smoke() {
     assert_eq!(outcome, "Done(100000)");
 }
 
+/// Map insertions at two scales. The index keeps insertion near
+/// linear; the printed timings document the shape, and the assert
+/// covers completion only, because wall-clock ratios are flaky in CI.
+#[test]
+fn map_insertion_scaling_smoke() {
+    for count in [4_000, 32_000] {
+        let source = format!(
+            "m: {{Int: Int}} = {{}}\ni = 0\nwhile i < {count}\n  m.put(i, i)\n  i = i + 1\nend\n\
+             m.len()\n"
+        );
+        let start = Instant::now();
+        let outcome = run_text("bench.lm", &source, VmConfig::default()).unwrap();
+        eprintln!("bench-smoke map_insert_{count}: {:?}", start.elapsed());
+        assert_eq!(outcome, format!("Done({count})"));
+    }
+}
+
+/// A loop that loads one string literal many times must not allocate
+/// one object per load: literals intern per machine. The live object
+/// count after the run is the structural assert.
+#[test]
+fn literal_loop_allocation_smoke() {
+    let source = "i = 0\ns = \"\"\nwhile i < 200000\n  s = \"hello\"\n  i = i + 1\nend\ni\n";
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source).unwrap();
+    let loaded = lm_vm::load_bytes(&bytes).unwrap();
+    let start = Instant::now();
+    let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    eprintln!("bench-smoke literal_loop_200k: {:?}", start.elapsed());
+    assert_eq!(vm.show_outcome(&outcome), "Done(200000)");
+    let live = vm.heap().live_count();
+    assert!(
+        live < 16,
+        "the literal loop leaked {live} objects; literals must intern"
+    );
+}
+
+/// Many classes with distinct selectors must not cost a dense
+/// classes-times-selectors dispatch table. The cell count is the
+/// structural assert.
+#[test]
+fn many_class_dispatch_memory_smoke() {
+    let classes = 300;
+    let mut source = String::new();
+    for i in 0..classes {
+        source.push_str(&format!(
+            "class C{i}\n  def m{i}(self): Int\n    {i}\n  end\nend\n"
+        ));
+    }
+    source.push_str("C7().m7()\n");
+    let start = Instant::now();
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", &source).unwrap();
+    let loaded = lm_vm::load_bytes(&bytes).unwrap();
+    eprintln!("bench-smoke many_class_load_300: {:?}", start.elapsed());
+    let cells = loaded.dispatch_cells();
+    let selectors = loaded.module().selectors.len();
+    let dense = loaded.module().classes.len() * selectors;
+    eprintln!("bench-smoke dispatch cells {cells} (dense equivalent {dense})");
+    // Every class answers its own selector plus the shared core
+    // selectors, so the cell count stays near the method count.
+    assert!(
+        cells < dense / 10,
+        "the dispatch table is near dense: {cells} of {dense}"
+    );
+    let mut vm = lm_vm::Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(7)");
+}
+
 /// Time one effectful workload in a world with grants.
 fn timed_world(name: &str, source: &str, allow: &[&str], expected: &str) {
     let start = Instant::now();

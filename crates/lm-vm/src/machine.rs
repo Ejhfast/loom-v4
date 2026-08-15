@@ -6,10 +6,11 @@
 //! that reaches outside the machine returns an `ExecOutcome` for the
 //! world driver.
 
-use crate::heap::{Heap, Object};
+use crate::heap::{Heap, MapIndex, Object};
 use crate::{FaultCode, VmConfig};
 use lm_bytecode::{Instr, Module};
 use lm_value::{ObjRef, Value};
+use std::hash::{Hash, Hasher};
 
 /// A dense machine identifier inside one world.
 pub type VmId = u32;
@@ -141,6 +142,11 @@ pub struct Machine {
     /// the driver stack. A machine with references rejects control
     /// methods.
     pub active: u32,
+    /// The per-machine literal string table, indexed by the module
+    /// string pool. A literal interns on its first load, stays frozen
+    /// from birth, and stays rooted for the machine lifetime, so a
+    /// repeated `ConstStr` reuses one object.
+    pub literals: Vec<Option<ObjRef>>,
 }
 
 impl Machine {
@@ -160,6 +166,7 @@ impl Machine {
             parent,
             next_ordinal: 1,
             active: 0,
+            literals: Vec::new(),
         }
     }
 
@@ -244,6 +251,8 @@ impl Machine {
                 roots.push(*r);
             }
         }
+        // Interned literals stay alive for the machine lifetime.
+        roots.extend(self.literals.iter().flatten().copied());
         roots.extend_from_slice(extra);
         self.heap.collect(roots);
     }
@@ -296,9 +305,75 @@ impl Machine {
         }
     }
 
-    /// Find the entry position of a key in a map.
-    fn map_find(&self, entries: &[(Value, Value)], key: Value) -> Option<usize> {
-        entries.iter().position(|(k, _)| self.key_eq(*k, key))
+    /// The lookup hash of one map key. Strings hash by content, so
+    /// the hash agrees with `key_eq`. The hash feeds the per-map
+    /// index only and never leaves the process.
+    fn key_hash(&self, key: Value) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match key {
+            Value::Bool(b) => {
+                0u8.hash(&mut h);
+                b.hash(&mut h);
+            }
+            Value::Int(v) => {
+                1u8.hash(&mut h);
+                v.hash(&mut h);
+            }
+            Value::Obj(r) => match self.heap.get(r) {
+                Object::Str(s) => {
+                    2u8.hash(&mut h);
+                    s.hash(&mut h);
+                }
+                _ => 3u8.hash(&mut h),
+            },
+            _ => 4u8.hash(&mut h),
+        }
+        h.finish()
+    }
+
+    /// Find the entry position of a key in the map object `r` through
+    /// the hash index. The index is a cache: the call first indexes
+    /// the entries appended since the last lookup.
+    fn map_lookup(&mut self, r: ObjRef, key: Value) -> Option<usize> {
+        let (built, len) = match self.heap.get(r) {
+            Object::Map { entries, index } => (index.built, entries.len()),
+            _ => unreachable!("verified map shape"),
+        };
+        if built < len {
+            let mut hashes = Vec::with_capacity(len - built);
+            for i in built..len {
+                let k = match self.heap.get(r) {
+                    Object::Map { entries, .. } => entries[i].0,
+                    _ => unreachable!("verified map shape"),
+                };
+                hashes.push(self.key_hash(k));
+            }
+            if let Object::Map { index, .. } = self.heap.get_mut(r) {
+                for (offset, hash) in hashes.into_iter().enumerate() {
+                    index
+                        .table
+                        .entry(hash)
+                        .or_default()
+                        .push((built + offset) as u32);
+                }
+                index.built = len;
+            }
+        }
+        let hash = self.key_hash(key);
+        let candidates: Vec<u32> = match self.heap.get(r) {
+            Object::Map { index, .. } => index.table.get(&hash).cloned().unwrap_or_default(),
+            _ => unreachable!("verified map shape"),
+        };
+        for i in candidates {
+            let k = match self.heap.get(r) {
+                Object::Map { entries, .. } => entries[i as usize].0,
+                _ => unreachable!("verified map shape"),
+            };
+            if self.key_eq(k, key) {
+                return Some(i as usize);
+            }
+        }
+        None
     }
 
     fn frozen_guard(&self, r: ObjRef) -> Result<(), FaultCode> {
@@ -313,7 +388,7 @@ impl Machine {
     pub fn exec_instr(
         &mut self,
         module: &Module,
-        dispatch: &[Vec<u32>],
+        dispatch: &[crate::DispatchRow],
     ) -> Result<ExecOutcome, FaultCode> {
         if self.fuel == 0 {
             return Err(FaultCode::OutOfFuel);
@@ -328,8 +403,24 @@ impl Machine {
             Instr::ConstBool(v) => self.push(Value::Bool(v))?,
             Instr::ConstInt(v) => self.push(Value::Int(v))?,
             Instr::ConstStr(idx) => {
-                let text = module.strings[idx as usize].clone();
-                let value = self.alloc(Object::Str(text))?;
+                // Literal strings intern per machine: the first load
+                // allocates one frozen object, and every later load
+                // reuses it. Literals are collection roots.
+                let idx = idx as usize;
+                if self.literals.len() <= idx {
+                    self.literals.resize(idx + 1, None);
+                }
+                let value = match self.literals[idx] {
+                    Some(r) => Value::Obj(r),
+                    None => {
+                        let text = module.strings[idx].clone();
+                        let value = self.alloc(Object::Str(text))?;
+                        if let Value::Obj(r) = value {
+                            self.literals[idx] = Some(r);
+                        }
+                        value
+                    }
+                };
                 self.push(value)?;
             }
             Instr::LoadLocal(slot) => {
@@ -414,7 +505,7 @@ impl Machine {
                     Object::Instance { class, .. } => *class,
                     _ => unreachable!("verified receiver shape"),
                 };
-                let target = dispatch[class as usize][selector as usize];
+                let target = dispatch[class as usize].method(selector);
                 self.push_frame(module, target, argc + 1, None)?;
             }
             Instr::CallValue { argc } => {
@@ -544,20 +635,36 @@ impl Machine {
                 let split = self.operands.len() - 2 * count as usize;
                 let flat: Vec<Value> = self.operands.split_off(split);
                 let mut entries: Vec<(Value, Value)> = Vec::new();
+                let mut index = MapIndex::default();
                 for pair in flat.chunks(2) {
                     let (key, value) = (pair[0], pair[1]);
-                    match self.map_find(&entries, key) {
-                        Some(pos) => entries[pos].1 = value,
-                        None => entries.push((key, value)),
+                    let hash = self.key_hash(key);
+                    let hit = index.table.get(&hash).and_then(|candidates| {
+                        candidates
+                            .iter()
+                            .copied()
+                            .find(|i| self.key_eq(entries[*i as usize].0, key))
+                    });
+                    match hit {
+                        Some(pos) => entries[pos as usize].1 = value,
+                        None => {
+                            index
+                                .table
+                                .entry(hash)
+                                .or_default()
+                                .push(entries.len() as u32);
+                            entries.push((key, value));
+                        }
                     }
                 }
-                let value = self.alloc(Object::Map { entries })?;
+                index.built = entries.len();
+                let value = self.alloc(Object::Map { entries, index })?;
                 self.push(value)?;
             }
             Instr::MapLen => {
                 let r = self.pop_obj();
                 let len = match self.heap.get(r) {
-                    Object::Map { entries } => entries.len(),
+                    Object::Map { entries, .. } => entries.len(),
                     _ => unreachable!("verified map shape"),
                 };
                 self.push(Value::Int(len as i64))?;
@@ -565,20 +672,18 @@ impl Machine {
             Instr::MapHas => {
                 let key = self.pop();
                 let r = self.pop_obj();
-                let found = match self.heap.get(r) {
-                    Object::Map { entries } => self.map_find(entries, key).is_some(),
-                    _ => unreachable!("verified map shape"),
-                };
+                let found = self.map_lookup(r, key).is_some();
                 self.push(Value::Bool(found))?;
             }
             Instr::MapAt => {
                 let key = self.pop();
                 let r = self.pop_obj();
+                let pos = match self.map_lookup(r, key) {
+                    Some(pos) => pos,
+                    None => return Err(FaultCode::MissingKey),
+                };
                 let value = match self.heap.get(r) {
-                    Object::Map { entries } => match self.map_find(entries, key) {
-                        Some(pos) => entries[pos].1,
-                        None => return Err(FaultCode::MissingKey),
-                    },
+                    Object::Map { entries, .. } => entries[pos].1,
                     _ => unreachable!("verified map shape"),
                 };
                 self.push(value)?;
@@ -588,19 +693,18 @@ impl Machine {
                 let key = self.pop();
                 let r = self.pop_obj();
                 self.frozen_guard(r)?;
-                let pos = match self.heap.get(r) {
-                    Object::Map { entries } => self.map_find(entries, key),
-                    _ => unreachable!("verified map shape"),
-                };
+                let pos = self.map_lookup(r, key);
                 match pos {
                     Some(pos) => match self.heap.get_mut(r) {
-                        Object::Map { entries } => entries[pos].1 = value,
+                        Object::Map { entries, .. } => entries[pos].1 = value,
                         _ => unreachable!(),
                     },
                     None => {
+                        // The appended entry joins the index on the
+                        // next lookup.
                         self.reserve(32, &[Value::Obj(r), key, value])?;
                         match self.heap.get_mut(r) {
-                            Object::Map { entries } => entries.push((key, value)),
+                            Object::Map { entries, .. } => entries.push((key, value)),
                             _ => unreachable!(),
                         }
                         self.heap.recharge(r);

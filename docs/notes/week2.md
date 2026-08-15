@@ -93,10 +93,10 @@ and the deferred work.
   future work; until then, a mis-nested pop fails with an assertion in
   every build profile.
 
-- Map lookup is a linear scan over the insertion-order entries. The
-  open-addressed hash index from specification section 22.9 arrives
-  with the performance work. Insertion order, equality, and display
-  do not depend on this choice.
+- Map lookup was a linear scan over the insertion-order entries.
+  The post-week-4 fix set added the hash index; see
+  docs/notes/fixes-post-week4.md. Insertion order, equality, and
+  display do not depend on this choice.
 - An interpolation expression cannot contain a string literal or a
   brace. The scanner rejects these forms with `E0006`.
 - `ByteBuffer.build()` decodes the bytes as UTF-8 and faults
@@ -105,9 +105,10 @@ and the deferred work.
   with the core image.
 - `StringBuilder.append` and `ByteBuffer.append` return the builder
   for call chains. `push` and `put` return `()`.
-- Function types do not carry `mut` parameter markers. A `mut`
-  closure parameter grants capability inside the body, but call
-  sites do not check the argument capability.
+- Function types did not carry `mut` parameter markers in this week.
+  The post-week-4 fix set closed the hole: function types and
+  function records now carry the markers, and call sites check the
+  argument capability. See docs/notes/fixes-post-week4.md.
 - The verifier does not prove field initialization across the
   `<new>`/`init` function boundary. Fields start with an internal
   uninitialized marker, and a field read of that marker faults
