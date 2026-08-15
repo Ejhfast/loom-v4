@@ -167,11 +167,11 @@ built  mathlib.matrix  11822e8c013f
 built  app.greeting  e26ea787a2a4
 built  app.main  267bd54c6fd5
 linked app  sem=0b91ae8fa454 container=879c429db5f4
-  build/debug/app.lma
+  examples/05-modules/app/build/debug/app.lma
 $ lm run examples/05-modules/app --allow Io.Print
 Hello Ada!
 2x3 has 6 cells
-$ lm run build/debug/app.lma --allow Io.Print
+$ lm run examples/05-modules/app/build/debug/app.lma --allow Io.Print
 Hello Ada!
 2x3 has 6 cells
 ```
@@ -179,6 +179,13 @@ Hello Ada!
 A second build reports `cached` for every module. The report line per
 module replaces the per-package sketch in the build order. A module
 is the unit the cache keys on, and the unit a user edits.
+
+The build directory of a package sits at the package root, not at the
+current directory. Two builds from two directories then share one
+cache and write one program. `lm build` and `lm run` also default to
+the current directory, so both work from anywhere inside a package.
+The single-file `lm build file.lm` keeps the week-5 rule and writes
+`build/debug` beside the current directory.
 
 ## The identity decision
 
@@ -403,8 +410,9 @@ makes the developer loop fast.
   in week 13. The week-6 test
   `the_typed_environments_compile_link_and_run_by_hand` drives the
   Rust API end to end instead.
-- The build directory is `build/` relative to the current directory,
-  as in week 5, not inside the package.
+- The build directory of a package is `build/` at the package root.
+  Only the single-file `lm build file.lm` keeps the week-5 rule and
+  writes beside the current directory.
 - Every module of a program links into the artifact, including the
   empty entry function of a library module. It is dead code of two
   instructions.

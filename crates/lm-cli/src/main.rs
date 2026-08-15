@@ -20,10 +20,11 @@ use std::process::ExitCode;
 const USAGE: &str = "usage:
   lm new <name>
   lm check <file.lm>
-  lm build <file.lm | package directory>
+  lm build [file.lm | package directory]
   lm run [--show-result] [--allow Op1,Group2,...] [--rand-seed N]
          [--fuel N] [--max-frames N] [--heap-bytes N]
-         <file.lm | file.lma | package directory>
+         [file.lm | file.lma | package directory]
+  (`lm build` and `lm run` default to the current directory)
   lm disasm <file.lm | file.lma>
   lm inspect <file.lmi | file.lma>
   lm inspect --live [--fuel N] [--max-frames N] [--heap-bytes N] <file.lm>";
@@ -70,7 +71,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         "build" => {
-            let options = parse_options(rest)?;
+            let options = parse_options_with(rest, Some("."))?;
             if is_package(&options.file) {
                 build_package(&options.file, false)?;
                 return Ok(ExitCode::SUCCESS);
@@ -78,7 +79,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             build_artifact(&options.file)
         }
         "run" => {
-            let options = parse_options(rest)?;
+            let options = parse_options_with(rest, Some("."))?;
             if is_package(&options.file) {
                 let report = build_package(&options.file, true)?;
                 let program = report.program.ok_or_else(|| {
@@ -166,9 +167,19 @@ fn is_package(path: &str) -> bool {
     Path::new(path).is_dir()
 }
 
+/// Shorten one path against the current directory, for the report.
+fn relative_to_here(path: &Path) -> &Path {
+    let here = std::env::current_dir().unwrap_or_default();
+    path.strip_prefix(&here).unwrap_or(path)
+}
+
 /// Build one package and print the per-module report.
 fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport, String> {
-    let report = lm_compiler::build_package(Path::new(path), Path::new("build"))?;
+    // The build directory belongs to the package, not to the current
+    // directory. Two builds from two directories then share one
+    // cache and write one program.
+    let root = lm_compiler::graph::find_package_dir(Path::new(path))?;
+    let report = lm_compiler::build_package(Path::new(path), &root.join("build"))?;
     let mut lines: Vec<String> = Vec::new();
     for module in &report.modules {
         let verb = if module.cached { "cached" } else { "built " };
@@ -190,7 +201,7 @@ fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport
                         .expect("a linked program has bytes")
                 )
             ));
-            lines.push(format!("  {}", program.display()));
+            lines.push(format!("  {}", relative_to_here(program).display()));
         }
         _ => lines.push(format!("library {} builds no program", report.root)),
     }
@@ -328,6 +339,14 @@ struct Options {
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
+    parse_options_with(args, None)
+}
+
+/// Parse the options of one command. `default_file` names the input
+/// a command uses when the user gives none. `lm build` and `lm run`
+/// default to the current directory, so both work from any directory
+/// inside a package.
+fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Options, String> {
     let mut file = None;
     let mut show_result = false;
     let mut live = false;
@@ -359,7 +378,9 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             }
         }
     }
-    let file = file.ok_or_else(|| format!("error: no input file\n{USAGE}\n"))?;
+    let file = file
+        .or_else(|| default_file.map(|f| f.to_string()))
+        .ok_or_else(|| format!("error: no input file\n{USAGE}\n"))?;
     Ok(Options {
         file,
         show_result,

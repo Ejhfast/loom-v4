@@ -110,7 +110,8 @@ are no ambient standard-library names. The core prelude (`Option`,
 - `lm new NAME` — scaffold the layout above.
 - `lm build` — build the dependency graph into verified artifacts,
   with a content-addressed cache. The linked program artifact lands
-  at `build/debug/<name>.lma`.
+  at `build/debug/<name>.lma` inside the package directory, so two
+  builds from two directories share one cache.
 - `lm run [--allow ...]` — build, then execute the program artifact
   under the given policy grants. `lm run <path>.lma` executes a
   prebuilt artifact directly, with no package or source present.

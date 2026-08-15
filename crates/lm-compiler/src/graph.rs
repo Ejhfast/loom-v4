@@ -87,10 +87,17 @@ impl Workspace {
 /// Find the package directory that holds one path: the nearest
 /// ancestor with an `lm.package` manifest.
 pub fn find_package_dir(start: &Path) -> Result<PathBuf, String> {
-    let mut at = if start.is_dir() {
-        start.to_path_buf()
+    // The walk needs an absolute path: a relative path runs out of
+    // parents at the first segment, and `.` has none at all.
+    let absolute = start.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(start)
+    });
+    let mut at = if absolute.is_dir() {
+        absolute
     } else {
-        start
+        absolute
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))

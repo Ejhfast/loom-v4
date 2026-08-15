@@ -1,5 +1,5 @@
 /target
-/build
+build/
 *.lma
 *.lms
 result
