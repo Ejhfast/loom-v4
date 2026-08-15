@@ -260,6 +260,33 @@ fn the_program_artifact_is_closed() {
     assert_eq!(output, "Hello Ada!\n2x3 has 6 cells\n");
 }
 
+/// A module no import slot names never reaches the program. The link
+/// order walks the import graph from the entry module.
+#[test]
+fn an_unused_module_stays_out_of_the_program() {
+    let tree = TempTree::new("unused");
+    workspace(&tree);
+    let before = tree.build("app").expect("builds");
+    let small = std::fs::read(before.program.clone().unwrap()).unwrap();
+    tree.write(
+        "mathlib/src/unused.lm",
+        "class Heavy\n\
+         \x20 a: Int = 1\n\
+         \x20 def one(self): Int\n\
+         \x20   self.a\n\
+         \x20 end\n\
+         end\n\
+         \n\
+         def never_called(n: Int): Int\n\
+         \x20 n * 99\n\
+         end\n",
+    );
+    let after = tree.build("app").expect("builds");
+    assert_eq!(after.modules.len(), 4, "the module did not build");
+    let big = std::fs::read(after.program.clone().unwrap()).unwrap();
+    assert_eq!(small, big, "an unused module reached the program");
+}
+
 /// The core classes of every module become one core in the linked
 /// program, so a core value keeps its class across a module boundary.
 #[test]

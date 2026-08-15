@@ -131,6 +131,10 @@ importer. A merge failure is never silent. The merged artifact meets
 the whole verifier before it runs, and two distinct `Option.Some`
 classes fail the type rules of the call site.
 
+The link order walks the import graph from the entry module, so a
+module no slot names never reaches the program. A library may
+therefore hold modules a given program does not pay for.
+
 The shared-definition rule compares the relocated definitions and
 rejects a hash that covers two different definitions. Function names
 stay out of that comparison, because function identity excludes the
@@ -451,15 +455,15 @@ makes the developer loop fast.
 
 ## New tests
 
-`week6.rs` (28 cases) covers the build loop end to end on real
+`week6.rs` (30 cases) covers the build loop end to end on real
 package trees:
 
 - the two-package workspace, the cache hit, and the two rebuild
   gates;
-- the stale caller, the damaged cache entry, and the stale-pin link
-  rejection;
-- the closed program artifact, the shared core, and program
-  determinism across two build directories;
+- the stale caller, the damaged cache entry, the stale-pin link
+  rejection, and the crafted export table;
+- the closed program artifact, the shared core, the unused module,
+  and program determinism across two build directories;
 - the imported enum, the imported generics, the imported mutable
   method, the imported effect parameter, and the transitive type;
 - the inheritance rejection, the self-import cycle, and authority;
