@@ -472,6 +472,22 @@ pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
 /// Verify a full module against a core layout the loader resolved
 /// through the pinned definition hashes.
 pub fn verify_with_layout(module: &Module, core: CoreLayout) -> Result<(), VerifyError> {
+    let ctx = verify_structure(module, core)?;
+    for (idx, func) in module.funcs.iter().enumerate() {
+        verify_func(&ctx, func, idx as u32)?;
+    }
+    Ok(())
+}
+
+/// Validate every module-level rule without the per-function
+/// dataflow: the tables and the entry shape. The verified-code cache
+/// may skip only the dataflow, never this pass, so a hash-equal
+/// byte stream with a non-canonical table is rejected on every load.
+pub fn verify_structure_with_layout(module: &Module, core: CoreLayout) -> Result<(), VerifyError> {
+    verify_structure(module, core).map(|_| ())
+}
+
+fn verify_structure(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyError> {
     let ctx = verify_tables(module, core)?;
     let entry = module.entry as usize;
     if entry >= module.funcs.len() {
@@ -500,10 +516,7 @@ pub fn verify_with_layout(module: &Module, core: CoreLayout) -> Result<(), Verif
     if entry_func.type_params != 0 || entry_func.effect_params != 0 {
         return Err(err(module.entry, "the entry function must not be generic"));
     }
-    for (idx, func) in module.funcs.iter().enumerate() {
-        verify_func(&ctx, func, idx as u32)?;
-    }
-    Ok(())
+    Ok(ctx)
 }
 
 /// Validate the type, selector, application, class, and function

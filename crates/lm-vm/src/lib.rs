@@ -231,6 +231,11 @@ fn load_inner(
     let core = lm_bytecode::corepin::core_layout(&module, &identity);
     match cache {
         Some(cache) => {
+            // The structural pass runs on every load. The semantic
+            // hash does not cover dead pool entries, so a hash-equal
+            // byte stream with a non-canonical table must reject
+            // here; the cache may skip only the function dataflow.
+            lm_verify::verify_structure_with_layout(&module, core)?;
             let key = (
                 identity.semantic_hash,
                 lm_bytecode::identity::COMPILER_ABI_VERSION,

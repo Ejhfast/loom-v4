@@ -87,8 +87,12 @@ schedule. The graph nodes are the classes, functions, types, and
 applications. An abstract enum parent references its case classes,
 so a family is one component: the closed arm set is part of the
 family identity, and the name-ordered member ordinals separate
-structurally identical arms and families (`StepEvent` versus
-`DriveEvent`, `Ran` versus `Waiting`).
+same-named arms of families whose arm sets differ (`StepEvent`
+versus `DriveEvent`: `Ran` and `Waiting` stay distinct because the
+two arm sets differ). Two families with identical arm names,
+fields, and methods share one hash: definition hashes are purely
+structural by design, and nominal distinctness lives in the export
+table and the module-local class indices that the runtime uses.
 
 The hashing domains, written out:
 
@@ -188,13 +192,17 @@ counter proves the skip. The trust boundary, exactly:
   verifier.
 - The decoder's structural checks and the identity preflight run on
   every load, cached or not.
-- A hit certifies that a module with the identical structural
-  fingerprint passed the verifier. The fingerprint covers every
-  instruction, operand, signature, row, type, name-table entry, and
-  the entry point; two byte streams can share it only when they
-  differ in interning order or debug content, which the semantics do
-  not observe. The remaining assumption is SHA-256 collision
-  resistance.
+- The semantic hash covers referenced content only, so two byte
+  streams can share it while one carries dead, non-canonical pool
+  entries that the verifier rejects. The review demonstrated this
+  with a dead duplicate type entry. Therefore the module-level
+  structural pass (`verify_structure_with_layout`: every table and
+  entry rule) runs on EVERY load; a hit skips only the per-function
+  dataflow. A hit then certifies: the tables of these exact bytes
+  passed the structural pass now, and functions with this exact
+  referenced content passed the dataflow before. The remaining
+  assumption is SHA-256 collision resistance. A regression test
+  replays the demonstrated bypass.
 - A rejected module never enters the cache.
 
 ### Interfaces and the CLI
@@ -289,6 +297,30 @@ the new rejection order reach them:
   seed: the bomb at the decoder, every forgery at the verifier.
 - The differential corpus gained two `use`-alias programs, so the
   oracle covers the new resolution layer on the pure subset.
+
+## Review fixes
+
+An independent review confirmed one defect and two documentation
+gaps. The defect: a byte stream with a dead duplicate pool entry
+kept the semantic hash equal and rode a cached admission past the
+verifier. The fix runs the module-level structural pass on every
+load; the cache skips only the per-function dataflow. The trust
+boundary above records the corrected claim, and a regression test
+replays the attack. The family-distinctness wording and the
+canonical-operand comment are corrected.
+
+Two review observations are deferred with rationale:
+
+- The intra-component resolver lookups are linear scans, so a very
+  wide hostile component makes load-time identity computation
+  superlinear. This is performance, not soundness. The week 6
+  identity work replaces the lookup vectors with maps.
+- Definition hashes are structural, so nominal distinctness rests on
+  module-local class indices and the export table. That is sound
+  while class values are not first-class (`E1018`). When class
+  values land (reflection, week 13), class-value equality must not
+  use the bare definition hash, or names must enter the identity.
+  This decision is recorded here for that week.
 
 ## Deferred work
 

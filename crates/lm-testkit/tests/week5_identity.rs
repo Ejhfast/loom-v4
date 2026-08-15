@@ -379,3 +379,29 @@ fn every_interface_truncation_is_rejected() {
     bad_kind[50] = 9;
     assert!(decode_interface(&bad_kind).is_err());
 }
+
+/// Review regression: a dead duplicate pool entry keeps the semantic
+/// hash equal, because the hash covers referenced content only. The
+/// structural pass must still reject the stream on every load; the
+/// cache may skip only the function dataflow.
+#[test]
+fn hash_equal_noncanonical_bytes_reject_on_a_cache_hit() {
+    let source = "def f(n: Int): Int\n  n + 1\nend\nf(41)\n";
+    let bytes = compile_to_bytes("t.lm", source).unwrap();
+    let mut cache = lm_vm::VerifiedCache::new();
+    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
+    assert_eq!(cache.verifications, 1);
+    // Append one dead duplicate type entry. The verifier rejects the
+    // table; the semantic hash does not change.
+    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    module.types.push(lm_bytecode::BcType::Int);
+    let bad = lm_bytecode::encode(&module);
+    let plain = lm_vm::load_bytes(&bad);
+    assert!(plain.is_err(), "the uncached load accepted the table");
+    let cached = lm_vm::load_bytes_cached(&bad, &mut cache);
+    assert!(cached.is_err(), "the cached load bypassed the verifier");
+    assert_eq!(cache.verifications, 1);
+    // The valid bytes still hit the cache afterward.
+    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
+    assert_eq!(cache.verifications, 1);
+}

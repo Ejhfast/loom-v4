@@ -13,7 +13,9 @@
 //! - selector indices become the selector name;
 //! - lifted closure bodies are embedded through a body digest and are
 //!   identified by their parent identity and occurrence index;
-//! - local slots and block indices stay as-is (function-local).
+//! - local slots, block indices, argument counts, manifest operation
+//!   slots, and table-edit operands stay as-is: they are
+//!   function-local or manifest-stable, never module-positional.
 //!
 //! Mutually recursive definitions form strongly connected components
 //! found with an iterative Tarjan walk (pinned traversal: roots in
