@@ -385,6 +385,7 @@ impl Machine {
     }
 
     /// Execute exactly one instruction of the current frame.
+    #[inline(always)]
     pub fn exec_instr(
         &mut self,
         module: &Module,
@@ -868,6 +869,20 @@ impl Machine {
             }
         }
         Ok(ExecOutcome::Continue)
+    }
+
+    /// Execute until an instruction reaches the world boundary.
+    pub fn exec_until_boundary(
+        &mut self,
+        module: &Module,
+        dispatch: &[crate::DispatchRow],
+    ) -> Result<ExecOutcome, FaultCode> {
+        loop {
+            match self.exec_instr(module, dispatch) {
+                Ok(ExecOutcome::Continue) => {}
+                outcome => return outcome,
+            }
+        }
     }
 
     /// Return true when the instance class equals or extends the
