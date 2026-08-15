@@ -1,0 +1,13 @@
+[package]
+name = "lm-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lm-abi = { path = "../lm-abi" }
+lm-source = { path = "../lm-source" }
+lm-types = { path = "../lm-types" }
+lm-hir = { path = "../lm-hir" }
+lm-bytecode = { path = "../lm-bytecode" }
+lm-verify = { path = "../lm-verify" }

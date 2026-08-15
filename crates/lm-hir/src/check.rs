@@ -42,14 +42,26 @@ pub const PRELUDE_CTORS: [&str; 4] = ["Some", "None", "Ok", "Err"];
 
 /// Checker options. `prelude` controls only unqualified name
 /// resolution; the core image itself never depends on it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CheckOptions {
     pub prelude: bool,
+    /// The module path of the source under compilation, for example
+    /// `mathlib.matrix`. It names this module's classes inside the
+    /// emitted interface. It never enters a definition hash, so
+    /// identity stays independent of the location on disk.
+    pub module_path: String,
+    /// The interfaces this module may import. The build tool
+    /// constructs it from the manifest and the dependency interfaces.
+    pub imports: crate::import::ImportEnv,
 }
 
 impl Default for CheckOptions {
     fn default() -> CheckOptions {
-        CheckOptions { prelude: true }
+        CheckOptions {
+            prelude: true,
+            module_path: String::new(),
+            imports: crate::import::ImportEnv::new(),
+        }
     }
 }
 
@@ -97,6 +109,8 @@ pub(crate) struct MethodSig {
 
 /// Checker-side class information with the full field layout.
 pub(crate) struct ClassInfo {
+    /// True for an imported declaration: a shape with no body.
+    pub(crate) imported: bool,
     pub(crate) name: String,
     pub(crate) parent: Option<u32>,
     pub(crate) type_params: Vec<String>,
@@ -119,8 +133,7 @@ pub(crate) struct ClassInfo {
     pub(crate) arm_short: String,
 }
 
-/// One resolved `use` binding. Week 5 supports the fixed `sys` paths
-/// only; module imports arrive with packages in week 6.
+/// One resolved `use` binding.
 #[derive(Clone)]
 pub(crate) enum UseBinding {
     /// A `sys` group object, by manifest group name (`Io`).
@@ -128,6 +141,9 @@ pub(crate) enum UseBinding {
     /// A callable `sys` member: the manifest group name plus the
     /// surface member name (`print`, `read_line`, or `Vm`).
     SysMember { group: &'static str, member: String },
+    /// A whole module bound to a short name. A member of it resolves
+    /// through the qualified key `alias.member`.
+    Module(String),
 }
 
 /// Map a surface `sys` member name to its manifest group name.
@@ -178,20 +194,140 @@ pub(crate) fn snake_member(member: &str) -> String {
     out
 }
 
+/// Resolve one `use` line that names a module or a definition of the
+/// compile environment. Phase A of import materialization runs here:
+/// the class indices are reserved before any signature resolves.
+fn resolve_module_use(
+    ctx: &mut Ctx,
+    mat: &mut crate::import::Materializer<'_>,
+    env: &crate::import::ImportEnv,
+    decl: &ast::UseDecl,
+) -> Result<(String, UseBinding), Diagnostic> {
+    let text = decl.path.join(".");
+    let root = &decl.path[0];
+    if root == "std" {
+        return Err(Diagnostic::new(
+            "E1052",
+            "the standard library does not ship with this toolchain yet; \
+             use a path dependency or the `sys` operations",
+            decl.span,
+        ));
+    }
+    let Some(prefix) = env.roots.get(root) else {
+        let mut known: Vec<&str> = env.roots.keys().map(|k| k.as_str()).collect();
+        known.push("sys");
+        return Err(Diagnostic::new(
+            "E1052",
+            if env.is_empty() {
+                format!(
+                    "`use {text}` names a module; a module import needs a package, \
+                     so compile the file inside one"
+                )
+            } else {
+                format!(
+                    "`{root}` is not a root name here; the roots are {}",
+                    known.join(", ")
+                )
+            },
+            decl.span,
+        ));
+    };
+    // The candidate path replaces the root with the prefix it names.
+    let mut segments: Vec<String> = prefix.split('.').map(|s| s.to_string()).collect();
+    segments.extend(decl.path[1..].iter().cloned());
+    let full = segments.join(".");
+    let bound = decl.path.last().expect("a use path has segments").clone();
+    if env.module(&full).is_some() {
+        // A module alias: every export binds under `alias.name`.
+        let interface = env.module(&full).expect("checked").clone();
+        for export in &interface.exports {
+            let bound_name = format!("{bound}.{}", export.name);
+            if export.kind.is_class() {
+                let id = mat.reserve_class(ctx, &full, &export.name, decl.span)?;
+                bind_type(ctx, &bound_name, id, decl.name_span)?;
+            } else {
+                mat.reserve_func(ctx, &bound_name, &full, &export.name, decl.span)?;
+            }
+        }
+        return Ok((bound, UseBinding::Module(full)));
+    }
+    // A definition of a module: the last segment names the export.
+    if segments.len() >= 2 {
+        let module = segments[..segments.len() - 1].join(".");
+        if let Some(interface) = env.module(&module) {
+            let Some(export) = interface.find(&bound) else {
+                let mut names: Vec<&str> =
+                    interface.exports.iter().map(|e| e.name.as_str()).collect();
+                names.sort_unstable();
+                return Err(Diagnostic::new(
+                    "E1052",
+                    format!(
+                        "the module `{module}` exports no `{bound}`; it exports {}",
+                        names.join(", ")
+                    ),
+                    decl.name_span,
+                ));
+            };
+            if export.kind.is_class() {
+                let id = mat.reserve_class(ctx, &module, &bound, decl.span)?;
+                bind_type(ctx, &bound, id, decl.name_span)?;
+            } else {
+                mat.reserve_func(ctx, &bound, &module, &bound, decl.span)?;
+            }
+            return Ok((bound, UseBinding::Module(module)));
+        }
+    }
+    let known = env.paths_under(prefix);
+    Err(Diagnostic::new(
+        "E1052",
+        if known.is_empty() {
+            format!("`{text}` names no module of `{root}`")
+        } else {
+            format!(
+                "`{text}` names no module; `{root}` provides {}",
+                known.join(", ")
+            )
+        },
+        decl.span,
+    ))
+}
+
+/// Bind one imported type name in the module scope. A name the module
+/// already defines is an error, never a silent shadow.
+fn bind_type(ctx: &mut Ctx, name: &str, class: u32, span: Span) -> Result<(), Diagnostic> {
+    if ctx.user_types.contains_key(name) {
+        return Err(Diagnostic::new(
+            "E1052",
+            format!(
+                "the name `{name}` already has a definition in this module; \
+                 rename it or bind the module instead"
+            ),
+            span,
+        ));
+    }
+    ctx.user_types.insert(name.to_string(), class);
+    Ok(())
+}
+
 /// Resolve the `use` lines of one module into named bindings.
-fn resolve_uses(uses: &[ast::UseDecl]) -> Result<HashMap<String, UseBinding>, Diagnostic> {
+fn resolve_uses(
+    ctx: &mut Ctx,
+    mat: &mut crate::import::Materializer<'_>,
+    env: &crate::import::ImportEnv,
+    uses: &[ast::UseDecl],
+) -> Result<HashMap<String, UseBinding>, Diagnostic> {
     let mut out: HashMap<String, UseBinding> = HashMap::new();
     for decl in uses {
-        let path = decl.path.join(".");
         if decl.path[0] != "sys" {
-            return Err(Diagnostic::new(
-                "E1052",
-                format!(
-                    "`use {path}` names a module import; module imports arrive \
-                     with packages, and only fixed `sys` paths bind here"
-                ),
-                decl.span,
-            ));
+            let (bound, binding) = resolve_module_use(ctx, mat, env, decl)?;
+            if out.insert(bound.clone(), binding).is_some() {
+                return Err(Diagnostic::new(
+                    "E1052",
+                    format!("the name `{bound}` already has a `use` binding"),
+                    decl.name_span,
+                ));
+            }
+            continue;
         }
         let binding = match decl.path.len() {
             1 => {
@@ -302,9 +438,39 @@ pub(crate) struct Ctx {
     /// below locals and module definitions. They never grant
     /// authority and never change a row.
     pub(crate) uses: HashMap<String, UseBinding>,
+    /// The class index where the core classes start. Every earlier
+    /// class is a definition of this module.
+    pub(crate) core_start: u32,
+    /// The class index where the imported declarations start. The
+    /// classes between `core_start` and here come from the core.
+    pub(crate) import_start: u32,
 }
 
 impl Ctx {
+    /// Where one class comes from. The registration order fixes the
+    /// three ranges: this module, then the core, then the imports.
+    pub(crate) fn class_origin(&self, class: u32) -> crate::iface::ClassOrigin {
+        if class < self.core_start {
+            return crate::iface::ClassOrigin::Local;
+        }
+        if class < self.import_start {
+            return crate::iface::ClassOrigin::Core;
+        }
+        for import in &self.imports {
+            if import.kind == lm_bytecode::ImportKind::Class {
+                if let HirImportDef::Class(c) = import.def {
+                    if c == class {
+                        return crate::iface::ClassOrigin::Imported(
+                            import.module.clone(),
+                            import.name.clone(),
+                        );
+                    }
+                }
+            }
+        }
+        crate::iface::ClassOrigin::Local
+    }
+
     /// Look up a class or enum type name in the given scope.
     pub(crate) fn lookup_type(&self, name: &str, env: &TyEnv) -> Option<u32> {
         if env.core_scope {
@@ -645,13 +811,22 @@ pub fn check_module_with(
             some_class: 0,
             none_class: 0,
         },
-        uses: resolve_uses(&module.uses)?,
+        uses: HashMap::new(),
         imports: Vec::new(),
+        core_start: 0,
+        import_start: 0,
     };
     // Pass 1: predeclare all type names. User definitions come first,
     // so their class indices do not depend on the core.
     register_type_names(&mut ctx, module, false)?;
+    ctx.core_start = ctx.store.class_count() as u32;
     register_type_names(&mut ctx, core, true).expect("the core type names register");
+    ctx.import_start = ctx.store.class_count() as u32;
+    // Import phase A: reserve the imported class indices before any
+    // signature resolves, so a user signature may name an imported
+    // type. Phase B fills the declarations after the core lands.
+    let mut materializer = crate::import::Materializer::new(&options.imports);
+    ctx.uses = resolve_uses(&mut ctx, &mut materializer, &options.imports, &module.uses)?;
     link_class_parents(&mut ctx, module, false)?;
     // The core has no user-style inheritance, only enum families,
     // which were linked during registration.
@@ -711,6 +886,17 @@ pub fn check_module_with(
     let mut own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>> = Vec::new();
     check_defaults(&mut ctx, module, false, &mut own_defaults)?;
     check_defaults(&mut ctx, core, true, &mut own_defaults).map_err(core_defect)?;
+    // Import phase B: fill the imported declarations. The class table
+    // holds the user and the core classes now, so an imported
+    // signature may name any of them. An imported declaration carries
+    // no default expression: the provider construction function
+    // evaluates its own defaults.
+    let import_span = module
+        .uses
+        .first()
+        .map(|u| u.span)
+        .unwrap_or(Span::new(0, 0));
+    materializer.finish(&mut ctx, &mut own_defaults, import_span)?;
     // Pass 4: check top-level function bodies.
     for (idx, func) in module.funcs.iter().enumerate() {
         let sig = ctx.sigs[idx].clone();
@@ -737,6 +923,7 @@ pub fn check_module_with(
         }
         let checked = checker.check_callable(&mut ctx, &func.body, sig.ret, func.span)?;
         ctx.funcs[idx] = Some(HirFunc {
+            imported: false,
             name: func.name.clone(),
             type_params: sig.type_params.len() as u32,
             effect_params: sig.effect_params.len() as u32,
@@ -762,8 +949,9 @@ pub fn check_module_with(
     let (body, entry_ty, _mutable, locals, entry_row) =
         checker.check_entry(&mut ctx, &module.entry, entry_span)?;
     let entry_ty = if entry_ty == NEVER { UNIT } else { entry_ty };
-    let exports = collect_exports(&ctx, module)?;
+    let exports = collect_exports(&ctx, module, &options.module_path)?;
     ctx.funcs[entry_idx] = Some(HirFunc {
+        imported: false,
         name: "<entry>".to_string(),
         type_params: 0,
         effect_params: 0,
@@ -781,47 +969,52 @@ pub fn check_module_with(
 /// Collect the exported top-level definitions of the source module,
 /// in declaration order. The embedded core and every imported
 /// declaration stay out: a module exports only what it defines.
-fn collect_exports(ctx: &Ctx, module: &ast::Module) -> Result<Vec<HirExport>, Diagnostic> {
-    let mut out = Vec::new();
+fn collect_exports(
+    ctx: &Ctx,
+    module: &ast::Module,
+    module_path: &str,
+) -> Result<Vec<HirExport>, Diagnostic> {
+    let naming = crate::iface::Naming { ctx, module_path };
+    let mut out: Vec<(lm_bytecode::ExportKind, String, u32)> = Vec::new();
     let class_index = |name: &str| -> u32 {
         *ctx.user_types
             .get(name)
             .expect("every user class name registers")
     };
     for class in &module.classes {
-        out.push(HirExport {
-            kind: lm_bytecode::ExportKind::Class,
-            name: class.name.clone(),
-            def: class_index(&class.name),
-        });
+        out.push((
+            lm_bytecode::ExportKind::Class,
+            class.name.clone(),
+            class_index(&class.name),
+        ));
     }
     for enum_def in &module.enums {
         let parent = class_index(&enum_def.name);
-        out.push(HirExport {
-            kind: lm_bytecode::ExportKind::Enum,
-            name: enum_def.name.clone(),
-            def: parent,
-        });
+        out.push((lm_bytecode::ExportKind::Enum, enum_def.name.clone(), parent));
         for arm in &enum_def.arms {
             let full = format!("{}.{}", enum_def.name, arm.name);
             let idx = ctx
                 .find_arm(parent, &arm.name)
                 .expect("every declared arm registers");
-            out.push(HirExport {
-                kind: lm_bytecode::ExportKind::EnumCase,
-                name: full,
-                def: idx,
-            });
+            out.push((lm_bytecode::ExportKind::EnumCase, full, idx));
         }
     }
     for func in &module.funcs {
-        out.push(HirExport {
-            kind: lm_bytecode::ExportKind::Function,
-            name: func.name.clone(),
-            def: ctx.func_index[&func.name],
-        });
+        out.push((
+            lm_bytecode::ExportKind::Function,
+            func.name.clone(),
+            ctx.func_index[&func.name],
+        ));
     }
-    Ok(out)
+    Ok(out
+        .into_iter()
+        .map(|(kind, name, def)| HirExport {
+            kind,
+            name,
+            def,
+            item: naming.item(kind, def),
+        })
+        .collect())
 }
 
 /// A defect in the pinned core sources is an implementation defect,
@@ -875,6 +1068,7 @@ fn assemble(
             .map(|m| m.row.clone())
             .unwrap_or_default();
         hir_classes.push(HirClass {
+            imported: info.imported,
             name: info.name.clone(),
             parent: info.parent,
             type_params: info.type_params.len() as u32,
@@ -1342,6 +1536,7 @@ fn resolve_class(
         }
     }
     Ok(ClassInfo {
+        imported: false,
         name: class.name.clone(),
         parent,
         type_params: type_names,
@@ -1432,6 +1627,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
     }
     let arms: Vec<u32> = arm_infos.iter().map(|(idx, _, _, _)| *idx).collect();
     ctx.classes.push(ClassInfo {
+        imported: false,
         name: enum_def.name.clone(),
         parent: None,
         type_params: type_names.clone(),
@@ -1459,6 +1655,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         };
         let count = field_tys.len();
         ctx.classes.push(ClassInfo {
+            imported: false,
             name: format!("{}.{}", enum_def.name, short),
             parent: Some(parent_idx),
             type_params: type_names.clone(),
@@ -1614,6 +1811,7 @@ fn check_method(
         crate::checkfn::require_complete(ctx, cidx, &checker_state, method.span)?;
     }
     ctx.funcs[func_idx as usize] = Some(HirFunc {
+        imported: false,
         name: format!("{}.{}", ctx.classes[cidx as usize].name, method.name),
         type_params: sig.type_params.len() as u32,
         effect_params: sig.effect_params.len() as u32,

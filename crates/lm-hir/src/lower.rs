@@ -1197,6 +1197,22 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
     let params: Vec<u32> = func.params.iter().map(|t| m.bc_ty(*t)).collect();
     let ret = m.bc_ty(func.ret);
     let row = m.bc_row(&func.row);
+    if func.imported {
+        // An imported function is a declaration: the signature only.
+        // The linker replaces it with the provider definition.
+        return Func {
+            name: func.name.clone(),
+            type_params: func.type_params,
+            effect_params: func.effect_params,
+            params: params.clone(),
+            param_muts: func.param_muts.clone(),
+            ret,
+            row,
+            captures: vec![],
+            local_types: params,
+            blocks: vec![],
+        };
+    }
     let captures: Vec<u32> = func.captures.iter().map(|t| m.bc_ty(*t)).collect();
     // The declared checker types of every local slot seed the table;
     // scratch slots append their true types during lowering.
@@ -1232,6 +1248,32 @@ fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {
 /// allocate, evaluate defaults, run `init` or store the case fields,
 /// and return the instance.
 fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
+    if class.imported {
+        // An imported class declares its construction function and
+        // carries no body. The provider evaluates its own defaults.
+        let params: Vec<u32> = class.ctor_params.iter().map(|t| m.bc_ty(*t)).collect();
+        let self_bc = if class.type_params == 0 {
+            m.intern_type(BcType::Class(cidx))
+        } else {
+            let var_tys: Vec<u32> = (0..class.type_params)
+                .map(|i| m.intern_type(BcType::Var(i)))
+                .collect();
+            m.intern_type(BcType::Inst(cidx, var_tys))
+        };
+        let row = m.bc_row(&class.ctor_row);
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: class.type_params,
+            effect_params: 0,
+            params: params.clone(),
+            param_muts: class.ctor_param_muts.clone(),
+            ret: self_bc,
+            row,
+            captures: vec![],
+            local_types: params,
+            blocks: vec![],
+        };
+    }
     if class.kind == ClassKind::EnumParent {
         // An abstract enum parent is never constructed. Its `<new>`
         // slot only keeps the index arithmetic dense.

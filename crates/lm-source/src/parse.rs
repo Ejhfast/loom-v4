@@ -553,7 +553,17 @@ impl Parser {
     fn type_expr_inner(&mut self) -> Result<TypeExpr, Diagnostic> {
         match self.peek() {
             Tok::Ident(_) => {
-                let (name, span) = self.ident("a type")?;
+                let (mut name, mut span) = self.ident("a type")?;
+                // A qualified type name such as `matrix.Matrix` names
+                // one type through a `use` binding. The checker
+                // resolves the dotted name.
+                while matches!(self.peek(), Tok::Dot) {
+                    self.pos += 1;
+                    let (segment, segment_span) = self.ident("a type after `.`")?;
+                    name.push('.');
+                    name.push_str(&segment);
+                    span = span.to(segment_span);
+                }
                 if matches!(self.peek(), Tok::LBracket) {
                     self.pos += 1;
                     let mut args = Vec::new();

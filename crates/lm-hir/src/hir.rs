@@ -33,6 +33,8 @@ pub struct HirExport {
     /// The class index for a class-like export, the function index
     /// otherwise.
     pub def: u32,
+    /// The structural signature the interface publishes.
+    pub item: lm_bytecode::interface::IfaceItem,
 }
 
 /// The definition one import slot declares. The lowering pass turns
@@ -85,6 +87,9 @@ pub enum CtorKind {
 
 /// One checked class with its full field layout.
 pub struct HirClass {
+    /// True for an imported declaration: a shape with no method body
+    /// and no construction body.
+    pub imported: bool,
     pub name: String,
     /// Parent class index.
     pub parent: Option<u32>,
@@ -115,6 +120,8 @@ pub struct HirClass {
 }
 
 pub struct HirFunc {
+    /// True for an imported declaration: a signature with no body.
+    pub imported: bool,
     pub name: String,
     /// The number of generic type parameters in scope for the body.
     pub type_params: u32,

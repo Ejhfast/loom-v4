@@ -1022,6 +1022,16 @@ impl<'o> FnChecker<'o> {
                             expr.span,
                         ));
                     }
+                    Some(UseBinding::Module(path)) => {
+                        return Err(Diagnostic::new(
+                            "E1051",
+                            format!(
+                                "`{name}` names the module `{path}` and is not a \
+                                 value; name one of its definitions"
+                            ),
+                            expr.span,
+                        ));
+                    }
                     None => {}
                 }
                 if ctx.func_index.contains_key(name) {
@@ -1671,6 +1681,17 @@ impl<'o> FnChecker<'o> {
             Some(UseBinding::SysGroup(group)) => {
                 return Ok(Callee::SysGroup(group));
             }
+            Some(UseBinding::Module(path)) => {
+                return Err(Diagnostic::new(
+                    "E1051",
+                    format!(
+                        "`{name}` names the module `{path}` and is not a value; \
+                         call one of its definitions, for example \
+                         `{name}.<definition>(...)`"
+                    ),
+                    name_span,
+                ));
+            }
             None => {}
         }
         Err(Diagnostic::new(
@@ -2113,6 +2134,26 @@ impl<'o> FnChecker<'o> {
         // A direct operation call `sys.<group>.<Member>(args)`.
         if let Some(group) = self.sys_group_of(ctx, recv)? {
             return self.check_sys_call(ctx, group, name, name_span, type_args, args, span);
+        }
+        // A call into a `use`-bound module: `matrix.det(x)` or the
+        // constructor `matrix.Matrix(2, 3)`. The materialized import
+        // carries the qualified key, so the ordinary call path
+        // resolves it.
+        if let ExprKind::Name(alias) = &recv.kind {
+            if let Some(UseBinding::Module(path)) = self.use_binding(ctx, alias)? {
+                let qualified = format!("{alias}.{name}");
+                if !ctx.func_index.contains_key(&qualified)
+                    && ctx.lookup_type(&qualified, &self.env).is_none()
+                {
+                    return Err(Diagnostic::new(
+                        "E1005",
+                        format!("the module `{path}` exports no `{name}`"),
+                        name_span,
+                    ));
+                }
+                return self
+                    .call_named(ctx, &qualified, name_span, type_args, args, expected, span);
+            }
         }
         let recv_h = self.synth_expr(ctx, recv)?;
         let recv_ty = recv_h.ty;
@@ -2637,6 +2678,7 @@ impl<'o> FnChecker<'o> {
         let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
         let func = ctx.push_func(
             HirFunc {
+                imported: false,
                 name,
                 type_params: type_param_count,
                 effect_params: effect_param_count,

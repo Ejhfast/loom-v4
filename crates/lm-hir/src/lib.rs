@@ -9,6 +9,8 @@ pub mod check;
 mod checkfn;
 pub mod exhaust;
 pub mod hir;
+pub mod iface;
+pub mod import;
 pub mod lower;
 
 pub use check::{check_module, check_module_with, CheckOptions, CORE_SOURCE};
@@ -25,7 +27,13 @@ pub fn dump_cfg(module: &lm_bytecode::Module) -> String {
 /// bytes are pinned by hash.
 pub fn core_image() -> lm_bytecode::Module {
     let empty = lm_source::parse::parse("").expect("the empty module parses");
-    let hir =
-        check_module_with(&empty, CheckOptions { prelude: false }).expect("the core image checks");
+    let hir = check_module_with(
+        &empty,
+        CheckOptions {
+            prelude: false,
+            ..CheckOptions::default()
+        },
+    )
+    .expect("the core image checks");
     lower_module(&hir)
 }

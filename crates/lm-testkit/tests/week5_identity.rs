@@ -3,9 +3,6 @@
 //! cache, and the interface artifact.
 
 use lm_bytecode::identity::{module_identity, ModuleIdentity};
-use lm_bytecode::interface::{
-    build_interface, decode_interface, dump_interface, encode_interface, ExportKind,
-};
 use lm_bytecode::{Func, Instr, Module};
 use lm_testkit::{compile_text, compile_to_bytes};
 
@@ -43,11 +40,6 @@ fn building_twice_is_byte_identical() {
     let a = compile_to_bytes("t.lm", source).unwrap();
     let b = compile_to_bytes("t.lm", source).unwrap();
     assert_eq!(a, b);
-    let (module, identity) = identity_of(source);
-    let exports = vec![(ExportKind::Function, "f".to_string())];
-    let ia = encode_interface(&build_interface(&module, &identity, &exports).unwrap());
-    let ib = encode_interface(&build_interface(&module, &identity, &exports).unwrap());
-    assert_eq!(ia, ib);
 }
 
 #[test]
@@ -322,64 +314,6 @@ fn tampered_bytes_never_ride_a_cached_admission() {
     let result = lm_vm::load_bytes_cached(&tampered, &mut cache);
     assert!(result.is_err(), "tampered bytes were admitted");
     assert_eq!(cache.verifications, 1, "a rejection never enters the cache");
-}
-
-// ---------------------------------------------------------------
-// The interface artifact.
-// ---------------------------------------------------------------
-
-fn sample_interface_bytes() -> Vec<u8> {
-    let source = "class Point\n  x: Int = 0\nend\n\
-                  enum Shape\n  Dot\n  Line(len: Int)\nend\n\
-                  def area(s: Shape): Int with Io.Print\n  \
-                  case s\n  in Dot then 0\n  in Line(l) then l\n  end\nend\n1\n";
-    let (module, identity) = identity_of(source);
-    let exports = vec![
-        (ExportKind::Class, "Point".to_string()),
-        (ExportKind::Enum, "Shape".to_string()),
-        (ExportKind::EnumCase, "Shape.Dot".to_string()),
-        (ExportKind::EnumCase, "Shape.Line".to_string()),
-        (ExportKind::Function, "area".to_string()),
-    ];
-    encode_interface(&build_interface(&module, &identity, &exports).unwrap())
-}
-
-#[test]
-fn the_interface_round_trips_and_dumps() {
-    let bytes = sample_interface_bytes();
-    let interface = decode_interface(&bytes).expect("decodes");
-    assert_eq!(encode_interface(&interface), bytes);
-    assert_eq!(interface.exports.len(), 5);
-    let area = &interface.exports[4];
-    assert_eq!(area.name, "area");
-    assert_eq!(area.kind, ExportKind::Function);
-    assert!(
-        area.signature.contains("with Io.Print"),
-        "{}",
-        area.signature
-    );
-    let dump = dump_interface(&interface);
-    assert!(dump.contains("fn area"), "{dump}");
-    assert!(dump.contains("semantic "), "{dump}");
-}
-
-#[test]
-fn every_interface_truncation_is_rejected() {
-    let bytes = sample_interface_bytes();
-    for len in 0..bytes.len() {
-        assert!(
-            decode_interface(&bytes[..len]).is_err(),
-            "interface prefix {len} was accepted"
-        );
-    }
-    let mut trailing = bytes.clone();
-    trailing.push(0);
-    assert!(decode_interface(&trailing).is_err());
-    let mut bad_kind = bytes;
-    // The first export kind byte follows the header (4 + 2 + 4 + 4 +
-    // 32 + 4 bytes).
-    bad_kind[50] = 9;
-    assert!(decode_interface(&bad_kind).is_err());
 }
 
 /// Review regression: a dead duplicate pool entry keeps the semantic

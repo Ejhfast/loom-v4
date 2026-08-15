@@ -185,8 +185,19 @@ fn build_artifact(path: &str) -> Result<ExitCode, String> {
         ));
     }
     let source = read_source(path)?;
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("error: `{path}` has no file name\n"))?;
     let ast = lm_source::parse::parse(&source.text).map_err(|d| d.render(&source))?;
-    let hir = lm_hir::check_module(&ast).map_err(|d| d.render(&source))?;
+    let hir = lm_hir::check_module_with(
+        &ast,
+        lm_hir::CheckOptions {
+            module_path: stem.to_string(),
+            ..lm_hir::CheckOptions::default()
+        },
+    )
+    .map_err(|d| d.render(&source))?;
     let module = lm_hir::lower_module(&hir);
     lm_verify::verify_module(&module)
         .map_err(|e| format!("error: the verifier rejected the module: {e}\n"))?;
@@ -194,31 +205,11 @@ fn build_artifact(path: &str) -> Result<ExitCode, String> {
         lm_bytecode::identity::module_identity(&module).map_err(|e| format!("error: {e}\n"))?;
     let container = lm_bytecode::encode(&module);
     let container_hash = lm_bytecode::identity::container_hash(&container);
-    // The exported top-level definitions, in declaration order.
-    use lm_bytecode::interface::ExportKind;
-    let mut exports: Vec<(ExportKind, String)> = Vec::new();
-    for class in &ast.classes {
-        exports.push((ExportKind::Class, class.name.clone()));
-    }
-    for enum_def in &ast.enums {
-        exports.push((ExportKind::Enum, enum_def.name.clone()));
-        for arm in &enum_def.arms {
-            exports.push((
-                ExportKind::EnumCase,
-                format!("{}.{}", enum_def.name, arm.name),
-            ));
-        }
-    }
-    for func in &ast.funcs {
-        exports.push((ExportKind::Function, func.name.clone()));
-    }
-    let interface = lm_bytecode::interface::build_interface(&module, &identity, &exports)
+    let items: Vec<lm_bytecode::interface::IfaceItem> =
+        hir.exports.iter().map(|e| e.item.clone()).collect();
+    let interface = lm_bytecode::interface::build_interface(&module, &identity, stem, &items)
         .map_err(|e| format!("error: {e}\n"))?;
     let interface_bytes = lm_bytecode::interface::encode_interface(&interface);
-    let stem = Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("error: `{path}` has no file name\n"))?;
     let dir = Path::new("build").join("debug");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("error: cannot create `{}`: {e}\n", dir.display()))?;

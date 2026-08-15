@@ -7,7 +7,14 @@ use lm_vm::VmConfig;
 
 fn compile_with_prelude(text: &str, prelude: bool) -> Vec<u8> {
     let ast = lm_source::parse::parse(text).expect("parses");
-    let hir = check_module_with(&ast, CheckOptions { prelude }).expect("checks");
+    let hir = check_module_with(
+        &ast,
+        CheckOptions {
+            prelude,
+            ..CheckOptions::default()
+        },
+    )
+    .expect("checks");
     lm_bytecode::encode(&lower_module(&hir))
 }
 
@@ -181,9 +188,15 @@ fn get_returns_core_option_without_the_prelude() {
 #[test]
 fn prelude_controls_only_unqualified_names() {
     let ast = lm_source::parse::parse("x: Option[Int] = None\nx\n").expect("parses");
-    let err = check_module_with(&ast, CheckOptions { prelude: false })
-        .err()
-        .expect("the name `Option` must be unknown without the prelude");
+    let err = check_module_with(
+        &ast,
+        CheckOptions {
+            prelude: false,
+            ..CheckOptions::default()
+        },
+    )
+    .err()
+    .expect("the name `Option` must be unknown without the prelude");
     assert_eq!(err.code, "E1013");
 }
 

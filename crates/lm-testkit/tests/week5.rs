@@ -174,10 +174,12 @@ fn use_binding_of_a_group_is_not_a_value_or_callable() {
 
 #[test]
 fn use_rejects_non_fixed_paths() {
-    // A module import is week 6; the diagnostic says so.
+    // A single file carries no compile environment, so a module
+    // import has no root to resolve against. Week 6 changed the
+    // wording: the fix is a package, not a later week.
     let rendered = compile_text("t.lm", "use mathlib.matrix\n1\n").unwrap_err();
     assert!(rendered.starts_with("error[E1052]"), "{rendered}");
-    assert!(rendered.contains("packages"), "{rendered}");
+    assert!(rendered.contains("package"), "{rendered}");
     // `use sys` alone binds nothing.
     assert_eq!(code_of("use sys\n1\n"), "E1052");
     // Unknown group and unknown member.
