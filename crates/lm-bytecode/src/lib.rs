@@ -25,6 +25,13 @@ pub const NO_PARENT: u32 = u32::MAX;
 /// value, so a user class never takes a core key.
 pub const CORE_MODULE: &str = "core";
 
+/// The sentinel for an unfilled core role slot.
+pub const NO_ROLE: u32 = u32::MAX;
+
+/// The number of stable core role slots. The order is
+/// `corepin::PINNED_LABELS`.
+pub const CORE_ROLE_COUNT: usize = 20;
+
 /// Join a module path and a declaration name into one qualified key.
 ///
 /// The key is the nominal identity of a class (specification 8.6). An
@@ -506,6 +513,12 @@ pub struct Module {
     /// The import slots, in declaration order. An empty table marks a
     /// linked module, which is the only kind the loader admits.
     pub imports: Vec<Import>,
+    /// The stable core role slots: one class index per role, or
+    /// `NO_ROLE`. The compiler fills the table, the linker relocates
+    /// it, and the verifier proves the shape of every filled slot.
+    /// The verifier and the VM then read slots, never a source name
+    /// and never a definition hash.
+    pub core_roles: [u32; CORE_ROLE_COUNT],
     pub classes: Vec<BcClass>,
     pub funcs: Vec<Func>,
     /// Index of the entry function.
@@ -741,6 +754,10 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
         out.push(import.kind.tag());
         write_u32(&mut out, import.def);
         out.extend_from_slice(&import.hash);
+    }
+    // The core role table: one class index per stable role.
+    for slot in &module.core_roles {
+        write_u32(&mut out, *slot);
     }
     write_u32(&mut out, module.classes.len() as u32);
     for class in &module.classes {
@@ -1138,6 +1155,9 @@ pub enum DecodeError {
     BadImport,
     /// A `mut` marker vector does not hold one marker per parameter.
     MutMarkerCount,
+    /// A core role slot names a class outside the table, or two roles
+    /// name one class.
+    BadCoreRole,
 }
 
 impl fmt::Display for DecodeError {
@@ -1165,6 +1185,7 @@ impl fmt::Display for DecodeError {
             DecodeError::MutMarkerCount => {
                 write!(f, "a mut marker vector does not match its parameter count")
             }
+            DecodeError::BadCoreRole => write!(f, "a core role slot is out of range"),
         }
     }
 }
@@ -1404,6 +1425,10 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             hash,
         });
     }
+    let mut core_roles = [NO_ROLE; CORE_ROLE_COUNT];
+    for slot in &mut core_roles {
+        *slot = cur.u32()?;
+    }
     let class_count = cur.len()?;
     let mut classes = Vec::with_capacity(class_count);
     for _ in 0..class_count {
@@ -1518,12 +1543,26 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         }
         claimed[idx] = true;
     }
+    // Every filled core role slot names a class of this module, and no
+    // two roles name one class. The verifier proves the shape; the
+    // decoder proves the index.
+    let mut taken: Vec<u32> = Vec::new();
+    for slot in &core_roles {
+        if *slot == NO_ROLE {
+            continue;
+        }
+        if *slot as usize >= classes.len() || taken.contains(slot) {
+            return Err(DecodeError::BadCoreRole);
+        }
+        taken.push(*slot);
+    }
     Ok(Module {
         strings,
         types,
         selectors,
         apps,
         imports,
+        core_roles,
         classes,
         funcs,
         entry,
@@ -1789,6 +1828,7 @@ mod tests {
                 },
             ],
             imports: vec![],
+            core_roles: [NO_ROLE; CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         }
@@ -1931,6 +1971,7 @@ mod tests {
             classes: vec![],
             funcs: vec![],
             imports: vec![],
+            core_roles: [NO_ROLE; CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         };

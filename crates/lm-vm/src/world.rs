@@ -1511,6 +1511,7 @@ mod tests {
                 blocks: vec![vec![Instr::ConstInt(1), Instr::Return]],
             }],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         })

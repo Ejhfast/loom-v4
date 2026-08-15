@@ -200,7 +200,6 @@ fn build_and_link_smoke() {
     }
     let loads = start.elapsed();
     assert_eq!(cache.verifications, 1);
-    assert_eq!(cache.identities, 1, "a cache hit recomputed the identity");
     eprintln!(
         "bench-smoke build_2_modules: {compiled:?} link: {linked_time:?} \
          20_cached_loads: {loads:?} bytes: {}",

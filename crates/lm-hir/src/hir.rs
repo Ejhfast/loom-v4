@@ -68,6 +68,9 @@ pub struct HirModule {
     pub entry: usize,
     /// Pinned core definition indices.
     pub core: CoreIds,
+    /// The stable core role slots: one class index per role, in
+    /// `lm_bytecode::corepin::PINNED_LABELS` order.
+    pub core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
     /// The exported top-level definitions, in declaration order.
     pub exports: Vec<HirExport>,
     /// The import slots, in slot order.

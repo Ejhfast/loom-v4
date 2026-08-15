@@ -42,7 +42,6 @@
 //! cache answers "did the verifier admit these exact bytes before?".
 //! Neither key stands in for the other.
 
-use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::hash::sha256;
 use lm_bytecode::interface::Interface;
 use std::path::{Path, PathBuf};
@@ -299,10 +298,6 @@ impl BuildDir {
 
 const VERDICT_MAGIC: &[u8; 16] = b"lm-verdict-v1\0\0\0";
 const VERDICT_VERSION: u32 = 1;
-/// The number of `CoreLayout` slots. The encoder writes one presence
-/// byte and one `u32` for each.
-const CORE_SLOTS: usize = 20;
-
 /// The key of one verified-code record: the verification hash, the
 /// compiler ABI version, and the verifier version.
 ///
@@ -312,123 +307,35 @@ const CORE_SLOTS: usize = 20;
 /// from the decoded module, never from a stored value.
 pub type VerdictKey = ([u8; 32], u32, u32);
 
-/// The facts one record replays: the definition hashes and the
-/// resolved core layout. The fields match `lm_vm::VerifiedRecord`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Verdict {
-    pub class_hashes: Vec<[u8; 32]>,
-    pub func_hashes: Vec<[u8; 32]>,
-    pub core: CoreLayout,
-}
-
-/// The 20 core layout slots in a fixed order.
+/// One stored admission verdict. It carries no fact.
 ///
-/// The destructuring is exhaustive, so a new slot in `CoreLayout`
-/// breaks this build instead of writing a short record.
-fn core_slots(core: &CoreLayout) -> [Option<u32>; CORE_SLOTS] {
-    let CoreLayout {
-        option_some,
-        option_none,
-        result_ok,
-        result_err,
-        io_error_failed,
-        run_done,
-        run_fault,
-        step_ran,
-        step_waiting,
-        step_done,
-        step_fault,
-        drive_asked,
-        drive_done,
-        drive_fault,
-        option,
-        result,
-        io_error,
-        run_result,
-        step_event,
-        drive_event,
-    } = *core;
-    [
-        option_some,
-        option_none,
-        result_ok,
-        result_err,
-        io_error_failed,
-        run_done,
-        run_fault,
-        step_ran,
-        step_waiting,
-        step_done,
-        step_fault,
-        drive_asked,
-        drive_done,
-        drive_fault,
-        option,
-        result,
-        io_error,
-        run_result,
-        step_event,
-        drive_event,
-    ]
-}
-
-/// Rebuild a layout from the 20 slots, in the order `core_slots`
-/// writes them.
-fn core_from_slots(slots: [Option<u32>; CORE_SLOTS]) -> CoreLayout {
-    CoreLayout {
-        option_some: slots[0],
-        option_none: slots[1],
-        result_ok: slots[2],
-        result_err: slots[3],
-        io_error_failed: slots[4],
-        run_done: slots[5],
-        run_fault: slots[6],
-        step_ran: slots[7],
-        step_waiting: slots[8],
-        step_done: slots[9],
-        step_fault: slots[10],
-        drive_asked: slots[11],
-        drive_done: slots[12],
-        drive_fault: slots[13],
-        option: slots[14],
-        result: slots[15],
-        io_error: slots[16],
-        run_result: slots[17],
-        step_event: slots[18],
-        drive_event: slots[19],
-    }
-}
+/// The artifact declares its own core role table, and the verifier
+/// proves the shape of every filled slot before the verdict exists.
+/// A verdict therefore records only that the verifier admitted the
+/// key, and a damaged entry can never supply a wrong resolved value.
+/// The type matches `lm_vm::VerifiedRecord`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Verdict;
 
 /// Encode one verdict record.
 ///
-/// The format is a magic, a version, the full key, the two hash
-/// vectors with their counts, and the 20 core slots.
-pub fn encode_verdict(key: &VerdictKey, verdict: &Verdict) -> Vec<u8> {
+/// The format is a magic, a version, and the full key. The verdict
+/// itself carries no field: it records that the verifier admitted the
+/// key.
+pub fn encode_verdict(key: &VerdictKey, _verdict: &Verdict) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(VERDICT_MAGIC);
     bytes.extend_from_slice(&VERDICT_VERSION.to_le_bytes());
     bytes.extend_from_slice(&key.0);
     bytes.extend_from_slice(&key.1.to_le_bytes());
     bytes.extend_from_slice(&key.2.to_le_bytes());
-    bytes.extend_from_slice(&(verdict.class_hashes.len() as u32).to_le_bytes());
-    for hash in &verdict.class_hashes {
-        bytes.extend_from_slice(hash);
-    }
-    bytes.extend_from_slice(&(verdict.func_hashes.len() as u32).to_le_bytes());
-    for hash in &verdict.func_hashes {
-        bytes.extend_from_slice(hash);
-    }
-    for slot in core_slots(&verdict.core) {
-        bytes.push(u8::from(slot.is_some()));
-        bytes.extend_from_slice(&slot.unwrap_or(0).to_le_bytes());
-    }
     bytes
 }
 
 /// Decode one verdict record. `None` marks a damaged file.
 ///
-/// Every count is checked against the remaining input before the
-/// decoder allocates, so a crafted count field allocates nothing.
+/// The reader checks every field against the remaining input before it
+/// reads, so a short or crafted file allocates nothing.
 pub fn decode_verdict(bytes: &[u8]) -> Option<(VerdictKey, Verdict)> {
     let mut input = Reader::new(bytes);
     if input.take(VERDICT_MAGIC.len())? != VERDICT_MAGIC {
@@ -438,29 +345,10 @@ pub fn decode_verdict(bytes: &[u8]) -> Option<(VerdictKey, Verdict)> {
         return None;
     }
     let key: VerdictKey = (input.hash()?, input.u32()?, input.u32()?);
-    let class_hashes = input.hashes()?;
-    let func_hashes = input.hashes()?;
-    let mut slots = [None; CORE_SLOTS];
-    for slot in slots.iter_mut() {
-        let present = input.u8()?;
-        let index = input.u32()?;
-        *slot = match present {
-            0 => None,
-            1 => Some(index),
-            _ => return None,
-        };
-    }
     if !input.at_end() {
         return None;
     }
-    Some((
-        key,
-        Verdict {
-            class_hashes,
-            func_hashes,
-            core: core_from_slots(slots),
-        },
-    ))
+    Some((key, Verdict))
 }
 
 /// The persistent verified-code store.
@@ -476,13 +364,39 @@ pub fn decode_verdict(bytes: &[u8]) -> Option<(VerdictKey, Verdict)> {
 /// content. It rejects a record under any other key. A damaged or
 /// wrongly filed record is a miss.
 ///
-/// A record with the right key and wrong facts is a hand-written
-/// file. Such a record replaces a verifier run. The store therefore
-/// needs the same trust as the rest of the build directory. Keep the
-/// store in a directory the user controls.
+/// A verdict carries no fact, so a damaged or forged entry supplies
+/// no resolved value: the core layout comes from the artifact, and the
+/// verifier proves it. A hand-written entry under the right key still
+/// asserts an admission the verifier never gave, so the store needs
+/// the same trust as the rest of the build directory. Keep the store
+/// in a directory the user controls, never beside a foreign artifact.
 #[derive(Debug, Clone)]
 pub struct VerifiedStore {
     root: PathBuf,
+}
+
+/// The user cache directory of this tool.
+///
+/// The value follows `LM_CACHE_DIR`, then `XDG_CACHE_HOME/lm`, then
+/// `HOME/.cache/lm`. With none of the three set, the store falls back
+/// to `.lm-cache` in the current directory.
+pub fn user_cache_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("LM_CACHE_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir).join("lm");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".cache").join("lm");
+        }
+    }
+    PathBuf::from(".lm-cache")
 }
 
 impl VerifiedStore {
@@ -498,18 +412,18 @@ impl VerifiedStore {
     /// Stage 3 must stay reachable for an artifact with no source,
     /// for example `lm run third-party.lma`. The rule walks up from
     /// the artifact directory: a package above the artifact gives
-    /// `<package>/build`, and no package gives `<artifact
-    /// directory>/build`. The directory is created on the first
-    /// write, never on a read.
+    /// `<package>/build`, and no package gives the user cache
+    /// directory. The directory is created on the first write, never
+    /// on a read.
     pub fn for_artifact(artifact: &Path) -> VerifiedStore {
-        let here = artifact
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
         let root = match crate::graph::find_package_dir(artifact) {
             Ok(package) => package.join("build"),
-            Err(_) => here.join("build"),
+            // An artifact with no package around it, for example a
+            // foreign `.lma`, keeps its store in the user cache. A
+            // directory beside the artifact would let the supplier of
+            // the artifact write the verdict of the artifact, and a
+            // verdict replaces a verifier run.
+            Err(_) => user_cache_dir(),
         };
         VerifiedStore::new(&root)
     }
@@ -569,15 +483,11 @@ pub fn load_through_store<T, E>(
     verify: impl FnOnce(lm_bytecode::Module) -> Result<(T, Verdict), E>,
 ) -> Result<T, E> {
     if let Some(verdict) = store.read(key) {
-        // A stored verdict must fit the module tables before it
-        // replaces the verifier, and an unlinked module never runs.
-        // `lm_vm::load_with_record` owns both decisions and repeats
-        // both checks. The test here only chooses the path, so a
-        // stale entry stays a miss and never becomes a failure.
-        if verdict.class_hashes.len() == module.classes.len()
-            && verdict.func_hashes.len() == module.funcs.len()
-            && module.imports.is_empty()
-        {
+        // An unlinked module never runs. `lm_vm::load_with_record`
+        // owns that decision and repeats the check. The test here only
+        // chooses the path, so a stale entry stays a miss and never
+        // becomes a failure.
+        if module.imports.is_empty() {
             return from_record(module, &verdict);
         }
     }
@@ -619,10 +529,6 @@ impl<'a> Reader<'a> {
         Some(out)
     }
 
-    fn u8(&mut self) -> Option<u8> {
-        Some(self.take(1)?[0])
-    }
-
     fn u32(&mut self) -> Option<u32> {
         let bytes: [u8; 4] = self.take(4)?.try_into().ok()?;
         Some(u32::from_le_bytes(bytes))
@@ -637,21 +543,6 @@ impl<'a> Reader<'a> {
     fn bytes(&mut self) -> Option<Vec<u8>> {
         let count = self.u32()? as usize;
         Some(self.take(count)?.to_vec())
-    }
-
-    /// A `u32` count and that many 32-byte hashes. The count is
-    /// checked against the remaining input before the vector grows.
-    fn hashes(&mut self) -> Option<Vec<[u8; 32]>> {
-        let count = self.u32()? as usize;
-        let span = count.checked_mul(32)?;
-        if span > self.remaining() {
-            return None;
-        }
-        let mut out = Vec::with_capacity(count);
-        for _ in 0..count {
-            out.push(self.hash()?);
-        }
-        Some(out)
     }
 }
 

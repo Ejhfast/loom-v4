@@ -331,6 +331,7 @@ fn regenerate_fuzz_corpus() {
                 ]],
             }],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         },
@@ -378,6 +379,7 @@ fn regenerate_fuzz_corpus() {
                 ]],
             }],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         },
@@ -427,6 +429,7 @@ fn regenerate_fuzz_corpus() {
                 blocks: vec![vec![Instr::ConstInt(1), Instr::Return]],
             }],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         };
@@ -434,13 +437,14 @@ fn regenerate_fuzz_corpus() {
         // The semantic region starts after the 30-byte header. Its
         // layout for this module: the string count (4), the type
         // count plus four primitive tags (8), the selector count (4),
-        // the application count (4), the class count (4), the
-        // function count (4), then the function record: type_params,
-        // effect_params, the parameter count, the result type, the
-        // row count, and the capture count (24). The local-type table
+        // the application count (4), the import count (4), the core
+        // role table (80), the class count (4), the function count
+        // (4), then the function record: type_params, effect_params,
+        // the parameter count, the marker count, the result type, the
+        // row count, and the capture count (28). The local-type table
         // count follows.
         let sem_at = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
-        let count_at = sem_at + 4 + 8 + 4 + 4 + 4 + 4 + 24;
+        let count_at = sem_at + 4 + 8 + 4 + 4 + 4 + 80 + 4 + 4 + 28;
         assert_eq!(
             u32::from_le_bytes(bytes[count_at..count_at + 4].try_into().unwrap()),
             0,

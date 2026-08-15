@@ -1,24 +1,23 @@
-//! Identity linking for the pinned core definitions.
+//! The stable core role slots.
 //!
-//! Core definitions receive a qualified key and a structural hash like
-//! every other definition. The file `core/pinned-core-defs.txt` pins
-//! the structural hashes of the core classes the verifier and the VM
-//! need. At load, the module identity is computed, and every class
-//! that matches a pinned `(qualified key, structural hash)` pair fills
-//! its layout slot.
+//! The VM and the verifier need the core enum families: `Option`,
+//! `Result`, `IoError`, and the three virtual-machine event families.
+//! An artifact declares them in its core role table, one class index
+//! per role. The compiler fills the table, the linker relocates it,
+//! and the verifier proves the shape of every filled slot.
 //!
-//! The key is the pair, never the hash alone. A structural hash covers
-//! no name, so two arms of one enum family with equal shapes share one
-//! value: `StepEvent.Ran` and `StepEvent.Waiting` are the pinned
-//! example. The qualified key separates them. No position takes part
-//! in the resolution.
+//! Reading a slot therefore reads no name, no hash, and no position.
+//! An artifact with no source, for example a foreign `.lma`, carries
+//! its own table, so the resolution needs nothing outside the bytes.
 //!
-//! A module can hold two classes with one key and one hash. Such
-//! classes are the same definition, so the choice between them is
-//! arbitrary. The rule is fixed for determinism: the lowest class
-//! index wins. Nothing depends on the emission order of the compiler.
+//! The file `core/pinned-core-defs.txt` pins the structural hash of
+//! every core class. It is a determinism gate now, not a resolution
+//! mechanism: a core edit that moves a hash must be deliberate. The
+//! pin key is the pair `(qualified key, structural hash)`, because a
+//! structural hash covers no name and two arms with equal shapes share
+//! one value. `StepEvent.Ran` and `StepEvent.Waiting` are the pinned
+//! example.
 
-use crate::identity::ModuleIdentity;
 use crate::Module;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -162,21 +161,43 @@ fn slot_of(layout: &CoreLayout, label: &str) -> Option<u32> {
     *slot_mut(&mut copy, label)
 }
 
-/// Resolve the core layout of one module through its pinned
-/// `(qualified key, structural hash)` pairs. The verifier and the VM
-/// share the one table built here. The lowest matching class index
-/// wins.
-pub fn core_layout(module: &Module, identity: &ModuleIdentity) -> CoreLayout {
-    debug_assert_eq!(identity.class_hashes.len(), module.classes.len());
-    let map = pinned_map();
+/// The core role index of one pinned label, or `None` when the label
+/// is unknown. The order is `PINNED_LABELS`.
+pub fn role_index(label: &str) -> Option<usize> {
+    PINNED_LABELS.iter().position(|l| *l == label)
+}
+
+/// Read the declared core layout of one module.
+///
+/// The artifact carries the table, the compiler filled it, and the
+/// verifier proves the shape of every filled slot. This function reads
+/// slots only: no name, no hash, and no position takes part.
+pub fn declared_layout(module: &Module) -> CoreLayout {
     let mut layout = CoreLayout::default();
-    for (idx, hash) in identity.class_hashes.iter().enumerate() {
-        let Some(label) = map.get(&(module.classes[idx].key.clone(), *hash)) else {
+    for (role, slot) in module.core_roles.iter().enumerate() {
+        if *slot == crate::NO_ROLE {
             continue;
-        };
-        if slot_of(&layout, label).is_none() {
-            set_slot(&mut layout, label, idx as u32);
         }
+        set_slot(&mut layout, PINNED_LABELS[role], *slot);
     }
     layout
+}
+
+/// The core role table that matches one layout, for a module builder.
+pub fn roles_of(layout: &CoreLayout) -> [u32; crate::CORE_ROLE_COUNT] {
+    let mut roles = [crate::NO_ROLE; crate::CORE_ROLE_COUNT];
+    for (role, label) in PINNED_LABELS.iter().enumerate() {
+        if let Some(idx) = slot_of(layout, label) {
+            roles[role] = idx;
+        }
+    }
+    roles
+}
+
+/// The pinned structural hash of one label, for the determinism gate.
+pub fn pinned_hash(label: &str) -> Option<[u8; 32]> {
+    pinned_map()
+        .iter()
+        .find(|((key, _), found)| *found == &label && *key == pinned_key(label))
+        .map(|((_, hash), _)| *hash)
 }

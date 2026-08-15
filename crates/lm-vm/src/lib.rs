@@ -173,7 +173,7 @@ impl DispatchRow {
 pub struct LoadedModule {
     module: Module,
     dispatch: Vec<DispatchRow>,
-    facts: VerifiedFacts,
+    core: lm_bytecode::corepin::CoreLayout,
 }
 
 impl LoadedModule {
@@ -185,30 +185,14 @@ impl LoadedModule {
         &self.dispatch
     }
 
-    /// The definition hash of one class.
-    pub fn class_hash(&self, class: u32) -> [u8; 32] {
-        self.facts.class_hashes[class as usize]
-    }
-
-    /// The definition hash of one function.
-    pub fn func_hash(&self, func: u32) -> [u8; 32] {
-        self.facts.func_hashes[func as usize]
-    }
-
-    /// The hash-resolved core layout, shared by the verifier and the
-    /// VM.
+    /// The core layout the artifact declares and the verifier proved.
     pub fn core_layout(&self) -> lm_bytecode::corepin::CoreLayout {
-        self.facts.core
+        self.core
     }
 
     /// The total dispatch-table cell count, for the memory gates.
     pub fn dispatch_cells(&self) -> usize {
         self.dispatch.iter().map(|row| row.table.len()).sum()
-    }
-
-    /// The facts an external store persists for this admission.
-    pub fn verified_record(&self) -> VerifiedRecord {
-        self.facts.clone()
     }
 }
 
@@ -228,22 +212,16 @@ pub fn verified_key(module: &Module) -> VerifiedKey {
     )
 }
 
-/// The facts a cache hit replays: the definition hashes and the
-/// resolved core layout.
+/// One admission verdict.
 ///
-/// The module semantic hash is deliberately absent. It covers the
-/// export table, which holds the definition names, and the cache key
-/// does not cover the function names. Call
-/// `lm_bytecode::identity::module_identity` when the semantic hash is
-/// needed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedRecord {
-    pub class_hashes: Vec<[u8; 32]>,
-    pub func_hashes: Vec<[u8; 32]>,
-    pub core: lm_bytecode::corepin::CoreLayout,
-}
-
-type VerifiedFacts = VerifiedRecord;
+/// The verdict carries no fact. The artifact declares its own core
+/// role table, and the verifier proves the shape of every filled slot,
+/// so a load reads the layout from the bytes and needs no side table.
+/// A store therefore records "the verifier admitted this key" and
+/// nothing else, and a damaged store entry can never supply a wrong
+/// resolved value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VerifiedRecord;
 
 /// The in-process verified-code cache.
 ///
@@ -252,19 +230,11 @@ type VerifiedFacts = VerifiedRecord;
 /// verifier input, with each module-global index preserved, so a hit
 /// skips every verifier pass. The loader always computes the key from
 /// the decoded content, so a stored or forged hash never enters it.
-///
-/// An entry also carries the module identity and the core layout. Both
-/// are pure functions of the key inputs: the verification hash covers
-/// the whole semantic region and the class names, and identity reads
-/// nothing else. Identity costs about as much as verification, so the
-/// stored facts roughly double the value of a hit.
 #[derive(Debug, Default)]
 pub struct VerifiedCache {
-    verified: std::collections::HashMap<VerifiedKey, VerifiedFacts>,
+    verified: std::collections::HashSet<VerifiedKey>,
     /// The number of full verifier runs, for the cache-skip tests.
     pub verifications: u64,
-    /// The number of identity computations, for the cache-skip tests.
-    pub identities: u64,
 }
 
 impl VerifiedCache {
@@ -272,16 +242,16 @@ impl VerifiedCache {
         VerifiedCache::default()
     }
 
-    /// The stored record of one key, or `None` on a miss.
-    pub fn record(&self, key: &VerifiedKey) -> Option<&VerifiedRecord> {
-        self.verified.get(key)
+    /// True when the cache holds an admission under this key.
+    pub fn holds(&self, key: &VerifiedKey) -> bool {
+        self.verified.contains(key)
     }
 
-    /// Place one record under its key. A caller that reads a record
-    /// from a store must place it here through `load_with_record`,
-    /// which proves the record belongs to the module.
-    pub fn insert(&mut self, key: VerifiedKey, record: VerifiedRecord) {
-        self.verified.insert(key, record);
+    /// Record one admission. A caller that reads a verdict from a
+    /// store must admit the module through `load_with_record`, which
+    /// proves the verdict belongs to the module.
+    pub fn insert(&mut self, key: VerifiedKey, _record: VerifiedRecord) {
+        self.verified.insert(key);
     }
 
     /// The number of stored admissions.
@@ -323,21 +293,7 @@ fn load_inner(
             ),
         });
     }
-    // The identity is computed from the decoded content, never read
-    // from the input. An unhashable module is a rejection.
-    let compute = |module: &Module| -> Result<VerifiedFacts, VerifyError> {
-        let identity = lm_bytecode::identity::module_identity(module).map_err(|e| VerifyError {
-            func: u32::MAX,
-            message: e.to_string(),
-        })?;
-        let core = lm_bytecode::corepin::core_layout(module, &identity);
-        Ok(VerifiedFacts {
-            class_hashes: identity.class_hashes,
-            func_hashes: identity.func_hashes,
-            core,
-        })
-    };
-    let facts = match cache {
+    match cache {
         Some(cache) => {
             // The key is the verification hash, never the semantic
             // hash. The semantic hash answers "same program meaning?"
@@ -345,47 +301,37 @@ fn load_inner(
             // two modules that differ only in an index share it. The
             // verifier reads those indices, so such a key can certify
             // a module the verifier rejects. The verification hash
-            // keeps every index, covers the operation manifest, and
-            // covers the class names.
+            // keeps every index and covers the operation manifest.
             //
             // The key therefore fixes every verifier input, so a hit
-            // skips every pass, not only the function dataflow. The
-            // identity, the core layout, and the dispatch rows below
-            // are pure functions of the same inputs. A hit replays
-            // them instead of recomputing them.
+            // skips every pass, not only the function dataflow.
             let key = verified_key(&module);
-            match cache.verified.get(&key) {
-                Some(facts) => facts.clone(),
-                None => {
-                    let facts = compute(&module)?;
-                    cache.identities += 1;
-                    lm_verify::verify_with_layout(&module, facts.core)?;
-                    cache.verifications += 1;
-                    cache.verified.insert(key, facts.clone());
-                    facts
-                }
+            if !cache.verified.contains(&key) {
+                lm_verify::verify_module(&module)?;
+                cache.verifications += 1;
+                cache.verified.insert(key);
             }
         }
-        None => {
-            let facts = compute(&module)?;
-            lm_verify::verify_with_layout(&module, facts.core)?;
-            facts
-        }
-    };
-    Ok(admit(module, facts))
+        None => lm_verify::verify_module(&module)?,
+    }
+    Ok(admit(module))
 }
 
-/// Admit a decoded module through a record an external store kept.
+/// Admit a decoded module through a verdict an external store kept.
 ///
-/// The record replaces the verifier pass and the identity pass, so the
-/// caller must prove the record belongs to this module. The proof is
-/// the key: this function recomputes it from the decoded content and
-/// rejects a record filed under any other key. A store that returns a
-/// wrong or damaged record therefore cannot admit a module.
+/// The verdict replaces the verifier pass, so the caller must prove it
+/// belongs to this module. The proof is the key: this function
+/// recomputes it from the decoded content and rejects a verdict filed
+/// under any other key. A store that returns a wrong or damaged
+/// verdict therefore cannot admit a module.
+///
+/// The verdict carries no resolved value, so a store cannot supply
+/// one. The core layout comes from the artifact, and the verifier
+/// proved it before the verdict existed.
 pub fn load_with_record(
     module: Module,
     key: &VerifiedKey,
-    record: &VerifiedRecord,
+    _record: &VerifiedRecord,
 ) -> Result<LoadedModule, VerifyError> {
     let reject = |message: &str| VerifyError {
         func: u32::MAX,
@@ -397,18 +343,12 @@ pub fn load_with_record(
     if verified_key(&module) != *key {
         return Err(reject("the stored verdict does not belong to this module"));
     }
-    if record.class_hashes.len() != module.classes.len()
-        || record.func_hashes.len() != module.funcs.len()
-    {
-        return Err(reject(
-            "the stored verdict does not match the module tables",
-        ));
-    }
-    Ok(admit(module, record.clone()))
+    Ok(admit(module))
 }
 
 /// Build the sealed dispatch tables of an admitted module.
-fn admit(module: Module, facts: VerifiedFacts) -> LoadedModule {
+fn admit(module: Module) -> LoadedModule {
+    let core = lm_bytecode::corepin::declared_layout(&module);
     // Build the sealed per-class selector tables. A child inherits
     // the resolved parent methods; own methods override entries.
     // Parents precede children in the verified class table. Each row
@@ -444,7 +384,7 @@ fn admit(module: Module, facts: VerifiedFacts) -> LoadedModule {
     LoadedModule {
         module,
         dispatch,
-        facts,
+        core,
     }
 }
 
@@ -529,6 +469,7 @@ mod tests {
                 blocks,
             }],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         })
@@ -607,6 +548,7 @@ mod tests {
                 blocks: vec![vec![Jump(9)]],
             }],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         };
@@ -650,6 +592,7 @@ mod tests {
                 blocks: vec![vec![New(0), LoadField(0), Return]],
             }],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         };

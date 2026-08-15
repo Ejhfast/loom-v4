@@ -14,6 +14,7 @@ fn importing_module(pin: [u8; 32]) -> Module {
         types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
         selectors: vec![],
         apps: vec![],
+        core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
         imports: vec![Import {
             module: "dep.math".to_string(),
             name: "add".to_string(),

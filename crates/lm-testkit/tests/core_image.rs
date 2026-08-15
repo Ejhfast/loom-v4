@@ -98,8 +98,7 @@ fn core_definition_hashes_match_the_pin() {
 fn core_layout_resolves_by_hash_in_a_user_module() {
     let bytes = compile_with_prelude("x = 1\nx\n", true);
     let module = lm_bytecode::decode(&bytes).expect("decodes");
-    let identity = lm_bytecode::identity::module_identity(&module).expect("hashes");
-    let layout = lm_bytecode::corepin::core_layout(&module, &identity);
+    let layout = lm_bytecode::corepin::declared_layout(&module);
     for (slot, name) in [
         (layout.option, "Option"),
         (layout.option_some, "Option.Some"),
@@ -124,8 +123,7 @@ fn a_renamed_shape_cannot_spoof_the_core_layout() {
     let program = "enum Option\n  Empty\n  Full(v: Int)\nend\nx: Option = Full(3)\n1\n";
     let bytes = compile_with_prelude(program, true);
     let module = lm_bytecode::decode(&bytes).expect("decodes");
-    let identity = lm_bytecode::identity::module_identity(&module).expect("hashes");
-    let layout = lm_bytecode::corepin::core_layout(&module, &identity);
+    let layout = lm_bytecode::corepin::declared_layout(&module);
     let option = layout.option.expect("the embedded core Option resolves");
     // The resolved class is the embedded core family, not the user
     // enum: it has the pinned two arms and one type parameter.

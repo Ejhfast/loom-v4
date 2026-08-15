@@ -267,24 +267,6 @@ fn load_program(path: &str) -> Result<lm_vm::LoadedModule, String> {
     }
 }
 
-/// The two record shapes. `lm-compiler` must not depend on `lm-vm`,
-/// so the store keeps plain values and this tool converts.
-fn to_record(verdict: &lm_compiler::Verdict) -> lm_vm::VerifiedRecord {
-    lm_vm::VerifiedRecord {
-        class_hashes: verdict.class_hashes.clone(),
-        func_hashes: verdict.func_hashes.clone(),
-        core: verdict.core,
-    }
-}
-
-fn to_verdict(record: &lm_vm::VerifiedRecord) -> lm_compiler::Verdict {
-    lm_compiler::Verdict {
-        class_hashes: record.class_hashes.clone(),
-        func_hashes: record.func_hashes.clone(),
-        core: record.core,
-    }
-}
-
 /// Admit one decoded artifact through the persistent verified-code
 /// store.
 ///
@@ -302,11 +284,10 @@ fn load_stored(
         &store,
         &key,
         module,
-        |module, verdict| lm_vm::load_with_record(module, &key, &to_record(verdict)),
+        |module, _verdict| lm_vm::load_with_record(module, &key, &lm_vm::VerifiedRecord),
         |module| {
             let loaded = lm_vm::load(module)?;
-            let verdict = to_verdict(&loaded.verified_record());
-            Ok((loaded, verdict))
+            Ok((loaded, lm_compiler::Verdict))
         },
     )
 }

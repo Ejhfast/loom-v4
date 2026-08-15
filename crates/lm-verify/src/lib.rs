@@ -456,26 +456,17 @@ impl<'m> Ctx<'m> {
 /// The verifier version. It takes part in the verified-code cache
 /// key: a rule change invalidates every cached admission.
 ///
-/// Version 2 adds the import-slot rules and the core-family
-/// completeness rule.
-pub const VERIFIER_VERSION: u32 = 2;
+/// Version 3 replaces the hash-linked core layout with the declared
+/// core role slots and proves the shape of every filled slot.
+pub const VERIFIER_VERSION: u32 = 3;
 
 /// Verify a full module. Every table and every function must pass.
-/// This computes the module identity for the hash-linked core layout;
-/// a loader with a computed identity uses `verify_with_layout`.
+///
+/// The core layout comes from the core role table the artifact
+/// carries. The verifier proves the shape of every filled slot, so it
+/// reads no definition hash and no source name.
 pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
-    let identity = lm_bytecode::identity::module_identity(module).map_err(|e| VerifyError {
-        func: u32::MAX,
-        message: e.to_string(),
-    })?;
-    let core = lm_bytecode::corepin::core_layout(module, &identity);
-    verify_with_layout(module, core)
-}
-
-/// Verify a full module against a core layout the loader resolved
-/// through the pinned definition hashes.
-pub fn verify_with_layout(module: &Module, core: CoreLayout) -> Result<(), VerifyError> {
-    let ctx = verify_structure(module, core)?;
+    let ctx = verify_structure(module)?;
     let imported = module.extern_funcs();
     for (idx, func) in module.funcs.iter().enumerate() {
         // An imported function has no body to check. The structural
@@ -492,11 +483,12 @@ pub fn verify_with_layout(module: &Module, core: CoreLayout) -> Result<(), Verif
 /// dataflow: the tables and the entry shape. The verified-code cache
 /// may skip only the dataflow, never this pass, so a hash-equal
 /// byte stream with a non-canonical table is rejected on every load.
-pub fn verify_structure_with_layout(module: &Module, core: CoreLayout) -> Result<(), VerifyError> {
-    verify_structure(module, core).map(|_| ())
+pub fn verify_structure_only(module: &Module) -> Result<(), VerifyError> {
+    verify_structure(module).map(|_| ())
 }
 
-fn verify_structure(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyError> {
+fn verify_structure(module: &Module) -> Result<Ctx<'_>, VerifyError> {
+    let core = lm_bytecode::corepin::declared_layout(module);
     let ctx = verify_tables(module, core)?;
     let entry = module.entry as usize;
     if entry >= module.funcs.len() {
@@ -528,6 +520,206 @@ fn verify_structure(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, Verify
     Ok(ctx)
 }
 
+// ----------------------------------------------------------------
+// The core role slots.
+// ----------------------------------------------------------------
+
+/// The core role indices. The order is `corepin::PINNED_LABELS`, and
+/// the test `the_role_indices_match_the_pinned_labels` proves it.
+const ROLE_OPTION: usize = 0;
+const ROLE_OPTION_SOME: usize = 1;
+const ROLE_OPTION_NONE: usize = 2;
+const ROLE_RESULT: usize = 3;
+const ROLE_RESULT_OK: usize = 4;
+const ROLE_RESULT_ERR: usize = 5;
+const ROLE_IO_ERROR: usize = 6;
+const ROLE_IO_ERROR_FAILED: usize = 7;
+const ROLE_RUN_RESULT: usize = 8;
+const ROLE_RUN_DONE: usize = 9;
+const ROLE_RUN_FAULT: usize = 10;
+const ROLE_STEP_EVENT: usize = 11;
+const ROLE_STEP_RAN: usize = 12;
+const ROLE_STEP_WAITING: usize = 13;
+const ROLE_STEP_DONE: usize = 14;
+const ROLE_STEP_FAULT: usize = 15;
+const ROLE_DRIVE_EVENT: usize = 16;
+const ROLE_DRIVE_ASKED: usize = 17;
+const ROLE_DRIVE_DONE: usize = 18;
+const ROLE_DRIVE_FAULT: usize = 19;
+
+/// The field shape one core arm must carry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldShape {
+    /// The type variable at this position of the family arity.
+    Var(u32),
+    Str,
+    Fault,
+    Request,
+}
+
+/// One core family: the parent role, the generic arity, and the arm
+/// roles in declaration order.
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 6] = [
+    (
+        ROLE_OPTION,
+        1,
+        &[ROLE_OPTION_SOME, ROLE_OPTION_NONE],
+        "Option",
+    ),
+    (ROLE_RESULT, 2, &[ROLE_RESULT_OK, ROLE_RESULT_ERR], "Result"),
+    (ROLE_IO_ERROR, 0, &[ROLE_IO_ERROR_FAILED], "IoError"),
+    (
+        ROLE_RUN_RESULT,
+        1,
+        &[ROLE_RUN_DONE, ROLE_RUN_FAULT],
+        "RunResult",
+    ),
+    (
+        ROLE_STEP_EVENT,
+        1,
+        &[
+            ROLE_STEP_RAN,
+            ROLE_STEP_WAITING,
+            ROLE_STEP_DONE,
+            ROLE_STEP_FAULT,
+        ],
+        "StepEvent",
+    ),
+    (
+        ROLE_DRIVE_EVENT,
+        1,
+        &[ROLE_DRIVE_ASKED, ROLE_DRIVE_DONE, ROLE_DRIVE_FAULT],
+        "DriveEvent",
+    ),
+];
+
+/// The field layout every core arm must carry, by role.
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 14] = [
+    (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
+    (ROLE_OPTION_NONE, &[]),
+    (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
+    (ROLE_RESULT_ERR, &[FieldShape::Var(1)]),
+    (ROLE_IO_ERROR_FAILED, &[FieldShape::Str]),
+    (ROLE_RUN_DONE, &[FieldShape::Var(0)]),
+    (ROLE_RUN_FAULT, &[FieldShape::Fault]),
+    (ROLE_STEP_RAN, &[]),
+    (ROLE_STEP_WAITING, &[]),
+    (ROLE_STEP_DONE, &[FieldShape::Var(0)]),
+    (ROLE_STEP_FAULT, &[FieldShape::Fault]),
+    (ROLE_DRIVE_ASKED, &[FieldShape::Request]),
+    (ROLE_DRIVE_DONE, &[FieldShape::Var(0)]),
+    (ROLE_DRIVE_FAULT, &[FieldShape::Fault]),
+];
+
+/// Prove the shape of every declared core role slot.
+///
+/// The artifact declares which class fills each role. The verifier
+/// never trusts that claim: it proves the kind, the generic arity, the
+/// parent slot, and the exact field layout of every filled slot. A
+/// crafted table therefore rejects instead of handing the runtime a
+/// class it cannot allocate through.
+///
+/// The rules read structure only. No name and no definition hash takes
+/// part, so a rename changes nothing the verifier reads.
+fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
+    let terr = |message: String| VerifyError {
+        func: u32::MAX,
+        message,
+    };
+    let slot = |role: usize| -> Option<u32> {
+        let idx = module.core_roles[role];
+        if idx == lm_bytecode::NO_ROLE {
+            None
+        } else {
+            Some(idx)
+        }
+    };
+    // A role slot names a class of this module, and no two roles name
+    // one class. The decoder proves the same rule; a hand-built module
+    // reaches the verifier without a decoder.
+    let mut taken: Vec<u32> = Vec::new();
+    for role in 0..lm_bytecode::CORE_ROLE_COUNT {
+        let Some(idx) = slot(role) else { continue };
+        if idx as usize >= module.classes.len() {
+            return Err(terr(format!(
+                "core role {role} names a class outside the table"
+            )));
+        }
+        if taken.contains(&idx) {
+            return Err(terr(format!(
+                "core role {role} names a class another role took"
+            )));
+        }
+        taken.push(idx);
+    }
+    for (family_role, arity, arm_roles, family) in CORE_FAMILIES {
+        let Some(parent) = slot(family_role) else {
+            // A family the artifact does not declare must declare no
+            // arm either. The runtime allocates through the arms.
+            for arm in arm_roles {
+                if slot(*arm).is_some() {
+                    return Err(terr(format!(
+                        "the core family `{family}` declares an arm without its parent"
+                    )));
+                }
+            }
+            continue;
+        };
+        let class = &module.classes[parent as usize];
+        if class.kind != BcClassKind::Abstract
+            || class.type_params != arity
+            || class.parent().is_some()
+            || !class.fields.is_empty()
+        {
+            return Err(terr(format!(
+                "the core family `{family}` names a class that is not its enum parent"
+            )));
+        }
+        for arm_role in arm_roles {
+            let Some(arm) = slot(*arm_role) else {
+                return Err(terr(format!(
+                    "the core family `{family}` resolves without every arm"
+                )));
+            };
+            let arm_class = &module.classes[arm as usize];
+            if arm_class.kind != BcClassKind::Case
+                || arm_class.type_params != arity
+                || arm_class.parent() != Some(parent)
+            {
+                return Err(terr(format!(
+                    "the core family `{family}` names an arm that is not its case class"
+                )));
+            }
+            let fields = CORE_ARM_FIELDS
+                .iter()
+                .find(|(role, _)| role == arm_role)
+                .map(|(_, fields)| *fields)
+                .expect("every arm role states its field layout");
+            if arm_class.fields.len() != fields.len() {
+                return Err(terr(format!(
+                    "the core family `{family}` names an arm with the wrong field count"
+                )));
+            }
+            for (position, want) in fields.iter().enumerate() {
+                let found = &module.types[arm_class.fields[position].1 as usize];
+                let ok = match want {
+                    FieldShape::Var(i) => found == &BcType::Var(*i),
+                    FieldShape::Str => found == &BcType::Str,
+                    FieldShape::Fault => found == &BcType::Fault,
+                    FieldShape::Request => found == &BcType::Request,
+                };
+                if !ok {
+                    return Err(terr(format!(
+                        "the core family `{family}` names an arm whose field {position} \
+                         has the wrong type"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate the type, selector, application, class, and function
 /// tables.
 fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyError> {
@@ -535,46 +727,6 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         func: u32::MAX,
         message,
     };
-    // A resolved core family must be complete. The verifier proves a
-    // parent slot where an instruction needs the family, and the
-    // runtime allocates through the arm slots. A crafted module with
-    // a parent and no arm would pass the verifier and reach an arm
-    // slot the layout does not hold.
-    for (parent, arms, family) in [
-        (
-            core.option,
-            vec![core.option_some, core.option_none],
-            "Option",
-        ),
-        (core.result, vec![core.result_ok, core.result_err], "Result"),
-        (core.io_error, vec![core.io_error_failed], "IoError"),
-        (
-            core.run_result,
-            vec![core.run_done, core.run_fault],
-            "RunResult",
-        ),
-        (
-            core.step_event,
-            vec![
-                core.step_ran,
-                core.step_waiting,
-                core.step_done,
-                core.step_fault,
-            ],
-            "StepEvent",
-        ),
-        (
-            core.drive_event,
-            vec![core.drive_asked, core.drive_done, core.drive_fault],
-            "DriveEvent",
-        ),
-    ] {
-        if parent.is_some() && arms.iter().any(|arm| arm.is_none()) {
-            return Err(terr(format!(
-                "the pinned core family `{family}` resolves without every arm"
-            )));
-        }
-    }
     // The selector table must hold no duplicate name. The canonical
     // identity encoding replaces a selector index with its name, so a
     // duplicate name lets two different dispatch keys hash alike. The
@@ -977,6 +1129,10 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             }
         }
     }
+    // Validate the declared core role slots. The class table is
+    // validated above, so every field type index is inside the type
+    // table by now.
+    verify_core_roles(module)?;
     // Validate function signatures and the declared local-type
     // tables. The verifier validates the table instead of trusting
     // it: entries must be valid types, the parameter prefix must
@@ -2207,6 +2363,7 @@ mod tests {
             classes: vec![],
             funcs: vec![plain_func("main", vec![], TY_INT, blocks)],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         }
@@ -2241,6 +2398,7 @@ mod tests {
                 ),
             ],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         }
@@ -2300,6 +2458,7 @@ mod tests {
                 },
             ],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         }
@@ -2936,6 +3095,7 @@ mod tests {
                 ],
             }],
             imports: vec![],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
         };

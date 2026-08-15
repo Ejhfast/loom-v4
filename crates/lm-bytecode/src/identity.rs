@@ -137,17 +137,19 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
 /// the row and signature rules read it, and it is not stored in the
 /// container.
 ///
-/// The class qualified keys are verifier inputs through the core
-/// layout, which the verifier reads. Identity computes that layout,
-/// and identity reads the key of every referenced class. A crafted
-/// key edit would otherwise drop a core slot with the key unchanged,
-/// and a cached load would admit what an uncached load rejects.
+/// The digest covers the semantic region and the operation manifest,
+/// and nothing else. That is the exact input set of the verifier:
 ///
-/// The definition names stay inside as well, because the core layout
-/// still cross-checks a class name against its pinned label.
+/// - the verifier reads the semantic region, with every module-global
+///   index preserved;
+/// - it reads the operation manifest, because the row and signature
+///   rules read it, and the container does not store it;
+/// - it reads the core role table, which lives inside the semantic
+///   region, and it proves the shape of every filled slot.
 ///
-/// The key therefore fixes every input of `module_identity`, so a
-/// cache entry may carry the resolved identity and core layout.
+/// No definition name and no qualified key enters the digest. Both
+/// live in the export section, and the verifier reads neither. A
+/// rename therefore costs no cache hit.
 ///
 /// The `mut` marker vectors carry their own count inside the semantic
 /// section since container version 8, so the digest needs no separate
@@ -157,15 +159,6 @@ pub fn verification_hash(module: &Module) -> [u8; 32] {
     bytes.extend_from_slice(TAG_VERIFICATION);
     bytes.extend_from_slice(&lm_abi::manifest_digest());
     bytes.extend_from_slice(&crate::semantic_section(module));
-    bytes.extend_from_slice(&(module.classes.len() as u32).to_le_bytes());
-    for class in &module.classes {
-        write_str(&mut bytes, &class.name);
-        write_str(&mut bytes, &class.key);
-    }
-    bytes.extend_from_slice(&(module.funcs.len() as u32).to_le_bytes());
-    for func in &module.funcs {
-        write_str(&mut bytes, &func.name);
-    }
     sha256(&bytes)
 }
 

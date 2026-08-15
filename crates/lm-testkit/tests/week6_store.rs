@@ -142,20 +142,12 @@ fn program_entries(tree: &TempTree) -> Vec<PathBuf> {
 // values and the caller converts. `lm` converts the same way.
 // ---------------------------------------------------------------
 
-fn to_record(verdict: &Verdict) -> lm_vm::VerifiedRecord {
-    lm_vm::VerifiedRecord {
-        class_hashes: verdict.class_hashes.clone(),
-        func_hashes: verdict.func_hashes.clone(),
-        core: verdict.core,
-    }
+fn to_record(_verdict: &Verdict) -> lm_vm::VerifiedRecord {
+    lm_vm::VerifiedRecord
 }
 
-fn to_verdict(record: &lm_vm::VerifiedRecord) -> Verdict {
-    Verdict {
-        class_hashes: record.class_hashes.clone(),
-        func_hashes: record.func_hashes.clone(),
-        core: record.core,
-    }
+fn to_verdict(_record: &lm_vm::VerifiedRecord) -> Verdict {
+    Verdict
 }
 
 /// The load path of `lm run` on an artifact, with the verifier run
@@ -167,12 +159,21 @@ fn to_verdict(record: &lm_vm::VerifiedRecord) -> Verdict {
 /// `lm_vm::load_cached` with an empty cache, which runs the same
 /// passes and counts them.
 fn load_artifact(path: &Path, verifications: &mut u64) -> Result<lm_vm::LoadedModule, String> {
+    load_artifact_in(&VerifiedStore::for_artifact(path), path, verifications)
+}
+
+/// The same path against an explicit store. A test that must not
+/// write into the user cache directory names its own store.
+fn load_artifact_in(
+    store: &VerifiedStore,
+    path: &Path,
+    verifications: &mut u64,
+) -> Result<lm_vm::LoadedModule, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read: {e}"))?;
     let module = lm_bytecode::decode(&bytes).map_err(|e| format!("cannot decode: {e}"))?;
-    let store = VerifiedStore::for_artifact(path);
     let key = lm_vm::verified_key(&module);
     load_through_store(
-        &store,
+        store,
         &key,
         module,
         |module, verdict| lm_vm::load_with_record(module, &key, &to_record(verdict)),
@@ -180,8 +181,7 @@ fn load_artifact(path: &Path, verifications: &mut u64) -> Result<lm_vm::LoadedMo
             let mut cache = lm_vm::VerifiedCache::new();
             let loaded = lm_vm::load_cached(module, &mut cache)?;
             *verifications += cache.verifications;
-            let verdict = to_verdict(&loaded.verified_record());
-            Ok((loaded, verdict))
+            Ok((loaded, to_verdict(&lm_vm::VerifiedRecord)))
         },
     )
     .map_err(|e| format!("the loader rejected the artifact: {e}"))
@@ -332,8 +332,11 @@ fn a_second_load_hits_the_verified_store() {
     let second = load_artifact(&program, &mut second_runs).expect("loads");
     assert_eq!(second_runs, 0, "the second load ran the verifier");
     assert_eq!(first_text, run_loaded(&second), "the results differ");
-    // A hit replays the facts, so both loads agree on them.
-    assert_eq!(first.verified_record(), second.verified_record());
+    // Both loads read the same declared core layout.
+    assert_eq!(
+        format!("{:?}", first.core_layout()),
+        format!("{:?}", second.core_layout())
+    );
 }
 
 /// The store of a package artifact sits in the package build
@@ -373,15 +376,28 @@ fn the_store_is_reachable_without_a_package() {
     std::fs::create_dir_all(loose.parent().unwrap()).expect("creates");
     std::fs::copy(&built, &loose).expect("copies");
 
-    let mut first_runs = 0;
-    load_artifact(&loose, &mut first_runs).expect("loads");
-    assert_eq!(first_runs, 1, "the first load skipped the verifier");
+    // The store of an artifact with no package sits in the user cache
+    // directory, never beside the artifact: the supplier of a foreign
+    // artifact must not write the verdict of that artifact.
+    let chosen = VerifiedStore::for_artifact(&loose);
     assert!(
-        tree.path("third-party/build/cache/verified").is_dir(),
-        "no store beside the artifact"
+        chosen.dir().starts_with(lm_compiler::user_cache_dir()),
+        "the store of a loose artifact left the user cache directory: {}",
+        chosen.dir().display()
     );
+    assert!(
+        !chosen.dir().starts_with(tree.path("third-party")),
+        "the store landed beside the artifact"
+    );
+    // The store still works. The test names its own directory so it
+    // writes nothing into the real user cache.
+    let store = VerifiedStore::new(&tree.path("cache"));
+    let mut first_runs = 0;
+    load_artifact_in(&store, &loose, &mut first_runs).expect("loads");
+    assert_eq!(first_runs, 1, "the first load skipped the verifier");
+    assert!(store.dir().is_dir(), "the store wrote no record");
     let mut second_runs = 0;
-    load_artifact(&loose, &mut second_runs).expect("loads");
+    load_artifact_in(&store, &loose, &mut second_runs).expect("loads");
     assert_eq!(second_runs, 0, "the second load ran the verifier");
 }
 
@@ -477,27 +493,18 @@ fn a_wrong_key_never_admits_the_module() {
     let other_key = lm_vm::verified_key(&other_module);
     assert_ne!(solo_key, other_key, "the two programs share a key");
 
-    // The right record under a wrong key is rejected: the key comes
-    // from the decoded module, never from the caller.
-    let other_loaded = lm_vm::load(other_module).expect("the other program loads");
-    let other_record = other_loaded.verified_record();
-    let solo_record = lm_vm::load(solo_module.clone())
-        .expect("the program loads")
-        .verified_record();
+    // A verdict under a wrong key is rejected: the key comes from the
+    // decoded module, never from the caller. The verdict itself
+    // carries no fact, so a wrong verdict can supply nothing.
+    lm_vm::load(other_module).expect("the other program loads");
+    lm_vm::load(solo_module.clone()).expect("the program loads");
     assert!(
-        lm_vm::load_with_record(solo_module.clone(), &other_key, &solo_record).is_err(),
+        lm_vm::load_with_record(solo_module.clone(), &other_key, &lm_vm::VerifiedRecord).is_err(),
         "a wrong key admitted the module"
     );
-    // A foreign record under the right key is rejected too, because
-    // its tables do not fit this module.
-    assert_ne!(
-        other_record.func_hashes.len(),
-        solo_record.func_hashes.len(),
-        "the two programs share a table shape"
-    );
     assert!(
-        lm_vm::load_with_record(solo_module, &solo_key, &other_record).is_err(),
-        "a foreign record admitted the module"
+        lm_vm::load_with_record(solo_module, &solo_key, &lm_vm::VerifiedRecord).is_ok(),
+        "the right key rejected the module"
     );
 
     // The production path: file the other program's record under the
@@ -505,7 +512,7 @@ fn a_wrong_key_never_admits_the_module() {
     // entry is a miss and the verifier runs.
     let store = VerifiedStore::for_artifact(&solo);
     store
-        .write(&other_key, &to_verdict(&other_record))
+        .write(&other_key, &to_verdict(&lm_vm::VerifiedRecord))
         .expect("writes");
     let wrong = store.record_path(&other_key);
     let target = store.record_path(&solo_key);

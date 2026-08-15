@@ -359,6 +359,7 @@ fn chain_cycle(n: usize) -> Module {
         selectors: vec![],
         apps: vec![],
         imports: vec![],
+        core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
         classes: vec![],
         funcs,
         entry: 0,
@@ -542,6 +543,84 @@ fn two_marker_shapes_write_two_semantic_regions() {
         lm_bytecode::semantic_section(&twin),
         "two marker shapes share one semantic region"
     );
+}
+
+// ---------------------------------------------------------------
+// Section 8: slot resolution.
+// ---------------------------------------------------------------
+
+/// Every compiled module declares its core role slots, and the table
+/// names the embedded core classes.
+#[test]
+fn a_compiled_module_declares_every_core_role() {
+    let module = compile_text("t.lm", "x = 1\nx\n").expect("compiles");
+    for (role, label) in lm_bytecode::corepin::PINNED_LABELS.iter().enumerate() {
+        let slot = module.core_roles[role];
+        assert_ne!(
+            slot,
+            lm_bytecode::NO_ROLE,
+            "the module declares no slot for `{label}`"
+        );
+        assert_eq!(
+            module.classes[slot as usize].key,
+            lm_bytecode::corepin::pinned_key(label),
+            "the slot of `{label}` names another class"
+        );
+    }
+}
+
+/// The verifier proves the shape of every declared slot. A table that
+/// points a role at a class with another shape rejects.
+#[test]
+fn a_crafted_core_role_shape_rejects() {
+    let module = compile_text("t.lm", "x = 1\nx\n").expect("compiles");
+    let some = lm_bytecode::corepin::role_index("Option.Some").expect("the role exists");
+    let ok = lm_bytecode::corepin::role_index("Result.Ok").expect("the role exists");
+    // `Result.Ok` has the right field but two type parameters and
+    // another parent, so it cannot fill the `Option.Some` role.
+    let mut twin = module.clone();
+    twin.core_roles[some] = module.core_roles[ok];
+    let error = lm_verify::verify_module(&twin).expect_err("the crafted role must reject");
+    assert!(error.message.contains("core role"), "{error:?}");
+    // A role that names a class outside the table rejects at the
+    // decoder as well as at the verifier.
+    let mut wild = module.clone();
+    wild.core_roles[some] = 9999;
+    assert!(lm_verify::verify_module(&wild).is_err());
+    let bytes = lm_bytecode::encode(&wild);
+    assert_eq!(
+        lm_bytecode::decode(&bytes),
+        Err(DecodeError::BadCoreRole),
+        "the decoder admitted a role outside the class table"
+    );
+}
+
+/// The verifier reads no source name. A rename of every class and
+/// every function leaves the verification hash unchanged.
+#[test]
+fn a_rename_of_every_definition_keeps_the_verification_hash() {
+    let source = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
+                  self.value = self.value + n\n    self.value\n  end\nend\n\
+                  c = Counter()\nc.add(1)\n";
+    let module = compile_text("t.lm", source).expect("compiles");
+    let mut twin = module.clone();
+    for (idx, class) in twin.classes.iter_mut().enumerate() {
+        class.name = format!("c{idx}");
+        class.key = format!("k{idx}");
+    }
+    for (idx, func) in twin.funcs.iter_mut().enumerate() {
+        func.name = format!("f{idx}");
+    }
+    assert_eq!(
+        lm_bytecode::identity::verification_hash(&module),
+        lm_bytecode::identity::verification_hash(&twin),
+        "a rename moved the verification hash"
+    );
+    // Both still load, and both agree with the uncached load.
+    let mut cache = lm_vm::VerifiedCache::new();
+    lm_vm::load_cached(module, &mut cache).expect("loads");
+    lm_vm::load_cached(twin, &mut cache).expect("loads");
+    assert_eq!(cache.verifications, 1, "the rename cost a verifier run");
 }
 
 /// The reserved module path `core` rejects with a clear diagnostic. A

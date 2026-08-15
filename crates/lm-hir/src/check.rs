@@ -1118,6 +1118,20 @@ fn assemble(
             ctor_row,
         });
     }
+    // The stable core role slots. The compiler knows which class fills
+    // each role, so the artifact carries the table and no later pass
+    // resolves a core class by name or by hash.
+    let mut core_roles = [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT];
+    for (idx, class) in hir_classes.iter().enumerate() {
+        let Some(label) = class.key.strip_prefix("core.") else {
+            continue;
+        };
+        if let Some(role) = lm_bytecode::corepin::role_index(label) {
+            if core_roles[role] == lm_bytecode::NO_ROLE {
+                core_roles[role] = idx as u32;
+            }
+        }
+    }
     let funcs: Vec<HirFunc> = ctx
         .funcs
         .into_iter()
@@ -1129,6 +1143,7 @@ fn assemble(
         funcs,
         entry: entry_idx,
         core: ctx.core,
+        core_roles,
         exports,
         imports: ctx.imports,
     })

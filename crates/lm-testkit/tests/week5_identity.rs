@@ -235,6 +235,7 @@ fn a_deep_definition_chain_hashes_on_a_bounded_stack() {
         classes: vec![],
         funcs,
         imports: vec![],
+        core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
         entry: 0,
         exports: vec![],
     };
@@ -262,11 +263,11 @@ fn the_loaded_module_carries_the_hash_resolved_core_layout() {
     assert!(core.drive_asked.is_some());
 }
 
-/// A corrupted embedded core definition changes its hash, so the
-/// layout slot resolves to nothing and the verifier rejects the
-/// instruction that needs the family.
+/// A corrupted embedded core definition keeps its declared role slot,
+/// and the verifier rejects the shape. The role table is a claim, and
+/// the verifier proves it.
 #[test]
-fn a_corrupted_core_definition_no_longer_resolves() {
+fn a_corrupted_core_definition_fails_the_role_shape() {
     let bytes = compile_to_bytes("t.lm", "xs = [1, 2]\nxs.get(0).is_some()\n").unwrap();
     let mut module = lm_bytecode::decode(&bytes).unwrap();
     // Flip the arm order of the embedded Option family record: swap
@@ -277,12 +278,15 @@ fn a_corrupted_core_definition_no_longer_resolves() {
         .position(|c| c.name == "Option.Some")
         .expect("the embedded core Option.Some exists");
     module.classes[some].fields[0].1 = 3;
-    let identity = module_identity(&module).expect("still hashes");
-    let layout = lm_bytecode::corepin::core_layout(&module, &identity);
-    assert!(layout.option_some.is_none(), "a corrupted arm resolved");
+    let layout = lm_bytecode::corepin::declared_layout(&module);
     assert!(
-        lm_vm::load(module).is_err(),
-        "the corrupted module was admitted"
+        layout.option_some.is_some(),
+        "the declared role slot must survive the edit"
+    );
+    let error = lm_vm::load(module).expect_err("the corrupted module was admitted");
+    assert!(
+        error.message.contains("wrong type"),
+        "the rejection must name the shape: {error:?}"
     );
 }
 
@@ -781,14 +785,13 @@ fn the_verification_hash_keeps_every_index() {
     assert_ne!(base, verification_hash(&dead));
 }
 
-/// Definition names live outside the semantic region, and week 5
-/// kept them out of the verification hash. Week 6 puts them in: the
-/// verifier reads the identity-resolved core layout, and identity
-/// reads the names. A rename therefore costs a cache hit now, which
-/// is the price of the admission invariant. See
-/// `week6_names.rs` for the attack this closes.
+/// Definition names live outside the semantic region, and the
+/// verifier reads no name: the core layout comes from the declared
+/// role table, and every rule reads resolved slots and structures. A
+/// rename therefore costs no cache hit. See `week6_names.rs` for the
+/// probes that hold the boundary.
 #[test]
-fn a_rename_moves_the_verification_hash() {
+fn a_rename_keeps_the_verification_hash() {
     use lm_bytecode::identity::verification_hash;
     let before = "def helper(n: Int): Int\n  n * 2\nend\n\
                   def caller(n: Int): Int\n  helper(n) + 1\nend\ncaller(3)\n";
@@ -799,12 +802,12 @@ fn a_rename_moves_the_verification_hash() {
     assert_ne!(
         module_identity(&ma).unwrap().semantic_hash,
         module_identity(&mb).unwrap().semantic_hash,
-        "a rename must move the semantic hash"
+        "a rename must move the semantic hash through the export table"
     );
-    assert_ne!(
+    assert_eq!(
         verification_hash(&ma),
         verification_hash(&mb),
-        "a rename must move the verification hash"
+        "a rename must not move the verification hash"
     );
     // The semantic region itself does not move: the names live in the
     // export section.

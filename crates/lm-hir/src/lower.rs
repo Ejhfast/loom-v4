@@ -248,6 +248,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
         selectors: m.selectors,
         apps: m.apps,
         imports,
+        core_roles: hir.core_roles,
         classes,
         funcs,
         entry: hir.entry as u32,

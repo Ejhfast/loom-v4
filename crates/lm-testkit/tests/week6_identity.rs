@@ -74,39 +74,39 @@ fn a_class_rename_moves_no_hash_when_the_key_holds() {
     );
 }
 
-/// A cache hit replays the definition hashes and the core layout.
-/// Both are pure functions of the verification-hash inputs, so a hit
-/// recomputes neither.
+/// The load path computes no identity. The core layout comes from the
+/// core role table the artifact declares, and the verifier proves the
+/// shape of every filled slot. A second load skips the verifier.
 #[test]
-fn a_cache_hit_replays_the_identity() {
+fn a_load_computes_no_identity() {
     let bytes =
         lm_testkit::compile_to_bytes("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(41)\n").unwrap();
     let mut cache = lm_vm::VerifiedCache::new();
     let first = lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
-    assert_eq!((cache.verifications, cache.identities), (1, 1));
+    assert_eq!(cache.verifications, 1);
     let second = lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
     assert_eq!(
-        (cache.verifications, cache.identities),
-        (1, 1),
-        "the second load recomputed identity or verification"
+        cache.verifications, 1,
+        "the second load ran the verifier again"
     );
-    let classes = first.module().classes.len() as u32;
-    for c in 0..classes {
-        assert_eq!(first.class_hash(c), second.class_hash(c));
-    }
     assert_eq!(
         format!("{:?}", first.core_layout()),
         format!("{:?}", second.core_layout())
     );
+    // The declared table is the whole resolution.
+    let module = lm_bytecode::decode(&bytes).expect("decodes");
+    assert_eq!(
+        format!("{:?}", first.core_layout()),
+        format!("{:?}", lm_bytecode::corepin::declared_layout(&module))
+    );
 }
 
-/// The core layout resolves every slot to the class that carries the
-/// slot label, never to a user class of another name.
+/// The core layout names the embedded core class of each role, never
+/// a user class with a core name.
 #[test]
 fn a_user_enum_cannot_fill_a_core_slot() {
     let module = compile_text("t.lm", MY_ERR).expect("compiles");
-    let identity = module_identity(&module).expect("hashes");
-    let layout = lm_bytecode::corepin::core_layout(&module, &identity);
+    let layout = lm_bytecode::corepin::declared_layout(&module);
     let io_error = layout.io_error.expect("the core IoError resolves");
     let failed = layout.io_error_failed.expect("the core arm resolves");
     assert_eq!(module.classes[io_error as usize].name, "IoError");

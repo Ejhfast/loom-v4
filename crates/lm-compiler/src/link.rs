@@ -123,7 +123,6 @@ impl LinkedEntry<'_> {
 }
 
 /// The merged tables of one link step.
-#[derive(Default)]
 struct Merged {
     strings: Vec<String>,
     string_index: HashMap<String, u32>,
@@ -135,6 +134,10 @@ struct Merged {
     app_index: HashMap<TypeApp, u32>,
     classes: Vec<BcClass>,
     funcs: Vec<Func>,
+    /// The merged core role table. Every module carries the same core,
+    /// so every module fills the same roles with the same merged
+    /// classes.
+    core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
     /// (qualified key, structural hash) to merged class index. The
     /// pair is the whole merge rule for a class.
     class_by_def: HashMap<(String, [u8; 32]), u32>,
@@ -153,6 +156,31 @@ struct Merged {
     ctor_exports: HashMap<(String, String), u32>,
     /// The interface hash of every export, for the pin check.
     export_hash: HashMap<(String, String), [u8; 32]>,
+}
+
+impl Default for Merged {
+    fn default() -> Merged {
+        Merged {
+            strings: Vec::new(),
+            string_index: HashMap::new(),
+            types: Vec::new(),
+            type_index: HashMap::new(),
+            selectors: Vec::new(),
+            selector_index: HashMap::new(),
+            apps: Vec::new(),
+            app_index: HashMap::new(),
+            classes: Vec::new(),
+            funcs: Vec::new(),
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            class_by_def: HashMap::new(),
+            class_version: HashMap::new(),
+            func_by_hash: HashMap::new(),
+            class_exports: HashMap::new(),
+            func_exports: HashMap::new(),
+            ctor_exports: HashMap::new(),
+            export_hash: HashMap::new(),
+        }
+    }
 }
 
 impl Merged {
@@ -234,6 +262,7 @@ pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError>
         selectors: merged.selectors,
         apps: merged.apps,
         imports: Vec::new(),
+        core_roles: merged.core_roles,
         classes: merged.classes,
         funcs: merged.funcs,
         entry,
@@ -448,6 +477,28 @@ fn relocate(
         classes,
         funcs,
     };
+    // The core role table: every module carries the same core, and the
+    // merge keeps one class per core key, so every module must name
+    // the same merged class for a role.
+    for (role, slot) in module.core_roles.iter().enumerate() {
+        if *slot == lm_bytecode::NO_ROLE {
+            continue;
+        }
+        if *slot as usize >= reloc.classes.len() {
+            return Err(fail(format!(
+                "the core role {role} of `{path}` names a class outside the module"
+            )));
+        }
+        let target = reloc.classes[*slot as usize];
+        if merged.core_roles[role] == lm_bytecode::NO_ROLE {
+            merged.core_roles[role] = target;
+        } else if merged.core_roles[role] != target {
+            return Err(fail(format!(
+                "the module `{path}` fills the core role {role} with another class; \
+                 rebuild the program against one core"
+            )));
+        }
+    }
     // Fill the created definitions, and prove that every shared one
     // really is the definition its hash claims.
     for idx in created_classes.iter().chain(shared_classes.iter()) {
