@@ -511,6 +511,16 @@ pub fn encode(module: &Module) -> Vec<u8> {
     out
 }
 
+/// The semantic region of one module, as bytes. This is the exact
+/// input set of the verifier: the strings, types, selectors,
+/// applications, classes, functions, and the entry index, with every
+/// module-global index preserved. The definition names and the debug
+/// content stay outside, so neither a rename nor a debug edit changes
+/// these bytes.
+pub fn semantic_section(module: &Module) -> Vec<u8> {
+    encode_semantic(module)
+}
+
 /// Encode the semantic region: every table except the definition
 /// names.
 fn encode_semantic(module: &Module) -> Vec<u8> {

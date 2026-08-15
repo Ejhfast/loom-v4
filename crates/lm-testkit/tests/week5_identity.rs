@@ -405,3 +405,368 @@ fn hash_equal_noncanonical_bytes_reject_on_a_cache_hit() {
     lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
     assert_eq!(cache.verifications, 1);
 }
+
+/// Review regression: a duplicate selector name keeps the semantic
+/// hash equal, because the canonical encoding replaces a selector
+/// index with its name. The two indices are different dispatch keys,
+/// and only the per-function pass resolved the method. The structural
+/// pass must reject the duplicate, or a cache hit admits a module that
+/// faults the dispatch table.
+#[test]
+fn a_duplicate_selector_name_rejects_on_a_cache_hit() {
+    let source = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
+                  self.value = self.value + n\n    self.value\n  end\nend\n\
+                  c = Counter()\nc.add(1)\n";
+    let bytes = compile_to_bytes("t.lm", source).unwrap();
+    let mut cache = lm_vm::VerifiedCache::new();
+    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
+    assert_eq!(cache.verifications, 1);
+
+    // Append a copy of the selector a call already uses, then point
+    // that call at the copy.
+    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let before = module_identity(&module).unwrap().semantic_hash;
+    let used = module
+        .funcs
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flatten()
+        .find_map(|i| match i {
+            Instr::CallVirtual { selector, .. } => Some(*selector),
+            _ => None,
+        })
+        .expect("the program calls a method");
+    let duplicate = module.selectors.len() as u32;
+    module
+        .selectors
+        .push(module.selectors[used as usize].clone());
+    for func in &mut module.funcs {
+        for block in &mut func.blocks {
+            for instr in block {
+                if let Instr::CallVirtual { selector, .. } = instr {
+                    if *selector == used {
+                        *selector = duplicate;
+                    }
+                }
+            }
+        }
+    }
+    let after = module_identity(&module).unwrap().semantic_hash;
+    assert_eq!(after, before, "the duplicate name must keep the hash");
+
+    let bad = lm_bytecode::encode(&module);
+    assert!(
+        lm_vm::load_bytes(&bad).is_err(),
+        "the uncached load accepted the table"
+    );
+    assert!(
+        lm_vm::load_bytes_cached(&bad, &mut cache).is_err(),
+        "the cached load bypassed the verifier"
+    );
+    assert_eq!(cache.verifications, 1, "a rejection never enters the cache");
+}
+
+/// Review regression: the loader computes the identity of untrusted
+/// bytes before the verifier runs. A function that makes a closure of
+/// itself is a one-member `MakeClosure` cycle. The cycle marker must
+/// cover it; an unfinished body digest must never panic the loader.
+#[test]
+fn a_self_referential_closure_hashes_without_a_panic() {
+    let source = "f = do |x: Int|: Int x + 1 end\nf(1)\n";
+    let mut module = compile_text("t.lm", source).unwrap();
+    let target = module
+        .funcs
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flatten()
+        .find_map(|i| match i {
+            Instr::MakeClosure { func, .. } => Some(*func),
+            _ => None,
+        })
+        .expect("the program makes a closure");
+    module.funcs[target as usize].blocks = vec![vec![
+        Instr::MakeClosure {
+            func: target,
+            captures: 0,
+        },
+        Instr::Return,
+    ]];
+    // The hash is defined and deterministic.
+    let first = module_identity(&module).expect("hashes").semantic_hash;
+    let second = module_identity(&module).expect("hashes").semantic_hash;
+    assert_eq!(first, second, "the cycle marker must be deterministic");
+    // The same bytes reach the loader, which must reject and not panic.
+    let bytes = lm_bytecode::encode(&module);
+    assert!(
+        lm_vm::load_bytes(&bytes).is_err(),
+        "the loader admitted a hand-built closure cycle"
+    );
+}
+
+/// The cache invariant: for one byte stream, a cached load and an
+/// uncached load must always agree on admission. This sweeps the four
+/// tables whose index the canonical encoding replaces with content.
+/// Each case copies the entry an instruction already names, then
+/// points that instruction at the copy, so the module hash stays
+/// equal and the mutated stream lands on a cache hit.
+#[test]
+fn a_cached_load_and_an_uncached_load_always_agree() {
+    let class_src = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
+                     self.value = self.value + n\n    self.value\n  end\n  \
+                     def get(self): Int\n    self.value\n  end\nend\n\
+                     c = Counter()\nc.add(1)\nc.get()\n";
+    let str_src = "def label(): String\n  \"hello\"\nend\nlabel()\n";
+    let gen_src = "def id[T](x: T): T\n  x\nend\nid[Int](1)\n";
+    let twin_src = "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\na.x\n";
+
+    // (label, source, mutation). Each mutation returns true when it
+    // applied.
+    type Mutation = fn(&mut Module) -> bool;
+    let cases: [(&str, &str, Mutation); 5] = [
+        ("selector", class_src, |m: &mut Module| {
+            let Some(used) = used_selector(m) else {
+                return false;
+            };
+            let copy = m.selectors.len() as u32;
+            m.selectors.push(m.selectors[used as usize].clone());
+            point_selector(m, used, copy)
+        }),
+        ("string", str_src, |m: &mut Module| {
+            let Some(used) = used_string(m) else {
+                return false;
+            };
+            let copy = m.strings.len() as u32;
+            m.strings.push(m.strings[used as usize].clone());
+            point_string(m, used, copy)
+        }),
+        ("application", gen_src, |m: &mut Module| {
+            let Some(used) = used_app(m) else {
+                return false;
+            };
+            let copy = m.apps.len() as u32;
+            m.apps.push(m.apps[used as usize].clone());
+            point_app(m, used, copy)
+        }),
+        ("dead type", class_src, |m: &mut Module| {
+            m.types.push(lm_bytecode::BcType::Int);
+            true
+        }),
+        // Two classes with identical structure share a definition
+        // hash, so retargeting `New` between them keeps the module
+        // hash equal. Only the dataflow pass sees the class index.
+        ("class twin", twin_src, |m: &mut Module| {
+            let a = m.classes.iter().position(|c| c.name == "A").unwrap() as u32;
+            let b = m.classes.iter().position(|c| c.name == "B").unwrap() as u32;
+            point_new(m, a, b)
+        }),
+    ];
+
+    for (label, source, mutate) in cases {
+        let bytes = compile_to_bytes("t.lm", source).unwrap();
+        let mut cache = lm_vm::VerifiedCache::new();
+        lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
+
+        let mut module = lm_bytecode::decode(&bytes).unwrap();
+        let before = module_identity(&module).unwrap().semantic_hash;
+        assert!(mutate(&mut module), "{label}: the mutation did not apply");
+        let after = module_identity(&module).unwrap().semantic_hash;
+        assert_eq!(after, before, "{label}: the mutation moved the hash");
+
+        let bad = lm_bytecode::encode(&module);
+        let plain = lm_vm::load_bytes(&bad).is_ok();
+        let cached = lm_vm::load_bytes_cached(&bad, &mut cache).is_ok();
+        assert_eq!(plain, cached, "{label}: the cache changed the verdict");
+    }
+}
+
+fn used_selector(m: &Module) -> Option<u32> {
+    m.funcs
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flatten()
+        .find_map(|i| match i {
+            Instr::CallVirtual { selector, .. } => Some(*selector),
+            _ => None,
+        })
+}
+
+fn used_string(m: &Module) -> Option<u32> {
+    m.funcs
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flatten()
+        .find_map(|i| match i {
+            Instr::ConstStr(idx) => Some(*idx),
+            _ => None,
+        })
+}
+
+fn used_app(m: &Module) -> Option<u32> {
+    m.funcs
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flatten()
+        .find_map(|i| match i {
+            Instr::CallG { app, .. } => Some(*app),
+            _ => None,
+        })
+}
+
+fn point_selector(m: &mut Module, from: u32, to: u32) -> bool {
+    let mut done = false;
+    for block in m.funcs.iter_mut().flat_map(|f| f.blocks.iter_mut()) {
+        for instr in block {
+            if let Instr::CallVirtual { selector, .. } = instr {
+                if *selector == from {
+                    *selector = to;
+                    done = true;
+                }
+            }
+        }
+    }
+    done
+}
+
+fn point_string(m: &mut Module, from: u32, to: u32) -> bool {
+    let mut done = false;
+    for block in m.funcs.iter_mut().flat_map(|f| f.blocks.iter_mut()) {
+        for instr in block {
+            if let Instr::ConstStr(idx) = instr {
+                if *idx == from {
+                    *idx = to;
+                    done = true;
+                }
+            }
+        }
+    }
+    done
+}
+
+fn point_app(m: &mut Module, from: u32, to: u32) -> bool {
+    let mut done = false;
+    for block in m.funcs.iter_mut().flat_map(|f| f.blocks.iter_mut()) {
+        for instr in block {
+            if let Instr::CallG { app, .. } = instr {
+                if *app == from {
+                    *app = to;
+                    done = true;
+                }
+            }
+        }
+    }
+    done
+}
+
+fn point_new(m: &mut Module, from: u32, to: u32) -> bool {
+    let mut done = false;
+    for block in m.funcs.iter_mut().flat_map(|f| f.blocks.iter_mut()) {
+        for instr in block {
+            if let Instr::New(c) = instr {
+                if *c == from {
+                    *c = to;
+                    done = true;
+                }
+            }
+        }
+    }
+    done
+}
+
+/// Review regression: two classes with the same name also share a
+/// definition hash, because a class hash covers structure only. The
+/// cache key must not rest on the semantic hash, or retargeting `New`
+/// between them rides a hit. This case survives a nominal class hash,
+/// so the cache key is the load-bearing fix, not the hash domain.
+#[test]
+fn a_duplicate_class_name_cannot_use_a_cache_hit() {
+    let source = "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\na.x\n";
+    let bytes = compile_to_bytes("t.lm", source).unwrap();
+    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let a = module.classes.iter().position(|c| c.name == "A").unwrap() as u32;
+    let b = module.classes.iter().position(|c| c.name == "B").unwrap() as u32;
+
+    // The baseline: two classes both named `A`. This module is valid.
+    module.classes[b as usize].name = "A".to_string();
+    let baseline = lm_bytecode::encode(&module);
+    let mut cache = lm_vm::VerifiedCache::new();
+    lm_vm::load_bytes_cached(&baseline, &mut cache).expect("loads");
+    let before = module_identity(&module).unwrap().semantic_hash;
+
+    // Retarget `New A` to the second class named `A`.
+    assert!(point_new(&mut module, a, b));
+    let after = module_identity(&module).unwrap().semantic_hash;
+    assert_eq!(after, before, "the retarget must keep the semantic hash");
+
+    let bad = lm_bytecode::encode(&module);
+    let plain = lm_vm::load_bytes(&bad).is_ok();
+    let cached = lm_vm::load_bytes_cached(&bad, &mut cache).is_ok();
+    assert!(!plain, "the uncached load accepted the retarget");
+    assert_eq!(plain, cached, "the cache changed the verdict");
+}
+
+/// The verification hash answers a different question from the
+/// semantic hash: "did the verifier approve this exact
+/// representation?" It keeps every module-global index, so any change
+/// the verifier can see moves it.
+#[test]
+fn the_verification_hash_keeps_every_index() {
+    use lm_bytecode::identity::verification_hash;
+    let source = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
+                  self.value = self.value + n\n    self.value\n  end\nend\n\
+                  c = Counter()\nc.add(1)\n";
+    let bytes = compile_to_bytes("t.lm", source).unwrap();
+    let module = lm_bytecode::decode(&bytes).unwrap();
+    let base = verification_hash(&module);
+    assert_eq!(base, verification_hash(&module), "not deterministic");
+
+    // A duplicate selector name keeps the semantic hash and must move
+    // the verification hash.
+    let mut dup = module.clone();
+    let used = dup
+        .funcs
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flatten()
+        .find_map(|i| match i {
+            Instr::CallVirtual { selector, .. } => Some(*selector),
+            _ => None,
+        })
+        .unwrap();
+    let copy = dup.selectors.len() as u32;
+    dup.selectors.push(dup.selectors[used as usize].clone());
+    assert!(point_selector(&mut dup, used, copy));
+    assert_eq!(
+        module_identity(&dup).unwrap().semantic_hash,
+        module_identity(&module).unwrap().semantic_hash,
+        "the case must keep the semantic hash"
+    );
+    assert_ne!(base, verification_hash(&dup), "the verifier sees this");
+
+    // A dead pool entry must move it too.
+    let mut dead = module.clone();
+    dead.types.push(lm_bytecode::BcType::Int);
+    assert_ne!(base, verification_hash(&dead));
+}
+
+/// Definition names live outside the semantic region and the verifier
+/// reads none of them, so a rename must not cost a cache hit.
+#[test]
+fn a_rename_does_not_move_the_verification_hash() {
+    use lm_bytecode::identity::verification_hash;
+    let before = "def helper(n: Int): Int\n  n * 2\nend\n\
+                  def caller(n: Int): Int\n  helper(n) + 1\nend\ncaller(3)\n";
+    let after = "def assist(n: Int): Int\n  n * 2\nend\n\
+                 def caller(n: Int): Int\n  assist(n) + 1\nend\ncaller(3)\n";
+    let ma = compile_text("t.lm", before).unwrap();
+    let mb = compile_text("t.lm", after).unwrap();
+    assert_ne!(
+        module_identity(&ma).unwrap().semantic_hash,
+        module_identity(&mb).unwrap().semantic_hash,
+        "a rename must move the semantic hash"
+    );
+    assert_eq!(
+        verification_hash(&ma),
+        verification_hash(&mb),
+        "a rename must not move the verification hash"
+    );
+}

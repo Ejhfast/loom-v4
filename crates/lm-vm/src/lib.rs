@@ -189,10 +189,13 @@ impl LoadedModule {
     }
 }
 
-/// The in-process verified-code cache. A key is the module semantic
-/// hash plus the compiler ABI version and the verifier version. The
-/// loader always recomputes the semantic hash from the decoded
-/// content, so a stored or forged hash never enters the key.
+/// The in-process verified-code cache.
+///
+/// A key is the module verification hash, the compiler ABI version,
+/// and the verifier version. The verification hash covers every
+/// verifier input, with each module-global index preserved, so a hit
+/// skips every verifier pass. The loader always computes the key from
+/// the decoded content, so a stored or forged hash never enters it.
 #[derive(Debug, Default)]
 pub struct VerifiedCache {
     verified: std::collections::HashSet<([u8; 32], u32, u32)>,
@@ -231,13 +234,20 @@ fn load_inner(
     let core = lm_bytecode::corepin::core_layout(&module, &identity);
     match cache {
         Some(cache) => {
-            // The structural pass runs on every load. The semantic
-            // hash does not cover dead pool entries, so a hash-equal
-            // byte stream with a non-canonical table must reject
-            // here; the cache may skip only the function dataflow.
-            lm_verify::verify_structure_with_layout(&module, core)?;
+            // The key is the verification hash, never the semantic
+            // hash. The semantic hash answers "same program meaning?"
+            // and replaces every module-global index with content, so
+            // two modules that differ only in an index share it. The
+            // verifier reads those indices, so such a key can certify
+            // a module the verifier rejects. The verification hash
+            // keeps every index and covers the operation manifest.
+            //
+            // The key therefore fixes every verifier input, so a hit
+            // skips every pass, not only the function dataflow. The
+            // core layout and the dispatch rows below are pure
+            // functions of the same inputs, so they stay valid.
             let key = (
-                identity.semantic_hash,
+                lm_bytecode::identity::verification_hash(&module),
                 lm_bytecode::identity::COMPILER_ABI_VERSION,
                 lm_verify::VERIFIER_VERSION,
             );

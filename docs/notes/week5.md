@@ -180,30 +180,54 @@ section.
 
 ### The verified-code cache
 
-`lm_vm::VerifiedCache` is an in-process set keyed by (module
-semantic hash, `COMPILER_ABI_VERSION`, `VERIFIER_VERSION`).
+The cache keys on the verification hash, never on the semantic hash.
+The two hashes answer different questions:
+
+- the semantic hash answers "do these bytes mean the same program?".
+  It replaces every module-global index with content, so two modules
+  that differ only in an index share it.
+- the verification hash (`lm-module-verify-v1`) answers "did the
+  verifier approve this exact representation?". It covers the
+  semantic region with every index preserved, plus the operation
+  manifest digest.
+
+`lm_vm::VerifiedCache` is an in-process set keyed by (verification
+hash, `COMPILER_ABI_VERSION`, `VERIFIER_VERSION`).
 `load_cached`/`load_bytes_cached` skip the verifier on a hit; a
 counter proves the skip. The trust boundary, exactly:
 
-- The loader recomputes the semantic hash from the decoded content
-  on every load. No hash stored in an artifact enters the key; the
-  container stores no hash at all, so a forged stored hash cannot
-  exist, and tampered bytes always miss the cache and meet the full
-  verifier.
+- The loader computes the key from the decoded content on every
+  load. No hash stored in an artifact enters the key; the container
+  stores no hash at all, so a forged stored hash cannot exist, and
+  tampered bytes always miss the cache and meet the full verifier.
 - The decoder's structural checks and the identity preflight run on
   every load, cached or not.
-- The semantic hash covers referenced content only, so two byte
-  streams can share it while one carries dead, non-canonical pool
-  entries that the verifier rejects. The review demonstrated this
-  with a dead duplicate type entry. Therefore the module-level
-  structural pass (`verify_structure_with_layout`: every table and
-  entry rule) runs on EVERY load; a hit skips only the per-function
-  dataflow. A hit then certifies: the tables of these exact bytes
-  passed the structural pass now, and functions with this exact
-  referenced content passed the dataflow before. The remaining
-  assumption is SHA-256 collision resistance. A regression test
-  replays the demonstrated bypass.
+- The key fixes every verifier input, so a hit skips every verifier
+  pass, not only the per-function dataflow. A hit certifies: a module
+  with these exact verifier inputs passed the whole verifier before.
+  The core layout and the dispatch rows are pure functions of the
+  same inputs, so they stay valid. The remaining assumption is
+  SHA-256 collision resistance.
+- The manifest digest is in the hash because the row and signature
+  rules read the manifest, and the container does not store it. The
+  semantic hash covered it through every definition hash; an
+  index-preserving hash over the container does not.
+- Definition names and debug content stay out of the hash. The
+  verifier reads neither, so a rename and a debug edit keep the
+  cache hit. Tests prove both directions: a rename holds the
+  verification hash, and a duplicate selector or a dead pool entry
+  moves it.
 - A rejected module never enters the cache.
+
+Two rules stay in the verifier for their own sake, not for the cache.
+The canonical identity encoding replaces an index with content, so a
+table whose index is also a runtime key must map indices to content
+one-to-one. The selector table is such a table: the identity encoding
+carries the selector name, and the dispatch row uses the selector
+index. The structural pass therefore rejects a duplicate selector
+name. A test sweeps the selector, string, application, type, and
+class tables and proves that a cached load and an uncached load
+always agree on admission.
 
 ### Interfaces and the CLI
 
@@ -309,18 +333,64 @@ boundary above records the corrected claim, and a regression test
 replays the attack. The family-distinctness wording and the
 canonical-operand comment are corrected.
 
-Two review observations are deferred with rationale:
+One review observation is deferred with rationale:
 
-- The intra-component resolver lookups are linear scans, so a very
-  wide hostile component makes load-time identity computation
-  superlinear. This is performance, not soundness. The week 6
-  identity work replaces the lookup vectors with maps.
 - Definition hashes are structural, so nominal distinctness rests on
   module-local class indices and the export table. That is sound
   while class values are not first-class (`E1018`). When class
   values land (reflection, week 13), class-value equality must not
   use the bare definition hash, or names must enter the identity.
   This decision is recorded here for that week.
+
+## The second review pass
+
+A second pass over the week-5 work confirmed two more defects. Both
+are fixed. Neither fix moves a hash: the artifact hashes of
+`examples/01-basics/factorial.lm` and the core pin are unchanged, and
+the determinism gates pass.
+
+- A duplicate selector name rode a cache hit. The canonical encoding
+  writes the selector name, so a copy of a used selector keeps the
+  module hash equal. The copy is a different dispatch key, and only
+  the per-function pass resolved the method. A cache hit skips that
+  pass, so the loader admitted the module and `DispatchRow::method`
+  indexed past its table. The fix adds the selector uniqueness rule
+  to the structural pass, which runs on every load.
+- Two classes with one definition hash rode a cache hit the same way.
+  Class hashes are structural, so `New A` retargeted to a
+  structurally identical `B` keeps the module hash equal, and only
+  the dataflow pass reads the class index. A nominal class hash does
+  not close this: two classes with one NAME collide the same way, and
+  no rule makes class names unique. The cache key is therefore the
+  fix, not the hash domain. The class identity question moves to
+  week 6, where import slots decide what a definition hash must
+  distinguish.
+- The cache key was the root cause behind all three cases, so it
+  moved from the semantic hash to the verification hash. The section
+  above records the corrected boundary. This also removed a defect
+  introduced during the pass: an intermediate key over the container
+  bytes dropped the operation manifest, which the semantic hash had
+  covered transitively.
+- The loader panicked on a hand-built closure cycle. A function that
+  makes a closure of itself is a one-member `MakeClosure` cycle.
+  `closure_body_digests` removed the function from the active path
+  before it serialized that function's own body, so the self
+  reference missed the cycle marker and read an unfinished digest.
+  `load_bytes` panicked on crafted bytes, which is a loader denial of
+  service: the identity runs before the verifier. The fix keeps the
+  function on the path until its digest is complete.
+
+The superlinear observation from the first pass is now closed as
+measured, not deferred. The intra-component lookups in
+`ordinal_of`, `type_digest`, `app_digest`, and `body_digest` are
+still linear scans. Cost is the number of intra-component references
+times the component member count. Measured on generated components:
+a 868 KiB artifact with a 200-member dense component hashes in
+3.9 ms, and a 3200-member call cycle hashes in 4.4 ms. The growth is
+near-linear in artifact size at these sizes, so no small input makes
+a large delay. The week-6 identity work still replaces the lookup
+vectors with maps. The load path stays the place to watch, because
+identity runs on untrusted bytes before the verifier.
 
 ## Deferred work
 

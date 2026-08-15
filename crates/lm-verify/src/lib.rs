@@ -526,6 +526,19 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         func: u32::MAX,
         message,
     };
+    // The selector table must hold no duplicate name. The canonical
+    // identity encoding replaces a selector index with its name, so a
+    // duplicate name lets two different dispatch keys hash alike. The
+    // verified-code cache keys on that hash, so this rule keeps the
+    // index-to-name map injective and belongs in the structural pass.
+    let mut selector_names: HashMap<&str, u32> = HashMap::new();
+    for (idx, name) in module.selectors.iter().enumerate() {
+        if let Some(first) = selector_names.insert(name.as_str(), idx as u32) {
+            return Err(terr(format!(
+                "selector {idx} duplicates the name of selector {first}"
+            )));
+        }
+    }
     // The type table must start with the canonical primitive prefix.
     let prefix = [BcType::Unit, BcType::Bool, BcType::Int, BcType::Str];
     if module.types.len() < prefix.len() || module.types[..prefix.len()] != prefix[..] {

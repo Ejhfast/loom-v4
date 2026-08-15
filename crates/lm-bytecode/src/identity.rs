@@ -88,6 +88,34 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
     sha256(bytes)
 }
 
+/// The verification hash: an index-preserving digest over every
+/// verifier input.
+///
+/// This answers a different question from the semantic hash. The
+/// semantic hash answers "do these bytes mean the same program?": it
+/// replaces every module-global index with content, so two modules
+/// that differ only in an index can share it. The verification hash
+/// answers "did the verifier approve this exact representation?": it
+/// keeps every index, because the verifier reads indices.
+///
+/// A verified-code cache must key on this hash. A key built on the
+/// semantic hash lets a future semantic equivalence certify a module
+/// the verifier rejects. Keying here also lets semantic identity
+/// evolve without touching cache soundness.
+///
+/// The digest covers the semantic region and the operation manifest.
+/// The manifest is a verifier input, because the row and signature
+/// rules read it, and it is not stored in the container. Definition
+/// names and debug content stay out: the verifier reads neither, so
+/// a rename or a debug edit must not cost a cache hit.
+pub fn verification_hash(module: &Module) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(TAG_VERIFICATION);
+    bytes.extend_from_slice(&lm_abi::manifest_digest());
+    bytes.extend_from_slice(&crate::semantic_section(module));
+    sha256(&bytes)
+}
+
 // ----------------------------------------------------------------
 // Node space and preflight validation.
 // ----------------------------------------------------------------
@@ -652,6 +680,7 @@ const TAG_MEMBER: &[u8] = b"lm-def-member-v1\0";
 const TAG_CLOSURE: &[u8] = b"lm-def-closure-v1\0";
 const TAG_CLOSURE_CYCLIC: &[u8] = b"lm-def-closure-cyclic-v1\0";
 const TAG_MODULE: &[u8] = b"lm-module-sem-v1\0";
+const TAG_VERIFICATION: &[u8] = b"lm-module-verify-v1\0";
 
 /// One identity reference inside canonical bytes.
 enum IdentRef {
@@ -1219,7 +1248,9 @@ fn closure_body_digests(
                 continue;
             }
             if expanded {
-                visiting.retain(|x| *x != f);
+                // `f` stays on the path while its own body serializes.
+                // A body that makes a closure of itself must reach the
+                // cycle marker, not a digest that is still in progress.
                 let digest = {
                     let resolver = Resolver {
                         module,
@@ -1239,6 +1270,7 @@ fn closure_body_digests(
                     bytes.extend_from_slice(&resolver.func_bytes(f));
                     sha256(&bytes)
                 };
+                visiting.retain(|x| *x != f);
                 done.push((f, digest));
                 continue;
             }
