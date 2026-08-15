@@ -7,7 +7,9 @@
 //! of another package. A cached module skips the compiler and keeps
 //! its recorded artifact.
 
-use crate::cache::{compile_key, interface_identity, write_atomic, BuildDir};
+use crate::cache::{
+    compile_key, interface_identity, program_key, write_atomic, BuildDir, ProgramEntry,
+};
 use crate::env::{CompileEnv, LinkEnv, LinkUnit};
 use crate::graph::{load_workspace, module_order, Workspace};
 use crate::link::link;
@@ -37,6 +39,10 @@ pub struct BuildReport {
     pub program: Option<PathBuf>,
     pub program_semantic: Option<[u8; 32]>,
     pub program_container: Option<[u8; 32]>,
+    /// True when the stage-2 cache answered instead of the linker.
+    /// A hit skips the link run and the verification of the merged
+    /// program.
+    pub program_cached: bool,
 }
 
 impl BuildReport {
@@ -57,6 +63,8 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     let mut interfaces: BTreeMap<String, [u8; 32]> = BTreeMap::new();
     let mut units: Vec<LinkUnit> = Vec::new();
     let mut modules: Vec<ModuleReport> = Vec::new();
+    // The stage-2 key inputs, in link order.
+    let mut contents: Vec<(String, [u8; 32])> = Vec::new();
     for package_name in &workspace.order {
         let package = workspace.package(package_name);
         // The root set of every module of this package: the
@@ -124,10 +132,13 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
                 semantic_hash: compiled.semantic_hash,
                 interface_id,
             });
+            contents.push((compiled.path.clone(), compiled.container_hash));
+            // The unit takes the compiled module, so a build moves
+            // one module and never copies it.
             units.push(LinkUnit {
-                path: compiled.path.clone(),
-                module: compiled.module.clone(),
-                interface: compiled.interface.clone(),
+                path: compiled.path,
+                module: compiled.module,
+                interface: compiled.interface,
             });
         }
     }
@@ -138,24 +149,45 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
         program: None,
         program_semantic: None,
         program_container: None,
+        program_cached: false,
     };
     if !root_package.has_main() {
         return Ok(report);
     }
     let main_path = format!("{}.main", workspace.root);
-    let mut link_env = LinkEnv::new();
-    for unit in units {
-        link_env.bind(unit).map_err(|e| format!("error: {e}\n"))?;
-    }
-    let program = link(&main_path, &link_env.freeze()).map_err(|e| format!("error: {e}\n"))?;
+    // Stage 2: the module set fixes the merged program, so an
+    // unchanged module set skips the link run and the verification of
+    // the merged program. A damaged entry is a miss.
+    let key = program_key(&main_path, &contents);
+    let entry = match dir.read_program(&key) {
+        Some(entry) => {
+            report.program_cached = true;
+            entry
+        }
+        None => {
+            let mut link_env = LinkEnv::new();
+            for unit in units {
+                link_env.bind(unit).map_err(|e| format!("error: {e}\n"))?;
+            }
+            let program =
+                link(&main_path, &link_env.freeze()).map_err(|e| format!("error: {e}\n"))?;
+            let entry = ProgramEntry {
+                artifact: program.artifact,
+                semantic_hash: program.semantic_hash,
+                container_hash: program.container_hash,
+            };
+            dir.write_program(&key, &entry)?;
+            entry
+        }
+    };
     let debug = dir.debug();
     std::fs::create_dir_all(&debug)
         .map_err(|e| format!("error: cannot create `{}`: {e}\n", debug.display()))?;
     let path = debug.join(format!("{}.lma", workspace.root));
-    write_atomic(&path, &program.artifact)?;
+    write_atomic(&path, &entry.artifact)?;
     report.program = Some(path);
-    report.program_semantic = Some(program.semantic_hash);
-    report.program_container = Some(program.container_hash);
+    report.program_semantic = Some(entry.semantic_hash);
+    report.program_container = Some(entry.container_hash);
     Ok(report)
 }
 

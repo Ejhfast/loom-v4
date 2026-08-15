@@ -99,6 +99,10 @@ pub struct ModuleIdentity {
     pub class_hashes: Vec<[u8; 32]>,
     pub func_hashes: Vec<[u8; 32]>,
     pub semantic_hash: [u8; 32],
+    /// The largest refinement round count any component needed. A
+    /// component with one member needs no round. The value is a
+    /// measurement, and no hash reads it.
+    pub max_refine_rounds: u32,
 }
 
 impl ModuleIdentity {
@@ -1388,10 +1392,10 @@ fn rank(values: &[&[u8]]) -> (Vec<u32>, usize) {
 /// Two symmetric members keep one colour through every round. That is
 /// a property of graph automorphism, so they share one structural
 /// hash, and their qualified keys keep them apart.
-fn refine_colours(base: &[Vec<u8>], refs: &[Vec<u32>]) -> Result<Vec<u32>, IdentityError> {
+fn refine_colours(base: &[Vec<u8>], refs: &[Vec<u32>]) -> Result<(Vec<u32>, u32), IdentityError> {
     let n = base.len();
     if n <= 1 {
-        return Ok(vec![0; n]);
+        return Ok((vec![0; n], 0));
     }
     let slices: Vec<&[u8]> = base.iter().map(|b| b.as_slice()).collect();
     let (mut colours, mut distinct) = rank(&slices);
@@ -1400,6 +1404,7 @@ fn refine_colours(base: &[Vec<u8>], refs: &[Vec<u32>]) -> Result<Vec<u32>, Ident
     let budget_rounds = (REFINE_WORK_BUDGET / per_round).max(1);
     let mut buf: Vec<u8> = Vec::new();
     let mut ends: Vec<usize> = Vec::with_capacity(n);
+    let mut used = 0u32;
     for round in 0..n {
         if distinct == n {
             break;
@@ -1409,6 +1414,7 @@ fn refine_colours(base: &[Vec<u8>], refs: &[Vec<u32>]) -> Result<Vec<u32>, Ident
                 "the component needs more refinement rounds than the budget allows",
             ));
         }
+        used = round as u32 + 1;
         buf.clear();
         ends.clear();
         for i in 0..n {
@@ -1431,7 +1437,7 @@ fn refine_colours(base: &[Vec<u8>], refs: &[Vec<u32>]) -> Result<Vec<u32>, Ident
         }
         distinct = next_distinct;
     }
-    Ok(colours)
+    Ok((colours, used))
 }
 
 /// Compute the closure body digests of the given closure functions,
@@ -1533,6 +1539,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         comp_hash: vec![[0u8; 32]; s.total()],
     };
     let manifest = lm_abi::manifest_digest();
+    let mut max_refine_rounds = 0u32;
     // The empty overlays of the final all-hash view.
     let empty_members: HashMap<u32, u32> = HashMap::new();
     let empty_digests: HashMap<u32, [u8; 32]> = HashMap::new();
@@ -1689,7 +1696,8 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             base.push(bytes);
             member_refs.push(record.into_inner());
         }
-        let colours = refine_colours(&base, &member_refs)?;
+        let (colours, rounds) = refine_colours(&base, &member_refs)?;
+        max_refine_rounds = max_refine_rounds.max(rounds);
         // Serialize the members again, now with the final colours, and
         // hash the component. The definition members emit in ascending
         // colour order; two members with one colour emit equal bytes,
@@ -1851,6 +1859,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         class_hashes,
         func_hashes,
         semantic_hash,
+        max_refine_rounds,
     })
 }
 

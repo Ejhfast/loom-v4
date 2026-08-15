@@ -8,8 +8,8 @@
 //! - `env` and `module`: the explicit typed environments and the
 //!   compilation of one module against dependency interfaces;
 //! - `link`: the pure linker that merges modules into one program;
-//! - `cache` and `build`: the content-addressed build directory and
-//!   the build loop.
+//! - `cache` and `build`: the three-stage content-addressed build
+//!   directory and the build loop.
 //!
 //! The layer above `lm-verify` never runs code. Every artifact this
 //! crate produces meets the one verifier before it executes.
@@ -24,6 +24,7 @@ pub mod module;
 pub mod scaffold;
 
 pub use build::{build_package, BuildReport, ModuleReport};
+pub use cache::{load_through_store, Verdict, VerdictKey, VerifiedStore};
 pub use env::{CompileEnv, LinkEnv, LinkUnit};
 pub use link::{link, LinkedProgram};
 pub use manifest::{parse_manifest, Manifest};

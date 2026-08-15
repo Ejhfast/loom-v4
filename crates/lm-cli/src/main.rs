@@ -191,8 +191,13 @@ fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport
     }
     match (&report.program, report.program_semantic) {
         (Some(program), Some(semantic)) => {
+            let verb = if report.program_cached {
+                "cached"
+            } else {
+                "linked"
+            };
             lines.push(format!(
-                "linked {}  sem={} container={}",
+                "{verb} {}  sem={} container={}",
                 report.root,
                 short(&semantic),
                 short(
@@ -251,14 +256,59 @@ fn extension(path: &str) -> &str {
 fn load_program(path: &str) -> Result<lm_vm::LoadedModule, String> {
     if extension(path) == "lma" {
         let bytes = read_bytes(path)?;
-        let mut cache = lm_vm::VerifiedCache::new();
-        lm_vm::load_bytes_cached(&bytes, &mut cache)
+        let module = lm_bytecode::decode(&bytes)
+            .map_err(|e| format!("error: cannot decode the artifact: {e}\n"))?;
+        load_stored(Path::new(path), module)
             .map_err(|e| format!("error: the loader rejected the artifact: {e}\n"))
     } else {
         let source = read_source(path)?;
         let module = compile(&source)?;
         lm_vm::load(module).map_err(|e| format!("error: the verifier rejected the module: {e}\n"))
     }
+}
+
+/// The two record shapes. `lm-compiler` must not depend on `lm-vm`,
+/// so the store keeps plain values and this tool converts.
+fn to_record(verdict: &lm_compiler::Verdict) -> lm_vm::VerifiedRecord {
+    lm_vm::VerifiedRecord {
+        class_hashes: verdict.class_hashes.clone(),
+        func_hashes: verdict.func_hashes.clone(),
+        core: verdict.core,
+    }
+}
+
+fn to_verdict(record: &lm_vm::VerifiedRecord) -> lm_compiler::Verdict {
+    lm_compiler::Verdict {
+        class_hashes: record.class_hashes.clone(),
+        func_hashes: record.func_hashes.clone(),
+        core: record.core,
+    }
+}
+
+/// Admit one decoded artifact through the persistent verified-code
+/// store.
+///
+/// A hit skips the verifier pass and the identity pass. The key comes
+/// from the decoded content on every load, so no stored value enters
+/// it, and `lm_vm::load_with_record` rejects a record filed under any
+/// other key.
+fn load_stored(
+    path: &Path,
+    module: lm_bytecode::Module,
+) -> Result<lm_vm::LoadedModule, lm_vm::VerifyError> {
+    let store = lm_compiler::VerifiedStore::for_artifact(path);
+    let key = lm_vm::verified_key(&module);
+    lm_compiler::load_through_store(
+        &store,
+        &key,
+        module,
+        |module, verdict| lm_vm::load_with_record(module, &key, &to_record(verdict)),
+        |module| {
+            let loaded = lm_vm::load(module)?;
+            let verdict = to_verdict(&loaded.verified_record());
+            Ok((loaded, verdict))
+        },
+    )
 }
 
 /// Read a decoded module from an artifact or a source file.
