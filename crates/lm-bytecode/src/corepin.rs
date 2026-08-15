@@ -29,7 +29,7 @@ const PINNED: &str = include_str!("../../../core/pinned-core-defs.txt");
 /// The resolved core class indices of one module. Each entry is the
 /// class index of one enum case or parent. `None` marks an absent
 /// definition.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CoreLayout {
     pub option_some: Option<u32>,
     pub option_none: Option<u32>,

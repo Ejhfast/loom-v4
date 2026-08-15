@@ -205,22 +205,45 @@ impl LoadedModule {
     pub fn dispatch_cells(&self) -> usize {
         self.dispatch.iter().map(|row| row.table.len()).sum()
     }
+
+    /// The facts an external store persists for this admission.
+    pub fn verified_record(&self) -> VerifiedRecord {
+        self.facts.clone()
+    }
+}
+
+/// The key of one verified-code cache entry: the module verification
+/// hash, the compiler ABI version, and the verifier version.
+pub type VerifiedKey = ([u8; 32], u32, u32);
+
+/// The verified-code cache key of one decoded module.
+///
+/// The value comes from the decoded content alone. No hash stored in
+/// an artifact enters it, and the container stores no hash at all.
+pub fn verified_key(module: &Module) -> VerifiedKey {
+    (
+        lm_bytecode::identity::verification_hash(module),
+        lm_bytecode::identity::COMPILER_ABI_VERSION,
+        lm_verify::VERIFIER_VERSION,
+    )
 }
 
 /// The facts a cache hit replays: the definition hashes and the
-/// hash-linked core layout.
+/// resolved core layout.
 ///
 /// The module semantic hash is deliberately absent. It covers the
 /// export table, which holds the definition names, and the cache key
 /// does not cover the function names. Call
 /// `lm_bytecode::identity::module_identity` when the semantic hash is
 /// needed.
-#[derive(Debug, Clone)]
-struct VerifiedFacts {
-    class_hashes: Vec<[u8; 32]>,
-    func_hashes: Vec<[u8; 32]>,
-    core: lm_bytecode::corepin::CoreLayout,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRecord {
+    pub class_hashes: Vec<[u8; 32]>,
+    pub func_hashes: Vec<[u8; 32]>,
+    pub core: lm_bytecode::corepin::CoreLayout,
 }
+
+type VerifiedFacts = VerifiedRecord;
 
 /// The in-process verified-code cache.
 ///
@@ -237,7 +260,7 @@ struct VerifiedFacts {
 /// stored facts roughly double the value of a hit.
 #[derive(Debug, Default)]
 pub struct VerifiedCache {
-    verified: std::collections::HashMap<([u8; 32], u32, u32), VerifiedFacts>,
+    verified: std::collections::HashMap<VerifiedKey, VerifiedFacts>,
     /// The number of full verifier runs, for the cache-skip tests.
     pub verifications: u64,
     /// The number of identity computations, for the cache-skip tests.
@@ -247,6 +270,27 @@ pub struct VerifiedCache {
 impl VerifiedCache {
     pub fn new() -> VerifiedCache {
         VerifiedCache::default()
+    }
+
+    /// The stored record of one key, or `None` on a miss.
+    pub fn record(&self, key: &VerifiedKey) -> Option<&VerifiedRecord> {
+        self.verified.get(key)
+    }
+
+    /// Place one record under its key. A caller that reads a record
+    /// from a store must place it here through `load_with_record`,
+    /// which proves the record belongs to the module.
+    pub fn insert(&mut self, key: VerifiedKey, record: VerifiedRecord) {
+        self.verified.insert(key, record);
+    }
+
+    /// The number of stored admissions.
+    pub fn len(&self) -> usize {
+        self.verified.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.verified.is_empty()
     }
 }
 
@@ -309,11 +353,7 @@ fn load_inner(
             // identity, the core layout, and the dispatch rows below
             // are pure functions of the same inputs. A hit replays
             // them instead of recomputing them.
-            let key = (
-                lm_bytecode::identity::verification_hash(&module),
-                lm_bytecode::identity::COMPILER_ABI_VERSION,
-                lm_verify::VERIFIER_VERSION,
-            );
+            let key = verified_key(&module);
             match cache.verified.get(&key) {
                 Some(facts) => facts.clone(),
                 None => {
@@ -332,6 +372,43 @@ fn load_inner(
             facts
         }
     };
+    Ok(admit(module, facts))
+}
+
+/// Admit a decoded module through a record an external store kept.
+///
+/// The record replaces the verifier pass and the identity pass, so the
+/// caller must prove the record belongs to this module. The proof is
+/// the key: this function recomputes it from the decoded content and
+/// rejects a record filed under any other key. A store that returns a
+/// wrong or damaged record therefore cannot admit a module.
+pub fn load_with_record(
+    module: Module,
+    key: &VerifiedKey,
+    record: &VerifiedRecord,
+) -> Result<LoadedModule, VerifyError> {
+    let reject = |message: &str| VerifyError {
+        func: u32::MAX,
+        message: message.to_string(),
+    };
+    if !module.imports.is_empty() {
+        return Err(reject("the module has unresolved import slots"));
+    }
+    if verified_key(&module) != *key {
+        return Err(reject("the stored verdict does not belong to this module"));
+    }
+    if record.class_hashes.len() != module.classes.len()
+        || record.func_hashes.len() != module.funcs.len()
+    {
+        return Err(reject(
+            "the stored verdict does not match the module tables",
+        ));
+    }
+    Ok(admit(module, record.clone()))
+}
+
+/// Build the sealed dispatch tables of an admitted module.
+fn admit(module: Module, facts: VerifiedFacts) -> LoadedModule {
     // Build the sealed per-class selector tables. A child inherits
     // the resolved parent methods; own methods override entries.
     // Parents precede children in the verified class table. Each row
@@ -364,11 +441,11 @@ fn load_inner(
         resolved.push(methods);
         dispatch.push(row);
     }
-    Ok(LoadedModule {
+    LoadedModule {
         module,
         dispatch,
         facts,
-    })
+    }
 }
 
 /// Decode serialized bytecode, verify it, and admit it for execution.
