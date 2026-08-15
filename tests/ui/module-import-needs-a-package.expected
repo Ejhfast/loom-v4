@@ -1,0 +1,2 @@
+error[E1052]: `use mathlib.matrix` names a module; a module import needs a package, so compile the file inside one
+  --> tests/ui/module-import-needs-a-package.lm:1:1

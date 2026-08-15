@@ -182,6 +182,8 @@ end
 
 Top-level definitions are `class`, `enum`, and `def`. There are no mutable module variables, top-level assignment slots, effectful initializers, or runtime namespace installation. All definitions are exported by source name. The optional trailing expression becomes the module entry value.
 
+Inside a package, one module holds the program entry: `src/main.lm`. Every other module must end without a trailing expression. The file tree under `src/` is the module tree, and the module path across packages carries the package name of the manifest (`docs/specs/packages.md`).
+
 ### 3.2 Predeclaration and recursion
 
 All top-level type and value names are predeclared before bodies are checked, permitting mutual recursion. A name may be defined once in its namespace. Enum arm labels live in the constructor namespace and do not consume ordinary top-level value names.
@@ -200,7 +202,11 @@ The following require no ordinary import slot:
 
 The standard library is not ambient. A package or explicit compile environment supplies every `std/*` module it uses. Every other free name must be defined by the module or supplied in the explicit compile environment.
 
-The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name, and a `use` of another package compiles to a named import slot that the build tool fulfills. `use` never grants authority. The package layout, the manifest, and the resolution roots are defined in `docs/specs/packages.md`.
+The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name, and a `use` of another module compiles to a named import slot that the build tool fulfills. `use` never grants authority and never changes an effect row. The package layout, the manifest, and the resolution roots are defined in `docs/specs/packages.md`.
+
+A `use` path starts at a root name. The root set is fixed per module: the dependency keys of the manifest, this package's own top-level modules, `std`, and `sys`. A collision inside the root set is a compile error, and the fix is a manifest rename; resolution never picks silently. A path that names a module binds that module, and every export of it resolves under the bound name. A path that names one export of a module binds that export.
+
+One import slot names the providing module, the exported name, the kind, and the pinned interface hash. A compiler checks the importing module against the interface alone, and never against the implementation of the provider. The linker resolves each slot and rejects a provider whose interface hash differs from the pin.
 
 ### 3.4 Primitive compile operation
 
@@ -267,6 +273,8 @@ end
 `LinkEnv.bind[T]` returns `Result[(),LinkEnvError]`; `Artifact.link` returns `Result[LinkedModule,LinkErrors]`. The typed environment must contain exactly one frozen compatible value per import slot. Linking validates signatures and pinned hashes, creates local class/function values, evaluates the pure entry expression, deep-freezes the result, and returns a `LinkedModule`. `definition` and `entry` return typed `Result` values rather than an erased lookup. Linking installs nothing globally.
 
 Missing, extra, incompatible, or mutable bindings produce `LinkErrors` in the trusted API. Injecting malformed linked state into a VM faults with `LinkMismatch`.
+
+Linking a program merges its modules into one closed artifact with an empty import table. The merge is pure: it installs no global name, performs no host operation, and reads no file. Two definitions with one definition hash are one definition in the merged program, so the core image every module carries becomes one core and a core value keeps its class across a module boundary. A module with an unresolved import slot never executes: the loader admits an artifact only with an empty import table. The merged artifact meets the whole verifier before it runs.
 
 ### 3.7 Definition and module identity
 

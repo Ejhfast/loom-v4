@@ -1,7 +1,7 @@
 # Packages and Modules
 
-Status: draft for review. Weeks 5 and 6 implement the base. Week 12
-completes the tooling.
+Status: week 6 implements the base of this document. Week 12
+completes the tooling. Section 9 records what week 6 left open.
 
 This document defines the ordinary developer loop: how a project
 lives on disk, how files refer to each other, and how one package
@@ -43,6 +43,18 @@ the local name of that package inside this one. Rename a dependency
 by its key when two names collide. Registries, version ranges,
 lockfiles, and workspaces are out of scope for now. Dependency
 identity is content-hashed, so a lockfile adds nothing yet.
+
+The accepted manifest grammar is a strict subset of TOML: blank
+lines, `#` comments, the two table headers `[package]` and
+`[dependencies]`, `key = "string"` pairs, and the inline dependency
+table `{ path = "..." }`. There is no array, no nested table, no
+escape sequence, and no number or boolean literal. Every rejection
+names the line and the fix.
+
+A module path across packages carries the package name of the
+manifest, not the dependency key: `mathlib.matrix` stays
+`mathlib.matrix` however a dependent names its key. Two packages with
+one name in one graph are an error.
 
 ## 3. Modules from files
 
@@ -129,3 +141,20 @@ For a simple name inside a module body: locals and parameters,
 then module definitions, then `use` bindings, then the prelude,
 then fixed bindings (`sys`). Ambiguity inside one layer is an
 error, never a silent pick.
+
+A `use` of a module binds every export of that module under the
+bound name, so `matrix.Matrix` and `matrix.describe` resolve through
+the qualified name. A `use` of one export binds the short name
+directly, and a name the module already defines is an error with the
+module form as the stated fix.
+
+## 9. What week 6 left open
+
+- `std` does not ship with this toolchain yet. `use std.*` rejects
+  with that message. Week 11 lands the library.
+- A fully qualified reference without a `use` line
+  (`mathlib.matrix.Matrix`) is not accepted yet. Name the module or
+  the definition with a `use` line first.
+- A `use` of a module imports its whole export set. Per-definition
+  pruning of the unused import slots is deferred.
+- `lm test` arrives with the test harness in week 12.
