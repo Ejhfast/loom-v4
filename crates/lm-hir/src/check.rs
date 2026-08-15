@@ -882,21 +882,28 @@ pub fn check_module_with(
     // Pass 2c: resolve core classes and enums. Their method function
     // indices follow the entry.
     resolve_all_classes(&mut ctx, core, true).map_err(core_defect)?;
-    // Pass 3: check field defaults.
-    let mut own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>> = Vec::new();
-    check_defaults(&mut ctx, module, false, &mut own_defaults)?;
-    check_defaults(&mut ctx, core, true, &mut own_defaults).map_err(core_defect)?;
     // Import phase B: fill the imported declarations. The class table
     // holds the user and the core classes now, so an imported
-    // signature may name any of them. An imported declaration carries
-    // no default expression: the provider construction function
-    // evaluates its own defaults.
+    // signature may name any of them. Phase B runs before any body
+    // and before any field default, because both may name an
+    // imported class.
     let import_span = module
         .uses
         .first()
         .map(|u| u.span)
         .unwrap_or(Span::new(0, 0));
-    materializer.finish(&mut ctx, &mut own_defaults, import_span)?;
+    let import_fields = materializer.finish(&mut ctx, import_span)?;
+    // Pass 3: check field defaults.
+    let mut own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>> = Vec::new();
+    check_defaults(&mut ctx, module, false, &mut own_defaults)?;
+    check_defaults(&mut ctx, core, true, &mut own_defaults).map_err(core_defect)?;
+    // An imported declaration carries no default expression: the
+    // provider construction function evaluates its own defaults. The
+    // entries follow the user and the core classes, so the table
+    // stays aligned with the class indices.
+    for count in import_fields {
+        own_defaults.push(vec![(None, Vec::new()); count]);
+    }
     // Pass 4: check top-level function bodies.
     for (idx, func) in module.funcs.iter().enumerate() {
         let sig = ctx.sigs[idx].clone();
@@ -1231,6 +1238,20 @@ fn link_class_parents(
                     ));
                 }
                 ClassKind::Normal => {}
+            }
+            if parent >= ctx.import_start {
+                // An imported class carries a signature and no body,
+                // so a subclass cannot reach its `init`. Inheritance
+                // across a module boundary needs a slot kind that
+                // week 6 does not define.
+                return Err(Diagnostic::new(
+                    "E1038",
+                    format!(
+                        "`{pname}` is an imported class, and a class cannot \
+                         inherit one; hold it in a field instead"
+                    ),
+                    *pspan,
+                ));
             }
             if parent >= idx {
                 return Err(Diagnostic::new(

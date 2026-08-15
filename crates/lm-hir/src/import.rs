@@ -182,7 +182,11 @@ impl<'a> Materializer<'a> {
         // Reserve every class the declaration names.
         let class = class.clone();
         if let Some(parent) = &class.parent {
-            self.reserve_qual(ctx, parent, span)?;
+            let parent = self.reserve_qual(ctx, parent, span)?;
+            // The store answers the subtype questions, so an imported
+            // child must carry its parent there too. The link happens
+            // in phase A, before any signature resolves.
+            ctx.store.set_class_parent(ClassId(id), ClassId(parent));
         }
         if let Some(family) = &class.family {
             self.reserve_qual(ctx, family, span)?;
@@ -292,21 +296,17 @@ impl<'a> Materializer<'a> {
     // ------------------------------------------------------------
 
     /// Fill every reserved declaration, create the imported
-    /// functions, and record the import slots. `own_defaults` grows
-    /// with one empty entry set per imported class.
-    pub(crate) fn finish(
-        &mut self,
-        ctx: &mut Ctx,
-        own_defaults: &mut Vec<Vec<(Option<crate::hir::HExpr>, Vec<TypeId>)>>,
-        span: Span,
-    ) -> Result<(), Diagnostic> {
+    /// functions, and record the import slots. The result is the own
+    /// field count of each imported class, in class-index order, so
+    /// the caller can keep the default table aligned.
+    pub(crate) fn finish(&mut self, ctx: &mut Ctx, span: Span) -> Result<Vec<usize>, Diagnostic> {
         let pending = std::mem::take(&mut self.pending);
+        let mut own_fields = Vec::with_capacity(pending.len());
         for item in &pending {
             debug_assert_eq!(item.id as usize, ctx.classes.len());
             let info = self.class_info(ctx, item, span)?;
-            let own_count = info.field_names.len() - info.own_start;
+            own_fields.push(info.field_names.len() - info.own_start);
             ctx.classes.push(info);
-            own_defaults.push(vec![(None, Vec::new()); own_count]);
             ctx.imports.push(HirImport {
                 module: item.module.clone(),
                 name: item.name.clone(),
@@ -397,7 +397,7 @@ impl<'a> Materializer<'a> {
                 hash: item.iface_hash,
             });
         }
-        Ok(())
+        Ok(own_fields)
     }
 
     /// The checker declaration of one imported class.

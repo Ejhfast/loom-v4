@@ -72,7 +72,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
         "build" => {
             let options = parse_options(rest)?;
             if is_package(&options.file) {
-                build_package(&options.file)?;
+                build_package(&options.file, false)?;
                 return Ok(ExitCode::SUCCESS);
             }
             build_artifact(&options.file)
@@ -80,7 +80,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
         "run" => {
             let options = parse_options(rest)?;
             if is_package(&options.file) {
-                let report = build_package(&options.file)?;
+                let report = build_package(&options.file, true)?;
                 let program = report.program.ok_or_else(|| {
                     format!(
                         "error: the package `{}` has no `src/main.lm`, so it \
@@ -167,15 +167,20 @@ fn is_package(path: &str) -> bool {
 }
 
 /// Build one package and print the per-module report.
-fn build_package(path: &str) -> Result<lm_compiler::BuildReport, String> {
+fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport, String> {
     let report = lm_compiler::build_package(Path::new(path), Path::new("build"))?;
+    let mut lines: Vec<String> = Vec::new();
     for module in &report.modules {
         let verb = if module.cached { "cached" } else { "built " };
-        println!("{verb} {}  {}", module.path, short(&module.semantic_hash));
+        lines.push(format!(
+            "{verb} {}  {}",
+            module.path,
+            short(&module.semantic_hash)
+        ));
     }
     match (&report.program, report.program_semantic) {
         (Some(program), Some(semantic)) => {
-            println!(
+            lines.push(format!(
                 "linked {}  sem={} container={}",
                 report.root,
                 short(&semantic),
@@ -184,10 +189,17 @@ fn build_package(path: &str) -> Result<lm_compiler::BuildReport, String> {
                         .program_container
                         .expect("a linked program has bytes")
                 )
-            );
-            println!("  {}", program.display());
+            ));
+            lines.push(format!("  {}", program.display()));
         }
-        _ => println!("library {} builds no program", report.root),
+        _ => lines.push(format!("library {} builds no program", report.root)),
+    }
+    for line in lines {
+        if to_stderr {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
     }
     Ok(report)
 }

@@ -603,6 +603,23 @@ fn register_exports(
 ) -> Result<(), LinkError> {
     for export in &module.exports {
         let key = (path.to_string(), export.name.clone());
+        // The decoder bounds these indices, and a hand-built module
+        // reaches the linker without a decoder, so the bound is
+        // checked here too.
+        let limit = if export.kind.is_class() {
+            reloc.classes.len()
+        } else {
+            reloc.funcs.len()
+        };
+        if export.def as usize >= limit
+            || (export.ctor != lm_bytecode::NO_CTOR && export.ctor as usize >= reloc.funcs.len())
+        {
+            return Err(fail(format!(
+                "the export `{}` of `{path}` names a definition outside the \
+                 module",
+                export.name
+            )));
+        }
         let entry = interface.find(&export.name).ok_or_else(|| {
             fail(format!(
                 "the interface of `{path}` does not describe the export `{}`",

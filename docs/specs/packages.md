@@ -157,4 +157,7 @@ module form as the stated fix.
   the definition with a `use` line first.
 - A `use` of a module imports its whole export set. Per-definition
   pruning of the unused import slots is deferred.
+- A class cannot inherit an imported class. An imported declaration
+  carries no body, so a subclass cannot reach the `init` of its
+  parent. Hold the imported class in a field instead.
 - `lm test` arrives with the test harness in week 12.

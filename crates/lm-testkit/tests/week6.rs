@@ -305,6 +305,190 @@ fn the_linked_program_shares_one_core() {
     );
 }
 
+/// An imported enum keeps its family: the arms construct, `case`
+/// matches, and the exhaustiveness rule sees the closed arm set.
+#[test]
+fn an_imported_enum_constructs_and_matches() {
+    let tree = TempTree::new("enum");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/shape.lm",
+        "enum Shape\n\
+         \x20 Dot\n\
+         \x20 Line(len: Int)\n\
+         \n\
+         \x20 def size(self): Int\n\
+         \x20   case self\n\
+         \x20   in Dot then 0\n\
+         \x20   in Line(l) then l\n\
+         \x20   end\n\
+         \x20 end\n\
+         end\n",
+    );
+    tree.write(
+        "prog/lm.package",
+        "[package]\nname = \"prog\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    // The direct import binds the family, so the arm names resolve
+    // unqualified and `case` sees the whole arm set.
+    tree.write(
+        "prog/src/main.lm",
+        "use sys.io.print\n\
+         use lib.shape.Shape\n\
+         \n\
+         def name(s: Shape): String\n\
+         \x20 case s\n\
+         \x20 in Dot then \"dot\"\n\
+         \x20 in Line(l) then \"line {l}\"\n\
+         \x20 end\n\
+         end\n\
+         \n\
+         def run() with Io.Print\n\
+         \x20 a = name(Dot())\n\
+         \x20 b = name(Line(4))\n\
+         \x20 print(\"{a} {b} {Line(7).size()}\\n\")\n\
+         end\n\
+         \n\
+         run()\n",
+    );
+    let report = tree.build("prog").expect("builds");
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    assert_eq!(output, "dot line 4 7\n");
+}
+
+/// An imported generic class and an imported generic function keep
+/// their arity through the import slot.
+#[test]
+fn imported_generics_keep_their_arity() {
+    let tree = TempTree::new("generics");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/box.lm",
+        "class Box[T]\n\
+         \x20 value: T\n\
+         \n\
+         \x20 def init(mut self, value: T)\n\
+         \x20   self.value = value\n\
+         \x20 end\n\
+         \n\
+         \x20 def get(self): T\n\
+         \x20   self.value\n\
+         \x20 end\n\
+         end\n\
+         \n\
+         def wrap[T](value: T): Box[T]\n\
+         \x20 Box(value)\n\
+         end\n",
+    );
+    tree.write(
+        "prog/lm.package",
+        "[package]\nname = \"prog\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "prog/src/main.lm",
+        "use sys.io.print\n\
+         use lib.box\n\
+         \n\
+         def run() with Io.Print\n\
+         \x20 a = box.Box(7)\n\
+         \x20 b = box.wrap(\"text\")\n\
+         \x20 c: box.Box[Int] = a\n\
+         \x20 print(\"{c.get()} {b.get()}\\n\")\n\
+         end\n\
+         \n\
+         run()\n",
+    );
+    let report = tree.build("prog").expect("builds");
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    assert_eq!(output, "7 text\n");
+}
+
+/// An imported class holds its mutable methods and works as the type
+/// of a local field.
+#[test]
+fn an_imported_class_holds_its_mutable_methods() {
+    let tree = TempTree::new("mutable");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/counter.lm",
+        "class Counter\n\
+         \x20 value: Int = 0\n\
+         \n\
+         \x20 def add(mut self, n: Int): Int\n\
+         \x20   self.value = self.value + n\n\
+         \x20   self.value\n\
+         \x20 end\n\
+         end\n",
+    );
+    tree.write(
+        "prog/lm.package",
+        "[package]\nname = \"prog\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "prog/src/main.lm",
+        "use sys.io.print\n\
+         use lib.counter\n\
+         \n\
+         class Pair\n\
+         \x20 left: counter.Counter = counter.Counter()\n\
+         \n\
+         \x20 def bump(mut self): Int\n\
+         \x20   self.left.add(2)\n\
+         \x20 end\n\
+         end\n\
+         \n\
+         def run() with Io.Print\n\
+         \x20 p = Pair()\n\
+         \x20 p.bump()\n\
+         \x20 print(\"{p.bump()}\\n\")\n\
+         end\n\
+         \n\
+         run()\n",
+    );
+    let report = tree.build("prog").expect("builds");
+    let output = run_artifact(&report.program.clone().unwrap(), &["Io.Print"]);
+    assert_eq!(output, "4\n");
+}
+
+/// A class cannot inherit an imported class, and the diagnostic names
+/// the fix.
+#[test]
+fn a_class_cannot_inherit_an_imported_class() {
+    let tree = TempTree::new("inherit");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/base.lm",
+        "class Base\n  tag: Int = 0\n  def show(self): Int\n    self.tag\n  end\nend\n",
+    );
+    tree.write(
+        "prog/lm.package",
+        "[package]\nname = \"prog\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "prog/src/main.lm",
+        "use lib.base.Base\n\nclass Child < Base\nend\n\ndef run(): Int\n  1\nend\n\nrun()\n",
+    );
+    let error = tree.build("prog").expect_err("inheritance must reject");
+    assert!(error.contains("E1038"), "{error}");
+    assert!(error.contains("imported class"), "{error}");
+}
+
 /// A `use` grants no authority: an imported function that performs
 /// still charges the row on its caller and still needs the grant.
 #[test]
@@ -483,6 +667,28 @@ fn the_manifest_subset_is_strict() {
     let error = tree.build("pkg").expect_err("the key must reject");
     assert!(error.contains("authors"), "{error}");
     assert!(error.contains("`[package]` key"), "{error}");
+}
+
+/// The build directory is not a trust boundary: a damaged entry is a
+/// miss, so the compiler runs again and the program is unchanged.
+#[test]
+fn a_damaged_cache_entry_is_a_miss() {
+    let tree = TempTree::new("damaged");
+    workspace(&tree);
+    let first = tree.build("app").expect("builds");
+    let good = std::fs::read(first.program.clone().unwrap()).unwrap();
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(tree.path("build/cache/modules"))
+        .expect("the cache directory exists")
+        .map(|e| e.expect("entry").path())
+        .filter(|p| p.extension().map(|e| e == "lma").unwrap_or(false))
+        .collect();
+    entries.sort();
+    assert_eq!(entries.len(), 3);
+    std::fs::write(&entries[0], b"not an artifact").expect("writes");
+    let second = tree.build("app").expect("builds");
+    assert_eq!(second.compiled(), 1, "the damaged entry did not miss");
+    let again = std::fs::read(second.program.clone().unwrap()).unwrap();
+    assert_eq!(good, again, "the rebuild changed the program");
 }
 
 /// Two builds in two build directories produce the same program

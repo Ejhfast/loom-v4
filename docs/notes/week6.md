@@ -343,6 +343,10 @@ precise error before that, not to keep the program safe.
 - An enum arm of a module-aliased enum has no qualified constructor
   form (`matrix.Shape.Dot(1)`). Bind the enum directly
   (`use mathlib.matrix.Shape`) and the unqualified arm names work.
+- A class cannot inherit an imported class. An imported declaration
+  carries no body, so a subclass cannot reach the `init` of its
+  parent, and week 6 defines no slot kind for it. The diagnostic
+  names the field alternative.
 - `std` does not exist yet, so `use std.*` rejects with that message.
 - The `LinkedEntry` handle is a Rust-side approximation of the typed
   `LinkedEntry[A,R]` of specification 3.6: it exposes the entry
@@ -392,11 +396,13 @@ precise error before that, not to keep the program safe.
 
 ## New tests
 
-`week6.rs` (20 cases) covers the build loop end to end on real
+`week6.rs` (25 cases) covers the build loop end to end on real
 package trees: the two-package workspace, the cache hit, the two
-rebuild gates, the stale caller, the closed program artifact, the
-shared core, authority, the scaffold, a build from a subdirectory,
-the dependency-name collision, the unknown root, the module tree from
+rebuild gates, the stale caller, the damaged cache entry, the closed
+program artifact, the shared core, the imported enum, the imported
+generics, the imported mutable method, the inheritance rejection,
+authority, the scaffold, a build from a subdirectory, the
+dependency-name collision, the unknown root, the module tree from
 directories, the library package, the manifest subset, program
 determinism across two build directories, the hand-driven typed
 environments, and the stale-pin link rejection.
@@ -409,6 +415,32 @@ nominal identity, the core slot, and the identity replay on a cache
 hit. `fuzz.rs` gains the interface decoder and the manifest parser.
 `tests/ui/` gains two `use` diagnostics. `bench_smoke.rs` times the
 build, the link, and the cached load path.
+
+## The self-review pass
+
+A pass over the import surface with probe tests found three defects.
+Each probe failed first and passes now.
+
+- **The imported parent never reached the type store.** The
+  materializer set the parent inside the checker class record and not
+  in `lm_types::TypeStore`, which answers every subtype question. An
+  imported enum arm was therefore not a subtype of its family, and
+  `name(Dot())` rejected with a type mismatch. Phase A now calls
+  `set_class_parent` as soon as it reserves the parent.
+- **A field default that named an imported class panicked the
+  checker.** Phase B ran after the default pass, so the default saw a
+  class index the checker record did not hold yet. Phase B now runs
+  before every body and every default, and the default table takes
+  the imported entries after the user and the core entries, so the
+  index alignment holds.
+- **Inheritance from an imported class gave a misleading
+  diagnostic.** The old message asked the user to declare the parent
+  earlier, which no edit can do. The rule is now explicit: a class
+  cannot inherit an imported class, and the message names the field
+  alternative.
+
+The `lm run <package>` report moved to standard error in the same
+pass, so the program output stays clean on standard output.
 
 ## Deferred work
 
