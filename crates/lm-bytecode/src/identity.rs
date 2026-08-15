@@ -139,6 +139,20 @@ pub fn verification_hash(module: &Module) -> [u8; 32] {
     for func in &module.funcs {
         write_str(&mut bytes, &func.name);
     }
+    // The `mut` marker vectors take their count from the parameter
+    // table inside the semantic section, so a hand-built module with
+    // a misaligned vector writes a shifted stream. The decoder never
+    // produces one, and the identity preflight rejects one, but the
+    // key is computed before either. The lengths therefore enter the
+    // key, so one key never covers two marker shapes.
+    for func in &module.funcs {
+        bytes.extend_from_slice(&(func.param_muts.len() as u32).to_le_bytes());
+    }
+    for ty in &module.types {
+        if let BcType::Fn(_, muts, _, _) = ty {
+            bytes.extend_from_slice(&(muts.len() as u32).to_le_bytes());
+        }
+    }
     sha256(&bytes)
 }
 

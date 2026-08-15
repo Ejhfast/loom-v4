@@ -625,14 +625,21 @@ positions:
    a definition hash, inside a cycle or outside one, and the
    specification gets one uniform rule with no special case. There is
    precedent: a closure inside a component with named definitions
-   already orders by its generated ID. The cost is that the component
-   hash no longer separates members that differ only by name, which
-   may be acceptable, because a function hash already excludes its own
-   name.
+   already orders by its generated ID. The cost is one lost
+   separation: the component hash no longer tells apart members that
+   differ only by name. That may be acceptable, because a function
+   hash already excludes its own name.
 
 Position 4 gives users the simplest story and deletes a special case.
 Position 2 is the weakest: it turns a guarantee into an implementation
 description and makes rebuild cost depend on alphabetical order.
+
+Week 6 takes position 1 for the text and leaves the mechanism open.
+Section 3.7 says a rename inside a cyclic component **may** move every
+member hash. The word states a bound, not a mechanism, so a later
+position 3 or position 4 stays legal. The implementation note beside
+it records position 4 and its cost. The cache key covers the names
+either way, because the bound is what a host must assume.
 
 ### The `mut` flag vectors inside the semantic section
 
@@ -658,6 +665,15 @@ Three fixes, which are not equivalent:
 3. Run `preflight` on every load. This rejects the malformed module
    instead of only separating it, and it restores the rule that a
    cached load and an uncached load agree.
+
+Week 6 takes fix 2. The property at risk is the injectivity of the
+cache key, and fix 2 closes exactly that. Fix 1 moves every artifact
+byte for a defect no byte stream can reach, because the decoder
+always writes one marker per parameter. Fix 3 costs a full preflight
+per load, which is most of what the identity replay saves. The
+question stays open only as a format question: an encoder that writes
+its own counts is the cleaner shape when the format version moves
+next.
 
 ## Deferred work
 
