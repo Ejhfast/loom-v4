@@ -274,32 +274,57 @@ end
 
 Missing, extra, incompatible, or mutable bindings produce `LinkErrors` in the trusted API. Injecting malformed linked state into a VM faults with `LinkMismatch`.
 
-Linking a program merges its modules into one closed artifact with an empty import table. The merge is pure: it installs no global name, performs no host operation, and reads no file. Two definitions with one definition hash are one definition in the merged program. The core image every module carries therefore becomes one core, and a core value keeps its class across a module boundary. A module with an unresolved import slot never executes: the loader admits an artifact only with an empty import table. The merged artifact meets the whole verifier before it runs.
+Linking a program merges its modules into one closed artifact with an empty import table. The merge is pure: it installs no global name, performs no host operation, and reads no file. A module with an unresolved import slot never executes: the loader admits an artifact only with an empty import table. The merged artifact meets the whole verifier before it runs.
+
+The linker compares two classes on QualifiedKey and StructuralHash (3.7, 8.6). The table is exhaustive:
+
+| QualifiedKey | StructuralHash | Result |
+| --- | --- | --- |
+| same | same | merge into one class |
+| same | different | reject: conflicting implementations |
+| different | same | keep distinct |
+| different | different | keep distinct |
+
+The second row rejects two implementation versions of one qualified name. The rejection names both providers and the rebuild. The third row keeps `mathlib.Vec2` and `app.Point` distinct although their structures are equal.
+
+Two functions with one StructuralHash are one function in the merged program. A function carries no QualifiedKey, so content decides. The core image every module carries therefore becomes one core, and a core value keeps its class across a module boundary.
 
 ### 3.7 Definition and module identity
 
-A definition hash covers canonical bytecode and constants, full signature and effect row, referenced definition identities, import requirements and pinned hashes, compiler ABI version, and intrinsic semantics version.
+Four identities answer four questions about one definition: **QualifiedKey**, **StructuralHash**, **InterfaceHash**, and **VerificationHash**. Section 8.6 states them for a class. Each consumer names the one it needs, and no consumer reads a value another consumer owns.
 
-For mutually recursive definitions, the compiler finds strongly connected components. A cyclic component is canonically ordered by exported name and stable generated ID, encodes internal references by member ordinal, and receives one component hash. Member hashes are domain-separated from that hash and ordinal; there is no iterative “hash until stable” rule.
+A **QualifiedKey** is the fully qualified declaration path of a class, for example `mathlib.geometry.Point`. The package name of the manifest supplies the root, never the dependency key. Two classes are the same nominal class when their QualifiedKey values are equal. A function carries no QualifiedKey: a function is identified by content alone.
 
-Canonical bytecode is a dedicated identity encoding, not the loading encoding. It replaces every module-global index — function, class, type, string, application, and selector — with content identity, inline content, or structural encoding. Definition hashes therefore do not depend on definition order in the source or on pool interning order.
+A **StructuralHash** covers canonical bytecode and constants, full signature and effect row, referenced definition identities, import requirements and pinned hashes, compiler ABI version, and intrinsic semantics version. It never covers the definition's own name.
 
-Names enter identity by definition kind:
+**The naming rule.** A declaration name never enters a structural definition hash. A name may enter an interface hash, a namespace hash, or a qualified key. The shorter claim "no name in any hash" is wrong: an interface hash must contain names, because an importer agrees with a named API.
 
-- A **function** definition hash excludes its own name. A function rename outside a cyclic component moves the module hash through the export table, and moves no definition hash. Inside a cyclic component the canonical member order sorts by name, so a rename there may move the member ordinals and every member hash of that component.
-- A **class** definition hash includes its own name. A class is a nominal type (5.3, 8.6), so two classes with different names are different definitions whatever their shape. A class rename moves that class hash, every hash that references it, and the module hash.
+A reference to a class inside canonical bytecode names that class by QualifiedKey, never by the structural identity of the referenced class. Two signatures that name two structurally identical classes therefore receive different structural hashes. This rule stays inside the naming rule, because it covers a referenced nominal identity and never the declaration's own name.
 
-*Implementation note.* The name-ordered member rule makes every definition name an input of identity. A host that caches a verified admission must therefore cover the names in its cache key, because the core-image resolution below reads identity. A content-ordered member rule would remove the function names from identity; it needs a canonical order over isomorphic members and is not defined here.
+Canonical bytecode is a dedicated identity encoding, not the loading encoding. It replaces every module-global index — function, class, type, string, application, and selector — with content identity, a qualified key, inline content, or structural encoding. Definition hashes therefore do not depend on definition order in the source or on pool interning order.
+
+For mutually recursive definitions, the compiler finds strongly connected components. A component labels its members by structural refinement, and no name and no source order enters the rule:
+
+1. The first label of a member is the hash of the member bytes, with every reference inside the component replaced by one fixed placeholder.
+2. The next label of a member is the hash of its current label plus the current labels of the members it references. References keep their position order inside the member; a member never sorts its own references, because `f(g(x))` and `g(f(x))` differ.
+3. Refinement stops as soon as the label partition stops refining. The round count is capped at the member count.
+4. The final label is the StructuralHash of the member. The component hash is the hash of the sorted final labels.
+
+The set of components is a property of the graph, so the emission order of the component walk is invisible in every hash. A rename therefore moves no definition hash, inside a cyclic component or outside one.
+
+Structural refinement cannot always give each member a unique label. Two mutually recursive definitions with equal bodies stay symmetric through every round. This is a property of graph automorphism, not a defect of the rule: no order-invariant rule separates such members without an external identity. Symmetric members share one StructuralHash, and their QualifiedKey values keep them distinct wherever distinctness is observable.
 
 A **method** takes part in its class identity as the pair of the selector name and the implementing function identity. Selector identity is therefore name-based and independent of any method body. An override with a different body keeps the selector name.
 
-An **interface hash** covers only the exported name, the kind, and the full signature, with class references by qualified name. It covers no method body and no function body. Import slots pin interface hashes. An edit to an exported body therefore moves the definition hash of that body and no interface hash, and no dependent module recompiles. The linker resolves an import slot to a definition, and it rejects a slot whose provider interface hash differs from the pin.
+An **InterfaceHash** covers only the exported name, the kind, and the full signature, with class references by qualified name. It covers no method body and no function body. Import slots pin interface hashes. An edit to an exported body therefore moves the StructuralHash of that body and no interface hash, and no dependent module recompiles. The linker resolves an import slot to a definition, and it rejects a slot whose provider interface hash differs from the pin.
 
-*Implementation note.* The reference implementation uses Tarjan's algorithm in an iterative form with an explicit work stack; the definition graph is untrusted input, so the walk must not grow the host stack. Traversal order is pinned: roots in ascending definition index, successors in ascending reference order. Tarjan emits components callees-first, and that emission order is the hash schedule: every referenced definition hash is complete before a component is hashed. The hashes themselves do not depend on the traversal order, because the partition and the in-component ordering are canonical.
+A **VerificationHash** is the exact resolved input of the verifier. It covers the semantic region, the operation manifest digest, and every resolved input the verifier reads. It answers one question: did the verifier approve this exact representation? A host that caches a verified admission keys on this value and on no other. The verifier reads resolved slots and structures, never a source name, so a rename moves no VerificationHash.
+
+*Implementation note.* The reference implementation uses Tarjan's algorithm in an iterative form with an explicit work stack; the definition graph is untrusted input, so the walk must not grow the host stack. Traversal order is pinned: roots in ascending definition index, successors in ascending reference order. Tarjan emits components callees-first, and that emission order is the hash schedule: every referenced definition hash is complete before a component is labeled. The hashes themselves do not depend on the traversal order, because the partition and the member labeling are canonical.
 
 A module semantic hash covers definitions, entry code/type, imports, and format version. It excludes source spelling, comments, paths, embedded source, source maps, and debug sections. A separate container hash covers exact bytes.
 
-A definition hash is not injective over source programs. Two classes with one name and one shape share a hash, and no rule makes class names unique inside a module. A lookup that must select one definition therefore states a deterministic tie rule, and no security property rests on the absence of ties.
+A StructuralHash is not injective over source programs. Two structurally identical classes share one value, and symmetric members of one component share one value. A lookup that must select one definition therefore states a deterministic tie rule, and no security property rests on the absence of ties. The linker separates such classes by QualifiedKey.
 
 ---
 
@@ -829,7 +854,14 @@ A call selector is fixed at compile time; the runtime class selects the sealed i
 
 ### 8.6 Class identity
 
-A class value is frozen. Its identity covers the class name, normalized field layout, method signatures and bytecode, superclass/import requirement, generic arity, and native intrinsic identifier where applicable. Instance headers point to a VM-local class slot resolved to this identity.
+A class value is frozen. Four identities answer four questions about one class. Each consumer names the one it needs.
+
+- **QualifiedKey** — the nominal identity. The value is the fully qualified declaration path, for example `mathlib.geometry.Point`. Two classes are the same nominal class when their QualifiedKey values are equal. The linker uses this value. The type checker never compares it, because it works on class indices inside one module.
+- **StructuralHash** — the name-free content identity. It covers the kind, the generic arity, the parent identity, the normalized field layout, the selector set, the method signatures, the implementing function identities, and the native intrinsic identifier where applicable. It never covers the class's own name. Section 3.7 states how a reference to another class enters it.
+- **InterfaceHash** — the named public API identity of one export. It covers the export name, the kind, the full structural signature with class references by qualified name, the field defaults, the arm names, and the initializer signature. An import slot pins it. A rename moves it.
+- **VerificationHash** — the exact resolved input of the verifier. It answers whether the verifier approved this exact representation.
+
+The linker merges two classes on QualifiedKey and StructuralHash together (3.6). Instance headers point to a VM-local class slot that the linker resolved. Class equality at run time stays an index comparison inside one linked program, and no run-time path compares a hash.
 
 ---
 
