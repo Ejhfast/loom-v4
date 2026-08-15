@@ -9,6 +9,7 @@ pub mod hir;
 pub mod lower;
 
 pub use check::check_module;
+pub use hir::dump_classes;
 pub use lower::lower_module;
 
 /// Render the lowered control-flow graph in a stable readable form.

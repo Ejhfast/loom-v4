@@ -1,0 +1,9 @@
+a = [1]
+b = [1]
+c = a
+s1 = "he"
+s2 = "hello"
+same_ref = a == c
+diff_ref = a == b
+str_eq = "{s1}llo" == s2
+"{same_ref} {diff_ref} {str_eq}"

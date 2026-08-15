@@ -1,0 +1,4 @@
+sb = StringBuilder()
+sb.append("a")
+sb.freeze()
+sb.append("b")

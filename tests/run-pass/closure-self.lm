@@ -1,0 +1,9 @@
+class Adder
+  base: Int = 5
+
+  def make(self): (Int) -> Int
+    do |n: Int|: Int n + self.base end
+  end
+end
+
+Adder().make()(1)

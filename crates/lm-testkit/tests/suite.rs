@@ -41,3 +41,21 @@ fn factorial_example_prints_3628800() {
 fn control_example_prints_4950() {
     assert_eq!(run_example("examples/01-basics/control.lm"), "Done(4950)");
 }
+
+#[test]
+fn counter_example_prints_done_5() {
+    assert_eq!(run_example("examples/02-objects/counter.lm"), "Done(5)");
+}
+
+#[test]
+fn counts_example_prints_the_word_counts() {
+    assert_eq!(
+        run_example("examples/02-objects/counts.lm"),
+        "Done({\"red\": 3, \"blue\": 2, \"green\": 1})"
+    );
+}
+
+#[test]
+fn closures_example_prints_done_42() {
+    assert_eq!(run_example("examples/02-objects/closures.lm"), "Done(42)");
+}

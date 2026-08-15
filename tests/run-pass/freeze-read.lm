@@ -1,0 +1,8 @@
+class Config
+  name: String = "x"
+  sizes: [Int] = [1, 2]
+end
+
+c = Config()
+c.freeze()
+c.sizes.at(1) + c.sizes.len()

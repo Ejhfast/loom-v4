@@ -70,14 +70,65 @@ fn deep_while_blocks_are_rejected_with_a_diagnostic() {
 }
 
 #[test]
-fn moderate_nesting_compiles_and_runs() {
-    let text = nested("(", "1", ")", 120) + "\n";
-    let shown = run_text("t.lm", &text, VmConfig::default()).unwrap();
-    assert_eq!(shown, "Done(1)");
+fn deep_list_literals_are_rejected_with_a_diagnostic() {
+    on_small_stack(|| {
+        let text = nested("[", "1", "]", 5_000) + "\n";
+        assert_eq!(code_of(&text), "E1022");
+    });
+}
 
-    let text = nested("if true\n", "x = 1\n", "end\n", 80) + "7\n";
-    let shown = run_text("t.lm", &text, VmConfig::default()).unwrap();
-    assert_eq!(shown, "Done(7)");
+#[test]
+fn deep_map_literals_are_rejected_with_a_diagnostic() {
+    on_small_stack(|| {
+        let text = nested("{1: ", "2", "}", 5_000) + "\n";
+        assert_eq!(code_of(&text), "E1022");
+    });
+}
+
+#[test]
+fn deep_closure_bodies_are_rejected_with_a_diagnostic() {
+    on_small_stack(|| {
+        let text = nested("do || ", "1", " end", 5_000) + "\n";
+        assert_eq!(code_of(&text), "E1022");
+    });
+}
+
+#[test]
+fn deep_type_annotations_are_rejected_with_a_diagnostic() {
+    on_small_stack(|| {
+        let text = format!("x: {}Int{} = 1\nx\n", "[".repeat(5_000), "]".repeat(5_000));
+        assert_eq!(code_of(&text), "E1022");
+    });
+}
+
+#[test]
+fn deep_nesting_in_a_method_body_is_rejected_with_a_diagnostic() {
+    on_small_stack(|| {
+        let body = nested("(", "1", ")", 5_000);
+        let text = format!("class A\n  def f(self): Int\n    {body}\n  end\nend\n1\n");
+        assert_eq!(code_of(&text), "E1022");
+    });
+}
+
+#[test]
+fn moderate_nesting_compiles_and_runs() {
+    // The full supported nesting depth needs a standard 8 MiB main
+    // stack. Test threads have a smaller default stack, so this case
+    // runs on an explicitly sized thread that matches the CLI process.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let text = nested("(", "1", ")", 120) + "\n";
+            let shown = run_text("t.lm", &text, VmConfig::default()).unwrap();
+            assert_eq!(shown, "Done(1)");
+
+            let text = nested("if true\n", "x = 1\n", "end\n", 80) + "7\n";
+            let shown = run_text("t.lm", &text, VmConfig::default()).unwrap();
+            assert_eq!(shown, "Done(7)");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

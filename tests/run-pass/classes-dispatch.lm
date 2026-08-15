@@ -1,0 +1,24 @@
+class Shape
+  def area(self): Int
+    0
+  end
+
+  def describe(self): String
+    "area {self.area()}"
+  end
+end
+
+class Square < Shape
+  side: Int
+
+  def init(mut self, side: Int)
+    self.side = side
+  end
+
+  def area(self): Int
+    self.side * self.side
+  end
+end
+
+s: Shape = Square(7)
+s.describe()

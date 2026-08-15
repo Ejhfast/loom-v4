@@ -1,0 +1,7 @@
+class A
+  x: Int = 0
+end
+
+a = A()
+a.freeze()
+a.x = 1

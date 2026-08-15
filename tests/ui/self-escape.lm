@@ -1,0 +1,14 @@
+def keep(p: Point): Point
+  p
+end
+
+class Point
+  x: Int
+
+  def init(mut self)
+    keep(self)
+    self.x = 1
+  end
+end
+
+Point()

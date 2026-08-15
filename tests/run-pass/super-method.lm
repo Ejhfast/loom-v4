@@ -1,0 +1,13 @@
+class Base
+  def hello(self): String
+    "base"
+  end
+end
+
+class Child < Base
+  def hello(self): String
+    "child+{super.hello()}"
+  end
+end
+
+Child().hello()

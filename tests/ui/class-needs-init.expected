@@ -1,0 +1,2 @@
+error[E1038]: the class needs an `init` because the field `x` has no default
+  --> tests/ui/class-needs-init.lm:1:7

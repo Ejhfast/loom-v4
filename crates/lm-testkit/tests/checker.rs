@@ -1,4 +1,4 @@
-//! Focused checker tests: one negative case for each new rule, plus
+//! Focused checker tests: one negative case for each rule, plus
 //! positive coverage for the lowered CFG dump.
 
 use lm_testkit::{compile_text, run_text};
@@ -18,7 +18,8 @@ fn negative_cases_have_stable_codes() {
     assert_eq!(code_of("\"\\q\"\n"), "E0003");
     assert_eq!(code_of("99999999999999999999\n"), "E0004");
     assert_eq!(code_of("3.14\n"), "E0005");
-    assert_eq!(code_of("\"hi {x}\"\n"), "E0006");
+    assert_eq!(code_of("\"hi {\"\n"), "E0006");
+    assert_eq!(code_of("\"hi { }\"\n"), "E0006");
     assert_eq!(code_of("0x\n"), "E0007");
     assert_eq!(code_of("'c'\n"), "E0008");
     assert_eq!(code_of("b\"x\"\n"), "E0009");
@@ -26,11 +27,8 @@ fn negative_cases_have_stable_codes() {
     // Parser rules.
     assert_eq!(code_of("x = 1 y = 2\n"), "E1001");
     assert_eq!(code_of("enum Color\nend\n"), "E1002");
-    assert_eq!(code_of("[1, 2]\n"), "E1002");
-    assert_eq!(code_of("{1: 2}\n"), "E1002");
     assert_eq!(code_of("(1, 2)\n"), "E1002");
-    assert_eq!(code_of("a.b\n"), "E1002");
-    assert_eq!(code_of("do || 1 end\n"), "E1002");
+    assert_eq!(code_of("m = {1: 2}\nm[1] = 3\n"), "E1002");
     assert_eq!(code_of("if true\n1\n"), "E1003");
     // Checker rules.
     assert_eq!(code_of("1 + \"a\"\n"), "E1004");
@@ -40,8 +38,8 @@ fn negative_cases_have_stable_codes() {
     assert_eq!(code_of("def f()\n  return 1\nend\nf()\n"), "E1004");
     assert_eq!(code_of("missing()\n"), "E1005");
     assert_eq!(code_of("nowhere\n"), "E1005");
+    assert_eq!(code_of("a.b\n"), "E1005");
     assert_eq!(code_of("def f(a: Int): Int\n  a\nend\nf()\n"), "E1006");
-    assert_eq!(code_of("x = 1\nx(2)\n"), "E1007");
     assert_eq!(code_of("continue\n"), "E1008");
     assert_eq!(
         code_of("def f(): Int\n  1\nend\ndef f(): Int\n  2\nend\nf()\n"),
@@ -58,6 +56,160 @@ fn negative_cases_have_stable_codes() {
     assert_eq!(code_of("def f(): Int\n  1\nend\nf = 3\n"), "E1019");
     assert_eq!(code_of("x = 1\nx: Int = 2\n"), "E1020");
     assert_eq!(code_of("while true\n  break\n  x = 1\nend\n1\n"), "E1021");
+}
+
+#[test]
+fn week_two_negative_cases_have_stable_codes() {
+    // Methods need a `self` receiver.
+    assert_eq!(
+        code_of("class A\n  def f(n: Int): Int\n    n\n  end\nend\n1\n"),
+        "E1023"
+    );
+    // Generic type misuse.
+    assert_eq!(code_of("x: List[Int, Int] = []\nx\n"), "E1024");
+    assert_eq!(code_of("x: List = []\nx\n"), "E1024");
+    assert_eq!(
+        code_of("class Box\n  x: Int = 0\nend\ny: Box[Int] = Box()\ny\n"),
+        "E1024"
+    );
+    // Unknown field.
+    assert_eq!(
+        code_of("class A\n  x: Int = 0\nend\na = A()\na.y\n"),
+        "E1025"
+    );
+    // Unknown method.
+    assert_eq!(
+        code_of("class A\n  x: Int = 0\nend\na = A()\na.grow()\n"),
+        "E1026"
+    );
+    // Member access on a non-object type.
+    assert_eq!(code_of("x = 1\nx.y\n"), "E1027");
+    assert_eq!(code_of("x = 1\nx[0]\n"), "E1027");
+    // A required field is not initialized on a path.
+    assert_eq!(
+        code_of(
+            "class P\n  x: Int\n  def init(mut self, b: Bool)\n    if b\n      \
+             self.x = 1\n    end\n  end\nend\nP(true)\n"
+        ),
+        "E1028"
+    );
+    // A field is read before its first assignment.
+    assert_eq!(
+        code_of(
+            "class P\n  x: Int\n  def init(mut self)\n    y = self.x\n    \
+             self.x = 1\n  end\nend\nP()\n"
+        ),
+        "E1028"
+    );
+    // `self` escapes before the constructor completes.
+    assert_eq!(
+        code_of(
+            "def id(p: P): P\n  p\nend\nclass P\n  x: Int\n  def init(mut self)\n    \
+             id(self)\n    self.x = 1\n  end\nend\nP()\n"
+        ),
+        "E1029"
+    );
+    // `self` cannot be captured before the constructor completes.
+    assert_eq!(
+        code_of(
+            "class P\n  x: Int\n  def init(mut self)\n    f = do ||: Int 1 end\n    \
+             g = do ||: P self end\n    self.x = 1\n  end\nend\nP()\n"
+        ),
+        "E1029"
+    );
+    // `super.init` must run on every path.
+    assert_eq!(
+        code_of(
+            "class A\n  x: Int\n  def init(mut self)\n    self.x = 1\n  end\nend\n\
+             class B < A\n  def init(mut self)\n  end\nend\nB()\n"
+        ),
+        "E1030"
+    );
+    // `super.init` cannot run twice.
+    assert_eq!(
+        code_of(
+            "class A\n  x: Int\n  def init(mut self)\n    self.x = 1\n  end\nend\n\
+             class B < A\n  def init(mut self)\n    super.init()\n    super.init()\n  \
+             end\nend\nB()\n"
+        ),
+        "E1030"
+    );
+    // An override cannot change the parameter types.
+    assert_eq!(
+        code_of(
+            "class A\n  def f(self, n: Int): Int\n    n\n  end\nend\n\
+             class B < A\n  def f(self, n: Bool): Int\n    1\n  end\nend\n1\n"
+        ),
+        "E1031"
+    );
+    // An override cannot widen the result type.
+    assert_eq!(
+        code_of(
+            "class A\nend\nclass B < A\nend\n\
+             class C\n  def f(self): B\n    B()\n  end\nend\n\
+             class D < C\n  def f(self): A\n    A()\n  end\nend\n1\n"
+        ),
+        "E1031"
+    );
+    // Calling a value that is not a closure.
+    assert_eq!(code_of("x = 1\nx(2)\n"), "E1032");
+    // A map key must be Bool, Int, or String.
+    assert_eq!(code_of("m = {[1]: 2}\nm\n"), "E1033");
+    assert_eq!(code_of("m: {[Int]: Int} = {}\nm\n"), "E1033");
+    // Interpolation of an unsupported type.
+    assert_eq!(code_of("xs = [1]\n\"{xs}\"\n"), "E1034");
+    // A write through a read-only reference.
+    assert_eq!(
+        code_of("def f(xs: [Int])\n  xs.push(1)\nend\nf([1])\n"),
+        "E1035"
+    );
+    assert_eq!(
+        code_of("class A\n  x: Int = 0\nend\ndef f(a: A)\n  a.x = 1\nend\nf(A())\n"),
+        "E1035"
+    );
+    assert_eq!(
+        code_of(
+            "class A\n  x: Int = 0\n  def bump(mut self)\n    self.x = 1\n  end\nend\n\
+             def f(a: A)\n  a.bump()\nend\nf(A())\n"
+        ),
+        "E1035"
+    );
+    // A captured name cannot be rebound inside a closure.
+    assert_eq!(code_of("y = 1\nf = do ||\n  y = 2\nend\nf()\n"), "E1036");
+    // An empty literal needs an expected type.
+    assert_eq!(code_of("x = []\nx\n"), "E1037");
+    assert_eq!(code_of("x = {}\nx\n"), "E1037");
+    // Class declaration rules.
+    assert_eq!(code_of("class A\n  x: Int\nend\nA()\n"), "E1038");
+    assert_eq!(code_of("class A < Missing\nend\n1\n"), "E1038");
+    assert_eq!(code_of("class A < B\nend\nclass B\nend\n1\n"), "E1038");
+    assert_eq!(
+        code_of("class A\n  x: Int = 0\n  x: Int = 1\nend\n1\n"),
+        "E1038"
+    );
+    assert_eq!(
+        code_of("class A\n  def freeze(self): Int\n    1\n  end\nend\n1\n"),
+        "E1038"
+    );
+    // `self` and `super` need a method context.
+    assert_eq!(code_of("self\n"), "E1039");
+    assert_eq!(
+        code_of("class A\nend\nclass B < A\nend\nsuper.f()\n"),
+        "E1039"
+    );
+    // Element and value type mismatches inside literals.
+    assert_eq!(code_of("[1, \"a\"]\n"), "E1004");
+    assert_eq!(code_of("{\"a\": 1, \"b\": true}\n"), "E1004");
+    assert_eq!(code_of("m: {String: Int} = {1: 2}\n"), "E1004");
+    assert_eq!(code_of("xs: [Int] = [true]\n"), "E1004");
+    // Wrong init arity.
+    assert_eq!(
+        code_of(
+            "class P\n  x: Int\n  def init(mut self, x: Int)\n    self.x = x\n  \
+             end\nend\nP()\n"
+        ),
+        "E1006"
+    );
 }
 
 #[test]
@@ -91,6 +243,16 @@ fn if_needs_else_to_produce_a_value() {
 }
 
 #[test]
+fn subclass_values_join_at_the_common_ancestor() {
+    let source = "class Animal\nend\nclass Dog < Animal\nend\nclass Cat < Animal\nend\n\
+                  x = if true\n  Dog()\nelse\n  Cat()\nend\ny: Animal = Dog()\ny = Cat()\n0\n";
+    assert_eq!(
+        run_text("t.lm", source, VmConfig::default()).unwrap(),
+        "Done(0)"
+    );
+}
+
+#[test]
 fn cfg_dump_shows_signatures_blocks_and_jumps() {
     let module = compile_text(
         "t.lm",
@@ -106,6 +268,26 @@ fn cfg_dump_shows_signatures_blocks_and_jumps() {
     assert!(dump.contains("pop 2 push 1"), "{dump}");
     // The dump is deterministic.
     assert_eq!(dump, lm_hir::dump_cfg(&module));
+}
+
+#[test]
+fn cfg_dump_covers_classes_selectors_and_closures() {
+    let module = compile_text(
+        "t.lm",
+        "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
+         self.value = self.value + n\n    self.value\n  end\nend\n\
+         c = Counter()\nf = do |x: Int|: Int x + 1 end\nc.add(f(1))\n",
+    )
+    .unwrap();
+    let dump = lm_hir::dump_cfg(&module);
+    assert!(dump.contains("selector sel0 = add"), "{dump}");
+    assert!(dump.contains("class class0 Counter"), "{dump}");
+    assert!(dump.contains("field 0 value: Int"), "{dump}");
+    assert!(dump.contains("CallVirtual sel0 argc 1"), "{dump}");
+    assert!(dump.contains("MakeClosure"), "{dump}");
+    assert!(dump.contains("CallValue argc 1"), "{dump}");
+    assert!(dump.contains("<new Counter>"), "{dump}");
+    assert!(dump.contains("New class0"), "{dump}");
 }
 
 #[test]

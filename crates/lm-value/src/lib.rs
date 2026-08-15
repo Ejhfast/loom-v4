@@ -1,15 +1,18 @@
 //! The runtime value representation.
 //!
-//! `Value` is a 16-byte copyable tagged union. Strings live in the VM
-//! heap and values hold only a stable string reference.
+//! `Value` is a 16-byte copyable tagged union. Heap data lives in the
+//! VM object table and values hold only a generation-checked reference.
 
-/// A reference to one immutable string in the VM heap.
+/// A generation-checked reference to one object-table slot.
+///
+/// The `slot` names an entry in the per-VM object table. The
+/// `generation` must match the entry generation. A mismatch marks a
+/// stale reference to a collected slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StrRef(pub u32);
-
-/// A reference to one code slot (a loaded function).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CodeSlot(pub u32);
+pub struct ObjRef {
+    pub slot: u32,
+    pub generation: u32,
+}
 
 /// One runtime value. `Int` keeps its full 64-bit width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,8 +20,22 @@ pub enum Value {
     Unit,
     Bool(bool),
     Int(i64),
-    Str(StrRef),
-    Code(CodeSlot),
+    /// A reference to a heap object: string, instance, list, map,
+    /// closure, or builder.
+    Obj(ObjRef),
+    /// The marker for an object field without a first assignment.
+    /// No instruction can produce or store this value.
+    Uninit,
+}
+
+impl Value {
+    /// Return the object reference when the value holds one.
+    pub fn as_obj(self) -> Option<ObjRef> {
+        match self {
+            Value::Obj(r) => Some(r),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -40,5 +57,15 @@ mod tests {
     fn int_keeps_full_width() {
         let v = Value::Int(i64::MIN);
         assert_eq!(v, Value::Int(i64::MIN));
+    }
+
+    #[test]
+    fn as_obj_extracts_references() {
+        let r = ObjRef {
+            slot: 3,
+            generation: 7,
+        };
+        assert_eq!(Value::Obj(r).as_obj(), Some(r));
+        assert_eq!(Value::Int(1).as_obj(), None);
     }
 }

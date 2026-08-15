@@ -1,0 +1,6 @@
+class A
+  x: Int = 0
+end
+
+a = A()
+a.y

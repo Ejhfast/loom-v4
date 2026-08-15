@@ -1,0 +1,4 @@
+y = 1
+f = do ||: Int y end
+y = 2
+f()

@@ -1,0 +1,15 @@
+words = ["red", "blue", "red", "green", "blue", "red"]
+counts: {String: Int} = {}
+
+i = 0
+while i < words.len()
+  word = words.at(i)
+  if counts.has(word)
+    counts.put(word, counts.at(word) + 1)
+  else
+    counts.put(word, 1)
+  end
+  i = i + 1
+end
+
+counts

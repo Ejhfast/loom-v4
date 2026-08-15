@@ -1,2 +1,0 @@
-error[E1002]: `class` is not supported in this language slice
-  --> tests/ui/class-not-supported.lm:1:1

@@ -1,12 +1,17 @@
-//! Scanner for the week-1 language slice.
+//! Scanner for the week-2 language slice.
 //!
 //! The scanner produces tokens with byte spans. It ends each statement
 //! with a `Newline` token. It does not emit a `Newline` token inside
 //! delimiters or after a token that cannot end an expression.
+//!
+//! A string literal can hold `{ expression }` interpolation. The
+//! scanner scans the inner expression with one nested pass and stores
+//! its tokens inside the string token. The inner expression cannot
+//! hold a string literal or a brace in this slice.
 
 use crate::diag::Diagnostic;
 use crate::span::Span;
-use crate::token::{Tok, Token};
+use crate::token::{StrPiece, Tok, Token};
 
 /// Scan the full source text into tokens.
 pub fn scan(text: &str) -> Result<Vec<Token>, Diagnostic> {
@@ -121,6 +126,7 @@ impl<'a> Scanner<'a> {
                     | Tok::Comma
                     | Tok::Colon
                     | Tok::Dot
+                    | Tok::Arrow
                     | Tok::KwAnd
                     | Tok::KwOr
                     | Tok::KwNot
@@ -141,7 +147,8 @@ impl<'a> Scanner<'a> {
             ));
         }
         self.pos += 1;
-        let mut value = String::new();
+        let mut pieces: Vec<StrPiece> = Vec::new();
+        let mut lit = String::new();
         loop {
             if self.pos >= self.bytes.len() {
                 return Err(self.error("E0002", "unterminated string literal", start));
@@ -157,19 +164,18 @@ impl<'a> Scanner<'a> {
                 }
                 '{' => {
                     if self.peek_byte(1) == b'{' {
-                        value.push('{');
+                        lit.push('{');
                         self.pos += 2;
                     } else {
-                        return Err(self.error(
-                            "E0006",
-                            "string interpolation is not supported in this language slice",
-                            self.pos,
-                        ));
+                        if !lit.is_empty() {
+                            pieces.push(StrPiece::Lit(std::mem::take(&mut lit)));
+                        }
+                        pieces.push(self.scan_interpolation()?);
                     }
                 }
                 '}' => {
                     if self.peek_byte(1) == b'}' {
-                        value.push('}');
+                        lit.push('}');
                         self.pos += 2;
                     } else {
                         return Err(self.error(
@@ -184,17 +190,17 @@ impl<'a> Scanner<'a> {
                     self.pos += 1;
                     let esc = self.cur_char();
                     match esc {
-                        '\\' => value.push('\\'),
-                        '"' => value.push('"'),
-                        '\'' => value.push('\''),
-                        'n' => value.push('\n'),
-                        'r' => value.push('\r'),
-                        't' => value.push('\t'),
-                        '0' => value.push('\0'),
+                        '\\' => lit.push('\\'),
+                        '"' => lit.push('"'),
+                        '\'' => lit.push('\''),
+                        'n' => lit.push('\n'),
+                        'r' => lit.push('\r'),
+                        't' => lit.push('\t'),
+                        '0' => lit.push('\0'),
                         'u' => {
                             self.pos += 1;
                             let scalar = self.scan_unicode_escape(esc_start)?;
-                            value.push(scalar);
+                            lit.push(scalar);
                             continue;
                         }
                         _ => {
@@ -205,13 +211,65 @@ impl<'a> Scanner<'a> {
                     self.pos += 1;
                 }
                 _ => {
-                    value.push(ch);
+                    lit.push(ch);
                     self.pos += ch.len_utf8();
                 }
             }
         }
-        self.push(Tok::Str(value), start);
+        if pieces.is_empty() {
+            self.push(Tok::Str(lit), start);
+        } else {
+            if !lit.is_empty() {
+                pieces.push(StrPiece::Lit(lit));
+            }
+            self.push(Tok::StrInterp(pieces), start);
+        }
         Ok(())
+    }
+
+    /// Scan one `{ expression }` interpolation. `pos` is at `{`.
+    fn scan_interpolation(&mut self) -> Result<StrPiece, Diagnostic> {
+        let brace = self.pos;
+        self.pos += 1;
+        let expr_start = self.pos;
+        loop {
+            if self.pos >= self.bytes.len() || self.bytes[self.pos] == b'\n' {
+                return Err(self.error(
+                    "E0006",
+                    "the interpolation expression has no closing `}`",
+                    brace,
+                ));
+            }
+            match self.bytes[self.pos] {
+                b'}' => break,
+                b'{' | b'"' => {
+                    return Err(self.error(
+                        "E0006",
+                        "a brace or a string literal is not valid inside an \
+                         interpolation expression in this language slice",
+                        self.pos,
+                    ));
+                }
+                _ => self.pos += 1,
+            }
+        }
+        let inner = &self.text[expr_start..self.pos];
+        self.pos += 1; // consume `}`
+        if inner.trim().is_empty() {
+            return Err(self.error("E0006", "the interpolation expression is empty", brace));
+        }
+        let offset = expr_start as u32;
+        let mut tokens = scan(inner).map_err(|d| {
+            Diagnostic::new(
+                d.code,
+                d.message,
+                Span::new(d.span.lo + offset, d.span.hi + offset),
+            )
+        })?;
+        for token in &mut tokens {
+            token.span = Span::new(token.span.lo + offset, token.span.hi + offset);
+        }
+        Ok(StrPiece::Expr(tokens))
     }
 
     /// Scan the `{HEX}` part of a `\u{HEX}` escape. `pos` is at `{`.
@@ -327,17 +385,17 @@ impl<'a> Scanner<'a> {
             "return" => Tok::KwReturn,
             "true" => Tok::KwTrue,
             "false" => Tok::KwFalse,
+            "class" => Tok::KwClass,
+            "do" => Tok::KwDo,
+            "self" => Tok::KwSelf,
+            "super" => Tok::KwSuper,
+            "mut" => Tok::KwMut,
             "as" => Tok::KwReserved("as"),
             "case" => Tok::KwReserved("case"),
-            "class" => Tok::KwReserved("class"),
-            "do" => Tok::KwReserved("do"),
             "effect" => Tok::KwReserved("effect"),
             "enum" => Tok::KwReserved("enum"),
             "in" => Tok::KwReserved("in"),
             "loop" => Tok::KwReserved("loop"),
-            "mut" => Tok::KwReserved("mut"),
-            "self" => Tok::KwReserved("self"),
-            "super" => Tok::KwReserved("super"),
             "then" => Tok::KwReserved("then"),
             "with" => Tok::KwReserved("with"),
             _ => Tok::Ident(word.to_string()),
@@ -360,6 +418,9 @@ impl<'a> Scanner<'a> {
         } else if two(b'>', b'=', self) {
             self.pos += 2;
             Tok::Ge
+        } else if two(b'-', b'>', self) {
+            self.pos += 2;
+            Tok::Arrow
         } else {
             let single = match self.peek_byte(0) {
                 b'=' => Tok::Assign,
@@ -449,9 +510,58 @@ mod tests {
     }
 
     #[test]
-    fn rejects_interpolation() {
-        let err = scan("\"hello {name}\"").unwrap_err();
-        assert_eq!(err.code, "E0006");
+    fn scans_interpolation_pieces() {
+        let toks = kinds("\"Hello {name}!\"");
+        assert_eq!(toks.len(), 2);
+        match &toks[0] {
+            Tok::StrInterp(pieces) => {
+                assert_eq!(pieces.len(), 3);
+                assert_eq!(pieces[0], StrPiece::Lit("Hello ".to_string()));
+                match &pieces[1] {
+                    StrPiece::Expr(inner) => {
+                        assert_eq!(inner.len(), 2);
+                        assert_eq!(inner[0].tok, Tok::Ident("name".to_string()));
+                        assert_eq!(inner[1].tok, Tok::Eof);
+                        // Spans point into the outer source text.
+                        assert_eq!(inner[0].span.lo, 8);
+                        assert_eq!(inner[0].span.hi, 12);
+                    }
+                    other => panic!("expected an expression piece, got {other:?}"),
+                }
+                assert_eq!(pieces[2], StrPiece::Lit("!".to_string()));
+            }
+            other => panic!("expected an interpolated string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_bad_interpolation() {
+        assert_eq!(scan("\"x {\"").unwrap_err().code, "E0006");
+        assert_eq!(scan("\"x { }\"").unwrap_err().code, "E0006");
+        assert_eq!(scan("\"x {a{b}\"").unwrap_err().code, "E0006");
+        assert_eq!(scan("\"x {\"y\"}\"").unwrap_err().code, "E0006");
+    }
+
+    #[test]
+    fn scans_arrow_and_new_keywords() {
+        assert_eq!(
+            kinds("do |x: Int| -> mut self super class end"),
+            vec![
+                Tok::KwDo,
+                Tok::Pipe,
+                Tok::Ident("x".to_string()),
+                Tok::Colon,
+                Tok::Ident("Int".to_string()),
+                Tok::Pipe,
+                Tok::Arrow,
+                Tok::KwMut,
+                Tok::KwSelf,
+                Tok::KwSuper,
+                Tok::KwClass,
+                Tok::KwEnd,
+                Tok::Eof
+            ]
+        );
     }
 
     #[test]

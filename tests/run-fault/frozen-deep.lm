@@ -1,0 +1,7 @@
+class Node
+  items: [Int] = []
+end
+
+outer = [Node()]
+outer.freeze()
+outer.at(0).items.push(1)

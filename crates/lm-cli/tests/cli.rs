@@ -72,6 +72,55 @@ fn disasm_prints_signatures_blocks_and_jump_targets() {
 }
 
 #[test]
+fn run_counter_prints_done_5() {
+    let out = lm(&["run", "--show-result", "examples/02-objects/counter.lm"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(5)\n");
+}
+
+#[test]
+fn run_counts_prints_the_word_counts() {
+    let out = lm(&["run", "--show-result", "examples/02-objects/counts.lm"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "Done({\"red\": 3, \"blue\": 2, \"green\": 1})\n"
+    );
+}
+
+#[test]
+fn run_closures_prints_done_42() {
+    let out = lm(&["run", "--show-result", "examples/02-objects/closures.lm"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(42)\n");
+}
+
+#[test]
+fn inspect_live_dumps_heap_objects_and_stats() {
+    let out = lm(&["inspect", "--live", "examples/02-objects/counter.lm"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("outcome: Done(5)"), "{text}");
+    assert!(text.contains("heap: live="), "{text}");
+    assert!(text.contains("collections="), "{text}");
+    assert!(text.contains("frames: 0 active"), "{text}");
+    assert!(
+        text.contains("Instance mutable Counter{value: 5}"),
+        "{text}"
+    );
+    // The dump is deterministic.
+    let again = lm(&["inspect", "--live", "examples/02-objects/counter.lm"]);
+    assert_eq!(out.stdout, again.stdout);
+}
+
+#[test]
+fn inspect_without_live_is_rejected() {
+    let out = lm(&["inspect", "examples/02-objects/counter.lm"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("--live"), "{}", stderr(&out));
+}
+
+#[test]
 fn run_reports_a_fault_with_a_stable_code() {
     let out = lm(&["run", "--show-result", "tests/run-fault/divide-by-zero.lm"]);
     assert!(!out.status.success());

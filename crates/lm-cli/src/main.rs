@@ -4,6 +4,7 @@
 //! - `lm check <file>`: parse and type-check one module.
 //! - `lm run [--show-result] <file>`: compile, verify, and run.
 //! - `lm disasm <file>`: print the lowered bytecode listing.
+//! - `lm inspect --live <file>`: run, then dump the live machine state.
 
 use lm_source::SourceFile;
 use lm_vm::{Vm, VmConfig};
@@ -12,7 +13,8 @@ use std::process::ExitCode;
 const USAGE: &str = "usage:
   lm check <file>
   lm run [--show-result] [--fuel N] [--max-frames N] [--heap-bytes N] <file>
-  lm disasm <file>";
+  lm disasm <file>
+  lm inspect --live [--fuel N] [--max-frames N] [--heap-bytes N] <file>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,6 +65,23 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             print!("{}", lm_hir::dump_cfg(&module));
             Ok(ExitCode::SUCCESS)
         }
+        "inspect" => {
+            let options = parse_options(rest)?;
+            if !options.live {
+                return Err(format!(
+                    "error: `lm inspect` supports only the `--live` test mode \
+                     in this slice\n{USAGE}\n"
+                ));
+            }
+            let source = read_source(&options.file)?;
+            let module = compile(&source)?;
+            let loaded = lm_vm::load(module)
+                .map_err(|e| format!("error: the verifier rejected the module: {e}\n"))?;
+            let mut vm = Vm::new(&loaded, options.config);
+            let outcome = vm.run();
+            print!("{}", vm.dump_live(&outcome));
+            Ok(ExitCode::SUCCESS)
+        }
         other => Err(format!("error: unknown command `{other}`\n{USAGE}\n")),
     }
 }
@@ -70,17 +89,20 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
 struct Options {
     file: String,
     show_result: bool,
+    live: bool,
     config: VmConfig,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut file = None;
     let mut show_result = false;
+    let mut live = false;
     let mut config = VmConfig::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--show-result" => show_result = true,
+            "--live" => live = true,
             "--fuel" => config.fuel = flag_value(&mut iter, "--fuel")?,
             "--max-frames" => config.max_frames = flag_value(&mut iter, "--max-frames")?,
             "--heap-bytes" => config.heap_bytes = flag_value(&mut iter, "--heap-bytes")?,
@@ -98,6 +120,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     Ok(Options {
         file,
         show_result,
+        live,
         config,
     })
 }

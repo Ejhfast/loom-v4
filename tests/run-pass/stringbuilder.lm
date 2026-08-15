@@ -1,0 +1,7 @@
+sb = StringBuilder()
+i = 0
+while i < 3
+  sb.append("{i},")
+  i = i + 1
+end
+sb.append("end").build()

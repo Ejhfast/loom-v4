@@ -1,5 +1,6 @@
-//! Week-1 gate tests: deep guest recursion without Rust-stack growth,
-//! fuel exhaustion, heap-cap faults, and deterministic output.
+//! Gate tests: deep guest recursion without Rust-stack growth, fuel
+//! exhaustion, heap-cap behavior with the collector, and deterministic
+//! output.
 
 use lm_testkit::{compile_to_bytes, run_text};
 use lm_vm::VmConfig;
@@ -63,11 +64,25 @@ fn infinite_loop_faults_with_out_of_fuel() {
 }
 
 #[test]
-fn string_allocation_faults_with_heap_limit_under_a_small_cap() {
+fn unreachable_garbage_does_not_fault_under_a_small_cap() {
+    // Each pass of the loop drops the previous string. The collector
+    // reclaims the garbage, so a tiny cap completes.
     let source = "i = 0\nh = \"start\"\nwhile i < 100000\n  h = \"chunk\"\n  \
                   i = i + 1\nend\ni\n";
     let config = VmConfig {
         heap_bytes: 1024,
+        ..VmConfig::default()
+    };
+    assert_eq!(run_text("heap.lm", source, config).unwrap(), "Done(100000)");
+}
+
+#[test]
+fn live_data_past_the_cap_faults_with_heap_limit() {
+    // The list keeps every string alive, so collection frees nothing.
+    let source = "xs: [String] = []\ni = 0\nwhile i < 100000\n  xs.push(\"chunk\")\n  \
+                  i = i + 1\nend\nxs.len()\n";
+    let config = VmConfig {
+        heap_bytes: 4096,
         ..VmConfig::default()
     };
     assert_eq!(
@@ -78,15 +93,20 @@ fn string_allocation_faults_with_heap_limit_under_a_small_cap() {
 
 #[test]
 fn compilation_is_deterministic() {
-    let source =
-        std::fs::read_to_string(lm_testkit::repo_root().join("examples/01-basics/factorial.lm"))
-            .unwrap();
-    let a = compile_to_bytes("factorial.lm", &source).unwrap();
-    let b = compile_to_bytes("factorial.lm", &source).unwrap();
-    assert_eq!(a, b, "bytecode bytes differ between compilations");
-    let run_a = run_text("factorial.lm", &source, VmConfig::default()).unwrap();
-    let run_b = run_text("factorial.lm", &source, VmConfig::default()).unwrap();
-    assert_eq!(run_a, run_b);
+    for example in [
+        "examples/01-basics/factorial.lm",
+        "examples/02-objects/counter.lm",
+        "examples/02-objects/counts.lm",
+        "examples/02-objects/closures.lm",
+    ] {
+        let source = std::fs::read_to_string(lm_testkit::repo_root().join(example)).unwrap();
+        let a = compile_to_bytes(example, &source).unwrap();
+        let b = compile_to_bytes(example, &source).unwrap();
+        assert_eq!(a, b, "bytecode bytes differ for {example}");
+        let run_a = run_text(example, &source, VmConfig::default()).unwrap();
+        let run_b = run_text(example, &source, VmConfig::default()).unwrap();
+        assert_eq!(run_a, run_b);
+    }
 }
 
 #[test]

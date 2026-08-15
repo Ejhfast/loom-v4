@@ -1,0 +1,2 @@
+error[E1025]: the class `A` has no field named `y`
+  --> tests/ui/unknown-field.lm:6:3

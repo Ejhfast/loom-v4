@@ -1,19 +1,30 @@
-//! Tokens for the week-1 language slice.
+//! Tokens for the week-2 language slice.
 
 use crate::span::Span;
 use std::fmt;
 
+/// One piece of an interpolated string literal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrPiece {
+    /// Literal text after escape processing.
+    Lit(String),
+    /// The tokens of one interpolated expression.
+    Expr(Vec<Token>),
+}
+
 /// The kind of one token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     /// Decimal, hexadecimal, octal, or binary integer literal.
     Int(i64),
-    /// String literal after escape processing.
+    /// String literal after escape processing, without interpolation.
     Str(String),
+    /// String literal with interpolated expressions.
+    StrInterp(Vec<StrPiece>),
     /// Identifier that is not a keyword.
     Ident(String),
 
-    // Keywords inside the week-1 slice.
+    // Keywords inside the week-2 slice.
     KwAnd,
     KwOr,
     KwNot,
@@ -28,8 +39,13 @@ pub enum Tok {
     KwReturn,
     KwTrue,
     KwFalse,
+    KwClass,
+    KwDo,
+    KwSelf,
+    KwSuper,
+    KwMut,
 
-    /// A reserved keyword outside the week-1 slice.
+    /// A reserved keyword outside the week-2 slice.
     KwReserved(&'static str),
 
     // Punctuation.
@@ -43,6 +59,7 @@ pub enum Tok {
     Colon,
     Dot,
     Pipe,
+    Arrow,
 
     // Operators.
     Assign,
@@ -68,7 +85,7 @@ impl fmt::Display for Tok {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
             Tok::Int(v) => return write!(f, "integer literal `{v}`"),
-            Tok::Str(_) => return write!(f, "string literal"),
+            Tok::Str(_) | Tok::StrInterp(_) => return write!(f, "string literal"),
             Tok::Ident(name) => return write!(f, "`{name}`"),
             Tok::KwAnd => "`and`",
             Tok::KwOr => "`or`",
@@ -84,6 +101,11 @@ impl fmt::Display for Tok {
             Tok::KwReturn => "`return`",
             Tok::KwTrue => "`true`",
             Tok::KwFalse => "`false`",
+            Tok::KwClass => "`class`",
+            Tok::KwDo => "`do`",
+            Tok::KwSelf => "`self`",
+            Tok::KwSuper => "`super`",
+            Tok::KwMut => "`mut`",
             Tok::KwReserved(name) => return write!(f, "`{name}`"),
             Tok::LParen => "`(`",
             Tok::RParen => "`)`",
@@ -95,6 +117,7 @@ impl fmt::Display for Tok {
             Tok::Colon => "`:`",
             Tok::Dot => "`.`",
             Tok::Pipe => "`|`",
+            Tok::Arrow => "`->`",
             Tok::Assign => "`=`",
             Tok::EqEq => "`==`",
             Tok::NotEq => "`!=`",
@@ -115,7 +138,7 @@ impl fmt::Display for Tok {
 }
 
 /// One token with its span.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub tok: Tok,
     pub span: Span,

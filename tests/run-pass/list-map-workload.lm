@@ -1,0 +1,10 @@
+xs = [3, 1, 2]
+xs.push(4)
+total = 0
+i = 0
+while i < xs.len()
+  total = total + xs[i]
+  i = i + 1
+end
+m = {"total": total, "len": xs.len()}
+m

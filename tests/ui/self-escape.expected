@@ -1,0 +1,2 @@
+error[E1029]: `self` cannot escape before the initializer assigns every required field
+  --> tests/ui/self-escape.lm:9:10

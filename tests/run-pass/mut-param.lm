@@ -1,0 +1,6 @@
+def fill(mut xs: [Int]): Int
+  xs.push(9)
+  xs.len()
+end
+
+fill([1, 2])

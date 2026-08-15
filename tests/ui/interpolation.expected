@@ -1,2 +1,2 @@
-error[E0006]: string interpolation is not supported in this language slice
-  --> tests/ui/interpolation.lm:1:8
+error[E1005]: cannot find `name` in this scope
+  --> tests/ui/interpolation.lm:1:9

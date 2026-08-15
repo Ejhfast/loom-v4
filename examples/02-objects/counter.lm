@@ -1,0 +1,12 @@
+class Counter
+  value: Int = 0
+
+  def add(mut self, n: Int): Int
+    self.value = self.value + n
+    self.value
+  end
+end
+
+c = Counter()
+c.add(2)
+c.add(3)
