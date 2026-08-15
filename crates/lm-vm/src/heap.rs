@@ -317,10 +317,12 @@ impl Heap {
         self.host_roots.push(r);
     }
 
-    /// Remove the most recent host root.
+    /// Remove the most recent host root. The check is active in all
+    /// build profiles: a mis-nested pop must fail loudly, because a
+    /// silent wrong pop would unroot a live object.
     pub fn pop_host_root(&mut self, r: ObjRef) {
         let top = self.host_roots.pop();
-        debug_assert_eq!(top, Some(r), "host roots pop in LIFO order");
+        assert_eq!(top, Some(r), "host roots pop in LIFO order");
     }
 
     /// Deeply freeze the graph under `root`. The walk is iterative and

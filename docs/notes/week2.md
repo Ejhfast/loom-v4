@@ -83,6 +83,16 @@ and the deferred work.
 
 ## Simplifications inside the slice
 
+- String ordering with `<`, `<=`, `>`, and `>=` is not implemented.
+  Specification section 6.4 defines lexicographic string comparison.
+  The checker rejects a string ordering with `E1004`. The comparison
+  arrives with the text work in a later week.
+- The host-root API on the heap (`push_host_root`/`pop_host_root`) has
+  no production caller yet. The interpreter roots values through the
+  frame and operand arenas. A scoped RAII guard for host callers is
+  future work; until then, a mis-nested pop fails with an assertion in
+  every build profile.
+
 - Map lookup is a linear scan over the insertion-order entries. The
   open-addressed hash index from specification section 22.9 arrives
   with the performance work. Insertion order, equality, and display
