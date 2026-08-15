@@ -249,8 +249,12 @@ impl<'m> World<'m> {
                         }
                         continue;
                     }
-                    let outcome =
-                        self.machines[act.vm as usize].exec_instr(self.module, self.dispatch);
+                    let machine = &mut self.machines[act.vm as usize];
+                    let outcome = if act.mode == StopMode::OneStep {
+                        machine.exec_instr(self.module, self.dispatch)
+                    } else {
+                        machine.exec_until_boundary(self.module, self.dispatch)
+                    };
                     stack[top_idx].retired = true;
                     match outcome {
                         Err(code) => {
