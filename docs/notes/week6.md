@@ -291,11 +291,15 @@ the pin of the definition that drifted.
 
 ### Why the qualified name is inside the interface hash
 
-An interface signature names a class by module path plus name, so the
-interface hash of a module depends on its own module path. Moving a
-module rebuilds its dependents. That is the honest answer: the
-importing `use` line changed too. Definition hashes stay
-location-independent, so content identity is unaffected.
+An interface signature names a class by module path plus name. The
+interface hash of an export therefore follows the module path
+whenever the signature names a class of that module. `def add(a: Int,
+b: Int): Int` names no class, so two modules publish one interface
+hash for it. That is safe: the linker resolves a slot by module path
+and export name first, and compares the hash after. Moving a module
+rebuilds its dependents, and the importing `use` line changed too.
+Definition hashes stay location-independent, so content identity is
+unaffected.
 
 ### What the decision does not fix
 
@@ -308,12 +312,23 @@ unobservable, because such classes are the same definition.
 
 ### The verification-hash coupling
 
-The core layout is a verifier input, and it now reads the class
-names, so the class names must fix the verified-code cache key. They
-are in `verification_hash`. Function names stay out, because no
-verifier rule and no identity rule reads one; the week-5 test
-`a_rename_does_not_move_the_verification_hash` renames a function and
-still holds.
+The core layout is a verifier input, and identity computes it, so
+every input of identity must fix the verified-code cache key.
+Identity reads two kinds of name:
+
+- a class name, because class identity is nominal;
+- a function name, because the canonical member order of a component
+  sorts its members by name. The member ordinal enters every member
+  hash of that component.
+
+Both are in `verification_hash` now. The second one is a week-5 rule
+that the week-5 note recorded and the specification did not: a rename
+inside a cycle moves the component hashes. An independent review
+turned it into an attack. A crafted rename of the core function
+`Option.is_some` drops the `Option` slot from the layout. The
+semantic region does not move, so the key held. The uncached load
+then rejected the module, and a cached load admitted it.
+`week6_names.rs` replays the attack.
 
 That closure has a second effect. The key now fixes every input of
 `module_identity` as well, so a cache hit may replay the identity
@@ -321,10 +336,19 @@ instead of recomputing it. The cache stores the definition hashes and
 the core layout beside the admission, and `cache.identities` proves
 the skip.
 
-The loaded module no longer exposes a module semantic hash. The key
-does not cover the function names, and the export table does, so a
-replayed semantic hash would be stale after a rename. `LoadedModule`
-exposes `class_hash` and `func_hash` instead.
+The loaded module still exposes no module semantic hash. The hash
+covers the export table, which the key does not, so a replayed
+semantic hash could be stale. `LoadedModule` exposes `class_hash`
+and `func_hash` instead.
+
+The cost of the name coverage is one cache miss per rename. That is
+the right trade: a rename already rebuilds the module in the build
+cache, and the admission invariant is worth more than one hit. The
+principled alternative is a content-ordered member rule inside a
+component, which would remove the function names from identity
+entirely. It needs a canonical order over isomorphic members, which
+is a graph-labeling problem, and it moves every cyclic definition
+hash. It stays deferred with that reason.
 
 ### The identity load path
 
@@ -441,6 +465,12 @@ makes the developer loop fast.
   different program. The admission invariant is the durable part of
   the test and is unchanged; the per-case hash expectation became
   explicit data. Two import cases join the sweep.
+- `week5_identity.rs`: `a_rename_does_not_move_the_verification_hash`
+  became `a_rename_moves_the_verification_hash`. The names are
+  identity inputs, and identity feeds the core layout, which the
+  verifier reads, so the key must cover them. The test also proves
+  the semantic region does not move, which is the part the old name
+  was really about.
 - `week5_identity.rs`: the two interface tests moved to
   `week6_interface.rs` and were rewritten for the structural format.
   `building_twice_is_byte_identical` dropped its interface half,
@@ -515,6 +545,39 @@ Each probe failed first and passes now.
 The `lm run <package>` report moved to standard error in the same
 pass, so the program output stays clean on standard output.
 
+## The independent review pass
+
+An independent review of the week found six items. Four are fixed
+here, one was already fixed, and one is a corrected sentence.
+
+- **The verified-code cache admitted what an uncached load
+  rejected.** The section above records the cause and the fix: every
+  definition name enters `verification_hash`.
+- **The compile key omitted the core image.** A core edit kept the
+  dependents cached and produced a program with two `Pair` classes.
+  The fix landed before the review ended: the key covers
+  `lm_hir::core_source_digest()`.
+- **A resolved core family could lose an arm.** The verifier proved
+  the parent slot, and the runtime allocated through the arm slots.
+  A crafted layout could therefore reach a slot the layout did not
+  hold, and panic the host process. The verifier rejects a family
+  that resolves without every arm now. No rename reaches the case, so
+  the gap was latent, and the rule closes it by construction. The
+  verifier version moves to 2.
+- **The module walk recursed and followed symbolic links.** A link
+  cycle produced forty copies of every module and a confusing
+  diagnostic. The walk keeps an explicit stack now, and a symbolic
+  link inside `src` rejects.
+- **One signature encoding was ambiguous.** The marker and name
+  vectors of an interface signature carried no count. Two signatures
+  could therefore share one encoding, and one interface hash. The
+  compiler never produced such a pair, because it builds all three
+  vectors from one signature. Both vectors carry their count now, and
+  the decoder forces the three counts equal.
+- **One note sentence over-claimed.** An interface hash follows the
+  module path only when the signature names a class of that module.
+  The section above states the condition.
+
 ## Deferred work
 
 - Per-definition pruning of unused import slots.
@@ -532,6 +595,13 @@ pass, so the program output stays clean on standard output.
 - Debug content (source maps) and a container hash that moves
   independently of the semantic hashes.
 - A parallel build loop. The loop is sequential and single-threaded.
+- A content-ordered member rule for a cyclic component, which would
+  remove the function names from identity.
+- A compiler build identity inside the compile key. The key covers
+  the format version, the compiler ABI version, the verifier version,
+  the manifest digest, and the core digest. A checker or lowering
+  change that moves the generated code must move the compiler ABI
+  version, which is the bump rule; the key does not enforce it.
 - CI workflow files, Miri, `cargo-fuzz` targets, and committed
   benchmark distributions stay deferred as before.
 - Week 13 keeps the recorded constraint: class values must not

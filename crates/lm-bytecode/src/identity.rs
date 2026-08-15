@@ -107,18 +107,25 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
 /// evolve without touching cache soundness.
 ///
 /// The digest covers the semantic region, the operation manifest, and
-/// the class names. The manifest is a verifier input, because the row
-/// and signature rules read it, and it is not stored in the container.
+/// every definition name. The manifest is a verifier input, because
+/// the row and signature rules read it, and it is not stored in the
+/// container.
 ///
-/// The class names are a verifier input since class identity became
-/// nominal: the hash-linked core layout resolves a slot by class name
-/// and definition hash, and the verifier reads that layout. The names
-/// therefore must fix the key. Function names stay out, because no
-/// verifier rule and no identity rule reads one, so a function rename
-/// must not cost a cache hit.
+/// The definition names are verifier inputs through the hash-linked
+/// core layout, which the verifier reads. Identity computes that
+/// layout, and identity reads two kinds of name:
 ///
-/// The key fixes every input of `module_identity` too, so a cache
-/// entry may carry the resolved identity and core layout.
+/// - a class name, because class identity is nominal;
+/// - a function name, because the canonical member order of a
+///   strongly connected component sorts its members by name, and the
+///   member ordinal enters every member hash of that component.
+///
+/// A crafted rename of one core method would otherwise drop a core
+/// slot with the key unchanged, and a cached load would admit what an
+/// uncached load rejects.
+///
+/// The key therefore fixes every input of `module_identity`, so a
+/// cache entry may carry the resolved identity and core layout.
 pub fn verification_hash(module: &Module) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(TAG_VERIFICATION);
@@ -127,6 +134,10 @@ pub fn verification_hash(module: &Module) -> [u8; 32] {
     bytes.extend_from_slice(&(module.classes.len() as u32).to_le_bytes());
     for class in &module.classes {
         write_str(&mut bytes, &class.name);
+    }
+    bytes.extend_from_slice(&(module.funcs.len() as u32).to_le_bytes());
+    for func in &module.funcs {
+        write_str(&mut bytes, &func.name);
     }
     sha256(&bytes)
 }

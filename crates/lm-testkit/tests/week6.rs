@@ -561,6 +561,19 @@ fn an_imported_effect_parameter_survives_the_interface() {
     assert_eq!(output, "tick\ntick\n6\n");
 }
 
+/// A symbolic link inside `src` rejects. A link cycle would
+/// otherwise produce an unbounded module tree.
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_in_the_module_tree_rejects() {
+    let tree = TempTree::new("symlink");
+    workspace(&tree);
+    std::os::unix::fs::symlink(tree.path("app/src"), tree.path("app/src/loop"))
+        .expect("the link is created");
+    let error = tree.build("app").expect_err("the link must reject");
+    assert!(error.contains("symbolic link"), "{error}");
+}
+
 /// A module that imports itself is an import cycle.
 #[test]
 fn a_module_cannot_import_itself() {

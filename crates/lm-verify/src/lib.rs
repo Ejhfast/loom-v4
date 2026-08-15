@@ -455,7 +455,10 @@ impl<'m> Ctx<'m> {
 
 /// The verifier version. It takes part in the verified-code cache
 /// key: a rule change invalidates every cached admission.
-pub const VERIFIER_VERSION: u32 = 1;
+///
+/// Version 2 adds the import-slot rules and the core-family
+/// completeness rule.
+pub const VERIFIER_VERSION: u32 = 2;
 
 /// Verify a full module. Every table and every function must pass.
 /// This computes the module identity for the hash-linked core layout;
@@ -532,6 +535,46 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         func: u32::MAX,
         message,
     };
+    // A resolved core family must be complete. The verifier proves a
+    // parent slot where an instruction needs the family, and the
+    // runtime allocates through the arm slots. A crafted module with
+    // a parent and no arm would pass the verifier and reach an arm
+    // slot the layout does not hold.
+    for (parent, arms, family) in [
+        (
+            core.option,
+            vec![core.option_some, core.option_none],
+            "Option",
+        ),
+        (core.result, vec![core.result_ok, core.result_err], "Result"),
+        (core.io_error, vec![core.io_error_failed], "IoError"),
+        (
+            core.run_result,
+            vec![core.run_done, core.run_fault],
+            "RunResult",
+        ),
+        (
+            core.step_event,
+            vec![
+                core.step_ran,
+                core.step_waiting,
+                core.step_done,
+                core.step_fault,
+            ],
+            "StepEvent",
+        ),
+        (
+            core.drive_event,
+            vec![core.drive_asked, core.drive_done, core.drive_fault],
+            "DriveEvent",
+        ),
+    ] {
+        if parent.is_some() && arms.iter().any(|arm| arm.is_none()) {
+            return Err(terr(format!(
+                "the pinned core family `{family}` resolves without every arm"
+            )));
+        }
+    }
     // The selector table must hold no duplicate name. The canonical
     // identity encoding replaces a selector index with its name, so a
     // duplicate name lets two different dispatch keys hash alike. The

@@ -244,7 +244,7 @@ pub fn load_package(dir: &Path) -> Result<Package, String> {
         ));
     }
     let mut files: Vec<(String, PathBuf)> = Vec::new();
-    collect_modules(&src, &mut Vec::new(), &mut files)?;
+    collect_modules(&src, &mut files)?;
     files.sort();
     if files.is_empty() {
         return Err(format!(
@@ -274,49 +274,62 @@ pub fn load_package(dir: &Path) -> Result<Package, String> {
 
 /// Collect `src/**/*.lm` as module paths. Directory and file names
 /// must be valid module names.
-fn collect_modules(
-    dir: &Path,
-    prefix: &mut Vec<String>,
-    out: &mut Vec<(String, PathBuf)>,
-) -> Result<(), String> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| format!("error: cannot read `{}`: {e}\n", dir.display()))?
-        .map(|e| e.map(|e| e.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("error: cannot read `{}`: {e}\n", dir.display()))?;
-    entries.sort();
-    for entry in entries {
-        let name = entry
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| format!("error: `{}` has no readable name\n", entry.display()))?
-            .to_string();
-        if entry.is_dir() {
-            if !valid_name(&name) {
+///
+/// The walk keeps an explicit stack, so a deep tree never grows the
+/// host stack. It rejects a symbolic link, so a link cycle cannot
+/// produce an unbounded module tree.
+fn collect_modules(root: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+    // Each frame is one directory and the module prefix it carries.
+    let mut stack: Vec<(PathBuf, Vec<String>)> = vec![(root.to_path_buf(), Vec::new())];
+    while let Some((dir, prefix)) = stack.pop() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map_err(|e| format!("error: cannot read `{}`: {e}\n", dir.display()))?
+            .map(|e| e.map(|e| e.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("error: cannot read `{}`: {e}\n", dir.display()))?;
+        entries.sort();
+        for entry in entries {
+            let name = entry
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| format!("error: `{}` has no readable name\n", entry.display()))?
+                .to_string();
+            let meta = std::fs::symlink_metadata(&entry)
+                .map_err(|e| format!("error: cannot read `{}`: {e}\n", entry.display()))?;
+            if meta.file_type().is_symlink() {
                 return Err(format!(
-                    "error: the directory `{}` is not a module name; use a \
-                     lowercase letter, then letters, digits, or underscores\n",
+                    "error: `{}` is a symbolic link; a module tree holds \
+                     ordinary files and directories only\n",
                     entry.display()
                 ));
             }
-            prefix.push(name);
-            collect_modules(&entry, prefix, out)?;
-            prefix.pop();
-            continue;
+            if meta.is_dir() {
+                if !valid_name(&name) {
+                    return Err(format!(
+                        "error: the directory `{}` is not a module name; use a \
+                         lowercase letter, then letters, digits, or underscores\n",
+                        entry.display()
+                    ));
+                }
+                let mut child = prefix.clone();
+                child.push(name);
+                stack.push((entry, child));
+                continue;
+            }
+            let Some(stem) = name.strip_suffix(".lm") else {
+                continue;
+            };
+            if !valid_name(stem) {
+                return Err(format!(
+                    "error: the file `{}` is not a module name; use a lowercase \
+                     letter, then letters, digits, or underscores\n",
+                    entry.display()
+                ));
+            }
+            let mut segments = prefix.clone();
+            segments.push(stem.to_string());
+            out.push((segments.join("."), entry));
         }
-        let Some(stem) = name.strip_suffix(".lm") else {
-            continue;
-        };
-        if !valid_name(stem) {
-            return Err(format!(
-                "error: the file `{}` is not a module name; use a lowercase \
-                 letter, then letters, digits, or underscores\n",
-                entry.display()
-            ));
-        }
-        let mut segments = prefix.clone();
-        segments.push(stem.to_string());
-        out.push((segments.join("."), entry));
     }
     Ok(())
 }

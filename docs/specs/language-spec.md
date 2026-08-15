@@ -202,7 +202,7 @@ The following require no ordinary import slot:
 
 The standard library is not ambient. A package or explicit compile environment supplies every `std/*` module it uses. Every other free name must be defined by the module or supplied in the explicit compile environment.
 
-The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name, and a `use` of another module compiles to a named import slot that the build tool fulfills. `use` never grants authority and never changes an effect row. The package layout, the manifest, and the resolution roots are defined in `docs/specs/packages.md`.
+The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name. A `use` of another module compiles to a named import slot, and the build tool fulfills it. `use` never grants authority and never changes an effect row. The package layout, the manifest, and the resolution roots are defined in `docs/specs/packages.md`.
 
 A `use` path starts at a root name. The root set is fixed per module: the dependency keys of the manifest, this package's own top-level modules, `std`, and `sys`. A collision inside the root set is a compile error, and the fix is a manifest rename; resolution never picks silently. A path that names a module binds that module, and every export of it resolves under the bound name. A path that names one export of a module binds that export.
 
@@ -274,7 +274,7 @@ end
 
 Missing, extra, incompatible, or mutable bindings produce `LinkErrors` in the trusted API. Injecting malformed linked state into a VM faults with `LinkMismatch`.
 
-Linking a program merges its modules into one closed artifact with an empty import table. The merge is pure: it installs no global name, performs no host operation, and reads no file. Two definitions with one definition hash are one definition in the merged program, so the core image every module carries becomes one core and a core value keeps its class across a module boundary. A module with an unresolved import slot never executes: the loader admits an artifact only with an empty import table. The merged artifact meets the whole verifier before it runs.
+Linking a program merges its modules into one closed artifact with an empty import table. The merge is pure: it installs no global name, performs no host operation, and reads no file. Two definitions with one definition hash are one definition in the merged program. The core image every module carries therefore becomes one core, and a core value keeps its class across a module boundary. A module with an unresolved import slot never executes: the loader admits an artifact only with an empty import table. The merged artifact meets the whole verifier before it runs.
 
 ### 3.7 Definition and module identity
 
@@ -286,12 +286,14 @@ Canonical bytecode is a dedicated identity encoding, not the loading encoding. I
 
 Names enter identity by definition kind:
 
-- A **function** definition hash excludes its own name. A function rename moves the module hash through the export table and moves no definition hash, its own or any caller's.
+- A **function** definition hash excludes its own name. A function rename outside a cyclic component moves the module hash through the export table, and moves no definition hash. Inside a cyclic component the canonical member order sorts by name, so a rename there moves the member ordinals and therefore every member hash of that component.
 - A **class** definition hash includes its own name. A class is a nominal type (5.3, 8.6), so two classes with different names are different definitions whatever their shape. A class rename moves that class hash, every hash that references it, and the module hash.
+
+*Implementation note.* The name-ordered member rule makes every definition name an input of identity. A host that caches a verified admission must therefore cover the names in its cache key, because the core-image resolution below reads identity. A content-ordered member rule would remove the function names from identity; it needs a canonical order over isomorphic members and is not defined here.
 
 A **method** takes part in its class identity as the pair of the selector name and the implementing function identity. Selector identity is therefore name-based and independent of any method body. An override with a different body keeps the selector name.
 
-An **interface hash** covers only the exported name, the kind, and the full signature, with class references by qualified name. It covers no method body and no function body. Import slots pin interface hashes, so an edit to an exported body changes the definition hash of that body and no interface hash, and no dependent module recompiles. The linker resolves an import slot to a definition and rejects a slot whose provider interface hash differs from the pin.
+An **interface hash** covers only the exported name, the kind, and the full signature, with class references by qualified name. It covers no method body and no function body. Import slots pin interface hashes. An edit to an exported body therefore moves the definition hash of that body and no interface hash, and no dependent module recompiles. The linker resolves an import slot to a definition, and it rejects a slot whose provider interface hash differs from the pin.
 
 *Implementation note.* The reference implementation uses Tarjan's algorithm in an iterative form with an explicit work stack; the definition graph is untrusted input, so the walk must not grow the host stack. Traversal order is pinned: roots in ascending definition index, successors in ascending reference order. Tarjan emits components callees-first, and that emission order is the hash schedule: every referenced definition hash is complete before a component is hashed. The hashes themselves do not depend on the traversal order, because the partition and the in-component ordering are canonical.
 

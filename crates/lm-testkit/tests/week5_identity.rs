@@ -763,10 +763,14 @@ fn the_verification_hash_keeps_every_index() {
     assert_ne!(base, verification_hash(&dead));
 }
 
-/// Definition names live outside the semantic region and the verifier
-/// reads none of them, so a rename must not cost a cache hit.
+/// Definition names live outside the semantic region, and week 5
+/// kept them out of the verification hash. Week 6 puts them in: the
+/// verifier reads the identity-resolved core layout, and identity
+/// reads the names. A rename therefore costs a cache hit now, which
+/// is the price of the admission invariant. See
+/// `week6_names.rs` for the attack this closes.
 #[test]
-fn a_rename_does_not_move_the_verification_hash() {
+fn a_rename_moves_the_verification_hash() {
     use lm_bytecode::identity::verification_hash;
     let before = "def helper(n: Int): Int\n  n * 2\nend\n\
                   def caller(n: Int): Int\n  helper(n) + 1\nend\ncaller(3)\n";
@@ -779,9 +783,16 @@ fn a_rename_does_not_move_the_verification_hash() {
         module_identity(&mb).unwrap().semantic_hash,
         "a rename must move the semantic hash"
     );
-    assert_eq!(
+    assert_ne!(
         verification_hash(&ma),
         verification_hash(&mb),
-        "a rename must not move the verification hash"
+        "a rename must move the verification hash"
+    );
+    // The semantic region itself does not move: the names live in the
+    // export section.
+    assert_eq!(
+        lm_bytecode::semantic_section(&ma),
+        lm_bytecode::semantic_section(&mb),
+        "a rename must not move the semantic region"
     );
 }

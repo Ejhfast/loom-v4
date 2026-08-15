@@ -378,6 +378,11 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
     }
 }
 
+/// Encode one signature.
+///
+/// The marker and name vectors carry their own counts. The decoder
+/// forces all three counts equal, so one encoding never stands for
+/// two signatures and the interface hash stays unambiguous.
 fn encode_fn(out: &mut Vec<u8>, sig: &IfaceFn) {
     write_u32(out, sig.type_params);
     write_u32(out, sig.effect_params);
@@ -385,9 +390,11 @@ fn encode_fn(out: &mut Vec<u8>, sig: &IfaceFn) {
     for p in &sig.params {
         encode_type(out, p);
     }
+    write_u32(out, sig.param_muts.len() as u32);
     for m in &sig.param_muts {
         out.push(u8::from(*m));
     }
+    write_u32(out, sig.param_names.len() as u32);
     for n in &sig.param_names {
         write_str(out, n);
     }
@@ -576,9 +583,16 @@ fn decode_fn(cur: &mut crate::Cursor<'_>) -> Result<IfaceFn, DecodeError> {
     for _ in 0..count {
         params.push(decode_type(cur, 0)?);
     }
+    // The three counts must agree, so one signature has one encoding.
+    if cur.len()? != count {
+        return Err(DecodeError::BadLength);
+    }
     let mut param_muts = Vec::with_capacity(count);
     for _ in 0..count {
         param_muts.push(cur.flag()?);
+    }
+    if cur.len()? != count {
+        return Err(DecodeError::BadLength);
     }
     let mut param_names = Vec::with_capacity(count);
     for _ in 0..count {

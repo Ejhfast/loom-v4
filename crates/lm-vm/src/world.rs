@@ -455,15 +455,18 @@ impl<'m> World<'m> {
         self.make_instance(parent, class, vec![fault])
     }
 
-    /// Allocate one core enum case instance. The verifier proved the
-    /// class exists wherever an instruction needs it.
+    /// Allocate one core enum case instance.
+    ///
+    /// The verifier proves the parent slot wherever an instruction
+    /// needs the family, and it rejects a family that resolves
+    /// without every arm. The arm slot is therefore present.
     fn make_instance(
         &mut self,
         vm: VmId,
         class: Option<u32>,
         fields: Vec<Value>,
     ) -> Result<Value, FaultCode> {
-        let class = class.expect("the verifier required this core definition");
+        let class = class.expect("the verifier requires the whole core family");
         self.machines[vm as usize].alloc(Object::Instance { class, fields })
     }
 
