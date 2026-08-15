@@ -31,7 +31,7 @@ pub enum BcRow {
 /// One type application: the generic arguments of a call site or an
 /// allocation site. `types` aligns with the callee type parameters.
 /// `rows` aligns with the callee effect parameters.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeApp {
     pub types: Vec<u32>,
     pub rows: Vec<Vec<BcRow>>,

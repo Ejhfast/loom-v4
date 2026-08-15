@@ -9,6 +9,7 @@ members = [
     "crates/lm-verify",
     "crates/lm-value",
     "crates/lm-vm",
+    "crates/lm-compiler",
     "crates/lm-cli",
     "crates/lm-host",
     "crates/lm-testkit",

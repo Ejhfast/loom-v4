@@ -1,0 +1,19 @@
+# A small library module. Every top-level definition is exported.
+
+class Matrix
+  rows: Int = 1
+  cols: Int = 1
+
+  def init(mut self, rows: Int, cols: Int)
+    self.rows = rows
+    self.cols = cols
+  end
+
+  def area(self): Int
+    self.rows * self.cols
+  end
+end
+
+def describe(m: Matrix): String
+  "{m.rows}x{m.cols}"
+end

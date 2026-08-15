@@ -18,10 +18,12 @@ use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
+  lm new <name>
   lm check <file.lm>
-  lm build <file.lm>
+  lm build <file.lm | package directory>
   lm run [--show-result] [--allow Op1,Group2,...] [--rand-seed N]
-         [--fuel N] [--max-frames N] [--heap-bytes N] <file.lm | file.lma>
+         [--fuel N] [--max-frames N] [--heap-bytes N]
+         <file.lm | file.lma | package directory>
   lm disasm <file.lm | file.lma>
   lm inspect <file.lmi | file.lma>
   lm inspect --live [--fuel N] [--max-frames N] [--heap-bytes N] <file.lm>";
@@ -54,31 +56,43 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 .map_err(|e| format!("error: the verifier rejected the module: {e}\n"))?;
             Ok(ExitCode::SUCCESS)
         }
+        "new" => {
+            let options = parse_options(rest)?;
+            let dir = Path::new(&options.file);
+            let name = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| format!("error: `{}` has no name\n", options.file))?;
+            lm_compiler::scaffold::new_package(dir, name)?;
+            println!("created {}", dir.display());
+            println!("  {}", dir.join("lm.package").display());
+            println!("  {}", dir.join("src").join("main.lm").display());
+            Ok(ExitCode::SUCCESS)
+        }
         "build" => {
             let options = parse_options(rest)?;
+            if is_package(&options.file) {
+                build_package(&options.file)?;
+                return Ok(ExitCode::SUCCESS);
+            }
             build_artifact(&options.file)
         }
         "run" => {
             let options = parse_options(rest)?;
-            let loaded = load_program(&options.file)?;
-            let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-            let mut world = World::new(&loaded, options.config, host);
-            for grant in &options.allow {
-                world
-                    .allow(grant)
-                    .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
+            if is_package(&options.file) {
+                let report = build_package(&options.file)?;
+                let program = report.program.ok_or_else(|| {
+                    format!(
+                        "error: the package `{}` has no `src/main.lm`, so it \
+                         builds no program\n",
+                        report.root
+                    )
+                })?;
+                let mut options = options;
+                options.file = program.display().to_string();
+                return run_program(options);
             }
-            let outcome = world.run_root();
-            let text = world.show_outcome(&outcome);
-            if options.show_result {
-                println!("{text}");
-            } else if matches!(outcome, lm_vm::Outcome::Fault(_)) {
-                eprintln!("{text}");
-            }
-            match outcome {
-                lm_vm::Outcome::Done(_) => Ok(ExitCode::SUCCESS),
-                lm_vm::Outcome::Fault(_) => Ok(ExitCode::from(1)),
-            }
+            run_program(options)
         }
         "disasm" => {
             let options = parse_options(rest)?;
@@ -140,6 +154,65 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The first twelve hex digits of a hash, for a readable report line.
+fn short(bytes: &[u8]) -> String {
+    hex(&bytes[..6])
+}
+
+/// True when the path names a package directory instead of a file.
+fn is_package(path: &str) -> bool {
+    Path::new(path).is_dir()
+}
+
+/// Build one package and print the per-module report.
+fn build_package(path: &str) -> Result<lm_compiler::BuildReport, String> {
+    let report = lm_compiler::build_package(Path::new(path), Path::new("build"))?;
+    for module in &report.modules {
+        let verb = if module.cached { "cached" } else { "built " };
+        println!("{verb} {}  {}", module.path, short(&module.semantic_hash));
+    }
+    match (&report.program, report.program_semantic) {
+        (Some(program), Some(semantic)) => {
+            println!(
+                "linked {}  sem={} container={}",
+                report.root,
+                short(&semantic),
+                short(
+                    &report
+                        .program_container
+                        .expect("a linked program has bytes")
+                )
+            );
+            println!("  {}", program.display());
+        }
+        _ => println!("library {} builds no program", report.root),
+    }
+    Ok(report)
+}
+
+/// Load and run one program with the given policy grants.
+fn run_program(options: Options) -> Result<ExitCode, String> {
+    let loaded = load_program(&options.file)?;
+    let host = Box::new(lm_host::CliHost::new(options.rand_seed));
+    let mut world = World::new(&loaded, options.config, host);
+    for grant in &options.allow {
+        world
+            .allow(grant)
+            .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
+    }
+    let outcome = world.run_root();
+    let text = world.show_outcome(&outcome);
+    if options.show_result {
+        println!("{text}");
+    } else if matches!(outcome, lm_vm::Outcome::Fault(_)) {
+        eprintln!("{text}");
+    }
+    match outcome {
+        lm_vm::Outcome::Done(_) => Ok(ExitCode::SUCCESS),
+        lm_vm::Outcome::Fault(_) => Ok(ExitCode::from(1)),
+    }
 }
 
 fn extension(path: &str) -> &str {

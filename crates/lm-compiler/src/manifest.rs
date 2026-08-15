@@ -195,8 +195,13 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, ManifestError> {
         }
         let full = format!("{section_name}.{key}");
         if let Some(first) = keys.insert(full, line) {
-            return Err(err(line, format!("the key `{key}` appears twice; line {first} \
-                                          declares it already")));
+            return Err(err(
+                line,
+                format!(
+                    "the key `{key}` appears twice; line {first} \
+                                          declares it already"
+                ),
+            ));
         }
         match section_name {
             "package" => match key.as_str() {

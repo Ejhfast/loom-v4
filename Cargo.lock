@@ -19,6 +19,7 @@ version = "0.1.0"
 dependencies = [
  "lm-abi",
  "lm-bytecode",
+ "lm-compiler",
  "lm-hir",
  "lm-host",
  "lm-source",
@@ -26,6 +27,18 @@ dependencies = [
  "lm-value",
  "lm-verify",
  "lm-vm",
+]
+
+[[package]]
+name = "lm-compiler"
+version = "0.1.0"
+dependencies = [
+ "lm-abi",
+ "lm-bytecode",
+ "lm-hir",
+ "lm-source",
+ "lm-types",
+ "lm-verify",
 ]
 
 [[package]]
@@ -56,6 +69,7 @@ version = "0.1.0"
 dependencies = [
  "lm-abi",
  "lm-bytecode",
+ "lm-compiler",
  "lm-hir",
  "lm-source",
  "lm-types",

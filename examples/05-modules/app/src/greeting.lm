@@ -1,0 +1,11 @@
+# A module of this package. `use greeting` binds it in `main.lm`.
+
+use mathlib.matrix
+
+def greet(name: String): String
+  "Hello {name}!"
+end
+
+def report(m: matrix.Matrix): String
+  "{matrix.describe(m)} has {m.area()} cells"
+end

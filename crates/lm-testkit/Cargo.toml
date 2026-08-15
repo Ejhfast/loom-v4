@@ -9,6 +9,7 @@ lm-abi = { path = "../lm-abi" }
 lm-source = { path = "../lm-source" }
 lm-types = { path = "../lm-types" }
 lm-hir = { path = "../lm-hir" }
+lm-compiler = { path = "../lm-compiler" }
 lm-bytecode = { path = "../lm-bytecode" }
 lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }

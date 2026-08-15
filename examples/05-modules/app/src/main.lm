@@ -1,0 +1,14 @@
+# The program entry: the trailing expression of `src/main.lm`.
+
+use sys.io.print
+use greeting
+use mathlib.matrix
+
+def run() with Io.Print
+  m = matrix.Matrix(2, 3)
+  hello = greeting.greet("Ada")
+  print("{hello}\n")
+  print("{greeting.report(m)}\n")
+end
+
+run()
