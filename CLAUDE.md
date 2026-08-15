@@ -55,6 +55,12 @@ need a new tool, add it to `shell.nix`.
 - `examples/` — runnable Loom programs (`.lm` files) with checked output.
 - `tests/` — UI, run-pass, run-fail, and verifier test suites.
 
+## Commit rules
+
+- Write a plain, descriptive commit message.
+- Do not add attribution trailers. Do not add `Co-Authored-By` lines,
+  tool branding, or vendor branding of any kind.
+
 ## Engineering rules
 
 - Keep the dependency direction from `docs/specs/build-order.md` section 1.

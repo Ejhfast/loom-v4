@@ -642,6 +642,8 @@ Ordering requires equal numeric types. Float ordering follows ordered IEEE compa
 
 `==` and `!=` otherwise compare scalars, strings, bytes, and digests by value; class values, operation identities/groups, and zero-capture top-level functions by canonical hash; captured closures, ordinary instances, lists, maps, VMs, handles, and resource descriptors by VM-local reference identity.
 
+Tuples compare structurally. Two tuples are equal when their types are equal and every element pair is equal under these same rules. Tuple equality requires equal static tuple types, and its element comparisons never widen: an element position compares by the rule for its declared element type. This matches the canonical digest encoding, which treats a tuple as its ordered elements.
+
 Deep graph equality is `std.value.deep_equal` and requires frozen digestible values.
 
 ### 6.5 Tuples, lists, maps, and indexing
