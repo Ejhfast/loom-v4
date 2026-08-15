@@ -704,3 +704,354 @@ next.
 - Week 13 keeps the recorded constraint: class values must not
   compare by bare definition hash, because a definition hash is not
   injective over names.
+
+## The identity, linking, and build-store rework
+
+This section records the work that implements
+`docs/specs/identity-and-linking.md`. It replaces the identity
+decision above wherever the two disagree.
+
+Bytecode format version 8 carries the class qualified keys, the core
+role table, and a self-describing `mut` marker encoding. The compiler
+ABI version is 3 and the verifier version is 3. The core image pin
+moved to
+`df377f94ffbf8cc9e4a6358f02146611448455e228bc029e0181a22f8dc68657`
+and `core/pinned-core-defs.txt` holds the twenty regenerated core
+structural hashes.
+
+### The rule this design delivers
+
+> Names control resolution and API compatibility. The verifier checks
+> resolved structure, not source names.
+
+Both halves hold now. The verifier reads resolved slots and
+structures. It reads no class name, no function name, and no
+qualified key.
+
+### The four identities
+
+- **QualifiedKey**: the fully qualified declaration path of a class,
+  for example `mathlib.matrix.Matrix`. The core image owns the
+  reserved path `core`, so a core class carries `core.Option`. A
+  module path of exactly `core` rejects with diagnostic E0290.
+- **StructuralHash**: the name-free content identity. A declaration
+  name never enters its own structural hash.
+- **InterfaceHash**: unchanged. It contains names by design.
+- **VerificationHash**: the semantic region plus the operation
+  manifest digest, and nothing else.
+
+`BcClass` carries the key beside the name. Both live in the export
+section, outside the semantic region.
+
+### Design 2 of specification section 4, and why
+
+A structural hash alone cannot separate two signatures that name two
+structurally identical classes. Design 1 keeps a nominal reference map
+beside the hash. Design 2 names a referenced class by QualifiedKey
+inside the type digest. **Design 2 landed.**
+
+The measured case is in `identity_linking.rs`:
+`a_referenced_qualified_key_separates_two_equal_signatures` compiles
+`class Vec2 {x, y}` and `class Point {x, y}` with `f(v: Vec2)` and
+`g(p: Point)`. The two classes share one structural hash, and the two
+functions do not.
+
+Design 1 rejected, with its measured cost:
+
+- it adds one value to the artifact, one value to the interface, and
+  one comparison to the linker merge rule, for exactly the separation
+  design 2 already gives;
+- it keeps class references inside the reference graph, so a class and
+  its methods stay in one strongly connected component. Under design 2
+  no edge points at a class, so every class is a singleton component
+  and every cycle is function-only. The refinement of section 6 then
+  runs over functions alone;
+- the enum family cycle disappears with it. Under design 1 the family
+  parent and its arms form one component, which is what made the old
+  name-ordered member rule load-bearing.
+
+Design 2 has one cost, and it is real: a structural hash is no longer
+location-independent. Moving a module moves the qualified key of every
+class it declares, and every hash that names one of those classes. The
+week-6 sentence "definition hashes stay location-independent" is false
+now. The build cache already keys on the module path, so nothing goes
+stale; the cost is one rebuild on a move, and the `use` line changed
+too.
+
+### One narrowing of specification section 5: functions carry no key
+
+Specification section 5 states the merge table over "definitions". The
+implementation gives a QualifiedKey to a **class** and to no function.
+A function merges on its structural hash alone.
+
+The reason is the principle the specification follows: a source
+binding names a nominal type, a selector names a method, and an
+implementation is content. A class is a nominal type (5.3, 8.6); a
+function is not. The consequences of specification section 5 all read
+as class consequences, and each one holds:
+
+- `mathlib.Vec2` and `app.Point` stay distinct
+  (`two_equal_shapes_with_two_keys_stay_distinct`);
+- every embedded copy of `core.Option` merges
+  (`every_embedded_core_copy_merges`);
+- a method body edit keeps the QualifiedKey and moves the
+  StructuralHash of the class that answers the selector
+  (`a_method_body_edit_keeps_the_key_and_moves_the_hash`);
+- two implementation versions of one qualified name reject with both
+  providers named (`two_versions_of_one_qualified_key_reject`).
+
+Row 2 still catches a drifted core method, because a class structural
+hash covers the identity of every implementing function. The split
+core the week-6 review found therefore rejects at the class level.
+
+The cost of a function key would be real: the generated constructor
+stubs of the abstract enum parents are all `unit; return`, and every
+structurally equal function across two modules would stop merging.
+Rows 2 and 3 of the table are therefore vacuous for a function. **This
+is a deviation from the plain reading of the specification, and it
+needs a decision.**
+
+### Order-invariant labeling, and the measured cost
+
+The canonical member order that sorted by name is gone. A component
+labels its members by structural refinement:
+
+1. the first colour of a member is its bytes with one placeholder for
+   each in-component reference;
+2. each round folds in the colours of the referenced members, in their
+   position order inside the member;
+3. the loop stops as soon as the distinct colour count stops growing.
+
+An in-component closure body takes part in the refinement, so a member
+that differs only inside a nested closure still receives its own
+colour.
+
+The colours are content ranks, not hashes: the rounds sort byte
+signatures and assign ranks, and one SHA-256 pass at the fixed point
+produces the component hash and the member hashes. **This is a
+deviation from step 4 of specification section 6**, which states that
+the final label is the iterated hash itself. Iterated hashing costs
+one SHA-256 per member per round, and the round count is one per
+member on a crafted component. The partition is identical either way;
+only the hash domain differs.
+
+Measured on a wide hostile component (`chain-N`: a cycle of N
+functions where member zero carries one extra instruction, so
+refinement separates one member per round), release build:
+
+```text
+chain-64:        3.5 KiB   62 rounds   162 us
+chain-256:      13.9 KiB  254 rounds   1.14 ms
+chain-1024:     55.4 KiB 1022 rounds  22.8 ms
+chain-2048:    111.7 KiB 2046 rounds  94.6 ms
+symmetric-256:  13.9 KiB    1 round    246 us
+symmetric-2048:111.7 KiB    1 round   1.82 ms
+symmetric-8192:449.6 KiB    1 round   7.58 ms
+```
+
+A wide symmetric component costs one round and stays linear in the
+module size. A crafted chain is quadratic. The work is therefore
+bounded: `REFINE_WORK_BUDGET` caps `rounds * (members + references)`
+at 2^24, and a component past the budget rejects with a clear
+diagnostic. The bound lets a chain of about 2900 members through and
+costs about 200 ms at the limit. No source program reaches it;
+`a_component_past_the_refinement_budget_rejects` proves the rejection.
+
+### Symmetric members
+
+`StepEvent.Ran` and `StepEvent.Waiting` are empty case classes of one
+family. Nothing structural separates them, so they share one
+structural hash. The pinned core table now holds one hash twice, and
+the core pin resolves on the pair `(qualified key, structural hash)`.
+`Ordering.Less`, `Ordering.Equal`, and `Ordering.Greater` are the same
+case.
+
+### Slot resolution and the core role table
+
+An artifact carries a core role table: twenty class slots, one per
+stable core role, inside the semantic region. The compiler fills it,
+the linker relocates it and rejects a module that fills a role with
+another class, and the verifier proves the kind, the generic arity,
+the parent slot, and the exact field layout of every filled slot.
+
+The consequences:
+
+- the verifier reads no name and no definition hash;
+- the loader computes no identity;
+- an artifact with no source resolves its core from its own bytes;
+- `core/pinned-core-defs.txt` is a determinism gate now, not a
+  resolution mechanism.
+
+The structural rules are weaker than the old hash pin in one way: a
+core class with an edited method body now fills its role. That is
+sound. The runtime allocates through the slots and reads fields by
+position, and the verifier proves the layout it needs. The old rule
+proved bit equality of the whole class, which is more than any rule
+reads.
+
+### The verification hash
+
+The digest covers the semantic region and the operation manifest
+digest. That is the exact input set of the verifier. A rename
+therefore costs no cache hit, and
+`a_rename_of_every_definition_keeps_the_verification_hash` renames
+every class, every key, and every function and proves one verifier
+run for both modules.
+
+The order held: the names left the digest only after the verifier
+stopped reading every name-derived value.
+
+### The `mut` marker encoding
+
+The week-6 note left this open as a format question. It is closed.
+`encode_semantic` and the `BcType::Fn` arm of `encode_type` write an
+explicit count before every marker vector, and the decoder rejects a
+vector whose count differs from the parameter count. The semantic
+region describes itself now, so the marker lengths left
+`verification_hash`: the stopgap is redundant.
+
+Three probes hold it:
+`a_misaligned_function_marker_vector_rejects_at_the_decoder`,
+`a_misaligned_type_marker_vector_rejects_at_the_decoder`, and
+`two_marker_shapes_write_two_semantic_regions`.
+
+### The rename question, closed
+
+The week-6 note left four positions open on a rename inside a cyclic
+component. **Position 4 landed**: the member order reads no name, so a
+rename never moves a structural hash, inside a cycle or outside one.
+The measured cases, which the week-6 note recorded as
+`even -> evenx  false`, `even -> aaa  false`, `even -> zzz  true`, are
+all `false` now (`a_rename_inside_a_cycle_moves_no_hash`). The stated
+cost of position 4 is real and visible: the component hash no longer
+tells apart members that differ only by name, and two symmetric
+members share one hash.
+
+### The three-stage build store
+
+Stage 2 keys the linked artifact on the ordered module content hashes
+of the program, so a rebuild with no source change neither links nor
+verifies the merged program. Stage 3 keys the verifier verdict on the
+verified-code key, so a second load of one artifact never meets the
+verifier.
+
+A stage-3 verdict carries no fact. The artifact declares its own core
+role table, so a load reads the layout from the bytes. A damaged or
+forged entry can therefore supply no resolved value; it can only
+assert an admission. `lm_vm::load_with_record` recomputes the key from
+the decoded module and rejects a verdict filed under any other key.
+
+**One change the specification did not call for.** Section 10 says
+stage 3 persists "beside stage 2, under the same directory". For an
+artifact inside a package that is `<package>/build`, which the
+developer owns. For an artifact with no package the first
+implementation used `<artifact directory>/build`, and an independent
+check found the hole: the supplier of a foreign `.lma` would then also
+control the directory that holds its verdict, and a verdict replaces a
+verifier run. The store of an artifact with no package moved to the
+user cache directory (`LM_CACHE_DIR`, then `XDG_CACHE_HOME/lm`, then
+`HOME/.cache/lm`). Stage 3 stays reachable for a foreign artifact,
+which is the requirement.
+
+### Measurements
+
+All figures are release builds on one machine, median of 41 runs.
+
+```text
+                        base ad80ad4    now      work above the floor
+process-start floor        1152 us    1139 us     -
+lm build (no-op rebuild)   2559 us    1586 us     1407 us -> 447 us
+lm run <artifact.lma>      1471 us    1251 us      319 us -> 112 us
+```
+
+The no-op rebuild falls 38% in wall time and 68% in the work above
+process start. Process start is 72% of what is left.
+
+The load path, on a 7.9 KiB module, 200 rounds:
+
+```text
+module_identity   195 us
+verify_module      21 us
+load_bytes         39 us   (decode, verify, dispatch tables)
+```
+
+`verify_module` no longer computes identity, and neither does the
+loader. The week-6 note measured `module_identity` at 138 us and the
+full verifier at 159 us on a 6.9 KiB module, where identity was almost
+all of the verifier cost. Identity now runs in the compiler and the
+linker only.
+
+Definition sharing holds: the linked `examples/05-modules/app` program
+still carries 27 classes.
+
+### Moved hashes
+
+- the core image pin:
+  `16eda1db90588c74321eb9352a84a5a1a4c982d3570fa83d2ef2aa76933f252f`
+  to
+  `df377f94ffbf8cc9e4a6358f02146611448455e228bc029e0181a22f8dc68657`;
+- every one of the twenty core structural hashes in
+  `core/pinned-core-defs.txt`, regenerated with the ignored test
+  `regenerate_core_pins`. `StepEvent.Ran` and `StepEvent.Waiting` now
+  hold one value;
+- every definition hash of every module, because the structural
+  encoding changed;
+- `examples/01-basics/factorial.lm` moved to semantic
+  `9a0e71625cbfab30e8c19278bed49ef6c206d87ad36228be660394e7175c6a7c`
+  and container
+  `1f5338c1443db6914209258d9fdcdb1912fa6054d21488f4fedb211921debe07`;
+- `examples/05-modules/app` moved to semantic
+  `bfc4ad384da9aba74e58a625ed504609da3e0775389c60b02fcfffafcabb9bf3`;
+- every fuzz corpus module, regenerated with the ignored test
+  `regenerate_fuzz_corpus` for container format version 8.
+
+### Changed tests
+
+- `week5_identity.rs`:
+  `identical_shapes_in_different_families_stay_distinct` became
+  `a_referenced_qualified_key_separates_identical_shapes`. Two arms of
+  one family with equal shapes now share one hash, which is section 7.
+- `week5_identity.rs`: `a_duplicate_class_name_cannot_use_a_cache_hit`
+  became `a_duplicate_class_key_cannot_use_a_cache_hit`. The probe
+  needs one key, not one name.
+- `week5_identity.rs`: `a_rename_moves_the_verification_hash` became
+  `a_rename_keeps_the_verification_hash`. The verifier reads no name.
+- `week5_identity.rs`:
+  `a_corrupted_core_definition_no_longer_resolves` became
+  `a_corrupted_core_definition_fails_the_role_shape`. The slot still
+  resolves; the verifier rejects the shape.
+- `week6_identity.rs`:
+  `differently_named_classes_never_share_a_definition_hash` became
+  `the_qualified_key_separates_a_user_enum_from_the_core_family`. Two
+  classes with different names may share a structural hash; the
+  referenced keys keep the two families apart.
+- `week6_identity.rs`: `a_cache_hit_replays_the_identity` became
+  `a_load_computes_no_identity`.
+- `week6_names.rs`: the file inverted.
+  `a_crafted_function_rename_cannot_split_the_cache` became
+  `a_crafted_function_rename_moves_no_structural_hash`, and a crafted
+  qualified key moves no verifier input either. The new probe
+  `a_crafted_core_role_cannot_split_the_cache` holds the invariant on
+  the value the verifier does read.
+- `bench_smoke.rs`: the identity-replay assertion is gone.
+- `core_image.rs` and `fuzz.rs`: the pinned core files and the fuzz
+  corpus regenerated. Expected churn, no expectation weakened.
+
+### New tests
+
+`identity_linking.rs` (21 cases) covers the referenced nominal
+identity, the four rows of the merge table, the order-invariant
+labeling, the symmetric members, the refinement budget, the core role
+slots, the self-describing marker encoding, and the reserved `core`
+module path. Two ignored cases measure the refinement cost and the
+load path. `week6_store.rs` (10 cases) covers stage 2 and stage 3.
+
+### Deferred
+
+- A QualifiedKey for a function, if the deviation above is settled the
+  other way.
+- The iterated-hash form of the labels in specification section 6, if
+  the hash domain matters more than the quadratic worst case.
+- A user-cache location for stage 3 that survives a `HOME` with no
+  write permission. The store falls back to `.lm-cache` in the current
+  directory, which is a working directory, not a user directory.

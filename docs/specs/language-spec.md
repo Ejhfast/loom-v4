@@ -24,12 +24,12 @@ There is one guest-to-host boundary primitive: calling an operation object. Prin
 A conforming distribution keeps five semantic layers distinct.
 
 1. **Language primitives.** Syntax and structural types that cannot be written as ordinary declarations: unit, `Never`, `Any`, scalar machine types, tuples, function types, operation types, local mutation capability, and the bytecode/runtime machinery required to execute them.
-2. **Core image.** A pinned, dependency-free artifact compiled from ordinary language source plus declarations for native classes. It defines nominal types required by public signatures, including `Option`, `Result`, `Ordering`, `Pair`, `Range`, VM/proc event enums, and portable error values. These are not parser keywords and are not magic enum layouts. Their definition hashes are part of the language ABI.
+2. **Core image.** A pinned, dependency-free artifact compiled from ordinary language source plus declarations for native classes. It defines nominal types required by public signatures, including `Option`, `Result`, `Ordering`, `Pair`, `Range`, VM/proc event enums, and portable error values. These are not parser keywords and are not magic enum layouts. Their structural hashes are part of the language ABI, and an artifact names each of them through a stable core role slot (5.2).
 3. **Prelude.** A deliberately small set of names implicitly introduced during name resolution. The prelude re-exports selected primitive, native-core, and core-image names; it does not define their identity and does not automatically import general algorithms or host wrappers.
 4. **Standard library.** Explicitly linked ordinary modules for collections algorithms, text, formatting, paths, files, time, random, networking, JSON, VM helpers, proc supervision, compilation, reflection, and testing. Standard-library code can call pure intrinsics or explicit host operations but cannot bypass rows or policy.
 5. **Host operations.** Fixed members of `sys.*`. They may suspend, are policy-gated, and their exact identities appear in rows.
 
-This separation breaks the bootstrap cycle cleanly. The stage-0 compiler knows only primitive types and the declarative native-class manifest. It compiles the core image first. Host-operation signatures are then resolved against pinned core definition hashes, so an operation may return `Result[Option[String], IoError]` without making `Option` or `Result` compiler built-ins.
+This separation breaks the bootstrap cycle cleanly. The stage-0 compiler knows only primitive types and the declarative native-class manifest. It compiles the core image first. Host-operation signatures are then resolved against the core role slots of the artifact, so an operation may return `Result[Option[String], IoError]` without making `Option` or `Result` compiler built-ins.
 
 A wrapper may make an operation convenient; it cannot make an effectful action pure or grant authority.
 
@@ -432,7 +432,9 @@ enum Result[T, E]
 end
 ```
 
-The compiler recognizes only their pinned definition hashes where a narrow language rule needs them, such as the return type of `Request.as_call`. Pattern matching and exhaustiveness use the same enum machinery as user enums. The host ABI refers to the same hashes, so `Io.ReadLine` and user code cannot silently disagree about what `Result` means.
+An artifact carries a **core role table**: one class slot per stable core role, for example `Option`, `Option.Some`, and `Option.None`. The compiler fills the table, the linker relocates it, and the verifier proves the kind, the generic arity, the parent slot, and the exact field layout of every filled slot. A rule that needs a core family, such as the return type of `Request.as_call`, reads a slot. It reads no name and no hash, so a rename changes nothing the verifier reads, and an artifact with no source resolves its core from its own bytes. A family whose parent slot is filled must fill every arm slot.
+
+Pattern matching and exhaustiveness use the same enum machinery as user enums. The host ABI reads the same slots, so `Io.ReadLine` and user code cannot silently disagree about what `Result` means.
 
 The prelude merely puts `Option`, `Some`, `None`, `Result`, `Ok`, `Err`, `Ordering`, `Pair`, `Range`, `List`, and `Map` into unqualified scope. Removing a name from a future prelude revision does not change its core identity.
 

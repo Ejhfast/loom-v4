@@ -640,3 +640,43 @@ fn the_reserved_core_module_path_rejects() {
     assert_eq!(error.code, "E0290");
     assert!(error.message.contains("core image"), "{error:?}");
 }
+
+/// Measure the load path: the identity cost, the verifier cost, and
+/// the module size. Run it with:
+///
+/// ```text
+/// cargo test --release -p lm-testkit --test identity_linking \
+///   measure_load_path -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn measure_load_path() {
+    let source = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
+                  self.value = self.value + n\n    self.value\n  end\n  \
+                  def get(self): Int\n    self.value\n  end\nend\n\
+                  def run(n: Int): Int\n  c = Counter()\n  i = 0\n  \
+                  while i < n\n    c.add(i)\n    i = i + 1\n  end\n  c.get()\nend\n\
+                  run(10)\n";
+    let bytes = lm_testkit::compile_to_bytes("t.lm", source).expect("compiles");
+    let module = lm_bytecode::decode(&bytes).expect("decodes");
+    const ROUNDS: u32 = 200;
+    let start = std::time::Instant::now();
+    for _ in 0..ROUNDS {
+        module_identity(&module).expect("hashes");
+    }
+    let identity = start.elapsed() / ROUNDS;
+    let start = std::time::Instant::now();
+    for _ in 0..ROUNDS {
+        lm_verify::verify_module(&module).expect("verifies");
+    }
+    let verify = start.elapsed() / ROUNDS;
+    let start = std::time::Instant::now();
+    for _ in 0..ROUNDS {
+        lm_vm::load_bytes(&bytes).expect("loads");
+    }
+    let load = start.elapsed() / ROUNDS;
+    println!(
+        "module {} bytes: identity {identity:?} verify {verify:?} load {load:?}",
+        bytes.len()
+    );
+}
