@@ -602,8 +602,16 @@ fn register_exports(
     path: &str,
     reloc: &Reloc,
 ) -> Result<(), LinkError> {
+    let extern_classes = module.extern_classes();
+    let extern_funcs = module.extern_funcs();
     for export in &module.exports {
         let key = (path.to_string(), export.name.clone());
+        if merged.export_hash.contains_key(&key) {
+            return Err(fail(format!(
+                "the module `{path}` exports the name `{}` twice",
+                export.name
+            )));
+        }
         // The decoder bounds these indices, and a hand-built module
         // reaches the linker without a decoder, so the bound is
         // checked here too.
@@ -618,6 +626,21 @@ fn register_exports(
             return Err(fail(format!(
                 "the export `{}` of `{path}` names a definition outside the \
                  module",
+                export.name
+            )));
+        }
+        // A module exports what it defines. A re-export of an
+        // imported declaration would give one definition two
+        // qualified names, and a pin would then name a module that
+        // does not hold the definition.
+        let imported = if export.kind.is_class() {
+            extern_classes[export.def as usize]
+        } else {
+            extern_funcs[export.def as usize]
+        };
+        if imported {
+            return Err(fail(format!(
+                "the module `{path}` exports `{}`, which it imports",
                 export.name
             )));
         }

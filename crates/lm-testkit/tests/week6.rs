@@ -904,6 +904,72 @@ fn a_stale_pin_fails_to_link() {
     assert!(error.0.contains("rebuild"), "{error}");
 }
 
+/// The linker takes decoded modules, so it checks the export table
+/// of a crafted unit instead of trusting it.
+#[test]
+fn the_linker_rejects_a_crafted_export_table() {
+    use lm_compiler::{link, LinkEnv, LinkUnit};
+    let tree = TempTree::new("crafted");
+    workspace(&tree);
+    let mut seen = Vec::new();
+    let units: Vec<lm_compiler::CompiledModule> = [
+        ("mathlib.matrix", "mathlib/src/matrix.lm"),
+        ("app.greeting", "app/src/greeting.lm"),
+        ("app.main", "app/src/main.lm"),
+    ]
+    .iter()
+    .map(|(path, file)| compile_one(&tree, path, file, &mut seen))
+    .collect();
+    // Each case damages one export table and must reject.
+    type Damage = fn(&mut lm_bytecode::Module);
+    let cases: [(&str, Damage); 3] = [
+        ("twice", |m: &mut lm_bytecode::Module| {
+            let copy = m.exports[0].clone();
+            m.exports.push(copy);
+        }),
+        ("outside the", |m: &mut lm_bytecode::Module| {
+            m.exports[0].def = 9999;
+        }),
+        ("which it imports", |m: &mut lm_bytecode::Module| {
+            // The greeting module imports `Matrix`, so a re-export of
+            // that declaration must reject.
+            let import = m
+                .imports
+                .iter()
+                .find(|i| i.kind == lm_bytecode::ImportKind::Class)
+                .expect("the module imports a class")
+                .clone();
+            m.exports.push(lm_bytecode::Export {
+                kind: lm_bytecode::ExportKind::Class,
+                name: "Copy".to_string(),
+                def: import.def,
+                ctor: lm_bytecode::NO_CTOR,
+            });
+        }),
+    ];
+    for (needle, damage) in cases {
+        let mut link_env = LinkEnv::new();
+        for (idx, unit) in units.iter().enumerate() {
+            let mut module = unit.module.clone();
+            // The first two cases damage the provider; the third
+            // damages the importer.
+            let target = if needle == "which it imports" { 1 } else { 0 };
+            if idx == target {
+                damage(&mut module);
+            }
+            link_env
+                .bind(LinkUnit {
+                    path: unit.path.clone(),
+                    module,
+                    interface: unit.interface.clone(),
+                })
+                .expect("binds");
+        }
+        let error = link("app.main", &link_env.freeze()).expect_err("the table must reject");
+        assert!(error.0.contains(needle), "{needle}: {error}");
+    }
+}
+
 /// Compile one module of a temporary workspace with the interfaces
 /// the earlier modules produced.
 fn compile_one(
