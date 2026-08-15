@@ -176,8 +176,8 @@ becomes an ordinary type error.
 ```text
 $ lm build examples/05-modules/app
 built  mathlib.matrix  11822e8c013f
-built  app.greeting  e26ea787a2a4
-built  app.main  267bd54c6fd5
+built  app.greeting  86850c4a059e
+built  app.main  9fa072abca88
 linked app  sem=0b91ae8fa454 container=879c429db5f4
   examples/05-modules/app/build/debug/app.lma
 $ lm run examples/05-modules/app --allow Io.Print
@@ -490,6 +490,9 @@ makes the developer loop fast.
   hash, and the export table in the export section moved the
   container bytes. No test pins those values; the week-5 note records
   the old pair.
+- A module with import slots also carries the pinned interface
+  hashes, so its semantic hash follows the interface encoding. The
+  linked program has no slot, so its hashes do not.
 
 ## New tests
 
