@@ -1,9 +1,8 @@
-//! Week-6 identity suites: nominal class identity, the core-pin
-//! lookup, and the interface hash.
+//! Identity suites: the qualified key, the core-pin lookup, and the
+//! identity replay on a cache hit.
 
 use lm_bytecode::identity::module_identity;
 use lm_testkit::compile_text;
-use std::collections::HashMap;
 
 /// The idiomatic user enum that week 5 could not separate from the
 /// core `IoError`: the same arm name, the same field, and the same
@@ -20,26 +19,59 @@ const MY_ERR: &str = "enum MyErr\n\
                       x: MyErr = Failed(\"n\")\n\
                       x.message()\n";
 
-/// Two classes with different names must never share a definition
-/// hash. Class identity is nominal.
+/// The week-5 gap the probe records: a user enum that copies the core
+/// `IoError` exactly. A structural hash carries no name now, so the
+/// separation must come from the qualified key of the referenced arm.
 #[test]
-fn differently_named_classes_never_share_a_definition_hash() {
+fn the_qualified_key_separates_a_user_enum_from_the_core_family() {
     let module = compile_text("t.lm", MY_ERR).expect("compiles");
     let identity = module_identity(&module).expect("hashes");
-    let mut groups: HashMap<[u8; 32], Vec<&str>> = HashMap::new();
-    for (idx, class) in module.classes.iter().enumerate() {
-        groups
-            .entry(identity.class_hashes[idx])
-            .or_default()
-            .push(class.name.as_str());
-    }
-    for names in groups.values() {
-        let first = names[0];
-        assert!(
-            names.iter().all(|n| *n == first),
-            "one definition hash covers differently named classes: {names:?}"
-        );
-    }
+    let find = |name: &str| {
+        module
+            .classes
+            .iter()
+            .position(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no class `{name}`"))
+    };
+    let my_err = find("MyErr");
+    let io_error = find("IoError");
+    let my_failed = find("MyErr.Failed");
+    let core_failed = find("IoError.Failed");
+    assert_eq!(module.classes[my_err].key, "MyErr");
+    assert_eq!(module.classes[io_error].key, "core.IoError");
+    // An arm names its parent by key, and a family names its arms by
+    // key, so both levels stay apart.
+    assert_ne!(
+        identity.class_hashes[my_failed], identity.class_hashes[core_failed],
+        "two arms with different parents share a structural hash"
+    );
+    assert_ne!(
+        identity.class_hashes[my_err], identity.class_hashes[io_error],
+        "two families with different arms share a structural hash"
+    );
+}
+
+/// A class rename moves no structural hash of another definition: a
+/// reference carries the qualified key, and the key follows the name.
+/// The own name never enters the own hash, so a class that nothing
+/// references keeps its hash through a rename.
+#[test]
+fn a_class_rename_moves_no_hash_when_the_key_holds() {
+    let source = "class Point\n  x: Int = 0\nend\np = Point()\np.x\n";
+    let module = compile_text("t.lm", source).expect("compiles");
+    let identity = module_identity(&module).expect("hashes");
+    let mut twin = module.clone();
+    let idx = twin
+        .classes
+        .iter()
+        .position(|c| c.name == "Point")
+        .expect("the class exists");
+    twin.classes[idx].name = "Place".to_string();
+    let twin_identity = module_identity(&twin).expect("hashes");
+    assert_eq!(
+        identity.class_hashes, twin_identity.class_hashes,
+        "a rename that keeps the key moved a structural hash"
+    );
 }
 
 /// A cache hit replays the definition hashes and the core layout.

@@ -1,29 +1,39 @@
 //! Definition and module identity (specification 3.7).
 //!
-//! A definition hash covers a dedicated canonical encoding, never the
+//! A structural hash covers a dedicated canonical encoding, never the
 //! raw semantic-section bytes. Every module-global index is replaced:
 //!
-//! - function and class references become the referenced definition
-//!   hash, or the member ordinal for a same-component reference;
+//! - a function reference becomes the referenced structural hash, or
+//!   the member colour for a same-component reference;
+//! - a class reference becomes the qualified key of that class. A
+//!   class is a nominal type, so a reference names it, and the two
+//!   structurally equal classes `mathlib.Vec2` and `app.Point` stay
+//!   apart in every signature that names one of them;
 //! - string-pool indices become the inline string content;
-//! - type-table indices become a structural type digest, with class
-//!   references by definition identity;
+//! - type-table indices become a structural type digest;
 //! - application indices become an application digest over structural
 //!   types and canonical rows;
 //! - selector indices become the selector name;
-//! - lifted closure bodies are embedded through a body digest and are
-//!   identified by their parent identity and occurrence index;
+//! - a lifted closure body of another component is embedded through a
+//!   body digest, and it takes its own hash from its parent identity
+//!   and occurrence index;
 //! - local slots, block indices, argument counts, manifest operation
 //!   slots, and table-edit operands stay as-is: they are
 //!   function-local or manifest-stable, never module-positional.
 //!
+//! A declaration name never enters its own structural hash. The
+//! qualified key of a class is its nominal identity, and it stays
+//! beside the structural hash instead of inside it.
+//!
 //! Mutually recursive definitions form strongly connected components
 //! found with an iterative Tarjan walk (pinned traversal: roots in
 //! ascending definition index, successors in ascending reference
-//! order). A component is canonically ordered by name and receives
-//! one component hash; member hashes are domain-separated from the
-//! component hash and the ordinal. Tarjan emits components
-//! callees-first, and that emission order is the hash schedule.
+//! order). A component labels its members by structural refinement:
+//! the first label is the member bytes with every in-component
+//! reference replaced by one placeholder, and each round folds in the
+//! labels of the referenced members. Refinement stops as soon as the
+//! partition stops refining. No name and no source order enters the
+//! rule, so a rename moves no structural hash.
 //!
 //! The domain tags:
 //!
@@ -31,8 +41,8 @@
 //! - `lm-app-v1`: type-application digest;
 //! - `lm-closure-body-v1`: closure body digest;
 //! - `lm-def-component-v1`: component hash;
-//! - `lm-def-member-v1`: member (definition) hash;
-//! - `lm-def-closure-v1`: closure definition hash;
+//! - `lm-def-member-v1`: member (structural) hash;
+//! - `lm-def-closure-v1`: closure structural hash;
 //! - `lm-def-closure-cyclic-v1`: closure hash inside a hand-built
 //!   `MakeClosure` cycle;
 //! - `lm-module-sem-v1`: module semantic hash.
@@ -43,6 +53,7 @@
 
 use crate::hash::sha256;
 use crate::{BcClassKind, BcRow, BcType, Instr, Module, NO_PARENT, VERSION};
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// The compiler ABI version. It covers the canonical bytecode
@@ -52,8 +63,19 @@ use std::collections::HashMap;
 /// the lowering ABI. The operation manifest is covered separately by
 /// `lm_abi::manifest_digest()`, which every definition hash includes.
 ///
-/// Version 2 makes class identity nominal and adds the import set.
-pub const COMPILER_ABI_VERSION: u32 = 2;
+/// Version 3 takes the declaration name out of every structural hash,
+/// names a referenced class by qualified key, and labels the members
+/// of a component by structural refinement.
+pub const COMPILER_ABI_VERSION: u32 = 3;
+
+/// The refinement work budget of one component.
+///
+/// Structural refinement runs before the verifier, on untrusted
+/// input. One round costs the member count plus the intra-component
+/// reference count. A crafted component can need one round per
+/// member, so the product is bounded. A component past the budget
+/// rejects with a clear diagnostic; no source program reaches it.
+const REFINE_WORK_BUDGET: u64 = 1 << 24;
 
 /// A failure to compute identity: the module structure is not
 /// hashable. The verifier rejects every such module too.
@@ -111,21 +133,21 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
 /// the row and signature rules read it, and it is not stored in the
 /// container.
 ///
-/// The definition names are verifier inputs through the hash-linked
-/// core layout, which the verifier reads. Identity computes that
-/// layout, and identity reads two kinds of name:
+/// The class qualified keys are verifier inputs through the core
+/// layout, which the verifier reads. Identity computes that layout,
+/// and identity reads the key of every referenced class. A crafted
+/// key edit would otherwise drop a core slot with the key unchanged,
+/// and a cached load would admit what an uncached load rejects.
 ///
-/// - a class name, because class identity is nominal;
-/// - a function name, because the canonical member order of a
-///   strongly connected component sorts its members by name, and the
-///   member ordinal enters every member hash of that component.
-///
-/// A crafted rename of one core method would otherwise drop a core
-/// slot with the key unchanged, and a cached load would admit what an
-/// uncached load rejects.
+/// The definition names stay inside as well, because the core layout
+/// still cross-checks a class name against its pinned label.
 ///
 /// The key therefore fixes every input of `module_identity`, so a
 /// cache entry may carry the resolved identity and core layout.
+///
+/// The `mut` marker vectors carry their own count inside the semantic
+/// section since container version 8, so the digest needs no separate
+/// marker-length field.
 pub fn verification_hash(module: &Module) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(TAG_VERIFICATION);
@@ -134,24 +156,11 @@ pub fn verification_hash(module: &Module) -> [u8; 32] {
     bytes.extend_from_slice(&(module.classes.len() as u32).to_le_bytes());
     for class in &module.classes {
         write_str(&mut bytes, &class.name);
+        write_str(&mut bytes, &class.key);
     }
     bytes.extend_from_slice(&(module.funcs.len() as u32).to_le_bytes());
     for func in &module.funcs {
         write_str(&mut bytes, &func.name);
-    }
-    // The `mut` marker vectors take their count from the parameter
-    // table inside the semantic section, so a hand-built module with
-    // a misaligned vector writes a shifted stream. The decoder never
-    // produces one, and the identity preflight rejects one, but the
-    // key is computed before either. The lengths therefore enter the
-    // key, so one key never covers two marker shapes.
-    for func in &module.funcs {
-        bytes.extend_from_slice(&(func.param_muts.len() as u32).to_le_bytes());
-    }
-    for ty in &module.types {
-        if let BcType::Fn(_, muts, _, _) = ty {
-            bytes.extend_from_slice(&(muts.len() as u32).to_le_bytes());
-        }
     }
     sha256(&bytes)
 }
@@ -544,6 +553,9 @@ impl Graph {
         let mut called = vec![false; s.funcs];
         let extern_class = module.extern_classes();
         let extern_func = module.extern_funcs();
+        // A class reference is a qualified key, so no edge points at a
+        // class. A class still needs the digests it embeds: its field
+        // types and its method function hashes.
         for (cidx, class) in module.classes.iter().enumerate() {
             if extern_class[cidx] {
                 // An imported class takes its identity from the pinned
@@ -551,9 +563,6 @@ impl Graph {
                 continue;
             }
             let node = s.class_node(cidx as u32);
-            if class.parent != NO_PARENT {
-                succ[node as usize].push(s.class_node(class.parent));
-            }
             for (_, fty) in &class.fields {
                 succ[node as usize].push(s.type_node(*fty));
             }
@@ -562,18 +571,15 @@ impl Graph {
                 called[*func as usize] = true;
             }
         }
-        // An abstract enum parent references its case classes: the
-        // closed arm set is part of the family identity, and the
-        // cycle puts the family into one component, so the
-        // name-ordered member ordinals separate structurally
-        // identical arms and families.
+        // An abstract enum parent carries its closed arm set. The arms
+        // enter its bytes by qualified key, so the family needs no
+        // cycle and no member ordering.
         let mut arms: Vec<Vec<u32>> = vec![Vec::new(); s.classes];
         for (cidx, class) in module.classes.iter().enumerate() {
             if extern_class[cidx] || class.parent == NO_PARENT {
                 continue;
             }
             if class.kind == BcClassKind::Case && !extern_class[class.parent as usize] {
-                succ[class.parent as usize].push(s.class_node(cidx as u32));
                 arms[class.parent as usize].push(cidx as u32);
             }
         }
@@ -611,11 +617,10 @@ impl Graph {
                             list.push(s.func_node(*f));
                             made_closure[*f as usize] = true;
                         }
-                        Instr::New(c) => list.push(s.class_node(*c)),
-                        Instr::NewG { class, app } => {
-                            list.push(s.class_node(*class));
-                            list.push(s.app_node(*app));
-                        }
+                        // `New` names a class by qualified key, so it
+                        // adds no edge.
+                        Instr::New(_) => {}
+                        Instr::NewG { class: _, app } => list.push(s.app_node(*app)),
                         Instr::TupleNew { ty, .. }
                         | Instr::ListNew { ty, .. }
                         | Instr::MapNew { ty, .. }
@@ -631,9 +636,10 @@ impl Graph {
             let node = s.type_node(tidx as u32);
             let list = &mut succ[node as usize];
             match ty {
-                BcType::Class(c) => list.push(s.class_node(*c)),
-                BcType::Inst(c, args) => {
-                    list.push(s.class_node(*c));
+                // A type digest names a class by qualified key, so it
+                // adds no edge.
+                BcType::Class(_) => {}
+                BcType::Inst(_, args) => {
                     for a in args {
                         list.push(s.type_node(*a));
                     }
@@ -768,10 +774,13 @@ const TAG_VERIFICATION: &[u8] = b"lm-module-verify-v1\0";
 
 /// One identity reference inside canonical bytes.
 enum IdentRef {
-    /// A definition outside the current component, by member hash.
+    /// A definition outside the current component, by structural hash.
     Hash([u8; 32]),
-    /// A member of the current component, by canonical ordinal.
-    Ordinal(u32),
+    /// A member of the current component, by refinement colour.
+    Colour(u32),
+    /// A member of the current component during the first refinement
+    /// round. Every in-component reference takes one placeholder.
+    Placeholder,
 }
 
 fn write_ident(out: &mut Vec<u8>, r: &IdentRef) {
@@ -780,10 +789,11 @@ fn write_ident(out: &mut Vec<u8>, r: &IdentRef) {
             out.push(0x00);
             out.extend_from_slice(h);
         }
-        IdentRef::Ordinal(o) => {
+        IdentRef::Colour(c) => {
             out.push(0x01);
-            out.extend_from_slice(&o.to_le_bytes());
+            out.extend_from_slice(&c.to_le_bytes());
         }
+        IdentRef::Placeholder => out.push(0x04),
     }
 }
 
@@ -814,10 +824,17 @@ struct Resolver<'a> {
     /// The current component index, or `None` for the final view.
     comp: Option<u32>,
     comp_of: &'a [u32],
-    /// Ordinals of the definition members of the current component.
-    /// The lookups are maps, not scans: identity runs on untrusted
-    /// bytes before the verifier, so the load path stays bounded.
-    ordinals: &'a HashMap<u32, u32>,
+    /// The refinement position of every in-component definition and
+    /// in-component closure body. The lookups are maps, not scans:
+    /// identity runs on untrusted bytes before the verifier, so the
+    /// load path stays bounded.
+    member_of: &'a HashMap<u32, u32>,
+    /// The refinement colour per position, or `None` during the first
+    /// round. The first round writes one placeholder instead.
+    colours: Option<&'a [u32]>,
+    /// The in-component references this serialization met, in
+    /// position order. The first round fills it; refinement reads it.
+    record: &'a RefCell<Vec<u32>>,
     /// Intra-component digest overlays.
     type_intra: &'a HashMap<u32, [u8; 32]>,
     app_intra: &'a HashMap<u32, [u8; 32]>,
@@ -837,26 +854,32 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn ordinal_of(&self, node: u32) -> u32 {
-        *self
-            .ordinals
+    /// The reference form of one in-component member: its colour, or
+    /// a placeholder plus a record entry during the first round.
+    fn member_ref(&self, node: u32) -> IdentRef {
+        let pos = *self
+            .member_of
             .get(&node)
-            .expect("every in-component definition member has an ordinal")
+            .expect("every in-component member has a refinement position");
+        match self.colours {
+            Some(colours) => IdentRef::Colour(colours[pos as usize]),
+            None => {
+                self.record.borrow_mut().push(pos);
+                IdentRef::Placeholder
+            }
+        }
     }
 
-    fn class_ident(&self, c: u32) -> IdentRef {
-        let node = self.graph.space.class_node(c);
-        if self.in_comp(node) {
-            IdentRef::Ordinal(self.ordinal_of(node))
-        } else {
-            IdentRef::Hash(self.state.class_hash[c as usize].expect("class hash scheduled"))
-        }
+    /// The qualified key of one class. A class reference is nominal,
+    /// so it never reads a class hash and never makes a cycle.
+    fn class_key(&self, c: u32) -> &str {
+        &self.module.classes[c as usize].key
     }
 
     fn func_ident(&self, f: u32) -> IdentRef {
         let node = self.graph.space.func_node(f);
         if self.in_comp(node) {
-            IdentRef::Ordinal(self.ordinal_of(node))
+            self.member_ref(node)
         } else {
             IdentRef::Hash(self.state.func_hash[f as usize].expect("function hash scheduled"))
         }
@@ -923,11 +946,11 @@ impl<'a> Resolver<'a> {
             BcType::Str => out.push(3),
             BcType::Class(c) => {
                 out.push(4);
-                write_ident(&mut out, &self.class_ident(*c));
+                write_str(&mut out, self.class_key(*c));
             }
             BcType::Inst(c, args) => {
                 out.push(5);
-                write_ident(&mut out, &self.class_ident(*c));
+                write_str(&mut out, self.class_key(*c));
                 out.extend_from_slice(&(args.len() as u32).to_le_bytes());
                 for a in args {
                     out.extend_from_slice(&self.type_digest(*a));
@@ -1007,15 +1030,13 @@ impl<'a> Resolver<'a> {
 
     /// The canonical member bytes of one class.
     ///
-    /// The class name is part of the identity: a class is a nominal
-    /// type (specification 5.3, 8.6). Two classes with different names
-    /// are different definitions, whatever their shape. Function
-    /// identity stays anonymous, so a function rename still moves no
-    /// definition hash.
+    /// The class's own name and its own qualified key stay outside:
+    /// a declaration name never enters its own structural hash
+    /// (specification 3.7). The nominal identity of the class lives
+    /// beside this value, and the linker reads both.
     fn class_bytes(&self, c: u32) -> Vec<u8> {
         let class = &self.module.classes[c as usize];
         let mut out = Vec::new();
-        write_str(&mut out, &class.name);
         out.push(match class.kind {
             BcClassKind::Normal => 0,
             BcClassKind::Abstract => 1,
@@ -1026,7 +1047,7 @@ impl<'a> Resolver<'a> {
             None => out.push(0xff),
             Some(p) => {
                 out.push(0xfe);
-                write_ident(&mut out, &self.class_ident(p));
+                write_str(&mut out, self.class_key(p));
             }
         }
         out.extend_from_slice(&(class.fields.len() as u32).to_le_bytes());
@@ -1045,7 +1066,7 @@ impl<'a> Resolver<'a> {
             let arms = &self.graph.arms[c as usize];
             out.extend_from_slice(&(arms.len() as u32).to_le_bytes());
             for arm in arms {
-                write_ident(&mut out, &self.class_ident(*arm));
+                write_str(&mut out, self.class_key(*arm));
             }
         }
         out
@@ -1091,8 +1112,9 @@ impl<'a> Resolver<'a> {
     /// with a new index operand fails to compile until its canonical
     /// form is decided. Canonical forms per operand kind:
     ///
-    /// - function/class index: identity reference (hash or ordinal);
-    /// - closure body: 0x02 plus the body digest;
+    /// - function index: identity reference (hash or colour);
+    /// - class index: the qualified key;
+    /// - closure body of another component: 0x02 plus the body digest;
     /// - string index: inline content;
     /// - type index: structural digest;
     /// - application index: application digest;
@@ -1175,7 +1197,8 @@ impl<'a> Resolver<'a> {
             }
             Instr::MakeClosure { func, captures } => {
                 out.push(0x42);
-                if self.graph.closure_body[*func as usize] {
+                let node = self.graph.space.func_node(*func);
+                if self.graph.closure_body[*func as usize] && !self.in_comp(node) {
                     if self.on_path.contains(func) {
                         // A hand-built `MakeClosure` cycle: a
                         // deterministic marker instead of recursion.
@@ -1191,6 +1214,9 @@ impl<'a> Resolver<'a> {
                         out.extend_from_slice(&self.body_digest(*func));
                     }
                 } else {
+                    // An in-component closure body is a refinement
+                    // member, so it takes a colour like any other
+                    // in-component reference.
                     write_ident(out, &self.func_ident(*func));
                 }
                 u(out, *captures);
@@ -1201,11 +1227,11 @@ impl<'a> Resolver<'a> {
             }
             Instr::New(class) => {
                 out.push(0x44);
-                write_ident(out, &self.class_ident(*class));
+                write_str(out, self.class_key(*class));
             }
             Instr::NewG { class, app } => {
                 out.push(0x62);
-                write_ident(out, &self.class_ident(*class));
+                write_str(out, self.class_key(*class));
                 out.extend_from_slice(&self.app_digest(*app));
             }
             Instr::LoadField(field) => {
@@ -1307,29 +1333,133 @@ impl<'a> Resolver<'a> {
 // Component processing and the module hash.
 // ----------------------------------------------------------------
 
-/// Compute the closure body digests of the given in-component closure
-/// functions, iteratively over the `MakeClosure` nesting with an
-/// explicit stack. A hand-built `MakeClosure` cycle gets a marker
-/// instead of unbounded recursion.
-#[allow(clippy::too_many_arguments)]
+/// The refinement member kinds.
+const KIND_CLASS: u8 = 0;
+const KIND_FUNC: u8 = 1;
+const KIND_BODY: u8 = 2;
+
+/// The canonical bytes of one refinement member. The kind tag comes
+/// first, so a class and a function never share one encoding.
+fn member_bytes(resolver: &Resolver<'_>, kind: u8, idx: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(kind);
+    match kind {
+        KIND_CLASS => out.extend_from_slice(&resolver.class_bytes(idx)),
+        KIND_FUNC => out.extend_from_slice(&resolver.func_bytes(idx)),
+        _ => {
+            out.extend_from_slice(TAG_BODY);
+            out.extend_from_slice(&resolver.func_bytes(idx));
+        }
+    }
+    out
+}
+
+/// Rank byte strings by content. Two equal strings receive one colour,
+/// and the colours follow the sorted order, so the result depends on
+/// the content alone. Returns the colours and the distinct count.
+fn rank(values: &[&[u8]]) -> (Vec<u32>, usize) {
+    let mut order: Vec<u32> = (0..values.len() as u32).collect();
+    order.sort_unstable_by(|a, b| values[*a as usize].cmp(values[*b as usize]));
+    let mut out = vec![0u32; values.len()];
+    let mut colour = 0u32;
+    for (k, idx) in order.iter().enumerate() {
+        if k > 0 && values[*idx as usize] != values[order[k - 1] as usize] {
+            colour += 1;
+        }
+        out[*idx as usize] = colour;
+    }
+    let distinct = if values.is_empty() {
+        0
+    } else {
+        colour as usize + 1
+    };
+    (out, distinct)
+}
+
+/// Give every member of one component a colour by structural
+/// refinement (specification 3.7).
+///
+/// The first colour comes from the member bytes with one placeholder
+/// for each in-component reference. Each round folds in the colours of
+/// the referenced members, in their position order inside the member.
+/// A round only splits colours, so the loop stops as soon as the
+/// distinct count stops growing.
+///
+/// Two symmetric members keep one colour through every round. That is
+/// a property of graph automorphism, so they share one structural
+/// hash, and their qualified keys keep them apart.
+fn refine_colours(base: &[Vec<u8>], refs: &[Vec<u32>]) -> Result<Vec<u32>, IdentityError> {
+    let n = base.len();
+    if n <= 1 {
+        return Ok(vec![0; n]);
+    }
+    let slices: Vec<&[u8]> = base.iter().map(|b| b.as_slice()).collect();
+    let (mut colours, mut distinct) = rank(&slices);
+    let edges: usize = refs.iter().map(|r| r.len()).sum();
+    let per_round = (n + edges).max(1) as u64;
+    let budget_rounds = (REFINE_WORK_BUDGET / per_round).max(1);
+    let mut buf: Vec<u8> = Vec::new();
+    let mut ends: Vec<usize> = Vec::with_capacity(n);
+    for round in 0..n {
+        if distinct == n {
+            break;
+        }
+        if round as u64 >= budget_rounds {
+            return Err(fail(
+                "the component needs more refinement rounds than the budget allows",
+            ));
+        }
+        buf.clear();
+        ends.clear();
+        for i in 0..n {
+            buf.extend_from_slice(&colours[i].to_le_bytes());
+            for r in &refs[i] {
+                buf.extend_from_slice(&colours[*r as usize].to_le_bytes());
+            }
+            ends.push(buf.len());
+        }
+        let mut sig: Vec<&[u8]> = Vec::with_capacity(n);
+        let mut start = 0usize;
+        for end in &ends {
+            sig.push(&buf[start..*end]);
+            start = *end;
+        }
+        let (next, next_distinct) = rank(&sig);
+        colours = next;
+        if next_distinct == distinct {
+            break;
+        }
+        distinct = next_distinct;
+    }
+    Ok(colours)
+}
+
+/// Compute the closure body digests of the given closure functions,
+/// iteratively over the `MakeClosure` nesting with an explicit stack.
+/// A hand-built `MakeClosure` cycle gets a marker instead of unbounded
+/// recursion.
+///
+/// This runs after the component members receive their hashes, so the
+/// resolver takes the final all-hash view. Later components read the
+/// result.
 fn closure_body_digests(
     module: &Module,
     graph: &Graph,
     state: &HashState,
-    comp: Option<u32>,
     comp_of: &[u32],
-    ordinals: &HashMap<u32, u32>,
-    type_intra: &HashMap<u32, [u8; 32]>,
-    app_intra: &HashMap<u32, [u8; 32]>,
     closures: &[u32],
 ) -> HashMap<u32, [u8; 32]> {
+    let empty_members: HashMap<u32, u32> = HashMap::new();
+    let empty_digests: HashMap<u32, [u8; 32]> = HashMap::new();
+    let no_colours: [u32; 0] = [];
+    let scratch: RefCell<Vec<u32>> = RefCell::new(Vec::new());
     let mut done: HashMap<u32, [u8; 32]> = HashMap::new();
     let mut visiting: Vec<u32> = Vec::new();
     for &start in closures {
         if done.contains_key(&start) {
             continue;
         }
-        // Iterative post-order over same-component nested closures.
+        // Iterative post-order over unresolved nested closures.
         let mut stack: Vec<(u32, bool)> = vec![(start, false)];
         while let Some((f, expanded)) = stack.pop() {
             if done.contains_key(&f) {
@@ -1344,11 +1474,13 @@ fn closure_body_digests(
                         module,
                         graph,
                         state,
-                        comp,
+                        comp: None,
                         comp_of,
-                        ordinals,
-                        type_intra,
-                        app_intra,
+                        member_of: &empty_members,
+                        colours: Some(&no_colours),
+                        record: &scratch,
+                        type_intra: &empty_digests,
+                        app_intra: &empty_digests,
                         body_intra: &done,
                         on_path: &visiting,
                         closure_list: closures,
@@ -1364,18 +1496,13 @@ fn closure_body_digests(
             }
             visiting.push(f);
             stack.push((f, true));
-            // Push unresolved same-component nested closure targets.
+            // Push unresolved nested closure targets.
             let func = &module.funcs[f as usize];
             for block in &func.blocks {
                 for instr in block {
                     if let Instr::MakeClosure { func: target, .. } = instr {
-                        let is_closure = graph.closure_body[*target as usize];
-                        let same = match comp {
-                            Some(c) => comp_of[graph.space.func_node(*target) as usize] == c,
-                            None => state.body_final[*target as usize].is_none(),
-                        };
-                        if is_closure
-                            && same
+                        if graph.closure_body[*target as usize]
+                            && state.body_final[*target as usize].is_none()
                             && !visiting.contains(target)
                             && !done.contains_key(target)
                         {
@@ -1407,7 +1534,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
     };
     let manifest = lm_abi::manifest_digest();
     // The empty overlays of the final all-hash view.
-    let empty_ordinals: HashMap<u32, u32> = HashMap::new();
+    let empty_members: HashMap<u32, u32> = HashMap::new();
     let empty_digests: HashMap<u32, [u8; 32]> = HashMap::new();
     // An imported definition takes the pinned interface hash as its
     // identity. It references nothing, so it is a singleton component
@@ -1465,28 +1592,31 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         closure_funcs.sort_unstable();
         types.sort_unstable();
         apps.sort_unstable();
-        // Canonical member order: by exported name, then kind, then
-        // the stable generated index.
-        let mut members: Vec<(u8, u32, u32)> = Vec::new();
+        // The refinement members: the definitions first, then the
+        // closure bodies of this component. A closure body takes part
+        // in the refinement, so a member that differs only inside a
+        // nested closure still receives its own colour.
+        let mut refine: Vec<(u8, u32, u32)> = Vec::new();
         for &c in &classes {
-            members.push((0, c, s.class_node(c)));
+            refine.push((KIND_CLASS, c, s.class_node(c)));
         }
         for &f in &member_funcs {
-            members.push((1, f, s.func_node(f)));
+            refine.push((KIND_FUNC, f, s.func_node(f)));
         }
-        members.sort_by(|a, b| {
-            let name_a = member_name(module, a.0, a.1);
-            let name_b = member_name(module, b.0, b.1);
-            name_a.cmp(name_b).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1))
-        });
-        let ordinals: HashMap<u32, u32> = members
+        for &f in &closure_funcs {
+            refine.push((KIND_BODY, f, s.func_node(f)));
+        }
+        let member_of: HashMap<u32, u32> = refine
             .iter()
             .enumerate()
             .map(|(i, (_, _, node))| (*node, i as u32))
             .collect();
+        let scratch: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+        let no_colours: [u32; 0] = [];
         // Intra-component digests: types in ascending index (their
-        // references point at earlier entries), then applications,
-        // then closure bodies.
+        // references point at earlier entries), then applications.
+        // Neither reads a definition member, so neither needs a
+        // colour.
         let mut type_intra: HashMap<u32, [u8; 32]> = HashMap::new();
         let mut app_intra: HashMap<u32, [u8; 32]> = HashMap::new();
         for &t in &types {
@@ -1497,7 +1627,9 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                     state: &state,
                     comp: Some(comp_idx),
                     comp_of: &comp_of,
-                    ordinals: &ordinals,
+                    member_of: &member_of,
+                    colours: Some(&no_colours),
+                    record: &scratch,
                     type_intra: &type_intra,
                     app_intra: &app_intra,
                     body_intra: &empty_digests,
@@ -1516,7 +1648,9 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                     state: &state,
                     comp: Some(comp_idx),
                     comp_of: &comp_of,
-                    ordinals: &ordinals,
+                    member_of: &member_of,
+                    colours: Some(&no_colours),
+                    record: &scratch,
                     type_intra: &type_intra,
                     app_intra: &app_intra,
                     body_intra: &empty_digests,
@@ -1527,24 +1661,48 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             };
             app_intra.insert(a, digest);
         }
-        let body_intra = closure_body_digests(
-            module,
-            &graph,
-            &state,
-            Some(comp_idx),
-            &comp_of,
-            &ordinals,
-            &type_intra,
-            &app_intra,
-            &closure_funcs,
-        );
-        // Serialize the members in canonical order and hash the
-        // component.
+        // Round one of the refinement: serialize every member with one
+        // placeholder for each in-component reference, and record the
+        // referenced members in position order.
+        let mut base: Vec<Vec<u8>> = Vec::with_capacity(refine.len());
+        let mut member_refs: Vec<Vec<u32>> = Vec::with_capacity(refine.len());
+        for (kind, idx, _) in &refine {
+            let record: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+            let bytes = {
+                let resolver = Resolver {
+                    module,
+                    graph: &graph,
+                    state: &state,
+                    comp: Some(comp_idx),
+                    comp_of: &comp_of,
+                    member_of: &member_of,
+                    colours: None,
+                    record: &record,
+                    type_intra: &type_intra,
+                    app_intra: &app_intra,
+                    body_intra: &empty_digests,
+                    on_path: &[],
+                    closure_list: &closure_funcs,
+                };
+                member_bytes(&resolver, *kind, *idx)
+            };
+            base.push(bytes);
+            member_refs.push(record.into_inner());
+        }
+        let colours = refine_colours(&base, &member_refs)?;
+        // Serialize the members again, now with the final colours, and
+        // hash the component. The definition members emit in ascending
+        // colour order; two members with one colour emit equal bytes,
+        // so the order inside a colour is not observable.
+        let mut order: Vec<usize> = (0..refine.len())
+            .filter(|i| refine[*i].0 != KIND_BODY)
+            .collect();
+        order.sort_by_key(|i| colours[*i]);
         let mut comp_bytes = Vec::new();
         comp_bytes.extend_from_slice(TAG_COMPONENT);
         comp_bytes.extend_from_slice(&COMPILER_ABI_VERSION.to_le_bytes());
         comp_bytes.extend_from_slice(&manifest);
-        comp_bytes.extend_from_slice(&(members.len() as u32).to_le_bytes());
+        comp_bytes.extend_from_slice(&(order.len() as u32).to_le_bytes());
         {
             let resolver = Resolver {
                 module,
@@ -1552,19 +1710,18 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                 state: &state,
                 comp: Some(comp_idx),
                 comp_of: &comp_of,
-                ordinals: &ordinals,
+                member_of: &member_of,
+                colours: Some(&colours),
+                record: &scratch,
                 type_intra: &type_intra,
                 app_intra: &app_intra,
-                body_intra: &body_intra,
+                body_intra: &empty_digests,
                 on_path: &[],
                 closure_list: &closure_funcs,
             };
-            for (kind, idx, _) in &members {
-                let bytes = match kind {
-                    0 => resolver.class_bytes(*idx),
-                    _ => resolver.func_bytes(*idx),
-                };
-                comp_bytes.push(*kind);
+            for i in &order {
+                let (kind, idx, _) = refine[*i];
+                let bytes = member_bytes(&resolver, kind, idx);
                 comp_bytes.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
                 comp_bytes.extend_from_slice(&bytes);
             }
@@ -1573,15 +1730,16 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         for &node in comp {
             state.comp_hash[node as usize] = comp_hash;
         }
-        for (ordinal, (kind, idx, _)) in members.iter().enumerate() {
+        for i in &order {
+            let (kind, idx, _) = refine[*i];
             let mut bytes = Vec::new();
             bytes.extend_from_slice(TAG_MEMBER);
             bytes.extend_from_slice(&comp_hash);
-            bytes.extend_from_slice(&(ordinal as u32).to_le_bytes());
+            bytes.extend_from_slice(&colours[*i].to_le_bytes());
             let hash = sha256(&bytes);
             match kind {
-                0 => state.class_hash[*idx as usize] = Some(hash),
-                _ => state.func_hash[*idx as usize] = Some(hash),
+                KIND_CLASS => state.class_hash[idx as usize] = Some(hash),
+                _ => state.func_hash[idx as usize] = Some(hash),
             }
         }
         // Final digests for this component's types, applications, and
@@ -1595,7 +1753,9 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                     state: &state,
                     comp: None,
                     comp_of: &comp_of,
-                    ordinals: &empty_ordinals,
+                    member_of: &empty_members,
+                    colours: Some(&no_colours),
+                    record: &scratch,
                     type_intra: &empty_digests,
                     app_intra: &empty_digests,
                     body_intra: &empty_digests,
@@ -1614,7 +1774,9 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                     state: &state,
                     comp: None,
                     comp_of: &comp_of,
-                    ordinals: &empty_ordinals,
+                    member_of: &empty_members,
+                    colours: Some(&no_colours),
+                    record: &scratch,
                     type_intra: &empty_digests,
                     app_intra: &empty_digests,
                     body_intra: &empty_digests,
@@ -1625,17 +1787,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             };
             state.app_final[a as usize] = Some(digest);
         }
-        let body_final = closure_body_digests(
-            module,
-            &graph,
-            &state,
-            None,
-            &comp_of,
-            &empty_ordinals,
-            &empty_digests,
-            &empty_digests,
-            &closure_funcs,
-        );
+        let body_final = closure_body_digests(module, &graph, &state, &comp_of, &closure_funcs);
         for (f, digest) in body_final {
             state.body_final[f as usize] = Some(digest);
         }
@@ -1700,15 +1852,6 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         func_hashes,
         semantic_hash,
     })
-}
-
-/// The canonical name of one component member.
-fn member_name(module: &Module, kind: u8, idx: u32) -> &str {
-    if kind == 0 {
-        &module.classes[idx as usize].name
-    } else {
-        &module.funcs[idx as usize].name
-    }
 }
 
 /// Give every closure body its definition hash: domain-separated from

@@ -190,6 +190,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
         .iter()
         .map(|class| BcClass {
             name: class.name.clone(),
+            key: class.key.clone(),
             parent: class.parent.unwrap_or(NO_PARENT),
             type_params: class.type_params,
             kind: match class.kind {

@@ -1,22 +1,22 @@
-//! Hash linking for the pinned core definitions.
+//! Identity linking for the pinned core definitions.
 //!
-//! Core definitions receive definition hashes like every other
-//! definition. The file `core/pinned-core-defs.txt` pins the hashes
-//! of the core classes the verifier and the VM need. At load, the
-//! module identity is computed and every class that matches a pinned
-//! `(label, hash)` pair fills its layout slot.
+//! Core definitions receive a qualified key and a structural hash like
+//! every other definition. The file `core/pinned-core-defs.txt` pins
+//! the structural hashes of the core classes the verifier and the VM
+//! need. At load, the module identity is computed, and every class
+//! that matches a pinned `(qualified key, structural hash)` pair fills
+//! its layout slot.
 //!
-//! The key is the pair, not the hash alone. Class identity is nominal
-//! since compiler ABI version 2, so the name is already inside the
-//! hash; the explicit label check keeps the resolution correct if a
-//! later identity change drops the name again. No position takes part
+//! The key is the pair, never the hash alone. A structural hash covers
+//! no name, so two arms of one enum family with equal shapes share one
+//! value: `StepEvent.Ran` and `StepEvent.Waiting` are the pinned
+//! example. The qualified key separates them. No position takes part
 //! in the resolution.
 //!
-//! A module can hold two classes with one label and one hash, for
-//! example a user enum that copies a core enum exactly. Such classes
-//! are the same definition, so the choice between them is arbitrary.
-//! The rule is fixed for determinism: the lowest class index wins.
-//! Nothing depends on the emission order of the compiler.
+//! A module can hold two classes with one key and one hash. Such
+//! classes are the same definition, so the choice between them is
+//! arbitrary. The rule is fixed for determinism: the lowest class
+//! index wins. Nothing depends on the emission order of the compiler.
 
 use crate::identity::ModuleIdentity;
 use crate::Module;
@@ -90,9 +90,14 @@ fn parse_hex(text: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-/// The pinned table: definition hash to slot label.
-fn pinned_map() -> &'static HashMap<[u8; 32], &'static str> {
-    static MAP: OnceLock<HashMap<[u8; 32], &'static str>> = OnceLock::new();
+/// The qualified key of one pinned core label.
+pub fn pinned_key(label: &str) -> String {
+    crate::qualified_key(crate::CORE_MODULE, label)
+}
+
+/// The pinned table: `(qualified key, structural hash)` to slot label.
+fn pinned_map() -> &'static HashMap<(String, [u8; 32]), &'static str> {
+    static MAP: OnceLock<HashMap<(String, [u8; 32]), &'static str>> = OnceLock::new();
     MAP.get_or_init(|| {
         let mut map = HashMap::new();
         for line in PINNED.lines() {
@@ -109,7 +114,7 @@ fn pinned_map() -> &'static HashMap<[u8; 32], &'static str> {
                 .copied()
                 .find(|l| *l == label)
                 .expect("a pinned core label is known");
-            map.insert(hash, label);
+            map.insert((pinned_key(label), hash), label);
         }
         assert_eq!(
             map.len(),
@@ -158,19 +163,17 @@ fn slot_of(layout: &CoreLayout, label: &str) -> Option<u32> {
 }
 
 /// Resolve the core layout of one module through its pinned
-/// `(label, hash)` pairs. The verifier and the VM share the one table
-/// built here. The lowest matching class index wins.
+/// `(qualified key, structural hash)` pairs. The verifier and the VM
+/// share the one table built here. The lowest matching class index
+/// wins.
 pub fn core_layout(module: &Module, identity: &ModuleIdentity) -> CoreLayout {
     debug_assert_eq!(identity.class_hashes.len(), module.classes.len());
     let map = pinned_map();
     let mut layout = CoreLayout::default();
     for (idx, hash) in identity.class_hashes.iter().enumerate() {
-        let Some(label) = map.get(hash) else {
+        let Some(label) = map.get(&(module.classes[idx].key.clone(), *hash)) else {
             continue;
         };
-        if module.classes[idx].name != *label {
-            continue;
-        }
         if slot_of(&layout, label).is_none() {
             set_slot(&mut layout, label, idx as u32);
         }

@@ -153,11 +153,15 @@ fn scc_members_have_distinct_deterministic_hashes() {
     assert_ne!(func_hash(&ma, &ia, "ping"), func_hash(&ma, &ia, "pong"));
 }
 
-/// Structurally identical enum families and arms stay distinct: the
-/// family forms one component, and the name-ordered member ordinals
-/// separate them.
+/// Two families with different shapes stay apart, and so do two arms
+/// with different parents: an arm names its parent by qualified key,
+/// and a family names its arms by qualified key.
+///
+/// Two arms of one family with equal shapes are symmetric members
+/// (specification 3.7). They share one structural hash, and their
+/// qualified keys keep them apart.
 #[test]
-fn identical_shapes_in_different_families_stay_distinct() {
+fn a_referenced_qualified_key_separates_identical_shapes() {
     let source = "x: Option[Int] = None\nx.is_none()\n";
     let (module, identity) = identity_of(source);
     assert_ne!(
@@ -165,13 +169,25 @@ fn identical_shapes_in_different_families_stay_distinct() {
         class_hash(&module, &identity, "DriveEvent")
     );
     assert_ne!(
-        class_hash(&module, &identity, "StepEvent.Ran"),
-        class_hash(&module, &identity, "StepEvent.Waiting")
-    );
-    assert_ne!(
         class_hash(&module, &identity, "StepEvent.Done"),
         class_hash(&module, &identity, "DriveEvent.Done")
     );
+    // `Ran` and `Waiting` are empty case classes of one family, so
+    // nothing structural separates them.
+    assert_eq!(
+        class_hash(&module, &identity, "StepEvent.Ran"),
+        class_hash(&module, &identity, "StepEvent.Waiting")
+    );
+    let key_of = |name: &str| {
+        module
+            .classes
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.key.clone())
+            .expect("the class exists")
+    };
+    assert_eq!(key_of("StepEvent.Ran"), "core.StepEvent.Ran");
+    assert_ne!(key_of("StepEvent.Ran"), key_of("StepEvent.Waiting"));
 }
 
 /// A definition chain a few thousand deep hashes on a small Rust
@@ -687,21 +703,23 @@ fn point_new(m: &mut Module, from: u32, to: u32) -> bool {
     done
 }
 
-/// Review regression: two classes with the same name also share a
-/// definition hash, because a class hash covers structure only. The
-/// cache key must not rest on the semantic hash, or retargeting `New`
-/// between them rides a hit. This case survives a nominal class hash,
-/// so the cache key is the load-bearing fix, not the hash domain.
+/// Review regression: two classes with one qualified key and one
+/// shape share a structural hash. The cache key must not rest on the
+/// semantic hash, or retargeting `New` between them rides a hit. This
+/// case survives every identity change, so the cache key is the
+/// load-bearing fix, not the hash domain.
 #[test]
-fn a_duplicate_class_name_cannot_use_a_cache_hit() {
+fn a_duplicate_class_key_cannot_use_a_cache_hit() {
     let source = "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\na.x\n";
     let bytes = compile_to_bytes("t.lm", source).unwrap();
     let mut module = lm_bytecode::decode(&bytes).unwrap();
     let a = module.classes.iter().position(|c| c.name == "A").unwrap() as u32;
     let b = module.classes.iter().position(|c| c.name == "B").unwrap() as u32;
 
-    // The baseline: two classes both named `A`. This module is valid.
+    // The baseline: two classes with one name and one key. This
+    // module is valid.
     module.classes[b as usize].name = "A".to_string();
+    module.classes[b as usize].key = module.classes[a as usize].key.clone();
     let baseline = lm_bytecode::encode(&module);
     let mut cache = lm_vm::VerifiedCache::new();
     lm_vm::load_bytes_cached(&baseline, &mut cache).expect("loads");

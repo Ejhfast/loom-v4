@@ -18,6 +18,25 @@ use std::fmt;
 /// The sentinel that encodes "no parent class".
 pub const NO_PARENT: u32 = u32::MAX;
 
+/// The reserved module path of the pinned core image.
+///
+/// Every module embeds one copy of the core, and every copy carries
+/// the same qualified keys. A source module path never equals this
+/// value, so a user class never takes a core key.
+pub const CORE_MODULE: &str = "core";
+
+/// Join a module path and a declaration name into one qualified key.
+///
+/// The key is the nominal identity of a class (specification 8.6). An
+/// empty module path names a single-file module, which has no path.
+pub fn qualified_key(module: &str, name: &str) -> String {
+    if module.is_empty() {
+        name.to_string()
+    } else {
+        format!("{module}.{name}")
+    }
+}
+
 /// One element of an effect row in the serialized module.
 ///
 /// `Op` names an operation or group through the module string table.
@@ -101,6 +120,11 @@ pub enum BcClassKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BcClass {
     pub name: String,
+    /// The qualified key: the nominal identity of the class
+    /// (specification 8.6). The linker merges on this value plus the
+    /// structural hash. It never enters the class's own structural
+    /// hash.
+    pub key: String,
     /// Parent class index, or `NO_PARENT`.
     pub parent: u32,
     /// The number of generic type parameters.
@@ -531,9 +555,13 @@ impl Module {
 
 const MAGIC: &[u8; 4] = b"LMBC";
 
-/// The container format version. Version 7 adds the import table to
-/// the semantic region and the export table to the export section.
-pub const VERSION: u16 = 7;
+/// The container format version.
+///
+/// Version 8 adds the class qualified keys to the export section, and
+/// it writes an explicit count before every `mut` marker vector. The
+/// second change makes the semantic region self-describing: a reader
+/// no longer takes the marker count from the parameter table.
+pub const VERSION: u16 = 8;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -742,8 +770,10 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
         for p in &func.params {
             write_u32(&mut out, *p);
         }
-        // One `mut` flag byte per parameter; the count comes from the
-        // parameter table.
+        // The marker vector carries its own count. The encoding is
+        // therefore self-describing: no reader takes the count from
+        // the parameter table.
+        write_u32(&mut out, func.param_muts.len() as u32);
         for m in &func.param_muts {
             out.push(u8::from(*m));
         }
@@ -769,14 +799,15 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
     out
 }
 
-/// Encode the export section: the definition names in definition
-/// index order, classes first, then functions, and then the exported
-/// top-level definitions.
+/// Encode the export section: the definition names and the class
+/// qualified keys in definition index order, classes first, then
+/// functions, and then the exported top-level definitions.
 fn encode_exports(module: &Module) -> Vec<u8> {
     let mut out = Vec::new();
     write_u32(&mut out, module.classes.len() as u32);
     for class in &module.classes {
         write_bytes(&mut out, class.name.as_bytes());
+        write_bytes(&mut out, class.key.as_bytes());
     }
     write_u32(&mut out, module.funcs.len() as u32);
     for func in &module.funcs {
@@ -848,6 +879,9 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
             for p in params {
                 write_u32(out, *p);
             }
+            // The marker vector carries its own count, like the
+            // parameter marker vector of a function.
+            write_u32(out, muts.len() as u32);
             for m in muts {
                 out.push(u8::from(*m));
             }
@@ -1102,6 +1136,8 @@ pub enum DecodeError {
     BadExport,
     /// An import slot names an index outside the definition tables.
     BadImport,
+    /// A `mut` marker vector does not hold one marker per parameter.
+    MutMarkerCount,
 }
 
 impl fmt::Display for DecodeError {
@@ -1126,6 +1162,9 @@ impl fmt::Display for DecodeError {
             }
             DecodeError::BadExport => write!(f, "an export entry is out of range"),
             DecodeError::BadImport => write!(f, "an import slot is out of range"),
+            DecodeError::MutMarkerCount => {
+                write!(f, "a mut marker vector does not match its parameter count")
+            }
         }
     }
 }
@@ -1261,6 +1300,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     }
     for class in &mut module.classes {
         class.name = cur.string()?;
+        class.key = cur.string()?;
     }
     let func_count = cur.len()?;
     if func_count != module.funcs.len() {
@@ -1391,6 +1431,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         }
         classes.push(BcClass {
             name: String::new(),
+            key: String::new(),
             parent,
             type_params,
             kind,
@@ -1408,8 +1449,15 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         for _ in 0..param_count {
             params.push(cur.u32()?);
         }
-        let mut param_muts = Vec::with_capacity(param_count);
-        for _ in 0..param_count {
+        // The marker vector carries its own count. The decoder forces
+        // it equal to the parameter count, so no later reader must
+        // guess how many markers the stream holds.
+        let mut_count = cur.len()?;
+        if mut_count != param_count {
+            return Err(DecodeError::MutMarkerCount);
+        }
+        let mut param_muts = Vec::with_capacity(mut_count);
+        for _ in 0..mut_count {
             param_muts.push(cur.flag()?);
         }
         let ret = cur.u32()?;
@@ -1516,8 +1564,12 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
             for _ in 0..count {
                 params.push(cur.u32()?);
             }
-            let mut muts = Vec::with_capacity(count);
-            for _ in 0..count {
+            let mut_count = cur.len()?;
+            if mut_count != count {
+                return Err(DecodeError::MutMarkerCount);
+            }
+            let mut muts = Vec::with_capacity(mut_count);
+            for _ in 0..mut_count {
                 muts.push(cur.flag()?);
             }
             let ret = cur.u32()?;
@@ -1695,6 +1747,7 @@ mod tests {
             classes: vec![
                 BcClass {
                     name: "Counter".to_string(),
+                    key: "Counter".to_string(),
                     parent: NO_PARENT,
                     type_params: 0,
                     kind: BcClassKind::Normal,
@@ -1703,6 +1756,7 @@ mod tests {
                 },
                 BcClass {
                     name: "Box".to_string(),
+                    key: "Box".to_string(),
                     parent: NO_PARENT,
                     type_params: 1,
                     kind: BcClassKind::Normal,

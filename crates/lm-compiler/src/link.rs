@@ -10,10 +10,13 @@
 //! - **Slot resolution.** An import slot names a providing module and
 //!   an export. The linker finds that export and rejects a provider
 //!   whose interface hash differs from the pinned one.
-//! - **Definition sharing.** Two definitions with one definition hash
-//!   are one definition, so the merged program keeps one copy. This
-//!   is how the embedded core copies of every module become one core:
-//!   a core value that crosses a module boundary keeps its class.
+//! - **Definition sharing.** The linker compares two classes on their
+//!   qualified key and their structural hash, and it implements all
+//!   four rows of the table in specification 3.6. Two functions with
+//!   one structural hash are one function, because a function carries
+//!   no qualified key. This is how the embedded core copies of every
+//!   module become one core: a core value that crosses a module
+//!   boundary keeps its class.
 //! - **Relocation.** Every module-global index is renumbered into the
 //!   merged tables. Strings, types, selectors, and applications
 //!   intern by content, so the merged tables stay canonical.
@@ -132,9 +135,15 @@ struct Merged {
     app_index: HashMap<TypeApp, u32>,
     classes: Vec<BcClass>,
     funcs: Vec<Func>,
-    /// Definition hash to merged class index.
-    class_by_hash: HashMap<[u8; 32], u32>,
-    /// Definition hash to merged function index.
+    /// (qualified key, structural hash) to merged class index. The
+    /// pair is the whole merge rule for a class.
+    class_by_def: HashMap<(String, [u8; 32]), u32>,
+    /// The one structural hash every qualified key carries, and the
+    /// module that first provided it. A second version of one key is
+    /// a rejection, and the message names both providers.
+    class_version: HashMap<String, ([u8; 32], String)>,
+    /// Structural hash to merged function index. A function carries no
+    /// qualified key, so content alone decides.
     func_by_hash: HashMap<[u8; 32], u32>,
     /// (module path, export name) to the merged class index.
     class_exports: HashMap<(String, String), u32>,
@@ -330,8 +339,27 @@ fn relocate(
         if classes[idx as usize] != u32::MAX {
             continue;
         }
+        let source = &module.classes[idx as usize];
         let hash = identity.class_hashes[idx as usize];
-        match merged.class_by_hash.get(&hash) {
+        // The merge table of specification 3.6. One qualified key
+        // carries one structural hash inside one program.
+        match merged.class_version.get(&source.key) {
+            Some((seen, provider)) if *seen != hash => {
+                return Err(fail(format!(
+                    "the class `{}` arrives with two implementations, from `{provider}` and \
+                     from `{path}`; rebuild both against one version",
+                    source.key
+                )));
+            }
+            Some(_) => {}
+            None => {
+                merged
+                    .class_version
+                    .insert(source.key.clone(), (hash, path.to_string()));
+            }
+        }
+        let key = (source.key.clone(), hash);
+        match merged.class_by_def.get(&key) {
             Some(existing) => {
                 classes[idx as usize] = *existing;
                 shared_classes.push(idx);
@@ -339,14 +367,15 @@ fn relocate(
             None => {
                 let at = merged.classes.len() as u32;
                 merged.classes.push(BcClass {
-                    name: module.classes[idx as usize].name.clone(),
+                    name: source.name.clone(),
+                    key: source.key.clone(),
                     parent: NO_PARENT,
-                    type_params: module.classes[idx as usize].type_params,
-                    kind: module.classes[idx as usize].kind,
+                    type_params: source.type_params,
+                    kind: source.kind,
                     fields: Vec::new(),
                     methods: Vec::new(),
                 });
-                merged.class_by_hash.insert(hash, at);
+                merged.class_by_def.insert(key, at);
                 classes[idx as usize] = at;
                 created_classes.push(idx);
             }
@@ -426,6 +455,7 @@ fn relocate(
         let at = reloc.classes[*idx as usize] as usize;
         let filled = BcClass {
             name: source.name.clone(),
+            key: source.key.clone(),
             parent: match source.parent() {
                 None => NO_PARENT,
                 Some(p) => reloc.classes[p as usize],
@@ -447,9 +477,9 @@ fn relocate(
             merged.classes[at] = filled;
         } else if merged.classes[at] != filled {
             return Err(fail(format!(
-                "the class `{}` of `{path}` shares a definition hash with a \
-                 different definition",
-                source.name
+                "the class `{}` of `{path}` shares a qualified key and a structural \
+                 hash with a different definition",
+                source.key
             )));
         }
     }

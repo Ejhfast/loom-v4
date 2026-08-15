@@ -31,6 +31,23 @@ pub(crate) struct Naming<'a> {
 }
 
 impl Naming<'_> {
+    /// The qualified key of one class: its nominal identity
+    /// (specification 8.6).
+    ///
+    /// A core class takes the reserved module path `core`. A source
+    /// module path never equals that value, so a user class never
+    /// takes a core key. The interface uses the empty path for a core
+    /// class instead, because an interface reader already knows that
+    /// every module carries the core.
+    pub(crate) fn key(&self, class: u32) -> String {
+        let info = &self.ctx.classes[class as usize];
+        match self.ctx.class_origin(class) {
+            ClassOrigin::Local => lm_bytecode::qualified_key(self.module_path, &info.name),
+            ClassOrigin::Core => lm_bytecode::qualified_key(lm_bytecode::CORE_MODULE, &info.name),
+            ClassOrigin::Imported(module, name) => lm_bytecode::qualified_key(&module, &name),
+        }
+    }
+
     /// The qualified name of one class.
     pub(crate) fn qual(&self, class: u32) -> QualName {
         let info = &self.ctx.classes[class as usize];

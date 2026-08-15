@@ -47,8 +47,9 @@ pub struct CheckOptions {
     pub prelude: bool,
     /// The module path of the source under compilation, for example
     /// `mathlib.matrix`. It names this module's classes inside the
-    /// emitted interface. It never enters a definition hash, so
-    /// identity stays independent of the location on disk.
+    /// emitted interface, and it forms the qualified key of every
+    /// class this module declares. A structural hash that names one
+    /// of those classes therefore follows the module path.
     pub module_path: String,
     /// The interfaces this module may import. The build tool
     /// constructs it from the manifest and the dependency interfaces.
@@ -796,6 +797,16 @@ pub fn check_module_with(
     module: &ast::Module,
     options: CheckOptions,
 ) -> Result<HirModule, Diagnostic> {
+    // The pinned core image owns the module path `core`. A source
+    // module with that path would give a user class a core qualified
+    // key, and the linker merges on that key.
+    if options.module_path == lm_bytecode::CORE_MODULE {
+        return Err(Diagnostic::new(
+            "E0290",
+            "the module path `core` belongs to the core image; rename the file or the package",
+            Span::new(0, 0),
+        ));
+    }
     let core = core_ast();
     let mut ctx = Ctx {
         store: TypeStore::new(),
@@ -970,7 +981,7 @@ pub fn check_module_with(
         locals,
         body,
     });
-    assemble(ctx, own_defaults, entry_idx, exports)
+    assemble(ctx, own_defaults, entry_idx, exports, &options.module_path)
 }
 
 /// Collect the exported top-level definitions of the source module,
@@ -1038,7 +1049,17 @@ fn assemble(
     own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>>,
     entry_idx: usize,
     exports: Vec<HirExport>,
+    module_path: &str,
 ) -> Result<HirModule, Diagnostic> {
+    let keys: Vec<String> = {
+        let naming = crate::iface::Naming {
+            ctx: &ctx,
+            module_path,
+        };
+        (0..ctx.classes.len() as u32)
+            .map(|c| naming.key(c))
+            .collect()
+    };
     let mut hir_classes: Vec<HirClass> = Vec::new();
     for (idx, info) in ctx.classes.iter().enumerate() {
         let (mut defaults, mut default_locals): (Vec<Option<HExpr>>, Vec<Vec<TypeId>>) =
@@ -1077,6 +1098,7 @@ fn assemble(
         hir_classes.push(HirClass {
             imported: info.imported,
             name: info.name.clone(),
+            key: keys[idx].clone(),
             parent: info.parent,
             type_params: info.type_params.len() as u32,
             kind: info.kind,

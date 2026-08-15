@@ -2224,6 +2224,7 @@ mod tests {
             apps: vec![],
             classes: vec![BcClass {
                 name: "Counter".to_string(),
+                key: "Counter".to_string(),
                 parent: NO_PARENT,
                 type_params: 0,
                 kind: BcClassKind::Normal,
@@ -2268,6 +2269,7 @@ mod tests {
             ],
             classes: vec![BcClass {
                 name: "Box".to_string(),
+                key: "Box".to_string(),
                 parent: NO_PARENT,
                 type_params: 1,
                 kind: BcClassKind::Normal,
@@ -2486,6 +2488,7 @@ mod tests {
         let mut m = class_module(vec![vec![New(1), Pop, ConstInt(0), Return]]);
         m.classes.push(BcClass {
             name: "Opt".to_string(),
+            key: "Opt".to_string(),
             parent: NO_PARENT,
             type_params: 0,
             kind: BcClassKind::Abstract,
@@ -2501,6 +2504,7 @@ mod tests {
         let mut m = class_module(vec![vec![ConstInt(0), Return]]);
         m.classes.push(BcClass {
             name: "Opt".to_string(),
+            key: "Opt".to_string(),
             parent: NO_PARENT,
             type_params: 0,
             kind: BcClassKind::Abstract,
@@ -2509,6 +2513,7 @@ mod tests {
         });
         m.classes.push(BcClass {
             name: "Opt.None".to_string(),
+            key: "Opt.None".to_string(),
             parent: 1,
             type_params: 0,
             kind: BcClassKind::Case,
@@ -2517,6 +2522,7 @@ mod tests {
         });
         m.classes.push(BcClass {
             name: "Bad".to_string(),
+            key: "Bad".to_string(),
             parent: 2,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -2533,6 +2539,7 @@ mod tests {
         m.types.push(BcType::Class(1)); // 5
         m.classes.push(BcClass {
             name: "Other".to_string(),
+            key: "Other".to_string(),
             parent: NO_PARENT,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -2667,6 +2674,7 @@ mod tests {
         m.types.push(BcType::Class(1)); // 5
         m.classes.push(BcClass {
             name: "Fast".to_string(),
+            key: "Fast".to_string(),
             parent: 0,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -2690,6 +2698,7 @@ mod tests {
         m.types.push(BcType::Class(1)); // 5
         m.classes.push(BcClass {
             name: "Loud".to_string(),
+            key: "Loud".to_string(),
             parent: 0,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -2718,6 +2727,7 @@ mod tests {
         m.types.push(BcType::Class(1));
         m.classes.push(BcClass {
             name: "Bad".to_string(),
+            key: "Bad".to_string(),
             parent: 0,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -2896,6 +2906,7 @@ mod tests {
         types.push(BcType::Class(2)); // 6 Cat
         let class = |name: &str, parent: u32| BcClass {
             name: name.to_string(),
+            key: name.to_string(),
             parent,
             type_params: 0,
             kind: BcClassKind::Normal,

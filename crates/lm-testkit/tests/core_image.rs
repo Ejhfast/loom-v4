@@ -56,10 +56,11 @@ fn core_def_lines() -> String {
     let identity = lm_bytecode::identity::module_identity(&image).expect("the core image hashes");
     let mut out = String::new();
     for label in lm_bytecode::corepin::PINNED_LABELS {
+        let key = lm_bytecode::corepin::pinned_key(label);
         let idx = image
             .classes
             .iter()
-            .position(|c| c.name == label)
+            .position(|c| c.key == key)
             .unwrap_or_else(|| panic!("the core image defines `{label}`"));
         let hex: String = identity.class_hashes[idx]
             .iter()

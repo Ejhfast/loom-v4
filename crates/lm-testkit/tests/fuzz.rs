@@ -303,6 +303,7 @@ fn regenerate_fuzz_corpus() {
             apps: vec![],
             classes: vec![BcClass {
                 name: "C".to_string(),
+                key: "C".to_string(),
                 parent: NO_PARENT,
                 type_params: 0,
                 kind: BcClassKind::Normal,
@@ -352,6 +353,7 @@ fn regenerate_fuzz_corpus() {
             }],
             classes: vec![BcClass {
                 name: "Box".to_string(),
+                key: "Box".to_string(),
                 parent: NO_PARENT,
                 type_params: 1,
                 kind: BcClassKind::Normal,

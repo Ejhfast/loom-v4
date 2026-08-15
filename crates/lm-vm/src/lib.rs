@@ -22,7 +22,7 @@ pub use world::{RootEvent, StopMode, World};
 
 use lm_bytecode::{DecodeError, Module};
 use lm_value::Value;
-use lm_verify::VerifyError;
+pub use lm_verify::VerifyError;
 use std::fmt;
 
 /// A stable machine-fault code.
@@ -630,6 +630,7 @@ mod tests {
             apps: vec![],
             classes: vec![lm_bytecode::BcClass {
                 name: "Point".to_string(),
+                key: "Point".to_string(),
                 parent: lm_bytecode::NO_PARENT,
                 type_params: 0,
                 kind: BcClassKind::Normal,

@@ -1,5 +1,9 @@
-//! The definition names are verifier inputs, because identity reads
-//! them and the verifier reads the identity-resolved core layout.
+//! Names, qualified keys, and the verifier.
+//!
+//! A rename moves no structural hash, so a rename cannot move the
+//! core layout. A crafted qualified key still can, because the core
+//! layout resolves on `(qualified key, structural hash)`. The keys are
+//! therefore verifier inputs, and the cache key covers them.
 
 use lm_bytecode::identity::{module_identity, verification_hash};
 use lm_testkit::compile_to_bytes;
@@ -19,8 +23,7 @@ const SOURCE: &str = "def read(): String with Io.ReadLine\n\
 
 /// Rename one definition in the export section only. The semantic
 /// region does not move, so the module means the same program to the
-/// decoder. Identity still moves, because the canonical member order
-/// of a component sorts by name.
+/// decoder.
 fn renamed(module: &lm_bytecode::Module, from: &str, to: &str) -> lm_bytecode::Module {
     let mut out = module.clone();
     let idx = out
@@ -32,23 +35,64 @@ fn renamed(module: &lm_bytecode::Module, from: &str, to: &str) -> lm_bytecode::M
     out
 }
 
-/// A crafted rename of a core method drops a core slot. The key must
-/// move with it, or a cached load admits what an uncached load
-/// rejects.
+/// The attack this file replays no longer reaches identity. A
+/// structural hash covers no name, so a crafted rename of a core
+/// method moves no core class hash and drops no core slot.
 #[test]
-fn a_crafted_function_rename_cannot_split_the_cache() {
+fn a_crafted_function_rename_moves_no_structural_hash() {
+    let bytes = compile_to_bytes("t.lm", SOURCE).unwrap();
+    let module = lm_bytecode::decode(&bytes).unwrap();
+    let twin = renamed(&module, "Option.is_some", "Aaa");
+    let identity = module_identity(&module).unwrap();
+    let twin_identity = module_identity(&twin).unwrap();
+    assert_eq!(
+        identity.class_hashes, twin_identity.class_hashes,
+        "a rename moved a class structural hash"
+    );
+    assert_eq!(
+        identity.func_hashes, twin_identity.func_hashes,
+        "a rename moved a function structural hash"
+    );
+    let layout = lm_bytecode::corepin::core_layout(&module, &identity);
+    let twin_layout = lm_bytecode::corepin::core_layout(&twin, &twin_identity);
+    assert_eq!(
+        format!("{layout:?}"),
+        format!("{twin_layout:?}"),
+        "a rename moved the core layout"
+    );
+    let twin_bytes = lm_bytecode::encode(&twin);
+    let plain = lm_vm::load_bytes(&twin_bytes).is_ok();
+    let mut cache = lm_vm::VerifiedCache::new();
+    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("the original loads");
+    let cached = lm_vm::load_bytes_cached(&twin_bytes, &mut cache).is_ok();
+    assert_eq!(
+        plain, cached,
+        "a cached load and an uncached load disagree on admission"
+    );
+    assert!(plain, "the rename changed nothing the verifier reads");
+}
+
+/// A crafted qualified key still moves a core class hash, because a
+/// family names its arms by key. The verification hash must cover the
+/// keys, or a cached load admits what an uncached load rejects.
+#[test]
+fn a_crafted_qualified_key_cannot_split_the_cache() {
     let bytes = compile_to_bytes("t.lm", SOURCE).unwrap();
     let module = lm_bytecode::decode(&bytes).unwrap();
     let option = module
         .classes
         .iter()
-        .position(|c| c.name == "Option")
+        .position(|c| c.key == "core.Option")
         .expect("the core Option is embedded");
-    let twin = renamed(&module, "Option.is_some", "Aaa");
+    let some = module
+        .classes
+        .iter()
+        .position(|c| c.key == "core.Option.Some")
+        .expect("the core arm is embedded");
+    let mut twin = module.clone();
+    twin.classes[some].key = "core.Option.Aaa".to_string();
     let identity = module_identity(&module).unwrap();
     let twin_identity = module_identity(&twin).unwrap();
-    // The rename really moves the core class hash, so the layout of
-    // the twin loses the `Option` slot.
     assert_ne!(
         identity.class_hashes[option], twin_identity.class_hashes[option],
         "the probe no longer moves the core class hash"
@@ -56,7 +100,7 @@ fn a_crafted_function_rename_cannot_split_the_cache() {
     assert_ne!(
         verification_hash(&module),
         verification_hash(&twin),
-        "a rename that moves the core layout must move the key"
+        "a key edit that moves the core layout must move the cache key"
     );
     let twin_bytes = lm_bytecode::encode(&twin);
     let plain = lm_vm::load_bytes(&twin_bytes).is_ok();

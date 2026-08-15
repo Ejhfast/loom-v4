@@ -153,6 +153,7 @@ fn a_class_and_its_methods_share_the_import_state() {
     module.selectors.push("add".to_string());
     module.classes.push(lm_bytecode::BcClass {
         name: "Local".to_string(),
+        key: "Local".to_string(),
         parent: lm_bytecode::NO_PARENT,
         type_params: 0,
         kind: lm_bytecode::BcClassKind::Normal,

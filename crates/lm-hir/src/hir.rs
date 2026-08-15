@@ -91,6 +91,11 @@ pub struct HirClass {
     /// and no construction body.
     pub imported: bool,
     pub name: String,
+    /// The qualified key: the nominal identity of the class. A local
+    /// class takes the module path, a core class takes the reserved
+    /// path `core`, and an imported class takes the path and the
+    /// export name of its provider.
+    pub key: String,
     /// Parent class index.
     pub parent: Option<u32>,
     /// The number of generic type parameters.
