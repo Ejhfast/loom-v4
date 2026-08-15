@@ -63,13 +63,19 @@ impl CompileEnv {
 
     /// Make one interface visible without binding a root name. A
     /// signature of a bound module may name a class of this one.
+    ///
+    /// Binding the same interface twice is allowed, because a build
+    /// may reach one module through two paths. Binding a different
+    /// interface at one module path is an error.
     pub fn bind_interface(&mut self, interface: Interface) -> Result<(), CompileEnvError> {
         let path = interface.module_path.clone();
-        if let Some(old) = self.env.modules.insert(path.clone(), interface) {
-            if old.module_path != path {
+        if let Some(old) = self.env.modules.get(&path) {
+            if *old != interface {
                 return Err(CompileEnvError::DuplicateModule(path));
             }
+            return Ok(());
         }
+        self.env.modules.insert(path, interface);
         Ok(())
     }
 
