@@ -188,3 +188,56 @@ fn missing_file_is_an_ordinary_error() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("cannot read"), "{}", stderr(&out));
 }
+
+/// **The single-file module path rule.** A single source file has no
+/// module path, and `lm check`, `lm run <file>.lm`, and
+/// `lm build <file>.lm` all apply it. One file therefore gives one
+/// module, whichever command a user runs.
+///
+/// The proof is a byte comparison: the listing of the source and the
+/// listing of the artifact `lm build` wrote must be equal.
+#[test]
+fn every_single_file_command_compiles_one_module() {
+    let source = "examples/02-objects/counter.lm";
+    for command in ["check", "build"] {
+        let out = lm(&[command, source]);
+        assert!(out.status.success(), "{command}: {}", stderr(&out));
+    }
+    let run = lm(&["run", "--show-result", source]);
+    assert!(run.status.success(), "{}", stderr(&run));
+    let from_source = lm(&["disasm", source]);
+    let from_artifact = lm(&["disasm", "build/debug/counter.lma"]);
+    assert!(from_source.status.success(), "{}", stderr(&from_source));
+    assert!(from_artifact.status.success(), "{}", stderr(&from_artifact));
+    assert_eq!(
+        stdout(&from_source),
+        stdout(&from_artifact),
+        "`lm build` and `lm run` compile one file two ways"
+    );
+    // The file name never reaches a qualified name.
+    let text = stdout(&from_source);
+    assert!(text.contains("binding Counter.add"), "{text}");
+    assert!(!text.contains("counter.Counter"), "{text}");
+}
+
+/// A file name is not a module name. A file named `core.lm` carries no
+/// module path, so it never takes the path the core image reserves,
+/// and every single-file command accepts it.
+#[test]
+fn a_file_named_core_compiles_through_every_single_file_command() {
+    let dir = repo_root().join("build/single-file");
+    std::fs::create_dir_all(&dir).expect("the directory is created");
+    std::fs::write(
+        dir.join("core.lm"),
+        "class Point\n  x: Int = 2\nend\nPoint().x\n",
+    )
+    .expect("the source is written");
+    let path = "build/single-file/core.lm";
+    for command in ["check", "build"] {
+        let out = lm(&[command, path]);
+        assert!(out.status.success(), "{command}: {}", stderr(&out));
+    }
+    let run = lm(&["run", "--show-result", path]);
+    assert!(run.status.success(), "{}", stderr(&run));
+    assert_eq!(stdout(&run), "Done(2)\n");
+}

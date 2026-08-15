@@ -48,8 +48,9 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
     match command.as_str() {
         "check" => {
             // `check` runs the full admission path: parse, check,
-            // lower, and verify. A success means `run` accepts the
-            // program.
+            // lower, and verify. It compiles exactly what `run` and
+            // `build` compile, so a success means `run` accepts the
+            // program and `build` writes it.
             let options = parse_options(rest)?;
             let source = read_source(&options.file)?;
             let module = compile(&source)?;
@@ -317,16 +318,9 @@ fn build_artifact(path: &str) -> Result<ExitCode, String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| format!("error: `{path}` has no file name\n"))?;
-    let ast = lm_source::parse::parse(&source.text).map_err(|d| d.render(&source))?;
-    let hir = lm_hir::check_module_with(
-        &ast,
-        lm_hir::CheckOptions {
-            module_path: stem.to_string(),
-            ..lm_hir::CheckOptions::default()
-        },
-    )
-    .map_err(|d| d.render(&source))?;
-    let module = lm_hir::lower_module(&hir);
+    // The file name names the output files only. It never names the
+    // module: a single file has no module path.
+    let (hir, module) = compile_file(&source)?;
     lm_verify::verify_module(&module)
         .map_err(|e| format!("error: the verifier rejected the module: {e}\n"))?;
     let identity =
@@ -335,8 +329,13 @@ fn build_artifact(path: &str) -> Result<ExitCode, String> {
     let container_hash = lm_bytecode::identity::container_hash(&container);
     let items: Vec<lm_bytecode::interface::IfaceItem> =
         hir.exports.iter().map(|e| e.item.clone()).collect();
-    let interface = lm_bytecode::interface::build_interface(&module, &identity, stem, &items)
-        .map_err(|e| format!("error: {e}\n"))?;
+    let interface = lm_bytecode::interface::build_interface(
+        &module,
+        &identity,
+        SINGLE_FILE_MODULE_PATH,
+        &items,
+    )
+    .map_err(|e| format!("error: {e}\n"))?;
     let interface_bytes = lm_bytecode::interface::encode_interface(&interface);
     let dir = Path::new("build").join("debug");
     std::fs::create_dir_all(&dir)
@@ -446,9 +445,38 @@ fn read_bytes(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("error: cannot read `{path}`: {e}\n"))
 }
 
+/// The module path of one source file outside a package.
+///
+/// **The rule: a single source file has no module path.** A module
+/// path comes from a package: the manifest supplies the root and the
+/// directory tree supplies the rest. One file has neither, so `lm
+/// check`, `lm run <file>.lm`, and `lm build <file>.lm` all compile it
+/// with the empty path. One file therefore gives one set of qualified
+/// keys, one semantic hash, and one admission answer, whichever
+/// command a user runs. A file name is not a module name: it may hold
+/// characters a module name cannot, and it may be `core`, which the
+/// core image reserves.
+const SINGLE_FILE_MODULE_PATH: &str = "";
+
+/// Compile one source file to a checked module and its bytecode.
+/// Every single-file command runs this one path.
+fn compile_file(
+    source: &SourceFile,
+) -> Result<(lm_hir::hir::HirModule, lm_bytecode::Module), String> {
+    let ast = lm_source::parse::parse(&source.text).map_err(|d| d.render(source))?;
+    let hir = lm_hir::check_module_with(
+        &ast,
+        lm_hir::CheckOptions {
+            module_path: SINGLE_FILE_MODULE_PATH.to_string(),
+            ..lm_hir::CheckOptions::default()
+        },
+    )
+    .map_err(|d| d.render(source))?;
+    let module = lm_hir::lower_module(&hir);
+    Ok((hir, module))
+}
+
 /// Compile one source file to decoded bytecode.
 fn compile(source: &SourceFile) -> Result<lm_bytecode::Module, String> {
-    let ast = lm_source::parse::parse(&source.text).map_err(|d| d.render(source))?;
-    let hir = lm_hir::check_module(&ast).map_err(|d| d.render(source))?;
-    Ok(lm_hir::lower_module(&hir))
+    Ok(compile_file(source)?.1)
 }
