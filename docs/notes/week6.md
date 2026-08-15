@@ -307,6 +307,24 @@ does not cover the function names, and the export table does, so a
 replayed semantic hash would be stale after a rename. `LoadedModule`
 exposes `class_hash` and `func_hash` instead.
 
+### The identity load path
+
+The intra-component lookups of `identity.rs` are maps now, not linear
+scans. Week 5 measured the cost as the number of intra-component
+references times the component member count. A release-build
+measurement over one dense component with eight references per member
+shows the term is gone:
+
+```text
+dense-200:  61 KiB identity 487us
+dense-400: 117 KiB identity 874us
+dense-800: 228 KiB identity 1.41ms
+```
+
+Four times the members cost 2.9 times the work, which follows the
+artifact size and not the square of the member count. This matters
+because identity runs on untrusted bytes before the verifier.
+
 ## The caches and the trust boundary
 
 Two caches answer two questions, and neither key stands in for the
