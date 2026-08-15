@@ -425,6 +425,19 @@ $ lm run examples/05-modules/app --allow Io.Print
 Hello Ada!
 ```
 
+`lm build` writes the linked program artifact to
+`build/debug/app.lma` beside the content-addressed store. The
+artifact runs directly, with no package or source present:
+
+```text
+$ lm run build/debug/app.lma --allow Io.Print
+Hello Ada!
+```
+
+The artifact is the deployment and sandbox unit. `lm run <package>`
+is sugar for build plus artifact execution; both paths admit code
+through the same verifier.
+
 A second build with unchanged inputs reports cache hits. Editing only a comment leaves semantic definition/module hashes unchanged while the exact source/input cache key changes appropriately.
 
 A runtime-compilation example binds a frozen `Config` with `CompileEnv.bind`, compiles a module, links it with `LinkEnv`, requests a typed entry, and runs it.

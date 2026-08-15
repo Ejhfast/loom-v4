@@ -97,11 +97,18 @@ are no ambient standard-library names. The core prelude (`Option`,
 
 - `lm new NAME` — scaffold the layout above.
 - `lm build` — build the dependency graph into verified artifacts,
-  with a content-addressed cache.
-- `lm run [--allow ...]` — build, then execute `src/main.lm` under
-  the given policy grants.
+  with a content-addressed cache. The linked program artifact lands
+  at `build/debug/<name>.lma`.
+- `lm run [--allow ...]` — build, then execute the program artifact
+  under the given policy grants. `lm run <path>.lma` executes a
+  prebuilt artifact directly, with no package or source present.
 - `lm test` — build and run the package tests (full harness in
   week 11).
+
+The `.lma` artifact is the deployment and sandbox unit. It is the
+same container the runtime compiler produces and the linker
+consumes (specification 3.4-3.6). Every load path admits code
+through the one verifier.
 
 ## 7. Identity and caching
 
