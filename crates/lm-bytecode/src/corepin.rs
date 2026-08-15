@@ -3,17 +3,20 @@
 //! Core definitions receive definition hashes like every other
 //! definition. The file `core/pinned-core-defs.txt` pins the hashes
 //! of the core classes the verifier and the VM need. At load, the
-//! module identity is computed and every class whose definition hash
-//! equals a pinned hash fills its layout slot. The lookup key is the
-//! hash; the labels in the pinned file only name the slots. No name
-//! or position takes part in the resolution.
+//! module identity is computed and every class that matches a pinned
+//! `(label, hash)` pair fills its layout slot.
 //!
-//! A module can hold more than one class with a pinned hash, for
-//! example a user enum that is structurally identical to the core
-//! `Option`. The last class index wins, which selects the embedded
-//! core copy, because the compiler appends the core after the user
-//! definitions. Structural equality means semantic equality here, so
-//! either choice executes identically.
+//! The key is the pair, not the hash alone. Class identity is nominal
+//! since compiler ABI version 2, so the name is already inside the
+//! hash; the explicit label check keeps the resolution correct if a
+//! later identity change drops the name again. No position takes part
+//! in the resolution.
+//!
+//! A module can hold two classes with one label and one hash, for
+//! example a user enum that copies a core enum exactly. Such classes
+//! are the same definition, so the choice between them is arbitrary.
+//! The rule is fixed for determinism: the lowest class index wins.
+//! Nothing depends on the emission order of the compiler.
 
 use crate::identity::ModuleIdentity;
 use crate::Module;
@@ -117,8 +120,8 @@ fn pinned_map() -> &'static HashMap<[u8; 32], &'static str> {
     })
 }
 
-fn set_slot(layout: &mut CoreLayout, label: &str, idx: u32) {
-    let slot = match label {
+fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> {
+    match label {
         "Option" => &mut layout.option,
         "Option.Some" => &mut layout.option_some,
         "Option.None" => &mut layout.option_none,
@@ -140,18 +143,35 @@ fn set_slot(layout: &mut CoreLayout, label: &str, idx: u32) {
         "DriveEvent.Done" => &mut layout.drive_done,
         "DriveEvent.Fault" => &mut layout.drive_fault,
         _ => unreachable!("only known labels enter the map"),
-    };
-    *slot = Some(idx);
+    }
 }
 
-/// Resolve the core layout of one module through its definition
-/// hashes. The verifier and the VM share the one table built here.
+fn set_slot(layout: &mut CoreLayout, label: &str, idx: u32) {
+    *slot_mut(layout, label) = Some(idx);
+}
+
+fn slot_of(layout: &CoreLayout, label: &str) -> Option<u32> {
+    // The read borrows nothing mutable; the clone keeps one label
+    // table instead of two.
+    let mut copy = *layout;
+    *slot_mut(&mut copy, label)
+}
+
+/// Resolve the core layout of one module through its pinned
+/// `(label, hash)` pairs. The verifier and the VM share the one table
+/// built here. The lowest matching class index wins.
 pub fn core_layout(module: &Module, identity: &ModuleIdentity) -> CoreLayout {
     debug_assert_eq!(identity.class_hashes.len(), module.classes.len());
     let map = pinned_map();
     let mut layout = CoreLayout::default();
     for (idx, hash) in identity.class_hashes.iter().enumerate() {
-        if let Some(label) = map.get(hash) {
+        let Some(label) = map.get(hash) else {
+            continue;
+        };
+        if module.classes[idx].name != *label {
+            continue;
+        }
+        if slot_of(&layout, label).is_none() {
             set_slot(&mut layout, label, idx as u32);
         }
     }

@@ -274,11 +274,22 @@ A definition hash covers canonical bytecode and constants, full signature and ef
 
 For mutually recursive definitions, the compiler finds strongly connected components. A cyclic component is canonically ordered by exported name and stable generated ID, encodes internal references by member ordinal, and receives one component hash. Member hashes are domain-separated from that hash and ordinal; there is no iterative “hash until stable” rule.
 
-Canonical bytecode is a dedicated identity encoding, not the loading encoding. It replaces every module-global index — function, class, type, string, application, and selector — with content identity, inline content, or structural encoding. Definition hashes therefore do not depend on definition order in the source, on pool interning order, or on definition names; a rename changes the module hash through the export table and no definition hash.
+Canonical bytecode is a dedicated identity encoding, not the loading encoding. It replaces every module-global index — function, class, type, string, application, and selector — with content identity, inline content, or structural encoding. Definition hashes therefore do not depend on definition order in the source or on pool interning order.
+
+Names enter identity by definition kind:
+
+- A **function** definition hash excludes its own name. A function rename moves the module hash through the export table and moves no definition hash, its own or any caller's.
+- A **class** definition hash includes its own name. A class is a nominal type (5.3, 8.6), so two classes with different names are different definitions whatever their shape. A class rename moves that class hash, every hash that references it, and the module hash.
+
+A **method** takes part in its class identity as the pair of the selector name and the implementing function identity. Selector identity is therefore name-based and independent of any method body. An override with a different body keeps the selector name.
+
+An **interface hash** covers only the exported name, the kind, and the full signature, with class references by qualified name. It covers no method body and no function body. Import slots pin interface hashes, so an edit to an exported body changes the definition hash of that body and no interface hash, and no dependent module recompiles. The linker resolves an import slot to a definition and rejects a slot whose provider interface hash differs from the pin.
 
 *Implementation note.* The reference implementation uses Tarjan's algorithm in an iterative form with an explicit work stack; the definition graph is untrusted input, so the walk must not grow the host stack. Traversal order is pinned: roots in ascending definition index, successors in ascending reference order. Tarjan emits components callees-first, and that emission order is the hash schedule: every referenced definition hash is complete before a component is hashed. The hashes themselves do not depend on the traversal order, because the partition and the in-component ordering are canonical.
 
 A module semantic hash covers definitions, entry code/type, imports, and format version. It excludes source spelling, comments, paths, embedded source, source maps, and debug sections. A separate container hash covers exact bytes.
+
+A definition hash is not injective over source programs. Two classes with one name and one shape share a hash, and no rule makes class names unique inside a module. A lookup that must select one definition therefore states a deterministic tie rule, and no security property rests on the absence of ties.
 
 ---
 
@@ -808,7 +819,7 @@ A call selector is fixed at compile time; the runtime class selects the sealed i
 
 ### 8.6 Class identity
 
-A class value is frozen. Its identity covers normalized field layout, method signatures and bytecode, superclass/import requirement, generic arity, and native intrinsic identifier where applicable. Instance headers point to a VM-local class slot resolved to this identity.
+A class value is frozen. Its identity covers the class name, normalized field layout, method signatures and bytecode, superclass/import requirement, generic arity, and native intrinsic identifier where applicable. Instance headers point to a VM-local class slot resolved to this identity.
 
 ---
 

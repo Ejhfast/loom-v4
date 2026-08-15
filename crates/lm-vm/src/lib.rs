@@ -142,8 +142,22 @@ pub struct DispatchRow {
 
 impl DispatchRow {
     /// The method for one selector. Verified calls always resolve.
+    ///
+    /// The index is unchecked on purpose: this is the hot dispatch
+    /// path, and the verifier proves every virtual call resolves on
+    /// the receiver class. The debug assertion turns a future verifier
+    /// gap into a test failure instead of a release panic.
     #[inline]
     pub(crate) fn method(&self, selector: u32) -> u32 {
+        debug_assert!(
+            selector >= self.base && ((selector - self.base) as usize) < self.table.len(),
+            "the verifier admitted a virtual call the dispatch row cannot answer"
+        );
+        debug_assert_ne!(
+            self.table[(selector - self.base) as usize],
+            NO_METHOD,
+            "the verifier admitted a virtual call on an empty dispatch slot"
+        );
         self.table[(selector - self.base) as usize]
     }
 }
@@ -159,8 +173,7 @@ impl DispatchRow {
 pub struct LoadedModule {
     module: Module,
     dispatch: Vec<DispatchRow>,
-    identity: lm_bytecode::identity::ModuleIdentity,
-    core: lm_bytecode::corepin::CoreLayout,
+    facts: VerifiedFacts,
 }
 
 impl LoadedModule {
@@ -172,21 +185,41 @@ impl LoadedModule {
         &self.dispatch
     }
 
-    /// The computed module identity.
-    pub fn identity(&self) -> &lm_bytecode::identity::ModuleIdentity {
-        &self.identity
+    /// The definition hash of one class.
+    pub fn class_hash(&self, class: u32) -> [u8; 32] {
+        self.facts.class_hashes[class as usize]
+    }
+
+    /// The definition hash of one function.
+    pub fn func_hash(&self, func: u32) -> [u8; 32] {
+        self.facts.func_hashes[func as usize]
     }
 
     /// The hash-resolved core layout, shared by the verifier and the
     /// VM.
     pub fn core_layout(&self) -> lm_bytecode::corepin::CoreLayout {
-        self.core
+        self.facts.core
     }
 
     /// The total dispatch-table cell count, for the memory gates.
     pub fn dispatch_cells(&self) -> usize {
         self.dispatch.iter().map(|row| row.table.len()).sum()
     }
+}
+
+/// The facts a cache hit replays: the definition hashes and the
+/// hash-linked core layout.
+///
+/// The module semantic hash is deliberately absent. It covers the
+/// export table, which holds the definition names, and the cache key
+/// does not cover the function names. Call
+/// `lm_bytecode::identity::module_identity` when the semantic hash is
+/// needed.
+#[derive(Debug, Clone)]
+struct VerifiedFacts {
+    class_hashes: Vec<[u8; 32]>,
+    func_hashes: Vec<[u8; 32]>,
+    core: lm_bytecode::corepin::CoreLayout,
 }
 
 /// The in-process verified-code cache.
@@ -196,11 +229,19 @@ impl LoadedModule {
 /// verifier input, with each module-global index preserved, so a hit
 /// skips every verifier pass. The loader always computes the key from
 /// the decoded content, so a stored or forged hash never enters it.
+///
+/// An entry also carries the module identity and the core layout. Both
+/// are pure functions of the key inputs: the verification hash covers
+/// the whole semantic region and the class names, and identity reads
+/// nothing else. Identity costs about as much as verification, so the
+/// stored facts roughly double the value of a hit.
 #[derive(Debug, Default)]
 pub struct VerifiedCache {
-    verified: std::collections::HashSet<([u8; 32], u32, u32)>,
+    verified: std::collections::HashMap<([u8; 32], u32, u32), VerifiedFacts>,
     /// The number of full verifier runs, for the cache-skip tests.
     pub verifications: u64,
+    /// The number of identity computations, for the cache-skip tests.
+    pub identities: u64,
 }
 
 impl VerifiedCache {
@@ -227,12 +268,19 @@ fn load_inner(
 ) -> Result<LoadedModule, VerifyError> {
     // The identity is computed from the decoded content, never read
     // from the input. An unhashable module is a rejection.
-    let identity = lm_bytecode::identity::module_identity(&module).map_err(|e| VerifyError {
-        func: u32::MAX,
-        message: e.to_string(),
-    })?;
-    let core = lm_bytecode::corepin::core_layout(&module, &identity);
-    match cache {
+    let compute = |module: &Module| -> Result<VerifiedFacts, VerifyError> {
+        let identity = lm_bytecode::identity::module_identity(module).map_err(|e| VerifyError {
+            func: u32::MAX,
+            message: e.to_string(),
+        })?;
+        let core = lm_bytecode::corepin::core_layout(module, &identity);
+        Ok(VerifiedFacts {
+            class_hashes: identity.class_hashes,
+            func_hashes: identity.func_hashes,
+            core,
+        })
+    };
+    let facts = match cache {
         Some(cache) => {
             // The key is the verification hash, never the semantic
             // hash. The semantic hash answers "same program meaning?"
@@ -240,25 +288,37 @@ fn load_inner(
             // two modules that differ only in an index share it. The
             // verifier reads those indices, so such a key can certify
             // a module the verifier rejects. The verification hash
-            // keeps every index and covers the operation manifest.
+            // keeps every index, covers the operation manifest, and
+            // covers the class names.
             //
             // The key therefore fixes every verifier input, so a hit
             // skips every pass, not only the function dataflow. The
-            // core layout and the dispatch rows below are pure
-            // functions of the same inputs, so they stay valid.
+            // identity, the core layout, and the dispatch rows below
+            // are pure functions of the same inputs, so a hit replays
+            // them instead of recomputing them.
             let key = (
                 lm_bytecode::identity::verification_hash(&module),
                 lm_bytecode::identity::COMPILER_ABI_VERSION,
                 lm_verify::VERIFIER_VERSION,
             );
-            if !cache.verified.contains(&key) {
-                lm_verify::verify_with_layout(&module, core)?;
-                cache.verifications += 1;
-                cache.verified.insert(key);
+            match cache.verified.get(&key) {
+                Some(facts) => facts.clone(),
+                None => {
+                    let facts = compute(&module)?;
+                    cache.identities += 1;
+                    lm_verify::verify_with_layout(&module, facts.core)?;
+                    cache.verifications += 1;
+                    cache.verified.insert(key, facts.clone());
+                    facts
+                }
             }
         }
-        None => lm_verify::verify_with_layout(&module, core)?,
-    }
+        None => {
+            let facts = compute(&module)?;
+            lm_verify::verify_with_layout(&module, facts.core)?;
+            facts
+        }
+    };
     // Build the sealed per-class selector tables. A child inherits
     // the resolved parent methods; own methods override entries.
     // Parents precede children in the verified class table. Each row
@@ -294,8 +354,7 @@ fn load_inner(
     Ok(LoadedModule {
         module,
         dispatch,
-        identity,
-        core,
+        facts,
     })
 }
 

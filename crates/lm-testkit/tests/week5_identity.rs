@@ -507,8 +507,15 @@ fn a_self_referential_closure_hashes_without_a_panic() {
 /// uncached load must always agree on admission. This sweeps the four
 /// tables whose index the canonical encoding replaces with content.
 /// Each case copies the entry an instruction already names, then
-/// points that instruction at the copy, so the module hash stays
-/// equal and the mutated stream lands on a cache hit.
+/// points that instruction at the copy.
+///
+/// The `stable` flag records whether the mutation keeps the module
+/// semantic hash. Four cases keep it, because the canonical encoding
+/// replaces the mutated index with content. The class twin no longer
+/// keeps it: compiler ABI version 2 makes class identity nominal, so
+/// `A` and `B` are different definitions and `New A` retargeted to
+/// `B` moves the module hash. The admission invariant is the durable
+/// part and holds in both directions.
 #[test]
 fn a_cached_load_and_an_uncached_load_always_agree() {
     let class_src = "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
@@ -519,49 +526,77 @@ fn a_cached_load_and_an_uncached_load_always_agree() {
     let gen_src = "def id[T](x: T): T\n  x\nend\nid[Int](1)\n";
     let twin_src = "class A\n  x: Int = 0\nend\nclass B\n  x: Int = 0\nend\na = A()\na.x\n";
 
-    // (label, source, mutation). Each mutation returns true when it
-    // applied.
+    // (label, source, mutation, stable). Each mutation returns true
+    // when it applied. `stable` states whether the module semantic
+    // hash must survive the mutation.
     type Mutation = fn(&mut Module) -> bool;
-    let cases: [(&str, &str, Mutation); 5] = [
-        ("selector", class_src, |m: &mut Module| {
-            let Some(used) = used_selector(m) else {
-                return false;
-            };
-            let copy = m.selectors.len() as u32;
-            m.selectors.push(m.selectors[used as usize].clone());
-            point_selector(m, used, copy)
-        }),
-        ("string", str_src, |m: &mut Module| {
-            let Some(used) = used_string(m) else {
-                return false;
-            };
-            let copy = m.strings.len() as u32;
-            m.strings.push(m.strings[used as usize].clone());
-            point_string(m, used, copy)
-        }),
-        ("application", gen_src, |m: &mut Module| {
-            let Some(used) = used_app(m) else {
-                return false;
-            };
-            let copy = m.apps.len() as u32;
-            m.apps.push(m.apps[used as usize].clone());
-            point_app(m, used, copy)
-        }),
-        ("dead type", class_src, |m: &mut Module| {
-            m.types.push(lm_bytecode::BcType::Int);
-            true
-        }),
-        // Two classes with identical structure share a definition
-        // hash, so retargeting `New` between them keeps the module
-        // hash equal. Only the dataflow pass sees the class index.
-        ("class twin", twin_src, |m: &mut Module| {
-            let a = m.classes.iter().position(|c| c.name == "A").unwrap() as u32;
-            let b = m.classes.iter().position(|c| c.name == "B").unwrap() as u32;
-            point_new(m, a, b)
-        }),
+    let cases: [(&str, &str, Mutation, bool); 5] = [
+        (
+            "selector",
+            class_src,
+            |m: &mut Module| {
+                let Some(used) = used_selector(m) else {
+                    return false;
+                };
+                let copy = m.selectors.len() as u32;
+                m.selectors.push(m.selectors[used as usize].clone());
+                point_selector(m, used, copy)
+            },
+            true,
+        ),
+        (
+            "string",
+            str_src,
+            |m: &mut Module| {
+                let Some(used) = used_string(m) else {
+                    return false;
+                };
+                let copy = m.strings.len() as u32;
+                m.strings.push(m.strings[used as usize].clone());
+                point_string(m, used, copy)
+            },
+            true,
+        ),
+        (
+            "application",
+            gen_src,
+            |m: &mut Module| {
+                let Some(used) = used_app(m) else {
+                    return false;
+                };
+                let copy = m.apps.len() as u32;
+                m.apps.push(m.apps[used as usize].clone());
+                point_app(m, used, copy)
+            },
+            true,
+        ),
+        (
+            "dead type",
+            class_src,
+            |m: &mut Module| {
+                m.types.push(lm_bytecode::BcType::Int);
+                true
+            },
+            true,
+        ),
+        // Two classes with identical structure kept one definition
+        // hash before compiler ABI version 2. Class identity is now
+        // nominal, so retargeting `New` between them moves the module
+        // hash. Only the dataflow pass sees the class index, so the
+        // admission verdict must still agree.
+        (
+            "class twin",
+            twin_src,
+            |m: &mut Module| {
+                let a = m.classes.iter().position(|c| c.name == "A").unwrap() as u32;
+                let b = m.classes.iter().position(|c| c.name == "B").unwrap() as u32;
+                point_new(m, a, b)
+            },
+            false,
+        ),
     ];
 
-    for (label, source, mutate) in cases {
+    for (label, source, mutate, stable) in cases {
         let bytes = compile_to_bytes("t.lm", source).unwrap();
         let mut cache = lm_vm::VerifiedCache::new();
         lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
@@ -570,7 +605,11 @@ fn a_cached_load_and_an_uncached_load_always_agree() {
         let before = module_identity(&module).unwrap().semantic_hash;
         assert!(mutate(&mut module), "{label}: the mutation did not apply");
         let after = module_identity(&module).unwrap().semantic_hash;
-        assert_eq!(after, before, "{label}: the mutation moved the hash");
+        assert_eq!(
+            after == before,
+            stable,
+            "{label}: the module hash did not follow the recorded rule"
+        );
 
         let bad = lm_bytecode::encode(&module);
         let plain = lm_vm::load_bytes(&bad).is_ok();

@@ -43,6 +43,7 @@
 
 use crate::hash::sha256;
 use crate::{BcClassKind, BcRow, BcType, Instr, Module, NO_PARENT, VERSION};
+use std::collections::HashMap;
 
 /// The compiler ABI version. It covers the canonical bytecode
 /// semantics, the identity encoding, and the lowering conventions.
@@ -50,7 +51,9 @@ use crate::{BcClassKind, BcRow, BcType, Instr, Module, NO_PARENT, VERSION};
 /// semantics, the canonical identity encoding, the hash domains, or
 /// the lowering ABI. The operation manifest is covered separately by
 /// `lm_abi::manifest_digest()`, which every definition hash includes.
-pub const COMPILER_ABI_VERSION: u32 = 1;
+///
+/// Version 2 makes class identity nominal and adds the import set.
+pub const COMPILER_ABI_VERSION: u32 = 2;
 
 /// A failure to compute identity: the module structure is not
 /// hashable. The verifier rejects every such module too.
@@ -103,16 +106,28 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
 /// the verifier rejects. Keying here also lets semantic identity
 /// evolve without touching cache soundness.
 ///
-/// The digest covers the semantic region and the operation manifest.
-/// The manifest is a verifier input, because the row and signature
-/// rules read it, and it is not stored in the container. Definition
-/// names and debug content stay out: the verifier reads neither, so
-/// a rename or a debug edit must not cost a cache hit.
+/// The digest covers the semantic region, the operation manifest, and
+/// the class names. The manifest is a verifier input, because the row
+/// and signature rules read it, and it is not stored in the container.
+///
+/// The class names are a verifier input since class identity became
+/// nominal: the hash-linked core layout resolves a slot by class name
+/// and definition hash, and the verifier reads that layout. The names
+/// therefore must fix the key. Function names stay out, because no
+/// verifier rule and no identity rule reads one, so a function rename
+/// must not cost a cache hit.
+///
+/// The key fixes every input of `module_identity` too, so a cache
+/// entry may carry the resolved identity and core layout.
 pub fn verification_hash(module: &Module) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(TAG_VERIFICATION);
     bytes.extend_from_slice(&lm_abi::manifest_digest());
     bytes.extend_from_slice(&crate::semantic_section(module));
+    bytes.extend_from_slice(&(module.classes.len() as u32).to_le_bytes());
+    for class in &module.classes {
+        write_str(&mut bytes, &class.name);
+    }
     sha256(&bytes)
 }
 
@@ -731,11 +746,13 @@ struct Resolver<'a> {
     comp: Option<u32>,
     comp_of: &'a [u32],
     /// Ordinals of the definition members of the current component.
-    ordinals: &'a [(u32, u32)],
+    /// The lookups are maps, not scans: identity runs on untrusted
+    /// bytes before the verifier, so the load path stays bounded.
+    ordinals: &'a HashMap<u32, u32>,
     /// Intra-component digest overlays.
-    type_intra: &'a [(u32, [u8; 32])],
-    app_intra: &'a [(u32, [u8; 32])],
-    body_intra: &'a [(u32, [u8; 32])],
+    type_intra: &'a HashMap<u32, [u8; 32]>,
+    app_intra: &'a HashMap<u32, [u8; 32]>,
+    body_intra: &'a HashMap<u32, [u8; 32]>,
     /// Closure bodies on the active serialization path. A reference
     /// to one is a hand-built cycle and gets a marker.
     on_path: &'a [u32],
@@ -752,10 +769,9 @@ impl<'a> Resolver<'a> {
     }
 
     fn ordinal_of(&self, node: u32) -> u32 {
-        self.ordinals
-            .iter()
-            .find(|(n, _)| *n == node)
-            .map(|(_, o)| *o)
+        *self
+            .ordinals
+            .get(&node)
             .expect("every in-component definition member has an ordinal")
     }
 
@@ -780,10 +796,9 @@ impl<'a> Resolver<'a> {
     fn type_digest(&self, t: u32) -> [u8; 32] {
         let node = self.graph.space.type_node(t);
         if self.in_comp(node) {
-            self.type_intra
-                .iter()
-                .find(|(idx, _)| *idx == t)
-                .map(|(_, d)| *d)
+            *self
+                .type_intra
+                .get(&t)
                 .expect("in-component type digest computed")
         } else {
             self.state.type_final[t as usize].expect("type digest scheduled")
@@ -793,10 +808,9 @@ impl<'a> Resolver<'a> {
     fn app_digest(&self, a: u32) -> [u8; 32] {
         let node = self.graph.space.app_node(a);
         if self.in_comp(node) {
-            self.app_intra
-                .iter()
-                .find(|(idx, _)| *idx == a)
-                .map(|(_, d)| *d)
+            *self
+                .app_intra
+                .get(&a)
                 .expect("in-component app digest computed")
         } else {
             self.state.app_final[a as usize].expect("app digest scheduled")
@@ -804,7 +818,7 @@ impl<'a> Resolver<'a> {
     }
 
     fn body_digest(&self, f: u32) -> [u8; 32] {
-        if let Some((_, d)) = self.body_intra.iter().find(|(idx, _)| *idx == f) {
+        if let Some(d) = self.body_intra.get(&f) {
             return *d;
         }
         self.state.body_final[f as usize].expect("body digest scheduled")
@@ -922,12 +936,17 @@ impl<'a> Resolver<'a> {
         sha256(&out)
     }
 
-    /// The canonical member bytes of one class. The class name is
-    /// excluded: the semantic bytes of a definition never contain its
-    /// own name.
+    /// The canonical member bytes of one class.
+    ///
+    /// The class name is part of the identity: a class is a nominal
+    /// type (specification 5.3, 8.6). Two classes with different names
+    /// are different definitions, whatever their shape. Function
+    /// identity stays anonymous, so a function rename still moves no
+    /// definition hash.
     fn class_bytes(&self, c: u32) -> Vec<u8> {
         let class = &self.module.classes[c as usize];
         let mut out = Vec::new();
+        write_str(&mut out, &class.name);
         out.push(match class.kind {
             BcClassKind::Normal => 0,
             BcClassKind::Abstract => 1,
@@ -1230,21 +1249,21 @@ fn closure_body_digests(
     state: &HashState,
     comp: Option<u32>,
     comp_of: &[u32],
-    ordinals: &[(u32, u32)],
-    type_intra: &[(u32, [u8; 32])],
-    app_intra: &[(u32, [u8; 32])],
+    ordinals: &HashMap<u32, u32>,
+    type_intra: &HashMap<u32, [u8; 32]>,
+    app_intra: &HashMap<u32, [u8; 32]>,
     closures: &[u32],
-) -> Vec<(u32, [u8; 32])> {
-    let mut done: Vec<(u32, [u8; 32])> = Vec::new();
+) -> HashMap<u32, [u8; 32]> {
+    let mut done: HashMap<u32, [u8; 32]> = HashMap::new();
     let mut visiting: Vec<u32> = Vec::new();
     for &start in closures {
-        if done.iter().any(|(f, _)| *f == start) {
+        if done.contains_key(&start) {
             continue;
         }
         // Iterative post-order over same-component nested closures.
         let mut stack: Vec<(u32, bool)> = vec![(start, false)];
         while let Some((f, expanded)) = stack.pop() {
-            if done.iter().any(|(x, _)| *x == f) {
+            if done.contains_key(&f) {
                 continue;
             }
             if expanded {
@@ -1271,7 +1290,7 @@ fn closure_body_digests(
                     sha256(&bytes)
                 };
                 visiting.retain(|x| *x != f);
-                done.push((f, digest));
+                done.insert(f, digest);
                 continue;
             }
             visiting.push(f);
@@ -1289,7 +1308,7 @@ fn closure_body_digests(
                         if is_closure
                             && same
                             && !visiting.contains(target)
-                            && !done.iter().any(|(x, _)| *x == *target)
+                            && !done.contains_key(target)
                         {
                             stack.push((*target, false));
                         }
@@ -1318,6 +1337,9 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         comp_hash: vec![[0u8; 32]; s.total()],
     };
     let manifest = lm_abi::manifest_digest();
+    // The empty overlays of the final all-hash view.
+    let empty_ordinals: HashMap<u32, u32> = HashMap::new();
+    let empty_digests: HashMap<u32, [u8; 32]> = HashMap::new();
     for (comp_idx, comp) in comps.iter().enumerate() {
         let comp_idx = comp_idx as u32;
         // Partition the component nodes, each list ascending.
@@ -1362,7 +1384,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             let name_b = member_name(module, b.0, b.1);
             name_a.cmp(name_b).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1))
         });
-        let ordinals: Vec<(u32, u32)> = members
+        let ordinals: HashMap<u32, u32> = members
             .iter()
             .enumerate()
             .map(|(i, (_, _, node))| (*node, i as u32))
@@ -1370,8 +1392,8 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         // Intra-component digests: types in ascending index (their
         // references point at earlier entries), then applications,
         // then closure bodies.
-        let mut type_intra: Vec<(u32, [u8; 32])> = Vec::new();
-        let mut app_intra: Vec<(u32, [u8; 32])> = Vec::new();
+        let mut type_intra: HashMap<u32, [u8; 32]> = HashMap::new();
+        let mut app_intra: HashMap<u32, [u8; 32]> = HashMap::new();
         for &t in &types {
             let digest = {
                 let resolver = Resolver {
@@ -1383,13 +1405,13 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                     ordinals: &ordinals,
                     type_intra: &type_intra,
                     app_intra: &app_intra,
-                    body_intra: &[],
+                    body_intra: &empty_digests,
                     on_path: &[],
                     closure_list: &closure_funcs,
                 };
                 resolver.type_digest_of(&module.types[t as usize])
             };
-            type_intra.push((t, digest));
+            type_intra.insert(t, digest);
         }
         for &a in &apps {
             let digest = {
@@ -1402,13 +1424,13 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                     ordinals: &ordinals,
                     type_intra: &type_intra,
                     app_intra: &app_intra,
-                    body_intra: &[],
+                    body_intra: &empty_digests,
                     on_path: &[],
                     closure_list: &closure_funcs,
                 };
                 resolver.app_digest_of(a)
             };
-            app_intra.push((a, digest));
+            app_intra.insert(a, digest);
         }
         let body_intra = closure_body_digests(
             module,
@@ -1478,10 +1500,10 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                     state: &state,
                     comp: None,
                     comp_of: &comp_of,
-                    ordinals: &[],
-                    type_intra: &[],
-                    app_intra: &[],
-                    body_intra: &[],
+                    ordinals: &empty_ordinals,
+                    type_intra: &empty_digests,
+                    app_intra: &empty_digests,
+                    body_intra: &empty_digests,
                     on_path: &[],
                     closure_list: &closure_funcs,
                 };
@@ -1497,10 +1519,10 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                     state: &state,
                     comp: None,
                     comp_of: &comp_of,
-                    ordinals: &[],
-                    type_intra: &[],
-                    app_intra: &[],
-                    body_intra: &[],
+                    ordinals: &empty_ordinals,
+                    type_intra: &empty_digests,
+                    app_intra: &empty_digests,
+                    body_intra: &empty_digests,
                     on_path: &[],
                     closure_list: &closure_funcs,
                 };
@@ -1514,9 +1536,9 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             &state,
             None,
             &comp_of,
-            &[],
-            &[],
-            &[],
+            &empty_ordinals,
+            &empty_digests,
+            &empty_digests,
             &closure_funcs,
         );
         for (f, digest) in body_final {
