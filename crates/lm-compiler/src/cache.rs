@@ -6,6 +6,8 @@
 //!
 //! - the container format version, the compiler ABI version, the
 //!   verifier version, and the operation manifest digest;
+//! - the digest of the core sources, because every module embeds the
+//!   core image;
 //! - the module path and whether the module holds the program entry;
 //! - the exact source bytes;
 //! - the root names the module may use, and the **interface identity**
@@ -68,6 +70,7 @@ pub fn compile_key(
     bytes.extend_from_slice(&lm_bytecode::identity::COMPILER_ABI_VERSION.to_le_bytes());
     bytes.extend_from_slice(&lm_verify::VERIFIER_VERSION.to_le_bytes());
     bytes.extend_from_slice(&lm_abi::manifest_digest());
+    bytes.extend_from_slice(&lm_hir::core_source_digest());
     write_str(&mut bytes, module_path);
     bytes.push(u8::from(is_main));
     write_str(&mut bytes, source);

@@ -148,12 +148,20 @@ The key covers:
 
 - the container format version, the compiler ABI version, the
   verifier version, and the operation manifest digest;
+- the digest of the core sources, because every module embeds the
+  core image and a core edit need not move the ABI version;
 - the module path and the entry flag;
 - the exact source bytes and the root set;
 - the **interface identity** of every visible module.
 
 An interface identity covers the export names, the kinds, and the
 interface hashes. It covers no definition hash.
+
+The visible set is every module the build already produced, not only
+the modules one file may name. The key is therefore coarser than it
+must be: an interface change in an unrelated package rebuilds this
+module too. The gate the week needs still holds, and the coarseness
+is sound in the safe direction.
 
 That is the rebuild gate. An edit to an exported body moves the
 definition hash and the module semantic hash. It moves no interface

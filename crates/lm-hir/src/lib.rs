@@ -14,6 +14,15 @@ pub mod import;
 pub mod lower;
 
 pub use check::{check_module, check_module_with, CheckOptions, CORE_SOURCE};
+
+/// The digest of the pinned core sources.
+///
+/// Every module embeds the core image, so a core edit changes every
+/// artifact. A build cache must therefore key on this digest: the
+/// compiler ABI version does not have to move when the core does.
+pub fn core_source_digest() -> [u8; 32] {
+    lm_bytecode::hash::sha256(CORE_SOURCE.as_bytes())
+}
 pub use hir::dump_classes;
 pub use lower::lower_module;
 
