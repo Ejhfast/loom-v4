@@ -1161,6 +1161,7 @@ fn assemble(
         bindings.push(lm_bytecode::FuncBinding {
             key: lm_bytecode::qualified_key(module_path, &func.name),
             func: idx as u32,
+            class: lm_bytecode::NO_CLASS,
         });
     }
     for class in &hir_classes {
@@ -1171,12 +1172,14 @@ fn assemble(
             bindings.push(lm_bytecode::FuncBinding {
                 key: format!("{}.{name}", class.key),
                 func: *func,
+                class: lm_bytecode::NO_CLASS,
             });
         }
         if let Some(func) = class.init {
             bindings.push(lm_bytecode::FuncBinding {
                 key: format!("{}.init", class.key),
                 func,
+                class: lm_bytecode::NO_CLASS,
             });
         }
     }

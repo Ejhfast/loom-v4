@@ -500,7 +500,19 @@ pub struct FuncBinding {
     pub key: String,
     /// The function value this name points at.
     pub func: u32,
+    /// The class this binding constructs, or `NO_CLASS`.
+    ///
+    /// A key alone ties a constructor to nothing. An earlier rule
+    /// proved only that a binding with the constructor key existed, so
+    /// the binding named any function of the module, an import slot
+    /// included. Two providers then hid two constructors behind one
+    /// harmless binding, and the conflict rule never fired. This field
+    /// makes the tie explicit, and the linker proves it.
+    pub class: u32,
 }
+
+/// The sentinel for a binding that constructs no class.
+pub const NO_CLASS: u32 = u32::MAX;
 
 /// The name segment of a generated construction function.
 pub const CTOR_SEGMENT: &str = "<new>";
@@ -609,7 +621,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// A binding maps a qualified name to a function value, so the linker
 /// keeps every name a program declares while it shares one code
 /// object between equal bodies.
-pub const VERSION: u16 = 9;
+pub const VERSION: u16 = 10;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -870,6 +882,7 @@ fn encode_exports(module: &Module) -> Vec<u8> {
     for binding in &module.bindings {
         write_bytes(&mut out, binding.key.as_bytes());
         write_u32(&mut out, binding.func);
+        write_u32(&mut out, binding.class);
     }
     write_u32(&mut out, module.exports.len() as u32);
     for export in &module.exports {
@@ -1381,10 +1394,14 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     for _ in 0..binding_count {
         let key = cur.string()?;
         let func = cur.u32()?;
+        let class = cur.u32()?;
         if func as usize >= module.funcs.len() {
             return Err(DecodeError::BadBinding);
         }
-        bindings.push(FuncBinding { key, func });
+        if class != NO_CLASS && class as usize >= module.classes.len() {
+            return Err(DecodeError::BadBinding);
+        }
+        bindings.push(FuncBinding { key, func, class });
     }
     module.bindings = bindings;
     let export_count = cur.len()?;
@@ -1893,10 +1910,12 @@ mod tests {
                 FuncBinding {
                     key: "Counter.add".to_string(),
                     func: 1,
+                    class: NO_CLASS,
                 },
                 FuncBinding {
                     key: "main".to_string(),
                     func: 0,
+                    class: NO_CLASS,
                 },
             ],
         }
@@ -1908,6 +1927,7 @@ mod tests {
         module.bindings = vec![FuncBinding {
             key: "gone".to_string(),
             func: 7,
+            class: NO_CLASS,
         }];
         let bytes = encode(&module);
         assert!(matches!(decode(&bytes), Err(DecodeError::BadBinding)));

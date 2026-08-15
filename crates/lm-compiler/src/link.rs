@@ -577,19 +577,77 @@ fn relocate(
 /// every module it writes passes.
 fn check_ctor_bindings(module: &Module, path: &str) -> Result<(), LinkError> {
     let extern_classes = module.extern_classes();
-    let mut keys: Vec<&str> = module.bindings.iter().map(|b| b.key.as_str()).collect();
-    keys.sort_unstable();
+    let extern_funcs = module.extern_funcs();
+    // Every constructor binding names the class it constructs, and the
+    // key alone proves nothing. A key check on its own let a binding
+    // name any function of the module, an import slot included, so two
+    // providers hid two constructors behind one binding hash and the
+    // conflict rule never fired.
+    for binding in &module.bindings {
+        if binding.class == lm_bytecode::NO_CLASS {
+            continue;
+        }
+        let class = &module.classes[binding.class as usize];
+        let want = lm_bytecode::ctor_binding_key(&class.key);
+        if binding.key != want {
+            return Err(fail(format!(
+                "the module `{path}` binds `{}` to the class `{}`, which needs \
+                 the key `{want}`; rebuild the module",
+                binding.key, class.key
+            )));
+        }
+        if extern_funcs[binding.func as usize] {
+            return Err(fail(format!(
+                "the module `{path}` binds the constructor `{}` to an imported \
+                 declaration, which carries no body; rebuild the module",
+                binding.key
+            )));
+        }
+    }
+    // Every class this module defines declares exactly one constructor
+    // binding of its own.
     for (idx, class) in module.classes.iter().enumerate() {
         if extern_classes[idx] {
             continue;
         }
         let want = lm_bytecode::ctor_binding_key(&class.key);
-        if keys.binary_search(&want.as_str()).is_err() {
+        let mut found: Option<u32> = None;
+        for binding in &module.bindings {
+            if binding.class != idx as u32 {
+                continue;
+            }
+            if found.is_some() {
+                return Err(fail(format!(
+                    "the module `{path}` declares two constructor bindings for \
+                     the class `{}`; rebuild the module",
+                    class.key
+                )));
+            }
+            found = Some(binding.func);
+        }
+        let Some(func) = found else {
             return Err(fail(format!(
                 "the module `{path}` defines the class `{}` and declares no \
                  constructor binding `{want}`; rebuild the module",
                 class.key
             )));
+        };
+        // The export table records the construction function of a
+        // class export. The two must name one function, or a caller
+        // reaches a constructor the binding never covered.
+        for export in &module.exports {
+            if export.kind.is_class()
+                && export.def == idx as u32
+                && export.ctor != lm_bytecode::NO_CTOR
+                && export.ctor != func
+            {
+                return Err(fail(format!(
+                    "the module `{path}` exports the class `{}` with one \
+                     construction function and binds `{want}` to another; \
+                     rebuild the module",
+                    class.key
+                )));
+            }
         }
     }
     Ok(())
@@ -628,7 +686,11 @@ fn merge_bindings(
         }
         if extern_funcs[local] {
             // An imported declaration carries no body, so the module
-            // that declares it is not a provider of that name.
+            // that declares it is not a provider of that name. A
+            // constructor binding never reaches this arm, because
+            // `check_ctor_bindings` rejects one that names an import
+            // slot. Without that rule a skip here switched the
+            // conflict test off for the exact case it must catch.
             continue;
         }
         let hash = identity.func_hashes[local];
@@ -650,6 +712,11 @@ fn merge_bindings(
         merged.bindings.push(lm_bytecode::FuncBinding {
             key: binding.key.clone(),
             func: reloc.funcs[local],
+            class: if binding.class == lm_bytecode::NO_CLASS {
+                lm_bytecode::NO_CLASS
+            } else {
+                reloc.classes[binding.class as usize]
+            },
         });
     }
     Ok(())

@@ -51,10 +51,13 @@ fn the_qualified_key_separates_a_user_enum_from_the_core_family() {
     );
 }
 
-/// A class rename moves no structural hash of another definition: a
-/// reference carries the qualified key, and the key follows the name.
-/// The own name never enters the own hash, so a class that nothing
-/// references keeps its hash through a rename.
+/// A class rename through the source moves the qualified key, so it
+/// moves every hash that names the class. The verification hash holds,
+/// because a key lives in the export section.
+///
+/// An earlier version of this test set `class.name` and left
+/// `class.key`, which the source compiler cannot produce, so it proved
+/// a case that never occurs.
 #[test]
 fn a_class_rename_moves_no_hash_when_the_key_holds() {
     let source = "class Point\n  x: Int = 0\nend\np = Point()\np.x\n";
@@ -71,6 +74,29 @@ fn a_class_rename_moves_no_hash_when_the_key_holds() {
     assert_eq!(
         identity.class_hashes, twin_identity.class_hashes,
         "a rename that keeps the key moved a structural hash"
+    );
+
+    // The case the source compiler produces: a rename moves the key.
+    let renamed = compile_text("t.lm", "class Place\n  x: Int = 0\nend\np = Place()\np.x\n")
+        .expect("compiles");
+    let renamed_identity = module_identity(&renamed).expect("hashes");
+    // The class keeps its own hash, because its own key never enters
+    // it. Every definition that NAMES the class moves, because a
+    // reference carries the qualified key. The constructor is one.
+    assert_eq!(
+        identity.class_hashes, renamed_identity.class_hashes,
+        "the own key must stay outside the own hash"
+    );
+    assert_ne!(
+        identity.func_hashes, renamed_identity.func_hashes,
+        "a source rename must move the hash of a definition that names the class"
+    );
+    // The verification hash holds: a key lives in the export section,
+    // which the verifier never reads.
+    assert_eq!(
+        lm_bytecode::identity::verification_hash(&module),
+        lm_bytecode::identity::verification_hash(&renamed),
+        "a source rename moved the verification hash"
     );
 }
 

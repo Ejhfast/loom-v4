@@ -449,10 +449,16 @@ impl VerifiedStore {
     pub fn for_artifact(_artifact: &Path) -> VerifiedStore {
         match user_cache_dir() {
             Some(dir) => VerifiedStore::new(&dir),
-            None => VerifiedStore {
-                root: PathBuf::new(),
-                enabled: false,
-            },
+            None => VerifiedStore::disabled(),
+        }
+    }
+
+    /// A store with no trusted directory. It reads no record and
+    /// writes none, so every load meets the verifier.
+    pub fn disabled() -> VerifiedStore {
+        VerifiedStore {
+            root: PathBuf::new(),
+            enabled: false,
         }
     }
 
@@ -585,16 +591,39 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Write one file atomically: a temporary file in the same directory,
-/// then a rename over the final path.
+/// Write one file atomically: a fresh temporary file in the same
+/// directory, then a rename over the final path.
+///
+/// The temporary name is unique and the create is exclusive, so the
+/// write never opens a file that already exists. A fixed `.tmp` name
+/// with a plain write followed a symbolic link. A package that
+/// shipped `build/debug/<name>.lma.tmp` as a link therefore made a
+/// build write outside the package.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let unique = NEXT.fetch_add(1, Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.{unique}.tmp", std::process::id()));
     let tmp = Path::new(&tmp);
-    std::fs::write(tmp, bytes)
-        .map_err(|e| format!("error: cannot write `{}`: {e}\n", tmp.display()))?;
-    std::fs::rename(tmp, path)
-        .map_err(|e| format!("error: cannot rename to `{}`: {e}\n", path.display()))
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)
+        .map_err(|e| format!("error: cannot create `{}`: {e}\n", tmp.display()))?;
+    let written = file
+        .write_all(bytes)
+        .map_err(|e| format!("error: cannot write `{}`: {e}\n", tmp.display()));
+    drop(file);
+    if let Err(message) = written {
+        let _ = std::fs::remove_file(tmp);
+        return Err(message);
+    }
+    std::fs::rename(tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(tmp);
+        format!("error: cannot rename to `{}`: {e}\n", path.display())
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {

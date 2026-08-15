@@ -1053,8 +1053,10 @@ load path. `week6_store.rs` (10 cases) covers stage 2 and stage 3.
 - The iterated-hash form of the labels in specification section 6, if
   the hash domain matters more than the quadratic worst case.
 - A user-cache location for stage 3 that survives a `HOME` with no
-  write permission. The store falls back to `.lm-cache` in the current
-  directory, which is a working directory, not a user directory.
+  write permission. With no trusted directory the store is disabled,
+  so every load meets the verifier. The earlier fallback to
+  `.lm-cache` in the current directory is gone: a working directory
+  can belong to the supplier of an artifact.
 
 ### One defect the self-review found
 
@@ -1375,3 +1377,90 @@ table. `cli.rs` gains the two single-file module path cases.
 - Per-definition pruning of unused import slots, unchanged.
 - The iterated-hash form of the labels in specification section 6,
   unchanged.
+
+## The external review pass
+
+An external review and an independent agent review ran on the binding
+work. Both found the constructor binding defect on their own. This
+section records what the pass fixed and what it defers.
+
+### The constructor binding named nothing (high)
+
+`check_ctor_bindings` proved that a binding with the key
+`<class key>.<new>` existed, and it proved nothing about the target.
+`merge_bindings` then skipped a binding that named an import slot, so
+the conflict rule never compared a hash. Two providers of one class
+key therefore merged into one class with two live constructors, and
+the merged program passed the whole verifier and ran. That is the
+exact defect the binding layer was built to close.
+
+Three probes reproduced it: a binding on an import slot, a binding on
+a decoy whose structural hash matched the honest constructor, and a
+`<new>` binding on an ordinary free function. The crafted module
+round-tripped through the container, so the vector was a file in the
+build directory, not an in-process value.
+
+The fix ties the binding to its class. `FuncBinding` carries a `class`
+field, `NO_CLASS` outside a constructor. The linker proves four rules:
+a constructor binding carries the key its class needs, it never names
+an imported declaration, every class the module defines declares
+exactly one constructor binding, and the export table names the same
+construction function as the binding.
+
+The field sits in the export section, so no definition hash moved and
+`core/pinned-core-defs.txt` is unchanged. The container format is 10
+and the core image pin moved with it.
+
+### The rename rule was too strong (medium)
+
+Specification 3.7 said a rename moves no definition hash. A class
+reference carries the qualified key, so a source class rename moves
+the key and moves the hash of every definition that names the class.
+The test that proved the old claim set `class.name` and left
+`class.key`, which the source compiler cannot produce.
+
+The specification now states three rules: a function binding rename
+moves no code hash; a class key rename and a selector rename can move
+a referenced hash; a verification hash holds through a class rename
+and a free-function rename. The test compiles both names and proves
+each rule.
+
+### A shipped package could write outside itself (high)
+
+`write_atomic` wrote a fixed `<path>.tmp` with a plain write, which
+follows a symbolic link. A package that shipped
+`build/debug/<name>.lma.tmp` as a link made a build write outside the
+package. The write now creates a unique temporary name with an
+exclusive create, and the tool keeps one implementation.
+
+### Smaller items
+
+- The disassembler and the live frame dump scanned every binding for
+  every function. The disassembler builds one index for the whole
+  dump.
+- `no_trusted_directory_disables_the_store` asserted nothing unless
+  the host had no cache directory. `VerifiedStore::disabled()` makes
+  the case reachable on every run.
+- Three uses of "should" left the specification. The `week` numbers
+  left `packages.md`.
+
+### Deferred, with the reason
+
+The build directory belongs to the user. An attacker who writes there
+already edits the sources, so hardening past a reasonable standard
+buys little. These stay open:
+
+- A stage-2 entry is not tied to the sources that produced it. A
+  planted entry holds another program that the verifier admits, and
+  the build emits it. Comparing the recomputed container hash to the
+  stored one closes it.
+- The stage-3 structural pass reads no instruction rule, so a forged
+  verdict admits a module that faults the VM. The pass bounds the
+  table rules only.
+- `a_cached_load_and_an_uncached_load_always_agree` exercises the
+  in-process cache and touches no file. The file-backed stages need
+  their own case.
+- A test writes a record into the real user cache directory.
+- The refinement budget bounds work per module, and not the wall time
+  of a whole artifact. A 35 MB artifact of small components is
+  accepted and costs about one second.

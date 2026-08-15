@@ -1,7 +1,7 @@
 # Packages and Modules
 
-Status: week 6 implements the base of this document. Week 12
-completes the tooling. Section 9 records what week 6 left open.
+Status: the base of this document is implemented. The tooling is not
+complete. Section 9 records what stays open.
 
 This document defines the ordinary developer loop: how a project
 lives on disk, how files refer to each other, and how one package
@@ -115,8 +115,8 @@ are no ambient standard-library names. The core prelude (`Option`,
 - `lm run [--allow ...]` — build, then execute the program artifact
   under the given policy grants. `lm run <path>.lma` executes a
   prebuilt artifact directly, with no package or source present.
-- `lm test` — build and run the package tests (full harness in
-  week 12).
+- `lm test` — build and run the package tests. The full harness is
+  not implemented yet.
 
 The `.lma` artifact is the deployment and sandbox unit. It is the
 same container the runtime compiler produces and the linker
@@ -149,10 +149,10 @@ the qualified name. A `use` of one export binds the short name
 directly. A name the module already defines is an error, and the
 module form is the stated fix.
 
-## 9. What week 6 left open
+## 9. What stays open
 
 - `std` does not ship with this toolchain yet. `use std.*` rejects
-  with that message. Week 11 lands the library.
+  with that message. The library is not implemented yet.
 - A fully qualified reference without a `use` line
   (`mathlib.matrix.Matrix`) is not accepted yet. Name the module or
   the definition with a `use` line first.
@@ -161,4 +161,4 @@ module form is the stated fix.
 - A class cannot inherit an imported class. An imported declaration
   carries no body, so a subclass cannot reach the `init` of its
   parent. Hold the imported class in a field instead.
-- `lm test` arrives with the test harness in week 12.
+- `lm test` arrives with the test harness.

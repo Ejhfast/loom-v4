@@ -24,7 +24,9 @@ pub mod module;
 pub mod scaffold;
 
 pub use build::{build_package, BuildReport, ModuleReport};
-pub use cache::{load_through_store, user_cache_dir, Verdict, VerdictKey, VerifiedStore};
+pub use cache::{
+    load_through_store, user_cache_dir, write_atomic, Verdict, VerdictKey, VerifiedStore,
+};
 pub use env::{CompileEnv, LinkEnv, LinkUnit};
 pub use link::{link, LinkedProgram};
 pub use manifest::{parse_manifest, Manifest};

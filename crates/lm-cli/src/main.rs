@@ -348,16 +348,11 @@ fn build_artifact(path: &str) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Write a file atomically: write a temporary file in the same
-/// directory, then rename it over the final path.
+/// Write a file atomically. The tool keeps one implementation, in
+/// `lm_compiler::write_atomic`, so the exclusive-create rule holds on
+/// every path the tool writes.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = Path::new(&tmp);
-    std::fs::write(tmp, bytes)
-        .map_err(|e| format!("error: cannot write `{}`: {e}\n", tmp.display()))?;
-    std::fs::rename(tmp, path)
-        .map_err(|e| format!("error: cannot rename to `{}`: {e}\n", path.display()))
+    lm_compiler::write_atomic(path, bytes)
 }
 
 struct Options {

@@ -255,6 +255,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
         bindings.push(lm_bytecode::FuncBinding {
             key: lm_bytecode::ctor_binding_key(&class.key),
             func: new_base + cidx as u32,
+            class: cidx as u32,
         });
     }
     Module {
@@ -1729,6 +1730,15 @@ pub fn dump_cfg(module: &Module) -> String {
             let _ = writeln!(out, "  method sel{sel} -> fn{func}");
         }
     }
+    // One function-to-names index for the whole dump.
+    let mut binding_index: std::collections::HashMap<u32, Vec<&str>> =
+        std::collections::HashMap::new();
+    for binding in &module.bindings {
+        binding_index
+            .entry(binding.func)
+            .or_default()
+            .push(binding.key.as_str());
+    }
     for (fidx, func) in module.funcs.iter().enumerate() {
         let params: Vec<String> = func.params.iter().map(|p| type_text(module, *p)).collect();
         let generics = if func.type_params > 0 || func.effect_params > 0 {
@@ -1753,9 +1763,12 @@ pub fn dump_cfg(module: &Module) -> String {
         );
         // Every name that points at this function value. Two modules
         // with equal bodies share one code object and keep two names,
-        // so the listing must print them all.
-        for binding in module.bindings.iter().filter(|b| b.func == fidx as u32) {
-            let _ = writeln!(out, "  binding {}", binding.key);
+        // so the listing must print them all. The index is built once,
+        // because a scan per function makes the dump quadratic.
+        if let Some(keys) = binding_index.get(&(fidx as u32)) {
+            for key in keys {
+                let _ = writeln!(out, "  binding {key}");
+            }
         }
         if !func.captures.is_empty() {
             let caps: Vec<String> = func

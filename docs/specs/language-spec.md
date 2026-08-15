@@ -331,7 +331,11 @@ For mutually recursive definitions, the compiler finds strongly connected compon
 3. Refinement stops as soon as the label partition stops refining. The round count is capped at the member count.
 4. The final label is the StructuralHash of the member. The component hash is the hash of the sorted final labels.
 
-The set of components is a property of the graph, so the emission order of the component walk is invisible in every hash. A rename therefore moves no definition hash, inside a cyclic component or outside one.
+The set of components is a property of the graph, so the emission order of the component walk is invisible in every hash. The rename rule is therefore narrower than "a rename moves no definition hash", and it reads:
+
+- A **function binding** rename moves no code hash. A binding name lives outside every structural hash, so the function value keeps its identity and so does every caller.
+- A **class key** rename and a **selector** rename can move a referenced hash. A type digest and a `New` site name a class by qualified key, and a method entry names a selector by name. A source class rename moves the key, so it moves the hash of every definition that names that class. The class keeps its own hash, because its own key never enters it. The class hash moves only when one of its own methods names the class.
+- A **VerificationHash** stays stable through a class rename and a free-function rename. A class key, a definition name, and a function binding all live in the export section, which the verifier never reads.
 
 Structural refinement cannot always give each member a unique label. The stable partition of this rule is bisimulation: two members keep one label exactly when they are bisimilar. Bisimulation is coarser than isomorphism, so the rule may give one label to two members an isomorphism test separates. One label stays sound, because a member is a deterministic system with ordered successors: two bisimilar members have identical unfoldings, so they compute the same thing. Members with one label share one StructuralHash, and their QualifiedKey values keep them distinct wherever distinctness is observable.
 
@@ -511,13 +515,13 @@ point = (10, 20)
 single = ("only",)
 ```
 
-`()` is unit, not a zero-field heap tuple. Tuple elements are covariant and addressed only by compile-time position. Tuples are used for lightweight returns, map entries, and typed operation argument packs. Their maximum portable arity is 16; larger records should be classes.
+`()` is unit, not a zero-field heap tuple. Tuple elements are covariant and addressed only by compile-time position. Tuples are used for lightweight returns, map entries, and typed operation argument packs. Their maximum portable arity is 16; larger records must be classes.
 
 ### 5.6 `Any`, `DynValue`, and deliberate dynamic boundaries
 
 Every ordinary value can widen to `Any`, but normal generic APIs must use a type parameter rather than `Any`. In particular, list algorithms, `freeze`, `digest`, `deep_equal`, VM results, proc messages, compile environments, and operation replies preserve their caller's type.
 
-`Any` is a primitive name but prelude and standard APIs do not return it merely for convenience. It should appear only in code intentionally doing dynamic type tests. Narrowing is explicit:
+`Any` is a primitive name but prelude and standard APIs do not return it merely for convenience. It appears only in code that intentionally does a dynamic type test. Narrowing is explicit:
 
 ```lm
 if value is String
@@ -2494,7 +2498,7 @@ Every fresh VM table denies all operations. Authority-bearing control objects ar
 
 ### 27.2 Admission
 
-A host admits code by one or more explicit rules: known semantic hash, successful bytecode verification plus accepted imports/row bound, signature policy, or an application-specific audit record. Verification proves structural/type/effect claims; it does not decide whether requested operations should be granted.
+A host admits code by one or more explicit rules: known semantic hash, successful bytecode verification plus accepted imports/row bound, signature policy, or an application-specific audit record. Verification proves structural/type/effect claims; it does not decide whether the host grants a requested operation.
 
 ### 27.3 Limits
 

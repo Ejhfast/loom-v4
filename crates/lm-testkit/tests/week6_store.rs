@@ -394,11 +394,22 @@ fn a_shipped_manifest_never_moves_the_verdict_store() {
 #[test]
 fn no_trusted_directory_disables_the_store() {
     let key = lm_vm::verified_key(&lm_testkit::compile_text("t.lm", "1\n").expect("compiles"));
-    let disabled = VerifiedStore::for_artifact(Path::new("/nonexistent/x.lma"));
-    if lm_compiler::user_cache_dir().is_none() {
-        assert!(!disabled.is_enabled());
-        assert!(disabled.read(&key).is_none(), "a disabled store answered");
-    }
+    // The disabled shape is reachable whatever this host sets, so the
+    // case asserts on every run.
+    let disabled = VerifiedStore::disabled();
+    assert!(!disabled.is_enabled());
+    assert!(disabled.read(&key).is_none(), "a disabled store answered");
+    assert!(
+        disabled.write(&key, &Verdict).is_ok(),
+        "a disabled write failed"
+    );
+    assert!(
+        disabled.read(&key).is_none(),
+        "a disabled store kept a record"
+    );
+    // The live rule still holds on this host.
+    let chosen = VerifiedStore::for_artifact(Path::new("/nonexistent/x.lma"));
+    assert_eq!(chosen.is_enabled(), lm_compiler::user_cache_dir().is_some());
 }
 
 /// Stage 3 stays reachable for an artifact with no package around it.
