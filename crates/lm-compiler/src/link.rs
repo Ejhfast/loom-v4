@@ -578,16 +578,34 @@ fn relocate(
 fn check_ctor_bindings(module: &Module, path: &str) -> Result<(), LinkError> {
     let extern_classes = module.extern_classes();
     let extern_funcs = module.extern_funcs();
-    // Every constructor binding names the class it constructs, and the
-    // key alone proves nothing. A key check on its own let a binding
+    // One pass over the bindings fills the constructor of every class,
+    // so the whole check stays linear in the module.
+    //
+    // A key alone proves nothing. A key check on its own let a binding
     // name any function of the module, an import slot included, so two
     // providers hid two constructors behind one binding hash and the
     // conflict rule never fired.
+    let mut ctor_of: Vec<Option<u32>> = vec![None; module.classes.len()];
     for binding in &module.bindings {
         if binding.class == lm_bytecode::NO_CLASS {
             continue;
         }
-        let class = &module.classes[binding.class as usize];
+        // A hand-built module reaches the linker without a decoder, so
+        // the lookup is defensive.
+        let Some(class) = module.classes.get(binding.class as usize) else {
+            return Err(fail(format!(
+                "the binding `{}` of `{path}` names a class outside the module",
+                binding.key
+            )));
+        };
+        let idx = binding.class as usize;
+        if extern_classes[idx] {
+            return Err(fail(format!(
+                "the module `{path}` binds the constructor `{}` to the imported \
+                 class `{}`, which it does not define; rebuild the module",
+                binding.key, class.key
+            )));
+        }
         let want = lm_bytecode::ctor_binding_key(&class.key);
         if binding.key != want {
             return Err(fail(format!(
@@ -603,51 +621,50 @@ fn check_ctor_bindings(module: &Module, path: &str) -> Result<(), LinkError> {
                 binding.key
             )));
         }
-    }
-    // Every class this module defines declares exactly one constructor
-    // binding of its own.
-    for (idx, class) in module.classes.iter().enumerate() {
-        if extern_classes[idx] {
-            continue;
-        }
-        let want = lm_bytecode::ctor_binding_key(&class.key);
-        let mut found: Option<u32> = None;
-        for binding in &module.bindings {
-            if binding.class != idx as u32 {
-                continue;
-            }
-            if found.is_some() {
-                return Err(fail(format!(
-                    "the module `{path}` declares two constructor bindings for \
-                     the class `{}`; rebuild the module",
-                    class.key
-                )));
-            }
-            found = Some(binding.func);
-        }
-        let Some(func) = found else {
+        if ctor_of[idx].is_some() {
             return Err(fail(format!(
-                "the module `{path}` defines the class `{}` and declares no \
-                 constructor binding `{want}`; rebuild the module",
+                "the module `{path}` declares two constructor bindings for the \
+                 class `{}`; rebuild the module",
                 class.key
             )));
+        }
+        ctor_of[idx] = Some(binding.func);
+    }
+    // Every class this module defines declares one constructor binding.
+    for (idx, class) in module.classes.iter().enumerate() {
+        if extern_classes[idx] || ctor_of[idx].is_some() {
+            continue;
+        }
+        return Err(fail(format!(
+            "the module `{path}` defines the class `{}` and declares no \
+             constructor binding `{}`; rebuild the module",
+            class.key,
+            lm_bytecode::ctor_binding_key(&class.key)
+        )));
+    }
+    // One pass over the exports. The export table records the
+    // construction function of a class export, and the two must name
+    // one function, or a caller reaches a constructor the binding
+    // never covered.
+    for export in &module.exports {
+        if !export.kind.is_class() || export.ctor == lm_bytecode::NO_CTOR {
+            continue;
+        }
+        let Some(class) = module.classes.get(export.def as usize) else {
+            return Err(fail(format!(
+                "the export `{}` of `{path}` names a class outside the module",
+                export.name
+            )));
         };
-        // The export table records the construction function of a
-        // class export. The two must name one function, or a caller
-        // reaches a constructor the binding never covered.
-        for export in &module.exports {
-            if export.kind.is_class()
-                && export.def == idx as u32
-                && export.ctor != lm_bytecode::NO_CTOR
-                && export.ctor != func
-            {
-                return Err(fail(format!(
-                    "the module `{path}` exports the class `{}` with one \
-                     construction function and binds `{want}` to another; \
-                     rebuild the module",
-                    class.key
-                )));
-            }
+        let idx = export.def as usize;
+        if ctor_of[idx] != Some(export.ctor) {
+            return Err(fail(format!(
+                "the module `{path}` exports the class `{}` with one \
+                 construction function and binds `{}` to another; rebuild \
+                 the module",
+                class.key,
+                lm_bytecode::ctor_binding_key(&class.key)
+            )));
         }
     }
     Ok(())

@@ -1464,3 +1464,32 @@ buys little. These stay open:
 - The refinement budget bounds work per module, and not the wall time
   of a whole artifact. A 35 MB artifact of small components is
   accepted and costs about one second.
+
+### The second external review pass
+
+Four findings, all confirmed and fixed.
+
+- **The class index of a binding reached the linker unchecked.** The
+  decoder rejected an index out of range, and the identity preflight
+  checked only the function index. A hand-built `LinkUnit` reaches the
+  linker without a decoder, so `check_ctor_bindings` indexed the class
+  table directly and panicked. The preflight now checks the class
+  index, the linker uses a defensive lookup, and a constructor binding
+  on an imported class rejects.
+- **The constructor check was quadratic.** It scanned every binding
+  and every export for every class, at `O(C * (B + E))`. One pass over
+  the bindings now fills a constructor vector, and one pass over the
+  exports checks it. Linking stays linear.
+- **The binding decoder sized an allocation from an unchecked count.**
+  The general length rule bounds a count at one byte per entry. One
+  encoded binding needs at least twelve bytes, so a count near the
+  byte count reserved far past the input. The decoder now checks the
+  real cost first. This is the project rule for every decoder.
+- **The rename text still overstated two things.** A class reaches its
+  own key through a method, a field whose type names the class, or an
+  enum arm the parent lists, and the text named only methods. A
+  selector name lives in the semantic region, so a selector rename
+  moves the verification hash; the text implied every rename holds it.
+  A stale paragraph in `identity.rs` also said definition names enter
+  the verification hash, one paragraph above the text that says the
+  opposite. The stale paragraph is gone.

@@ -1281,6 +1281,11 @@ impl<'a> Cursor<'a> {
 
     /// Read a table length and reject counts the input cannot contain.
     /// Each counted element needs at least one byte.
+    /// The bytes left to read.
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.pos)
+    }
+
     fn len(&mut self) -> Result<usize, DecodeError> {
         let count = self.u32()? as usize;
         if count > self.bytes.len().saturating_sub(self.pos) {
@@ -1389,7 +1394,14 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     for func in &mut module.funcs {
         func.name = cur.string()?;
     }
+    // One encoded binding needs at least twelve bytes: the key
+    // length, the function index, and the class index. `len` bounds a
+    // count at one byte per entry, which is not enough to size this
+    // allocation. Check the real cost before the reserve.
     let binding_count = cur.len()?;
+    if binding_count > cur.remaining() / 12 {
+        return Err(DecodeError::BadLength);
+    }
     let mut bindings = Vec::with_capacity(binding_count);
     for _ in 0..binding_count {
         let key = cur.string()?;

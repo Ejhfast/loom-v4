@@ -147,11 +147,6 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
 /// the verifier rejects. Keying here also lets semantic identity
 /// evolve without touching cache soundness.
 ///
-/// The digest covers the semantic region, the operation manifest, and
-/// every definition name. The manifest is a verifier input, because
-/// the row and signature rules read it, and it is not stored in the
-/// container.
-///
 /// The digest covers the semantic region and the operation manifest,
 /// and nothing else. That is the exact input set of the verifier:
 ///
@@ -388,6 +383,11 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
         if binding.func as usize >= s.funcs {
             return Err(fail(format!(
                 "binding {idx} names a function index out of range"
+            )));
+        }
+        if binding.class != crate::NO_CLASS && binding.class as usize >= s.classes {
+            return Err(fail(format!(
+                "binding {idx} names a class index out of range"
             )));
         }
     }
