@@ -189,3 +189,16 @@ re-join work entirely. No further work is planned.
   shared checker, and the corpus gained covering programs.
 - Real benchmark infrastructure with committed distributions stays
   deferred as before; the smokes stand in.
+
+## Driver regression fix
+
+The week 4 driver returned to the activation-stack dispatch after
+every instruction, and the four workload timings roughly doubled
+against week 3. The fix batches ordinary instructions: run and
+drive execute a tight loop inside the machine until an instruction
+reaches a world boundary. Step keeps exact one-instruction
+semantics. Fuel decrements per instruction inside `exec_instr`, so
+`OutOfFuel` stays exact. Measured recovery: integer loop 72 to 33
+ms, direct calls 95 to 46 ms, virtual calls 146 to 71 ms, list
+allocations 172 to 114 ms, with process start included. The user
+supplied the fix on the `batch-vm-boundaries` branch.
