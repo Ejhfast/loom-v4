@@ -274,6 +274,8 @@ A definition hash covers canonical bytecode and constants, full signature and ef
 
 For mutually recursive definitions, the compiler finds strongly connected components. A cyclic component is canonically ordered by exported name and stable generated ID, encodes internal references by member ordinal, and receives one component hash. Member hashes are domain-separated from that hash and ordinal; there is no iterative “hash until stable” rule.
 
+Canonical bytecode is a dedicated identity encoding, not the loading encoding. It replaces every module-global index — function, class, type, string, application, and selector — with content identity, inline content, or structural encoding. Definition hashes therefore do not depend on definition order in the source, on pool interning order, or on definition names; a rename changes the module hash through the export table and no definition hash.
+
 *Implementation note.* The reference implementation uses Tarjan's algorithm in an iterative form with an explicit work stack; the definition graph is untrusted input, so the walk must not grow the host stack. Traversal order is pinned: roots in ascending definition index, successors in ascending reference order. Tarjan emits components callees-first, and that emission order is the hash schedule: every referenced definition hash is complete before a component is hashed. The hashes themselves do not depend on the traversal order, because the partition and the in-component ordering are canonical.
 
 A module semantic hash covers definitions, entry code/type, imports, and format version. It excludes source spelling, comments, paths, embedded source, source maps, and debug sections. A separate container hash covers exact bytes.
