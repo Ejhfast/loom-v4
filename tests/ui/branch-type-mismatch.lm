@@ -1,0 +1,5 @@
+x = if true
+  1
+else
+  "two"
+end

@@ -1,0 +1,7 @@
+a = "hello"
+b = "world"
+if a == b
+  "same"
+else
+  "different"
+end

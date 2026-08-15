@@ -1,0 +1,2 @@
+error[E1004]: expected Int, found Bool
+  --> tests/ui/local-type-fixed.lm:4:13

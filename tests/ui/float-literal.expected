@@ -1,0 +1,2 @@
+error[E0005]: float literals are not supported in this language slice
+  --> tests/ui/float-literal.lm:1:5

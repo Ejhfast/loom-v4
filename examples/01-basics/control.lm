@@ -1,0 +1,8 @@
+# examples/01-basics/control.lm
+x = 0
+sum = 0
+while x < 100
+  sum = sum + x
+  x = x + 1
+end
+sum

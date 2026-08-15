@@ -1,0 +1,2 @@
+error[E1005]: cannot find `y` in this scope
+  --> tests/ui/unknown-name.lm:1:1

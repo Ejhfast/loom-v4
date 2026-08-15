@@ -1,0 +1,13 @@
+i = 0
+total = 0
+while true
+  i = i + 1
+  if i > 10
+    break
+  end
+  if i % 2 == 0
+    continue
+  end
+  total = total + i
+end
+total

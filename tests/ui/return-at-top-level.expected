@@ -1,0 +1,2 @@
+error[E1016]: `return` is not valid at the top level of a module
+  --> tests/ui/return-at-top-level.lm:1:1

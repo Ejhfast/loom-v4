@@ -1,0 +1,13 @@
+def grade(score: Int): String
+  if score >= 90
+    "A"
+  elsif score >= 80
+    "B"
+  elsif score >= 70
+    "C"
+  else
+    "F"
+  end
+end
+
+grade(85)

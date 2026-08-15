@@ -1,0 +1,534 @@
+//! Scanner for the week-1 language slice.
+//!
+//! The scanner produces tokens with byte spans. It ends each statement
+//! with a `Newline` token. It does not emit a `Newline` token inside
+//! delimiters or after a token that cannot end an expression.
+
+use crate::diag::Diagnostic;
+use crate::span::Span;
+use crate::token::{Tok, Token};
+
+/// Scan the full source text into tokens.
+pub fn scan(text: &str) -> Result<Vec<Token>, Diagnostic> {
+    let mut scanner = Scanner {
+        text,
+        bytes: text.as_bytes(),
+        pos: 0,
+        tokens: Vec::new(),
+        depth: 0,
+    };
+    scanner.run()?;
+    Ok(scanner.tokens)
+}
+
+struct Scanner<'a> {
+    text: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
+    tokens: Vec<Token>,
+    /// Open delimiter depth. Newlines inside delimiters do not end a statement.
+    depth: u32,
+}
+
+impl<'a> Scanner<'a> {
+    fn run(&mut self) -> Result<(), Diagnostic> {
+        // Skip one initial byte-order mark.
+        if self.text.starts_with('\u{feff}') {
+            self.pos = 3;
+        }
+        while self.pos < self.bytes.len() {
+            let start = self.pos;
+            let ch = self.cur_char();
+            match ch {
+                ' ' | '\t' | '\r' => {
+                    self.pos += 1;
+                }
+                '#' => {
+                    while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
+                        self.pos += 1;
+                    }
+                }
+                '\n' => {
+                    self.pos += 1;
+                    self.push_newline(start);
+                }
+                ';' => {
+                    self.pos += 1;
+                    self.push_newline(start);
+                }
+                '"' => self.scan_string(start)?,
+                '\'' => {
+                    return Err(self.error(
+                        "E0008",
+                        "character literals are not supported in this language slice",
+                        start,
+                    ));
+                }
+                '0'..='9' => self.scan_number(start)?,
+                'a'..='z' | 'A'..='Z' | '_' => self.scan_word(start)?,
+                _ => self.scan_punct(start)?,
+            }
+        }
+        let end = self.text.len() as u32;
+        self.tokens.push(Token {
+            tok: Tok::Eof,
+            span: Span::new(end, end),
+        });
+        Ok(())
+    }
+
+    fn cur_char(&self) -> char {
+        self.text[self.pos..].chars().next().unwrap_or('\0')
+    }
+
+    fn peek_byte(&self, ahead: usize) -> u8 {
+        *self.bytes.get(self.pos + ahead).unwrap_or(&0)
+    }
+
+    fn error(&self, code: &'static str, message: impl Into<String>, start: usize) -> Diagnostic {
+        let hi = (self.pos.max(start + 1)).min(self.text.len());
+        Diagnostic::new(code, message, Span::new(start as u32, hi as u32))
+    }
+
+    fn push(&mut self, tok: Tok, start: usize) {
+        self.tokens.push(Token {
+            tok,
+            span: Span::new(start as u32, self.pos as u32),
+        });
+    }
+
+    /// Push a statement terminator unless the position continues an expression.
+    fn push_newline(&mut self, start: usize) {
+        if self.depth > 0 {
+            return;
+        }
+        let continues = match self.tokens.last().map(|t| &t.tok) {
+            None | Some(Tok::Newline) => true,
+            Some(prev) => matches!(
+                prev,
+                Tok::Assign
+                    | Tok::EqEq
+                    | Tok::NotEq
+                    | Tok::Lt
+                    | Tok::Le
+                    | Tok::Gt
+                    | Tok::Ge
+                    | Tok::Plus
+                    | Tok::Minus
+                    | Tok::Star
+                    | Tok::Slash
+                    | Tok::Percent
+                    | Tok::Comma
+                    | Tok::Colon
+                    | Tok::Dot
+                    | Tok::KwAnd
+                    | Tok::KwOr
+                    | Tok::KwNot
+                    | Tok::LParen
+            ),
+        };
+        if !continues {
+            self.push(Tok::Newline, start);
+        }
+    }
+
+    fn scan_string(&mut self, start: usize) -> Result<(), Diagnostic> {
+        if self.text[self.pos..].starts_with("\"\"\"") {
+            return Err(self.error(
+                "E0010",
+                "triple-quoted strings are not supported in this language slice",
+                start,
+            ));
+        }
+        self.pos += 1;
+        let mut value = String::new();
+        loop {
+            if self.pos >= self.bytes.len() {
+                return Err(self.error("E0002", "unterminated string literal", start));
+            }
+            let ch = self.cur_char();
+            match ch {
+                '"' => {
+                    self.pos += 1;
+                    break;
+                }
+                '\n' => {
+                    return Err(self.error("E0002", "unterminated string literal", start));
+                }
+                '{' => {
+                    if self.peek_byte(1) == b'{' {
+                        value.push('{');
+                        self.pos += 2;
+                    } else {
+                        return Err(self.error(
+                            "E0006",
+                            "string interpolation is not supported in this language slice",
+                            self.pos,
+                        ));
+                    }
+                }
+                '}' => {
+                    if self.peek_byte(1) == b'}' {
+                        value.push('}');
+                        self.pos += 2;
+                    } else {
+                        return Err(self.error(
+                            "E0003",
+                            "write `}}` for a literal `}` in a string",
+                            self.pos,
+                        ));
+                    }
+                }
+                '\\' => {
+                    let esc_start = self.pos;
+                    self.pos += 1;
+                    let esc = self.cur_char();
+                    match esc {
+                        '\\' => value.push('\\'),
+                        '"' => value.push('"'),
+                        '\'' => value.push('\''),
+                        'n' => value.push('\n'),
+                        'r' => value.push('\r'),
+                        't' => value.push('\t'),
+                        '0' => value.push('\0'),
+                        'u' => {
+                            self.pos += 1;
+                            let scalar = self.scan_unicode_escape(esc_start)?;
+                            value.push(scalar);
+                            continue;
+                        }
+                        _ => {
+                            self.pos += esc.len_utf8();
+                            return Err(self.error("E0003", "invalid string escape", esc_start));
+                        }
+                    }
+                    self.pos += 1;
+                }
+                _ => {
+                    value.push(ch);
+                    self.pos += ch.len_utf8();
+                }
+            }
+        }
+        self.push(Tok::Str(value), start);
+        Ok(())
+    }
+
+    /// Scan the `{HEX}` part of a `\u{HEX}` escape. `pos` is at `{`.
+    fn scan_unicode_escape(&mut self, esc_start: usize) -> Result<char, Diagnostic> {
+        if self.peek_byte(0) != b'{' {
+            return Err(self.error("E0003", "invalid string escape", esc_start));
+        }
+        self.pos += 1;
+        let digits_start = self.pos;
+        while self.peek_byte(0).is_ascii_hexdigit() {
+            self.pos += 1;
+        }
+        if self.peek_byte(0) != b'}' || self.pos == digits_start {
+            return Err(self.error("E0003", "invalid string escape", esc_start));
+        }
+        let digits = &self.text[digits_start..self.pos];
+        self.pos += 1;
+        let value = u32::from_str_radix(digits, 16)
+            .ok()
+            .and_then(char::from_u32)
+            .ok_or_else(|| self.error("E0003", "invalid string escape", esc_start))?;
+        Ok(value)
+    }
+
+    fn scan_number(&mut self, start: usize) -> Result<(), Diagnostic> {
+        let radix: u32;
+        if self.peek_byte(0) == b'0'
+            && matches!(self.peek_byte(1), b'x' | b'o' | b'b')
+            && self.peek_byte(2).is_ascii_alphanumeric()
+        {
+            radix = match self.peek_byte(1) {
+                b'x' => 16,
+                b'o' => 8,
+                _ => 2,
+            };
+            self.pos += 2;
+        } else {
+            radix = 10;
+        }
+        let digits_start = self.pos;
+        let mut value: i64 = 0;
+        let mut digit_count = 0u32;
+        while self.pos < self.bytes.len() {
+            let byte = self.bytes[self.pos];
+            if byte == b'_' {
+                self.pos += 1;
+                continue;
+            }
+            let digit = match (byte as char).to_digit(radix) {
+                Some(d) => d,
+                None => break,
+            };
+            digit_count += 1;
+            value = value
+                .checked_mul(radix as i64)
+                .and_then(|v| v.checked_add(digit as i64))
+                .ok_or_else(|| {
+                    self.error("E0004", "integer literal is too large for Int", start)
+                })?;
+            self.pos += 1;
+        }
+        if digit_count == 0 {
+            self.pos = digits_start.max(self.pos);
+            return Err(self.error("E0007", "invalid numeric literal", start));
+        }
+        // Reject float forms with a clear diagnostic.
+        if radix == 10 {
+            let next = self.peek_byte(0);
+            let exponent = (next == b'e' || next == b'E')
+                && (self.peek_byte(1).is_ascii_digit()
+                    || (matches!(self.peek_byte(1), b'+' | b'-')
+                        && self.peek_byte(2).is_ascii_digit()));
+            let is_float = (next == b'.' && self.peek_byte(1).is_ascii_digit()) || exponent;
+            if is_float {
+                return Err(self.error(
+                    "E0005",
+                    "float literals are not supported in this language slice",
+                    start,
+                ));
+            }
+        }
+        if self.peek_byte(0).is_ascii_alphanumeric() {
+            return Err(self.error("E0007", "invalid numeric literal", start));
+        }
+        self.push(Tok::Int(value), start);
+        Ok(())
+    }
+
+    fn scan_word(&mut self, start: usize) -> Result<(), Diagnostic> {
+        while self.peek_byte(0).is_ascii_alphanumeric() || self.peek_byte(0) == b'_' {
+            self.pos += 1;
+        }
+        let word = &self.text[start..self.pos];
+        if word == "b" && self.peek_byte(0) == b'"' {
+            return Err(self.error(
+                "E0009",
+                "byte-string literals are not supported in this language slice",
+                start,
+            ));
+        }
+        let tok = match word {
+            "and" => Tok::KwAnd,
+            "or" => Tok::KwOr,
+            "not" => Tok::KwNot,
+            "if" => Tok::KwIf,
+            "elsif" => Tok::KwElsif,
+            "else" => Tok::KwElse,
+            "end" => Tok::KwEnd,
+            "while" => Tok::KwWhile,
+            "break" => Tok::KwBreak,
+            "continue" => Tok::KwContinue,
+            "def" => Tok::KwDef,
+            "return" => Tok::KwReturn,
+            "true" => Tok::KwTrue,
+            "false" => Tok::KwFalse,
+            "as" => Tok::KwReserved("as"),
+            "case" => Tok::KwReserved("case"),
+            "class" => Tok::KwReserved("class"),
+            "do" => Tok::KwReserved("do"),
+            "effect" => Tok::KwReserved("effect"),
+            "enum" => Tok::KwReserved("enum"),
+            "in" => Tok::KwReserved("in"),
+            "loop" => Tok::KwReserved("loop"),
+            "mut" => Tok::KwReserved("mut"),
+            "self" => Tok::KwReserved("self"),
+            "super" => Tok::KwReserved("super"),
+            "then" => Tok::KwReserved("then"),
+            "with" => Tok::KwReserved("with"),
+            _ => Tok::Ident(word.to_string()),
+        };
+        self.push(tok, start);
+        Ok(())
+    }
+
+    fn scan_punct(&mut self, start: usize) -> Result<(), Diagnostic> {
+        let two = |a: u8, b: u8, s: &Scanner| s.peek_byte(0) == a && s.peek_byte(1) == b;
+        let tok = if two(b'=', b'=', self) {
+            self.pos += 2;
+            Tok::EqEq
+        } else if two(b'!', b'=', self) {
+            self.pos += 2;
+            Tok::NotEq
+        } else if two(b'<', b'=', self) {
+            self.pos += 2;
+            Tok::Le
+        } else if two(b'>', b'=', self) {
+            self.pos += 2;
+            Tok::Ge
+        } else {
+            let single = match self.peek_byte(0) {
+                b'=' => Tok::Assign,
+                b'<' => Tok::Lt,
+                b'>' => Tok::Gt,
+                b'+' => Tok::Plus,
+                b'-' => Tok::Minus,
+                b'*' => Tok::Star,
+                b'/' => Tok::Slash,
+                b'%' => Tok::Percent,
+                b'(' => {
+                    self.depth += 1;
+                    Tok::LParen
+                }
+                b')' => {
+                    self.depth = self.depth.saturating_sub(1);
+                    Tok::RParen
+                }
+                b'[' => {
+                    self.depth += 1;
+                    Tok::LBracket
+                }
+                b']' => {
+                    self.depth = self.depth.saturating_sub(1);
+                    Tok::RBracket
+                }
+                b'{' => {
+                    self.depth += 1;
+                    Tok::LBrace
+                }
+                b'}' => {
+                    self.depth = self.depth.saturating_sub(1);
+                    Tok::RBrace
+                }
+                b',' => Tok::Comma,
+                b':' => Tok::Colon,
+                b'.' => Tok::Dot,
+                b'|' => Tok::Pipe,
+                _ => {
+                    let ch = self.cur_char();
+                    self.pos += ch.len_utf8();
+                    return Err(self.error(
+                        "E0001",
+                        format!("invalid character `{ch}` in source"),
+                        start,
+                    ));
+                }
+            };
+            self.pos += 1;
+            single
+        };
+        self.push(tok, start);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(text: &str) -> Vec<Tok> {
+        scan(text).unwrap().into_iter().map(|t| t.tok).collect()
+    }
+
+    #[test]
+    fn scans_number_forms() {
+        assert_eq!(
+            kinds("0 42 1_000_000 0xff 0o755 0b1010_0011"),
+            vec![
+                Tok::Int(0),
+                Tok::Int(42),
+                Tok::Int(1_000_000),
+                Tok::Int(255),
+                Tok::Int(493),
+                Tok::Int(163),
+                Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn scans_string_escapes() {
+        assert_eq!(
+            kinds("\"a\\n{{b}}\\u{41}\""),
+            vec![Tok::Str("a\n{b}A".to_string()), Tok::Eof]
+        );
+    }
+
+    #[test]
+    fn rejects_interpolation() {
+        let err = scan("\"hello {name}\"").unwrap_err();
+        assert_eq!(err.code, "E0006");
+    }
+
+    #[test]
+    fn rejects_float_literal() {
+        assert_eq!(scan("1.5").unwrap_err().code, "E0005");
+        assert_eq!(scan("1e9").unwrap_err().code, "E0005");
+    }
+
+    #[test]
+    fn rejects_overflowing_literal() {
+        assert_eq!(scan("9223372036854775808").unwrap_err().code, "E0004");
+    }
+
+    #[test]
+    fn rejects_invalid_number_suffix() {
+        assert_eq!(scan("12ab").unwrap_err().code, "E0007");
+        assert_eq!(scan("0x").unwrap_err().code, "E0007");
+    }
+
+    #[test]
+    fn rejects_unterminated_string() {
+        assert_eq!(scan("\"abc").unwrap_err().code, "E0002");
+        assert_eq!(scan("\"abc\ndef\"").unwrap_err().code, "E0002");
+    }
+
+    #[test]
+    fn rejects_char_and_byte_literals() {
+        assert_eq!(scan("'a'").unwrap_err().code, "E0008");
+        assert_eq!(scan("b\"x\"").unwrap_err().code, "E0009");
+        assert_eq!(scan("\"\"\"x\"\"\"").unwrap_err().code, "E0010");
+    }
+
+    #[test]
+    fn suppresses_newline_after_operator_and_inside_parens() {
+        assert_eq!(
+            kinds("1 +\n2"),
+            vec![Tok::Int(1), Tok::Plus, Tok::Int(2), Tok::Eof]
+        );
+        assert_eq!(
+            kinds("f(1,\n2)"),
+            vec![
+                Tok::Ident("f".to_string()),
+                Tok::LParen,
+                Tok::Int(1),
+                Tok::Comma,
+                Tok::Int(2),
+                Tok::RParen,
+                Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn emits_newline_between_statements() {
+        assert_eq!(
+            kinds("x = 1\nx"),
+            vec![
+                Tok::Ident("x".to_string()),
+                Tok::Assign,
+                Tok::Int(1),
+                Tok::Newline,
+                Tok::Ident("x".to_string()),
+                Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_comments() {
+        assert_eq!(kinds("# a comment\n42"), vec![Tok::Int(42), Tok::Eof]);
+    }
+
+    #[test]
+    fn semicolon_ends_statement() {
+        assert_eq!(
+            kinds("1; 2"),
+            vec![Tok::Int(1), Tok::Newline, Tok::Int(2), Tok::Eof]
+        );
+    }
+}

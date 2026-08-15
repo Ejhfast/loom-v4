@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lm-source",
+    "crates/lm-types",
+    "crates/lm-hir",
+    "crates/lm-bytecode",
+    "crates/lm-verify",
+    "crates/lm-value",
+    "crates/lm-vm",
+    "crates/lm-cli",
+    "crates/lm-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"

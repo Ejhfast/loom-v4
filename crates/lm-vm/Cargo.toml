@@ -1,0 +1,10 @@
+[package]
+name = "lm-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lm-bytecode = { path = "../lm-bytecode" }
+lm-verify = { path = "../lm-verify" }
+lm-value = { path = "../lm-value" }

@@ -1,0 +1,2 @@
+error[E1004]: expected Bool, found Int
+  --> tests/ui/condition-not-bool.lm:1:4

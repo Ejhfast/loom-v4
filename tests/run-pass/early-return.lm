@@ -1,0 +1,11 @@
+def clamp(n: Int): Int
+  if n > 100
+    return 100
+  end
+  if n < 0
+    return 0
+  end
+  n
+end
+
+clamp(250) + clamp(-5) + clamp(7)

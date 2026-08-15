@@ -1,0 +1,18 @@
+[package]
+name = "lm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lm"
+path = "src/main.rs"
+
+[dependencies]
+lm-source = { path = "../lm-source" }
+lm-types = { path = "../lm-types" }
+lm-hir = { path = "../lm-hir" }
+lm-bytecode = { path = "../lm-bytecode" }
+lm-verify = { path = "../lm-verify" }
+lm-value = { path = "../lm-value" }
+lm-vm = { path = "../lm-vm" }

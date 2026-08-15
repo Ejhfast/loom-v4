@@ -1,0 +1,2 @@
+error[E1006]: the function `double` expects 1 argument(s), found 2
+  --> tests/ui/bad-arity.lm:5:1

@@ -1,0 +1,2 @@
+error[E1008]: `break` is only valid inside a loop
+  --> tests/ui/break-outside-loop.lm:1:1

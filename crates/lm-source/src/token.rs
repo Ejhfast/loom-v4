@@ -1,0 +1,122 @@
+//! Tokens for the week-1 language slice.
+
+use crate::span::Span;
+use std::fmt;
+
+/// The kind of one token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tok {
+    /// Decimal, hexadecimal, octal, or binary integer literal.
+    Int(i64),
+    /// String literal after escape processing.
+    Str(String),
+    /// Identifier that is not a keyword.
+    Ident(String),
+
+    // Keywords inside the week-1 slice.
+    KwAnd,
+    KwOr,
+    KwNot,
+    KwIf,
+    KwElsif,
+    KwElse,
+    KwEnd,
+    KwWhile,
+    KwBreak,
+    KwContinue,
+    KwDef,
+    KwReturn,
+    KwTrue,
+    KwFalse,
+
+    /// A reserved keyword outside the week-1 slice.
+    KwReserved(&'static str),
+
+    // Punctuation.
+    LParen,
+    RParen,
+    LBracket,
+    RBracket,
+    LBrace,
+    RBrace,
+    Comma,
+    Colon,
+    Dot,
+    Pipe,
+
+    // Operators.
+    Assign,
+    EqEq,
+    NotEq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+
+    /// Statement terminator: a newline or a semicolon.
+    Newline,
+    /// End of the token stream.
+    Eof,
+}
+
+impl fmt::Display for Tok {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Tok::Int(v) => return write!(f, "integer literal `{v}`"),
+            Tok::Str(_) => return write!(f, "string literal"),
+            Tok::Ident(name) => return write!(f, "`{name}`"),
+            Tok::KwAnd => "`and`",
+            Tok::KwOr => "`or`",
+            Tok::KwNot => "`not`",
+            Tok::KwIf => "`if`",
+            Tok::KwElsif => "`elsif`",
+            Tok::KwElse => "`else`",
+            Tok::KwEnd => "`end`",
+            Tok::KwWhile => "`while`",
+            Tok::KwBreak => "`break`",
+            Tok::KwContinue => "`continue`",
+            Tok::KwDef => "`def`",
+            Tok::KwReturn => "`return`",
+            Tok::KwTrue => "`true`",
+            Tok::KwFalse => "`false`",
+            Tok::KwReserved(name) => return write!(f, "`{name}`"),
+            Tok::LParen => "`(`",
+            Tok::RParen => "`)`",
+            Tok::LBracket => "`[`",
+            Tok::RBracket => "`]`",
+            Tok::LBrace => "`{`",
+            Tok::RBrace => "`}`",
+            Tok::Comma => "`,`",
+            Tok::Colon => "`:`",
+            Tok::Dot => "`.`",
+            Tok::Pipe => "`|`",
+            Tok::Assign => "`=`",
+            Tok::EqEq => "`==`",
+            Tok::NotEq => "`!=`",
+            Tok::Lt => "`<`",
+            Tok::Le => "`<=`",
+            Tok::Gt => "`>`",
+            Tok::Ge => "`>=`",
+            Tok::Plus => "`+`",
+            Tok::Minus => "`-`",
+            Tok::Star => "`*`",
+            Tok::Slash => "`/`",
+            Tok::Percent => "`%`",
+            Tok::Newline => "end of line",
+            Tok::Eof => "end of file",
+        };
+        f.write_str(text)
+    }
+}
+
+/// One token with its span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Token {
+    pub tok: Tok,
+    pub span: Span,
+}

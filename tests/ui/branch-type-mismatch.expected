@@ -1,0 +1,2 @@
+error[E1004]: expected Int, found String
+  --> tests/ui/branch-type-mismatch.lm:4:3

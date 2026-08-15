@@ -1,0 +1,8 @@
+def boom(): Bool
+  x = 1 / 0
+  true
+end
+
+a = false and boom()
+b = true or boom()
+a == false and b

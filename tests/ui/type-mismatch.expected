@@ -1,0 +1,2 @@
+error[E1004]: expected Int, found String
+  --> tests/ui/type-mismatch.lm:2:5

@@ -1,0 +1,5 @@
+def double(a: Int): Int
+  a * 2
+end
+
+double(1, 2)

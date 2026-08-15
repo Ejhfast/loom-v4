@@ -1,0 +1,9 @@
+def pick(flag: Bool): Int
+  value = 0
+  if flag
+    value = true
+  end
+  value
+end
+
+pick(true)

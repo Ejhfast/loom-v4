@@ -1,0 +1,5 @@
+def store_nothing()
+  x = 1
+end
+
+store_nothing()
