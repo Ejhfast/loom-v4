@@ -156,10 +156,21 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     }
     let main_path = format!("{}.main", workspace.root);
     // Stage 2: the module set fixes the merged program, so an
-    // unchanged module set skips the link run and the verification of
-    // the merged program. A damaged entry is a miss.
+    // unchanged module set skips the link run. A damaged entry is a
+    // miss.
+    //
+    // A hit does not skip the verification of the merged program. The
+    // entry is a file, so a writer of the build directory decides what
+    // this build emits. The verifier therefore runs on every hit, and
+    // the two reported hashes come from the bytes, never from the
+    // entry. A failing entry falls through to a fresh link, which
+    // overwrites it, so a damaged or planted entry costs one link and
+    // never emits an unverified program.
     let key = program_key(&main_path, &contents);
-    let entry = match dir.read_program(&key) {
+    let checked = dir
+        .read_program(&key)
+        .and_then(|entry| verified_program_entry(&entry.artifact));
+    let entry = match checked {
         Some(entry) => {
             report.program_cached = true;
             entry
@@ -200,4 +211,25 @@ fn display_name(path: &Path) -> String {
 /// tests.
 pub fn workspace_of(start: &Path) -> Result<Workspace, String> {
     load_workspace(start)
+}
+
+/// Check one stage-2 entry and rebuild its two hashes from its bytes.
+///
+/// A stage-2 entry is a file in the build directory, so it carries no
+/// trust. The check decodes the artifact, proves it holds no import
+/// slot, runs the whole verifier over it, and computes the two hashes
+/// from the bytes. `None` marks an entry the build must not emit, and
+/// the caller then links again.
+fn verified_program_entry(artifact: &[u8]) -> Option<ProgramEntry> {
+    let module = lm_bytecode::decode(artifact).ok()?;
+    if !module.imports.is_empty() {
+        return None;
+    }
+    lm_verify::verify_module(&module).ok()?;
+    let identity = lm_bytecode::identity::module_identity(&module).ok()?;
+    Some(ProgramEntry {
+        artifact: artifact.to_vec(),
+        semantic_hash: identity.semantic_hash,
+        container_hash: lm_bytecode::identity::container_hash(artifact),
+    })
 }

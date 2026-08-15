@@ -13,8 +13,27 @@
 //! verification of the merged program. Stage 3 removes the verifier
 //! pass of a load.
 //!
-//! No stage is a trust boundary. Every entry decodes through the
-//! ordinary decoder, and a damaged file is a miss, not a trust hole.
+//! Every stage is a trust boundary, because every entry is a file. An
+//! earlier claim here said no stage is one, on the ground that a
+//! damaged file is a miss. That covers damage and never covers
+//! forgery: a writer of the directory builds a well-formed entry under
+//! the correct key.
+//!
+//! Two rules hold the boundary:
+//!
+//! - a stage-2 hit meets the whole verifier, and the two reported
+//!   hashes come from the bytes, never from the entry. A failing entry
+//!   falls through to a fresh link and never reaches the output;
+//!
+//! - a stage-3 hit meets the module-level structural pass, and the
+//!   store of a loaded artifact sits in the user cache directory. The
+//!   location never follows the path of the artifact, so the supplier
+//!   of an artifact never writes the verdict of that artifact.
+//!
+//! A verified-code key is exact, which stops a collision. It never
+//! stops a forgery, because the forger computes the key of the module
+//! it ships. Store integrity therefore carries the property, and the
+//! two rules above bound the damage when the store is wrong.
 //!
 //! # Stage 1
 //!
@@ -373,30 +392,37 @@ pub fn decode_verdict(bytes: &[u8]) -> Option<(VerdictKey, Verdict)> {
 #[derive(Debug, Clone)]
 pub struct VerifiedStore {
     root: PathBuf,
+    /// False when no trusted directory exists. A disabled store reads
+    /// no record and writes none, so every load meets the verifier.
+    enabled: bool,
 }
 
 /// The user cache directory of this tool.
 ///
 /// The value follows `LM_CACHE_DIR`, then `XDG_CACHE_HOME/lm`, then
-/// `HOME/.cache/lm`. With none of the three set, the store falls back
-/// to `.lm-cache` in the current directory.
-pub fn user_cache_dir() -> PathBuf {
+/// `HOME/.cache/lm`. `None` means no trusted directory exists.
+///
+/// There is no fallback to the current directory. A verdict replaces
+/// a verifier run, and the current directory can belong to the
+/// supplier of the artifact. An unpacked archive is the exact case: a
+/// shipped `.lm-cache` beside a shipped artifact would admit it.
+pub fn user_cache_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("LM_CACHE_DIR") {
         if !dir.is_empty() {
-            return PathBuf::from(dir);
+            return Some(PathBuf::from(dir));
         }
     }
     if let Ok(dir) = std::env::var("XDG_CACHE_HOME") {
         if !dir.is_empty() {
-            return PathBuf::from(dir).join("lm");
+            return Some(PathBuf::from(dir).join("lm"));
         }
     }
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() {
-            return PathBuf::from(home).join(".cache").join("lm");
+            return Some(PathBuf::from(home).join(".cache").join("lm"));
         }
     }
-    PathBuf::from(".lm-cache")
+    None
 }
 
 impl VerifiedStore {
@@ -404,28 +430,35 @@ impl VerifiedStore {
     pub fn new(build_root: &Path) -> VerifiedStore {
         VerifiedStore {
             root: build_root.join("cache").join("verified"),
+            enabled: true,
         }
     }
 
     /// The store of one artifact on disk.
     ///
-    /// Stage 3 must stay reachable for an artifact with no source,
-    /// for example `lm run third-party.lma`. The rule walks up from
-    /// the artifact directory: a package above the artifact gives
-    /// `<package>/build`, and no package gives the user cache
-    /// directory. The directory is created on the first write, never
-    /// on a read.
-    pub fn for_artifact(artifact: &Path) -> VerifiedStore {
-        let root = match crate::graph::find_package_dir(artifact) {
-            Ok(package) => package.join("build"),
-            // An artifact with no package around it, for example a
-            // foreign `.lma`, keeps its store in the user cache. A
-            // directory beside the artifact would let the supplier of
-            // the artifact write the verdict of the artifact, and a
-            // verdict replaces a verifier run.
-            Err(_) => user_cache_dir(),
-        };
-        VerifiedStore::new(&root)
+    /// The location never depends on the path of the artifact. A
+    /// verdict replaces a verifier run, so the supplier of an artifact
+    /// must never reach the directory that holds the verdict of that
+    /// artifact. An earlier rule walked up to a package directory
+    /// above the artifact, and a supplier who shipped `lm.package`
+    /// beside the artifact therefore owned that directory.
+    ///
+    /// The store lives in the user cache directory, which belongs to
+    /// the trust domain of the user, never to the artifact. The
+    /// directory is created on the first write, never on a read.
+    pub fn for_artifact(_artifact: &Path) -> VerifiedStore {
+        match user_cache_dir() {
+            Some(dir) => VerifiedStore::new(&dir),
+            None => VerifiedStore {
+                root: PathBuf::new(),
+                enabled: false,
+            },
+        }
+    }
+
+    /// True when the store has a trusted directory.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// The directory the store writes into.
@@ -442,6 +475,9 @@ impl VerifiedStore {
     /// Read the record of one key. A missing, unreadable, damaged, or
     /// wrongly filed record is a miss, never an error.
     pub fn read(&self, key: &VerdictKey) -> Option<Verdict> {
+        if !self.enabled {
+            return None;
+        }
         let bytes = std::fs::read(self.record_path(key)).ok()?;
         let (stored_key, verdict) = decode_verdict(&bytes)?;
         // The file name holds only part of the key. Check the whole
@@ -454,6 +490,9 @@ impl VerifiedStore {
 
     /// Write the record of one key with an atomic rename.
     pub fn write(&self, key: &VerdictKey, verdict: &Verdict) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
         std::fs::create_dir_all(&self.root)
             .map_err(|e| format!("error: cannot create `{}`: {e}\n", self.root.display()))?;
         write_atomic(&self.record_path(key), &encode_verdict(key, verdict))

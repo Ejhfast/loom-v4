@@ -343,6 +343,17 @@ pub fn load_with_record(
     if verified_key(&module) != *key {
         return Err(reject("the stored verdict does not belong to this module"));
     }
+    // The key proves the verdict belongs to this module. It does not
+    // prove a verifier ever produced the verdict: a writer of the
+    // store computes the key of any module and files a verdict under
+    // it. An exact key stops a collision, never a forgery, so store
+    // integrity carries the whole property.
+    //
+    // The module-level structural pass therefore runs on every hit.
+    // It costs a small part of a verifier run, and it bounds the
+    // damage of a store an attacker reaches: the table rules of these
+    // exact bytes hold, whatever the verdict claims.
+    lm_verify::verify_structure_only(&module)?;
     Ok(admit(module))
 }
 

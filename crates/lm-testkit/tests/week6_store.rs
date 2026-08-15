@@ -323,13 +323,16 @@ fn a_second_load_hits_the_verified_store() {
     let report = build_package(&tree.path("solo"), &tree.path("solo/build")).expect("builds");
     let program = report.program.expect("the package builds a program");
 
+    // The test names its own store, because the store of an artifact
+    // now sits in the user cache directory.
+    let store = VerifiedStore::new(&tree.path("store"));
     let mut first_runs = 0;
-    let first = load_artifact(&program, &mut first_runs).expect("loads");
+    let first = load_artifact_in(&store, &program, &mut first_runs).expect("loads");
     assert_eq!(first_runs, 1, "the first load skipped the verifier");
     let first_text = run_loaded(&first);
 
     let mut second_runs = 0;
-    let second = load_artifact(&program, &mut second_runs).expect("loads");
+    let second = load_artifact_in(&store, &program, &mut second_runs).expect("loads");
     assert_eq!(second_runs, 0, "the second load ran the verifier");
     assert_eq!(first_text, run_loaded(&second), "the results differ");
     // Both loads read the same declared core layout.
@@ -339,27 +342,63 @@ fn a_second_load_hits_the_verified_store() {
     );
 }
 
-/// The store of a package artifact sits in the package build
-/// directory, so `lm build` and `lm run` share one store.
+/// Review regression: the store location never follows the path of
+/// the artifact.
+///
+/// A verdict replaces a verifier run. An earlier rule walked up from
+/// the artifact to a directory holding `lm.package`, so a supplier who
+/// shipped a manifest beside the artifact owned the directory that
+/// holds the verdict of that artifact. A forged record then admitted a
+/// module the verifier rejects.
 #[test]
-fn the_store_of_a_package_artifact_sits_in_the_package() {
-    let tree = TempTree::new("stage3-place");
+fn a_shipped_manifest_never_moves_the_verdict_store() {
+    let tree = TempTree::new("stage3-shipped");
     small_package(&tree);
     let report = build_package(&tree.path("solo"), &tree.path("solo/build")).expect("builds");
     let program = report.program.expect("the package builds a program");
-    let mut runs = 0;
-    load_artifact(&program, &mut runs).expect("loads");
-    let dir = tree.path("solo/build/cache/verified");
-    let records: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("no store at `{}`: {e}", dir.display()))
-        .map(|e| e.expect("entry").path())
-        .collect();
-    assert_eq!(records.len(), 1, "one record");
-    assert_eq!(
-        records[0].extension().and_then(|e| e.to_str()),
-        Some("lmv"),
-        "the record extension moved"
+
+    // The supplier ships a manifest beside the artifact.
+    let vendor = tree.path("vendor");
+    std::fs::create_dir_all(&vendor).expect("creates");
+    std::fs::write(
+        vendor.join("lm.package"),
+        "[package]\nname = \"vendor\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("writes");
+    let shipped = vendor.join("thirdparty.lma");
+    std::fs::copy(&program, &shipped).expect("copies");
+
+    let chosen = VerifiedStore::for_artifact(&shipped);
+    assert!(
+        !chosen.dir().starts_with(&vendor),
+        "the store landed inside the supplier's directory: {}",
+        chosen.dir().display()
     );
+    match lm_compiler::user_cache_dir() {
+        Some(cache) => assert!(
+            chosen.dir().starts_with(&cache),
+            "the store left the user cache directory: {}",
+            chosen.dir().display()
+        ),
+        None => assert!(
+            !chosen.is_enabled(),
+            "the store stayed enabled with no trusted directory"
+        ),
+    }
+}
+
+/// With no trusted directory, the store is disabled. It reads no
+/// record and writes none, so every load meets the verifier. An
+/// earlier rule fell back to `.lm-cache` in the current directory,
+/// which an unpacked archive supplies.
+#[test]
+fn no_trusted_directory_disables_the_store() {
+    let key = lm_vm::verified_key(&lm_testkit::compile_text("t.lm", "1\n").expect("compiles"));
+    let disabled = VerifiedStore::for_artifact(Path::new("/nonexistent/x.lma"));
+    if lm_compiler::user_cache_dir().is_none() {
+        assert!(!disabled.is_enabled());
+        assert!(disabled.read(&key).is_none(), "a disabled store answered");
+    }
 }
 
 /// Stage 3 stays reachable for an artifact with no package around it.
@@ -381,7 +420,9 @@ fn the_store_is_reachable_without_a_package() {
     // artifact must not write the verdict of that artifact.
     let chosen = VerifiedStore::for_artifact(&loose);
     assert!(
-        chosen.dir().starts_with(lm_compiler::user_cache_dir()),
+        lm_compiler::user_cache_dir()
+            .map(|c| chosen.dir().starts_with(c))
+            .unwrap_or(!chosen.is_enabled()),
         "the store of a loose artifact left the user cache directory: {}",
         chosen.dir().display()
     );
@@ -409,9 +450,10 @@ fn a_damaged_verified_record_is_a_miss() {
     small_package(&tree);
     let report = build_package(&tree.path("solo"), &tree.path("solo/build")).expect("builds");
     let program = report.program.expect("the package builds a program");
+    let store = VerifiedStore::new(&tree.path("store"));
     let mut runs = 0;
-    load_artifact(&program, &mut runs).expect("loads");
-    let dir = tree.path("solo/build/cache/verified");
+    load_artifact_in(&store, &program, &mut runs).expect("loads");
+    let dir = store.dir().to_path_buf();
     let record: PathBuf = std::fs::read_dir(&dir)
         .expect("the store exists")
         .map(|e| e.expect("entry").path())
@@ -447,7 +489,8 @@ fn a_damaged_verified_record_is_a_miss() {
     ] {
         std::fs::write(&record, &damage).expect("writes");
         let mut runs = 0;
-        let loaded = load_artifact(&program, &mut runs).expect("the damaged record must load");
+        let loaded =
+            load_artifact_in(&store, &program, &mut runs).expect("the damaged record must load");
         assert_eq!(runs, 1, "the damaged record hit the store");
         run_loaded(&loaded);
     }
