@@ -146,7 +146,7 @@ fn out_of_range_local_type_entry_is_rejected() {
         .local_types
         .last_mut()
         .expect("the entry has locals") = bad;
-    expect_load_reject(&module, "invalid type index");
+    expect_load_reject(&module, "type index");
 }
 
 #[test]

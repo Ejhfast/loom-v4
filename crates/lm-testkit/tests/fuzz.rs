@@ -187,13 +187,23 @@ fn the_regression_corpus_replays() {
             match path.extension().and_then(|e| e.to_str()) {
                 Some("lmbc") => {
                     let bytes = std::fs::read(&path).expect("corpus case reads");
-                    // Every checked-in module case is a rejection case:
-                    // it must fail decode or verify, without a panic.
-                    let accepted = lm_bytecode::decode(&bytes)
-                        .ok()
-                        .and_then(|m| lm_vm::load(m).ok())
-                        .is_some();
-                    assert!(!accepted, "{} was accepted", path.display());
+                    // Every checked-in module case is a rejection
+                    // case, and it must reject at the intended layer:
+                    // the local-count bomb at the decoder, every
+                    // forgery seed at the verifier.
+                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    let decoded = lm_bytecode::decode(&bytes);
+                    if name == "local-count-bomb" {
+                        assert!(decoded.is_err(), "{} passed the decoder", path.display());
+                    } else {
+                        let module = decoded
+                            .unwrap_or_else(|e| panic!("{} must decode: {e}", path.display()));
+                        assert!(
+                            lm_vm::load(module).is_err(),
+                            "{} was accepted",
+                            path.display()
+                        );
+                    }
                     modules += 1;
                 }
                 Some("lm") => {
@@ -355,14 +365,21 @@ fn regenerate_fuzz_corpus() {
             entry: 0,
         };
         let mut bytes = lm_bytecode::encode(&module);
-        let pos = bytes
-            .windows(4)
-            .position(|w| w == b"main")
-            .expect("the function name is in the encoding");
-        // After the name: type_params, effect_params, the parameter
-        // count, the result type, the row count, and the capture
-        // count. The local-type table count follows.
-        let count_at = pos + 4 + 4 * 6;
+        // The semantic region starts after the 30-byte header. Its
+        // layout for this module: the string count (4), the type
+        // count plus four primitive tags (8), the selector count (4),
+        // the application count (4), the class count (4), the
+        // function count (4), then the function record: type_params,
+        // effect_params, the parameter count, the result type, the
+        // row count, and the capture count (24). The local-type table
+        // count follows.
+        let sem_at = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
+        let count_at = sem_at + 4 + 8 + 4 + 4 + 4 + 4 + 24;
+        assert_eq!(
+            u32::from_le_bytes(bytes[count_at..count_at + 4].try_into().unwrap()),
+            0,
+            "the local-count field moved; update the offset"
+        );
         bytes[count_at..count_at + 4].copy_from_slice(&0x7fff_ffffu32.to_le_bytes());
         assert!(
             lm_bytecode::decode(&bytes).is_err(),

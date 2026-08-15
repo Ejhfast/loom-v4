@@ -211,6 +211,22 @@ fn use_bindings_sit_below_locals_and_module_definitions() {
     assert_eq!(runs("use sys.clock.now\n\nnow = 5\nnow\n"), "Done(5)");
 }
 
+#[test]
+fn use_alias_example_has_checked_output() {
+    let text =
+        std::fs::read_to_string(lm_testkit::repo_root().join("examples/04-effects/use-alias.lm"))
+            .expect("example reads");
+    let (out, host) = run_world(
+        "use-alias.lm",
+        &text,
+        &["Io.Print", "Vm"],
+        VmConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(out, "Done(42)");
+    assert_eq!(host.borrow().printed, vec!["Hello Ada!\n".to_string()]);
+}
+
 // ---------------------------------------------------------------
 // The `as_call` descriptor form.
 // ---------------------------------------------------------------

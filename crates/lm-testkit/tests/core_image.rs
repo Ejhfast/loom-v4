@@ -43,6 +43,115 @@ fn core_image_matches_the_pinned_hash() {
     );
 }
 
+/// Compute the pinned core definition lines from a fresh core image.
+fn core_def_lines() -> String {
+    let image = lm_hir::core_image();
+    let identity = lm_bytecode::identity::module_identity(&image).expect("the core image hashes");
+    let mut out = String::new();
+    for label in lm_bytecode::corepin::PINNED_LABELS {
+        let idx = image
+            .classes
+            .iter()
+            .position(|c| c.name == label)
+            .unwrap_or_else(|| panic!("the core image defines `{label}`"));
+        let hex: String = identity.class_hashes[idx]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        out.push_str(&format!("{label} {hex}\n"));
+    }
+    out
+}
+
+/// The hash-linking gate: the pinned core definition hashes match a
+/// fresh recompilation. After a deliberate core or identity change,
+/// run the ignored test `regenerate_core_pins` and commit the files.
+#[test]
+fn core_definition_hashes_match_the_pin() {
+    let pin_path = repo_root().join("core/pinned-core-defs.txt");
+    let pinned = std::fs::read_to_string(&pin_path).expect("core/pinned-core-defs.txt exists");
+    let pinned_lines: Vec<&str> = pinned
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .collect();
+    let fresh = core_def_lines();
+    let fresh_lines: Vec<&str> = fresh.lines().collect();
+    assert_eq!(
+        pinned_lines, fresh_lines,
+        "the core definition hashes changed; if the change is deliberate, \
+         run `cargo test -p lm-testkit --test core_image regenerate_core_pins -- --ignored` \
+         and commit the new pins"
+    );
+}
+
+/// The resolved layout in a user module comes from the hashes: every
+/// pinned core definition resolves to the embedded core copy.
+#[test]
+fn core_layout_resolves_by_hash_in_a_user_module() {
+    let bytes = compile_with_prelude("x = 1\nx\n", true);
+    let module = lm_bytecode::decode(&bytes).expect("decodes");
+    let identity = lm_bytecode::identity::module_identity(&module).expect("hashes");
+    let layout = lm_bytecode::corepin::core_layout(&module, &identity);
+    for (slot, name) in [
+        (layout.option, "Option"),
+        (layout.option_some, "Option.Some"),
+        (layout.option_none, "Option.None"),
+        (layout.result_ok, "Result.Ok"),
+        (layout.result_err, "Result.Err"),
+        (layout.io_error_failed, "IoError.Failed"),
+        (layout.run_done, "RunResult.Done"),
+        (layout.run_fault, "RunResult.Fault"),
+        (layout.step_done, "StepEvent.Done"),
+        (layout.drive_asked, "DriveEvent.Asked"),
+    ] {
+        let idx = slot.unwrap_or_else(|| panic!("the layout resolves `{name}`"));
+        assert_eq!(module.classes[idx as usize].name, name);
+    }
+}
+
+/// A user enum with a core name but a different shape never spoofs
+/// the layout: the hash decides, not the name or the position.
+#[test]
+fn a_renamed_shape_cannot_spoof_the_core_layout() {
+    let program = "enum Option\n  Empty\n  Full(v: Int)\nend\nx: Option = Full(3)\n1\n";
+    let bytes = compile_with_prelude(program, true);
+    let module = lm_bytecode::decode(&bytes).expect("decodes");
+    let identity = lm_bytecode::identity::module_identity(&module).expect("hashes");
+    let layout = lm_bytecode::corepin::core_layout(&module, &identity);
+    let option = layout.option.expect("the embedded core Option resolves");
+    // The resolved class is the embedded core family, not the user
+    // enum: it has the pinned two arms and one type parameter.
+    assert_eq!(module.classes[option as usize].type_params, 1);
+    let user_option = module
+        .classes
+        .iter()
+        .position(|c| c.name == "Option" && c.type_params == 0)
+        .expect("the user enum exists") as u32;
+    assert_ne!(option, user_option);
+}
+
+/// Rebuild the pinned core files. Run explicitly with
+/// `cargo test -p lm-testkit --test core_image -- --ignored`.
+#[test]
+#[ignore]
+fn regenerate_core_pins() {
+    let bytes = lm_bytecode::encode(&lm_hir::core_image());
+    let hash = lm_bytecode::hash::sha256_hex(&bytes);
+    std::fs::write(
+        repo_root().join("core/pinned-hash.txt"),
+        format!("{hash}\n"),
+    )
+    .expect("pinned-hash.txt writes");
+    let header = "# Pinned core definition hashes: `label hash` per line.\n\
+                  # Regenerate with the ignored test `regenerate_core_pins`\n\
+                  # in crates/lm-testkit/tests/core_image.rs.\n";
+    std::fs::write(
+        repo_root().join("core/pinned-core-defs.txt"),
+        format!("{header}{}", core_def_lines()),
+    )
+    .expect("pinned-core-defs.txt writes");
+}
+
 /// The prelude is a name-import layer only. The core image compiles
 /// without it, and a program that uses no prelude name compiles to
 /// identical bytes with the prelude on or off.

@@ -12,7 +12,7 @@ use crate::machine::{
     Action, ExecOutcome, FaultRec, Machine, MachineState, Pending, Terminal, VmId,
 };
 use crate::{FaultCode, LoadedModule, Outcome, VmConfig};
-use lm_bytecode::corelink::CoreLayout;
+use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, Module};
 use lm_value::{ObjRef, Value};
 use std::collections::HashMap;
@@ -88,7 +88,7 @@ impl<'m> World<'m> {
         World {
             module,
             dispatch: loaded.dispatch(),
-            core: lm_bytecode::corelink::core_layout(module),
+            core: loaded.core_layout(),
             machines: vec![root],
             host,
             config,

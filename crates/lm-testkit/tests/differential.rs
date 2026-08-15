@@ -118,6 +118,11 @@ fn oracle_agrees_on_the_feature_corpus() {
         "xs: [Int] = [1]\nf = do |mut ys: [Int]|: () ys.push(2) end\nf(xs)\nxs.len()\n",
         // A nested exact-arm scrutinee is exhaustive.
         "s = Some(Some(3))\ncase s\nin Some(Some(v)) then v\nend\n",
+        // A `use` alias line in a pure program: the binding resolves
+        // and stays unused, and both engines agree.
+        "use sys.io.print\nuse sys.vm\n\ndef double(n: Int): Int\n  n * 2\nend\ndouble(21)\n",
+        // A module definition shadows a `use` binding in both engines.
+        "use sys.clock.now\n\ndef now(): Int\n  9\nend\nnow()\n",
     ];
     for (idx, text) in corpus.iter().enumerate() {
         compare(&format!("corpus[{idx}]"), text);

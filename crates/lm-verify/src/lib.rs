@@ -11,7 +11,7 @@
 //! call sites substitute the callee signature through the type
 //! application. The verifier shares no code with the source checker.
 
-use lm_bytecode::corelink::CoreLayout;
+use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, BcRow, BcType, Func, Instr, Module};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -453,9 +453,26 @@ impl<'m> Ctx<'m> {
     }
 }
 
+/// The verifier version. It takes part in the verified-code cache
+/// key: a rule change invalidates every cached admission.
+pub const VERIFIER_VERSION: u32 = 1;
+
 /// Verify a full module. Every table and every function must pass.
+/// This computes the module identity for the hash-linked core layout;
+/// a loader with a computed identity uses `verify_with_layout`.
 pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
-    let ctx = verify_tables(module)?;
+    let identity = lm_bytecode::identity::module_identity(module).map_err(|e| VerifyError {
+        func: u32::MAX,
+        message: e.to_string(),
+    })?;
+    let core = lm_bytecode::corepin::core_layout(module, &identity);
+    verify_with_layout(module, core)
+}
+
+/// Verify a full module against a core layout the loader resolved
+/// through the pinned definition hashes.
+pub fn verify_with_layout(module: &Module, core: CoreLayout) -> Result<(), VerifyError> {
+    let ctx = verify_tables(module, core)?;
     let entry = module.entry as usize;
     if entry >= module.funcs.len() {
         return Err(err(
@@ -491,7 +508,7 @@ pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
 
 /// Validate the type, selector, application, class, and function
 /// tables.
-fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
+fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyError> {
     let terr = |message: String| VerifyError {
         func: u32::MAX,
         message,
@@ -632,7 +649,7 @@ fn verify_tables(module: &Module) -> Result<Ctx<'_>, VerifyError> {
             types: module.types.clone(),
             index,
         }),
-        core: lm_bytecode::corelink::core_layout(module),
+        core,
     };
     // Row canonicality inside function types.
     for (idx, ty) in module.types.iter().enumerate() {

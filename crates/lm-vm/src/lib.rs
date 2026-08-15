@@ -159,6 +159,8 @@ impl DispatchRow {
 pub struct LoadedModule {
     module: Module,
     dispatch: Vec<DispatchRow>,
+    identity: lm_bytecode::identity::ModuleIdentity,
+    core: lm_bytecode::corepin::CoreLayout,
 }
 
 impl LoadedModule {
@@ -170,15 +172,78 @@ impl LoadedModule {
         &self.dispatch
     }
 
+    /// The computed module identity.
+    pub fn identity(&self) -> &lm_bytecode::identity::ModuleIdentity {
+        &self.identity
+    }
+
+    /// The hash-resolved core layout, shared by the verifier and the
+    /// VM.
+    pub fn core_layout(&self) -> lm_bytecode::corepin::CoreLayout {
+        self.core
+    }
+
     /// The total dispatch-table cell count, for the memory gates.
     pub fn dispatch_cells(&self) -> usize {
         self.dispatch.iter().map(|row| row.table.len()).sum()
     }
 }
 
+/// The in-process verified-code cache. A key is the module semantic
+/// hash plus the compiler ABI version and the verifier version. The
+/// loader always recomputes the semantic hash from the decoded
+/// content, so a stored or forged hash never enters the key.
+#[derive(Debug, Default)]
+pub struct VerifiedCache {
+    verified: std::collections::HashSet<([u8; 32], u32, u32)>,
+    /// The number of full verifier runs, for the cache-skip tests.
+    pub verifications: u64,
+}
+
+impl VerifiedCache {
+    pub fn new() -> VerifiedCache {
+        VerifiedCache::default()
+    }
+}
+
 /// Verify a decoded module and admit it for execution.
 pub fn load(module: Module) -> Result<LoadedModule, VerifyError> {
-    lm_verify::verify_module(&module)?;
+    load_inner(module, None)
+}
+
+/// Admit a decoded module through the verified-code cache. A second
+/// load of the same semantic module under the same ABI and verifier
+/// version skips re-verification.
+pub fn load_cached(module: Module, cache: &mut VerifiedCache) -> Result<LoadedModule, VerifyError> {
+    load_inner(module, Some(cache))
+}
+
+fn load_inner(
+    module: Module,
+    cache: Option<&mut VerifiedCache>,
+) -> Result<LoadedModule, VerifyError> {
+    // The identity is computed from the decoded content, never read
+    // from the input. An unhashable module is a rejection.
+    let identity = lm_bytecode::identity::module_identity(&module).map_err(|e| VerifyError {
+        func: u32::MAX,
+        message: e.to_string(),
+    })?;
+    let core = lm_bytecode::corepin::core_layout(&module, &identity);
+    match cache {
+        Some(cache) => {
+            let key = (
+                identity.semantic_hash,
+                lm_bytecode::identity::COMPILER_ABI_VERSION,
+                lm_verify::VERIFIER_VERSION,
+            );
+            if !cache.verified.contains(&key) {
+                lm_verify::verify_with_layout(&module, core)?;
+                cache.verifications += 1;
+                cache.verified.insert(key);
+            }
+        }
+        None => lm_verify::verify_with_layout(&module, core)?,
+    }
     // Build the sealed per-class selector tables. A child inherits
     // the resolved parent methods; own methods override entries.
     // Parents precede children in the verified class table. Each row
@@ -211,13 +276,28 @@ pub fn load(module: Module) -> Result<LoadedModule, VerifyError> {
         resolved.push(methods);
         dispatch.push(row);
     }
-    Ok(LoadedModule { module, dispatch })
+    Ok(LoadedModule {
+        module,
+        dispatch,
+        identity,
+        core,
+    })
 }
 
 /// Decode serialized bytecode, verify it, and admit it for execution.
 pub fn load_bytes(bytes: &[u8]) -> Result<LoadedModule, LoadError> {
     let module = lm_bytecode::decode(bytes).map_err(LoadError::Decode)?;
     load(module).map_err(LoadError::Verify)
+}
+
+/// Decode serialized bytecode and admit it through the verified-code
+/// cache.
+pub fn load_bytes_cached(
+    bytes: &[u8],
+    cache: &mut VerifiedCache,
+) -> Result<LoadedModule, LoadError> {
+    let module = lm_bytecode::decode(bytes).map_err(LoadError::Decode)?;
+    load_cached(module, cache).map_err(LoadError::Verify)
 }
 
 /// A single-machine view over one world with a null host and no

@@ -8,8 +8,10 @@
 //! `lm-verify` validates tables, types, rows, type applications,
 //! jumps, calls, and stack shapes.
 
-pub mod corelink;
+pub mod corepin;
 pub mod hash;
+pub mod identity;
+pub mod interface;
 
 use std::fmt;
 
@@ -369,7 +371,15 @@ pub struct Module {
 }
 
 const MAGIC: &[u8; 4] = b"LMBC";
-const VERSION: u16 = 5;
+
+/// The container format version. Version 6 is the sectioned
+/// container: a semantic region, an export section with the
+/// definition names, and a reserved debug section.
+pub const VERSION: u16 = 6;
+
+/// The byte length of the container header: the magic, the version,
+/// and the three section-table entries (offset and length each).
+const HEADER_LEN: usize = 4 + 2 + 3 * 8;
 
 // Opcode bytes for the serialized form.
 const OP_CONST_UNIT: u8 = 0x00;
@@ -476,11 +486,35 @@ const KIND_NORMAL: u8 = 0;
 const KIND_ABSTRACT: u8 = 1;
 const KIND_CASE: u8 = 2;
 
-/// Encode a module into the compact serialized form.
+/// Encode a module into the sectioned container form.
+///
+/// The container holds the magic and version header, a section
+/// table, the semantic region, the export section with the
+/// definition names, and an empty reserved debug section. The
+/// semantic bytes of a definition do not contain its own name.
 pub fn encode(module: &Module) -> Vec<u8> {
-    let mut out = Vec::new();
+    let semantic = encode_semantic(module);
+    let exports = encode_exports(module);
+    let debug: Vec<u8> = Vec::new();
+    let mut out = Vec::with_capacity(HEADER_LEN + semantic.len() + exports.len() + debug.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
+    let mut offset = HEADER_LEN as u32;
+    for section in [&semantic, &exports, &debug] {
+        write_u32(&mut out, offset);
+        write_u32(&mut out, section.len() as u32);
+        offset += section.len() as u32;
+    }
+    out.extend_from_slice(&semantic);
+    out.extend_from_slice(&exports);
+    out.extend_from_slice(&debug);
+    out
+}
+
+/// Encode the semantic region: every table except the definition
+/// names.
+fn encode_semantic(module: &Module) -> Vec<u8> {
+    let mut out = Vec::new();
     write_u32(&mut out, module.strings.len() as u32);
     for s in &module.strings {
         write_bytes(&mut out, s.as_bytes());
@@ -506,7 +540,6 @@ pub fn encode(module: &Module) -> Vec<u8> {
     }
     write_u32(&mut out, module.classes.len() as u32);
     for class in &module.classes {
-        write_bytes(&mut out, class.name.as_bytes());
         write_u32(&mut out, class.parent);
         write_u32(&mut out, class.type_params);
         out.push(match class.kind {
@@ -527,7 +560,6 @@ pub fn encode(module: &Module) -> Vec<u8> {
     }
     write_u32(&mut out, module.funcs.len() as u32);
     for func in &module.funcs {
-        write_bytes(&mut out, func.name.as_bytes());
         write_u32(&mut out, func.type_params);
         write_u32(&mut out, func.effect_params);
         write_u32(&mut out, func.params.len() as u32);
@@ -558,6 +590,21 @@ pub fn encode(module: &Module) -> Vec<u8> {
         }
     }
     write_u32(&mut out, module.entry);
+    out
+}
+
+/// Encode the export section: the definition names in definition
+/// index order, classes first, then functions.
+fn encode_exports(module: &Module) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_u32(&mut out, module.classes.len() as u32);
+    for class in &module.classes {
+        write_bytes(&mut out, class.name.as_bytes());
+    }
+    write_u32(&mut out, module.funcs.len() as u32);
+    for func in &module.funcs {
+        write_bytes(&mut out, func.name.as_bytes());
+    }
     out
 }
 
@@ -860,6 +907,12 @@ pub enum DecodeError {
     BadLength,
     /// Extra bytes follow the encoded module.
     TrailingBytes,
+    /// The section table does not describe the input exactly: a wrong
+    /// offset, an overlap, a gap, or a size past the input end.
+    BadSectionTable,
+    /// The export-section name counts do not equal the semantic
+    /// definition counts.
+    ExportCountMismatch,
 }
 
 impl fmt::Display for DecodeError {
@@ -876,6 +929,12 @@ impl fmt::Display for DecodeError {
             DecodeError::BadUtf8 => write!(f, "a string is not valid UTF-8"),
             DecodeError::BadLength => write!(f, "a length field exceeds the input size"),
             DecodeError::TrailingBytes => write!(f, "extra bytes follow the module"),
+            DecodeError::BadSectionTable => {
+                write!(f, "the section table does not describe the input exactly")
+            }
+            DecodeError::ExportCountMismatch => {
+                write!(f, "the export names do not match the definition counts")
+            }
         }
     }
 }
@@ -958,7 +1017,11 @@ fn decode_row(cur: &mut Cursor<'_>) -> Result<Vec<BcRow>, DecodeError> {
     Ok(row)
 }
 
-/// Decode a serialized module. This checks structure only.
+/// Decode a serialized container. This checks structure only.
+///
+/// The section table is validated with plain arithmetic before any
+/// section is read, so a claimed size that disagrees with the actual
+/// byte count rejects before any allocation is sized from it.
 pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     let mut cur = Cursor { bytes, pos: 0 };
     if cur.take(4)? != MAGIC {
@@ -968,6 +1031,61 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     if version != VERSION {
         return Err(DecodeError::BadVersion(version));
     }
+    // Read the section table: three (offset, length) pairs. The
+    // sections must be contiguous, in order, and cover the input
+    // exactly.
+    let mut sections = [(0usize, 0usize); 3];
+    let mut expected = HEADER_LEN as u64;
+    for slot in &mut sections {
+        let offset = cur.u32()? as u64;
+        let len = cur.u32()? as u64;
+        if offset != expected {
+            return Err(DecodeError::BadSectionTable);
+        }
+        expected += len;
+        if expected > bytes.len() as u64 {
+            return Err(DecodeError::BadSectionTable);
+        }
+        *slot = (offset as usize, len as usize);
+    }
+    if expected != bytes.len() as u64 {
+        return Err(DecodeError::BadSectionTable);
+    }
+    let (sem_at, sem_len) = sections[0];
+    let (exp_at, exp_len) = sections[1];
+    // The debug section is reserved. Its content is ignored.
+    let mut module = decode_semantic(&bytes[sem_at..sem_at + sem_len])?;
+    decode_exports(&bytes[exp_at..exp_at + exp_len], &mut module)?;
+    Ok(module)
+}
+
+/// Decode the export section and fill the definition names.
+fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> {
+    let mut cur = Cursor { bytes, pos: 0 };
+    let class_count = cur.len()?;
+    if class_count != module.classes.len() {
+        return Err(DecodeError::ExportCountMismatch);
+    }
+    for class in &mut module.classes {
+        class.name = cur.string()?;
+    }
+    let func_count = cur.len()?;
+    if func_count != module.funcs.len() {
+        return Err(DecodeError::ExportCountMismatch);
+    }
+    for func in &mut module.funcs {
+        func.name = cur.string()?;
+    }
+    if cur.pos != bytes.len() {
+        return Err(DecodeError::TrailingBytes);
+    }
+    Ok(())
+}
+
+/// Decode the semantic region. The names stay empty; the export
+/// section fills them.
+fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
+    let mut cur = Cursor { bytes, pos: 0 };
     let string_count = cur.len()?;
     let mut strings = Vec::with_capacity(string_count);
     for _ in 0..string_count {
@@ -1004,7 +1122,6 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     let class_count = cur.len()?;
     let mut classes = Vec::with_capacity(class_count);
     for _ in 0..class_count {
-        let name = cur.string()?;
         let parent = cur.u32()?;
         let type_params = cur.u32()?;
         let kind = match cur.u8()? {
@@ -1028,7 +1145,7 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
             methods.push((sel, func));
         }
         classes.push(BcClass {
-            name,
+            name: String::new(),
             parent,
             type_params,
             kind,
@@ -1039,7 +1156,6 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     let func_count = cur.len()?;
     let mut funcs = Vec::with_capacity(func_count);
     for _ in 0..func_count {
-        let name = cur.string()?;
         let type_params = cur.u32()?;
         let effect_params = cur.u32()?;
         let param_count = cur.len()?;
@@ -1076,7 +1192,7 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
             blocks.push(block);
         }
         funcs.push(Func {
-            name,
+            name: String::new(),
             type_params,
             effect_params,
             params,
@@ -1471,16 +1587,17 @@ mod tests {
 
     #[test]
     fn trailing_bytes_are_rejected() {
+        // Bytes past the described sections fail the section table.
         let mut bytes = encode(&sample_module());
         bytes.push(0);
-        assert_eq!(decode(&bytes), Err(DecodeError::TrailingBytes));
+        assert_eq!(decode(&bytes), Err(DecodeError::BadSectionTable));
     }
 
     #[test]
     fn huge_length_field_is_rejected() {
         let mut bytes = encode(&sample_module());
-        // The string count is at offset 6.
-        bytes[6..10].copy_from_slice(&u32::MAX.to_le_bytes());
+        // The string count starts the semantic region.
+        bytes[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(decode(&bytes), Err(DecodeError::BadLength));
     }
 
@@ -1496,11 +1613,86 @@ mod tests {
             entry: 0,
         };
         let mut bytes = encode(&module);
-        // The single type tag sits directly after the type count.
-        let pos = 4 + 2 + 4 + 4;
+        // The single type tag sits directly after the string count
+        // and the type count at the semantic region start.
+        let pos = HEADER_LEN + 4 + 4;
         assert_eq!(bytes[pos], TY_UNIT);
         bytes[pos] = 0xee;
         assert_eq!(decode(&bytes), Err(DecodeError::BadTypeTag(0xee)));
+    }
+
+    #[test]
+    fn section_offsets_must_be_contiguous() {
+        let bytes = encode(&sample_module());
+        // Shift the semantic offset forward by one.
+        let mut corrupt = bytes.clone();
+        let offset = u32::from_le_bytes(corrupt[6..10].try_into().unwrap());
+        corrupt[6..10].copy_from_slice(&(offset + 1).to_le_bytes());
+        assert_eq!(decode(&corrupt), Err(DecodeError::BadSectionTable));
+        // Grow the semantic length so the sections overlap the input
+        // end.
+        let mut corrupt = bytes.clone();
+        let len = u32::from_le_bytes(corrupt[10..14].try_into().unwrap());
+        corrupt[10..14].copy_from_slice(&(len + 1).to_le_bytes());
+        assert_eq!(decode(&corrupt), Err(DecodeError::BadSectionTable));
+        // Shrink the semantic length: the export offset no longer
+        // lines up.
+        let mut corrupt = bytes;
+        let len = u32::from_le_bytes(corrupt[10..14].try_into().unwrap());
+        corrupt[10..14].copy_from_slice(&(len - 1).to_le_bytes());
+        assert_eq!(decode(&corrupt), Err(DecodeError::BadSectionTable));
+    }
+
+    #[test]
+    fn every_section_boundary_truncation_is_rejected() {
+        let bytes = encode(&sample_module());
+        // Read the section table for the boundary positions.
+        let mut boundaries = vec![HEADER_LEN];
+        for i in 0..3 {
+            let at = 6 + i * 8;
+            let offset = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            boundaries.push(offset + len);
+        }
+        for boundary in boundaries {
+            for cut in [boundary.saturating_sub(1), boundary] {
+                if cut >= bytes.len() {
+                    continue;
+                }
+                assert!(
+                    decode(&bytes[..cut]).is_err(),
+                    "truncation at {cut} was accepted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn export_count_mismatch_is_rejected() {
+        let module = sample_module();
+        let bytes = encode(&module);
+        // The export section starts with the class-name count.
+        let exp_at = u32::from_le_bytes(bytes[14..18].try_into().unwrap()) as usize;
+        let mut corrupt = bytes.clone();
+        corrupt[exp_at..exp_at + 4].copy_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            decode(&corrupt),
+            Err(DecodeError::ExportCountMismatch) | Err(DecodeError::BadLength)
+        ));
+    }
+
+    #[test]
+    fn names_live_in_the_export_section_only() {
+        // The semantic region must not contain the definition names.
+        let module = sample_module();
+        let bytes = encode(&module);
+        let sem_at = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
+        let sem_len = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
+        let semantic = &bytes[sem_at..sem_at + sem_len];
+        for name in ["Counter", "Box", "main"] {
+            let found = semantic.windows(name.len()).any(|w| w == name.as_bytes());
+            assert!(!found, "the semantic region contains the name {name}");
+        }
     }
 
     #[test]

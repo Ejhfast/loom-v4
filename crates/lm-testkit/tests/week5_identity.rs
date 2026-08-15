@@ -1,0 +1,381 @@
+//! Week-5 identity suites: the sectioned container, definition and
+//! module hashes, hash-linked core references, the verified-code
+//! cache, and the interface artifact.
+
+use lm_bytecode::identity::{module_identity, ModuleIdentity};
+use lm_bytecode::interface::{
+    build_interface, decode_interface, dump_interface, encode_interface, ExportKind,
+};
+use lm_bytecode::{Func, Instr, Module};
+use lm_testkit::{compile_text, compile_to_bytes};
+
+fn identity_of(source: &str) -> (Module, ModuleIdentity) {
+    let module = compile_text("t.lm", source).expect("compiles");
+    let identity = module_identity(&module).expect("hashes");
+    (module, identity)
+}
+
+fn func_hash(module: &Module, identity: &ModuleIdentity, name: &str) -> [u8; 32] {
+    let idx = module
+        .funcs
+        .iter()
+        .position(|f| f.name == name)
+        .unwrap_or_else(|| panic!("no function `{name}`"));
+    identity.func_hashes[idx]
+}
+
+fn class_hash(module: &Module, identity: &ModuleIdentity, name: &str) -> [u8; 32] {
+    let idx = module
+        .classes
+        .iter()
+        .position(|c| c.name == name)
+        .unwrap_or_else(|| panic!("no class `{name}`"));
+    identity.class_hashes[idx]
+}
+
+// ---------------------------------------------------------------
+// Deterministic artifacts.
+// ---------------------------------------------------------------
+
+#[test]
+fn building_twice_is_byte_identical() {
+    let source = "def f(n: Int): Int\n  n + 1\nend\nf(41)\n";
+    let a = compile_to_bytes("t.lm", source).unwrap();
+    let b = compile_to_bytes("t.lm", source).unwrap();
+    assert_eq!(a, b);
+    let (module, identity) = identity_of(source);
+    let exports = vec![(ExportKind::Function, "f".to_string())];
+    let ia = encode_interface(&build_interface(&module, &identity, &exports).unwrap());
+    let ib = encode_interface(&build_interface(&module, &identity, &exports).unwrap());
+    assert_eq!(ia, ib);
+}
+
+#[test]
+fn a_comment_edit_changes_no_hash_and_no_byte() {
+    let plain = "def f(n: Int): Int\n  n + 1\nend\nf(41)\n";
+    let commented = "# a leading comment\ndef f(n: Int): Int\n  # inside\n  n + 1\nend\n\nf(41)\n";
+    let a = compile_to_bytes("t.lm", plain).unwrap();
+    let b = compile_to_bytes("t.lm", commented).unwrap();
+    // With an empty debug section the container bytes are identical,
+    // so the container hash may only change when debug content
+    // changes.
+    assert_eq!(a, b);
+    let (ma, ia) = identity_of(plain);
+    let (mb, ib) = identity_of(commented);
+    assert_eq!(ia.semantic_hash, ib.semantic_hash);
+    assert_eq!(func_hash(&ma, &ia, "f"), func_hash(&mb, &ib, "f"));
+}
+
+#[test]
+fn a_body_edit_changes_only_that_definition() {
+    let one = "def f(n: Int): Int\n  n + 1\nend\ndef g(n: Int): Int\n  n * 3\nend\nf(g(1))\n";
+    let two = "def f(n: Int): Int\n  n + 2\nend\ndef g(n: Int): Int\n  n * 3\nend\nf(g(1))\n";
+    let (ma, ia) = identity_of(one);
+    let (mb, ib) = identity_of(two);
+    assert_ne!(func_hash(&ma, &ia, "f"), func_hash(&mb, &ib, "f"));
+    assert_eq!(func_hash(&ma, &ia, "g"), func_hash(&mb, &ib, "g"));
+    assert_ne!(ia.semantic_hash, ib.semantic_hash);
+}
+
+// ---------------------------------------------------------------
+// Order independence and rename invariance.
+// ---------------------------------------------------------------
+
+/// Reordering the top-level definitions renumbers the string pool,
+/// the type table, and the application table, because the
+/// definitions share literals and generic instantiations. Every
+/// definition hash and the module semantic hash stay unchanged.
+#[test]
+fn definition_hashes_do_not_depend_on_source_order() {
+    let shared_defs = [
+        // `alpha` and `beta` share the string literals and the
+        // Box[Int] / Box[String] instantiations, so a reorder
+        // renumbers the pools.
+        "class Box[T]\n  value: T\n  def init(mut self, value: T)\n    self.value = value\n  \
+         end\nend\n",
+        "def alpha(): String\n  b = Box(\"shared literal\")\n  i = Box(7)\n  \
+         \"{b.value} {i.value} first\"\nend\n",
+        "def beta(): String\n  i = Box(9)\n  b = Box(\"shared literal\")\n  \
+         \"{b.value} {i.value} second\"\nend\n",
+        // Mutual recursion: one strongly connected component.
+        "def is_even(n: Int): Bool\n  if n == 0\n    true\n  else\n    is_odd(n - 1)\n  end\nend\n",
+        "def is_odd(n: Int): Bool\n  if n == 0\n    false\n  else\n    is_even(n - 1)\n  end\nend\n",
+    ];
+    let entry = "(alpha(), beta(), is_even(4))\n";
+    let forward = format!("{}{entry}", shared_defs.join(""));
+    let reversed: Vec<&str> = shared_defs.iter().rev().copied().collect();
+    let backward = format!("{}{entry}", reversed.join(""));
+    let (ma, ia) = identity_of(&forward);
+    let (mb, ib) = identity_of(&backward);
+    // The pools really renumbered: the first string differs.
+    assert_ne!(
+        ma.strings, mb.strings,
+        "the reorder must renumber the pools"
+    );
+    for name in ["alpha", "beta", "is_even", "is_odd", "<entry>"] {
+        assert_eq!(
+            func_hash(&ma, &ia, name),
+            func_hash(&mb, &ib, name),
+            "the hash of `{name}` depends on definition order"
+        );
+    }
+    assert_eq!(class_hash(&ma, &ia, "Box"), class_hash(&mb, &ib, "Box"));
+    assert_eq!(ia.semantic_hash, ib.semantic_hash);
+}
+
+/// Renaming one definition leaves its own hash and every caller's
+/// hash unchanged, because references are by hash. The module
+/// semantic hash changes through the export table.
+#[test]
+fn a_rename_changes_the_module_hash_and_no_definition_hash() {
+    let before = "def helper(n: Int): Int\n  n * 2\nend\n\
+                  def caller(n: Int): Int\n  helper(n) + 1\nend\ncaller(3)\n";
+    let after = "def assist(n: Int): Int\n  n * 2\nend\n\
+                 def caller(n: Int): Int\n  assist(n) + 1\nend\ncaller(3)\n";
+    let (ma, ia) = identity_of(before);
+    let (mb, ib) = identity_of(after);
+    assert_eq!(
+        func_hash(&ma, &ia, "helper"),
+        func_hash(&mb, &ib, "assist"),
+        "the renamed definition hash changed"
+    );
+    assert_eq!(
+        func_hash(&ma, &ia, "caller"),
+        func_hash(&mb, &ib, "caller"),
+        "the caller hash changed on a callee rename"
+    );
+    assert_ne!(ia.semantic_hash, ib.semantic_hash);
+}
+
+/// A mutually recursive component hashes deterministically, and its
+/// two members receive distinct hashes.
+#[test]
+fn scc_members_have_distinct_deterministic_hashes() {
+    let source = "def ping(n: Int): Int\n  if n == 0\n    0\n  else\n    pong(n - 1)\n  end\nend\n\
+                  def pong(n: Int): Int\n  if n == 0\n    1\n  else\n    ping(n - 1)\n  end\nend\n\
+                  ping(4)\n";
+    let (ma, ia) = identity_of(source);
+    let (mb, ib) = identity_of(source);
+    assert_eq!(func_hash(&ma, &ia, "ping"), func_hash(&mb, &ib, "ping"));
+    assert_eq!(func_hash(&ma, &ia, "pong"), func_hash(&mb, &ib, "pong"));
+    assert_ne!(func_hash(&ma, &ia, "ping"), func_hash(&ma, &ia, "pong"));
+}
+
+/// Structurally identical enum families and arms stay distinct: the
+/// family forms one component, and the name-ordered member ordinals
+/// separate them.
+#[test]
+fn identical_shapes_in_different_families_stay_distinct() {
+    let source = "x: Option[Int] = None\nx.is_none()\n";
+    let (module, identity) = identity_of(source);
+    assert_ne!(
+        class_hash(&module, &identity, "StepEvent"),
+        class_hash(&module, &identity, "DriveEvent")
+    );
+    assert_ne!(
+        class_hash(&module, &identity, "StepEvent.Ran"),
+        class_hash(&module, &identity, "StepEvent.Waiting")
+    );
+    assert_ne!(
+        class_hash(&module, &identity, "StepEvent.Done"),
+        class_hash(&module, &identity, "DriveEvent.Done")
+    );
+}
+
+/// A definition chain a few thousand deep hashes on a small Rust
+/// stack: the Tarjan walk and the digest passes are iterative.
+#[test]
+fn a_deep_definition_chain_hashes_on_a_bounded_stack() {
+    const CHAIN: usize = 3000;
+    let mut funcs = Vec::with_capacity(CHAIN + 1);
+    for i in 0..CHAIN {
+        funcs.push(Func {
+            name: format!("f{i}"),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: 2,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::Call(i as u32 + 1), Instr::Return]],
+        });
+    }
+    funcs.push(Func {
+        name: "last".to_string(),
+        type_params: 0,
+        effect_params: 0,
+        params: vec![],
+        param_muts: vec![],
+        ret: 2,
+        row: vec![],
+        captures: vec![],
+        local_types: vec![],
+        blocks: vec![vec![Instr::ConstInt(1), Instr::Return]],
+    });
+    let module = Module {
+        strings: vec![],
+        types: vec![
+            lm_bytecode::BcType::Unit,
+            lm_bytecode::BcType::Bool,
+            lm_bytecode::BcType::Int,
+            lm_bytecode::BcType::Str,
+        ],
+        selectors: vec![],
+        apps: vec![],
+        classes: vec![],
+        funcs,
+        entry: 0,
+    };
+    let identity = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || module_identity(&module).expect("the chain hashes"))
+        .expect("thread starts")
+        .join()
+        .expect("no Rust stack overflow");
+    assert_eq!(identity.func_hashes.len(), CHAIN + 1);
+}
+
+// ---------------------------------------------------------------
+// Hash-linked core references.
+// ---------------------------------------------------------------
+
+#[test]
+fn the_loaded_module_carries_the_hash_resolved_core_layout() {
+    let bytes = compile_to_bytes("t.lm", "xs = [1, 2]\nxs.get(0).is_some()\n").unwrap();
+    let loaded = lm_vm::load_bytes(&bytes).expect("loads");
+    let core = loaded.core_layout();
+    assert!(core.option_some.is_some());
+    assert!(core.option_none.is_some());
+    assert!(core.run_done.is_some());
+    assert!(core.drive_asked.is_some());
+}
+
+/// A corrupted embedded core definition changes its hash, so the
+/// layout slot resolves to nothing and the verifier rejects the
+/// instruction that needs the family.
+#[test]
+fn a_corrupted_core_definition_no_longer_resolves() {
+    let bytes = compile_to_bytes("t.lm", "xs = [1, 2]\nxs.get(0).is_some()\n").unwrap();
+    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    // Flip the arm order of the embedded Option family record: swap
+    // the field type of Some to String.
+    let some = module
+        .classes
+        .iter()
+        .position(|c| c.name == "Option.Some")
+        .expect("the embedded core Option.Some exists");
+    module.classes[some].fields[0].1 = 3;
+    let identity = module_identity(&module).expect("still hashes");
+    let layout = lm_bytecode::corepin::core_layout(&module, &identity);
+    assert!(layout.option_some.is_none(), "a corrupted arm resolved");
+    assert!(
+        lm_vm::load(module).is_err(),
+        "the corrupted module was admitted"
+    );
+}
+
+// ---------------------------------------------------------------
+// The verified-code cache.
+// ---------------------------------------------------------------
+
+#[test]
+fn a_second_load_of_the_same_semantic_module_skips_verification() {
+    let bytes = compile_to_bytes("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(41)\n").unwrap();
+    let mut cache = lm_vm::VerifiedCache::new();
+    let loaded = lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
+    assert_eq!(cache.verifications, 1);
+    let again = lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
+    assert_eq!(cache.verifications, 1, "the second load re-verified");
+    // Both admissions execute.
+    for loaded in [&loaded, &again] {
+        let mut vm = lm_vm::Vm::new(loaded, lm_vm::VmConfig::default());
+        let outcome = vm.run();
+        assert_eq!(vm.show_outcome(&outcome), "Done(42)");
+    }
+    // A different module misses and verifies.
+    let other = compile_to_bytes("t.lm", "def f(n: Int): Int\n  n + 2\nend\nf(40)\n").unwrap();
+    lm_vm::load_bytes_cached(&other, &mut cache).expect("loads");
+    assert_eq!(cache.verifications, 2);
+}
+
+/// Poisoning: the loader recomputes the semantic hash from the
+/// decoded content, so tampered bytes can never ride a cached entry.
+/// The tampered module misses the cache and the verifier rejects it.
+#[test]
+fn tampered_bytes_never_ride_a_cached_admission() {
+    let source = "def f(n: Int): Int\n  n + 1\nend\nf(41)\n";
+    let bytes = compile_to_bytes("t.lm", source).unwrap();
+    let mut cache = lm_vm::VerifiedCache::new();
+    lm_vm::load_bytes_cached(&bytes, &mut cache).expect("loads");
+    assert_eq!(cache.verifications, 1);
+    // Tamper: retarget a jump in the entry to an invalid block. The
+    // bytes decode, but the semantics differ, so the recomputed hash
+    // misses the cache and the full verifier rejects the module.
+    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    let entry = module.entry as usize;
+    module.funcs[entry].blocks[0].insert(0, Instr::Jump(9999));
+    let tampered = lm_bytecode::encode(&module);
+    let result = lm_vm::load_bytes_cached(&tampered, &mut cache);
+    assert!(result.is_err(), "tampered bytes were admitted");
+    assert_eq!(cache.verifications, 1, "a rejection never enters the cache");
+}
+
+// ---------------------------------------------------------------
+// The interface artifact.
+// ---------------------------------------------------------------
+
+fn sample_interface_bytes() -> Vec<u8> {
+    let source = "class Point\n  x: Int = 0\nend\n\
+                  enum Shape\n  Dot\n  Line(len: Int)\nend\n\
+                  def area(s: Shape): Int with Io.Print\n  \
+                  case s\n  in Dot then 0\n  in Line(l) then l\n  end\nend\n1\n";
+    let (module, identity) = identity_of(source);
+    let exports = vec![
+        (ExportKind::Class, "Point".to_string()),
+        (ExportKind::Enum, "Shape".to_string()),
+        (ExportKind::EnumCase, "Shape.Dot".to_string()),
+        (ExportKind::EnumCase, "Shape.Line".to_string()),
+        (ExportKind::Function, "area".to_string()),
+    ];
+    encode_interface(&build_interface(&module, &identity, &exports).unwrap())
+}
+
+#[test]
+fn the_interface_round_trips_and_dumps() {
+    let bytes = sample_interface_bytes();
+    let interface = decode_interface(&bytes).expect("decodes");
+    assert_eq!(encode_interface(&interface), bytes);
+    assert_eq!(interface.exports.len(), 5);
+    let area = &interface.exports[4];
+    assert_eq!(area.name, "area");
+    assert_eq!(area.kind, ExportKind::Function);
+    assert!(
+        area.signature.contains("with Io.Print"),
+        "{}",
+        area.signature
+    );
+    let dump = dump_interface(&interface);
+    assert!(dump.contains("fn area"), "{dump}");
+    assert!(dump.contains("semantic "), "{dump}");
+}
+
+#[test]
+fn every_interface_truncation_is_rejected() {
+    let bytes = sample_interface_bytes();
+    for len in 0..bytes.len() {
+        assert!(
+            decode_interface(&bytes[..len]).is_err(),
+            "interface prefix {len} was accepted"
+        );
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(decode_interface(&trailing).is_err());
+    let mut bad_kind = bytes;
+    // The first export kind byte follows the header (4 + 2 + 4 + 4 +
+    // 32 + 4 bytes).
+    bad_kind[50] = 9;
+    assert!(decode_interface(&bad_kind).is_err());
+}

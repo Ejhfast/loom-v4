@@ -1,0 +1,21 @@
+# The `use` alias form: `use` binds a short name to a fixed `sys`
+# path. The alias grants nothing; the row and the policy still
+# decide.
+
+use sys.io.print
+use sys.vm
+
+def greet(name: String) with Io.Print
+  print("Hello {name}!\n")
+end
+
+def run_child(): Int with Vm
+  m = vm.Vm().from_object(do || 40 + 2 end, args: ())
+  case m.run()
+  in Done(v) then v
+  in Fault(_) then 0 - 1
+  end
+end
+
+greet("Ada")
+run_child()

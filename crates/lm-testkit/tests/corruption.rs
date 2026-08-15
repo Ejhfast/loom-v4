@@ -237,7 +237,7 @@ fn method_selector_out_of_range_is_rejected() {
 fn method_function_out_of_range_is_rejected() {
     let mut module = lm_bytecode::decode(&object_bytes()).unwrap();
     module.classes[0].methods[0].1 = 999;
-    expect_verify_reject(&lm_bytecode::encode(&module), "does not exist");
+    expect_verify_reject(&lm_bytecode::encode(&module), "method function");
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn call_virtual_selector_out_of_range_is_rejected() {
         }
     }
     assert!(patched, "the sample has a virtual call");
-    expect_verify_reject(&lm_bytecode::encode(&module), "selector index");
+    expect_verify_reject(&lm_bytecode::encode(&module), "selector");
 }
 
 #[test]
@@ -303,7 +303,7 @@ fn new_with_bad_class_index_is_rejected() {
         }
     }
     assert!(patched, "the sample allocates an instance");
-    expect_verify_reject(&lm_bytecode::encode(&module), "class index");
+    expect_verify_reject(&lm_bytecode::encode(&module), "class");
 }
 
 #[test]
@@ -354,7 +354,7 @@ fn app_with_invalid_type_index_is_rejected() {
     let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
     let bad = module.types.len() as u32 + 9;
     module.apps[0].types[0] = bad;
-    expect_verify_reject(&lm_bytecode::encode(&module), "invalid type index");
+    expect_verify_reject(&lm_bytecode::encode(&module), "type index");
 }
 
 #[test]
@@ -546,10 +546,12 @@ fn every_truncated_stream_is_rejected_by_the_decoder() {
 #[test]
 fn unknown_opcode_is_rejected_by_the_decoder() {
     let mut bytes = valid_bytes();
-    // The last five bytes are the entry index and the final Return
-    // opcode. Overwrite the Return opcode.
-    let pos = bytes.len() - 5;
-    assert_eq!(bytes[pos], 0x34, "the sample ends with a Return opcode");
+    // The semantic region ends with the entry index; the final
+    // Return opcode sits directly before it.
+    let sem_at = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
+    let sem_len = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
+    let pos = sem_at + sem_len - 5;
+    assert_eq!(bytes[pos], 0x34, "the semantic region ends with Return");
     bytes[pos] = 0xfe;
     assert!(matches!(
         lm_vm::load_bytes(&bytes),
@@ -609,10 +611,7 @@ fn virtual_call_app_out_of_range_is_rejected_not_a_panic() {
         }
     }
     assert!(hit, "the sample contains a generic virtual call");
-    expect_verify_reject(
-        &lm_bytecode::encode(&module),
-        "type application index out of range",
-    );
+    expect_verify_reject(&lm_bytecode::encode(&module), "type application");
 }
 
 #[test]
