@@ -251,3 +251,72 @@ fn a_file_named_core_compiles_through_every_single_file_command() {
     assert!(run.status.success(), "{}", stderr(&run));
     assert_eq!(stdout(&run), "Done(2)\n");
 }
+
+#[test]
+fn run_the_worker_example_prints_done_done_42() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "examples/07-procs/worker.lm",
+        "--allow",
+        "Proc",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(Done(42))\n");
+    // The scheduler reads no clock, so a second run agrees.
+    let again = lm(&[
+        "run",
+        "--show-result",
+        "examples/07-procs/worker.lm",
+        "--allow",
+        "Proc",
+    ]);
+    assert_eq!(out.stdout, again.stdout);
+}
+
+/// A proc program survives the artifact round trip: the linker
+/// relocates the parent type arguments and the handle types, and the
+/// loader admits the result.
+#[test]
+fn a_proc_program_runs_from_its_artifact() {
+    let build = lm(&["build", "examples/07-procs/worker.lm"]);
+    assert!(build.status.success(), "{}", stderr(&build));
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "build/debug/worker.lma",
+        "--allow",
+        "Proc",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(Done(42))\n");
+}
+
+/// A proc program builds and runs through the package path as well.
+#[test]
+fn a_proc_package_builds_and_runs() {
+    let root = repo_root().join("target/test-proc-package");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("the package directory");
+    std::fs::write(
+        root.join("lm.package"),
+        "[package]\nname = \"procapp\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("the manifest writes");
+    std::fs::write(
+        root.join("src/main.lm"),
+        "class Worker < Proc[Int]\n  \
+         def on_spawn(self): Int with Proc\n    \
+         case self.receive()\n    \
+         in Msg(n)\n      n * 2\n    \
+         in Closed\n      0\n    \
+         end\n  end\nend\n\n\
+         h = Worker.spawn()\nh.send(21)\nh.close()\n\
+         case h.done()\nin Done(v)  then v\nin Fault(_) then 0\nend\n",
+    )
+    .expect("the source writes");
+    let path = root.display().to_string();
+    let out = lm(&["run", "--show-result", &path, "--allow", "Proc"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).ends_with("Done(42)\n"), "{}", stdout(&out));
+}

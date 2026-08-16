@@ -388,8 +388,11 @@ cannot serve this"; the open question below asks for a better one.
   inheritance.
 - `tests/fuzz-regressions/`, 2 new source seeds for the generic parent
   and the proc surface.
+- `crates/lm-cli/tests/cli.rs`, 3 new cases: the worker example twice
+  through the tool, the same program from its artifact, and a proc
+  package through the build loop.
 
-Test count: 620 before, 704 after.
+Test count: 620 before, 707 after.
 
 ## Measurements
 
