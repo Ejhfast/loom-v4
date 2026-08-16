@@ -91,7 +91,9 @@ The rules the model tests state:
   `Fault(DeadProc)`;
 - the bound is checked before the copy, so a refused message never
   enters the target heap;
-- a mutable message faults the sender at its own boundary.
+- a mutable message faulted the sender at its own boundary. The
+  decision of 2026-08-16 at the end of this note replaced that rule:
+  the message copies.
 
 ### The proc launch
 
@@ -539,7 +541,11 @@ The carry-forward below states it for the week-9 encoder.
 
 ## Open questions
 
-### The build-order example omits the freeze
+### The build-order example omits the freeze (decided 2026-08-16)
+
+The project owner decided this question. Boundary crossings adopt copy
+semantics, and the build-order example stands as written. The decided
+section at the end of this note holds the record.
 
 The build order writes `h.send(Double(21))`. Specification 10.3 checks
 frozenness at proc send, and specification 16.2 rejects a mutable
@@ -581,7 +587,11 @@ copy to become failure-atomic from the sender's point of view. The
 transfer is already failure-atomic for the destination heap, so the
 change is small; the semantics decision is not.
 
-### Should a proc still receive after its parent dies
+### Should a proc still receive after its parent dies (decided 2026-08-16)
+
+The project owner decided this question. Uniform pass-through stays.
+The decided section at the end of this note holds the record.
+
 
 Specification 18.6 says a child table passes through the live parent
 table, and that parent death removes those pass-throughs so future
@@ -673,11 +683,15 @@ roots minus the policy-table entries. `World::machine_references` and
 
 ### The self-send and cross-heap paths must stay in step
 
-`World::send_copy` runs `lm_graph::verify_sendable` for a same-heap
+`World::boundary_copy` runs `lm_graph::copy_within` for a same-heap
 send and `lm_graph::transfer` for a cross-heap send. Both carry the
 `CopyCheck` visitor of `crates/lm-graph/src/mode.rs`, which is what
 keeps the two answers equal. A new boundary rule must go into that
 visitor, not beside it.
+
+The decision of 2026-08-16 renamed the path and gave the same-heap
+send a real copy. The rule above is unchanged: one visitor serves both
+paths.
 
 ## Deferred work
 
@@ -697,3 +711,118 @@ visitor, not beside it.
   0.2.
 - Committed benchmark distributions, `cargo-fuzz` targets, Miri, and
   CI workflow files stay deferred as before.
+
+## Decided after the week (2026-08-16)
+
+The project owner decided three questions after the week closed. Each
+item records the decision, the repealed rule, and the reason.
+
+### Boundary crossings copy the value
+
+The rule is one sentence. A crossing of a machine boundary copies the
+value. Sharing inside one crossing is preserved. Nothing is shared
+across a boundary, and identity does not cross. A mutable graph copies
+as a mutable graph.
+
+The frozen requirement at boundaries is repealed. The repealed
+principle is the last clause of specification 10.3: "there is no
+silent mutable deep copy". The copy is no longer silent, because the
+specification now states it as the boundary rule.
+
+Freeze keeps its other work without change:
+
+- a map key must be frozen and digestible at insertion;
+- `digest()` and `deep_equal` need a frozen graph;
+- a program may freeze a graph to make it immutable on purpose.
+
+Two categories still refuse to cross, with the errors of week 8:
+
+- a holder-local control handle: `Vm`, `PolicyTable`, `Request`, and
+  `PendingCall`;
+- a live host attachment.
+
+A proc handle still crosses as a reference, because send rights are
+shared on purpose. A machine still forks only through an explicit
+snapshot, never through a send.
+
+The reasons for the decision:
+
+- a snapshot already copies a whole machine world, so the copy rule
+  makes one boundary story instead of two;
+- freeze becomes an opt-in guard rather than a toll on every send;
+- frozen sharing and copy elision stay available, because the
+  specification says an implementation may elide a copy that no
+  program can observe.
+
+The implementation follows in `crates/lm-graph/src/mode.rs`. The
+`CopyCheck` visitor reads shapes alone, and the copy preserves the
+frozen bit of each source object. `lm_graph::copy_within` copies
+inside one heap, so a self send copies as well. Both send paths still
+run one visitor, which the week-8 carry-forward asked for.
+
+One new static rule joins the send rule: a mailbox message type must
+not name a holder-local native class. The checker rejects the proc
+class declaration with `E1056`. `Handle[M,R]` stays a legal message
+type.
+
+### The receiver-heap fault attribution stays open
+
+The question above ("Who owns the fault when a receiver heap limit
+stops a message") is unchanged and still open. It now covers mutable
+copies as well, and those copies are larger than the frozen graphs of
+week 8, so a receiver heap limit is easier to reach.
+
+### Uniform pass-through stays
+
+A perform of a proc resolves through the live parent table. Parent
+death removes the pass-through, and the next request fails closed. The
+reviewer's position, that `Proc.Recv` must survive parent death, was
+considered and declined.
+
+The discipline is that a spawner outlives its workers. The
+spawn-and-hand-off pattern is wrong by design, and no grant survives
+the death of the parent.
+
+The semantics do not change. Only the failure text changes: the
+`PolicyDenied` message now names the cause, for example "the operation
+Proc.Recv lost its pass through: the parent machine is gone". The
+pinned test reads the message from the orphan machine.
+
+The week-17 API review revisits this rule with corpus experience.
+
+### `close` is the end-of-stream signal, not boilerplate
+
+`close` is the typed end-of-stream signal of a streaming flow. A proc
+that drains a loop needs it, because the loop exits on `Closed`.
+
+A request-and-reply flow needs `send` and `done` alone. The proc
+receives one message and terminates, so a close adds a third call and
+teaches boilerplate. The narrative examples in `examples/07-procs`
+follow this rule now, and the streaming example carries one comment
+that states why its close is there.
+
+Week 11 queues a `finish` convenience for `std/proc`: one library call
+that closes and then waits. The primitives stay separate.
+
+## Open questions after the decision
+
+### Does the copy rule reach the link and compile envelope
+
+Specification 3.6 requires one frozen compatible value per import
+slot, and linking deep-freezes the result. Specification 16.1 lists
+linking and imports as codec contexts, and a codec context now copies.
+The two texts read differently, and this note does not resolve them.
+
+### `Bytes` and the builders are holder-local shapes
+
+The shape table marks `StringBuilder` and `ByteBuffer` holder-local,
+and the reference implementation stores a `Bytes` value in a
+`ByteBuffer`. Specification 16.2 lists bytes among the sendable
+values. Before the decision the frozen rule hid the disagreement,
+because a mutable value never crossed. It is visible now: a byte
+value refuses to cross.
+
+The new mailbox rule follows the shape table, so `Proc[ByteBuffer]`
+and `Proc[StringBuilder]` reject as well. A decision that makes bytes
+sendable must change the shape table, and the mailbox rule follows it
+without further work.
