@@ -508,15 +508,41 @@ requests a typed entry, and runs it.
 
 ---
 
-## Week 7 — One graph engine, boundaries, freezing, and nested sandboxes
+## Week 7 — Graph consolidation, resource policy, and snapshot foundations
+
+The current VM already has iterative collection, deep freeze,
+cycle-preserving transfer, and one activation stack for nested VMs.
+This week consolidates those paths. It does not replace them.
 
 ### Land
 
-- Iterative graph engine and native shape table for mark, freeze, frozen verification, transfer/copy, canonical digest, detached inspection, and later snapshot encoding.
-- Cycle/sharing preservation, canonical traversal ordinals, bounded work tables, digest cache on frozen objects, and stable map semantics.
-- Transfer versus control-envelope modes; sendability checks; code/classes by hash; holder-local VM/table handles; typed proc handles reserved for Week 9; inert resource descriptors.
-- `Vm.from_object` and terminal publication fully routed through the codec.
-- Nested VM authority chains and resource reservation from parent budgets.
+- Add `lm-graph` with one non-recursive traversal engine and one
+  deterministic child-order contract per native shape.
+- Move mark, freeze, frozen verification, transfer/copy, canonical
+  digest, detached inspection, and snapshot traversal behind that
+  contract.
+- Keep the current heap, three-pass transfer behavior, and nested VM
+  driver as migration oracles until the new paths match them.
+- Preserve cycles and sharing; add canonical traversal ordinals,
+  bounded work tables, stable map semantics, and digest caching on
+  frozen objects.
+- Add object, edge, byte, and work limits to each graph mode.
+- Make transfer and copy failure-atomic for the destination heap.
+- Resolve transferred code and classes through verified semantic
+  identity. Keep numeric slots local to one linked program.
+- Give every native shape one snapshot policy: `Portable`,
+  `RestoreSlot`, `ScopedBarrier`, or `Reject`.
+- Give every suspending host operation one continuation policy from
+  the same set. No live callback enters snapshot bytes.
+- Add a host-side resource registry to each VM. Record resource kind,
+  policy, owning VM, scope identity, and pending operation ordinal.
+- Separate serializable `VmState` from policy, execution ownership,
+  active host work, and resource control state.
+- Add parent resource reservation for nested VM creation.
+- Add brace closures and trailing closure arguments. Lower both
+  closure spellings to one typed HIR node and one bytecode form.
+- Keep `Vm.from_object`, terminal publication, and nested VM examples
+  on the production path throughout the migration.
 
 ### Runnable outputs
 
@@ -526,7 +552,7 @@ class Node
   next: Option[Node] = None
 end
 
-# test helper creates a cycle, freezes it, and computes a stable digest
+# A test helper creates a cycle and computes its stable digest.
 ```
 
 ```text
@@ -535,86 +561,70 @@ Done(6f58…)
 ```
 
 ```lm
-def sandbox(program: () -> Int with Clock.Now): RunResult[Int] with Vm
-  vm = sys.vm.Vm().from_object(program, args: ())
-  vm.table().mock(Clock.Now, do || 1000 end)
-  vm.run()
+def apply_twice(f: (Int) -> Int, value: Int): Int
+  f(f(value))
 end
 
-sandbox(do || with Clock.Now sys.clock.now() + 1 end)
+apply_twice({ |x: Int| x + 1 }, 40)
 ```
 
 ```text
-$ lm run --show-result examples/06-graphs/sandbox.lm --allow Vm
-Done(Done(1001))
+$ lm run --show-result examples/06-graphs/brace-closure.lm
+Done(42)
 ```
 
-A boundary-negative example attempts to return a mutable list from a child VM and receives `Fault(UnsendableValue)`.
+The existing nested-sandbox example runs unchanged. A migration test
+compares the old and new transfer outputs before the old path retires.
 
 ### Gates
 
-- One graph-shape definition controls every mode; no native class has a one-off serializer or freezer.
+- One graph-shape definition controls child reachability and order for
+  every mode.
 - Deep graphs never recurse on the Rust stack.
-- Differential property tests compare freeze/copy/digest reachability and cycle preservation.
-- Nested VM depth does not multiply interpreter loops or Rust stack depth.
-- Graph benchmarks cover flat data, deep chains, cycles, shared subgraphs, large bytes, and maps.
+- Freeze and transfer retain their current observable behavior.
+- Copy and transfer preserve cycles and sharing.
+- Digest is stable across allocation order and host process runs.
+- Code and classes cross by verified semantic identity.
+- Every graph mode rejects work past its published limits.
+- A failed transfer leaves the destination heap unchanged.
+- Every native shape and suspending operation declares one snapshot
+  policy.
+- Parent resource reservation is fail-atomic.
+- Both closure spellings produce identical typed HIR and bytecode.
+- Nested VM depth still does not multiply interpreter loops or Rust
+  stack depth.
 
 ---
 
-## Week 8 — Snapshots, restore, inspection, and branching execution
+## Week 8 — Portable procs, ownership, and scheduler barriers
+
+Logical proc state lands before snapshot bytes. This order keeps the
+snapshot format from defining scheduler semantics by accident.
 
 ### Land
 
-- Canonical snapshot writer over trusted state; external snapshot loader/verifier; one-time conversion from bytes to trusted `SnapshotImage`; typed `Snapshot[T]` result casting.
-- Serialization of heap, code/class/type manifests, frames, locals/operands, limits/fuel, pending request, and inert descriptors; exclusion of tables/grants/live callbacks/scheduler ownership.
-- Restore of between-instruction, `asked`, and supported inert-wait states; multi-shot restore; receiverless self-snapshot.
-- `lm snapshot verify/run`, `lm inspect` for artifacts/snapshots, source-mapped `stack()`, and deterministic snapshot diffs for tests.
-
-### Runnable outputs
-
-```lm
-vm = sys.vm.Vm().from_object(do ||
-  x = 20
-  x + 22
-end, args: ())
-
-vm.step()
-snap = vm.snapshot()
-left = sys.vm.Vm().restore(snap).run()
-right = sys.vm.Vm().restore(snap).run()
-(left, right)
-```
-
-```text
-$ lm run --show-result examples/07-snapshots/branch.lm --allow Vm
-Done((Done(42), Done(42)))
-```
-
-A self-checkpoint example requests `sys.vm.snapshot()`, receives a `SnapshotImage`, writes its bytes through an explicitly granted file wrapper, and resumes. A manual-drive snapshot captured in `asked` restores to the same operation and typed reply expectation; its holder calls `drive()` to mint a fresh request token before answering.
-
-```text
-$ lm snapshot verify checkpoints/asked.lms
-valid: state=asked op=Clock.Now frames=2 objects=37
-```
-
-### Gates
-
-- Snapshot round-trip tests at every bytecode boundary in the example corpus.
-- Loader rejects malformed object references, frame PCs, stack shapes, pending replies, descriptors, and limit overflows.
-- Instrumentation proves whole-image structural verification occurs once on external load, not on every resume/step.
-- In-process trusted snapshot restore and external byte load remain separate APIs.
-- Snapshot size/load/write benchmarks are tracked by workload shape.
-
----
-
-## Week 9 — Typed procs, mailboxes, supervision, and live revocation
-
-### Land
-
-- Proc scheduler, scheduler/holder ownership transfer, `Handle[M,R]`, `Proc.Run`, compiler `spawn` sugar, bounded FIFO mailboxes, `send`, `receive`, `close`, `done`, pause/resume, and dead-peer results.
-- One VM per proc, one logical guest thread, no shared mutable guest memory, transfer-checked messages/results, and live parent table chains.
-- Scheduler completion/pause channels using VM IDs and ordinals rather than guest references.
-- Proc tracing, mailbox metrics, and deterministic test scheduler mode.
+- Add the proc scheduler, scheduler/holder ownership transfer,
+  `Handle[M,R]`, `Proc.Run`, and compiler `spawn` sugar.
+- Add stable portable proc references with realm, identity, and
+  generation. Preserve `M` and `R` across every transfer.
+- Make proc handles sendable through the graph codec. A handle
+  transfer never changes snapshot ownership.
+- Make each launch create one snapshot ownership edge. Ownership is a
+  tree and is independent from handle reachability.
+- Add bounded FIFO mailboxes, `send`, `receive`, `close`, `done`,
+  pause/resume, and dead-peer results.
+- Keep one VM per proc, one logical guest thread, no shared mutable
+  guest memory, and live parent table chains.
+- Add scheduler completion and pause channels using proc IDs and
+  ordinals rather than guest references.
+- Add deterministic scheduler mode, proc tracing, and mailbox metrics.
+- Add one domain barrier that pauses a root VM and every transitively
+  owned proc at safe boundaries.
+- Freeze proc creation and mailbox acceptance at one cut marker.
+- Classify each reachable proc handle as internal or external to the
+  proposed snapshot domain.
+- Run resource-registry preflight across the whole paused domain.
+- Resume every included proc after a barrier failure.
 
 ### Runnable outputs
 
@@ -639,38 +649,173 @@ h.done()
 ```
 
 ```text
-$ lm run --show-result examples/08-procs/worker.lm --allow Proc
+$ lm run --show-result examples/07-procs/worker.lm --allow Proc
 Done(Done(42))
 ```
 
-A logger example drains messages after close. A sandbox-service example launches a configured VM on a proc thread, revokes `Io.Print` while it runs, pauses it, inspects frames, snapshots it, and resumes.
+A second example sends one handle through another proc mailbox. The
+handle still targets the original proc. A domain example proves that
+an unrelated reachable handle stays outside the owned tree.
 
 ### Gates
 
 - Message and result types never erase to `Any`.
-- FIFO acceptance, close/drain, pause/resume, parent death, revocation, and dead-peer behavior have deterministic model tests.
-- Mailbox limits are checked before copying/acceptance.
-- Thread sanitizer equivalents are unnecessary for guest memory because no guest heap is shared; Rust concurrency tests focus on scheduler/table/handle state.
-- Proc send/receive, spawn, pause, and terminal publication benchmarks are committed.
+- Handle transfer preserves the exact portable proc reference.
+- Handle transfer never changes snapshot ownership.
+- FIFO acceptance, close/drain, pause/resume, parent death,
+  revocation, and dead-peer behavior have deterministic model tests.
+- Mailbox limits are checked before copy and acceptance.
+- One VM never executes concurrently.
+- The domain barrier records one consistent mailbox cut.
+- Barrier failure resumes every included proc.
+- Scheduler records contain no guest heap reference.
+- Proc send/receive, spawn, pause, and terminal publication benchmarks
+  are committed.
+
+---
+
+## Week 9 — Proc-domain snapshots, restore, and branching execution
+
+### Land
+
+- Add a canonical snapshot writer over trusted state and an external
+  snapshot loader/verifier.
+- Convert external bytes once to trusted `SnapshotImage`; retain typed
+  `Snapshot[T]` result casting.
+- Capture the root VM and every transitively owned proc as one snapshot
+  domain.
+- Serialize each VM heap, code/class/type manifests, frames,
+  locals/operands, limits/fuel, state, and pending request.
+- Serialize proc ownership edges, mailbox types and limits, accepted
+  queues, close state, blocked receives, and terminal proc results.
+- Assign canonical proc ordinals. Encode internal proc handles by
+  ordinal and external handles by portable scheduler reference.
+- Relocate every internal handle during restore, including handles in
+  heaps, frames, captures, mailboxes, pending arguments, and results.
+- Resolve every external proc reference before any restored VM can
+  run. An unresolved reference fails restore atomically.
+- Preflight every native resource and pending host continuation through
+  its Week 7 snapshot policy.
+- Add typed `RestoreBindings` for resource slots, external proc
+  resolvers, pending waits, and per-proc table plans.
+- Return ordinary typed errors for expected snapshot and restore
+  blockers. No unresolved resource becomes an inert guest value.
+- Give every restored VM a fresh default-deny table. Restore internal
+  pass chains against the new parent tables.
+- Keep restored descendants stopped behind one domain gate until the
+  root resumes.
+- Restore between-instruction, `asked`, supported waiting, terminal,
+  and receiverless self-snapshot states.
+- Support multi-shot restore of the complete domain.
+- Add `lm snapshot verify/run`, snapshot-aware `lm inspect`,
+  source-mapped `stack()`, and deterministic snapshot diffs.
+
+### Runnable outputs
+
+```lm
+def restore_run(snap: Snapshot[Int]): Int with Vm
+  case sys.vm.Vm().restore(snap)
+  in Ok(restored)
+    case restored.run()
+    in Done(value) then value
+    in Fault(_)    then -1
+    end
+  in Err(_) then -2
+  end
+end
+
+vm = sys.vm.Vm().from_object({ || 20 + 22 }, args: ())
+vm.step()
+case vm.snapshot(SnapshotOptions())
+in Ok(snap) then (restore_run(snap), restore_run(snap))
+in Err(_)   then (-3, -3)
+end
+```
+
+```text
+$ lm run --show-result examples/08-snapshots/branch.lm --allow Vm
+Done((42, 42))
+```
+
+A proc-domain example captures a root, child, and grandchild. Each
+restore gets its own internal proc tree. Both restores keep one shared
+external proc target.
+
+A manual-drive snapshot restores the same operation and reply type.
+The holder calls `drive()` to obtain a fresh request token.
+
+```text
+$ lm snapshot verify checkpoints/asked-tree.lms
+valid: state=asked procs=3 mailboxes=2 external_procs=1
+```
+
+### Gates
+
+- Snapshot round trips cover every bytecode boundary in the example
+  corpus.
+- Proc ordinals are deterministic and independent from scheduler IDs.
+- Internal handle relocation covers every VM and mailbox root.
+- External proc resolution completes before runnable state exists.
+- Multi-shot restore creates distinct internal proc trees.
+- Multi-shot restore preserves shared external proc targets.
+- Policy tables and root grants never enter snapshot bytes.
+- A failed restore exposes no partial proc domain.
+- A failed snapshot resumes the original domain.
+- The loader checks ownership acyclicity, one-owner rules, mailbox
+  types, limits, and accepted values.
+- Whole-image structural verification occurs once on external load.
+- In-process trusted restore and external byte load remain separate
+  APIs.
+- Snapshot size/load/write benchmarks are tracked by workload shape.
 
 ---
 
 # Part III — A practical distribution by Week 13
 
-## Week 10 — Files, paths, console, time, random, and TCP
+## Week 10 — Scoped files, external resources, time, random, and TCP
 
 ### Land
 
-- Full initial operation manifest for I/O, filesystem, clock, random, TCP, and optional process environment/current-directory operations.
-- Platform adapters for Unix and Windows with ordinary portable error enums and inert snapshot descriptors.
-- Pure `std/path`; explicit `File`/TCP wrappers; `read_exact`, `read_all`, `write_all`, text helpers; durations/instants; random selection/shuffle. `std` ships with the toolchain, needs no manifest entry, and its names enter a module only through `use` lines (`docs/specs/packages.md` section 5).
-- Cancellation and async completion behavior for blocking reads, sleeps, connects, accepts, and proc pause.
-- Root CLI policy profiles with explicit grants and finite limits.
+- Add the full operation manifest for I/O, filesystem, clock, random,
+  TCP, and optional process environment/current-directory operations.
+- Add Unix and Windows platform adapters with ordinary portable error
+  enums.
+- Add typed resource-registry entries for every live host resource and
+  pending host continuation.
+- Add pure `std/path` and explicit finite root policy profiles.
+- Add `FileLease` as a scoped native designator and
+  `std/fs.with_open` as the standard file entry point.
+- Close a lease before a normal callback return. Close every remaining
+  lease when its VM terminates, without a guest callback.
+- Preserve the original machine fault when cleanup also fails.
+- Add `std/fs.open_handle` for deliberate long-lived ownership.
+- Keep explicit read, write, seek, flush, and close on `FileHandle`.
+- Give raw file handles the fixed `Reject` snapshot policy.
+- Permit host extensions to add separate checkpointable file types
+  with typed `RestoreSlot` policies.
+- Give TCP streams and listeners the fixed `Reject` policy. Do not
+  reopen a connection silently.
+- Add bounded descendant scope quiescence for snapshot creation.
+- Report precise resource blocker paths through nested proc ownership.
+- Add cancellation for blocking reads, sleeps, connects, accepts, and
+  proc pause.
+- Keep completion sinks single-use after cancellation or VM death.
+- Add durations/instants, random selection/shuffle, and text helpers.
 
 ### Runnable outputs
 
+```lm
+case files.with_open(path, ReadOnly()) { |file|
+  file.read_text(max_bytes: 1_000_000)
+}
+in Ok(text) then sys.io.print(text)
+in Err(error) then sys.io.error(error.message())
+end
+```
+
 ```text
-$ lm run examples/09-host/cat.lm --allow Fs.Open,Fs.Read,Fs.Close -- data.txt
+$ lm run examples/09-host/cat.lm \
+    --allow Fs.Open,Fs.Read,Fs.Close -- data.txt
 first line
 second line
 ```
@@ -681,15 +826,30 @@ $ lm run examples/09-host/word-count.lm \
 lines=1240 words=18302 bytes=100771
 ```
 
-A TCP echo client/server pair runs in separate procs with explicit `Net.*` and `Proc` grants. A deterministic mode manually answers clock/random operations and produces byte-for-byte repeatable output.
+A proc performs long work inside `with_open`. An ancestor snapshot
+with bounded scope waiting captures the domain after the lease closes.
+A self-snapshot inside the same active scope returns `ResourceActive`.
+A live raw handle reports its ownership path.
+
+A TCP echo client/server pair runs in separate procs. A snapshot
+attempt reports the active stream path. Deterministic manual clock and
+random answers produce byte-for-byte repeatable output.
 
 ### Gates
 
-- No wrapper hides or widens the exact underlying row.
-- OS handles cannot cross a snapshot as live resources.
+- The standard file path leaks no live handle after callback return.
+- Scoped designators cannot escape through source or bytecode.
+- Cleanup runs on normal return and VM termination.
+- Cleanup invokes no guest callback.
+- No file or socket becomes an inert guest value.
+- Restore slots bind atomically before domain activation.
+- No wrapper hides or widens its exact underlying row.
 - Platform error mapping has cross-platform golden tests.
-- Async completions are single-use and safe after cancellation/VM death.
-- Host-operation latency is excluded from interpreter dispatch benchmarks but completion overhead is measured separately.
+- Async completions are single-use and safe after cancellation or VM
+  death.
+- Snapshot blocker paths include nested proc ownership.
+- Host-operation latency is excluded from interpreter dispatch
+  benchmarks; completion overhead is measured separately.
 
 ---
 
@@ -722,7 +882,8 @@ $ lm run --show-result examples/10-std/list-pipeline.lm
 Done(35)
 ```
 
-A CSV-to-JSON command-line example combines strings, lists, maps, files, and JSON and is used as the first broad allocation/GC workload.
+A CSV-to-JSON command-line example combines strings, lists, maps,
+scoped files, and JSON. It is the first broad allocation/GC workload.
 
 ### Gates
 
@@ -734,15 +895,22 @@ A CSV-to-JSON command-line example combines strings, lists, maps, files, and JSO
 
 ---
 
-## Week 12 — Package/build loop, test runner, and developer tooling
+## Week 12 — Test runner and developer tooling
 
 ### Land
 
-- Complete package manifest semantics, deterministic dependency resolution for path/pinned artifact dependencies, interface-driven rebuilds, and content-addressed cache.
+- Harden the Week 6 package commands, interface-driven rebuilds, and
+  content-addressed cache. Add precise cache explanations and recovery
+  from corrupted entries.
 - `lm check`, `build`, `run`, `test`, `inspect`, `disasm`, `snapshot`, and cache diagnostics with stable exit codes.
 - Compile-pass, UI, run-pass, run-fail, verifier, corruption, conformance, and benchmark test modes in one harness; `--bless` for intentional diagnostic/IR changes.
 - Child-VM test execution, per-test policy/limits, deterministic operation transcripts, parallel host scheduling with deterministic result ordering.
 - Source maps, stack traces, concise artifact/row summaries, and reproducible failure bundles.
+- Snapshot inspection prints proc ordinals, ownership paths, mailbox
+  state, external proc references, resource blockers, and restore
+  slots.
+- Add focused test modes for scoped-designator diagnostics and
+  proc-domain restore failures.
 
 ### Runnable outputs
 
@@ -762,7 +930,9 @@ imports 2
 verified yes
 ```
 
-A three-package application rebuild shows only the changed package and dependent semantic units. A failing test prints the child VM fault, bounded trace, and captured operation transcript.
+A three-package application rebuild shows only the changed module and
+dependent semantic units. A failing test prints the child VM fault,
+bounded trace, and captured operation transcript.
 
 ### Gates
 
@@ -770,6 +940,8 @@ A three-package application rebuild shows only the changed package and dependent
 - Flaky tests are treated as failures; time/random/network tests use controlled policies.
 - Cache tests simulate source edits, dependency interface changes, compiler/core ABI changes, and corrupted cache entries.
 - Developer commands never grant effects merely because they appear in an artifact row.
+- Snapshot tools never expose host secrets in resource paths or
+  external references.
 - Full smoke suite runs locally in one command and within an interactive development cycle.
 
 ---
@@ -782,7 +954,7 @@ A three-package application rebuild shows only the changed package and dependent
 - Typed `LinkEnv`, `Type[T]` witnesses, `DynValue` pack/unpack for intentionally dynamic tooling, and typed `LinkedEntry[A,R]`.
 - Read-only `Reflect.Mirror`, frame/code/class metadata, no dynamic selector invocation, and detached `ValueView` trees.
 - Standard VM/compiler/reflection/test helpers built on these primitives.
-- End-to-end admission example: compile source, inspect row/hash, choose policy, link, run in a child VM, capture requests, and snapshot.
+- End-to-end admission example: compile source, inspect row/hash, choose policy, link, run in a child VM, capture requests, and snapshot its owned proc domain.
 
 ### Runnable outputs
 
@@ -813,9 +985,9 @@ A reflection example prints class/field/code metadata without acquiring a callab
 
 ### Land
 
-- Implement every remaining static rule in the specification as a table-driven conformance matrix: namespace resolution, recursion, annotations, tuple/function ambiguity, generic inference failures, variance, initialization, mutation capability, flow refinement, exhaustiveness, override rows, first-class operations, and grant charging.
+- Implement every remaining static rule in the specification as a table-driven conformance matrix: namespace resolution, recursion, annotations, tuple/function ambiguity, generic inference failures, variance, initialization, mutation capability, scoped-designator escape, flow refinement, exhaustiveness, override rows, first-class operations, and grant charging.
 - Normalize diagnostics around stable codes/spans/notes; eliminate cascades and accidental dependence on hash-map iteration.
-- Add property-generated well-typed pure programs and ill-typed near misses.
+- Add property-generated well-typed pure programs and ill-typed near misses, including scoped returns, captures, storage, and sends.
 - Compare pure HIR oracle, bytecode VM, and snapshot-resumed VM results.
 
 ### Runnable outputs
@@ -846,9 +1018,10 @@ The cyclic-graph program also exercises `Option`, higher-order rows, freeze, and
 
 ### Land
 
-- Model every VM state and control transition explicitly, including waiting completion races, request token reuse, terminal idempotence, proc ownership, pause, parent death, cancellation, resource reservation, and nested tables.
-- Add a small executable state-machine model in tests and compare random command sequences against the production VM.
+- Model every VM and proc-domain transition explicitly, including waiting completion races, request token reuse, terminal idempotence, proc ownership, pause, parent death, cancellation, resource reservation, nested tables, domain barriers, mailbox cuts, scope quiescence, and barrier abort.
+- Add a small executable state-machine model in tests and compare random command sequences against the production VM and scheduler.
 - Complete fuel/heap/frame/operand/boundary/mailbox/mock/snapshot limit interactions and fail-atomic updates.
+- Model external proc disappearance during restore and one failed binding among many successful bindings.
 - Audit all host callbacks and completion sinks for single use and dead-VM behavior.
 
 ### Runnable outputs
@@ -857,9 +1030,9 @@ The cyclic-graph program also exercises `Option`, higher-order rows, freeze, and
 $ lm run --show-result examples/14-vm/tower.lm --allow Vm
 Done(42)
 $ lm run --show-result examples/14-vm/all-transitions.lm --allow Vm,Proc
-Done(TransitionSummary(legal: 23, rejected: 19))
+Done(TransitionSummary(legal: 31, rejected: 24))
 $ lm inspect build/all-transitions-paused.lms
-state=asked owner=holder ordinal=8 frames=3 fuel=9912
+state=asked owner=holder ordinal=8 procs=3 mailboxes=2 fuel=9912
 ```
 
 The tower constructs five nested machines and grants only `Vm`; the transition supervisor drives, snapshots, restores, rejects, dispatches, pauses, and revokes a child through every legal state.
@@ -867,9 +1040,9 @@ The tower constructs five nested machines and grants only `Vm`; the transition s
 ### Gates
 
 - Random model traces cover all transition edges and reproduce failures as compact scripts.
-- No illegal caller action mutates the controlled VM.
+- No illegal caller action mutates the controlled VM or proc domain.
 - Nested depth does not change Rust stack usage.
-- Limit exhaustion leaves heaps, frames, pending requests, and tables internally valid.
+- Limit exhaustion leaves heaps, frames, pending requests, tables, mailboxes, and ownership internally valid.
 
 ---
 
@@ -877,11 +1050,11 @@ The tower constructs five nested machines and grants only `Vm`; the transition s
 
 ### Land
 
-- Full adversarial validation pass over artifact/snapshot decoders, verifier, graph codec, type/class layouts, code availability, descriptor inertness, and size arithmetic.
+- Full adversarial validation pass over artifact/snapshot decoders, verifier, graph codec, type/class layouts, code availability, proc ordinals, ownership edges, internal handle relocation, external proc references, restore slots, resource policies, and size arithmetic.
 - Streaming/preflight checks that reject impossible sizes before large allocations.
 - Fuzz dictionaries/corpora derived from real artifacts and snapshots; structure-aware mutators; coverage reporting.
 - Verified-code and trusted-snapshot cache poisoning tests.
-- Threat model for untrusted source, bytecode, snapshots, host implementations, and proc messages.
+- Threat model for untrusted source, bytecode, snapshots, host implementations, proc messages, and restore bindings.
 
 ### Runnable outputs
 
@@ -903,6 +1076,9 @@ A sandbox example consumes intentionally hostile source/artifact/snapshot inputs
 - No unchecked `offset + count * width` arithmetic.
 - Verification caches bind exact bytes/hash/ABI/verifier version.
 - External snapshots are verified once; trusted resume paths contain no hidden reparse.
+- Fuzzing covers proc counts, mailbox counts, ownership cycles,
+  relocation type mismatches, restore-slot mismatches, and unavailable
+  external proc references.
 - Unsafe modules have written invariants, Miri tests, and independent review checklists.
 
 ---
@@ -912,8 +1088,9 @@ A sandbox example consumes intentionally hostile source/artifact/snapshot inputs
 ### Land
 
 - Run the complete example corpus as an API design review. Remove awkward names, duplicate mechanisms, accidental `Any`, and wrappers that hide rows before freezing version 0.2 interfaces.
-- Fill only gaps demonstrated by real programs: list/map/string convenience, path edge cases, explicit file loops, typed VM helpers, proc supervision, JSON diagnostics, and test ergonomics.
-- Add reference documentation with complexity, mutation/freeze behavior, effects, ordinary errors, and faults for every public API.
+- Fill only gaps demonstrated by real programs: list/map/string convenience, path edge cases, scoped file loops, explicit raw resource ownership, typed VM helpers, proc supervision, JSON diagnostics, and test ergonomics.
+- Review every external resource through its scoped and raw APIs. Keep raw handles only where long ownership is required.
+- Add reference documentation with complexity, mutation/freeze behavior, effects, ordinary errors, faults, and snapshot policy for every public API.
 - Establish compatibility policy for core hashes, operation revisions, standard modules, and diagnostic stability.
 
 ### Runnable outputs
@@ -942,6 +1119,7 @@ $ cargo xtask examples --release
 
 - Every example is a black-box release test and documentation source.
 - No example reaches into bootstrap-only or test-only APIs.
+- File examples use scoped access unless long ownership is essential.
 - Public API inventory matches the specification exactly.
 - A clean checkout can build and run the corpus with one command.
 
@@ -954,6 +1132,7 @@ $ cargo xtask examples --release
 ### Land
 
 - Port scanner, parser, source map, diagnostics skeleton, module predeclaration, and lexical/name resolution to the language.
+- Port brace closures and trailing closure arguments first. Compare both closure spellings against the Rust frontend.
 - Keep the Rust compiler as stage 0 and compare canonical token/AST/resolution dumps on the full corpus.
 - Use ordinary `List`, `Map`, `Result`, builders, and explicit diagnostics; no privileged parser runtime.
 - Compile the self-hosted frontend with stage 0 and run it in a VM with only file-read/write operations required by the tool.
@@ -970,6 +1149,7 @@ The self-hosted parser successfully parses core, std, compiler sources, and ever
 ### Gates
 
 - Canonical token/AST/resolution output matches stage 0 across the corpus.
+- Equivalent brace and `do` closures produce identical typed HIR.
 - The self-hosted frontend can be manually driven with file operations supplied by a holder.
 - Parser fuzz inputs are run against both implementations; crashes and divergent successful parses are regressions.
 
@@ -979,7 +1159,7 @@ The self-hosted parser successfully parses core, std, compiler sources, and ever
 
 ### Land
 
-- Port interned type forms, subtype checks, bidirectional checking, generic unification, flow environments, enum exhaustiveness, definite initialization, and effect-row calculation.
+- Port interned type forms, subtype checks, bidirectional checking, generic unification, flow environments, enum exhaustiveness, definite initialization, effect-row calculation, and scoped-designator escape checks.
 - Emit the same typed-HIR and row summaries as the Rust compiler.
 - Keep verifier/runtime in Rust; self-hosting changes no execution trust boundary.
 
@@ -1284,11 +1464,11 @@ The release demonstration builds and runs a program that:
 2. compiles a typed plugin at runtime;
 3. verifies its empty or declared row;
 4. links it through typed environments;
-5. launches it in a nested VM/proc with finite limits;
+5. launches it in a nested VM and owned proc domain with finite limits;
 6. manually intercepts one typed operation and automatically dispatches another;
-7. snapshots the suspended machine;
-8. restores two diverging copies under fresh policies;
-9. collects typed results and writes output through explicit filesystem operations.
+7. snapshots the suspended proc domain;
+8. restores two domains with distinct internal procs and shared external handles;
+9. collects typed results and writes output through scoped filesystem operations.
 
 ```text
 $ lm run examples/28-release/sandbox-service.lm \

@@ -154,6 +154,8 @@ Operators:
 = == != < <= > >= + - * / %
 ```
 
+A left brace followed by a pipe starts a brace closure. Every other left brace starts a map literal. The empty form `{}` remains an empty map.
+
 `and`, `or`, and `not` are short-circuit Boolean operators. User-defined operator overloading is absent.
 
 ---
@@ -439,7 +441,7 @@ The type universe has four strata.
 
 **Core-image nominal types** are ordinary source definitions with pinned hashes. The minimum set includes `Option`, `Result`, `Ordering`, `Pair`, `Range`, `RunResult`, `StepEvent`, `DriveEvent`, `Recv`, `ProcResult`, portable operation error enums, and the typed request-token declarations used by VM control.
 
-**Host and holder types** such as `EmptyVm`, `Vm[T]`, typed `Snapshot[T]`, erased-but-contained `SnapshotImage`, `Handle[M,T]`, `PolicyTable`, file handles, and socket handles are native nominal classes with explicit boundary rules.
+**Host and holder types** such as `EmptyVm`, `Vm[T]`, typed `Snapshot[T]`, erased-but-contained `SnapshotImage`, `Handle[M,T]`, `PolicyTable`, scoped `FileLease`, file handles, and socket handles are native nominal classes with explicit boundary rules.
 
 There is no `nil`. Absence is `Option[T]`; ordinary failure is `Result[T,E]`; machine failure is `Fault` observed by the holder.
 
@@ -656,10 +658,13 @@ The VM does not re-check this theorem at run time. Policy remains a separate dyn
 | no implicit nil and enum/Boolean cases are exhaustive | policy grants or operation success |
 | required fields are initialized before `self` escapes | deep frozenness, sendability, digestibility, or resource liveness |
 | writes and mutating calls use a locally mutable reference | uniqueness or alias freedom |
+| scoped designators do not enter an escaping position | general lifetime inference or borrow checking |
 | overrides preserve call and row substitutability | termination, fuel use, heap use, or asymptotic cost |
 | every possible perform is contained in the declared row | absence of faults, deadlock, host failure, or timing side channels |
 | typed manual replies match the selected operation at the source level | a stale or cross-VM request token; the runtime still validates it |
 | emitted bytecode has typed stack/local states | correctness of externally supplied bytes until the verifier accepts them |
+
+A native ABI declaration may mark a type as scoped. A scoped designator may use local aliases and scoped parameters. It cannot be returned, captured, stored in an ordinary object or collection, frozen, transferred, digested, sent, or snapshotted. Only ABI-declared non-storing parameters may accept it. This is one native capability rule, not a general lifetime system. Bytecode records the scoped marker, and the verifier checks every move into an escaping location.
 
 ### 5.14 Checker and verifier construction
 
@@ -667,7 +672,7 @@ The compiler represents primitive, nominal, tuple, function, operation, and type
 
 Each callable is lowered to a control-flow graph. Definite assignment, return analysis, and stack-shape planning are forward dataflow problems with finite states. Effect rows are sorted small sets of operation IDs with an inline representation for common rows and an interned representation for larger rows.
 
-The source checker and bytecode verifier are independent implementations over different representations. The verifier reconstructs local/operand type states at block entries, checks joins, calls, fields, intrinsics, performs, and claimed rows, and rejects malformed external code before it enters the verified-code cache. Source types are erased from the execution hot path to dense slots after verification; ordinary instruction dispatch performs no general subtype lookup.
+The source checker and bytecode verifier are independent implementations over different representations. The verifier reconstructs local/operand type states at block entries, checks joins, calls, fields, intrinsics, performs, scoped-designator escape, and claimed rows, and rejects malformed external code before it enters the verified-code cache. Source types are erased from the execution hot path to dense slots after verification; ordinary instruction dispatch performs no general subtype lookup.
 
 ## 6. Expressions and statements
 
@@ -693,7 +698,19 @@ obj.method(1)
 vm.from_object(program, args: ("Ada",))
 ```
 
-There is no overload resolution.
+A call may place one closure after its closing parenthesis. That closure becomes the final argument:
+
+```lm
+files.with_open(path, options) { |file|
+  file.read_all(max_bytes: 1_000_000)
+}
+
+files.with_open(path, options) do |file|
+  file.read_all(max_bytes: 1_000_000)
+end
+```
+
+The two trailing forms have identical precedence and evaluation order. A call accepts at most one trailing closure. There is no overload resolution.
 
 ### 6.2 Closures
 
@@ -709,7 +726,14 @@ end
 thunk = do || 42 end
 ```
 
-A closure is a sealed function object containing code identity and captures. Omitting `with` means empty row.
+A brace closure is an equivalent spelling:
+
+```lm
+increment = { |x: Int|: Int x + 1 }
+thunk = { || 42 }
+```
+
+Both forms lower to the same typed HIR node and bytecode form. They have identical capture, result, row, and evaluation rules. A closure is a sealed function object containing code identity and captures. Omitting `with` means empty row.
 
 ### 6.3 Fields, `self`, and `super`
 
@@ -742,7 +766,7 @@ List elements and map keys/values require a common non-`Any` type unless the lit
 
 ### 6.6 Precedence
 
-Strongest to weakest: postfix call/field/index; unary `not`/`-`; multiplicative; additive; ordering; equality/`is`/`as`; `and`; `or`; assignment. Assignment is right-associative; other binary operators are left-associative.
+Strongest to weakest: postfix call/field/index and a trailing closure; unary `not`/`-`; multiplicative; additive; ordering; equality/`is`/`as`; `and`; `or`; assignment. Assignment is right-associative; other binary operators are left-associative.
 
 ---
 
@@ -978,7 +1002,7 @@ Frozenness is checked at transfer boundaries, proc send/spawn, closure transfer,
 
 `digest()` computes BLAKE3-256 over a canonical frozen graph encoding. The encoder traverses deterministic field/index/insertion order, assigns object ordinals at first encounter, uses back-references for later encounters, encodes code/classes by hash, and includes sharing and cycles. Float encoding normalizes both signed zeros to positive zero and all NaNs to the canonical NaN, matching language equality. Live resources and nondigestible descriptors cause `BoundaryViolation`.
 
-One graph walker must define reachability and ordering for freeze, verification, copy, transfer, digest, and snapshot traversal.
+One graph walker must define reachability and ordering for freeze, verification, copy, transfer, digest, and snapshot traversal. Each native shape also declares one snapshot policy: `Portable`, `RestoreSlot`, `ScopedBarrier`, or `Reject`. Each suspending host operation declares one continuation policy from the same set.
 
 ---
 
@@ -1088,7 +1112,7 @@ enum Result[T, E]
 end
 ```
 
-File-not-found, end-of-input, parse failure, connection refusal, mailbox closure, and similar expected conditions belong in ordinary result types.
+File-not-found, end-of-input, parse failure, connection refusal, mailbox closure, snapshot blockers, and restore binding failures belong in ordinary result types.
 
 ### 12.2 Machine faults
 
@@ -1123,10 +1147,9 @@ Hosts may redact message and trace details while preserving the stable code.
 | `BoundaryViolation` | codec or descriptor rule violated |
 | `UnsendableValue` | mutable/nonsendable graph crossed a boundary |
 | `MalformedArtifact` | invalid artifact/bytecode |
-| `MalformedSnapshot` | invalid snapshot/machine image |
+| `MalformedSnapshot` | invalid snapshot/proc-domain image |
 | `LinkMismatch` | link binding incompatible |
 | `MissingCode` | required code hash unavailable |
-| `InertDescriptor` | unrebound resource was exercised |
 | `DeadProc` | operation required a live proc |
 | `IndexOutOfBounds` | invalid sequence index |
 | `MissingKey` | faulting map lookup missed |
@@ -1423,7 +1446,7 @@ One boundary codec serves VM load, terminal results, proc send/spawn, snapshots,
 
 1. **transfer:** independently controlled heap boundary;
 2. **control envelope:** holder-supplied temporary containers such as `args`, compile imports, link maps, and restore bindings;
-3. **snapshot:** canonical machine serialization;
+3. **snapshot:** canonical machine and proc-domain serialization;
 4. **inspection:** detached frozen views.
 
 A control envelope is holder-owned native metadata rather than a guest collection. Every member installed into guest, link, or compiler state is independently encoded and checked. Thus `args: ("Ada",)` is legal without making mutable guest lists generally sendable.
@@ -1438,22 +1461,31 @@ Transfer mode accepts:
 - frozen graphs of sendable fields/elements;
 - class/code/function values by hash plus frozen captures;
 - operation/group/type descriptors;
-- proc handles and snapshots;
+- portable typed proc handles and snapshots;
 - host value types explicitly marked sendable by the ABI.
 
-It rejects mutable graphs, full VM and policy-table handles, live host callbacks, and live OS resources. Rejection faults with `UnsendableValue` or `BoundaryViolation`; no implicit mutable deep copy occurs.
+It rejects mutable graphs, scoped designators, full VM and policy-table handles, live host callbacks, and live OS resources. Rejection faults with `UnsendableValue` or `BoundaryViolation`; no implicit mutable deep copy occurs.
 
 ### 16.3 Code and class transfer
 
 Code and classes cross by semantic hash. The receiving code store must already contain verified bytes for that hash or obtain them through an embedding-host code resolver. Missing code yields `MissingCode`. Code bytes are never accepted under a mismatched hash.
 
-A closure transfers code identity and its frozen capture graph. A capture that includes a holder-local handle or mutable graph makes the closure unsendable.
+A closure transfers code identity and its frozen capture graph. A capture that includes a holder-local handle, scoped designator, or mutable graph makes the closure unsendable.
 
-### 16.4 Handles and resources
+### 16.4 Handles, proc references, and resources
 
-A full `Vm`, `PolicyTable`, or raw host registry handle is holder-local. A proc `Handle` is a live sendable designator because send rights are intentionally transferable. Resource handles such as files and sockets serialize only as inert descriptors in snapshots; ordinary transfer rejects them unless an operation's ABI explicitly defines a safe transfer.
+A full `Vm`, `PolicyTable`, or raw host registry handle is holder-local. A proc `Handle[M,R]` is a live portable typed designator. Transfer preserves its opaque scheduler reference and its exact `M` and `R` types. Transfer never changes snapshot ownership.
 
-Trying to use an inert descriptor faults with `InertDescriptor` until a trusted restorer explicitly rebinds it.
+Each live proc reference has a realm identity, proc identity, and generation in the reference implementation. These fields are not ordinary guest fields. A stale generation produces the existing dead-proc result.
+
+A live external resource follows one fixed snapshot policy:
+
+- `Portable` encodes a logical capability directly;
+- `RestoreSlot(kind)` creates a typed restore requirement outside the guest heap;
+- `ScopedBarrier(kind)` can finish within bounded snapshot quiescence;
+- `Reject(kind)` blocks snapshot creation while the resource is live.
+
+Proc handles use `Portable`. Live file and socket handles never use `Portable`. No unresolved resource becomes an inert guest value. Restore validates every slot before it creates runnable state.
 
 ### 16.5 Inspection
 
@@ -1463,14 +1495,27 @@ Everything read out of another heap—stack frames, mirrors, pending request arg
 
 ## 17. Snapshots
 
-### 17.1 Shapes
+### 17.1 Snapshot domains
 
 ```lm
-snap = vm.snapshot()
-vm2 = sys.vm.Vm().restore(snap)
+case vm.snapshot(SnapshotOptions())
+in Ok(snap)
+  case sys.vm.Vm().restore(snap)
+  in Ok(vm2) then vm2.run()
+  in Err(error) then report_restore(error)
+  end
+in Err(error)
+  report_snapshot(error)
+end
 ```
 
-The surface spellings lower to distinct exact identities `Vm.SnapshotHeld` and `Vm.SnapshotSelf`. `vm.snapshot()` serializes a paused held `Vm[T]` and returns `Snapshot[T]`. `sys.vm.snapshot()` is receiverless and snapshots the machine performing that operation; because an independently compiled function cannot know the enclosing root machine's terminal type, it returns `SnapshotImage`, a frozen trusted image carrying a hidden result `TypeId` rather than `Any` or `DynValue`. External bytes first pass through `sys.vm.load_snapshot(bytes)`, which performs the one-time load verification and also returns `Result[SnapshotImage,SnapshotError]`.
+A held snapshot names one paused `Vm[T]` as its snapshot root. A receiverless self snapshot names the performing VM as its root. The snapshot domain contains that root and every transitively owned proc. Reachability through a proc handle does not add the target to the domain.
+
+`Proc.Run` and proc-class `spawn` create snapshot ownership edges. Each proc has at most one snapshot owner. Ownership forms a tree. Sending or storing a handle does not move its ownership edge.
+
+The surface spellings lower to distinct exact identities `Vm.SnapshotHeld` and `Vm.SnapshotSelf`. A held call returns `Result[Snapshot[T],SnapshotError]`. A self call returns `Result[SnapshotImage,SnapshotError]`, because the calling function cannot name the enclosing machine result type.
+
+External bytes first pass through `sys.vm.load_snapshot(bytes)`. The loader verifies the bytes once and returns `Result[SnapshotImage,SnapshotError]`.
 
 ```text
 SnapshotImage.result_type(self) -> TypeView
@@ -1480,25 +1525,101 @@ SnapshotImage.to_bytes(self) -> Bytes
 Snapshot[T].to_bytes(self) -> Bytes
 ```
 
-`restore(snap: Snapshot[T])` is valid only on an `EmptyVm`, installs the already trusted snapshot state, gives the receiver a fresh default-deny table, and returns `Vm[T]`. `restore_with` is the explicit form for rebinding supported inert descriptors or pending waits. `RestoreBindings` is a holder-side typed builder with ABI-generated descriptor-specific `bind` methods; it is not a `Map[String,Any]`, and a live handle can be bound only to the exact inert descriptor kind it implements. Serialization of either trusted snapshot view is deterministic.
+### 17.2 Domain contents
 
-A snapshot contains format/ABI versions, code and class manifest, type table, heap graph, roots, frame/operand arenas, current PCs, limits/fuel, state, pending request when present, inert host descriptors, and a container hash.
+A snapshot contains format and ABI versions, code and class manifests, type tables, every included heap, roots, frames, locals, operands, current PCs, limits, fuel, VM states, pending requests, proc ownership edges, mailbox types, mailbox limits, accepted mailbox values, mailbox close state, blocked receive state, terminal proc results, restore slots, proc references, and a container hash.
 
-It excludes policy table, root grants, live host callbacks, proc scheduler ownership, host thread state, and live OS resources.
+It excludes policy tables, root grants, live host callbacks, host thread identity, executor tasks, mutex/channel storage, wake objects, and live OS handles.
 
-### 17.2 Paused and pending snapshots
+The scheduler assigns one canonical proc ordinal to each included proc. An internal proc handle stores that ordinal and its static `Handle[M,R]` type. An external proc handle stores its portable scheduler reference. Handle reachability never copies an external proc.
 
-A snapshot taken between instructions restores between those instructions. A snapshot in `asked` restores in `asked`, preserving operation, frozen arguments, reply type, destination, continuation PC, and ordinal. The holder calls `drive()` once to obtain a fresh `Request` token for that preserved ordinal; no guest instruction runs.
+Restore relocates every internal handle to the corresponding restored proc. This includes handles in heaps, frames, locals, operands, closure captures, mailbox values, pending operation arguments, and terminal results.
 
-A snapshot in `waiting` cannot preserve a live host callback. It restores with the pending operation and an inert completion designator. The restorer must rebind the operation to a supported host continuation, reject it, or provide a validated answer.
+Restore resolves every external proc reference before any restored VM can run. The current scheduler realm may resolve the reference directly. `RestoreBindings` may supply another typed resolver. An unresolved external reference fails restore atomically. It never becomes an inert handle.
 
-A receiverless self-snapshot is captured while `Vm.SnapshotSelf` itself is pending. The restored copy resumes when the restorer answers that pending request with the snapshot descriptor/value it chooses. Execution then continues on the line after the call.
+### 17.3 Consistent cut
 
-### 17.3 Fresh authority and multi-shot restore
+One scheduler barrier captures the whole snapshot domain.
 
-The table is never serialized. Every restored VM receives a fresh default-deny table and fresh root relationship chosen by the restorer. Restored resources are inert. Snapshot bytes are immutable, so one snapshot may produce multiple diverging machines.
+1. It fixes the owned proc set.
+2. It blocks ownership changes in that set.
+3. It stops each included VM at an instruction or operation boundary.
+4. It freezes mailbox acceptance at one cut marker.
+5. It records accepted queues and logical proc state.
+6. It preflights resources and proc references.
+7. It encodes only after every preflight succeeds.
+8. It resumes the original domain after success or failure.
 
-### 17.4 Verification only on load
+A send accepted before the cut appears in the snapshot queue. A send accepted after the cut affects only the original domain. The barrier does not stop unrelated proc domains.
+
+A failed snapshot leaves the original domain unchanged. No included proc remains paused after the failure returns.
+
+### 17.4 Scoped resources and snapshot errors
+
+`SnapshotOptions` controls bounded descendant quiescence:
+
+```text
+wait_for_scopes: Bool
+scope_fuel: Int
+scope_steps: Int
+```
+
+When `wait_for_scopes` is false, an active `ScopedBarrier` returns `ResourceActive`. When it is true, included descendants may continue until their scoped barriers close or the limits expire. The snapshot root never runs during this work.
+
+A self snapshot inside the root's own active scoped resource cannot advance past itself. It returns `ResourceActive`. A descendant scope can finish, after which the scheduler pauses that proc at the next safe boundary.
+
+`SnapshotError` includes at least:
+
+```text
+ResourceActive(proc_path, resource_kind)
+ScopeDidNotQuiesce(proc_path, resource_kind)
+ProcUnavailable(proc_path)
+OwnershipChanged(proc_path)
+SnapshotLimitExceeded
+```
+
+The ownership path is bounded and starts at the snapshot root. Expected blockers are ordinary errors, not machine faults.
+
+### 17.5 Restore and fresh authority
+
+`restore(snap: Snapshot[T])` is valid only on an `EmptyVm`. It accepts a snapshot with no restore slots and directly resolvable external proc references. It returns `Result[Vm[T],RestoreError]`.
+
+`restore_with` accepts typed `RestoreBindings`. The builder can bind resource slots, external proc references, pending waits, and table plans keyed by canonical proc ordinal. It is not a `Map[String,Any]`. Every binding preserves the exact ABI resource kind or `Handle[M,R]` type.
+
+Restore validates all bindings before it creates runnable state. One invalid binding destroys the incomplete domain and returns an ordinary error.
+
+`RestoreError` includes at least:
+
+```text
+MissingResourceBinding(slot, resource_kind)
+WrongResourceBinding(slot, resource_kind)
+ExternalProcUnavailable(proc_path, proc_reference)
+WrongProcBinding(proc_path, expected_type)
+TablePlanMismatch(proc_path)
+RestoreLimitExceeded
+```
+
+Policy tables are never serialized. Each restored VM receives a fresh default-deny table. Internal pass chains refer to the new parent tables. A typed table plan may add entries before the domain gate opens.
+
+The returned root VM is holder-controlled. Restored descendants are scheduler-owned but stopped behind one domain gate. The first root `run`, `step`, or `drive` opens that gate.
+
+### 17.6 Paused, pending, and self snapshots
+
+A snapshot taken between instructions restores between those instructions. A snapshot in `asked` preserves operation, frozen arguments, reply type, destination, continuation PC, and ordinal. The holder calls `drive()` once to obtain a fresh `Request` token. No guest instruction runs.
+
+A snapshot in `waiting` never preserves a live completion callback. The operation continuation uses its declared snapshot policy. A `RestoreSlot` requires a typed binding. A `Reject` continuation blocks snapshot creation.
+
+A receiverless self snapshot is captured while `Vm.SnapshotSelf` is pending. The restored copy resumes when that pending request receives its selected snapshot value. `RestoreBindings` may choose the reply. The default reply is the trusted image used for that restore.
+
+### 17.7 Multi-shot restore
+
+Snapshot bytes are immutable. One snapshot may produce many restored domains.
+
+Each restore creates a distinct internal proc tree. Internal handles in one restore target that restore's proc clones. Internal handles in another restore target the other clones.
+
+External handles from every restore still target the same external proc. Proc handles are not linear capabilities. Normal proc operations define concurrent send, close, pause, and completion races.
+
+### 17.8 Verification only on load
 
 An in-process snapshot created from trusted verified state may use a trusted restore path. Bytes entering from storage, network, or another process are verified once at load.
 
@@ -1511,13 +1632,17 @@ Load verification checks:
 - object references, frozen flags, lists/maps, cycles, and roots;
 - frame function slots, PCs at instruction boundaries, locals, operands, and return destinations;
 - pending-request identity, argument/reply types, continuation destination, and legal state;
-- descriptor encoding and inertness of resource records.
+- proc ordinals, ownership acyclicity, and one-owner rules;
+- mailbox types, limits, accepted values, and close state;
+- internal handle relocation records and static handle types;
+- external proc references and restore-slot kinds;
+- domain-gate and paused-state consistency.
 
-Successful loading constructs trusted `VmState`. Execution, answering, and later snapshotting do not repeat structural verification. The write barrier and normal dynamic checks remain active because they enforce runtime semantics, not snapshot trust.
+Successful loading constructs trusted domain state. Execution, answering, and later snapshotting do not repeat structural verification. The write barrier and normal dynamic checks remain active because they enforce runtime semantics, not snapshot trust.
 
-### 17.5 Canonical form
+### 17.9 Canonical form
 
-The canonical snapshot representation uses deterministic section order, little-endian fixed fields where specified, canonical LEB128 counts/integers, object ordinals assigned by root traversal, and BLAKE3-256 domain-separated hashes. Debug/source-map data may be present but does not affect guest semantic identity.
+The canonical snapshot representation uses deterministic section order, little-endian fixed fields where specified, canonical LEB128 counts/integers, object ordinals assigned by root traversal, proc ordinals assigned by ownership traversal, and BLAKE3-256 domain-separated hashes. Debug/source-map data may be present but does not affect guest semantic identity.
 
 ---
 
@@ -1545,7 +1670,7 @@ end
 
 The proc instance is constructed inside its VM. The spawner receives only a typed `Handle[M,R]`, where `M` is the mailbox message type and `R` is the declared result of `on_spawn`.
 
-### 18.2 General launch
+### 18.2 General launch and snapshot ownership
 
 ```lm
 vm = sys.vm.Vm().from_object(program, args: ("Ada",))
@@ -1557,9 +1682,11 @@ h: Handle[Never, ()] = sys.proc.run(vm)
 
 `Proc.Run` with no mailbox argument chooses `M = Never`. The mailbox-bearing native form accepts an explicit `MailboxType[M]` created by proc-class lowering. `Proc.Run` atomically transfers execution ownership to the scheduler. The original VM handle becomes dormant; execution/inspection through it faults until `pause()` returns ownership. These methods are operations and therefore carry their exact `Proc.*` rows; table edits remain legal for revocation.
 
+Each launch also creates one snapshot ownership edge from the calling proc or held root to the new proc. Snapshot ownership forms a tree. Pause, resume, and handle transfer do not move the edge. Version 0.2 has no ownership-transfer operation.
+
 ### 18.3 `spawn` sugar and birth grant
 
-`Class.spawn(args...)` is compiler sugar available only for a subclass with a valid `on_spawn`. It constructs a VM from the proc class and a typed argument tuple, transfers code/data through the codec, grants the child `Proc` group, creates the declared mailbox, and invokes `Proc.Run`. The return type is `Handle[M,R]` inferred from the proc superclass and `on_spawn` result.
+`Class.spawn(args...)` is compiler sugar available only for a subclass with a valid `on_spawn`. It constructs a VM from the proc class and a typed argument tuple, transfers code/data through the codec, grants the child `Proc` group, creates the declared mailbox, invokes `Proc.Run`, and creates the same snapshot ownership edge. The return type is `Handle[M,R]` inferred from the proc superclass and `on_spawn` result.
 
 The birth grant is required so mailbox-bearing procs can receive. Since `spawn` itself carries `Proc`, the spawner is statically allowed to pass that group. Additional grants, mocks, limits, or admission checks use the explicit VM path.
 
@@ -1592,6 +1719,8 @@ h.close(): SendResult with Proc.Close
 ```
 
 When `M` is not `Never`, it also supports `h.send(message: M): SendResult with Proc.Send`. No `send(Any)` escape exists. `done()` blocks the holder operation until terminal and returns `Done(value)` or `Fault(fault)`. The value is transfer-checked. Pause requests synchronize at a guest instruction/operation boundary and return the underlying paused VM; resume moves it back to scheduler ownership.
+
+Handles are portable typed designators. Sending a handle preserves its target and types. It does not transfer snapshot ownership. During snapshot encoding, an internal handle becomes a canonical proc ordinal. An external handle keeps its portable scheduler reference.
 
 ### 18.5 Typed mailboxes
 
@@ -1635,13 +1764,15 @@ Accepted messages are delivered FIFO by host acceptance order. `close` prevents 
 
 Handles are sendable typed designators, so send rights can travel as data without erasing `M` or `R`. Attenuated send-only views are deferred.
 
-### 18.6 Failure and parent lifetime
+### 18.6 Failure, parent lifetime, and ownership records
 
 A proc crash is a value for its holder. Two blocked procs may deadlock; fuel, explicit timeout operations, or supervision converts that condition into policy-specific results or faults. A child table passes through the live parent's table. Parent death removes those pass-throughs and future requests fail closed.
 
+Snapshot ownership remains a classification record after owner termination. It does not keep authority alive. A later snapshot of an ancestor can still classify internal and external proc references deterministically.
+
 ### 18.7 Distribution
 
-A spawn payload is already a code hash plus a typed tuple of sendable values, and operations/messages already cross one codec. A future remote scheduler may transport the same protocol without changing language semantics; distribution is not required in version 0.2.
+A spawn payload is already a code hash plus a typed tuple of sendable values, and operations/messages already cross one codec. A portable proc reference may name another scheduler realm. A future remote scheduler may transport the same protocol without changing language semantics; distribution is not required in version 0.2.
 
 ## 19. Reflection
 
@@ -1780,6 +1911,7 @@ The verifier accepts a canonical artifact plus trusted ABI manifests and checks:
 - sealed class layouts, field/class/tag relationships, constructor initialization states, override signature/row compatibility, and enum switch coverage metadata;
 - intrinsic IDs/signatures/fuel formulas;
 - operation IDs, argument/reply types, and row containment;
+- scoped-designator escape and non-storing call positions;
 - exception-free control flow and frame/stack maxima;
 - constant graph validity and frozen status;
 - import and definition reference integrity.
@@ -1844,7 +1976,7 @@ flags:      u16    # frozen, marked, native, digest-cached, ...
 gc_word:    u32
 ```
 
-Ordinary instance payloads are contiguous `Value` fields in inherited-then-source order. Native objects use an immutable shape descriptor that supplies tracing, write locations, transfer, snapshot, digest, and destruction hooks.
+Ordinary instance payloads are contiguous `Value` fields in inherited-then-source order. Native objects use an immutable shape descriptor that supplies tracing, write locations, transfer, snapshot policy, snapshot encoding, digest, and destruction hooks.
 
 The object table adds one indexed load to field access but keeps the rest of the runtime safe Rust, allows page movement or compaction later, makes ownership checks explicit, and avoids self-referential Rust structures. A direct-pointer mode is permitted only after benchmarks show that indirection dominates.
 
@@ -1912,13 +2044,13 @@ reply_type
 reply_destination
 continuation_pc
 ordinal
-state: none | asked | waiting | inert_wait
+state: none | asked | waiting | restore_wait
 host_completion_token      # host-only; never serialized live
 ```
 
 While executing normally, arguments remain in verified operand slots. `drive` exits after the record is complete and before policy lookup. `Request.as_call` checks the exact operation slot and returns a holder token carrying VM identity, ordinal, argument tuple type, and reply type; `PendingCall.args()` boundary-encodes that tuple lazily. `answer` validates the token again before installing a reply.
 
-The snapshot form serializes semantic fields, never a live completion token. A waiting operation restores as an inert wait requiring explicit rebinding or rejection.
+The snapshot form serializes semantic fields, never a live completion token. Each waiting operation uses the continuation policy from the operation manifest. A `RestoreSlot` becomes a typed restore requirement. A `ScopedBarrier` can quiesce within limits. A `Reject` operation blocks snapshot creation.
 
 ### 22.9 `List`, `Map`, strings, and bytes
 
@@ -1937,10 +2069,10 @@ One non-recursive engine drives mark, deep freeze, frozen verification, boundary
 - `freeze`: O(V + E), sets bits only after all reachable objects validate;
 - transfer/copy: O(V + E + bytes), preserves cycles and sharing;
 - digest: O(V + E + bytes), assigns deterministic traversal ordinals and domain-separates backreferences;
-- snapshot write: O(reachable encoded bytes);
+- snapshot write: O(reachable encoded bytes plus proc-domain state);
 - external snapshot load: O(container bytes) once, producing trusted state.
 
-Depth never consumes the Rust stack. Every mode has object, edge, byte, and work limits.
+Depth never consumes the Rust stack. Every mode has object, edge, byte, and work limits. Transfer and copy commit destination state only after preflight succeeds.
 
 ### 22.11 Policy representation
 
@@ -1948,11 +2080,17 @@ A policy table contains one dense exact-action vector indexed by operation slot 
 
 The default block action requires no allocation. Live edits replace one action under the table's synchronization primitive. A running VM reads an immutable action snapshot for the current perform; revocation affects the next lookup.
 
-### 22.12 Procs and asynchronous host work
+### 22.12 Procs, snapshot ownership, and asynchronous host work
 
 A proc owns one `VmState` on one scheduler task. The baseline scheduler uses Rust threads for isolation clarity, with a bounded mailbox and a completion channel for host operations. An implementation may multiplex many proc tasks, but one VM is never executed concurrently.
 
+Each proc has a stable opaque reference and at most one snapshot owner. Launch creates the ownership edge. Handle transfer preserves the reference and never moves the edge.
+
+A snapshot-domain barrier fixes the owned proc set, pauses each VM at a safepoint, and records one mailbox acceptance cut. It resumes the original domain after success or failure. Host scheduler objects never enter snapshot bytes.
+
 Asynchronous host operations receive a single-use completion sink containing only controlled-VM ID, pending ordinal, and typed reply encoder. Completion queues never hold Rust references into the guest heap. Pause/resume transfers scheduler ownership at an interpreter safepoint.
+
+Each VM also owns a host-side resource registry outside the guest heap. The registry records resource kind, snapshot policy, scope identity, pending ordinal, and cleanup state. Snapshot preflight reads this registry and the guest graph.
 
 ### 22.13 Unsafe-code policy
 
@@ -1989,7 +2127,7 @@ Fs.Remove      (String) -> Result[(), FsError]
 Fs.Rename      (String, String) -> Result[(), FsError]
 ```
 
-A `FileHandle` is live only in the host binding that created it. Snapshot form is inert.
+A `FileHandle` is live only in the host binding that created it. Its snapshot policy is `Reject`. A separate ABI type can use `RestoreSlot` only when its host contract defines validation and rebinding. The standard library never reopens a raw file handle silently.
 
 ### 23.3 Clock and randomness
 
@@ -2017,7 +2155,7 @@ Net.Shutdown      (TcpHandle) -> Result[(), NetError]
 Net.Close         (NetHandle) -> Result[(), NetError]
 ```
 
-`NetHandle` is the sealed native resource parent of `TcpHandle` and `ListenerHandle`; it is unrelated to the `Any` top type. TLS, DNS policy, proxies, and certificates are library/host extensions, not ambient behavior.
+`NetHandle` is the sealed native resource parent of `TcpHandle` and `ListenerHandle`; it is unrelated to the `Any` top type. Live TCP streams and listeners have snapshot policy `Reject`. A checkpointable connection needs a separate ABI identity and restore contract. TLS, DNS policy, proxies, and certificates are library/host extensions, not ambient behavior.
 
 ### 23.5 VM operations
 
@@ -2037,11 +2175,16 @@ Vm.Stack[T]              (Vm[T]) -> [FrameView]
 Vm.Table[T]              (Vm[T]) -> PolicyTable
 Vm.SetLimits[T]          (Vm[T], Limits) -> ()
 Vm.AddFuel[T]            (Vm[T], Int) -> ()
-Vm.SnapshotHeld[T]       (Vm[T]) -> Snapshot[T]
-Vm.SnapshotSelf          () -> SnapshotImage
-Vm.LoadSnapshot          (Bytes) -> Result[SnapshotImage, SnapshotError]
-Vm.Restore[T]            (EmptyVm, Snapshot[T]) -> Vm[T]
-Vm.RestoreWith[T]        (EmptyVm, Snapshot[T], RestoreBindings) -> Vm[T]
+Vm.SnapshotHeld[T]       (Vm[T], SnapshotOptions)
+                          -> Result[Snapshot[T], SnapshotError]
+Vm.SnapshotSelf          (SnapshotOptions)
+                          -> Result[SnapshotImage, SnapshotError]
+Vm.LoadSnapshot          (Bytes)
+                          -> Result[SnapshotImage, SnapshotError]
+Vm.Restore[T]            (EmptyVm, Snapshot[T])
+                          -> Result[Vm[T], RestoreError]
+Vm.RestoreWith[T]        (EmptyVm, Snapshot[T], RestoreBindings)
+                          -> Result[Vm[T], RestoreError]
 ```
 
 The held and receiverless forms use separate exact operation identities because their honest result types differ, while sharing one serializer/host implementation family. `SnapshotImage.cast_result(type_descriptor[T]())` checks the hidden result `TypeId` and returns `Result[Snapshot[T],SnapshotTypeError]`; typed restore accepts only the checked view.
@@ -2061,7 +2204,7 @@ Proc.Pause[M,R]     (Handle[M,R]) -> Result[Vm[R], ProcError]
 Proc.Resume[M,R]    (Handle[M,R]) -> Result[(), ProcError]
 ```
 
-A proc with no mailbox uses `Never` as `M`; such a handle has no callable `send` method.
+A proc with no mailbox uses `Never` as `M`; such a handle has no callable `send` method. `Run` and `Spawn` create snapshot ownership edges. No other proc operation moves those edges.
 
 ### 23.7 Compiler and reflection
 
@@ -2126,9 +2269,9 @@ class Range
 end
 ```
 
-It also contains `StepEvent`, `RunResult`, `DriveEvent`, `Recv`, `ProcResult`, `SendResult`, `PendingCall`, `SnapshotImage`, portable operation error enums, `OpenOptions`, `SeekFrom`, `FileInfo`, `SocketAddress`, `Duration`, `Instant`, `CompileOptions`, and related ABI records.
+It also contains `StepEvent`, `RunResult`, `DriveEvent`, `Recv`, `ProcResult`, `SendResult`, `PendingCall`, `SnapshotImage`, `SnapshotOptions`, `SnapshotError`, `RestoreError`, `RestoreBindings`, portable operation error enums, `OpenOptions`, `SeekFrom`, `FileInfo`, `SocketAddress`, `Duration`, `Instant`, `CompileOptions`, and related ABI records.
 
-`List`, `Map`, `String`, `Bytes`, builders, type descriptors, faults, empty/typed VM, snapshot, proc, and resource handles are native core classes declared in the same pinned image. Their complete method tables are sealed there; some bodies are intrinsics and some are ordinary verified bytecode attached during the core build.
+`List`, `Map`, `String`, `Bytes`, builders, type descriptors, faults, empty/typed VM, snapshot, proc, scoped file lease, and resource handles are native core classes declared in the same pinned image. Their complete method tables are sealed there; some bodies are intrinsics and some are ordinary verified bytecode attached during the core build.
 
 ### 24.2 Prelude
 
@@ -2301,15 +2444,46 @@ read_line(): Result[Option[String], IoError] with Io.ReadLine
 read_all(max_bytes: Int): Result[Bytes, IoError] with Io.ReadBytes
 ```
 
-`std/fs` defines explicit `File` and directory helpers. `File` offers `read`, `read_exact`, `read_all`, `read_text`, `write`, `write_all`, `flush`, `seek`, and `close`, each retaining the exact underlying `Fs.*` row. Top-level helpers include `open`, `read`, `read_text`, `write`, `write_text`, `stat`, `read_dir`, `create_dir`, `remove`, and `rename`.
+`std/fs` makes scoped access the standard file path:
 
-There are no finalizers. Code closes explicitly; the host reclaims leaked resources only when the VM dies, without guest callbacks.
+```lm
+files.with_open(path, options) { |file|
+  file.read_all(max_bytes: 1_000_000)
+}
+```
+
+Conceptually:
+
+```text
+with_open[R,e](
+  path: Path,
+  options: OpenOptions,
+  body: (FileLease) -> R with e
+) -> Result[R,FsError] with Fs.Open, Fs.Close, e
+```
+
+`FileLease` is a scoped designator. It offers `read`, `read_exact`, `read_all`, `read_text`, `write`, `write_all`, `flush`, and `seek`. It has no public `close` method. An open failure returns `Err` without calling the body. A normal body return closes the lease before returning. A close failure returns `Err` instead of the body value.
+
+A body fault terminates the machine normally. The host-side resource registry closes the lease during VM cleanup. Cleanup invokes no guest callback and does not replace the original terminal fault.
+
+The advanced API remains explicit:
+
+```text
+open_handle(path, options)
+  -> Result[FileHandle,FsError] with Fs.Open
+```
+
+`FileHandle` has explicit read, write, seek, flush, and close methods. Its snapshot policy is `Reject`. A host extension may define a distinct checkpointable file type with a typed `RestoreSlot` contract.
+
+Top-level helpers include `read`, `read_text`, `write`, `write_text`, `stat`, `read_dir`, `create_dir`, `remove`, and `rename`. They use scoped handles internally and retain the exact underlying rows.
+
+There are no finalizers. Scoped cleanup is host-managed. Raw handle ownership remains explicit.
 
 ### 24.10 Time, randomness, networking, and process inputs
 
 `std/time` defines frozen `Duration` and `Instant`, checked conversion helpers, `now`, `monotonic`, and `sleep`. `std/random` provides `bytes`, half-open integer ranges, Boolean selection, list `choose`, and Fisher-Yates `shuffle`, with exact `Rand` rows.
 
-`std/net` wraps resolve/connect/listen/accept/read/write/shutdown/close for TCP. TLS, HTTP, and DNS policy are separate packages because they introduce substantial policy and dependency choices.
+`std/net` wraps resolve/connect/listen/accept/read/write/shutdown/close for TCP. Raw TCP handles have snapshot policy `Reject`. TLS, HTTP, and DNS policy are separate packages because they introduce substantial policy and dependency choices.
 
 Command-line arguments are passed as the root entry tuple by the CLI rather than read ambiently. `Process.EnvGet` and `Process.CurrentDir` are optional explicit host operations; `std/process` wraps them when the host ABI enables that group.
 
@@ -2352,11 +2526,11 @@ def answer_print[T](
 end
 ```
 
-A policy can define one such function per operation whose behavior it owns. This remains fully type-checked by the ordinary `Request.as_call` rule and does not add variadic generics, tuple spreading, or a third dependent native rule. `std/vm` instead provides fuel/limit builders, terminal-result mapping, snapshot-image file helpers, and bounded request logging through `ValueView`.
+A policy can define one such function per operation whose behavior it owns. This remains fully type-checked by the ordinary `Request.as_call` rule and does not add variadic generics, tuple spreading, or a third dependent native rule. `std/vm` instead provides fuel/limit builders, terminal-result mapping, snapshot-image file helpers, bounded request logging through `ValueView`, and typed restore-binding builders.
 
 ### 24.13 Procs
 
-`std/proc` supplies explicit supervision, bounded send loops, close/drain, cancellation-message conventions, and result aggregation. It does not add shared memory or hide proc effects. `Handle[M,R]` preserves message and result types through `send`, `done`, `pause`, and `resume`.
+`std/proc` supplies explicit supervision, bounded send loops, close/drain, cancellation-message conventions, result aggregation, and snapshot ownership inspection. It does not add shared memory or hide proc effects. `Handle[M,R]` preserves message and result types through `send`, `done`, `pause`, `resume`, transfer, and snapshot restore.
 
 ### 24.14 Compiler, reflection, and testing
 
@@ -2410,9 +2584,15 @@ An intrinsic is deterministic, has the empty row, cannot suspend, and cannot cal
 
 Native `List`, `Map`, `String`, `Bytes`, builder, graph, numeric, and type-test operations are intrinsics or kernel instructions, not host operations. Their faults are deterministic language faults.
 
-### 25.5 Native classes and graph shapes
+### 25.5 Native classes, graph shapes, and resource registry
 
-Every native heap class registers one immutable shape descriptor describing traced references, frozen-write locations, canonical field order, snapshot encoding, boundary policy, and digestibility. A native class that cannot participate consistently must be holder-local or inert and cannot masquerade as an ordinary sendable object.
+Every native heap class registers one immutable shape descriptor describing traced references, frozen-write locations, canonical field order, snapshot policy, snapshot encoding, boundary policy, digestibility, and cleanup behavior. A native class that cannot participate consistently must be holder-local or use `Reject`; it cannot masquerade as an ordinary sendable object.
+
+Every suspending host operation declares one continuation snapshot policy. No live completion callback enters snapshot bytes.
+
+Each VM has a host-side resource registry outside the guest heap. It records resource kind, snapshot policy, owning VM, scope identity, pending operation ordinal, and cleanup state. Snapshot preflight reads the registry and the guest graph. A pending operation can retain live external state after its guest wrapper becomes unreachable.
+
+VM termination closes registered scoped resources. It invokes no guest callback. Cleanup failure does not replace an existing machine fault.
 
 ### 25.6 ABI initialization
 
@@ -2486,7 +2666,7 @@ Debug maps are keyed by semantic code hash and excluded from semantic identity. 
 
 ### 26.6 Embedding API
 
-The Rust reference host exposes narrow APIs to initialize an ABI bundle, load/verify artifacts and snapshots, create root bindings, configure limits/tables, drive VMs, register host operation implementations, and resolve code hashes. An optional generated C ABI shim exposes opaque handles over the same Rust API. Embedders cannot install unverified executable bytes directly into a `VmState`.
+The Rust reference host exposes narrow APIs to initialize an ABI bundle, load/verify artifacts and snapshots, create root bindings, configure limits/tables, drive VMs, register host operation implementations, resolve code hashes, resolve external proc references, and bind restore slots. An optional generated C ABI shim exposes opaque handles over the same Rust API. Embedders cannot install unverified executable bytes directly into a `VmState`.
 
 ---
 
@@ -2502,13 +2682,13 @@ A host admits code by one or more explicit rules: known semantic hash, successfu
 
 ### 27.3 Limits
 
-Before allocating from untrusted artifact/snapshot/boundary input, implementations check byte counts, object counts, nesting/work limits, frame/operand maxima, string/collection sizes, and checked arithmetic. Runtime limits cover fuel, heap, stack, pending boundary bytes, snapshot bytes, mailbox bytes/messages, mock work, and host-specific quotas.
+Before allocating from untrusted artifact/snapshot/boundary input, implementations check byte counts, object counts, proc counts, mailbox counts, nesting/work limits, frame/operand maxima, string/collection sizes, and checked arithmetic. Runtime limits cover fuel, heap, stack, pending boundary bytes, snapshot bytes, mailbox bytes/messages, mock work, scope quiescence, and host-specific quotas.
 
 A malformed external input returns a load/verify error or faults the controlled boundary; it must not crash the host, overflow arithmetic, allocate beyond declared limits, or create unchecked code/state.
 
 ### 27.4 Revocation and fail-closed behavior
 
-Policy edits apply to future performs. Parent/root disappearance, missing code, inert resources, invalid state, and host registry mismatches fail closed. Snapshot restore creates no authority. A blocked operation is a machine fault, not a value visible to code inside that machine.
+Policy edits apply to future performs. Parent/root disappearance, missing code, unavailable external proc references, invalid restore bindings, active rejected resources, invalid state, and host registry mismatches fail closed. Snapshot restore creates no authority. A blocked operation is a machine fault, not a value visible to code inside that machine.
 
 ### 27.5 No ambient recovery hooks
 
@@ -2526,22 +2706,24 @@ A conforming implementation passes tests for at least:
 
 1. identical semantic hashes for canonical equivalent compiler output;
 2. rejection of malformed, truncated, overlong, and noncanonical artifact encodings;
-3. verifier detection of stack, local, type, call, field, intrinsic, perform, and row inconsistencies;
+3. verifier detection of stack, local, type, call, field, intrinsic, perform, row, and scoped-designator inconsistencies;
 4. class sealing, initialization safety, override row narrowing, and enum exhaustiveness;
 5. exact/group/default table precedence, pure mocks, pass-chain authority, and live revocation;
 6. `run`, one-instruction `step`, `drive`, `answer`, `reject`, `dispatch`, waiting, and illegal-state transitions;
 7. no host-stack growth proportional to guest call depth;
 8. nested-VM default denial and transitive grant charging;
 9. deep freeze, cycles, sharing, map order, digest stability, and frozen write barriers;
-10. boundary rejection of mutable/holder-local values and inert descriptor behavior;
-11. snapshot round trips at every instruction boundary, in `asked`, and with supported waiting rebinding;
+10. boundary rejection of mutable, scoped, and holder-local values; portable proc-handle transfer;
+11. snapshot round trips at every instruction boundary, in `asked`, and with supported waiting bindings;
 12. one-time snapshot load verification followed by trusted resume without repeated whole-image checks;
-13. proc isolation, FIFO acceptance, close/drain, pause/resume, dead-peer results, and terminal transfer checks;
-14. reflection and stack views containing no writable guest references;
-15. deterministic diagnostics, compile environments, interface/build keys, and byte-for-byte reproducible artifacts;
-16. fuel, heap, frame, operand, boundary, mailbox, mock, and snapshot limits;
-17. fuzzing of scanners, parsers, artifact/snapshot readers, verifier, boundary codec, graph walker, and interpreter state transitions;
-18. cross-platform ABI vectors for hashes, numbers, UTF-8, floats, manifests, artifacts, snapshots, and value digests.
+13. proc isolation, FIFO acceptance, close/drain, pause/resume, ownership trees, dead-peer results, and terminal transfer checks;
+14. internal proc-handle relocation and external proc-reference resolution across multi-shot restore;
+15. resource-policy preflight, scoped quiescence, atomic restore slots, and precise blocker paths;
+16. reflection and stack views containing no writable guest references;
+17. deterministic diagnostics, compile environments, interface/build keys, and byte-for-byte reproducible artifacts;
+18. fuel, heap, frame, operand, boundary, mailbox, mock, scope-quiescence, and snapshot limits;
+19. fuzzing of scanners, parsers, artifact/snapshot readers, verifier, boundary codec, graph walker, proc ownership, handle relocation, restore bindings, and interpreter state transitions;
+20. cross-platform ABI vectors for hashes, numbers, UTF-8, floats, manifests, artifacts, snapshots, proc references, and value digests.
 
 ---
 
@@ -2622,11 +2804,13 @@ multiplicative  = unary, { ( "*" | "/" | "%" ), unary } ;
 unary           = ( "not" | "-" ), unary | postfix ;
 
 postfix         = primary,
-                  { generic_apply_suffix | call_suffix | field_suffix | index_suffix } ;
+                  { generic_apply_suffix | call_suffix | field_suffix | index_suffix },
+                  [ trailing_closure ] ;
 generic_apply_suffix = "[", type, { ",", type }, "]" ;
 call_suffix     = "(", [ arguments ], ")" ;
 field_suffix    = ".", IDENT ;
 index_suffix    = "[", expression, "]" ;
+trailing_closure= closure ;
 
 arguments       = argument, { ",", argument } ;
 argument        = [ IDENT, ":" ], expression ;
@@ -2647,13 +2831,17 @@ primary         = literal
                 | "break"
                 | "continue" ;
 
-list_literal   = "[", [ expression, { ",", expression } ], "]" ;
+list_literal    = "[", [ expression, { ",", expression } ], "]" ;
 map_literal     = "{", [ map_entry, { ",", map_entry } ], "}" ;
 map_entry       = expression, ":", expression ;
 
-closure         = "do", "|", [ parameters ], "|", [ ":", type ],
+closure         = do_closure | brace_closure ;
+do_closure      = "do", "|", [ parameters ], "|", [ ":", type ],
                   [ effect_clause ],
                   ( separators, block | expression ), "end" ;
+brace_closure   = "{", "|", [ parameters ], "|", [ ":", type ],
+                  [ effect_clause ],
+                  ( separators, block | expression ), "}" ;
 
 if_expr         = "if", expression, separators, block,
                   { "elsif", expression, separators, block },
@@ -2683,12 +2871,15 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - `method_parameters` always starts with untyped source `self` or `mut self`; its containing class supplies the type. There are no source static methods.
 - Classes and enums declare only type parameters. Top-level functions and methods may additionally declare `effect` parameters.
 - `()` is unit. `(T,)` and `(T,U)` are tuple types; the same parenthesized list followed by `->` is a function parameter list. A one-element tuple requires the trailing comma.
-- `do || ... end` is an empty-parameter closure. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.
+- `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.
+- A left brace followed by a pipe starts a brace closure. Other braces start a map literal. `{}` is an empty map.
+- A trailing closure is valid only after a postfix chain that contains a call suffix. It becomes the final call argument.
 - A bracket suffix is generic application only where static resolution permits it and normally precedes a call; otherwise it is indexing. Ambiguous source is rejected.
 - A postfix assignment target must be a writable field or index, not an arbitrary call result.
 - Enum arms must precede enum methods. A zero-field constructor such as `None` is recognized from expected/scrutinee context; another bare name is a binding pattern.
 - Class fields and methods may be interleaved. Field layout follows inherited fields then local field source order.
 - The built-in static typing rule for `PolicyTable.pass` is specified in section 11.5 and is not expressible fully in the ordinary grammar/type language.
+- The scoped-designator escape rule is specified in section 5.13 and is not a general source lifetime syntax.
 
 ---
 
@@ -2753,10 +2944,12 @@ No `Any` appears in the reply path. Matching the exact operation recovers its ar
 - dynamic selector calls, `method_missing`, class reopening, or mutable code;
 - ad-hoc unions/intersections, nullable references, traits, or user variance;
 - exceptions, rescue, unwinding, destructors, or finalizers;
+- general borrow checking or user-defined lifetime parameters;
 - shared-memory guest threads;
 - stateful policy-table callbacks;
 - ambient imports, mutable globals, or effectful module initialization;
-- automatic resource closing or serialization of live OS resources;
+- transparent serialization or silent reopening of live OS resources;
+- snapshots of unrelated proc domains through handle reachability;
 - record/replay layers, reply channels, attenuated handles, or remote scheduling;
 - JIT/tiered execution, although verified interpreter state is designed to permit later deoptimization;
 - guarantees against microarchitectural or process-wide timing side channels.
