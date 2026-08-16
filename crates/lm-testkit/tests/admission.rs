@@ -322,6 +322,182 @@ fn a_shared_object_checked_under_a_second_type_rejects() {
 }
 
 // ---------------------------------------------------------------
+// Object type coherence.
+// ---------------------------------------------------------------
+
+const ALIAS_SOURCE: &str = "\
+def go(): Int
+  xs: [Int] = []
+  ys: [String] = []
+  xs.len() + ys.len()
+end
+
+go()
+";
+
+/// The ordinals of the objects one local of the root machine names and
+/// that answer the question, in local order.
+fn local_objects(image: &Image, ok: impl Fn(&Object) -> bool) -> Vec<u32> {
+    let machine = &image.machines[0];
+    let mut out: Vec<u32> = Vec::new();
+    for value in &machine.locals {
+        let Value::Obj(r) = value else { continue };
+        if out.contains(&r.slot) {
+            continue;
+        }
+        if ok(&machine.objects[r.slot as usize].object) {
+            out.push(r.slot);
+        }
+    }
+    out
+}
+
+/// Point the local that names `what` at the object `to`, and rebuild
+/// the heap in canonical order.
+fn alias_local(image: &Image, what: u32, to: u32) -> Image {
+    let mut broken = image.clone();
+    let at = broken.machines[0]
+        .locals
+        .iter()
+        .position(|v| {
+            *v == Value::Obj(ObjRef {
+                slot: what,
+                generation: 0,
+            })
+        })
+        .expect("one local names the object");
+    broken.machines[0].locals[at] = Value::Obj(ObjRef {
+        slot: to,
+        generation: 0,
+    });
+    recanonicalize(&mut broken.machines[0]);
+    broken
+}
+
+/// One typed edge proves that edge alone. Two locals typed `[Int]` and
+/// `[String]` can name one empty mutable list, and each edge passes
+/// because the list holds no element. Verified code then appends an
+/// integer through the first local and reads a string through the
+/// second.
+#[test]
+fn one_empty_list_under_two_element_types_rejects() {
+    let loaded = program(ALIAS_SOURCE);
+    let images = boundaries(&loaded, &[], 40);
+    let empty = |image: &Image| -> Vec<u32> {
+        local_objects(
+            image,
+            |object| matches!(object, Object::List { items } if items.is_empty()),
+        )
+    };
+    let image = pick(&images, "two empty lists in locals", |image| {
+        empty(image).len() == 2
+    });
+    let found = empty(&image);
+    let broken = alias_local(&image, found[1], found[0]);
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+}
+
+const BAG_SOURCE: &str = "\
+class Bag[T]
+  v: [T]
+
+  def init(mut self, v: [T])
+    self.v = v
+  end
+
+  def size(self): Int
+    self.v.len()
+  end
+end
+
+def go(): Int
+  a: Bag[Int] = Bag([])
+  b: Bag[String] = Bag([])
+  a.size() + b.size()
+end
+
+go()
+";
+
+/// A generic instance with an empty collection field carries the same
+/// defect. The exact type of an instance is its concrete class with its
+/// concrete arguments, so `Bag[Int]` and `Bag[String]` cannot name one
+/// object.
+#[test]
+fn one_generic_instance_under_two_arguments_rejects() {
+    let loaded = program(BAG_SOURCE);
+    let images = boundaries(&loaded, &[], 80);
+    let bags = |image: &Image| -> Vec<u32> {
+        local_objects(image, |object| {
+            matches!(object, Object::Instance { fields, .. }
+                if fields.len() == 1 && matches!(fields[0], Value::Obj(_)))
+        })
+    };
+    let image = pick(&images, "two bags in locals", |image| {
+        bags(image).len() == 2
+    });
+    let found = bags(&image);
+    let broken = alias_local(&image, found[1], found[0]);
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+}
+
+const SUBCLASS_ALIAS_SOURCE: &str = "\
+class Beast
+  legs: Int = 4
+end
+
+class Hound < Beast
+  def bark(self): Int
+    self.legs
+  end
+end
+
+def go(): Int
+  d = Hound()
+  a: Beast = d
+  d.bark() + a.legs
+end
+
+go()
+";
+
+/// A subclass instance reached from a parent-typed edge and a
+/// child-typed edge is ordinary code. The coherence rule normalizes
+/// both edges through the concrete class, so the world still admits.
+#[test]
+fn one_instance_at_a_parent_and_a_child_edge_admits() {
+    let loaded = program(SUBCLASS_ALIAS_SOURCE);
+    let images = boundaries(&loaded, &[], 80);
+    let mut count = 0usize;
+    for image in &images {
+        let shared = image.machines[0]
+            .objects
+            .iter()
+            .enumerate()
+            .any(|(idx, entry)| {
+                matches!(entry.object, Object::Instance { .. })
+                    && image.machines[0]
+                        .locals
+                        .iter()
+                        .filter(|v| {
+                            **v == Value::Obj(ObjRef {
+                                slot: idx as u32,
+                                generation: 0,
+                            })
+                        })
+                        .count()
+                        == 2
+            });
+        if !shared {
+            continue;
+        }
+        count += 1;
+        assert_eq!(admit(&loaded, image), None, "one instance at two edges");
+    }
+    assert!(count > 0, "no capture aliased the instance from two locals");
+}
+
+// ---------------------------------------------------------------
 // Dynamic dispatch.
 // ---------------------------------------------------------------
 
@@ -1468,6 +1644,9 @@ fn gate_corpus() -> Vec<(String, String)> {
         ("call-token-source", CALL_TOKEN_SOURCE),
         ("abstract-source", ABSTRACT_SOURCE),
         ("override-source", OVERRIDE_SOURCE),
+        ("alias-source", ALIAS_SOURCE),
+        ("bag-source", BAG_SOURCE),
+        ("subclass-alias-source", SUBCLASS_ALIAS_SOURCE),
         ("pick-source", PICK_SOURCE),
         ("faulted-source", FAULTED_SOURCE),
         ("asked-source", ASKED_SOURCE),

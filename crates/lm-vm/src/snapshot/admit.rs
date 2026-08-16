@@ -1614,14 +1614,82 @@ impl Admit<'_> {
     /// proof under several types, so the visited key carries the type.
     fn walk(&self, budget: &mut AdmissionBudget, work: &mut Work) -> Result<(), ImageError> {
         let mut visited: HashSet<(u32, u32, u32)> = HashSet::new();
+        // Specification 5.4: one object carries one exact closed type.
+        let mut exact: HashMap<(u32, u32), u32> = HashMap::new();
         while let Some((vm, object, ty)) = work.pop() {
             if !visited.insert((vm, object, ty)) {
                 continue;
             }
             budget.charge(1)?;
             self.check_object(vm, object, ty, budget, work)?;
+            self.check_coherence(vm, object, ty, &mut exact, budget)?;
         }
         Ok(())
+    }
+
+    /// The one exact closed type of one object.
+    ///
+    /// The type of an instance follows from the concrete class of the
+    /// object, so two positions that name one instance at two class
+    /// levels normalize to one type. The type of a closure follows from
+    /// its function in the same way.
+    ///
+    /// Every other shape takes the type of the edge that reached it. An
+    /// empty list names no element type, so the object alone answers
+    /// nothing.
+    fn exact_type(&self, vm: u32, object: u32, ty: u32) -> u32 {
+        match self.image.machines[vm as usize].objects[object as usize].object {
+            Object::Instance { class, .. } => self.types.instance_type(class, ty).unwrap_or(ty),
+            Object::Closure { func, .. } => self.types.fn_type(func).unwrap_or(ty),
+            _ => ty,
+        }
+    }
+
+    /// Prove that every edge into one object names one exact type.
+    ///
+    /// One typed edge proves that edge alone. Two locals typed
+    /// `List[Int]` and `List[Str]` can name one empty mutable list, and
+    /// each edge passes because the list holds no element. Verified
+    /// code then appends an integer through the first local and reads a
+    /// string through the second.
+    ///
+    /// Class arguments are invariant (`docs/specs/language-spec.md`
+    /// section 6), so `List[Int]` and `List[Str]` are unrelated types
+    /// and the aliased list rejects. A `Dog` instance reached from an
+    /// `Animal` edge still admits: nominal subclassing is real
+    /// subtyping, and the concrete class answers the same exact type at
+    /// both edges.
+    ///
+    /// The map keeps the most specific type any edge names, so the
+    /// order of the walk does not change the answer.
+    fn check_coherence(
+        &self,
+        vm: u32,
+        object: u32,
+        ty: u32,
+        exact: &mut HashMap<(u32, u32), u32>,
+        budget: &mut AdmissionBudget,
+    ) -> Result<(), ImageError> {
+        let found = self.exact_type(vm, object, ty);
+        let key = (vm, object);
+        let Some(held) = exact.get(&key).copied() else {
+            budget.charge(1)?;
+            exact.insert(key, found);
+            return Ok(());
+        };
+        if self.types.is_subtype(held, found) {
+            return Ok(());
+        }
+        if self.types.is_subtype(found, held) {
+            exact.insert(key, found);
+            return Ok(());
+        }
+        fail(
+            ImageReason::Layout,
+            format!(
+                "machine {vm} object {object} is reached at two types that no one value carries"
+            ),
+        )
     }
 
     /// Prove one object against one resolved type.
