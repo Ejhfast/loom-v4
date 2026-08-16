@@ -67,8 +67,9 @@ use std::collections::HashMap;
 /// `lm_abi::manifest_digest()`, which every definition hash includes.
 ///
 /// Version 6 adds the parent type arguments of a generic parent to
-/// the canonical class identity encoding.
-pub const COMPILER_ABI_VERSION: u32 = 6;
+/// the canonical class identity encoding. Version 7 adds the
+/// `SnapshotImage` and `Snapshot` type tags.
+pub const COMPILER_ABI_VERSION: u32 = 7;
 
 /// The refinement work budget of one component.
 ///
@@ -261,6 +262,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             | BcType::PolicyTable
             | BcType::EmptyVm
             | BcType::Digest
+            | BcType::SnapshotImage
             | BcType::Var(_) => {}
             BcType::Class(c) => class_ok(*c)?,
             BcType::Inst(c, args) => {
@@ -289,7 +291,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
                 earlier(*ret)?;
                 check_row(&format!("type {idx}"), row)?;
             }
-            BcType::Vm(t) => earlier(*t)?,
+            BcType::Vm(t) | BcType::Snapshot(t) => earlier(*t)?,
             BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 earlier(*a)?;
                 earlier(*r)?;
@@ -692,7 +694,7 @@ impl Graph {
                     }
                     list.push(s.type_node(*ret));
                 }
-                BcType::Vm(t) => list.push(s.type_node(*t)),
+                BcType::Vm(t) | BcType::Snapshot(t) => list.push(s.type_node(*t)),
                 BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                     list.push(s.type_node(*a));
                     list.push(s.type_node(*r));
@@ -1040,6 +1042,11 @@ impl<'a> Resolver<'a> {
                 out.push(21);
                 out.extend_from_slice(&self.type_digest(*m));
                 out.extend_from_slice(&self.type_digest(*r));
+            }
+            BcType::SnapshotImage => out.push(22),
+            BcType::Snapshot(t) => {
+                out.push(23);
+                out.extend_from_slice(&self.type_digest(*t));
             }
             BcType::Op(op, f) => {
                 out.push(19);

@@ -46,6 +46,44 @@ pub enum FaultCode {
     UnreachableCode,
 }
 
+/// Every stable fault code, in declaration order.
+///
+/// A snapshot writes a fault by its stable name (specification 12.3),
+/// so a loader must map a name back to a code. This table is the one
+/// place that lists the codes, so a new code joins both directions at
+/// once.
+pub const FAULT_CODES: [FaultCode; 19] = [
+    FaultCode::IntegerOverflow,
+    FaultCode::DivideByZero,
+    FaultCode::OutOfFuel,
+    FaultCode::StackLimit,
+    FaultCode::HeapLimit,
+    FaultCode::FrozenWrite,
+    FaultCode::IndexOutOfBounds,
+    FaultCode::MissingKey,
+    FaultCode::BadCast,
+    FaultCode::PolicyDenied,
+    FaultCode::InvalidVmState,
+    FaultCode::InvalidRequestToken,
+    FaultCode::UnsendableValue,
+    FaultCode::BoundaryLimit,
+    FaultCode::BoundaryViolation,
+    FaultCode::HostFault,
+    FaultCode::DeadProc,
+    FaultCode::UninitializedField,
+    FaultCode::UnreachableCode,
+];
+
+impl FaultCode {
+    /// The code with this stable name, or `None`.
+    pub fn from_name(name: &str) -> Option<FaultCode> {
+        FAULT_CODES
+            .iter()
+            .copied()
+            .find(|code| code.to_string() == name)
+    }
+}
+
 impl fmt::Display for FaultCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
@@ -104,6 +142,21 @@ mod tests {
             FaultCode::BoundaryViolation.to_string(),
             "BoundaryViolation"
         );
+    }
+
+    /// Every code round trips through its stable name, and the table
+    /// lists each code once. A snapshot writes the name, so a missing
+    /// entry would make a stored fault unreadable.
+    #[test]
+    fn every_code_round_trips_through_its_name() {
+        let mut seen: Vec<String> = Vec::new();
+        for code in FAULT_CODES {
+            let name = code.to_string();
+            assert!(!seen.contains(&name), "duplicate code name {name}");
+            assert_eq!(FaultCode::from_name(&name), Some(code));
+            seen.push(name);
+        }
+        assert_eq!(FaultCode::from_name("NoSuchCode"), None);
     }
 
     #[test]

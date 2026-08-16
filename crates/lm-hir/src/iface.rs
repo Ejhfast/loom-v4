@@ -79,6 +79,7 @@ impl Naming<'_> {
             Type::Request => IfaceType::Request,
             Type::PolicyTable => IfaceType::PolicyTable,
             Type::EmptyVm => IfaceType::EmptyVm,
+            Type::SnapshotImage => IfaceType::SnapshotImage,
             Type::Class(c) => IfaceType::Named {
                 class: self.qual(c.0),
                 args: vec![],
@@ -98,6 +99,7 @@ impl Naming<'_> {
             },
             Type::Var(i) => IfaceType::Var(i),
             Type::Vm(t) => IfaceType::Vm(Box::new(self.ty(t))),
+            Type::Snapshot(t) => IfaceType::Snapshot(Box::new(self.ty(t))),
             Type::PendingCall(a, r) => {
                 IfaceType::PendingCall(Box::new(self.ty(a)), Box::new(self.ty(r)))
             }

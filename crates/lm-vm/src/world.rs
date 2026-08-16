@@ -2551,6 +2551,9 @@ impl<'m> World<'m> {
                     Object::NativeHandle { proc, generation } => {
                         format!("<proc {proc}.{generation}>")
                     }
+                    Object::NativeSnapshot(image) => {
+                        format!("<snapshot {} bytes>", image.len())
+                    }
                 }
             }
         }

@@ -68,10 +68,16 @@ pub struct CoreLayout {
     pub proc_error: Option<u32>,
     /// The core class `Proc`, the parent of every proc class.
     pub proc_class: Option<u32>,
+    pub snapshot_error: Option<u32>,
+    pub snapshot_resource_active: Option<u32>,
+    pub snapshot_limit_exceeded: Option<u32>,
+    pub snapshot_bad_image: Option<u32>,
+    pub restore_error: Option<u32>,
+    pub restore_limit_exceeded: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 36] = [
+pub const PINNED_LABELS: [&str; 42] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -108,6 +114,12 @@ pub const PINNED_LABELS: [&str; 36] = [
     "ProcError.AlreadyPaused",
     "ProcError.InUse",
     "Proc",
+    "SnapshotError",
+    "SnapshotError.ResourceActive",
+    "SnapshotError.SnapshotLimitExceeded",
+    "SnapshotError.BadImage",
+    "RestoreError",
+    "RestoreError.RestoreLimitExceeded",
 ];
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
@@ -195,6 +207,12 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "ProcError.AlreadyPaused" => &mut layout.proc_error_already_paused,
         "ProcError.InUse" => &mut layout.proc_error_in_use,
         "Proc" => &mut layout.proc_class,
+        "SnapshotError" => &mut layout.snapshot_error,
+        "SnapshotError.ResourceActive" => &mut layout.snapshot_resource_active,
+        "SnapshotError.SnapshotLimitExceeded" => &mut layout.snapshot_limit_exceeded,
+        "SnapshotError.BadImage" => &mut layout.snapshot_bad_image,
+        "RestoreError" => &mut layout.restore_error,
+        "RestoreError.RestoreLimitExceeded" => &mut layout.restore_limit_exceeded,
         _ => unreachable!("only known labels enter the map"),
     }
 }

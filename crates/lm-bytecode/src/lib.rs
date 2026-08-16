@@ -30,7 +30,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 36;
+pub const CORE_ROLE_COUNT: usize = 42;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -113,6 +113,11 @@ pub enum BcType {
     Op(u32, u32),
     /// The frozen canonical graph digest of one value.
     Digest,
+    /// One verified snapshot image with no checked result type.
+    SnapshotImage,
+    /// One snapshot of a machine world, typed by the terminal result
+    /// type index of its root machine.
+    Snapshot(u32),
 }
 
 /// The declaration kind of one class.
@@ -632,9 +637,10 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// The container format version.
 ///
 /// Version 11 adds the `Digest` type and the three digest
-/// instructions. Every earlier tag keeps its byte, so the change adds
+/// instructions. Version 13 adds the `SnapshotImage` and `Snapshot`
+/// types. Every earlier tag keeps its byte, so each change adds
 /// encodings and moves none.
-pub const VERSION: u16 = 12;
+pub const VERSION: u16 = 13;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -740,6 +746,8 @@ const TY_PENDING_CALL: u8 = 18;
 const TY_OP: u8 = 19;
 const TY_DIGEST: u8 = 20;
 const TY_HANDLE: u8 = 21;
+const TY_SNAPSHOT_IMAGE: u8 = 22;
+const TY_SNAPSHOT: u8 = 23;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -1005,6 +1013,11 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
             out.push(TY_HANDLE);
             write_u32(out, *m);
             write_u32(out, *r);
+        }
+        BcType::SnapshotImage => out.push(TY_SNAPSHOT_IMAGE),
+        BcType::Snapshot(t) => {
+            out.push(TY_SNAPSHOT);
+            write_u32(out, *t);
         }
         BcType::Op(op, f) => {
             out.push(TY_OP);
@@ -1752,6 +1765,8 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_VM => BcType::Vm(cur.u32()?),
         TY_PENDING_CALL => BcType::PendingCall(cur.u32()?, cur.u32()?),
         TY_HANDLE => BcType::Handle(cur.u32()?, cur.u32()?),
+        TY_SNAPSHOT_IMAGE => BcType::SnapshotImage,
+        TY_SNAPSHOT => BcType::Snapshot(cur.u32()?),
         TY_OP => BcType::Op(cur.u32()?, cur.u32()?),
         other => return Err(DecodeError::BadTypeTag(other)),
     };

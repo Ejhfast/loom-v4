@@ -89,6 +89,13 @@ pub enum Object {
     /// generation of that slot. Born frozen and sendable, so send
     /// rights travel as data (specification 18.5).
     NativeHandle { proc: u32, generation: u32 },
+    /// One canonical snapshot image: the immutable container bytes of
+    /// one captured machine world (specification 17.9).
+    ///
+    /// The payload never changes, so two heaps that hold one image
+    /// share the storage. Specification 16.1 permits that, because no
+    /// program can observe the difference.
+    NativeSnapshot(std::sync::Arc<Vec<u8>>),
 }
 
 /// How a boundary transfer treats one shape.
@@ -267,9 +274,24 @@ const SHAPE_HANDLE: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_SNAPSHOT: ShapeDesc = ShapeDesc {
+    name: "Snapshot",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    // A snapshot is machine state whose bytes the codec can copy
+    // (specification 16.2 and 16.4), so it crosses a boundary.
+    boundary: BoundaryPolicy::Sendable,
+    // The container carries its own canonical hash, and the value
+    // digest encodes guest graphs. A snapshot therefore takes no
+    // second canonical encoding.
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 15] = [
+pub const SHAPES: [&ShapeDesc; 16] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -285,6 +307,7 @@ pub const SHAPES: [&ShapeDesc; 15] = [
     &SHAPE_FAULT,
     &SHAPE_DIGEST,
     &SHAPE_HANDLE,
+    &SHAPE_SNAPSHOT,
 ];
 
 impl Object {
@@ -308,6 +331,7 @@ impl Object {
             Object::NativeFault { .. } => 12,
             Object::NativeDigest(_) => 13,
             Object::NativeHandle { .. } => 14,
+            Object::NativeSnapshot(_) => 15,
         }
     }
 
@@ -335,6 +359,7 @@ impl Object {
                 | Object::NativeHandle { .. } => VALUE_COST,
                 Object::NativeFault { message, .. } => message.len(),
                 Object::NativeDigest(bytes) => bytes.len(),
+                Object::NativeSnapshot(image) => image.len(),
             }
     }
 
@@ -361,7 +386,8 @@ impl Object {
             | Object::NativeCall { .. }
             | Object::NativeFault { .. }
             | Object::NativeDigest(_)
-            | Object::NativeHandle { .. } => {}
+            | Object::NativeHandle { .. }
+            | Object::NativeSnapshot(_) => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
             Object::Map { entries, .. } => {
@@ -393,6 +419,8 @@ impl Object {
                 proc: *proc,
                 generation: *generation,
             },
+            // The bytes never change, so the copy shares the storage.
+            Object::NativeSnapshot(image) => Object::NativeSnapshot(image.clone()),
             Object::Tuple { items } => Object::Tuple {
                 items: vec![Value::Unit; items.len()],
             },
@@ -429,7 +457,8 @@ impl Object {
             Object::Str(_)
             | Object::NativeFault { .. }
             | Object::NativeDigest(_)
-            | Object::NativeHandle { .. } => return None,
+            | Object::NativeHandle { .. }
+            | Object::NativeSnapshot(_) => return None,
             Object::Tuple { items } => Object::Tuple {
                 items: items.iter().map(|v| value(*v)).collect(),
             },
@@ -537,6 +566,7 @@ mod tests {
                 proc: 1,
                 generation: 2,
             },
+            Object::NativeSnapshot(std::sync::Arc::new(vec![7, 8, 9])),
         ]
     }
 
@@ -630,6 +660,7 @@ mod tests {
                 proc: 0,
                 generation: 0,
             },
+            Object::NativeSnapshot(std::sync::Arc::new(Vec::new())),
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -705,10 +736,15 @@ mod tests {
     /// second list is the whole set of values a message may not hold.
     /// A boundary crossing copies every other shape.
     ///
+    /// `Snapshot` joins the sendable column. Specification 16.2 lists
+    /// snapshots among the sendable values, and specification 16.4
+    /// calls a snapshot machine state with bytes the codec can copy.
+    ///
     /// Version 0.2 has no `Bytes` shape. A byte literal rejects at
     /// the scanner, and no operation mints one. A later `Bytes` shape
     /// must choose its column here, and specification 16.2 calls
-    /// bytes sendable.
+    /// bytes sendable. A guest-level `Snapshot.to_bytes` needs that
+    /// shape, so the method waits for it.
     #[test]
     fn every_shape_declares_its_boundary_column() {
         let mut sendable: Vec<&str> = Vec::new();
@@ -723,7 +759,7 @@ mod tests {
             sendable,
             vec![
                 "String", "Instance", "List", "Map", "Tuple", "Closure", "Fault", "Digest",
-                "Handle",
+                "Handle", "Snapshot",
             ]
         );
         // A builder holds a growable private buffer and produces an

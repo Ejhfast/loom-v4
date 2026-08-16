@@ -267,6 +267,10 @@ impl<'m> Ctx<'m> {
                 let t = self.subst(t, targs, rows);
                 self.intern(BcType::Vm(t))
             }
+            BcType::Snapshot(t) => {
+                let t = self.subst(t, targs, rows);
+                self.intern(BcType::Snapshot(t))
+            }
             BcType::PendingCall(a, r) => {
                 let a = self.subst(a, targs, rows);
                 let r = self.subst(r, targs, rows);
@@ -416,6 +420,8 @@ impl<'m> Ctx<'m> {
                 | BcType::Vm(_)
                 | BcType::PendingCall(_, _)
                 | BcType::Handle(_, _)
+                | BcType::SnapshotImage
+                | BcType::Snapshot(_)
         )
     }
 
@@ -435,7 +441,7 @@ impl<'m> Ctx<'m> {
                     && self.vars_bounded(ret, limit, elimit)
                     && self.row_vars_bounded(&row, elimit)
             }
-            BcType::Vm(t) => self.vars_bounded(t, limit, elimit),
+            BcType::Vm(t) | BcType::Snapshot(t) => self.vars_bounded(t, limit, elimit),
             BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 self.vars_bounded(a, limit, elimit) && self.vars_bounded(r, limit, elimit)
             }
@@ -547,8 +553,9 @@ impl<'m> Ctx<'m> {
 /// key: a rule change invalidates every cached admission.
 ///
 /// Version 5 adds the class rules and the dispatch rules of a
-/// generic parent.
-pub const VERIFIER_VERSION: u32 = 5;
+/// generic parent. Version 6 adds the two snapshot core families and
+/// the four snapshot operation rules.
+pub const VERIFIER_VERSION: u32 = 6;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -652,6 +659,12 @@ const ROLE_PROC_ERROR_NOT_PAUSED: usize = 32;
 const ROLE_PROC_ERROR_ALREADY_PAUSED: usize = 33;
 const ROLE_PROC_ERROR_IN_USE: usize = 34;
 const ROLE_PROC_CLASS: usize = 35;
+const ROLE_SNAPSHOT_ERROR: usize = 36;
+const ROLE_SNAPSHOT_RESOURCE_ACTIVE: usize = 37;
+const ROLE_SNAPSHOT_LIMIT_EXCEEDED: usize = 38;
+const ROLE_SNAPSHOT_BAD_IMAGE: usize = 39;
+const ROLE_RESTORE_ERROR: usize = 40;
+const ROLE_RESTORE_LIMIT_EXCEEDED: usize = 41;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -661,11 +674,14 @@ enum FieldShape {
     Str,
     Fault,
     Request,
+    /// A list of integers, for example the bounded machine path of
+    /// `SnapshotError.ResourceActive`.
+    ListInt,
 }
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 10] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 12] = [
     (
         ROLE_OPTION,
         1,
@@ -721,10 +737,26 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 10] = [
         ],
         "ProcError",
     ),
+    (
+        ROLE_SNAPSHOT_ERROR,
+        0,
+        &[
+            ROLE_SNAPSHOT_RESOURCE_ACTIVE,
+            ROLE_SNAPSHOT_LIMIT_EXCEEDED,
+            ROLE_SNAPSHOT_BAD_IMAGE,
+        ],
+        "SnapshotError",
+    ),
+    (
+        ROLE_RESTORE_ERROR,
+        0,
+        &[ROLE_RESTORE_LIMIT_EXCEEDED],
+        "RestoreError",
+    ),
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 25] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 29] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -750,6 +782,13 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 25] = [
     (ROLE_PROC_ERROR_NOT_PAUSED, &[]),
     (ROLE_PROC_ERROR_ALREADY_PAUSED, &[]),
     (ROLE_PROC_ERROR_IN_USE, &[]),
+    (
+        ROLE_SNAPSHOT_RESOURCE_ACTIVE,
+        &[FieldShape::ListInt, FieldShape::Str],
+    ),
+    (ROLE_SNAPSHOT_LIMIT_EXCEEDED, &[]),
+    (ROLE_SNAPSHOT_BAD_IMAGE, &[FieldShape::Str]),
+    (ROLE_RESTORE_LIMIT_EXCEEDED, &[]),
 ];
 
 /// Prove the shape of every declared core role slot.
@@ -848,6 +887,15 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
                     FieldShape::Str => found == &BcType::Str,
                     FieldShape::Fault => found == &BcType::Fault,
                     FieldShape::Request => found == &BcType::Request,
+                    // The element index is read through `get`, because
+                    // this pass must reject a crafted table instead of
+                    // reaching outside the type table.
+                    FieldShape::ListInt => match found {
+                        BcType::List(elem) => {
+                            module.types.get(*elem as usize) == Some(&BcType::Int)
+                        }
+                        _ => false,
+                    },
                 };
                 if !ok {
                     return Err(terr(format!(
@@ -1001,8 +1049,12 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                     }
                 }
             }
-            BcType::Fault | BcType::Request | BcType::PolicyTable | BcType::EmptyVm => {}
-            BcType::Vm(t) => check_ref(*t)?,
+            BcType::Fault
+            | BcType::Request
+            | BcType::PolicyTable
+            | BcType::EmptyVm
+            | BcType::SnapshotImage => {}
+            BcType::Vm(t) | BcType::Snapshot(t) => check_ref(*t)?,
             BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 check_ref(*a)?;
                 check_ref(*r)?;

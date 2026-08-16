@@ -34,10 +34,12 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/proc.lm"),
     "\n",
+    include_str!("../../../core/snapshot.lm"),
+    "\n",
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 10] = [
+pub const PRELUDE_TYPES: [&str; 12] = [
     "Option",
     "Result",
     "Ordering",
@@ -48,6 +50,8 @@ pub const PRELUDE_TYPES: [&str; 10] = [
     "SendResult",
     "ProcResult",
     "ProcError",
+    "SnapshotError",
+    "RestoreError",
 ];
 
 /// The constructor names the prelude places into unqualified scope.
@@ -716,6 +720,17 @@ pub(crate) fn resolve_type(
                 }
                 let result = resolve_type(ctx, env, &args[0])?;
                 Ok(ctx.store.intern(Type::Vm(result)))
+            }
+            "Snapshot" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1024",
+                        format!("`Snapshot` takes 1 type argument, found {}", args.len()),
+                        ty.span,
+                    ));
+                }
+                let result = resolve_type(ctx, env, &args[0])?;
+                Ok(ctx.store.intern(Type::Snapshot(result)))
             }
             "Handle" => {
                 if args.len() != 2 {

@@ -1,0 +1,31 @@
+# Core: snapshot and restore results.
+#
+# A snapshot copies one machine world at one moment and persists the
+# copy (specification 17.1). The conditions that block a copy are
+# ordinary typed errors, not machine faults (17.4). `Snapshot[T]` and
+# `SnapshotImage` are native holder types declared by the ABI.
+
+enum SnapshotError
+  # A live host attachment has no bytes to copy. The path names the
+  # machine ordinals from the snapshot root to the machine that holds
+  # the attachment. The kind names the attachment.
+  ResourceActive(path: List[Int], kind: String)
+  # The capture passed the configured snapshot byte limit.
+  SnapshotLimitExceeded
+  # External bytes did not pass the load checks of 17.8.
+  BadImage(reason: String)
+
+  def is_resource_active(self): Bool
+    case self
+    in ResourceActive(_, _)  then true
+    in SnapshotLimitExceeded then false
+    in BadImage(_)           then false
+    end
+  end
+end
+
+# The ordinary error of a restore.
+enum RestoreError
+  # The restored world passed a machine, heap, or graph limit.
+  RestoreLimitExceeded
+end

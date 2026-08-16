@@ -128,6 +128,11 @@ impl<'m> ModLowerer<'m> {
             Type::Request => self.intern_type(BcType::Request),
             Type::PolicyTable => self.intern_type(BcType::PolicyTable),
             Type::EmptyVm => self.intern_type(BcType::EmptyVm),
+            Type::SnapshotImage => self.intern_type(BcType::SnapshotImage),
+            Type::Snapshot(t) => {
+                let t = self.bc_ty(t);
+                self.intern_type(BcType::Snapshot(t))
+            }
             Type::Vm(t) => {
                 let t = self.bc_ty(t);
                 self.intern_type(BcType::Vm(t))
@@ -1742,7 +1747,9 @@ fn type_text(module: &Module, idx: u32) -> String {
         BcType::Request => "Request".to_string(),
         BcType::PolicyTable => "PolicyTable".to_string(),
         BcType::EmptyVm => "EmptyVm".to_string(),
+        BcType::SnapshotImage => "SnapshotImage".to_string(),
         BcType::Vm(t) => format!("Vm[{}]", type_text(module, *t)),
+        BcType::Snapshot(t) => format!("Snapshot[{}]", type_text(module, *t)),
         BcType::PendingCall(a, r) => format!(
             "PendingCall[{}, {}]",
             type_text(module, *a),

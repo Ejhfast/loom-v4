@@ -43,6 +43,8 @@ pub const POLICY_TABLE: TypeId = TypeId(9);
 pub const EMPTY_VM: TypeId = TypeId(10);
 /// The frozen canonical graph digest type.
 pub const DIGEST: TypeId = TypeId(11);
+/// One verified snapshot image whose result type is not yet checked.
+pub const SNAPSHOT_IMAGE: TypeId = TypeId(12);
 
 /// One element of an effect row.
 ///
@@ -113,6 +115,14 @@ pub enum Type {
     /// A proc handle: the mailbox message type and the terminal
     /// result type of the proc.
     Handle(TypeId, TypeId),
+    /// One verified snapshot image with no checked result type. A
+    /// receiverless self snapshot and the loader both produce it,
+    /// because neither can name the enclosing machine result type
+    /// (specification 17.1).
+    SnapshotImage,
+    /// One snapshot of a machine world, typed by the terminal result
+    /// type of its root machine.
+    Snapshot(TypeId),
     /// An identity-indexed first-class operation value: the manifest
     /// operation slot and the callable function type.
     Op(u32, TypeId),
@@ -175,6 +185,7 @@ impl TypeStore {
         store.intern(Type::PolicyTable);
         store.intern(Type::EmptyVm);
         store.intern(Type::Digest);
+        store.intern(Type::SnapshotImage);
         store
     }
 
@@ -355,6 +366,7 @@ impl TypeStore {
             "PolicyTable" => Some(POLICY_TABLE),
             "EmptyVm" => Some(EMPTY_VM),
             "Digest" => Some(DIGEST),
+            "SnapshotImage" => Some(SNAPSHOT_IMAGE),
             _ => None,
         }
     }
@@ -504,6 +516,8 @@ impl TypeStore {
                 | Type::Vm(_)
                 | Type::PendingCall(_, _)
                 | Type::Handle(_, _)
+                | Type::SnapshotImage
+                | Type::Snapshot(_)
         )
     }
 
@@ -574,6 +588,10 @@ impl TypeStore {
                 let t = self.substitute(t, targs, rowargs);
                 self.intern(Type::Vm(t))
             }
+            Type::Snapshot(t) => {
+                let t = self.substitute(t, targs, rowargs);
+                self.intern(Type::Snapshot(t))
+            }
             Type::PendingCall(a, r) => {
                 let a = self.substitute(a, targs, rowargs);
                 let r = self.substitute(r, targs, rowargs);
@@ -614,7 +632,7 @@ impl TypeStore {
             Type::Fn(params, _, ret, _) => {
                 params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
             }
-            Type::Vm(t) => self.contains_var(*t),
+            Type::Vm(t) | Type::Snapshot(t) => self.contains_var(*t),
             Type::PendingCall(a, r) => self.contains_var(*a) || self.contains_var(*r),
             Type::Handle(m, r) => self.contains_var(*m) || self.contains_var(*r),
             _ => false,
@@ -634,7 +652,7 @@ impl TypeStore {
                     || params.iter().any(|p| self.contains_effect_var(*p))
                     || self.contains_effect_var(*ret)
             }
-            Type::Vm(t) => self.contains_effect_var(*t),
+            Type::Vm(t) | Type::Snapshot(t) => self.contains_effect_var(*t),
             Type::PendingCall(a, r) => self.contains_effect_var(*a) || self.contains_effect_var(*r),
             Type::Handle(m, r) => self.contains_effect_var(*m) || self.contains_effect_var(*r),
             _ => false,
@@ -704,6 +722,8 @@ impl TypeStore {
             Type::PolicyTable => "PolicyTable".to_string(),
             Type::EmptyVm => "EmptyVm".to_string(),
             Type::Vm(t) => format!("Vm[{}]", self.display(*t)),
+            Type::SnapshotImage => "SnapshotImage".to_string(),
+            Type::Snapshot(t) => format!("Snapshot[{}]", self.display(*t)),
             Type::PendingCall(a, r) => {
                 format!("PendingCall[{}, {}]", self.display(*a), self.display(*r))
             }

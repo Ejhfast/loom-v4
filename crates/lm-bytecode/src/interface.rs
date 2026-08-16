@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 4;
+const VERSION: u16 = 5;
 
 /// The domain tag of the interface hash.
 const TAG_IFACE: &[u8] = b"lm-iface-v1\0";
@@ -110,6 +110,11 @@ pub enum IfaceType {
     PendingCall(Box<IfaceType>, Box<IfaceType>),
     Handle(Box<IfaceType>, Box<IfaceType>),
     Op(u32, Box<IfaceType>),
+    /// One verified snapshot image with no checked result type.
+    SnapshotImage,
+    /// One snapshot of a machine world, typed by the terminal result
+    /// type of its root machine.
+    Snapshot(Box<IfaceType>),
 }
 
 /// One callable signature, without `self`.
@@ -384,6 +389,11 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
             encode_type(out, m);
             encode_type(out, r);
         }
+        IfaceType::SnapshotImage => out.push(21),
+        IfaceType::Snapshot(t) => {
+            out.push(22);
+            encode_type(out, t);
+        }
     }
 }
 
@@ -585,6 +595,8 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
             let r = decode_type(cur, depth + 1)?;
             IfaceType::Handle(Box::new(m), Box::new(r))
         }
+        21 => IfaceType::SnapshotImage,
+        22 => IfaceType::Snapshot(Box::new(decode_type(cur, depth + 1)?)),
         other => return Err(DecodeError::BadTypeTag(other)),
     };
     Ok(ty)
@@ -840,6 +852,8 @@ pub fn type_text(ty: &IfaceType) -> String {
         }
         IfaceType::Op(op, f) => format!("Op[op{}, {}]", op, type_text(f)),
         IfaceType::Handle(m, r) => format!("Handle[{}, {}]", type_text(m), type_text(r)),
+        IfaceType::SnapshotImage => "SnapshotImage".to_string(),
+        IfaceType::Snapshot(t) => format!("Snapshot[{}]", type_text(t)),
     }
 }
 

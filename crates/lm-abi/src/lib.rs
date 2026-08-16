@@ -14,14 +14,15 @@
 mod fault;
 mod sha;
 
-pub use fault::{FaultCode, SnapshotClass};
+pub use fault::{FaultCode, SnapshotClass, FAULT_CODES};
 pub use sha::{sha256, sha256_hex};
 
 /// The manifest ABI version. A signature or membership change must
 /// increment this value.
 ///
 /// Version 2 adds the eight proc operations of specification 23.6.
-pub const ABI_VERSION: u32 = 2;
+/// Version 3 adds the four snapshot operations of specification 23.5.
+pub const ABI_VERSION: u32 = 3;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -133,9 +134,13 @@ pub const OP_PROC_RECV: OpSlot = 20;
 pub const OP_PROC_DONE: OpSlot = 21;
 pub const OP_PROC_PAUSE: OpSlot = 22;
 pub const OP_PROC_RESUME: OpSlot = 23;
+pub const OP_VM_SNAPSHOT_HELD: OpSlot = 24;
+pub const OP_VM_SNAPSHOT_SELF: OpSlot = 25;
+pub const OP_VM_LOAD_SNAPSHOT: OpSlot = 26;
+pub const OP_VM_RESTORE: OpSlot = 27;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 24] = [
+pub const OPS: [OpDef; 28] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -357,6 +362,45 @@ pub const OPS: [OpDef; 24] = [
         schema: "[M,R](Handle[M,R]) -> Result[(), ProcError]",
         snapshot: SnapshotClass::MachineState,
     },
+    // The snapshot operations of specification 23.5. A capture, a
+    // load, and a restore all run inside the driver loop, so none of
+    // them holds live state outside a machine.
+    OpDef {
+        group: "Vm",
+        member: "SnapshotHeld",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](Vm[T]) -> Result[Snapshot[T], SnapshotError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "SnapshotSelf",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "() -> Result[SnapshotImage, SnapshotError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "LoadSnapshot",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "(Bytes) -> Result[SnapshotImage, SnapshotError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "Restore",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](EmptyVm, Snapshot[T]) -> Result[Vm[T], RestoreError]",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -481,6 +525,10 @@ mod tests {
         assert_eq!(op_by_name("Proc.Done"), Some(OP_PROC_DONE));
         assert_eq!(op_by_name("Proc.Pause"), Some(OP_PROC_PAUSE));
         assert_eq!(op_by_name("Proc.Resume"), Some(OP_PROC_RESUME));
+        assert_eq!(op_by_name("Vm.SnapshotHeld"), Some(OP_VM_SNAPSHOT_HELD));
+        assert_eq!(op_by_name("Vm.SnapshotSelf"), Some(OP_VM_SNAPSHOT_SELF));
+        assert_eq!(op_by_name("Vm.LoadSnapshot"), Some(OP_VM_LOAD_SNAPSHOT));
+        assert_eq!(op_by_name("Vm.Restore"), Some(OP_VM_RESTORE));
         assert_eq!(op_by_name("Fs.Open"), None);
     }
 
