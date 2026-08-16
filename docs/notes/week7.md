@@ -310,10 +310,11 @@ variant yet. The rule enters with floats.
   oracles for cycles and shared subgraphs, five guest digest cases,
   two semantic-identity gates, the shape-table dump, and the two
   example outputs.
-- `crates/lm-testkit/tests/week7_resources.rs`, 6 cases: the pending
+- `crates/lm-testkit/tests/week7_resources.rs`, 7 cases: the pending
   operation registry and its cleanup, the host suspension contract,
   the fail-atomic child reservation, budget inheritance, the snapshot
-  preflight, and the nested sandbox example on the production path.
+  preflight, the nested sandbox example on the production path, and
+  three arguments crossing one boundary over ninety heap caps.
 - `crates/lm-testkit/tests/week7_closures.rs`, 12 cases: both
   spellings encoding identically, every closure part in brace form,
   trailing closures on every call form, map disambiguation, every
@@ -321,9 +322,10 @@ variant yet. The rule enters with floats.
 - `crates/lm-graph/src/engine.rs`, 4 cases: canonical ordinals against
   allocation order, cycle and sharing termination, each limit
   rejecting on its own, and a 100,000-deep chain on a 256 KiB stack.
-- `crates/lm-graph/src/mode.rs`, 16 cases: one per mode plus the
-  failure-atomic transfer, the digest properties, the limit rejection
-  of every mode, and every mode on a 50,000-deep chain.
+- `crates/lm-graph/src/mode.rs`, 18 cases: one per mode plus the
+  failure-atomic transfer, the rooting rule for a later transfer, the
+  digest properties, the limit rejection of every mode, and every mode
+  on a 50,000-deep chain.
 - `crates/lm-heap/src/shape.rs`, 5 cases: the tag table, the child
   order agreeing with the reference flag, holder-local shapes never
   digestible, map child order, and the dump.
@@ -337,7 +339,7 @@ variant yet. The rule enters with floats.
 - `tests/fuzz-regressions/`, 2 new source seeds for the new parser
   surface.
 
-Test count: 541 before, 606 after.
+Test count: 541 before, 608 after.
 
 ## Measurements
 
@@ -358,6 +360,50 @@ eighteen percent regression. The cause was the digest-cache lookup the
 sweep ran for every freed slot. Most heaps hold no digest, so the
 sweep now skips the lookup when the cache is empty, and the path
 returned to its earlier cost.
+
+## The self-review pass
+
+The review of the migrated transfer path found one latent defect and
+one encoding gap.
+
+### A transferred value was unrooted while the next value crossed
+
+`World` copies several values into one machine in three places: the
+mock handler arguments, the `from_object` argument view, and
+`call.args()`. Each loop held its results in a Rust vector only.
+
+A destination collection during one copy frees every object the
+destination roots do not reach. A value that already crossed, but that
+no machine field held yet, was one of those. A later copy into the
+same machine could therefore free an earlier result and leave a stale
+reference in the argument list. The reference is generation-checked,
+so the next read panics rather than corrupting memory.
+
+The defect predates this week; the migration made it visible. The fix
+is `World::transfer_all`, which roots each result while the next value
+crosses and unroots in LIFO order afterwards. The mock handler and the
+program closure stay rooted while their arguments cross, for the same
+reason.
+
+One graph-level test proves the hazard is real: an unrooted earlier
+result does not survive a later copy into a tight destination, and a
+rooted one does. One VM-level test drives three arguments across one
+boundary over ninety heap caps and requires a terminal outcome at
+every cap.
+
+The week-7 guest surface cannot reach the hazard: the destination of
+every multi-value transfer is a fresh machine with no reclaimable
+garbage. Week 8 adds mailboxes, which deliver into an established
+machine, so the fix lands before the paths that could reach it.
+
+### A length past the 32-bit prefix wrapped
+
+Every payload in the canonical digest encoding carries a 32-bit
+length prefix. `count` cast a `usize` length, so a length past
+`u32::MAX` wrapped and encoded a different graph. It now rejects with
+`BoundaryViolation`. The published byte limit already bounds the
+reachable size, so no reachable graph hit it; the cast was still a
+hole in an encoding whose whole value is that it is unambiguous.
 
 ## Open questions
 
