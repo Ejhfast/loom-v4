@@ -893,7 +893,14 @@ impl<'m> World<'m> {
                 self.machines.push(Machine::empty(child_config, Some(vm)));
                 match self.machines[vm as usize].alloc(Object::NativeVm { vm: child }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
-                    Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
+                    Err(code) => {
+                        // No handle names the child, so the whole call
+                        // rolls back: the record goes and the parent
+                        // gets its reservation back.
+                        self.machines.pop();
+                        self.machines[vm as usize].children -= 1;
+                        self.machines[vm as usize].set_fault(code, "", Some(op));
+                    }
                 }
             }
             lm_abi::OP_VM_FROM_OBJECT => {
@@ -1244,7 +1251,8 @@ impl<'m> World<'m> {
     /// holder-local value with `BoundaryViolation`. A frozen object
     /// never changes, so the heap caches the result.
     fn handle_digest(&mut self, vm: VmId, value: ObjRef) {
-        let limits = self.config.graph;
+        // The machine that asks for the digest pays for the walk.
+        let limits = self.machines[vm as usize].config.graph;
         let loaded = self.loaded;
         let built = match loaded.identity() {
             Ok(identity) => {
@@ -1347,7 +1355,7 @@ impl<'m> World<'m> {
             return Err(FaultCode::BoundaryViolation);
         }
         let roots = self.machines[vm as usize].gc_roots(&[]);
-        let limits = self.config.graph;
+        let limits = self.machines[vm as usize].config.graph;
         let m = &mut self.machines[vm as usize];
         lm_graph::snapshot_ordinals(&mut m.vm.heap, &roots, &limits).map(|order| order.len())
     }
@@ -1405,7 +1413,9 @@ impl<'m> World<'m> {
         dst: VmId,
         value: Value,
     ) -> Result<Value, FaultCode> {
-        let limits = self.config.graph;
+        // The copy allocates in the destination, so the destination
+        // limits govern the walk.
+        let limits = self.machines[dst as usize].config.graph;
         let (src_m, dst_m) = self.two(src, dst);
         // The destination roots are read before the heap is borrowed:
         // a destination collection during the copy needs them.

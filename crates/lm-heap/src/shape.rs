@@ -522,6 +522,24 @@ mod tests {
         }
     }
 
+    /// No native shape is a host attachment today: the week-7 shapes
+    /// are data, code, descriptors, and holder-local designators, and
+    /// every live host state sits outside the guest heap. The
+    /// snapshot rejection rule therefore has nothing to reject yet.
+    /// A shape that becomes a host attachment, such as an open file,
+    /// must land with the test that proves the rejection.
+    #[test]
+    fn no_native_shape_is_a_host_attachment_yet() {
+        for shape in SHAPES {
+            assert_eq!(
+                shape.snapshot,
+                SnapshotClass::MachineState,
+                "{}",
+                shape.name
+            );
+        }
+    }
+
     #[test]
     fn map_children_visit_key_before_value() {
         let key = ObjRef {

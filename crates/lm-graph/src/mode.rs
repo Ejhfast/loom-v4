@@ -275,6 +275,9 @@ pub fn digest_value(
     limits: &GraphLimits,
 ) -> Result<[u8; 32], FaultCode> {
     if let Value::Obj(root) = value {
+        // A cache hit costs one lookup, which is under every published
+        // limit, so the walk and its limits do not run again. The
+        // frozen bit is monotonic, so a cached answer stays true.
         if let Some(cached) = heap.cached_digest(root) {
             return Ok(cached);
         }
