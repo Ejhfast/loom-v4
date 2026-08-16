@@ -38,9 +38,20 @@ use std::collections::{HashMap, HashSet};
 /// The work one admission may perform.
 ///
 /// The budget is one aggregate ledger for the whole image. It charges
-/// every resolved type, every graph pair, and every nested container,
-/// so a compact container can never expand into unbounded checking
-/// work.
+/// one unit for each of these, and for nothing else:
+///
+/// - one resolved frame slot, operand, pending argument, or accepted
+///   message the rules read;
+/// - one triple the graph walk pushes. Every element of a list, a map,
+///   a tuple, a closure, and an instance goes through that push, so the
+///   work vector cannot grow past the ledger;
+/// - one triple the graph walk visits;
+/// - one object the coherence map records;
+/// - each 64 bytes of one nested container it decodes.
+///
+/// The ledger therefore bounds the work vector, the visited set, and
+/// the coherence map together. A compact container can never expand
+/// into unbounded checking work.
 ///
 /// The default limit is conservative. Worklist item 10 sizes it beside
 /// the decode budget and shares one ledger with nested containers.
@@ -175,6 +186,22 @@ pub(super) fn prove(
 
 fn fail<T>(reason: ImageReason, detail: impl Into<String>) -> Result<T, ImageError> {
     Err(ImageError::admission(reason, detail))
+}
+
+/// Push one `(machine, object, resolved type)` triple onto the walk.
+///
+/// Every push charges the ledger, so the work vector can never grow
+/// past the budget. A container with N elements pushes N triples, and
+/// the ledger sees all N. Every element loop of `check_object` reaches
+/// the walk through this one call.
+fn push_work(
+    budget: &mut AdmissionBudget,
+    work: &mut Work,
+    entry: (u32, u32, u32),
+) -> Result<(), ImageError> {
+    budget.charge(1)?;
+    work.push(entry);
+    Ok(())
 }
 
 /// The class of the instance one frame holds in its first local slot.
@@ -1185,9 +1212,9 @@ impl Admit<'_> {
         // no rule below reads a type from them. `check_state` and
         // `check_references` already proved their structure.
         if machine.state == ImageState::Faulted {
-            self.check_terminal(vm, work)?;
+            self.check_terminal(vm, budget, work)?;
             self.check_mailbox(vm, budget, work)?;
-            self.check_proc_body(vm, work)?;
+            self.check_proc_body(vm, budget, work)?;
             return Ok(());
         }
         // Every local slot. A slot the verifier proves initialized
@@ -1208,7 +1235,14 @@ impl Admit<'_> {
                 };
                 match proved {
                     Some(ty) => {
-                        self.check_value(vm, *value, *ty, &at(&format!("local {slot}")), work)?;
+                        self.check_value(
+                            vm,
+                            *value,
+                            *ty,
+                            &at(&format!("local {slot}")),
+                            budget,
+                            work,
+                        )?;
                     }
                     None => {
                         if *value != Value::Uninit {
@@ -1217,6 +1251,7 @@ impl Admit<'_> {
                                 *value,
                                 slots.declared[slot],
                                 &at(&format!("local {slot}")),
+                                budget,
                                 work,
                             )?;
                         }
@@ -1226,7 +1261,7 @@ impl Admit<'_> {
         }
         self.check_operands(vm, budget, work)?;
         self.check_pending_args(vm, budget, work)?;
-        self.check_terminal(vm, work)?;
+        self.check_terminal(vm, budget, work)?;
         self.check_mailbox(vm, budget, work)?;
         // A capture context is the closure the frame runs, so the walk
         // proves it at the function type of that frame.
@@ -1240,15 +1275,20 @@ impl Admit<'_> {
                     at("a frame function has no function type"),
                 )
             })?;
-            work.push((vm, closure, ty));
+            push_work(budget, work, (vm, closure, ty))?;
         }
-        self.check_proc_body(vm, work)?;
+        self.check_proc_body(vm, budget, work)?;
         Ok(())
     }
 
     /// The proc body is a closure the runtime calls with the proc
     /// instance. Its own function type proves its captures.
-    fn check_proc_body(&self, vm: u32, work: &mut Work) -> Result<(), ImageError> {
+    fn check_proc_body(
+        &self,
+        vm: u32,
+        budget: &mut AdmissionBudget,
+        work: &mut Work,
+    ) -> Result<(), ImageError> {
         let machine = self.machine(vm);
         let Some(body) = machine.start_body else {
             return Ok(());
@@ -1260,7 +1300,7 @@ impl Admit<'_> {
                     format!("machine {vm}: the proc body has no function type"),
                 )
             })?;
-            work.push((vm, body, ty));
+            push_work(budget, work, (vm, body, ty))?;
         }
         Ok(())
     }
@@ -1407,6 +1447,7 @@ impl Admit<'_> {
                     machine.operands[start + offset],
                     *ty,
                     &format!("machine {vm}: frame {idx} operand {offset}"),
+                    budget,
                     work,
                 )?;
             }
@@ -1474,6 +1515,7 @@ impl Admit<'_> {
                 pending.args[offset],
                 *ty,
                 &format!("machine {vm}: pending argument {offset}"),
+                budget,
                 work,
             )?;
         }
@@ -1487,7 +1529,12 @@ impl Admit<'_> {
     /// only record of that type. The unit value takes no exception: a
     /// consumer reads the stored value at the declared result type,
     /// whatever that type is.
-    fn check_terminal(&self, vm: u32, work: &mut Work) -> Result<(), ImageError> {
+    fn check_terminal(
+        &self,
+        vm: u32,
+        budget: &mut AdmissionBudget,
+        work: &mut Work,
+    ) -> Result<(), ImageError> {
         let machine = self.machine(vm);
         let Some(ImageTerminal::Done(value)) = &machine.terminal else {
             return Ok(());
@@ -1511,6 +1558,7 @@ impl Admit<'_> {
             *value,
             ty,
             &format!("machine {vm}: the terminal value"),
+            budget,
             work,
         )
     }
@@ -1547,6 +1595,7 @@ impl Admit<'_> {
                 *value,
                 message,
                 &format!("machine {vm}: accepted message {idx}"),
+                budget,
                 work,
             )?;
         }
@@ -1563,6 +1612,7 @@ impl Admit<'_> {
         value: Value,
         ty: u32,
         what: &str,
+        budget: &mut AdmissionBudget,
         work: &mut Work,
     ) -> Result<(), ImageError> {
         let declared = self.ty(ty)?;
@@ -1601,7 +1651,7 @@ impl Admit<'_> {
                         format!("{what} names no object of its machine"),
                     );
                 }
-                work.push((vm, r.slot, ty));
+                push_work(budget, work, (vm, r.slot, ty))?;
                 Ok(())
             }
         }
@@ -1890,6 +1940,7 @@ impl Admit<'_> {
                             *value,
                             *capture,
                             &format!("{at} capture {idx}"),
+                            budget,
                             work,
                         )?;
                     }
@@ -1900,7 +1951,14 @@ impl Admit<'_> {
             BcType::List(elem) => match payload {
                 Object::List { items } => {
                     for (idx, value) in items.iter().enumerate() {
-                        self.check_value(vm, *value, elem, &format!("{at} item {idx}"), work)?;
+                        self.check_value(
+                            vm,
+                            *value,
+                            elem,
+                            &format!("{at} item {idx}"),
+                            budget,
+                            work,
+                        )?;
                     }
                     Ok(())
                 }
@@ -1909,8 +1967,15 @@ impl Admit<'_> {
             BcType::Map(key, value) => match payload {
                 Object::Map { entries, .. } => {
                     for (idx, (k, v)) in entries.iter().enumerate() {
-                        self.check_value(vm, *k, key, &format!("{at} key {idx}"), work)?;
-                        self.check_value(vm, *v, value, &format!("{at} value {idx}"), work)?;
+                        self.check_value(vm, *k, key, &format!("{at} key {idx}"), budget, work)?;
+                        self.check_value(
+                            vm,
+                            *v,
+                            value,
+                            &format!("{at} value {idx}"),
+                            budget,
+                            work,
+                        )?;
                     }
                     Ok(())
                 }
@@ -1919,7 +1984,14 @@ impl Admit<'_> {
             BcType::Tuple(elems) => match payload {
                 Object::Tuple { items } if items.len() == elems.len() => {
                     for (idx, (value, elem)) in items.iter().zip(elems.iter()).enumerate() {
-                        self.check_value(vm, *value, *elem, &format!("{at} element {idx}"), work)?;
+                        self.check_value(
+                            vm,
+                            *value,
+                            *elem,
+                            &format!("{at} element {idx}"),
+                            budget,
+                            work,
+                        )?;
                     }
                     Ok(())
                 }
@@ -1954,7 +2026,14 @@ impl Admit<'_> {
                                 format!("{at} field {idx} has no resolved type"),
                             );
                         }
-                        self.check_value(vm, *value, *field, &format!("{at} field {idx}"), work)?;
+                        self.check_value(
+                            vm,
+                            *value,
+                            *field,
+                            &format!("{at} field {idx}"),
+                            budget,
+                            work,
+                        )?;
                     }
                     Ok(())
                 }

@@ -1303,6 +1303,52 @@ fn an_admission_budget_that_runs_out_rejects() {
     assert!(budget.used() > 0);
 }
 
+/// The element loop of one container grows with the container, so the
+/// ledger charges every element.
+///
+/// The walk once pushed one triple per list item, map entry, tuple
+/// element, capture, and field with no charge at all. A compact
+/// container could then push an unbounded work vector while the ledger
+/// counted a handful of units.
+///
+/// The case stays small on purpose: the point is the charge, and the
+/// address-space cap of the build shell governs the size.
+#[test]
+fn the_budget_charges_every_element_of_a_wide_container() {
+    const WIDE: usize = 20_000;
+    let loaded = program(SHARED_SOURCE);
+    let images = boundaries(&loaded, &[], 40);
+    let image = pick(&images, "a list of strings", |image| {
+        image.machines[0].objects.iter().any(|entry| {
+            matches!(&entry.object, Object::List { items }
+                if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Obj(_))))
+        })
+    });
+    // One list of many references to one string. The container stays
+    // compact, because every element names the same object.
+    let mut wide = image.clone();
+    for entry in &mut wide.machines[0].objects {
+        if let Object::List { items } = &mut entry.object {
+            if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Obj(_))) {
+                let first = items[0];
+                *items = vec![first; WIDE];
+            }
+        }
+    }
+    let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+    lm_vm::snapshot::admit(wide.clone(), &loaded, &mut budget).expect("the wide image admits");
+    assert!(
+        budget.used() >= WIDE as u64,
+        "the ledger charged {} units for {WIDE} elements",
+        budget.used()
+    );
+    // A ledger below the element count stops the walk.
+    let mut small = lm_vm::snapshot::AdmissionBudget::new(WIDE as u64 / 2);
+    let error =
+        lm_vm::snapshot::admit(wide, &loaded, &mut small).expect_err("the small budget runs out");
+    assert_eq!(error.reason, ImageReason::Budget);
+}
+
 // ---------------------------------------------------------------
 // The trusted interpreter boundary.
 // ---------------------------------------------------------------
