@@ -136,6 +136,9 @@ pub struct BcClass {
     pub key: String,
     /// Parent class index, or `NO_PARENT`.
     pub parent: u32,
+    /// Type arguments of a generic parent, as type indices. Empty
+    /// when the parent declares no type parameters.
+    pub parent_args: Vec<u32>,
     /// The number of generic type parameters.
     pub type_params: u32,
     pub kind: BcClassKind,
@@ -628,7 +631,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 11 adds the `Digest` type and the three digest
 /// instructions. Every earlier tag keeps its byte, so the change adds
 /// encodings and moves none.
-pub const VERSION: u16 = 11;
+pub const VERSION: u16 = 12;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -821,6 +824,10 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
     write_u32(&mut out, module.classes.len() as u32);
     for class in &module.classes {
         write_u32(&mut out, class.parent);
+        write_u32(&mut out, class.parent_args.len() as u32);
+        for arg in &class.parent_args {
+            write_u32(&mut out, *arg);
+        }
         write_u32(&mut out, class.type_params);
         out.push(match class.kind {
             BcClassKind::Normal => KIND_NORMAL,
@@ -1536,6 +1543,11 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     let mut classes = Vec::with_capacity(class_count);
     for _ in 0..class_count {
         let parent = cur.u32()?;
+        let parent_arg_count = cur.len()?;
+        let mut parent_args = Vec::with_capacity(parent_arg_count);
+        for _ in 0..parent_arg_count {
+            parent_args.push(cur.u32()?);
+        }
         let type_params = cur.u32()?;
         let kind = match cur.u8()? {
             KIND_NORMAL => BcClassKind::Normal,
@@ -1561,6 +1573,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             name: String::new(),
             key: String::new(),
             parent,
+            parent_args,
             type_params,
             kind,
             fields,
@@ -1894,6 +1907,7 @@ mod tests {
             classes: vec![
                 BcClass {
                     name: "Counter".to_string(),
+                    parent_args: Vec::new(),
                     key: "Counter".to_string(),
                     parent: NO_PARENT,
                     type_params: 0,
@@ -1903,6 +1917,7 @@ mod tests {
                 },
                 BcClass {
                     name: "Box".to_string(),
+                    parent_args: Vec::new(),
                     key: "Box".to_string(),
                     parent: NO_PARENT,
                     type_params: 1,

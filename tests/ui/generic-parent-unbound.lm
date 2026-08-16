@@ -1,0 +1,10 @@
+class Cell[T]
+  def get(self): T
+    self.get()
+  end
+end
+
+class Bad < Cell[Missing]
+end
+
+1

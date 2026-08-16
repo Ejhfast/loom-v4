@@ -287,7 +287,15 @@ impl Parser<'_> {
         let generics = self.generic_params()?;
         let parent = if matches!(self.peek(), Tok::Lt) {
             self.pos += 1;
-            Some(self.ident("a parent class name")?)
+            let (name, span) = self.ident("a parent class name")?;
+            // A generic parent carries its type arguments, for example
+            // `< Proc[Work]`.
+            let args = if matches!(self.peek(), Tok::LBracket) {
+                self.type_args_inner()?
+            } else {
+                Vec::new()
+            };
+            Some(ParentClause { name, span, args })
         } else {
             None
         };
@@ -1811,13 +1819,9 @@ mod tests {
                       class Dog < Animal\n  def init(mut self)\n    super.init(1)\n  end\nend\n1\n";
         let module = parse(source).unwrap();
         assert_eq!(module.classes.len(), 2);
-        assert_eq!(
-            module.classes[1].parent,
-            Some((
-                "Animal".to_string(),
-                module.classes[1].parent.as_ref().unwrap().1
-            ))
-        );
+        let parent = module.classes[1].parent.as_ref().expect("a parent clause");
+        assert_eq!(parent.name, "Animal");
+        assert!(parent.args.is_empty());
     }
 
     #[test]

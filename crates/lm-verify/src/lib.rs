@@ -120,6 +120,59 @@ impl<'m> Ctx<'m> {
         }
     }
 
+    /// The type arguments of `ancestor` seen from an instance of
+    /// `child` applied to `args`. `None` when `child` does not inherit
+    /// `ancestor`.
+    ///
+    /// Three parent shapes exist. An enum case shares the arity of its
+    /// family and passes its arguments through. A declared generic
+    /// parent records closed arguments, because a generic class never
+    /// declares a parent. Every other parent has no arguments. The
+    /// walk therefore never substitutes.
+    fn ancestor_args(&self, child: u32, args: &[u32], ancestor: u32) -> Option<Vec<u32>> {
+        let mut cur = child;
+        let mut cur_args = args.to_vec();
+        loop {
+            if cur == ancestor {
+                return Some(cur_args);
+            }
+            let class = &self.module.classes[cur as usize];
+            let parent = class.parent()?;
+            if !class.parent_args.is_empty() {
+                cur_args = class.parent_args.clone();
+            } else if self.module.classes[parent as usize].type_params == 0 {
+                cur_args = Vec::new();
+            }
+            cur = parent;
+        }
+    }
+
+    /// The parent type arguments of one class, in the class's own type
+    /// parameters. An enum case has the implicit identity arguments.
+    fn declared_parent_args(&self, cidx: u32) -> Vec<u32> {
+        let class = &self.module.classes[cidx as usize];
+        if !class.parent_args.is_empty() {
+            return class.parent_args.clone();
+        }
+        let Some(parent) = class.parent() else {
+            return Vec::new();
+        };
+        let arity = self.module.classes[parent as usize].type_params;
+        (0..arity).map(|i| self.intern(BcType::Var(i))).collect()
+    }
+
+    /// The class that declares one selector, walking the ancestor
+    /// chain from `class`.
+    fn method_owner(&self, mut class: u32, selector: u32) -> Option<u32> {
+        loop {
+            let entry = &self.module.classes[class as usize];
+            if entry.methods.iter().any(|(sel, _)| *sel == selector) {
+                return Some(class);
+            }
+            class = entry.parent()?;
+        }
+    }
+
     /// The sort key of one row element, for canonical order checks.
     fn row_key(&self, elem: &BcRow) -> (u8, String, u32) {
         match elem {
@@ -231,7 +284,17 @@ impl<'m> Ctx<'m> {
         }
         match (self.ty(found), self.ty(expected)) {
             (BcType::Class(a), BcType::Class(b)) => self.class_extends(a, b),
-            (BcType::Inst(a, xs), BcType::Inst(b, ys)) => self.class_extends(a, b) && xs == ys,
+            // A class may inherit an instantiated generic parent, so a
+            // plain class instance can satisfy an application type.
+            (BcType::Class(a), BcType::Inst(b, ys)) => {
+                self.ancestor_args(a, &[], b).as_ref() == Some(&ys)
+            }
+            (BcType::Inst(a, xs), BcType::Class(b)) => {
+                self.ancestor_args(a, &xs, b) == Some(Vec::new())
+            }
+            (BcType::Inst(a, xs), BcType::Inst(b, ys)) => {
+                self.ancestor_args(a, &xs, b).as_ref() == Some(&ys)
+            }
             (BcType::Tuple(xs), BcType::Tuple(ys)) => {
                 xs.len() == ys.len()
                     && xs
@@ -457,9 +520,9 @@ impl<'m> Ctx<'m> {
 /// The verifier version. It takes part in the verified-code cache
 /// key: a rule change invalidates every cached admission.
 ///
-/// Version 4 adds the typing rules of the three digest
-/// instructions.
-pub const VERIFIER_VERSION: u32 = 4;
+/// Version 5 adds the class rules and the dispatch rules of a
+/// generic parent.
+pub const VERIFIER_VERSION: u32 = 5;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -1015,20 +1078,52 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                         "only a case class may inherit a sealed enum class".to_string(),
                     ));
                 }
-                if parent.type_params != 0 || class.type_params != 0 {
+                // A generic parent carries one closed type argument per
+                // parameter. A generic class still declares no parent,
+                // so no parent argument holds a type variable.
+                if class.type_params != 0 {
+                    return Err(cerr("a generic class cannot declare a parent".to_string()));
+                }
+                if class.parent_args.len() != parent.type_params as usize {
                     return Err(cerr(
-                        "a generic class cannot take part in inheritance".to_string(),
+                        "the parent type argument count does not match the parent arity"
+                            .to_string(),
                     ));
                 }
+                for arg in &class.parent_args {
+                    if *arg as usize >= module.types.len() {
+                        return Err(cerr("a parent type argument is out of range".to_string()));
+                    }
+                    if !ctx.vars_bounded(*arg, 0, 0) {
+                        return Err(cerr(
+                            "a parent type argument holds a type variable".to_string(),
+                        ));
+                    }
+                }
+            } else if !class.parent_args.is_empty() {
+                return Err(cerr(
+                    "a case class carries no parent type argument".to_string(),
+                ));
             }
             // The field layout must extend the parent layout exactly.
-            if class.fields.len() < parent.fields.len()
-                || class.fields[..parent.fields.len()] != parent.fields[..]
+            // A generic parent contributes its fields with the declared
+            // arguments applied.
+            let inherited: Vec<(String, u32)> = parent
+                .fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), ctx.subst(*ty, &class.parent_args, &[])))
+                .collect();
+            if class.fields.len() < inherited.len()
+                || class.fields[..inherited.len()] != inherited[..]
             {
                 return Err(cerr(
                     "the field layout does not extend the parent layout".to_string(),
                 ));
             }
+        } else if !class.parent_args.is_empty() {
+            return Err(cerr(
+                "a class without a parent carries no parent type argument".to_string(),
+            ));
         }
         for (fname, fty) in &class.fields {
             if *fty as usize >= module.types.len() {
@@ -1096,10 +1191,41 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                 )));
             }
             // Override compatibility with the nearest ancestor method.
+            // The base signature is read in the subclass view, so a
+            // generic ancestor compares with its arguments applied.
             if let Some(parent) = class.parent() {
                 if let Some(base_func) = ctx.find_method(parent, *sel) {
                     let base = &module.funcs[base_func as usize];
-                    if base.params.len() != f.params.len() || base.params[1..] != f.params[1..] {
+                    let owner = ctx
+                        .method_owner(parent, *sel)
+                        .expect("the base method has a declaring class");
+                    let owner_arity = module.classes[owner as usize].type_params;
+                    let start_args = ctx.declared_parent_args(cidx as u32);
+                    let owner_args = ctx
+                        .ancestor_args(parent, &start_args, owner)
+                        .expect("the declaring class is an ancestor");
+                    let Some(own_count) = base.type_params.checked_sub(owner_arity) else {
+                        return Err(cerr(format!(
+                            "the base of selector {sel} does not carry its class type arity"
+                        )));
+                    };
+                    if f.type_params != class.type_params + own_count
+                        || base.effect_params != f.effect_params
+                    {
+                        return Err(cerr(format!(
+                            "override of selector {sel} changes the generic arity"
+                        )));
+                    }
+                    let mut targs = owner_args;
+                    for i in 0..own_count {
+                        targs.push(ctx.intern(BcType::Var(class.type_params + i)));
+                    }
+                    let base_params: Vec<u32> = base
+                        .params
+                        .iter()
+                        .map(|p| ctx.subst(*p, &targs, &[]))
+                        .collect();
+                    if base_params.len() != f.params.len() || base_params[1..] != f.params[1..] {
                         return Err(cerr(format!(
                             "override of selector {sel} changes the parameter types"
                         )));
@@ -1111,12 +1237,8 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                             "override of selector {sel} changes the parameter mut markers"
                         )));
                     }
-                    if base.type_params != f.type_params || base.effect_params != f.effect_params {
-                        return Err(cerr(format!(
-                            "override of selector {sel} changes the generic arity"
-                        )));
-                    }
-                    if !ctx.is_subtype(f.ret, base.ret) {
+                    let base_ret = ctx.subst(base.ret, &targs, &[]);
+                    if !ctx.is_subtype(f.ret, base_ret) {
                         return Err(cerr(format!(
                             "override of selector {sel} widens the result type"
                         )));
@@ -1804,7 +1926,15 @@ fn step(
                 .ok_or_else(|| fail(format!("selector {selector} is not a class method")))?;
             let sig = &module.funcs[target as usize];
             let app = &module.apps[*app as usize];
-            let mut targs = class_args;
+            // The declaring class may be a generic ancestor. Its type
+            // arguments come from the class table, not from the call
+            // site, so no application can forge them.
+            let owner = ctx
+                .method_owner(class, *selector)
+                .ok_or_else(|| fail(format!("selector {selector} is not a class method")))?;
+            let mut targs = ctx
+                .ancestor_args(class, &class_args, owner)
+                .ok_or_else(|| fail("the method owner is not an ancestor".to_string()))?;
             targs.extend_from_slice(&app.types);
             if sig.type_params as usize != targs.len()
                 || sig.effect_params as usize != app.rows.len()
@@ -2405,6 +2535,7 @@ mod tests {
             apps: vec![],
             classes: vec![BcClass {
                 name: "Counter".to_string(),
+                parent_args: Vec::new(),
                 key: "Counter".to_string(),
                 parent: NO_PARENT,
                 type_params: 0,
@@ -2452,6 +2583,7 @@ mod tests {
             ],
             classes: vec![BcClass {
                 name: "Box".to_string(),
+                parent_args: Vec::new(),
                 key: "Box".to_string(),
                 parent: NO_PARENT,
                 type_params: 1,
@@ -2673,6 +2805,7 @@ mod tests {
         let mut m = class_module(vec![vec![New(1), Pop, ConstInt(0), Return]]);
         m.classes.push(BcClass {
             name: "Opt".to_string(),
+            parent_args: Vec::new(),
             key: "Opt".to_string(),
             parent: NO_PARENT,
             type_params: 0,
@@ -2689,6 +2822,7 @@ mod tests {
         let mut m = class_module(vec![vec![ConstInt(0), Return]]);
         m.classes.push(BcClass {
             name: "Opt".to_string(),
+            parent_args: Vec::new(),
             key: "Opt".to_string(),
             parent: NO_PARENT,
             type_params: 0,
@@ -2698,6 +2832,7 @@ mod tests {
         });
         m.classes.push(BcClass {
             name: "Opt.None".to_string(),
+            parent_args: Vec::new(),
             key: "Opt.None".to_string(),
             parent: 1,
             type_params: 0,
@@ -2707,6 +2842,7 @@ mod tests {
         });
         m.classes.push(BcClass {
             name: "Bad".to_string(),
+            parent_args: Vec::new(),
             key: "Bad".to_string(),
             parent: 2,
             type_params: 0,
@@ -2724,6 +2860,7 @@ mod tests {
         m.types.push(BcType::Class(1)); // 5
         m.classes.push(BcClass {
             name: "Other".to_string(),
+            parent_args: Vec::new(),
             key: "Other".to_string(),
             parent: NO_PARENT,
             type_params: 0,
@@ -2859,6 +2996,7 @@ mod tests {
         m.types.push(BcType::Class(1)); // 5
         m.classes.push(BcClass {
             name: "Fast".to_string(),
+            parent_args: Vec::new(),
             key: "Fast".to_string(),
             parent: 0,
             type_params: 0,
@@ -2883,6 +3021,7 @@ mod tests {
         m.types.push(BcType::Class(1)); // 5
         m.classes.push(BcClass {
             name: "Loud".to_string(),
+            parent_args: Vec::new(),
             key: "Loud".to_string(),
             parent: 0,
             type_params: 0,
@@ -2912,6 +3051,7 @@ mod tests {
         m.types.push(BcType::Class(1));
         m.classes.push(BcClass {
             name: "Bad".to_string(),
+            parent_args: Vec::new(),
             key: "Bad".to_string(),
             parent: 0,
             type_params: 0,
@@ -3139,6 +3279,7 @@ mod tests {
         types.push(BcType::Class(2)); // 6 Cat
         let class = |name: &str, parent: u32| BcClass {
             name: name.to_string(),
+            parent_args: Vec::new(),
             key: name.to_string(),
             parent,
             type_params: 0,

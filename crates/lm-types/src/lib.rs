@@ -120,6 +120,13 @@ pub enum Type {
 pub struct ClassMeta {
     pub name: String,
     pub parent: Option<ClassId>,
+    /// The type arguments of a generic parent, for example the `Work`
+    /// of `class Worker < Proc[Work]`. Empty for a plain parent.
+    ///
+    /// Only a class without type parameters may declare a parent, so
+    /// these arguments never hold a type variable. Every ancestor walk
+    /// therefore reads them without substitution.
+    pub parent_args: Vec<TypeId>,
     /// The number of generic type parameters.
     pub type_params: u32,
     pub kind: ClassKind,
@@ -266,6 +273,7 @@ impl TypeStore {
         self.classes.push(ClassMeta {
             name: name.into(),
             parent: None,
+            parent_args: Vec::new(),
             type_params,
             kind,
         });
@@ -273,8 +281,48 @@ impl TypeStore {
     }
 
     pub fn set_class_parent(&mut self, class: ClassId, parent: ClassId) {
-        self.classes[class.0 as usize].parent = Some(parent);
+        self.set_class_parent_args(class, parent, Vec::new());
+    }
+
+    /// Record the parent of one class together with the type arguments
+    /// of a generic parent.
+    pub fn set_class_parent_args(&mut self, class: ClassId, parent: ClassId, args: Vec<TypeId>) {
+        let meta = &mut self.classes[class.0 as usize];
+        meta.parent = Some(parent);
+        meta.parent_args = args;
         self.subtype_cache.borrow_mut().clear();
+    }
+
+    /// The type arguments of `ancestor` seen from an instance of
+    /// `child` applied to `args`. `None` when `child` does not inherit
+    /// `ancestor`.
+    ///
+    /// Three parent shapes exist. An enum case shares the arity of its
+    /// family and passes its arguments through. A declared generic
+    /// parent records closed arguments, because a generic class never
+    /// declares a parent. Every other parent has no arguments. The
+    /// walk therefore never substitutes.
+    pub fn ancestor_args(
+        &self,
+        child: ClassId,
+        args: &[TypeId],
+        ancestor: ClassId,
+    ) -> Option<Vec<TypeId>> {
+        let mut cur = child;
+        let mut cur_args = args.to_vec();
+        loop {
+            if cur == ancestor {
+                return Some(cur_args);
+            }
+            let meta = &self.classes[cur.0 as usize];
+            let parent = meta.parent?;
+            if !meta.parent_args.is_empty() {
+                cur_args = meta.parent_args.clone();
+            } else if self.classes[parent.0 as usize].type_params == 0 {
+                cur_args = Vec::new();
+            }
+            cur = parent;
+        }
     }
 
     pub fn class_meta(&self, class: ClassId) -> &ClassMeta {
@@ -330,7 +378,17 @@ impl TypeStore {
         }
         let answer = match (self.get(found), self.get(expected)) {
             (Type::Class(a), Type::Class(b)) => self.class_extends(*a, *b),
-            (Type::Inst(a, xs), Type::Inst(b, ys)) => self.class_extends(*a, *b) && xs == ys,
+            // A class may inherit a generic parent, so a plain class
+            // instance can satisfy an application type.
+            (Type::Class(a), Type::Inst(b, ys)) => {
+                self.ancestor_args(*a, &[], *b).as_ref() == Some(ys)
+            }
+            (Type::Inst(a, xs), Type::Class(b)) => {
+                self.ancestor_args(*a, xs, *b) == Some(Vec::new())
+            }
+            (Type::Inst(a, xs), Type::Inst(b, ys)) => {
+                self.ancestor_args(*a, xs, *b).as_ref() == Some(ys)
+            }
             (Type::Tuple(xs), Type::Tuple(ys)) => {
                 xs.len() == ys.len()
                     && xs
@@ -369,7 +427,19 @@ impl TypeStore {
         match (self.get(a).clone(), self.get(b).clone()) {
             (Type::Class(ca), Type::Class(cb)) => {
                 let common = self.common_ancestor(ca, cb)?;
-                Some(self.intern(Type::Class(common)))
+                // The common ancestor may be a generic class, because
+                // a class may inherit an instantiated generic parent.
+                // Both branches must reach it with equal arguments.
+                let left = self.ancestor_args(ca, &[], common)?;
+                let right = self.ancestor_args(cb, &[], common)?;
+                if left != right {
+                    return None;
+                }
+                if left.is_empty() {
+                    Some(self.intern(Type::Class(common)))
+                } else {
+                    Some(self.intern(Type::Inst(common, left)))
+                }
             }
             (Type::Inst(ca, xs), Type::Inst(cb, ys)) => {
                 if xs != ys {

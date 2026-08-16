@@ -127,3 +127,187 @@ fn an_override_of_a_core_method_keeps_the_signature() {
     );
     assert!(error.contains("E1031"), "{error}");
 }
+
+// ---------------------------------------------------------------
+// Generic-parent inheritance.
+// ---------------------------------------------------------------
+
+/// The parent type argument flows into every inherited signature.
+#[test]
+fn an_instantiated_generic_parent_binds_the_inherited_signature() {
+    let source = "class Cell[T]\n\
+                  \x20 value: T\n\
+                  \x20 def init(mut self, value: T)\n\
+                  \x20   self.value = value\n\
+                  \x20 end\n\
+                  \x20 def get(self): T\n\
+                  \x20   self.value\n\
+                  \x20 end\n\
+                  end\n\
+                  class IntCell < Cell[Int]\n\
+                  \x20 def init(mut self, value: Int)\n\
+                  \x20   super.init(value)\n\
+                  \x20 end\n\
+                  end\n\
+                  IntCell(41).get() + 1\n";
+    assert_eq!(run(source), "Done(42)");
+}
+
+/// A subclass value is valid at the instantiated parent type, and an
+/// override of the inherited method dispatches.
+#[test]
+fn a_subclass_is_valid_at_the_instantiated_parent_type() {
+    let source = "class Cell[T]\n\
+                  \x20 value: T\n\
+                  \x20 def init(mut self, value: T)\n\
+                  \x20   self.value = value\n\
+                  \x20 end\n\
+                  \x20 def get(self): T\n\
+                  \x20   self.value\n\
+                  \x20 end\n\
+                  end\n\
+                  class Bumped < Cell[Int]\n\
+                  \x20 def init(mut self, value: Int)\n\
+                  \x20   super.init(value)\n\
+                  \x20 end\n\
+                  \x20 def get(self): Int\n\
+                  \x20   super.get() + 1\n\
+                  \x20 end\n\
+                  end\n\
+                  c: Cell[Int] = Bumped(41)\n\
+                  c.get()\n";
+    assert_eq!(run(source), "Done(42)");
+}
+
+/// A generic method of a generic parent keeps its own parameters
+/// after the parent parameters.
+#[test]
+fn a_generic_method_of_a_generic_parent_still_infers() {
+    let source = "class Maker[T]\n\
+                  \x20 def pair[U](self, a: T, b: U): Pair[T, U]\n\
+                  \x20   Pair(a, b)\n\
+                  \x20 end\n\
+                  end\n\
+                  class IntMaker < Maker[Int]\n\
+                  end\n\
+                  p = IntMaker().pair(1, \"x\")\n\
+                  (p.first, p.second)\n";
+    assert_eq!(run(source), "Done((1, \"x\"))");
+}
+
+/// A wrong type-argument count rejects.
+#[test]
+fn a_wrong_parent_arity_rejects() {
+    let error = reject("class Cell[T]\nend\nclass Bad < Cell[Int, Int]\nend\n1\n");
+    assert!(error.contains("E1024"), "{error}");
+    assert!(
+        error.contains("takes 1 type argument(s), found 2"),
+        "{error}"
+    );
+    let missing = reject("class Cell[T]\nend\nclass Bad < Cell\nend\n1\n");
+    assert!(
+        missing.contains("takes 1 type argument(s), found 0"),
+        "{missing}"
+    );
+    let extra = reject("class Plain\nend\nclass Bad < Plain[Int]\nend\n1\n");
+    assert!(
+        extra.contains("takes 0 type argument(s), found 1"),
+        "{extra}"
+    );
+}
+
+/// An unbound name in a parent type argument rejects.
+#[test]
+fn an_unbound_parent_type_argument_rejects() {
+    let error = reject("class Cell[T]\nend\nclass Bad < Cell[Nope]\nend\n1\n");
+    assert!(error.contains("E1013"), "{error}");
+}
+
+/// An override of an inherited method still may not widen the row.
+#[test]
+fn an_override_of_a_generic_parent_method_may_not_widen_the_row() {
+    let error = reject(
+        "class Cell[T]\n\
+         \x20 def show(self): String\n\
+         \x20   \"cell\"\n\
+         \x20 end\n\
+         end\n\
+         class Loud < Cell[Int]\n\
+         \x20 def show(self): String with Io.Print\n\
+         \x20   sys.io.print(\"x\")\n\
+         \x20   \"loud\"\n\
+         \x20 end\n\
+         end\n\
+         1\n",
+    );
+    assert!(error.contains("E1046"), "{error}");
+}
+
+/// An override of an inherited method may not change the bound
+/// parameter types.
+#[test]
+fn an_override_of_a_generic_parent_method_keeps_the_bound_types() {
+    let error = reject(
+        "class Cell[T]\n\
+         \x20 def take(self, v: T): Int\n\
+         \x20   0\n\
+         \x20 end\n\
+         end\n\
+         class Bad < Cell[Int]\n\
+         \x20 def take(self, v: String): Int\n\
+         \x20   1\n\
+         \x20 end\n\
+         end\n\
+         1\n",
+    );
+    assert!(error.contains("E1031"), "{error}");
+}
+
+/// A generic class still declares no parent.
+#[test]
+fn a_generic_class_still_declares_no_parent() {
+    let error = reject("class Cell[T]\nend\nclass Bad[U] < Cell[Int]\nend\n1\n");
+    assert!(error.contains("E1024"), "{error}");
+    assert!(
+        error.contains("generic class cannot declare a parent"),
+        "{error}"
+    );
+}
+
+/// A default of a generic parent field that names a class parameter
+/// rejects with a diagnostic, not with a verifier rejection.
+#[test]
+fn a_generic_parent_default_that_names_a_parameter_rejects() {
+    let error = reject("class Slot[T]\n  items: [T] = []\nend\nclass Bad < Slot[Int]\nend\n1\n");
+    assert!(error.contains("E1024"), "{error}");
+    assert!(error.contains("class type parameter"), "{error}");
+}
+
+/// The class entry records the parent type arguments, so the verifier
+/// reads them from the class table and no call site can forge them.
+#[test]
+fn the_class_entry_records_the_parent_type_arguments() {
+    let module = compile_text(
+        "inherit.lm",
+        "class Cell[T]\n\
+         \x20 def get(self): T\n\
+         \x20   self.miss()\n\
+         \x20 end\n\
+         \x20 def miss(self): T\n\
+         \x20   self.miss()\n\
+         \x20 end\n\
+         end\n\
+         class IntCell < Cell[Int]\n\
+         end\n\
+         1\n",
+    )
+    .expect("the module compiles");
+    let int_cell = module
+        .classes
+        .iter()
+        .position(|c| c.name == "IntCell")
+        .expect("the module declares IntCell");
+    assert_eq!(module.classes[int_cell].parent_args.len(), 1);
+    let arg = module.classes[int_cell].parent_args[0];
+    assert_eq!(module.types[arg as usize], lm_bytecode::BcType::Int);
+}

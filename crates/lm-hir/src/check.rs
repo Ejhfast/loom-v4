@@ -511,17 +511,71 @@ impl Ctx {
         None
     }
 
-    /// Find a method by name, walking the ancestor chain.
-    pub(crate) fn find_method(&self, mut class: u32, name: &str) -> Option<MethodSig> {
+    /// Find a method by name and return the type arguments of the
+    /// declaring class, seen from `class`. The list is empty when the
+    /// declaring class has no type parameters.
+    pub(crate) fn find_method_owner(
+        &mut self,
+        class: u32,
+        name: &str,
+    ) -> Option<(MethodSig, Vec<TypeId>)> {
+        let arity = self.classes[class as usize].type_params.len();
+        self.lookup_method(class, Vec::new(), arity, name)
+    }
+
+    /// The method `name` that the ancestor chain from `start` answers.
+    /// `args` holds the type arguments of `start` seen from the class
+    /// the caller asked about, and `arity` is that class's own generic
+    /// arity.
+    pub(crate) fn lookup_method(
+        &mut self,
+        start: u32,
+        args: Vec<TypeId>,
+        arity: usize,
+        name: &str,
+    ) -> Option<(MethodSig, Vec<TypeId>)> {
+        let mut cur = start;
+        let mut cur_args = args;
         loop {
-            let info = &self.classes[class as usize];
-            if let Some(m) = info.methods.iter().find(|m| m.name == name) {
-                return Some(m.clone());
+            let found = self.classes[cur as usize]
+                .methods
+                .iter()
+                .find(|m| m.name == name)
+                .cloned();
+            if let Some(sig) = found {
+                if cur_args.is_empty() {
+                    return Some((sig, cur_args));
+                }
+                let sig = self.substitute_method(&sig, &cur_args, arity);
+                return Some((sig, cur_args));
             }
-            match info.parent {
-                Some(p) => class = p,
-                None => return None,
-            }
+            let meta = self.store.class_meta(ClassId(cur));
+            let parent = meta.parent?;
+            cur_args = meta.parent_args.clone();
+            cur = parent.0;
+        }
+    }
+
+    /// Re-express one inherited method signature in the type
+    /// parameters of the subclass. `args` replaces the class
+    /// parameters of the declaring class, and the method's own
+    /// parameters move down to follow the subclass parameters.
+    fn substitute_method(&mut self, sig: &MethodSig, args: &[TypeId], arity: usize) -> MethodSig {
+        let mut targs = args.to_vec();
+        for i in 0..sig.own_type_params.len() {
+            let var = self.store.intern(Type::Var((arity + i) as u32));
+            targs.push(var);
+        }
+        let params = sig
+            .params
+            .iter()
+            .map(|p| self.store.substitute(*p, &targs, &[]))
+            .collect();
+        let ret = self.store.substitute(sig.ret, &targs, &[]);
+        MethodSig {
+            params,
+            ret,
+            ..sig.clone()
         }
     }
 
@@ -1151,6 +1205,11 @@ fn assemble(
             name: info.name.clone(),
             key: keys[idx].clone(),
             parent: info.parent,
+            parent_args: ctx
+                .store
+                .class_meta(ClassId(idx as u32))
+                .parent_args
+                .clone(),
             type_params: info.type_params.len() as u32,
             kind: info.kind,
             ctor_kind,
@@ -1341,7 +1400,9 @@ fn link_class_parents(
             &ctx.user_types
         };
         let idx = map[&class.name];
-        if let Some((pname, pspan)) = &class.parent {
+        if let Some(clause) = &class.parent {
+            let pname = &clause.name;
+            let pspan = &clause.span;
             if !class.generics.is_empty() {
                 return Err(Diagnostic::new(
                     "E1024",
@@ -1394,14 +1455,27 @@ fn link_class_parents(
                     *pspan,
                 ));
             }
-            if parent_meta.type_params > 0 {
+            // A generic parent carries one type argument per parameter.
+            // The subclass declares no type parameters, so the
+            // arguments are closed types.
+            if clause.args.len() != parent_meta.type_params as usize {
+                let want = parent_meta.type_params;
+                let found = clause.args.len();
                 return Err(Diagnostic::new(
                     "E1024",
-                    "a generic class cannot be a parent in this slice",
+                    format!(
+                        "the parent class `{pname}` takes {want} type argument(s), \
+                         found {found}"
+                    ),
                     *pspan,
                 ));
             }
-            ctx.store.set_class_parent(ClassId(idx), ClassId(parent));
+            let mut args = Vec::with_capacity(clause.args.len());
+            for arg in &clause.args {
+                args.push(resolve_type(ctx, &env, arg)?);
+            }
+            ctx.store
+                .set_class_parent_args(ClassId(idx), ClassId(parent), args);
         }
     }
     Ok(())
@@ -1565,14 +1639,40 @@ fn resolve_class(
         effect_names: vec![],
         core_scope: is_core,
     };
+    // The subclass layout starts with the parent layout. A generic
+    // parent contributes its fields with its type arguments applied.
+    let parent_args = ctx.store.class_meta(ClassId(idx)).parent_args.clone();
     let (mut field_names, mut field_tys, mut has_default) = match parent {
         Some(p) => {
             let info = &ctx.classes[p as usize];
-            (
-                info.field_names.clone(),
-                info.field_tys.clone(),
-                info.has_default.clone(),
-            )
+            let names = info.field_names.clone();
+            let tys = info.field_tys.clone();
+            let defaults = info.has_default.clone();
+            if !parent_args.is_empty() {
+                // A subclass copies the default expressions of its
+                // parent. A default whose type names a class parameter
+                // would arrive with the parameter still free, so this
+                // slice rejects it instead of rewriting the expression.
+                for (i, ty) in tys.iter().enumerate() {
+                    if defaults[i] && ctx.store.contains_var(*ty) {
+                        let span = class.parent.as_ref().map(|p| p.span).unwrap_or(class.span);
+                        return Err(Diagnostic::new(
+                            "E1024",
+                            format!(
+                                "the generic parent field `{}` has a default that names a \
+                                 class type parameter; give the field an `init` instead",
+                                names[i]
+                            ),
+                            span,
+                        ));
+                    }
+                }
+            }
+            let tys = tys
+                .into_iter()
+                .map(|t| ctx.store.substitute(t, &parent_args, &[]))
+                .collect();
+            (names, tys, defaults)
         }
         None => (Vec::new(), Vec::new(), Vec::new()),
     };
@@ -1629,9 +1729,14 @@ fn resolve_class(
             continue;
         }
         let msig = resolve_method_sig(ctx, method, &type_names, self_ty, is_core, false)?;
-        // Override compatibility with the nearest ancestor method.
+        // Override compatibility with the nearest ancestor method. The
+        // inherited signature is read in the subclass view, so a
+        // generic parent compares with its arguments applied.
         if let Some(p) = parent {
-            if let Some(base) = ctx.find_method(p, &method.name) {
+            let inherited = ctx
+                .lookup_method(p, parent_args.clone(), type_names.len(), &method.name)
+                .map(|(sig, _)| sig);
+            if let Some(base) = inherited {
                 let same_params = base.params == msig.params
                     && base.param_muts == msig.param_muts
                     && base.mut_self == msig.mut_self

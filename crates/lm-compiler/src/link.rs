@@ -414,6 +414,7 @@ fn relocate(
                     name: source.name.clone(),
                     key: source.key.clone(),
                     parent: NO_PARENT,
+                    parent_args: Vec::new(),
                     type_params: source.type_params,
                     kind: source.kind,
                     fields: Vec::new(),
@@ -526,6 +527,11 @@ fn relocate(
                 None => NO_PARENT,
                 Some(p) => reloc.classes[p as usize],
             },
+            parent_args: source
+                .parent_args
+                .iter()
+                .map(|t| reloc.types[*t as usize])
+                .collect(),
             type_params: source.type_params,
             kind: source.kind,
             fields: source

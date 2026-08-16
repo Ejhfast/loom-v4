@@ -1,0 +1,14 @@
+class Cell[T]
+  def show(self): String
+    "cell"
+  end
+end
+
+class Loud < Cell[Int]
+  def show(self): String with Io.Print
+    sys.io.print("x")
+    "loud"
+  end
+end
+
+1

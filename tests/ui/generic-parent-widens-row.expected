@@ -1,0 +1,2 @@
+error[E1046]: the override of `show` widens the effect row; the parent row is `empty`
+  --> tests/ui/generic-parent-widens-row.lm:8:7

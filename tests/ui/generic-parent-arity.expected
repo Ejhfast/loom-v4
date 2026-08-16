@@ -1,0 +1,2 @@
+error[E1024]: the parent class `Cell` takes 1 type argument(s), found 2
+  --> tests/ui/generic-parent-arity.lm:7:13

@@ -105,6 +105,8 @@ pub struct HirClass {
     pub key: String,
     /// Parent class index.
     pub parent: Option<u32>,
+    /// Type arguments of a generic parent. Empty for a plain parent.
+    pub parent_args: Vec<TypeId>,
     /// The number of generic type parameters.
     pub type_params: u32,
     pub kind: ClassKind,
@@ -308,6 +310,10 @@ pub enum HExprKind {
     MethodCall {
         recv: Box<HExpr>,
         selector: String,
+        /// True when the declaring class has type parameters. The
+        /// call then needs the generic instruction form, because the
+        /// verifier reads the owner arguments from the class table.
+        generic_owner: bool,
         own_targs: Vec<TypeId>,
         own_rowargs: Vec<Row>,
         args: Vec<HExpr>,

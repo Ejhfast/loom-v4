@@ -2173,7 +2173,7 @@ impl<'o> FnChecker<'o> {
         }
         // Class and enum methods first, then the universal `freeze`.
         if let Some((class, class_args)) = class_of(ctx, recv_ty) {
-            if let Some(sig) = ctx.find_method(class, name) {
+            if let Some((sig, owner_args)) = ctx.find_method_owner(class, name) {
                 if sig.name == "init" {
                     return Err(Diagnostic::new(
                         "E1026",
@@ -2219,6 +2219,7 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::MethodCall {
                         recv: Box::new(recv_h),
                         selector: name.to_string(),
+                        generic_owner: !owner_args.is_empty(),
                         own_targs,
                         own_rowargs: out.rowargs,
                         args: out.args,
@@ -2345,6 +2346,13 @@ impl<'o> FnChecker<'o> {
                 span,
             ));
         };
+        // A generic parent contributes its type arguments to every
+        // signature the subclass inherits.
+        let parent_args = ctx
+            .store
+            .class_meta(lm_types::ClassId(cidx))
+            .parent_args
+            .clone();
         if name == "init" {
             let Some(c) = &self.ctor else {
                 return Err(Diagnostic::new(
@@ -2371,11 +2379,16 @@ impl<'o> FnChecker<'o> {
                 .init
                 .clone()
                 .expect("needs_super implies parent init");
+            let init_params: Vec<TypeId> = parent_init
+                .params
+                .iter()
+                .map(|p| ctx.store.substitute(*p, &parent_args, &[]))
+                .collect();
             self.charge_row(ctx, &parent_init.row, span)?;
             let checked = self.check_args_simple(
                 ctx,
                 args,
-                &parent_init.params,
+                &init_params,
                 &parent_init.param_muts,
                 &parent_init.param_names,
                 "super.init",
@@ -2394,19 +2407,23 @@ impl<'o> FnChecker<'o> {
                 mutable: true,
                 kind: HExprKind::Call {
                     func: parent_init.func,
-                    targs: vec![],
+                    targs: parent_args,
                     rowargs: vec![],
                     args: all_args,
                 },
             });
         }
-        let sig = ctx.find_method(parent, name).ok_or_else(|| {
-            Diagnostic::new(
-                "E1026",
-                format!("the superclass has no method named `{name}`"),
-                name_span,
-            )
-        })?;
+        // The superclass method is read in the subclass view.
+        let arity = ctx.classes[cidx as usize].type_params.len();
+        let (sig, owner_args) = ctx
+            .lookup_method(parent, parent_args, arity, name)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "E1026",
+                    format!("the superclass has no method named `{name}`"),
+                    name_span,
+                )
+            })?;
         // The receiver escapes into the superclass method.
         let self_expr = self.synth_self(ctx, span)?;
         if sig.mut_self && !self_expr.mutable {
@@ -2435,12 +2452,16 @@ impl<'o> FnChecker<'o> {
         )?;
         let mut all_args = vec![self_expr];
         all_args.extend(out.args);
+        // The callee reads its class parameters first, so the owner
+        // arguments come before the method's own arguments.
+        let mut targs = owner_args;
+        targs.extend(out.targs);
         Ok(HExpr {
             ty: out.ret,
             mutable: true,
             kind: HExprKind::Call {
                 func: sig.func,
-                targs: out.targs,
+                targs,
                 rowargs: out.rowargs,
                 args: all_args,
             },

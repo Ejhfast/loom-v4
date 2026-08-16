@@ -66,10 +66,9 @@ use std::collections::HashMap;
 /// the lowering ABI. The operation manifest is covered separately by
 /// `lm_abi::manifest_digest()`, which every definition hash includes.
 ///
-/// Version 5 adds the `Digest` type and the three digest
-/// instructions to the instruction set and to the canonical identity
-/// encoding.
-pub const COMPILER_ABI_VERSION: u32 = 5;
+/// Version 6 adds the parent type arguments of a generic parent to
+/// the canonical class identity encoding.
+pub const COMPILER_ABI_VERSION: u32 = 6;
 
 /// The refinement work budget of one component.
 ///
@@ -311,6 +310,13 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
     for (cidx, class) in module.classes.iter().enumerate() {
         if class.parent != NO_PARENT && class.parent as usize >= s.classes {
             return Err(fail(format!("class {cidx}: parent out of range")));
+        }
+        for arg in &class.parent_args {
+            if *arg as usize >= s.types {
+                return Err(fail(format!(
+                    "class {cidx}: parent type argument out of range"
+                )));
+            }
         }
         for (fname, fty) in &class.fields {
             if *fty as usize >= s.types {
@@ -1075,6 +1081,13 @@ impl<'a> Resolver<'a> {
             Some(p) => {
                 out.push(0xfe);
                 write_str(&mut out, self.class_key(p));
+                // A generic parent contributes its type arguments: two
+                // subclasses of the same parent with other arguments
+                // are different definitions.
+                out.extend_from_slice(&(class.parent_args.len() as u32).to_le_bytes());
+                for arg in &class.parent_args {
+                    out.extend_from_slice(&self.type_digest(*arg));
+                }
             }
         }
         out.extend_from_slice(&(class.fields.len() as u32).to_le_bytes());

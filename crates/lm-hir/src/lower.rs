@@ -195,6 +195,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
             name: class.name.clone(),
             key: class.key.clone(),
             parent: class.parent.unwrap_or(NO_PARENT),
+            parent_args: class.parent_args.iter().map(|t| m.bc_ty(*t)).collect(),
             type_params: class.type_params,
             kind: match class.kind {
                 ClassKind::Normal => BcClassKind::Normal,
@@ -586,6 +587,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             HExprKind::MethodCall {
                 recv,
                 selector,
+                generic_owner,
                 own_targs,
                 own_rowargs,
                 args,
@@ -596,7 +598,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 }
                 let sel = self.m.selector(selector);
                 let generic_recv = matches!(self.m.store.get(recv.ty), Type::Inst(_, _));
-                if generic_recv || !own_targs.is_empty() || !own_rowargs.is_empty() {
+                if generic_recv
+                    || *generic_owner
+                    || !own_targs.is_empty()
+                    || !own_rowargs.is_empty()
+                {
                     let app = self.m.app_of(own_targs, own_rowargs);
                     self.emit(Instr::CallVirtualG {
                         selector: sel,

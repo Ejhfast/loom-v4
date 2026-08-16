@@ -574,6 +574,7 @@ mod tests {
                 name: "Point".to_string(),
                 key: "Point".to_string(),
                 parent: lm_bytecode::NO_PARENT,
+                parent_args: Vec::new(),
                 type_params: 0,
                 kind: BcClassKind::Normal,
                 fields: vec![("x".to_string(), 2)],

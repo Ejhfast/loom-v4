@@ -45,13 +45,22 @@ pub struct RowItem {
     pub span: Span,
 }
 
+/// A parent clause: `< Name` or `< Name[T, U]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParentClause {
+    pub name: String,
+    pub span: Span,
+    /// The type arguments of a generic parent. Empty for a plain name.
+    pub args: Vec<TypeExpr>,
+}
+
 /// A `class` declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDef {
     pub name: String,
     pub name_span: Span,
     pub generics: Vec<GenericParam>,
-    pub parent: Option<(String, Span)>,
+    pub parent: Option<ParentClause>,
     pub fields: Vec<FieldDef>,
     pub methods: Vec<MethodDef>,
     pub span: Span,
@@ -390,8 +399,18 @@ pub fn dump_module(module: &Module) -> String {
     for class in &module.classes {
         let generics = dump_generics(&class.generics);
         match &class.parent {
-            Some((parent, _)) => {
-                let _ = writeln!(out, "  class {}{generics} < {}", class.name, parent);
+            Some(parent) => {
+                let args = if parent.args.is_empty() {
+                    String::new()
+                } else {
+                    let parts: Vec<String> = parent.args.iter().map(dump_type).collect();
+                    format!("[{}]", parts.join(", "))
+                };
+                let _ = writeln!(
+                    out,
+                    "  class {}{generics} < {}{args}",
+                    class.name, parent.name
+                );
             }
             None => {
                 let _ = writeln!(out, "  class {}{generics}", class.name);

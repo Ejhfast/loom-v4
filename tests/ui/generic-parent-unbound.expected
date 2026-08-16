@@ -1,0 +1,2 @@
+error[E1013]: unknown type name `Missing`
+  --> tests/ui/generic-parent-unbound.lm:7:18
