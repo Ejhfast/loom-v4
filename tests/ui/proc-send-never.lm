@@ -1,0 +1,8 @@
+class Quiet < Proc
+  def on_spawn(self): Int with Proc
+    1
+  end
+end
+
+h = Quiet.spawn()
+h.send(1)

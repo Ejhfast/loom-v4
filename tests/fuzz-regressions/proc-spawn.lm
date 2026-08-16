@@ -1,0 +1,14 @@
+class Worker < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(n)
+      n
+    in Closed
+      0
+    end
+  end
+end
+h: Handle[Int, Int] = Worker.spawn()
+h.send(1)
+h.close()
+h.done()

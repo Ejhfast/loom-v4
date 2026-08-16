@@ -1,0 +1,2 @@
+error[E1051]: `sys.proc.recv` is only valid inside a method of a `Proc` subclass
+  --> tests/ui/proc-receive-outside.lm:2:17

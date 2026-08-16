@@ -1,0 +1,2 @@
+error[E1026]: a proc with no mailbox has no `send` method
+  --> tests/ui/proc-send-never.lm:8:3

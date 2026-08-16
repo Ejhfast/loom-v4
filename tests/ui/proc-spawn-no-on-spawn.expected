@@ -1,0 +1,2 @@
+error[E1026]: the proc class `Silent` declares no `on_spawn`
+  --> tests/ui/proc-spawn-no-on-spawn.lm:4:8

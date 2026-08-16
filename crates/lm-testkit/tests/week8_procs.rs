@@ -491,3 +491,78 @@ fn week8_examples_have_checked_output() {
     );
     assert_eq!(run(&read("examples/07-procs/barrier.lm")), "Done(Done(5))");
 }
+
+/// A bare `Proc` parent is sugar for `Proc[Never]`: the proc takes no
+/// message, and the spawn arguments reach its `init`.
+#[test]
+fn a_bare_proc_parent_takes_no_message() {
+    let source = "class Doubler < Proc\n\
+                  \x20 n: Int\n\
+                  \x20 def init(mut self, n: Int)\n\
+                  \x20   self.n = n\n\
+                  \x20 end\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   self.n * 2\n\
+                  \x20 end\n\
+                  end\n\
+                  h: Handle[Never, Int] = Doubler.spawn(21)\n\
+                  case h.done()\n\
+                  in Done(v)  then v\n\
+                  in Fault(_) then 0\n\
+                  end\n";
+    assert_eq!(run(source), "Done(42)");
+}
+
+/// The spawn arguments are checked against the proc class `init`.
+#[test]
+fn the_spawn_arguments_check_against_init() {
+    let source = "class Doubler < Proc\n\
+                  \x20 n: Int\n\
+                  \x20 def init(mut self, n: Int)\n\
+                  \x20   self.n = n\n\
+                  \x20 end\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   self.n * 2\n\
+                  \x20 end\n\
+                  end\n\
+                  Doubler.spawn(\"x\")\n";
+    let error = run_allowed("proc.lm", source, &["Proc"]).expect_err("the spawn must reject");
+    assert!(error.contains("E1004"), "{error}");
+    let arity = "class Doubler < Proc\n\
+                 \x20 n: Int\n\
+                 \x20 def init(mut self, n: Int)\n\
+                 \x20   self.n = n\n\
+                 \x20 end\n\
+                 \x20 def on_spawn(self): Int with Proc\n\
+                 \x20   self.n * 2\n\
+                 \x20 end\n\
+                 end\n\
+                 Doubler.spawn()\n";
+    let error = run_allowed("proc.lm", arity, &["Proc"]).expect_err("the spawn must reject");
+    assert!(error.contains("E1006"), "{error}");
+}
+
+/// The spawner charges `Proc.Spawn` only. The constructor and the
+/// proc body run inside the child, so their rows resolve through the
+/// child table and the birth grant.
+#[test]
+fn the_spawner_charges_the_spawn_operation_only() {
+    let source = "class Worker < Proc[Int]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(n)\n\
+                  \x20     n\n\
+                  \x20   in Closed\n\
+                  \x20     0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  def launch(): Handle[Int, Int] with Proc.Spawn\n\
+                  \x20 Worker.spawn()\n\
+                  end\n\
+                  h = launch()\n\
+                  h.send(4)\n\
+                  h.close()\n\
+                  h.done()\n";
+    assert_eq!(run(source), "Done(Done(4))");
+}

@@ -1,0 +1,5 @@
+class Plain
+  value: Int = 0
+end
+
+Plain.spawn()

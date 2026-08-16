@@ -1,0 +1,2 @@
+error[E1026]: `spawn` needs a subclass of `Proc`; `Plain` is not one
+  --> tests/ui/proc-spawn-not-a-proc.lm:5:7

@@ -127,13 +127,14 @@ fn seed_sources() -> Vec<(String, String)> {
         "examples/03-types",
         "examples/04-effects",
         "examples/06-graphs",
+        "examples/07-procs",
     ] {
         for path in lm_files(&repo_root().join(dir)) {
             let text = std::fs::read_to_string(&path).expect("example reads");
             out.push((path.display().to_string(), text));
         }
     }
-    assert!(out.len() >= 11, "the example corpus shrank");
+    assert!(out.len() >= 14, "the example corpus shrank");
     out
 }
 
@@ -276,7 +277,7 @@ fn the_regression_corpus_replays() {
             }
         }
         assert!(modules >= 5, "the module corpus shrank: {modules}");
-        assert!(sources >= 2, "the source corpus shrank: {sources}");
+        assert!(sources >= 4, "the source corpus shrank: {sources}");
     });
 }
 

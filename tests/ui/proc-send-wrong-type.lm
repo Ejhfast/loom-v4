@@ -1,0 +1,8 @@
+class Adder < Proc[Int]
+  def on_spawn(self): Int with Proc
+    0
+  end
+end
+
+h = Adder.spawn()
+h.send("one")

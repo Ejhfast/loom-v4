@@ -1,0 +1,8 @@
+def go(): Int with Proc.Recv
+  case sys.proc.recv()
+  in Msg(n) then n
+  in Closed then 0
+  end
+end
+
+go()

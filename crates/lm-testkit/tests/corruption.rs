@@ -745,3 +745,147 @@ fn digest_comparison_on_other_types_is_rejected_by_the_verifier() {
         );
     }
 }
+
+// ---------------------------------------------------------------
+// Week-8 formats: the parent type arguments and the proc rules.
+// ---------------------------------------------------------------
+
+/// The proc sample: a generic parent, a mailbox, and one spawn.
+const PROC_SOURCE: &str = "class Worker < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(n)
+      n
+    in Closed
+      0
+    end
+  end
+end
+
+h = Worker.spawn()
+h.send(1)
+h.close()
+h.done()
+";
+
+fn proc_bytes() -> Vec<u8> {
+    compile_to_bytes("proc.lm", PROC_SOURCE).unwrap()
+}
+
+/// The class entry carries the parent type arguments. A forged count
+/// no longer matches the parent arity.
+#[test]
+fn a_forged_parent_argument_count_is_rejected() {
+    let mut module = lm_bytecode::decode(&proc_bytes()).unwrap();
+    let worker = class_index(&module, "Worker");
+    module.classes[worker].parent_args.clear();
+    expect_verify_reject(&lm_bytecode::encode(&module), "parent type argument count");
+}
+
+/// A parent type argument out of range rejects before any use.
+#[test]
+fn a_parent_argument_out_of_range_is_rejected() {
+    let mut module = lm_bytecode::decode(&proc_bytes()).unwrap();
+    let worker = class_index(&module, "Worker");
+    let bad = module.types.len() as u32 + 3;
+    module.classes[worker].parent_args[0] = bad;
+    let bytes = lm_bytecode::encode(&module);
+    assert!(matches!(
+        lm_vm::load_bytes(&bytes),
+        Err(LoadError::Verify(_))
+    ));
+}
+
+/// A parent type argument may not hold a type variable: the subclass
+/// declares no type parameter to bind it.
+#[test]
+fn a_parent_argument_with_a_variable_is_rejected() {
+    let mut module = lm_bytecode::decode(&proc_bytes()).unwrap();
+    let worker = class_index(&module, "Worker");
+    let var = module
+        .types
+        .iter()
+        .position(|t| matches!(t, lm_bytecode::BcType::Var(0)))
+        .expect("the module interns a type variable") as u32;
+    module.classes[worker].parent_args[0] = var;
+    expect_verify_reject(&lm_bytecode::encode(&module), "type variable");
+}
+
+/// A class without a parent carries no parent type argument.
+#[test]
+fn a_parent_argument_without_a_parent_is_rejected() {
+    let mut module = lm_bytecode::decode(&proc_bytes()).unwrap();
+    let proc = class_index(&module, "Proc");
+    module.classes[proc].parent_args.push(0);
+    expect_verify_reject(
+        &lm_bytecode::encode(&module),
+        "without a parent carries no parent type argument",
+    );
+}
+
+/// The `Proc` core role must name the proc parent shape. A role that
+/// names another class rejects.
+#[test]
+fn a_forged_proc_role_is_rejected() {
+    let mut module = lm_bytecode::decode(&proc_bytes()).unwrap();
+    let role = lm_bytecode::corepin::role_index("Proc").expect("the label is known");
+    let worker = class_index(&module, "Worker") as u32;
+    module.core_roles[role] = worker;
+    expect_verify_reject(&lm_bytecode::encode(&module), "not the proc parent");
+}
+
+/// The mailbox type of a send comes from the handle on the stack. A
+/// forged handle type no longer accepts the message.
+#[test]
+fn a_forged_handle_message_type_is_rejected() {
+    let mut module = lm_bytecode::decode(&proc_bytes()).unwrap();
+    let str_ty = module
+        .types
+        .iter()
+        .position(|t| matches!(t, lm_bytecode::BcType::Str))
+        .expect("the module interns String") as u32;
+    let mut patched = false;
+    for ty in module.types.iter_mut() {
+        if let lm_bytecode::BcType::Handle(m, _) = ty {
+            *m = str_ty;
+            patched = true;
+            break;
+        }
+    }
+    assert!(patched, "the sample uses a proc handle");
+    let bytes = lm_bytecode::encode(&module);
+    assert!(matches!(
+        lm_vm::load_bytes(&bytes),
+        Err(LoadError::Verify(_))
+    ));
+}
+
+/// A `Proc.Recv` whose receiver is not a proc instance rejects.
+#[test]
+fn a_receive_on_a_foreign_receiver_is_rejected() {
+    let mut module = lm_bytecode::decode(&proc_bytes()).unwrap();
+    let mut patched = false;
+    'outer: for func in module.funcs.iter_mut() {
+        for block in func.blocks.iter_mut() {
+            for instr in block.iter_mut() {
+                if let lm_bytecode::Instr::Perform { op, .. } = instr {
+                    if *op == lm_abi::OP_PROC_RECV {
+                        // Load an integer instead of `self`.
+                        *instr = lm_bytecode::Instr::Perform {
+                            op: lm_abi::OP_PROC_DONE,
+                            argc: 1,
+                        };
+                        patched = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    assert!(patched, "the sample performs Proc.Recv");
+    let bytes = lm_bytecode::encode(&module);
+    assert!(matches!(
+        lm_vm::load_bytes(&bytes),
+        Err(LoadError::Verify(_))
+    ));
+}

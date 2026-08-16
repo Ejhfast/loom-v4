@@ -312,3 +312,138 @@ fn collection_after_the_graph_engine_smoke() {
     assert_eq!(outcome, "Done(300000)");
     eprintln!("bench-smoke mark_sweep_100k_under_256k: {elapsed:?}");
 }
+
+// ---------------------------------------------------------------
+// Week-8 proc paths.
+// ---------------------------------------------------------------
+
+/// The mailbox round trip: one send and one receive per message, plus
+/// the scheduler slice that carries each one.
+#[test]
+fn proc_send_receive_smoke() {
+    let source = "class Adder < Proc[Int]\n\
+                  \x20 total: Int = 0\n\
+                  \x20 def on_spawn(mut self): Int with Proc\n\
+                  \x20   loop do\n\
+                  \x20     case self.receive()\n\
+                  \x20     in Msg(n)\n\
+                  \x20       self.total = self.total + n\n\
+                  \x20     in Closed\n\
+                  \x20       return self.total\n\
+                  \x20     end\n\
+                  \x20   end\n\
+                  \x20   self.total\n\
+                  \x20 end\n\
+                  end\n\
+                  h = Adder.spawn()\n\
+                  i = 0\n\
+                  while i < 20000\n  h.send(1)\n  i = i + 1\nend\n\
+                  h.close()\n\
+                  case h.done()\n\
+                  in Done(v)  then v\n\
+                  in Fault(_) then 0 - 1\n\
+                  end\n";
+    timed_world("proc_send_receive_20k", source, &["Proc"], "Done(20000)");
+}
+
+/// Spawn cost: one machine, one birth grant, one mailbox, and one
+/// handle per proc.
+#[test]
+fn proc_spawn_smoke() {
+    let source = "class Quick < Proc\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   1\n\
+                  \x20 end\n\
+                  end\n\
+                  i = 0\n\
+                  total = 0\n\
+                  while i < 500\n\
+                  \x20 h = Quick.spawn()\n\
+                  \x20 got = case h.done()\n\
+                  \x20 in Done(v)  then v\n\
+                  \x20 in Fault(_) then 0\n\
+                  \x20 end\n\
+                  \x20 total = total + got\n\
+                  \x20 i = i + 1\n\
+                  end\n\
+                  total\n";
+    let config = VmConfig {
+        max_children: 4_096,
+        ..VmConfig::default()
+    };
+    let start = Instant::now();
+    let outcome = lm_testkit::run_world("bench.lm", source, &["Proc"], config)
+        .unwrap()
+        .0;
+    let elapsed = start.elapsed();
+    assert_eq!(outcome, "Done(500)");
+    eprintln!("bench-smoke proc_spawn_500: {elapsed:?}");
+}
+
+/// Pause and resume: one ownership transfer per round trip.
+#[test]
+fn proc_pause_resume_smoke() {
+    let source = "class Waiter < Proc[Int]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(n)\n\
+                  \x20     n\n\
+                  \x20   in Closed\n\
+                  \x20     0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  h = Waiter.spawn()\n\
+                  i = 0\n\
+                  while i < 5000\n\
+                  \x20 h.pause()\n\
+                  \x20 h.resume()\n\
+                  \x20 i = i + 1\n\
+                  end\n\
+                  h.close()\n\
+                  case h.done()\n\
+                  in Done(v)  then v\n\
+                  in Fault(_) then 0 - 1\n\
+                  end\n";
+    timed_world("proc_pause_resume_5k", source, &["Proc"], "Done(0)");
+}
+
+/// Terminal publication: one blocked holder, one terminal proc, and
+/// one boundary copy of the result per proc.
+#[test]
+fn proc_terminal_publication_smoke() {
+    let source = "class Maker < Proc\n\
+                  \x20 def on_spawn(self): [Int] with Proc\n\
+                  \x20   xs: [Int] = []\n\
+                  \x20   i = 0\n\
+                  \x20   while i < 200\n\
+                  \x20     xs.push(i)\n\
+                  \x20     i = i + 1\n\
+                  \x20   end\n\
+                  \x20   xs.freeze()\n\
+                  \x20 end\n\
+                  end\n\
+                  i = 0\n\
+                  total = 0\n\
+                  while i < 200\n\
+                  \x20 h = Maker.spawn()\n\
+                  \x20 got = case h.done()\n\
+                  \x20 in Done(xs) then xs.len()\n\
+                  \x20 in Fault(_) then 0\n\
+                  \x20 end\n\
+                  \x20 total = total + got\n\
+                  \x20 i = i + 1\n\
+                  end\n\
+                  total\n";
+    let config = VmConfig {
+        max_children: 4_096,
+        ..VmConfig::default()
+    };
+    let start = Instant::now();
+    let outcome = lm_testkit::run_world("bench.lm", source, &["Proc"], config)
+        .unwrap()
+        .0;
+    let elapsed = start.elapsed();
+    assert_eq!(outcome, "Done(40000)");
+    eprintln!("bench-smoke proc_terminal_200x200: {elapsed:?}");
+}

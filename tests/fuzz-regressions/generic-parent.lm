@@ -1,0 +1,15 @@
+class Cell[T]
+  value: T
+  def init(mut self, value: T)
+    self.value = value
+  end
+  def get(self): T
+    self.value
+  end
+end
+class IntCell < Cell[Int]
+  def init(mut self, value: Int)
+    super.init(value)
+  end
+end
+IntCell(1).get()

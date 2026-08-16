@@ -345,6 +345,7 @@ impl TypeStore {
     pub fn by_name(&self, name: &str) -> Option<TypeId> {
         match name {
             "Bool" => Some(BOOL),
+            "Never" => Some(NEVER),
             "Int" => Some(INT),
             "String" => Some(STRING),
             "StringBuilder" => Some(STRING_BUILDER),

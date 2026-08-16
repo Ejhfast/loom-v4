@@ -1,0 +1,4 @@
+class Silent < Proc[Int]
+end
+
+Silent.spawn()

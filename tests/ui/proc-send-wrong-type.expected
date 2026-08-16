@@ -1,0 +1,2 @@
+error[E1004]: expected Int, found String
+  --> tests/ui/proc-send-wrong-type.lm:8:8
