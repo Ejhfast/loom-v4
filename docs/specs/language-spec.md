@@ -998,7 +998,7 @@ Freezing is monotonic and idempotent. There is no interior mutability. A later f
 
 ### 10.3 Boundary checks and digest
 
-Frozenness is checked at transfer boundaries, proc send/spawn, closure transfer, digest/cache-key creation, mock installation, and relevant snapshot boundaries. Failure faults; there is no silent mutable deep copy.
+Frozenness is checked at digest and cache-key creation and at map-key insertion. Failure faults. A boundary crossing does not check frozenness: it copies the value and preserves the frozen bit of each object (16.1).
 
 `digest()` computes BLAKE3-256 over a canonical frozen graph encoding. The encoder traverses deterministic field/index/insertion order, assigns object ordinals at first encounter, uses back-references for later encounters, encodes code/classes by hash, and includes sharing and cycles. Float encoding normalizes both signed zeros to positive zero and all NaNs to the canonical NaN, matching language equality. Live resources and nondigestible descriptors cause `BoundaryViolation`.
 
@@ -1145,7 +1145,7 @@ Hosts may redact message and trace details while preserving the stable code.
 | `BadOperationReply` | answer did not match declared reply type |
 | `BadCast` | failed `as T` |
 | `BoundaryViolation` | codec or descriptor rule violated |
-| `UnsendableValue` | mutable/nonsendable graph crossed a boundary |
+| `UnsendableValue` | holder-local or nonsendable value crossed a boundary |
 | `MalformedArtifact` | invalid artifact/bytecode |
 | `MalformedSnapshot` | invalid snapshot/machine-world image |
 | `LinkMismatch` | link binding incompatible |
@@ -1207,7 +1207,7 @@ Lookup order is exact operation, group, then default block. Groups are flat. Ins
 
 ### 13.3 Mock execution
 
-A mock handler has verified code, empty row, and frozen captures. Installation boundary-copies it into table-owned storage. It has no table, cannot suspend, and receives a deterministic work limit. Its heap result must be frozen/sendable. A mock fault, budget exhaustion, or invalid result faults the controlled guest. The guest sees the whole perform as one instruction.
+A mock handler has verified code, an empty row, and a sendable capture graph. Installation boundary-copies it into table-owned storage. It has no table, cannot suspend, and receives a deterministic work limit. Its heap result must be sendable, and that result copies into the controlled guest. A mock fault, budget exhaustion, or invalid result faults the controlled guest. The guest sees the whole perform as one instruction.
 
 ### 13.4 Pass chains and revocation
 
@@ -1291,7 +1291,7 @@ end
 
 `WaitView` is inspection-only because automatic policy has already accepted and dispatched that operation. `Request` appears only on the manual path before policy lookup.
 
-Events are frozen boundary views. Before terminal success is published, the value crosses transfer mode. A mutable or nonsendable result converts the controlled machine to `Fault(UnsendableValue)`.
+Events are frozen boundary views. Before terminal success is published, the value crosses transfer mode. A mutable result copies, and the holder receives a mutable copy. A holder-local or nonsendable result converts the controlled machine to `Fault(UnsendableValue)`.
 
 ### 14.5 `step`
 
@@ -1449,7 +1449,9 @@ One boundary codec serves VM load, terminal results, proc send/spawn, snapshots,
 3. **snapshot:** canonical machine-world serialization;
 4. **inspection:** detached frozen views.
 
-A control envelope is holder-owned native metadata rather than a guest collection. Every member installed into guest, link, or compiler state is independently encoded and checked. Thus `args: ("Ada",)` is legal without making mutable guest lists generally sendable.
+A boundary crossing copies the value. Sharing and cycles inside one crossing are preserved, nothing is shared across the boundary, and object identity does not cross. The copy preserves the frozen bit of each object, so a mutable graph crosses as a mutable graph and a frozen graph crosses as a frozen graph. An implementation may share frozen storage or elide a copy when no program can observe the difference.
+
+A control envelope is holder-owned native metadata rather than a guest collection. Every member installed into guest, link, or compiler state is independently encoded and checked. Thus `args: ("Ada",)` is legal, and each member crosses under its own rule.
 
 Each host-operation parameter and result position has an ABI mode. The default `value` mode supplies an immutable/frozen boundary value. `transfer` moves a sendable value into another independently controlled heap (for example proc messages). `designator` accepts only the exact native handle kind named by the signature. `inspect` permits a transient read-only graph walk of the performing VM without making that graph sendable; the host receives a bounded inspection cursor/view and may not retain a guest pointer. `control` is reserved for holder-facing VM/compiler/link/snapshot envelopes. These modes are fixed in the operation manifest and cannot be chosen dynamically by guest code.
 
@@ -1458,19 +1460,19 @@ Each host-operation parameter and result position has an ABI mode. The default `
 Transfer mode accepts:
 
 - unit, booleans, numbers, characters, strings, bytes, digests;
-- frozen graphs of sendable fields/elements;
-- class/code/function values by hash plus frozen captures;
+- graphs of sendable fields/elements, mutable or frozen;
+- class/code/function values by hash plus their capture graphs;
 - operation/group/type descriptors;
 - sendable typed proc handles and snapshots;
 - host value types explicitly marked sendable by the ABI.
 
-It rejects mutable graphs, scoped designators, full VM and policy-table handles, live host callbacks, and live OS resources. Rejection faults with `UnsendableValue` or `BoundaryViolation`; no implicit mutable deep copy occurs.
+It rejects scoped designators, full VM and policy-table handles, live host callbacks, and live OS resources. Rejection faults with `UnsendableValue` or `BoundaryViolation`. An accepted value copies, and the copy keeps the frozen bit of each object (16.1).
 
 ### 16.3 Code and class transfer
 
 Code and classes cross by semantic hash. The receiving code store must already contain verified bytes for that hash or obtain them through an embedding-host code resolver. Missing code yields `MissingCode`. Code bytes are never accepted under a mismatched hash.
 
-A closure transfers code identity and its frozen capture graph. A capture that includes a holder-local handle, scoped designator, or mutable graph makes the closure unsendable.
+A closure transfers code identity and a copy of its capture graph. A capture that includes a holder-local handle or a scoped designator makes the closure unsendable.
 
 ### 16.4 Handles, machine references, and resources
 
@@ -1673,6 +1675,8 @@ end
 
 `Closed` means the target mailbox no longer accepts messages; `Fault` reports a dead target, cancellation, or another target/host supervisory fault. A message that fails the sender-side boundary check faults the sender instead of becoming `SendResult`. A successful `close` returns `Sent`; repeating it returns `Closed`.
 
+`send` copies the message into the receiving machine (16.1). The receiver owns a fresh graph, and that graph is mutable when the source was mutable. Identity does not cross: two sends of one object deliver two objects, and a later write by the sender never reaches a delivered message.
+
 A `Handle[M,R]` supports:
 
 ```lm
@@ -1724,7 +1728,11 @@ enum Recv[M]
 end
 ```
 
-Accepted messages are delivered FIFO by host acceptance order. `close` prevents later acceptance but preserves queued messages; `Closed` arrives after the queue drains. A send to a closed/dead peer returns a dedicated ordinary `SendResult`, unless malformed or mutable data faults the sender at its boundary.
+Accepted messages are delivered FIFO by host acceptance order. `close` prevents later acceptance but preserves queued messages; `Closed` arrives after the queue drains. A send to a closed/dead peer returns a dedicated ordinary `SendResult`, unless malformed or holder-local data faults the sender at its boundary.
+
+A proc may hold its own handle, so a send may name the sending machine. That send copies the message inside one heap, so the sender and the mailbox never share one graph.
+
+A mailbox message type must not name a holder-local native class. The checker rejects the proc-class declaration or the mailbox type at compile time. `Handle[M,R]` remains a legal message type, because a handle is a sendable typed designator.
 
 Handles are sendable typed designators, so send rights can travel as data without erasing `M` or `R`. Attenuated send-only views are deferred.
 
@@ -2675,7 +2683,7 @@ A conforming implementation passes tests for at least:
 7. no host-stack growth proportional to guest call depth;
 8. nested-VM default denial and transitive grant charging;
 9. deep freeze, cycles, sharing, map order, digest stability, and frozen write barriers;
-10. boundary rejection of mutable, scoped, and holder-local values; sendable proc-handle transfer;
+10. boundary copy of mutable graphs; rejection of scoped and holder-local values; sendable proc-handle transfer;
 11. snapshot round trips at every instruction boundary and in `asked`; world closure over reachable machines;
 12. one-time snapshot load verification followed by trusted resume without repeated whole-image checks;
 13. proc isolation, FIFO acceptance, close/drain, pause/resume, dead-peer results, and terminal transfer checks;
