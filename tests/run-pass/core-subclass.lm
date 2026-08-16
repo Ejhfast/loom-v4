@@ -1,0 +1,17 @@
+# A module class may inherit a class of the pinned core image. The
+# subclass keeps the parent fields and the parent methods.
+
+class Window < Range
+  label: String = "w"
+
+  def init(mut self, start: Int, stop: Int)
+    super.init(start, stop)
+  end
+
+  def describe(self): String
+    "{self.label} {self.len()}"
+  end
+end
+
+w = Window(0, 4)
+(w.describe(), w.has(2), w.has(9), w.start, w.stop)

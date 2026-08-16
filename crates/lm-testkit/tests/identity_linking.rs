@@ -1222,18 +1222,16 @@ fn a_constructor_binding_on_an_imported_class_rejects() {
 #[test]
 fn an_export_and_a_binding_that_disagree_reject() {
     let mut units = dot_providers();
-    let other = units[0]
-        .module
-        .funcs
-        .len()
-        .checked_sub(1)
-        .expect("the module has a function") as u32;
+    let count = units[0].module.funcs.len() as u32;
+    assert!(count > 1, "the module has more than one function");
     let export = units[0]
         .module
         .exports
         .iter_mut()
         .find(|e| e.kind.is_class() && e.ctor != lm_bytecode::NO_CTOR)
         .expect("the module exports a class with a constructor");
+    // Any other function index proves the disagreement.
+    let other = (export.ctor + 1) % count;
     assert_ne!(export.ctor, other, "pick a different function");
     export.ctor = other;
     let error = link_units(&units).expect_err("the crafted module linked");

@@ -134,6 +134,31 @@ pub(crate) struct ClassInfo {
     pub(crate) arm_short: String,
 }
 
+impl ClassInfo {
+    /// An unresolved table entry. Registration fixes every class index
+    /// before any signature resolves, so the table is presized and
+    /// every entry is replaced by its resolved form.
+    pub(crate) fn placeholder(_idx: u32) -> ClassInfo {
+        ClassInfo {
+            imported: false,
+            name: String::new(),
+            parent: None,
+            type_params: Vec::new(),
+            kind: ClassKind::Normal,
+            self_ty: UNIT,
+            field_names: Vec::new(),
+            field_tys: Vec::new(),
+            has_default: Vec::new(),
+            own_start: 0,
+            methods: Vec::new(),
+            init: None,
+            family: None,
+            arms: Vec::new(),
+            arm_short: String::new(),
+        }
+    }
+}
+
 /// One resolved `use` binding.
 #[derive(Clone)]
 pub(crate) enum UseBinding {
@@ -439,23 +464,23 @@ pub(crate) struct Ctx {
     /// below locals and module definitions. They never grant
     /// authority and never change a row.
     pub(crate) uses: HashMap<String, UseBinding>,
-    /// The class index where the core classes start. Every earlier
-    /// class is a definition of this module.
-    pub(crate) core_start: u32,
+    /// The class index where the module classes start. Every earlier
+    /// class belongs to the pinned core image.
+    pub(crate) user_start: u32,
     /// The class index where the imported declarations start. The
-    /// classes between `core_start` and here come from the core.
+    /// classes between `user_start` and here belong to this module.
     pub(crate) import_start: u32,
 }
 
 impl Ctx {
     /// Where one class comes from. The registration order fixes the
-    /// three ranges: this module, then the core, then the imports.
+    /// three ranges: the core, then this module, then the imports.
     pub(crate) fn class_origin(&self, class: u32) -> crate::iface::ClassOrigin {
-        if class < self.core_start {
-            return crate::iface::ClassOrigin::Local;
+        if class < self.user_start {
+            return crate::iface::ClassOrigin::Core;
         }
         if class < self.import_start {
-            return crate::iface::ClassOrigin::Core;
+            return crate::iface::ClassOrigin::Local;
         }
         for import in &self.imports {
             if import.kind == lm_bytecode::ImportKind::Class {
@@ -824,14 +849,17 @@ pub fn check_module_with(
         },
         uses: HashMap::new(),
         imports: Vec::new(),
-        core_start: 0,
+        user_start: 0,
         import_start: 0,
     };
-    // Pass 1: predeclare all type names. User definitions come first,
-    // so their class indices do not depend on the core.
-    register_type_names(&mut ctx, module, false)?;
-    ctx.core_start = ctx.store.class_count() as u32;
+    // Pass 1: predeclare all type names. The core comes first, so a
+    // core class that a module class inherits always keeps the lower
+    // class index. Every later table reads that order: the verifier,
+    // the dispatch builder, and the linker all require a parent to
+    // precede its child.
     register_type_names(&mut ctx, core, true).expect("the core type names register");
+    ctx.user_start = ctx.store.class_count() as u32;
+    register_type_names(&mut ctx, module, false)?;
     ctx.import_start = ctx.store.class_count() as u32;
     // Import phase A: reserve the imported class indices before any
     // signature resolves, so a user signature may name an imported
@@ -876,7 +904,14 @@ pub fn check_module_with(
         ctx.sigs.push(sig);
         ctx.funcs.push(None);
     }
-    // Pass 2b: resolve user classes and enums in class-index order.
+    // The class table is index addressed from here on. Registration
+    // fixed every index, so a later pass may fill the entries in any
+    // order. The core resolves first, because a user class may name a
+    // core class as its parent.
+    ctx.classes = (0..ctx.import_start).map(ClassInfo::placeholder).collect();
+    // Pass 2b: resolve core classes and enums.
+    resolve_all_classes(&mut ctx, core, true).map_err(core_defect)?;
+    // Pass 2c: resolve user classes and enums in class-index order.
     resolve_all_classes(&mut ctx, module, false)?;
     // Reserve the entry function index.
     let entry_idx = ctx.funcs.len();
@@ -890,9 +925,6 @@ pub fn check_module_with(
         ret: UNIT,
         row: vec![],
     });
-    // Pass 2c: resolve core classes and enums. Their method function
-    // indices follow the entry.
-    resolve_all_classes(&mut ctx, core, true).map_err(core_defect)?;
     // Import phase B: fill the imported declarations. The class table
     // holds the user and the core classes now, so an imported
     // signature may name any of them. Phase B runs before any body
@@ -904,8 +936,10 @@ pub fn check_module_with(
         .map(|u| u.span)
         .unwrap_or(Span::new(0, 0));
     let import_fields = materializer.finish(&mut ctx, import_span)?;
-    // Pass 3: check field defaults.
-    let mut own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>> = Vec::new();
+    // Pass 3: check field defaults. The table is index addressed, like
+    // the class table.
+    let mut own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>> =
+        vec![Vec::new(); ctx.import_start as usize];
     check_defaults(&mut ctx, module, false, &mut own_defaults)?;
     check_defaults(&mut ctx, core, true, &mut own_defaults).map_err(core_defect)?;
     // An imported declaration carries no default expression: the
@@ -1073,17 +1107,23 @@ fn assemble(
     };
     let mut hir_classes: Vec<HirClass> = Vec::new();
     for (idx, info) in ctx.classes.iter().enumerate() {
-        let (mut defaults, mut default_locals): (Vec<Option<HExpr>>, Vec<Vec<TypeId>>) =
-            match info.parent {
-                Some(p) => (
-                    hir_classes[p as usize].defaults.clone(),
-                    hir_classes[p as usize].default_locals.clone(),
-                ),
-                None => (Vec::new(), Vec::new()),
-            };
-        for (expr, locals) in &own_defaults[idx] {
-            defaults.push(expr.clone());
-            default_locals.push(locals.clone());
+        // A class inherits the field defaults of its ancestors. The
+        // parent index may be greater than the child index, because a
+        // module class may inherit a core class, so the walk collects
+        // the chain instead of reading an earlier result.
+        let mut chain: Vec<usize> = vec![idx];
+        let mut cur = info.parent;
+        while let Some(p) = cur {
+            chain.push(p as usize);
+            cur = ctx.classes[p as usize].parent;
+        }
+        let mut defaults: Vec<Option<HExpr>> = Vec::new();
+        let mut default_locals: Vec<Vec<TypeId>> = Vec::new();
+        for c in chain.iter().rev() {
+            for (expr, locals) in &own_defaults[*c] {
+                defaults.push(expr.clone());
+                default_locals.push(locals.clone());
+            }
         }
         debug_assert_eq!(defaults.len(), info.field_tys.len());
         let ctor_kind = if info.kind == ClassKind::EnumCase {
@@ -1309,7 +1349,14 @@ fn link_class_parents(
                     *pspan,
                 ));
             }
-            let parent = *map.get(pname).ok_or_else(|| {
+            // The parent name resolves like every other type name: a
+            // module type first, then a core type the prelude names.
+            let env = TyEnv {
+                type_names: Vec::new(),
+                effect_names: Vec::new(),
+                core_scope: is_core,
+            };
+            let parent = ctx.lookup_type(pname, &env).ok_or_else(|| {
                 Diagnostic::new("E1038", format!("unknown parent class `{pname}`"), *pspan)
             })?;
             let parent_meta = ctx.store.class_meta(ClassId(parent)).clone();
@@ -1337,6 +1384,9 @@ fn link_class_parents(
                     *pspan,
                 ));
             }
+            // A parent must precede its subclass in the class table.
+            // The core registers before every module class, so a core
+            // parent always satisfies the rule.
             if parent >= idx {
                 return Err(Diagnostic::new(
                     "E1038",
@@ -1371,9 +1421,8 @@ fn resolve_all_classes(
             &ctx.user_types
         };
         let idx = map[&class.name];
-        debug_assert_eq!(idx as usize, ctx.classes.len());
         let info = resolve_class(ctx, class, idx, is_core)?;
-        ctx.classes.push(info);
+        ctx.classes[idx as usize] = info;
     }
     for enum_def in &module.enums {
         resolve_enum(ctx, enum_def, is_core)?;
@@ -1499,12 +1548,9 @@ fn resolve_class(
     idx: u32,
     is_core: bool,
 ) -> Result<ClassInfo, Diagnostic> {
-    let map = if is_core {
-        &ctx.core_types
-    } else {
-        &ctx.user_types
-    };
-    let parent = class.parent.as_ref().map(|(name, _)| map[name]);
+    // `link_class_parents` already resolved and validated the parent,
+    // and it recorded the link in the type store.
+    let parent = ctx.store.class_meta(ClassId(idx)).parent.map(|p| p.0);
     let (type_names, _) = split_generics(&class.generics);
     let self_ty = if type_names.is_empty() {
         ctx.store.intern(Type::Class(ClassId(idx)))
@@ -1676,7 +1722,6 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         &ctx.user_types
     };
     let parent_idx = map[&enum_def.name];
-    debug_assert_eq!(parent_idx as usize, ctx.classes.len());
     let (type_names, _) = split_generics(&enum_def.generics);
     let self_ty = if type_names.is_empty() {
         ctx.store.intern(Type::Class(ClassId(parent_idx)))
@@ -1731,7 +1776,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         methods.push(msig);
     }
     let arms: Vec<u32> = arm_infos.iter().map(|(idx, _, _, _)| *idx).collect();
-    ctx.classes.push(ClassInfo {
+    ctx.classes[parent_idx as usize] = ClassInfo {
         imported: false,
         name: enum_def.name.clone(),
         parent: None,
@@ -1747,9 +1792,8 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         family: None,
         arms,
         arm_short: String::new(),
-    });
+    };
     for (arm_class, short, field_names, field_tys) in arm_infos {
-        debug_assert_eq!(arm_class as usize, ctx.classes.len());
         let arm_self_ty = if type_names.is_empty() {
             ctx.store.intern(Type::Class(ClassId(arm_class)))
         } else {
@@ -1759,7 +1803,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
             ctx.store.intern(Type::Inst(ClassId(arm_class), vars))
         };
         let count = field_tys.len();
-        ctx.classes.push(ClassInfo {
+        ctx.classes[arm_class as usize] = ClassInfo {
             imported: false,
             name: format!("{}.{}", enum_def.name, short),
             parent: Some(parent_idx),
@@ -1775,7 +1819,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
             family: Some(parent_idx),
             arms: Vec::new(),
             arm_short: short,
-        });
+        };
     }
     Ok(())
 }
@@ -1785,7 +1829,7 @@ fn check_defaults(
     ctx: &mut Ctx,
     module: &ast::Module,
     is_core: bool,
-    own_defaults: &mut Vec<Vec<(Option<HExpr>, Vec<TypeId>)>>,
+    own_defaults: &mut [Vec<(Option<HExpr>, Vec<TypeId>)>],
 ) -> Result<(), Diagnostic> {
     for class in &module.classes {
         let map = if is_core {
@@ -1818,14 +1862,18 @@ fn check_defaults(
             };
             defaults.push(checked);
         }
-        debug_assert_eq!(idx, own_defaults.len());
-        own_defaults.push(defaults);
+        own_defaults[idx] = defaults;
     }
     for enum_def in &module.enums {
         // The parent has no fields; each arm has required fields.
-        own_defaults.push(Vec::new());
-        for arm in &enum_def.arms {
-            own_defaults.push(vec![(None, Vec::new()); arm.fields.len()]);
+        let map = if is_core {
+            &ctx.core_types
+        } else {
+            &ctx.user_types
+        };
+        let parent_idx = map[&enum_def.name] as usize;
+        for (aidx, arm) in enum_def.arms.iter().enumerate() {
+            own_defaults[parent_idx + 1 + aidx] = vec![(None, Vec::new()); arm.fields.len()];
         }
     }
     Ok(())

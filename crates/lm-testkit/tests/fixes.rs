@@ -120,10 +120,15 @@ fn forged_narrow_local_type_entry_is_rejected() {
     // Narrow the declared Animal slot of the entry to Int. The store
     // of the Dog instance no longer fits the declared type.
     let mut module = widened_module();
+    let animal = module
+        .classes
+        .iter()
+        .position(|c| c.name == "Animal")
+        .expect("the module declares Animal") as u32;
     let animal_ty = module
         .types
         .iter()
-        .position(|t| matches!(t, lm_bytecode::BcType::Class(0)))
+        .position(|t| matches!(t, lm_bytecode::BcType::Class(c) if *c == animal))
         .expect("the Animal class type exists") as u32;
     let entry = module.entry as usize;
     let mut hit = false;

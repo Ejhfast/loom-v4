@@ -106,6 +106,16 @@ fn object_bytes() -> Vec<u8> {
     compile_to_bytes("corrupt.lm", OBJECT_SOURCE).unwrap()
 }
 
+/// The class index of one declared class. The core classes take
+/// the first indices, so a module class index is not a constant.
+fn class_index(module: &lm_bytecode::Module, name: &str) -> usize {
+    module
+        .classes
+        .iter()
+        .position(|c| c.name == name)
+        .unwrap_or_else(|| panic!("the module declares `{name}`"))
+}
+
 fn expect_verify_reject(bytes: &[u8], needle: &str) {
     match lm_vm::load_bytes(bytes) {
         Err(LoadError::Verify(e)) => {
@@ -205,14 +215,16 @@ fn forward_type_reference_is_rejected() {
 fn class_parent_cycle_is_rejected() {
     let mut module = lm_bytecode::decode(&object_bytes()).unwrap();
     // Point the Dog parent at itself.
-    module.classes[1].parent = 1;
+    let dog = class_index(&module, "Dog");
+    module.classes[dog].parent = dog as u32;
     expect_verify_reject(&lm_bytecode::encode(&module), "earlier class");
 }
 
 #[test]
 fn broken_field_layout_prefix_is_rejected() {
     let mut module = lm_bytecode::decode(&object_bytes()).unwrap();
-    module.classes[1].fields[0].1 = 0;
+    let dog = class_index(&module, "Dog");
+    module.classes[dog].fields[0].1 = 0;
     expect_verify_reject(&lm_bytecode::encode(&module), "parent layout");
 }
 
@@ -220,7 +232,8 @@ fn broken_field_layout_prefix_is_rejected() {
 fn field_type_out_of_range_is_rejected() {
     let mut module = lm_bytecode::decode(&object_bytes()).unwrap();
     let bad = module.types.len() as u32 + 3;
-    module.classes[0].fields[0].1 = bad;
+    let animal = class_index(&module, "Animal");
+    module.classes[animal].fields[0].1 = bad;
     // The child layout no longer extends the parent, or the type index
     // is invalid; either rejection is before execution.
     let bytes = lm_bytecode::encode(&module);
@@ -233,14 +246,16 @@ fn field_type_out_of_range_is_rejected() {
 #[test]
 fn method_selector_out_of_range_is_rejected() {
     let mut module = lm_bytecode::decode(&object_bytes()).unwrap();
-    module.classes[0].methods[0].0 = 999;
+    let animal = class_index(&module, "Animal");
+    module.classes[animal].methods[0].0 = 999;
     expect_verify_reject(&lm_bytecode::encode(&module), "selector");
 }
 
 #[test]
 fn method_function_out_of_range_is_rejected() {
     let mut module = lm_bytecode::decode(&object_bytes()).unwrap();
-    module.classes[0].methods[0].1 = 999;
+    let animal = class_index(&module, "Animal");
+    module.classes[animal].methods[0].1 = 999;
     expect_verify_reject(&lm_bytecode::encode(&module), "method function");
 }
 

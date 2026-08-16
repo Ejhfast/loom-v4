@@ -263,8 +263,14 @@ fn cfg_dump_shows_signatures_blocks_and_jumps() {
     )
     .unwrap();
     let dump = lm_hir::dump_cfg(&module);
+    // The module functions take the first indices. The entry follows
+    // every class method, so the test reads its index from the module.
+    let entry = module.entry;
     assert!(dump.contains("fn0 half(Int) -> Int"), "{dump}");
-    assert!(dump.contains("fn1 <entry>() -> Int"), "{dump}");
+    assert!(
+        dump.contains(&format!("fn{entry} <entry>() -> Int")),
+        "{dump}"
+    );
     assert!(dump.contains("b1:"), "{dump}");
     assert!(dump.contains("JumpIfFalse -> b"), "{dump}");
     assert!(dump.contains("Call fn0"), "{dump}");
@@ -283,14 +289,36 @@ fn cfg_dump_covers_classes_selectors_and_closures() {
     )
     .unwrap();
     let dump = lm_hir::dump_cfg(&module);
-    assert!(dump.contains("selector sel0 = add"), "{dump}");
-    assert!(dump.contains("class class0 Counter"), "{dump}");
+    // The core classes register first, so a module class never takes
+    // index zero. The test reads the index from the module.
+    let counter = module
+        .classes
+        .iter()
+        .position(|c| c.name == "Counter")
+        .expect("the module declares Counter");
+    assert!(counter > 0, "a module class follows the core classes");
+    let sel_index = module
+        .selectors
+        .iter()
+        .position(|s| s == "add")
+        .expect("the module interns the add selector");
+    assert!(
+        dump.contains(&format!("selector sel{sel_index} = add")),
+        "{dump}"
+    );
+    assert!(
+        dump.contains(&format!("class class{counter} Counter")),
+        "{dump}"
+    );
     assert!(dump.contains("field 0 value: Int"), "{dump}");
-    assert!(dump.contains("CallVirtual sel0 argc 1"), "{dump}");
+    assert!(
+        dump.contains(&format!("CallVirtual sel{sel_index} argc 1")),
+        "{dump}"
+    );
     assert!(dump.contains("MakeClosure"), "{dump}");
     assert!(dump.contains("CallValue argc 1"), "{dump}");
     assert!(dump.contains("<new Counter>"), "{dump}");
-    assert!(dump.contains("New class0"), "{dump}");
+    assert!(dump.contains(&format!("New class{counter}")), "{dump}");
 }
 
 #[test]
