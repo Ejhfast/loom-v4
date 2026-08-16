@@ -568,34 +568,46 @@ fn waiting_state_appears_through_step_and_completes() {
 }
 
 #[test]
-fn terminal_results_cross_the_boundary_or_convert_to_a_fault() {
+fn terminal_results_cross_the_boundary_as_a_copy() {
     // A frozen list crosses.
     let source = "def go(): Int with Vm\n  \
         vm = sys.vm.Vm().from_object(do ||\n    xs = [1, 2, 3]\n    xs.freeze()\n  end, args: ())\n  \
         case vm.run()\n  in Done(xs) then xs.len()\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(3)");
-    // A mutable list converts the machine to Fault(UnsendableValue).
-    let source = "def go(): String with Vm\n  \
+    // A mutable list crosses as a mutable copy, so the holder writes
+    // into the copy it received.
+    let source = "def go(): Int with Vm\n  \
         vm = sys.vm.Vm().from_object(do ||\n    [1, 2, 3]\n  end, args: ())\n  \
+        case vm.run()\n  in Done(xs)\n    xs.push(4)\n    xs.len()\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done(4)");
+    // A holder-local value still converts the machine to
+    // Fault(UnsendableValue).
+    let source = "def go(): String with Vm\n  \
+        vm = sys.vm.Vm().from_object(do ||: EmptyVm with Vm\n    sys.vm.Vm()\n  end, args: ())\n  \
+        vm.table().pass(Vm)\n  \
         case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"UnsendableValue\")");
     // The conversion is sticky: a second observation returns the
     // same stable code.
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().from_object(do ||\n    [1, 2, 3]\n  end, args: ())\n  \
+        vm = sys.vm.Vm().from_object(do ||: EmptyVm with Vm\n    sys.vm.Vm()\n  end, args: ())\n  \
+        vm.table().pass(Vm)\n  \
         first = case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\n  \
         case vm.run()\n  in Done(_) then first\n  in Fault(f2) then f2.code()\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"UnsendableValue\")");
 }
 
 #[test]
-fn unsendable_program_arguments_fault_the_loader() {
-    // A mutable list capture makes the program unsendable.
+fn program_captures_and_arguments_copy_at_the_loader_boundary() {
+    // A mutable list capture copies at the load. A later write into
+    // the source misses the copy the child machine holds.
     let source = "def go(): Int with Vm\n  \
         xs = [1]\n  \
-        vm = sys.vm.Vm().from_object(do ||\n    xs.len()\n  end, args: ())\n  1\nend\ngo()\n";
-    assert_eq!(allowed(source, &["Vm"]), "Fault(UnsendableValue)");
-    // Freezing the capture makes it sendable.
+        vm = sys.vm.Vm().from_object(do ||: Int\n    xs.len()\n  end, args: ())\n  \
+        xs.push(2)\n  \
+        case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done(1)");
+    // A frozen capture crosses the same way.
     let source = "def go(): Int with Vm\n  \
         xs = [1, 2]\n  xs.freeze()\n  \
         vm = sys.vm.Vm().from_object(do ||\n    xs.len()\n  end, args: ())\n  \

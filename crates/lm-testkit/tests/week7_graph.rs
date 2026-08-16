@@ -135,27 +135,41 @@ go()
     assert_eq!(allowed(&source), "Done(75)");
 }
 
-/// A mutable node inside a cyclic graph still rejects. The cyclic
-/// walk must not treat the cycle as a termination proof.
+/// A mutable cycle crosses as a mutable copy. The cyclic walk must
+/// not treat the cycle as a termination proof, and the copy must not
+/// share one node with the source.
 #[test]
-fn a_partly_mutable_cycle_still_rejects() {
+fn a_partly_mutable_cycle_crosses_as_a_copy() {
     let source = format!(
         "{NODE}
-def go(): String with Vm
+def go(): Int with Vm
   a = Node(1)
   b = Node(2)
   a.next = Some(b)
   b.next = Some(a)
   vm = sys.vm.Vm().from_object(do |n: Node|: Int
-    n.value
+    case n.next
+    in Some(m)
+      case m.next
+      in Some(k) then k.value * 100 + m.value * 10 + n.value
+      in None    then 0
+      end
+    in None then 0
+    end
   end, args: (a,))
-  \"loaded\"
+  a.value = 9
+  case vm.run()
+  in Done(v)  then v
+  in Fault(_) then 0 - 1
+  end
 end
 
 go()
 "
     );
-    assert_eq!(allowed(&source), "Fault(UnsendableValue)");
+    // 121 proves two things: the copy closed its own cycle, and the
+    // later write into the source never reached the copy.
+    assert_eq!(allowed(&source), "Done(121)");
 }
 
 // ---------------------------------------------------------------

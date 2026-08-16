@@ -91,14 +91,15 @@ fn a_send_to_a_dead_proc_returns_a_fault_result() {
     assert_eq!(run(source), "Done((Done(7), false, false))");
 }
 
-/// A message must be a frozen graph. A mutable one faults the sender
-/// at its own boundary (specification 18.4).
+/// A send copies the message (specification 18.4). The receiver owns
+/// a fresh mutable copy, so a write after the send never reaches it.
 #[test]
-fn a_mutable_message_faults_the_sender() {
+fn a_mutable_message_copies_and_the_two_graphs_diverge() {
     let source = "class Sink < Proc[[Int]]\n\
                   \x20 def on_spawn(self): Int with Proc\n\
                   \x20   case self.receive()\n\
                   \x20   in Msg(xs)\n\
+                  \x20     xs.push(0)\n\
                   \x20     xs.len()\n\
                   \x20   in Closed\n\
                   \x20     0\n\
@@ -106,9 +107,47 @@ fn a_mutable_message_faults_the_sender() {
                   \x20 end\n\
                   end\n\
                   h = Sink.spawn()\n\
-                  h.send([1, 2])\n\
+                  xs = [1, 2]\n\
+                  h.send(xs)\n\
+                  xs.push(3)\n\
+                  sent = h.done()\n\
+                  (sent, xs.len())\n";
+    // The receiver counted two elements and added one of its own.
+    // The sender counted three. Neither write reached the other.
+    assert_eq!(run(source), "Done((Done(3), 3))");
+}
+
+/// A proc that holds its own handle sends to itself. The message
+/// copies inside one heap, so the mailbox never shares a mutable
+/// graph with the sender.
+#[test]
+fn a_self_send_copies_the_message_inside_one_heap() {
+    let source = "enum Job\n\
+                  \x20 Own(target: Handle[Job, Int])\n\
+                  \x20 Data(items: [Int])\n\
+                  end\n\
+                  class Echo < Proc[Job]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(Own(me))\n\
+                  \x20     xs = [1, 2]\n\
+                  \x20     me.send(Data(xs))\n\
+                  \x20     xs.push(3)\n\
+                  \x20     case self.receive()\n\
+                  \x20     in Msg(Data(ys)) then ys.len()\n\
+                  \x20     in Msg(Own(_))   then 0 - 1\n\
+                  \x20     in Closed        then 0 - 2\n\
+                  \x20     end\n\
+                  \x20   in Msg(Data(_)) then 0 - 3\n\
+                  \x20   in Closed       then 0 - 4\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  h = Echo.spawn()\n\
+                  h.send(Own(h))\n\
                   h.done()\n";
-    assert_eq!(run(source), "Fault(UnsendableValue)");
+    // The received list holds the two elements it had at the send.
+    assert_eq!(run(source), "Done(Done(2))");
 }
 
 /// The mailbox limit is checked before the copy. A send past the

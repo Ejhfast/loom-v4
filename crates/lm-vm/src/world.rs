@@ -1485,26 +1485,27 @@ impl<'m> World<'m> {
         self.record(TraceEvent::Block { vm, block });
     }
 
-    /// Move one message into a mailbox.
+    /// Copy one value across a machine boundary.
+    ///
+    /// A crossing copies the value, so the receiver owns a fresh
+    /// graph and the two machines share nothing (specification 16.1).
     ///
     /// A proc may hold its own handle, because a handle is sendable
-    /// data. A self send stays inside one heap, so it has no second
-    /// heap to copy into. It still owes the whole boundary rule, so
-    /// it runs the standalone sendable check, which carries the same
-    /// visitor the copy carries: every object frozen, and every shape
-    /// sendable. The two paths therefore accept the same graphs.
-    fn send_copy(&mut self, src: VmId, dst: VmId, value: Value) -> Result<Value, FaultCode> {
+    /// data. That send stays inside one heap, so it has no second
+    /// heap to copy into. It owes the same rule, so it runs the
+    /// one-heap copy, which carries the same `CopyCheck` visitor the
+    /// two-heap copy carries. Without the copy the sender and the
+    /// mailbox would share one mutable graph.
+    fn boundary_copy(&mut self, src: VmId, dst: VmId, value: Value) -> Result<Value, FaultCode> {
         if src != dst {
             return self.transfer(src, dst, value);
         }
-        let Some(root) = value.as_obj() else {
-            // A scalar carries no reference, so it is always sendable.
-            return Ok(value);
-        };
         let limits = self.machines[dst as usize].config.graph;
+        // The heap roots are read before the heap is borrowed: a
+        // collection during the copy needs them.
+        let roots = self.machines[dst as usize].gc_roots(&[]);
         let heap = &mut self.machines[dst as usize].vm.heap;
-        lm_graph::verify_sendable(heap, root, &limits)?;
-        Ok(value)
+        lm_graph::copy_within(heap, &roots, value, &limits)
     }
 
     /// Execute one proc operation of the machine `vm`.
@@ -1676,7 +1677,7 @@ impl<'m> World<'m> {
             );
             return;
         }
-        let moved = match self.send_copy(vm, proc, args[1]) {
+        let moved = match self.boundary_copy(vm, proc, args[1]) {
             Ok(value) => value,
             Err(code) => {
                 // A message that fails the sender-side boundary check
@@ -1879,24 +1880,17 @@ impl<'m> World<'m> {
             1 => Some(Action::Block),
             2 => {
                 let closure = mock.expect("a mock edit carries its handler");
-                // A cross-machine install crosses the boundary, which
-                // proves the whole handler graph frozen. A same-heap
-                // install skips the copy and therefore skips that
-                // proof, which specification 10.3 requires at mock
-                // installation.
+                // Installation boundary-copies the handler into
+                // table-owned storage (specification 13.3). The
+                // one-heap path runs the same copy, so a same-heap
+                // install carries the same rule.
                 //
-                // No machine can reach this branch: a table handle
-                // comes from a machine handle, and no operation mints
-                // a handle to the performing machine. The assertion
-                // holds the gap closed until one does.
+                // No machine can reach the same-heap branch today: a
+                // table handle comes from a machine handle, and no
+                // operation mints a handle to the performing machine.
                 // `docs/notes/week7.md` records it.
                 debug_assert_ne!(target, vm, "a machine cannot hold a table handle to itself");
-                let moved = if target == vm {
-                    Ok(closure)
-                } else {
-                    self.transfer(vm, target, closure)
-                };
-                match moved {
+                match self.boundary_copy(vm, target, closure) {
                     Ok(value) => Some(Action::Mock(
                         value.as_obj().expect("a mock handler is a closure"),
                     )),
@@ -2794,35 +2788,42 @@ mod tests {
     }
 
     /// A proc may hold its own handle, so a send can name the sending
-    /// machine. The message stays in one heap, and the whole boundary
-    /// rule still applies.
+    /// machine. The message stays in one heap, and it copies there.
     ///
-    /// The copy path needs two distinct machines, so a same-heap send
-    /// would otherwise reach an assertion instead of the rule.
+    /// Without the one-heap copy the sender and the mailbox would
+    /// share one mutable graph.
     #[test]
-    fn a_self_send_proves_the_boundary_rule_without_a_copy() {
+    fn a_self_send_copies_inside_one_heap() {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         // A scalar carries no reference.
-        assert_eq!(world.send_copy(0, 0, Value::Int(7)), Ok(Value::Int(7)));
-        // A frozen graph of sendable shapes passes the check and
-        // stays where it is.
-        let frozen = world.machines[0]
-            .alloc(Object::Str("text".to_string()))
-            .expect("the string allocates");
-        assert_eq!(world.send_copy(0, 0, frozen), Ok(frozen));
-        // A mutable graph is not sendable.
+        assert_eq!(world.boundary_copy(0, 0, Value::Int(7)), Ok(Value::Int(7)));
+        // A mutable graph copies, so the message is a second object.
         let mutable = world.machines[0]
-            .alloc(Object::List { items: vec![] })
+            .alloc(Object::List {
+                items: vec![Value::Int(1)],
+            })
             .expect("the list allocates");
-        assert_eq!(
-            world.send_copy(0, 0, mutable),
-            Err(FaultCode::UnsendableValue)
-        );
+        let moved = world
+            .boundary_copy(0, 0, mutable)
+            .expect("a mutable message copies");
+        assert_ne!(moved, mutable);
+        let source = mutable.as_obj().expect("the source is an object");
+        let copy = moved.as_obj().expect("the copy is an object");
+        assert!(!world.machines[0].vm.heap.is_frozen(copy));
+        // A later write through the source misses the copy.
+        if let Object::List { items } = world.machines[0].vm.heap.get_mut(source) {
+            items.push(Value::Int(2));
+        }
+        world.machines[0].vm.heap.recharge(source);
+        match world.machines[0].vm.heap.get(copy) {
+            Object::List { items } => assert_eq!(items, &vec![Value::Int(1)]),
+            other => panic!("expected a list, got {other:?}"),
+        }
     }
 
-    /// The self send applies the shape rule as well as the frozen
-    /// rule, so it accepts exactly what a copy accepts.
+    /// The self send applies the shape rule, so it accepts exactly
+    /// what a cross-heap copy accepts.
     ///
     /// A machine handle is born frozen and holder local. The frozen
     /// bit alone would let it into a mailbox, and a cross-heap send
@@ -2841,12 +2842,12 @@ mod tests {
         let r = handle.as_obj().expect("a handle is a heap object");
         assert!(world.machines[0].vm.heap.is_frozen(r));
         assert_eq!(
-            world.send_copy(0, 0, handle),
+            world.boundary_copy(0, 0, handle),
             Err(FaultCode::UnsendableValue)
         );
         // The cross-heap path gives the same answer.
         assert_eq!(
-            world.send_copy(0, 1, handle),
+            world.boundary_copy(0, 1, handle),
             Err(FaultCode::UnsendableValue)
         );
         // A holder-local object inside a frozen container is refused
@@ -2857,11 +2858,11 @@ mod tests {
             })
             .expect("the tuple allocates");
         assert_eq!(
-            world.send_copy(0, 0, wrapper),
+            world.boundary_copy(0, 0, wrapper),
             Err(FaultCode::UnsendableValue)
         );
         assert_eq!(
-            world.send_copy(0, 1, wrapper),
+            world.boundary_copy(0, 1, wrapper),
             Err(FaultCode::UnsendableValue)
         );
     }

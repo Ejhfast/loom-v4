@@ -18,6 +18,6 @@ class Worker < Proc[Work]
 end
 
 h = Worker.spawn()
-h.send(Double(21).freeze())
+h.send(Double(21))
 h.close()
 h.done()
