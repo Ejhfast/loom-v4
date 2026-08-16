@@ -1,6 +1,6 @@
-//! The consistent cut and the canonical writer (specification 17.3).
+//! The consistent cut and the canonical writer (speciication 17.3).
 //!
-//! One barrier defines the moment of one snapshot. It stops the root
+//! One barrier deines the moment of one snapshot. It stops the root
 //! and every reachable machine at an instruction boundary, closes the
 //! set over the machine references their stopped state holds, freezes
 //! mailbox acceptance at one cut marker, records the states,
@@ -353,7 +353,11 @@ impl World<'_> {
             .into_iter()
             .map(|slot| (slot, identity.class_hashes[slot as usize]))
             .collect();
-        let result_type = self.result_type_digest(root);
+        // The header names the result type of the root machine, so a
+        // tool reads it without walking the machine records. The
+        // loader proves the two agree.
+        let result_type = machines[0].result_type.unwrap_or([0u8; 32]);
+        let _ = root;
         Ok(Image {
             format: super::FORMAT_VERSION,
             abi_version: lm_abi::ABI_VERSION,
@@ -370,26 +374,6 @@ impl World<'_> {
             classes,
             machines,
         })
-    }
-
-    /// The semantic type digest of the result type of one machine.
-    ///
-    /// The entry frame of a machine declares its result type. A
-    /// machine with no frame left, for example a terminal one, records
-    /// the zero digest.
-    fn result_type_digest(&self, vm: VmId) -> [u8; 32] {
-        let Some(func) = self.machines[vm as usize].vm.frames.first().map(|f| f.func) else {
-            return [0u8; 32];
-        };
-        let Ok(identity) = self.identity() else {
-            return [0u8; 32];
-        };
-        let ret = self.module().funcs[func as usize].ret;
-        identity
-            .type_hashes
-            .get(ret as usize)
-            .copied()
-            .unwrap_or([0u8; 32])
     }
 
     /// Build one captured machine record.
@@ -544,6 +528,11 @@ impl World<'_> {
             scheduler_owned: record.owner == Ownership::Scheduler,
             paused: record.paused,
             is_proc: record.owner == Ownership::Scheduler || record.paused,
+            result_type: record.result_ty.and_then(|ret| {
+                self.identity()
+                    .ok()
+                    .and_then(|identity| identity.type_hashes.get(ret as usize).copied())
+            }),
             generation: record.generation,
             fuel: m.fuel,
             next_ordinal: m.next_ordinal,

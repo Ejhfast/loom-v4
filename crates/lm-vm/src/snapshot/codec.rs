@@ -339,6 +339,13 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
             flags |= 4;
         }
         out.u8(flags);
+        match machine.result_type {
+            None => out.u8(0),
+            Some(hash) => {
+                out.u8(1);
+                out.hash(&hash);
+            }
+        }
         out.u32(machine.generation);
         out.u64(machine.fuel);
         out.u64(machine.next_ordinal);
@@ -601,6 +608,12 @@ struct Ctx<'m> {
     /// The verified operand types of every program point of the
     /// loaded program.
     frame_types: Option<lm_verify::FrameTypes<'m>>,
+    /// The module type slot of every semantic type digest.
+    ///
+    /// A snapshot names a type by digest, because a numeric type slot
+    /// belongs to one linked program. Two slots with equal digests
+    /// name one type, so the first slot answers for both.
+    types_by_digest: std::collections::HashMap<[u8; 32], u32>,
 }
 
 impl Ctx<'_> {
@@ -615,6 +628,11 @@ impl Ctx<'_> {
 
     fn class_ok(&self, slot: u32) -> bool {
         self.classes.binary_search(&slot).is_ok()
+    }
+
+    /// The module type slot one semantic type digest names.
+    fn type_of_digest(&self, digest: &[u8; 32]) -> Option<u32> {
+        self.types_by_digest.get(digest).copied()
     }
 }
 
@@ -873,6 +891,13 @@ pub fn decode(
         classes: classes.iter().map(|(s, _)| *s).collect(),
         machine_count: machine_count as u32,
         frame_types: lm_verify::FrameTypes::new(module).ok(),
+        types_by_digest: {
+            let mut map = std::collections::HashMap::new();
+            for (slot, hash) in identity.type_hashes.iter().enumerate() {
+                map.entry(*hash).or_insert(slot as u32);
+            }
+            map
+        },
     };
     // Section 3: the heaps, one per machine, in ordinal order.
     let mut heaps = section(2);
@@ -923,6 +948,15 @@ pub fn decode(
         classes,
         machines,
     };
+    // The header names the result type of the root machine, and the
+    // machine record names it again. One image states one type.
+    let root_type = image.machines[0].result_type.unwrap_or([0u8; 32]);
+    if root_type != image.result_type {
+        return err(
+            ImageReason::State,
+            "the header and the root machine name two result types",
+        );
+    }
     check_world(&image)?;
     Ok(image)
 }
@@ -1167,6 +1201,16 @@ fn decode_machine(
     let scheduler_owned = flags & 1 != 0;
     let paused = flags & 2 != 0;
     let is_proc = flags & 4 != 0;
+    let result_type = match cur.u8()? {
+        0 => None,
+        1 => Some(cur.hash()?),
+        other => {
+            return err(
+                ImageReason::State,
+                format!("the result-type tag {other} is not 0 or 1"),
+            )
+        }
+    };
     let generation = cur.u32()?;
     let fuel = cur.u64()?;
     let next_ordinal = cur.u64()?;
@@ -1285,6 +1329,7 @@ fn decode_machine(
         scheduler_owned,
         paused,
         is_proc,
+        result_type,
         generation,
         fuel,
         next_ordinal,
@@ -1623,6 +1668,27 @@ fn check_types(machine: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
     // Every operand of every stopped frame names the type the
     // verifier proved at that program point.
     check_operands(machine, ctx, vm, &mut work)?;
+    // A stored terminal value names the declared result type of its
+    // machine. A terminal machine keeps no frame, so the recorded
+    // digest is the only record of that type.
+    if let (Some(ImageTerminal::Done(value)), Some(digest)) =
+        (&machine.terminal, &machine.result_type)
+    {
+        match ctx.type_of_digest(digest) {
+            Some(ty) => check_shape(machine, ctx, vm, *value, ty, &mut work).map_err(|e| {
+                ImageError::new(
+                    e.reason,
+                    format!("machine {vm}: the terminal value has the wrong shape"),
+                )
+            })?,
+            None => {
+                return err(
+                    ImageReason::Code,
+                    format!("machine {vm}: the result type names no type of this program"),
+                )
+            }
+        }
+    }
     // Every accepted message names the mailbox type of its proc. The
     // class table fixes that type, so the rule never reads it from
     // the image.

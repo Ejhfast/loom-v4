@@ -695,3 +695,59 @@ fn an_accepted_message_of_the_wrong_shape_rejects() {
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
 }
+
+/// A terminal machine keeps no frame, so the recorded result type is
+/// the only record of the type its stored result carries.
+#[test]
+fn a_terminal_value_of_the_wrong_shape_rejects() {
+    let source = "\
+def go(): Int with Vm
+  vm = sys.vm.Vm().from_object(do ||: String
+    \"answer\"
+  end, args: ())
+  case vm.run()
+  in Done(_)  then 0
+  in Fault(_) then 0
+  end
+  case vm.snapshot()
+  in Ok(_)  then 1
+  in Err(_) then 0 - 1
+  end
+end
+
+go()
+";
+    let loaded = program(source);
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the grant names a target");
+    lm_proc::run_world(&mut world);
+    let bytes = world
+        .last_snapshot()
+        .expect("the program captured a world")
+        .bytes()
+        .to_vec();
+    let image = accept(&loaded, &bytes);
+    assert!(image.machines[0].frames.is_empty());
+    assert!(image.machines[0].result_type.is_some());
+    let mut broken = image.clone();
+    broken.machines[0].terminal = Some(lm_vm::snapshot::ImageTerminal::Done(lm_value::Value::Int(
+        1,
+    )));
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    // The header and the root machine state one result type.
+    let mut broken = image.clone();
+    broken.result_type = [7u8; 32];
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::State);
+    // A result type the program does not name rejects.
+    let mut broken = image.clone();
+    broken.machines[0].result_type = Some([7u8; 32]);
+    broken.result_type = [7u8; 32];
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Code);
+}

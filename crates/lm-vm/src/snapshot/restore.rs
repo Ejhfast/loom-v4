@@ -95,10 +95,18 @@ impl World<'_> {
         gate: u32,
     ) -> Result<(), RestoreFail> {
         let generations: Vec<u32> = image.machines.iter().map(|m| m.generation).collect();
+        // A snapshot names a type by digest, so the restore maps each
+        // digest back to the type slot of the running program.
+        let mut types: std::collections::HashMap<[u8; 32], u32> = std::collections::HashMap::new();
+        if let Ok(identity) = self.identity() {
+            for (slot, hash) in identity.type_hashes.iter().enumerate() {
+                types.entry(*hash).or_insert(slot as u32);
+            }
+        }
         for (ordinal, source) in image.machines.iter().enumerate() {
             let vm = ids[ordinal];
             let refs = self.restore_heap(vm, source, ids)?;
-            self.restore_state(vm, source, ids, &generations, &refs, restorer, gate);
+            self.restore_state(vm, source, ids, &generations, &types, &refs, restorer, gate);
         }
         Ok(())
     }
@@ -157,6 +165,7 @@ impl World<'_> {
         source: &ImageMachine,
         ids: &[VmId],
         generations: &[u32],
+        types: &std::collections::HashMap<[u8; 32], u32>,
         refs: &[ObjRef],
         restorer: VmId,
         gate: u32,
@@ -205,6 +214,9 @@ impl World<'_> {
         }
         m.generation = source.generation;
         m.children = source.children;
+        m.result_ty = source
+            .result_type
+            .and_then(|digest| types.get(&digest).copied());
         m.gate = gate;
         m.vm.fuel = source.fuel;
         m.vm.next_ordinal = source.next_ordinal;

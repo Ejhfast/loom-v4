@@ -182,6 +182,12 @@ pub struct ImageMachine {
     pub scheduler_owned: bool,
     /// True when a holder paused this proc (specification 17.6).
     pub paused: bool,
+    /// The semantic digest of the declared result type of this
+    /// machine, when its entry frame declared one.
+    ///
+    /// A terminal machine keeps no frame, so the stored digest is the
+    /// only record of the type its stored result carries.
+    pub result_type: Option<[u8; 32]>,
     /// True when this machine is a proc: a machine with a mailbox
     /// that a scheduler owns or a holder paused.
     ///

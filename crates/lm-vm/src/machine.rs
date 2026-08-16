@@ -261,6 +261,13 @@ pub struct Machine {
     /// so two barriers never share a machine. A barrier over a
     /// disjoint set proceeds.
     pub barrier: Option<u32>,
+    /// The declared result type of this machine, as a bytecode type
+    /// index.
+    ///
+    /// The entry frame of a machine declares it. A snapshot records
+    /// the semantic digest of the type, so a loader can prove the
+    /// shape of a stored terminal value after every frame is gone.
+    pub result_ty: Option<u32>,
     /// The world gate a restore put this machine behind.
     ///
     /// Restored procs are scheduler-owned but stopped until the
@@ -314,6 +321,7 @@ impl Machine {
             generation,
             paused: false,
             barrier: None,
+            result_ty: None,
             gate: 0,
             start_body: None,
         }
@@ -341,6 +349,7 @@ impl Machine {
             );
             return;
         }
+        self.result_ty = Some(module.funcs[func as usize].ret);
         self.vm.locals = args;
         self.vm.locals.resize(local_count, Value::Unit);
         self.vm.operands.clear();
