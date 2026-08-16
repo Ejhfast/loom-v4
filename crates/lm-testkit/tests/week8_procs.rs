@@ -604,3 +604,176 @@ fn a_proc_reaches_a_peer_it_learned_from_a_message() {
                   (s.done(), e.done())\n";
     assert_eq!(run(source), "Done((Done(1), Done(3)))");
 }
+
+// ---------------------------------------------------------------
+// The week-8 gates, stated directly.
+// ---------------------------------------------------------------
+
+/// Message and result types never erase. The manifest schema of every
+/// proc operation names `M` and `R`, and no schema names `Any`.
+#[test]
+fn no_proc_operation_erases_its_types() {
+    let mut seen = 0;
+    for slot in 0..lm_abi::OP_COUNT {
+        let def = lm_abi::op(slot);
+        if def.group != "Proc" {
+            continue;
+        }
+        seen += 1;
+        assert!(!def.schema.contains("Any"), "{}", def.schema);
+        assert!(!def.schema.is_empty(), "{}.{}", def.group, def.member);
+    }
+    assert_eq!(seen, 8, "the manifest declares eight proc operations");
+}
+
+/// A transfer keeps the exact proc reference: the copy carries the
+/// same machine identifier and the same generation.
+#[test]
+fn a_transfer_keeps_the_proc_identifier_and_generation() {
+    let source = "class Echo < Proc[Int]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   0\n\
+                  \x20 end\n\
+                  end\n\
+                  class Holder < Proc[Handle[Int, Int]]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(_)\n\
+                  \x20     1\n\
+                  \x20   in Closed\n\
+                  \x20     0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  e = Echo.spawn()\n\
+                  hold = Holder.spawn()\n\
+                  hold.send(e)\n\
+                  hold.close()\n\
+                  hold.done()\n";
+    let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Proc").expect("the grant names a group");
+    // Drive the root until it blocks, so the message sits in the
+    // holder mailbox and the root still names the echo proc.
+    match world.drive_root() {
+        lm_vm::RootEvent::Blocked => {}
+        other => panic!("the root must block, got {other:?}"),
+    }
+    // The root names the echo proc and the holder proc; the holder
+    // names the echo proc through its accepted message.
+    assert_eq!(
+        world.machine_references(0).expect("the walk finishes"),
+        vec![1, 2]
+    );
+    assert_eq!(
+        world.machine_references(2).expect("the walk finishes"),
+        vec![1]
+    );
+    assert_eq!(world.generation_of(1), 0);
+}
+
+/// A proc fault is a value for its holder (specification 18.6).
+#[test]
+fn a_proc_fault_publishes_as_a_terminal_value() {
+    let source = "class Bad < Proc\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   1 / 0\n\
+                  \x20 end\n\
+                  end\n\
+                  case Bad.spawn().done()\n\
+                  in Done(v)  then \"{v}\"\n\
+                  in Fault(f) then f.code()\n\
+                  end\n";
+    assert_eq!(run(source), "Done(\"DivideByZero\")");
+}
+
+/// The birth grant carries the `Proc` group and nothing else.
+/// Additional grants use the explicit machine path (18.3).
+#[test]
+fn the_birth_grant_carries_the_proc_group_only() {
+    let spawned = "class Talker < Proc\n\
+                   \x20 def on_spawn(self): Int with Proc, Io.Print\n\
+                   \x20   sys.io.print(\"x\")\n\
+                   \x20   1\n\
+                   \x20 end\n\
+                   end\n\
+                   case Talker.spawn().done()\n\
+                   in Done(v)  then \"{v}\"\n\
+                   in Fault(f) then f.code()\n\
+                   end\n";
+    assert_eq!(
+        run_allowed("proc.lm", spawned, &["Proc", "Io"]).expect("the program compiles"),
+        "Done(\"PolicyDenied\")"
+    );
+    // The explicit path grants what the launch needs.
+    let explicit = "vm = sys.vm.Vm().from_object(do ||: Int with Io.Print\n\
+                    \x20 sys.io.print(\"x\")\n\
+                    \x20 1\n\
+                    end, args: ())\n\
+                    vm.table().pass(Io.Print)\n\
+                    h = sys.proc.run(vm)\n\
+                    case h.done()\n\
+                    in Done(v)  then \"{v}\"\n\
+                    in Fault(f) then f.code()\n\
+                    end\n";
+    assert_eq!(
+        run_allowed("proc.lm", explicit, &["Proc", "Io", "Vm"]).expect("the program compiles"),
+        "Done(\"1\")"
+    );
+}
+
+/// A proc reserves a child from the parent budget, like every other
+/// machine. A refused reservation faults the spawner.
+#[test]
+fn a_spawn_reserves_a_child_from_the_parent_budget() {
+    let source = "class Q < Proc\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   1\n\
+                  \x20 end\n\
+                  end\n\
+                  Q.spawn()\n\
+                  Q.spawn()\n\
+                  1\n";
+    let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let config = VmConfig {
+        max_children: 1,
+        ..VmConfig::default()
+    };
+    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
+    world.allow("Proc").expect("the grant names a group");
+    let mut scheduler = Scheduler::default();
+    let outcome = scheduler.run(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Fault(InvalidVmState)");
+    // The refused spawn created no machine.
+    assert_eq!(world.machine_count(), 2);
+    assert_eq!(world.child_count(0), 1);
+}
+
+/// A proc launched inside another proc is an ordinary child machine.
+#[test]
+fn a_proc_may_spawn_a_proc() {
+    let source = "class Inner < Proc\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   5\n\
+                  \x20 end\n\
+                  end\n\
+                  class Outer < Proc\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case Inner.spawn().done()\n\
+                  \x20   in Done(v)  then v + 1\n\
+                  \x20   in Fault(_) then 0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  case Outer.spawn().done()\n\
+                  in Done(v)  then v\n\
+                  in Fault(_) then 0 - 1\n\
+                  end\n";
+    assert_eq!(run(source), "Done(6)");
+}

@@ -238,3 +238,26 @@ fn a_held_machine_leaves_the_run_set() {
     world.set_barrier(2, None);
     assert_eq!(world.runnable_procs(), vec![1, 2]);
 }
+
+/// The closed-set gate stated directly: every handle in the stopped
+/// state of a set member targets another member of the set.
+#[test]
+fn every_handle_in_the_set_targets_a_member_of_the_set() {
+    let source = std::fs::read_to_string(repo_root().join("examples/07-procs/barrier.lm"))
+        .expect("the example reads");
+    let (loaded, ()) = world_of(&source);
+    let mut world = ready_world(&loaded, &["Proc"]);
+    run_to_first_block(&mut world);
+    let report = Barrier::new(1)
+        .run(&mut world, 0)
+        .expect("the barrier opens");
+    for vm in &report.set {
+        for target in world.machine_references(*vm).expect("the walk finishes") {
+            assert!(
+                report.set.contains(&target),
+                "machine {vm} names {target} outside the set {:?}",
+                report.set
+            );
+        }
+    }
+}

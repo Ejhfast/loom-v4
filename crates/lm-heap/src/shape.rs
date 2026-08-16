@@ -704,5 +704,13 @@ mod tests {
         let dump = dump_shapes();
         assert_eq!(dump.lines().count(), SHAPES.len());
         assert!(dump.contains("3 Map refs=true"), "{dump}");
+        // A proc handle is a sendable designator of one machine, so
+        // send rights travel as data and no digest can name it.
+        assert!(
+            dump.contains(
+                "14 Handle refs=false born_frozen=true boundary=sendable digestible=false"
+            ),
+            "{dump}"
+        );
     }
 }
