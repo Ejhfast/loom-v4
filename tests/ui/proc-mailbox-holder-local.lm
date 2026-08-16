@@ -1,0 +1,8 @@
+class Bad < Proc[Vm[Int]]
+  def on_spawn(self): Int with Proc
+    1
+  end
+end
+
+h = Bad.spawn()
+h.done()

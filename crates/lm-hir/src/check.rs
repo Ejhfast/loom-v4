@@ -876,6 +876,26 @@ pub(crate) fn check_key_type(ctx: &Ctx, key: TypeId, span: Span) -> Result<(), D
     }
 }
 
+/// Reject a mailbox message type that names a holder-local class.
+///
+/// Every message crosses a machine boundary as a copy. A holder-local
+/// native class has no copy, so a mailbox of that type could never
+/// accept one message. The rule rejects the declaration instead of
+/// the send.
+pub(crate) fn check_mailbox_type(ctx: &Ctx, mailbox: TypeId, span: Span) -> Result<(), Diagnostic> {
+    match ctx.store.holder_local_part(mailbox) {
+        None => Ok(()),
+        Some(part) => Err(Diagnostic::new(
+            "E1056",
+            format!(
+                "a mailbox message type must not name the holder-local type {}",
+                ctx.store.display(part)
+            ),
+            span,
+        )),
+    }
+}
+
 /// Split generic parameters into type names and effect names.
 fn split_generics(generics: &[ast::GenericParam]) -> (Vec<String>, Vec<String>) {
     let mut type_names = Vec::new();
@@ -1507,6 +1527,12 @@ fn link_class_parents(
             let mut args = Vec::with_capacity(clause.args.len());
             for arg in &clause.args {
                 args.push(resolve_type(ctx, &env, arg)?);
+            }
+            // A message crosses a machine boundary, and a holder-local
+            // value never crosses one (specification 18.5). The
+            // mailbox type therefore rejects here, at the declaration.
+            if ctx.core_types.get("Proc").copied() == Some(parent) {
+                check_mailbox_type(ctx, args[0], clause.args[0].span)?;
             }
             ctx.store
                 .set_class_parent_args(ClassId(idx), ClassId(parent), args);

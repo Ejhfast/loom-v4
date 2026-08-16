@@ -1,0 +1,2 @@
+error[E1056]: a mailbox message type must not name the holder-local type Vm[Int]
+  --> tests/ui/proc-mailbox-holder-local.lm:1:18

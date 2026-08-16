@@ -213,6 +213,17 @@ fn week_two_negative_cases_have_stable_codes() {
         ),
         "E1006"
     );
+    // A mailbox message type must not name a holder-local class.
+    let mailbox = "class B < Proc[{}]\n  def on_spawn(self): Int with Proc\n    1\n  end\nend\n1\n";
+    for named in [
+        "Vm[Int]",
+        "PolicyTable",
+        "Request",
+        "[Request]",
+        "(Int, Vm[Int])",
+    ] {
+        assert_eq!(code_of(&mailbox.replace("{}", named)), "E1056", "{named}");
+    }
 }
 
 #[test]

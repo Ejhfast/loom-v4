@@ -507,6 +507,34 @@ impl TypeStore {
         )
     }
 
+    /// The first holder-local part of one type, or `None` when every
+    /// part crosses a machine boundary.
+    ///
+    /// A holder-local native value stays in the heap that holds it
+    /// (specification 16.4). The walk reads the parts of a composite
+    /// type, so it finds a holder-local element of a list, a map, a
+    /// tuple, or a generic application. It stops at `Handle`, because
+    /// a handle crosses as a designator and its type arguments name
+    /// no part of the handle value.
+    pub fn holder_local_part(&self, id: TypeId) -> Option<TypeId> {
+        match self.get(id) {
+            Type::StringBuilder
+            | Type::ByteBuffer
+            | Type::Request
+            | Type::PolicyTable
+            | Type::EmptyVm
+            | Type::Vm(_)
+            | Type::PendingCall(_, _) => Some(id),
+            Type::List(item) => self.holder_local_part(*item),
+            Type::Map(key, value) => self
+                .holder_local_part(*key)
+                .or_else(|| self.holder_local_part(*value)),
+            Type::Tuple(items) => items.iter().find_map(|t| self.holder_local_part(*t)),
+            Type::Inst(_, args) => args.iter().find_map(|t| self.holder_local_part(*t)),
+            _ => None,
+        }
+    }
+
     /// Substitute type variables and effect variables in `ty`.
     /// `targs[i]` replaces `Var(i)`. `rowargs[i]` replaces the row
     /// variable `i`. Missing entries keep the variable.
