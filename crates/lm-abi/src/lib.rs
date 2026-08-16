@@ -19,7 +19,9 @@ pub use sha::{sha256, sha256_hex};
 
 /// The manifest ABI version. A signature or membership change must
 /// increment this value.
-pub const ABI_VERSION: u32 = 1;
+///
+/// Version 2 adds the eight proc operations of specification 23.6.
+pub const ABI_VERSION: u32 = 2;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;

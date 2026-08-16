@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
 
 /// The domain tag of the interface hash.
 const TAG_IFACE: &[u8] = b"lm-iface-v1\0";
