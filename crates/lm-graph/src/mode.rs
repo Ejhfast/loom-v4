@@ -655,6 +655,36 @@ mod tests {
         assert_eq!(dst.live_count(), 0);
     }
 
+    /// Every mode runs a 50,000-deep chain on a small Rust stack.
+    #[test]
+    fn every_mode_runs_a_deep_chain_off_the_rust_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let mut heap = Heap::new(64 << 20);
+                let mut head = heap.alloc(Object::List { items: vec![] });
+                for _ in 0..50_000 {
+                    head = heap.alloc(Object::List {
+                        items: vec![Value::Obj(head)],
+                    });
+                }
+                freeze(&mut heap, head, &limits()).expect("the freeze finishes");
+                verify_frozen(&mut heap, head, &limits()).expect("the graph is frozen");
+                digest_value(&mut heap, Value::Obj(head), &Slots, &limits())
+                    .expect("the digest finishes");
+                snapshot_ordinals(&mut heap, &[head], &limits()).expect("the walk finishes");
+                let mut dst = Heap::new(64 << 20);
+                transfer(&mut heap, &mut dst, &[], Value::Obj(head), &limits())
+                    .expect("the transfer finishes");
+                assert_eq!(dst.live_count(), 50_001);
+                collect(&mut heap, []);
+                assert_eq!(heap.live_count(), 0);
+            })
+            .expect("thread starts")
+            .join()
+            .expect("no Rust stack overflow");
+    }
+
     #[test]
     fn snapshot_traversal_orders_the_reachable_graph() {
         let mut heap = Heap::new(1 << 20);

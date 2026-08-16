@@ -457,9 +457,9 @@ impl<'m> Ctx<'m> {
 /// The verifier version. It takes part in the verified-code cache
 /// key: a rule change invalidates every cached admission.
 ///
-/// Version 3 replaces the hash-linked core layout with the declared
-/// core role slots and proves the shape of every filled slot.
-pub const VERIFIER_VERSION: u32 = 3;
+/// Version 4 adds the typing rules of the three digest
+/// instructions.
+pub const VERIFIER_VERSION: u32 = 4;
 
 /// Verify a full module. Every table and every function must pass.
 ///

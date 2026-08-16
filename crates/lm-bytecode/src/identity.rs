@@ -66,10 +66,10 @@ use std::collections::HashMap;
 /// the lowering ABI. The operation manifest is covered separately by
 /// `lm_abi::manifest_digest()`, which every definition hash includes.
 ///
-/// Version 4 adds the named function bindings to the module semantic
-/// hash. A binding key stays outside every structural hash: a name
-/// points at an identity and is never a part of it.
-pub const COMPILER_ABI_VERSION: u32 = 4;
+/// Version 5 adds the `Digest` type and the three digest
+/// instructions to the instruction set and to the canonical identity
+/// encoding.
+pub const COMPILER_ABI_VERSION: u32 = 5;
 
 /// The refinement work budget of one component.
 ///
