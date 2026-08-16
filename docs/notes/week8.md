@@ -765,6 +765,13 @@ not name a holder-local native class. The checker rejects the proc
 class declaration with `E1056`. `Handle[M,R]` stays a legal message
 type.
 
+The rule reads the whole message type. It walks composite types,
+generic type arguments, and the declared fields of every class it
+reaches, enum arms included. A message carries the whole graph, so a
+holder-local field is a holder-local message. A class graph may hold a
+cycle, so the walk visits each class once. The pass runs after class
+resolution, because it reads the field types.
+
 ### The receiver-heap fault attribution stays open
 
 The question above ("Who owns the fault when a receiver heap limit
@@ -813,16 +820,34 @@ slot, and linking deep-freezes the result. Specification 16.1 lists
 linking and imports as codec contexts, and a codec context now copies.
 The two texts read differently, and this note does not resolve them.
 
-### `Bytes` and the builders are holder-local shapes
+### The builders are holder-local shapes
 
-The shape table marks `StringBuilder` and `ByteBuffer` holder-local,
-and the reference implementation stores a `Bytes` value in a
-`ByteBuffer`. Specification 16.2 lists bytes among the sendable
-values. Before the decision the frozen rule hid the disagreement,
-because a mutable value never crossed. It is visible now: a byte
-value refuses to cross.
+Correction. An earlier version of this item said that the reference
+implementation stores a `Bytes` value in a `ByteBuffer`. That is
+wrong, and the correction matters for week 9.
+
+Version 0.2 has no `Bytes` value at all. `lm-types` declares no
+`Bytes` type, the shape table of `crates/lm-heap/src/shape.rs`
+declares no `Bytes` shape, and a byte literal rejects at the scanner
+with `E0009`. Specification 16.2 lists bytes among the sendable
+values, so the specification is ahead of the implementation. There is
+no shape to reclassify today.
+
+Week 9 needs the reverse direction: a snapshot image must cross as
+bytes. The new test `every_shape_declares_its_boundary_column` states
+the boundary column of all fifteen shapes, so the week-9 shape makes a
+deliberate choice and any later change shows in one diff. A `Bytes`
+shape must be sendable machine state, which matches 16.2.
+
+`StringBuilder` and `ByteBuffer` stay holder-local. They hold growable
+private buffers and produce immutable outputs (22.9), and no canonical
+encoding names them. Under copy semantics a builder could copy like
+any other mutable graph, because the copy rule needs no frozen bit.
+The reasons to keep them holder-local are the missing canonical
+encoding and the risk of a silent large copy, not the repealed frozen
+rule. Whether a builder becomes sendable is a future owner call.
 
 The new mailbox rule follows the shape table, so `Proc[ByteBuffer]`
-and `Proc[StringBuilder]` reject as well. A decision that makes bytes
-sendable must change the shape table, and the mailbox rule follows it
-without further work.
+and `Proc[StringBuilder]` reject as well. A decision that makes a
+builder sendable changes the shape table, and the mailbox rule follows
+it without further work.

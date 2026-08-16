@@ -699,6 +699,49 @@ mod tests {
         assert_eq!(out, vec![key, value]);
     }
 
+    /// The boundary column of every shape, by name.
+    ///
+    /// A holder-local shape never crosses a machine boundary, so the
+    /// second list is the whole set of values a message may not hold.
+    /// A boundary crossing copies every other shape.
+    ///
+    /// Version 0.2 has no `Bytes` shape. A byte literal rejects at
+    /// the scanner, and no operation mints one. A later `Bytes` shape
+    /// must choose its column here, and specification 16.2 calls
+    /// bytes sendable.
+    #[test]
+    fn every_shape_declares_its_boundary_column() {
+        let mut sendable: Vec<&str> = Vec::new();
+        let mut holder_local: Vec<&str> = Vec::new();
+        for shape in SHAPES {
+            match shape.boundary {
+                BoundaryPolicy::Sendable => sendable.push(shape.name),
+                BoundaryPolicy::HolderLocal => holder_local.push(shape.name),
+            }
+        }
+        assert_eq!(
+            sendable,
+            vec![
+                "String", "Instance", "List", "Map", "Tuple", "Closure", "Fault", "Digest",
+                "Handle",
+            ]
+        );
+        // A builder holds a growable private buffer and produces an
+        // immutable output (specification 22.9). The four handles are
+        // holder-local control values (16.4).
+        assert_eq!(
+            holder_local,
+            vec![
+                "StringBuilder",
+                "ByteBuffer",
+                "Vm",
+                "PolicyTable",
+                "Request",
+                "PendingCall",
+            ]
+        );
+    }
+
     #[test]
     fn the_shape_dump_lists_every_shape() {
         let dump = dump_shapes();
