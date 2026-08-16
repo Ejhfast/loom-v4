@@ -122,12 +122,19 @@ pub enum SnapshotClass {
     HostAttachment,
 }
 
-impl fmt::Display for SnapshotClass {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+impl SnapshotClass {
+    /// The stable tag of one classification, for identity hashing.
+    pub fn tag(self) -> &'static str {
+        match self {
             SnapshotClass::MachineState => "machine-state",
             SnapshotClass::HostAttachment => "host-attachment",
-        })
+        }
+    }
+}
+
+impl fmt::Display for SnapshotClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.tag())
     }
 }
 

@@ -22,7 +22,10 @@ pub use sha::{sha256, sha256_hex};
 ///
 /// Version 2 adds the eight proc operations of specification 23.6.
 /// Version 3 adds the four snapshot operations of specification 23.5.
-pub const ABI_VERSION: u32 = 3;
+/// Version 4 adds the snapshot classification to the operation
+/// identity, so a classification-only change moves every dependent
+/// digest.
+pub const ABI_VERSION: u32 = 4;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -464,14 +467,28 @@ pub fn row_name_valid(name: &str) -> bool {
 }
 
 /// The stable identity hash of one operation: the domain-separated
-/// SHA-256 of the ABI version, the qualified name, and the complete
-/// signature or schema text.
+/// SHA-256 of the ABI version, the qualified name, the complete
+/// signature or schema text, and every other semantic field.
 pub fn op_identity(slot: OpSlot) -> [u8; 32] {
-    let def = op(slot);
+    identity_of(&op_name(slot), op(slot))
+}
+
+/// The stable identity hash of one operation definition.
+///
+/// The hash covers every semantic field of the definition. The
+/// snapshot classification is one of them: it decides whether a
+/// pending instance holds live host state, so it changes snapshot and
+/// resource behavior. A classification-only change therefore moves the
+/// operation identity, the manifest digest, and the verification hash
+/// of every module that names the operation.
+///
+/// The call takes the definition, so a test can hash a changed
+/// definition without a second manifest.
+pub fn identity_of(name: &str, def: &OpDef) -> [u8; 32] {
     let mut input = Vec::new();
-    input.extend_from_slice(b"lm-operation-v1\0");
+    input.extend_from_slice(b"lm-operation-v2\0");
     input.extend_from_slice(&ABI_VERSION.to_le_bytes());
-    input.extend_from_slice(op_name(slot).as_bytes());
+    input.extend_from_slice(name.as_bytes());
     input.push(0);
     match def.kind {
         OpKind::Fixed => {
@@ -488,6 +505,8 @@ pub fn op_identity(slot: OpSlot) -> [u8; 32] {
             input.extend_from_slice(def.schema.as_bytes());
         }
     }
+    input.push(0xfe);
+    input.extend_from_slice(def.snapshot.tag().as_bytes());
     sha256(&input)
 }
 
