@@ -231,3 +231,85 @@ operation. The opcode space is not the constraint either, with about
 - The `String` method surface of specification 24.6 is unimplemented,
   so string work is interpolation and the builder alone. `Bytes` does
   not exist as a type; `ByteBuffer` is the only byte surface.
+
+## Where the map cost is
+
+The map is the largest gap in the suite, so this section records what
+the cost is made of. Every number is measured on this host.
+
+### The measured breakdown
+
+One integer-key hit through `has` costs 80.0 ns. A miss costs 61.3 ns.
+A list index of the same shape costs 36.6 ns.
+
+| Part | Cost | Evidence |
+| --- | ---: | --- |
+| The loop and the native-op dispatch floor | ~36.6 ns | `list_at` of the same shape |
+| The candidate vector clone | ~18.7 ns | hit minus miss |
+| The key hash and the index lookup | ~25 ns | the remainder |
+
+A hit clones a candidate vector; a miss finds no bucket and allocates
+nothing. The difference is therefore the clone.
+
+String keys add the content hash on top, and the cost grows with the
+key, because nothing caches it:
+
+| Key bytes | Loom ns | CPython ns |
+| ---: | ---: | ---: |
+| 3 | 78.2 | 31.9 |
+| 11 | 78.2 | 32.1 |
+| 35 | 81.7 | 32.3 |
+| 131 | 94.0 | 33.8 |
+
+Loom costs 0.12 ns per extra byte, and CPython costs 0.015 ns. An
+integer key costs 70.5 ns in the same shape, so the string hash is
+about 8 ns at a short key and about 24 ns at 131 bytes.
+
+### What the structure does
+
+`Object::Map` holds `entries: Vec<(Value, Value)>` in insertion order
+plus a derived index. The entries vector is the dense, ordered half of
+a compact map, and it is the harder half to get right.
+
+The index is `HashMap<u64, Vec<u32>>`, which costs three things the
+entries vector does not:
+
+- **A second hash.** `key_hash` reduces the key to a `u64`, and the
+  standard `HashMap` then hashes that `u64` again with its own hasher.
+- **One allocation per distinct hash.** Each bucket is a `Vec<u32>`,
+  so inserting a new key allocates.
+- **One allocation per lookup.** `map_lookup` calls `.cloned()` on the
+  candidate vector, because it cannot hold a borrow of the heap while
+  it compares keys. That is a borrow workaround, not a design choice,
+  and it measures 18.7 ns.
+
+`key_hash` builds a fresh hasher on every call, so a string key hashes
+its whole content on every lookup.
+
+### What CPython does instead
+
+CPython uses a compact dict. A sparse index array holds positions into
+a dense entries array, and the entry width narrows with the table, so
+the index is one array and never a per-bucket allocation. Probing is
+open addressing with a perturbation step that mixes in the high bits
+of the hash. Each entry stores its own hash, so a probe compares
+hashes before it compares keys. A resize happens at a two-thirds load
+factor and grows to a power of two.
+
+The string hash is stored **in the string object** and computed once.
+A literal that a loop looks up therefore hashes one time, whatever the
+loop count and whatever the key length. That single property explains
+the flat CPython column above.
+
+### The order to fix it
+
+1. Replace the index with a sparse integer array plus open addressing.
+   That removes the second hash, the per-bucket allocation, and the
+   per-lookup clone together.
+2. Store the hash beside each entry, so a probe compares hashes first.
+3. Cache the hash of a string in its object.
+4. Set an explicit load factor and a power-of-two growth.
+
+Steps 1 and 3 carry the measured cost. Loom already holds the ordered
+entries vector, so this is the standard structure applied to the half
+that does not have it yet.
