@@ -534,12 +534,13 @@ This week consolidates those paths. It does not replace them.
 - Make transfer and copy failure-atomic for the destination heap.
 - Resolve transferred code and classes through verified semantic
   identity. Keep numeric slots local to one linked program.
-- Give every native shape one snapshot policy: `Portable`,
-  `RestoreSlot`, `ScopedBarrier`, or `Reject`.
-- Give every suspending host operation one continuation policy from
-  the same set. No live callback enters snapshot bytes.
+- Classify every native shape as machine state or host attachment.
+  Machine state can enter snapshot bytes; a live host attachment
+  blocks the snapshot instead.
+- Classify every suspending host operation the same way. No live
+  callback enters snapshot bytes.
 - Add a host-side resource registry to each VM. Record resource kind,
-  policy, owning VM, scope identity, and pending operation ordinal.
+  owning VM, scope identity, and pending operation ordinal.
 - Separate serializable `VmState` from policy, execution ownership,
   active host work, and resource control state.
 - Add parent resource reservation for nested VM creation.
@@ -592,7 +593,7 @@ compares the old and new transfer outputs before the old path retires.
 - Every graph mode rejects work past its published limits.
 - A failed transfer leaves the destination heap unchanged.
 - Every native shape and suspending operation declares one snapshot
-  policy.
+  classification.
 - Parent resource reservation is fail-atomic.
 - Both closure spellings produce identical typed HIR and bytecode.
 - Nested VM depth still does not multiply interpreter loops or Rust
@@ -600,7 +601,7 @@ compares the old and new transfer outputs before the old path retires.
 
 ---
 
-## Week 8 — Portable procs, ownership, and scheduler barriers
+## Week 8 — Procs, mailboxes, and scheduler barriers
 
 Logical proc state lands before snapshot bytes. This order keeps the
 snapshot format from defining scheduler semantics by accident.
@@ -609,12 +610,9 @@ snapshot format from defining scheduler semantics by accident.
 
 - Add the proc scheduler, scheduler/holder ownership transfer,
   `Handle[M,R]`, `Proc.Run`, and compiler `spawn` sugar.
-- Add stable portable proc references with realm, identity, and
-  generation. Preserve `M` and `R` across every transfer.
-- Make proc handles sendable through the graph codec. A handle
-  transfer never changes snapshot ownership.
-- Make each launch create one snapshot ownership edge. Ownership is a
-  tree and is independent from handle reachability.
+- Add stable proc references with identity and generation. Preserve
+  `M` and `R` across every transfer.
+- Make proc handles sendable through the graph codec.
 - Add bounded FIFO mailboxes, `send`, `receive`, `close`, `done`,
   pause/resume, and dead-peer results.
 - Keep one VM per proc, one logical guest thread, no shared mutable
@@ -622,13 +620,14 @@ snapshot format from defining scheduler semantics by accident.
 - Add scheduler completion and pause channels using proc IDs and
   ordinals rather than guest references.
 - Add deterministic scheduler mode, proc tracing, and mailbox metrics.
-- Add one domain barrier that pauses a root VM and every transitively
-  owned proc at safe boundaries.
-- Freeze proc creation and mailbox acceptance at one cut marker.
-- Classify each reachable proc handle as internal or external to the
-  proposed snapshot domain.
-- Run resource-registry preflight across the whole paused domain.
-- Resume every included proc after a barrier failure.
+- Add one snapshot barrier. It pauses the root and each reachable
+  machine at a safe boundary, then closes the set over the handles in
+  their captured state.
+- Freeze mailbox acceptance for the closed set at one cut marker.
+- Serialize every control call on a machine through the scheduler, so
+  a barrier never races a holder.
+- Run resource-registry preflight across the whole paused set.
+- Resume every paused machine after a barrier failure.
 
 ### Runnable outputs
 
@@ -658,27 +657,34 @@ Done(Done(42))
 ```
 
 A second example sends one handle through another proc mailbox. The
-handle still targets the original proc. A domain example proves that
-an unrelated reachable handle stays outside the owned tree.
+handle still targets the original proc. A barrier example pauses a
+root, a worker, and a helper found only through a mailbox message.
 
 ### Gates
 
 - Message and result types never erase to `Any`.
-- Handle transfer preserves the exact portable proc reference.
-- Handle transfer never changes snapshot ownership.
+- Handle transfer preserves the exact proc reference.
+- The barrier set is closed: every handle in the paused state targets
+  a paused machine.
 - FIFO acceptance, close/drain, pause/resume, parent death,
   revocation, and dead-peer behavior have deterministic model tests.
 - Mailbox limits are checked before copy and acceptance.
 - One VM never executes concurrently.
-- The domain barrier records one consistent mailbox cut.
-- Barrier failure resumes every included proc.
+- The barrier records one consistent mailbox cut.
+- Barrier failure resumes every paused machine.
 - Scheduler records contain no guest heap reference.
 - Proc send/receive, spawn, pause, and terminal publication benchmarks
   are committed.
 
 ---
 
-## Week 9 — Proc-domain snapshots, restore, and branching execution
+## Week 9 — Machine-world snapshots, restore, and branching execution
+
+A snapshot copies the machine world reachable from its root. The
+world is closed under the handles it contains, so a reference cannot
+leave it. Restore builds a complete independent copy. The plan
+carries no ownership records, no external references, and no restore
+bindings, because the closed world makes them unnecessary.
 
 ### Land
 
@@ -686,34 +692,29 @@ an unrelated reachable handle stays outside the owned tree.
   snapshot loader/verifier.
 - Convert external bytes once to trusted `SnapshotImage`; retain typed
   `Snapshot[T]` result casting.
-- Capture the root VM and every transitively owned proc as one snapshot
-  domain.
-- Serialize each VM heap, code/class/type manifests, frames,
+- Capture the root and every reachable machine as one snapshot world,
+  using the Week 8 barrier.
+- Serialize each machine heap, code/class/type manifests, frames,
   locals/operands, limits/fuel, state, and pending request.
-- Serialize proc ownership edges, mailbox types and limits, accepted
-  queues, close state, blocked receives, and terminal proc results.
-- Assign canonical proc ordinals. Encode internal proc handles by
-  ordinal and external handles by portable scheduler reference.
-- Relocate every internal handle during restore, including handles in
-  heaps, frames, captures, mailboxes, pending arguments, and results.
-- Resolve every external proc reference before any restored VM can
-  run. An unresolved reference fails restore atomically.
-- Preflight every native resource and pending host continuation through
-  its Week 7 snapshot policy.
-- Add typed `RestoreBindings` for resource slots, external proc
-  resolvers, pending waits, and per-proc table plans.
-- Add one test-only checkpointable resource kind in `lm-testkit`. It
-  is the first `RestoreSlot` consumer and proves slot binding end to
-  end before any host extension exists.
-- Return ordinary typed errors for expected snapshot and restore
-  blockers. No unresolved resource becomes an inert guest value.
-- Give every restored VM a fresh default-deny table. Restore internal
-  pass chains against the new parent tables.
-- Keep restored descendants stopped behind one domain gate until the
-  root resumes.
-- Restore between-instruction, `asked`, supported waiting, terminal,
-  and receiverless self-snapshot states.
-- Support multi-shot restore of the complete domain.
+- Serialize mailbox types and limits, accepted queues, close state,
+  blocked receives, terminal proc results, and holder-paused state.
+- Assign canonical machine ordinals. Encode every handle by ordinal
+  and static type.
+- Relocate every handle during restore, including handles in heaps,
+  frames, captures, mailboxes, pending arguments, and results.
+- Preflight every registry entry. A live host attachment returns
+  `ResourceActive` with its bounded machine path.
+- Return ordinary typed errors for the two snapshot blockers and the
+  restore limit. No resource ever becomes an inert guest value.
+- Give every restored machine a fresh default-deny table. Restore
+  internal pass chains against the new parent tables.
+- Keep restored procs stopped behind one world gate until the root
+  resumes.
+- Restore between-instruction, `asked`, terminal, holder-paused, and
+  receiverless self-snapshot states. A machine in `waiting` blocks
+  the snapshot instead.
+- Support multi-shot restore. Each restore is a complete independent
+  world.
 - Add `lm snapshot verify/run`, snapshot-aware `lm inspect`,
   source-mapped `stack()`, and deterministic snapshot diffs.
 
@@ -733,7 +734,7 @@ end
 
 vm = sys.vm.Vm().from_object({ || 20 + 22 }, args: ())
 vm.step()
-case vm.snapshot(SnapshotOptions())
+case vm.snapshot()
 in Ok(snap) then (restore_run(snap), restore_run(snap))
 in Err(_)   then (-3, -3)
 end
@@ -744,32 +745,33 @@ $ lm run --show-result examples/08-snapshots/branch.lm --allow Vm
 Done((42, 42))
 ```
 
-A proc-domain example captures a root, child, and grandchild. Each
-restore gets its own internal proc tree. Both restores keep one shared
-external proc target.
+A machine-world example captures a root, a worker, and a helper the
+worker reaches through a stored handle. Each restore gets its own
+complete copy of all three. The original three continue unchanged.
 
 A manual-drive snapshot restores the same operation and reply type.
 The holder calls `drive()` to obtain a fresh request token.
 
 ```text
 $ lm snapshot verify checkpoints/asked-tree.lms
-valid: state=asked procs=3 mailboxes=2 external_procs=1
+valid: state=asked machines=3 mailboxes=2
 ```
 
 ### Gates
 
 - Snapshot round trips cover every bytecode boundary in the example
   corpus.
-- Proc ordinals are deterministic and independent from scheduler IDs.
-- Internal handle relocation covers every VM and mailbox root.
-- External proc resolution completes before runnable state exists.
-- Multi-shot restore creates distinct internal proc trees.
-- Multi-shot restore preserves shared external proc targets.
+- Machine ordinals are deterministic and independent from scheduler
+  IDs.
+- Every handle in snapshot bytes targets a captured machine.
+- Handle relocation covers every VM and mailbox root.
+- Multi-shot restore creates complete independent worlds. Nothing is
+  shared between two restores, or with the original.
 - Policy tables and root grants never enter snapshot bytes.
-- A failed restore exposes no partial proc domain.
-- A failed snapshot resumes the original domain.
-- The loader checks ownership acyclicity, one-owner rules, mailbox
-  types, limits, and accepted values.
+- A failed restore exposes no partial world.
+- A failed snapshot resumes the original world.
+- The loader checks machine references, mailbox types, limits, and
+  accepted values.
 - Whole-image structural verification occurs once on external load.
 - In-process trusted restore and external byte load remain separate
   APIs.
@@ -797,13 +799,14 @@ valid: state=asked procs=3 mailboxes=2 external_procs=1
 - Preserve the original machine fault when cleanup also fails.
 - Add `std/fs.open_handle` for deliberate long-lived ownership.
 - Keep explicit read, write, seek, flush, and close on `FileHandle`.
-- Give raw file handles the fixed `Reject` snapshot policy.
-- Permit host extensions to add separate checkpointable file types
-  with typed `RestoreSlot` policies.
-- Give TCP streams and listeners the fixed `Reject` policy. Do not
-  reopen a connection silently.
-- Add bounded descendant scope quiescence for snapshot creation.
-- Report precise resource blocker paths through nested proc ownership.
+- Register every live raw file handle as a host attachment. A live
+  attachment blocks snapshot creation.
+- Register live TCP streams and listeners the same way. Do not reopen
+  a connection silently.
+- Defer checkpointable file and connection types with explicit
+  restore contracts to a later version.
+- Report precise resource blocker paths along reachability from the
+  snapshot root.
 - Add cancellation for blocking reads, sleeps, connects, accepts, and
   proc pause.
 - Keep completion sinks single-use after cancellation or VM death.
@@ -834,10 +837,10 @@ $ lm run examples/09-host/word-count.lm \
 lines=1240 words=18302 bytes=100771
 ```
 
-A proc performs long work inside `with_open`. An ancestor snapshot
-with bounded scope waiting captures the domain after the lease closes.
-A self-snapshot inside the same active scope returns `ResourceActive`.
-A live raw handle reports its ownership path.
+A proc performs long work inside `with_open`. A snapshot during that
+scope returns `ResourceActive` with the lease path. A later snapshot
+succeeds after the scope closes. A live raw handle reports its
+machine path.
 
 A TCP echo client/server pair runs in separate procs. A snapshot
 attempt reports the active stream path. Deterministic manual clock and
@@ -850,12 +853,11 @@ random answers produce byte-for-byte repeatable output.
 - Cleanup runs on normal return and VM termination.
 - Cleanup invokes no guest callback.
 - No file or socket becomes an inert guest value.
-- Restore slots bind atomically before domain activation.
 - No wrapper hides or widens its exact underlying row.
 - Platform error mapping has cross-platform golden tests.
 - Async completions are single-use and safe after cancellation or VM
   death.
-- Snapshot blocker paths include nested proc ownership.
+- Snapshot blocker paths follow reachability from the root.
 - Host-operation latency is excluded from interpreter dispatch
   benchmarks; completion overhead is measured separately.
 
@@ -914,11 +916,10 @@ scoped files, and JSON. It is the first broad allocation/GC workload.
 - Compile-pass, UI, run-pass, run-fail, verifier, corruption, conformance, and benchmark test modes in one harness; `--bless` for intentional diagnostic/IR changes.
 - Child-VM test execution, per-test policy/limits, deterministic operation transcripts, parallel host scheduling with deterministic result ordering.
 - Source maps, stack traces, concise artifact/row summaries, and reproducible failure bundles.
-- Snapshot inspection prints proc ordinals, ownership paths, mailbox
-  state, external proc references, resource blockers, and restore
-  slots.
+- Snapshot inspection prints machine ordinals, reachability paths,
+  mailbox state, and resource blockers.
 - Add focused test modes for scoped-designator diagnostics and
-  proc-domain restore failures.
+  snapshot blocker diagnostics.
 
 ### Runnable outputs
 
@@ -962,7 +963,7 @@ bounded trace, and captured operation transcript.
 - Typed `LinkEnv`, `Type[T]` witnesses, `DynValue` pack/unpack for intentionally dynamic tooling, and typed `LinkedEntry[A,R]`.
 - Read-only `Reflect.Mirror`, frame/code/class metadata, no dynamic selector invocation, and detached `ValueView` trees.
 - Standard VM/compiler/reflection/test helpers built on these primitives.
-- End-to-end admission example: compile source, inspect row/hash, choose policy, link, run in a child VM, capture requests, and snapshot its owned proc domain.
+- End-to-end admission example: compile source, inspect row/hash, choose policy, link, run in a child VM, capture requests, and snapshot its reachable machine world.
 
 ### Runnable outputs
 
@@ -1026,10 +1027,10 @@ The cyclic-graph program also exercises `Option`, higher-order rows, freeze, and
 
 ### Land
 
-- Model every VM and proc-domain transition explicitly, including waiting completion races, request token reuse, terminal idempotence, proc ownership, pause, parent death, cancellation, resource reservation, nested tables, domain barriers, mailbox cuts, scope quiescence, and barrier abort.
+- Model every VM and machine-world transition explicitly, including waiting completion races, request token reuse, terminal idempotence, pause, parent death, cancellation, resource reservation, nested tables, snapshot barriers, mailbox cuts, and barrier abort.
 - Add a small executable state-machine model in tests and compare random command sequences against the production VM and scheduler.
 - Complete fuel/heap/frame/operand/boundary/mailbox/mock/snapshot limit interactions and fail-atomic updates.
-- Model external proc disappearance during restore and one failed binding among many successful bindings.
+- Model barrier closure over handles found late in the walk, and the serialization of overlapping barriers.
 - Audit all host callbacks and completion sinks for single use and dead-VM behavior.
 
 ### Runnable outputs
@@ -1048,9 +1049,9 @@ The tower constructs five nested machines and grants only `Vm`; the transition s
 ### Gates
 
 - Random model traces cover all transition edges and reproduce failures as compact scripts.
-- No illegal caller action mutates the controlled VM or proc domain.
+- No illegal caller action mutates the controlled VM or machine world.
 - Nested depth does not change Rust stack usage.
-- Limit exhaustion leaves heaps, frames, pending requests, tables, mailboxes, and ownership internally valid.
+- Limit exhaustion leaves heaps, frames, pending requests, tables, and mailboxes internally valid.
 
 ---
 
@@ -1058,11 +1059,11 @@ The tower constructs five nested machines and grants only `Vm`; the transition s
 
 ### Land
 
-- Full adversarial validation pass over artifact/snapshot decoders, verifier, graph codec, type/class layouts, code availability, proc ordinals, ownership edges, internal handle relocation, external proc references, restore slots, resource policies, and size arithmetic.
+- Full adversarial validation pass over artifact/snapshot decoders, verifier, graph codec, type/class layouts, code availability, machine ordinals, handle relocation, machine references, resource classifications, and size arithmetic.
 - Streaming/preflight checks that reject impossible sizes before large allocations.
 - Fuzz dictionaries/corpora derived from real artifacts and snapshots; structure-aware mutators; coverage reporting.
 - Verified-code and trusted-snapshot cache poisoning tests.
-- Threat model for untrusted source, bytecode, snapshots, host implementations, proc messages, and restore bindings.
+- Threat model for untrusted source, bytecode, snapshots, host implementations, and proc messages.
 
 ### Runnable outputs
 
@@ -1084,9 +1085,8 @@ A sandbox example consumes intentionally hostile source/artifact/snapshot inputs
 - No unchecked `offset + count * width` arithmetic.
 - Verification caches bind exact bytes/hash/ABI/verifier version.
 - External snapshots are verified once; trusted resume paths contain no hidden reparse.
-- Fuzzing covers proc counts, mailbox counts, ownership cycles,
-  relocation type mismatches, restore-slot mismatches, and unavailable
-  external proc references.
+- Fuzzing covers machine counts, mailbox counts, relocation type
+  mismatches, and malformed machine references.
 - Unsafe modules have written invariants, Miri tests, and independent review checklists.
 
 ---
@@ -1098,7 +1098,7 @@ A sandbox example consumes intentionally hostile source/artifact/snapshot inputs
 - Run the complete example corpus as an API design review. Remove awkward names, duplicate mechanisms, accidental `Any`, and wrappers that hide rows before freezing version 0.2 interfaces.
 - Fill only gaps demonstrated by real programs: list/map/string convenience, path edge cases, scoped file loops, explicit raw resource ownership, typed VM helpers, proc supervision, JSON diagnostics, and test ergonomics.
 - Review every external resource through its scoped and raw APIs. Keep raw handles only where long ownership is required.
-- Add reference documentation with complexity, mutation/freeze behavior, effects, ordinary errors, faults, and snapshot policy for every public API.
+- Add reference documentation with complexity, mutation/freeze behavior, effects, ordinary errors, faults, and snapshot classification for every public API.
 - Establish compatibility policy for core hashes, operation revisions, standard modules, and diagnostic stability.
 
 ### Runnable outputs
@@ -1402,7 +1402,7 @@ The Rust embedder registers `Telemetry.Emit`, manually drives a guest, and recor
 
 ### Land
 
-- Independent audit of unsafe modules, verifier assumptions, snapshot loader, graph canonicalization, policy/pass chains, host completion lifetimes, proc ownership, and resource limits.
+- Independent audit of unsafe modules, verifier assumptions, snapshot loader, graph canonicalization, policy/pass chains, host completion lifetimes, scheduler ownership transfer, and resource limits.
 - Panic/abort policy: untrusted input yields diagnostics/faults; internal invariant failures are distinguished and produce reproducible crash bundles in debug tools.
 - Dependency/license/SBOM generation, reproducible release builds, signed ABI/core/compiler manifests, and security-response process.
 - Long-running stress: compiler daemon-like workloads, millions of VM creates/runs, repeated snapshot branches, proc churn, and host cancellation.
@@ -1472,10 +1472,10 @@ The release demonstration builds and runs a program that:
 2. compiles a typed plugin at runtime;
 3. verifies its empty or declared row;
 4. links it through typed environments;
-5. launches it in a nested VM and owned proc domain with finite limits;
+5. launches it in a nested VM with worker procs and finite limits;
 6. manually intercepts one typed operation and automatically dispatches another;
-7. snapshots the suspended proc domain;
-8. restores two domains with distinct internal procs and shared external handles;
+7. snapshots the suspended machine world;
+8. restores two complete independent worlds;
 9. collects typed results and writes output through scoped filesystem operations.
 
 ```text
