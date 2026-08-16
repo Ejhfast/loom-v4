@@ -260,7 +260,7 @@ an editor can break them with no container behind it.
 
 ### New tests
 
-`crates/lm-testkit/tests/admission.rs` holds 19 cases. Ten of them
+`crates/lm-testkit/tests/admission.rs` holds 22 cases. Ten of them
 crafted the known holes and failed against the tree before this work:
 
 | case | the hole it closes |
@@ -276,7 +276,10 @@ crafted the known holes and failed against the tree before this work:
 | `a_terminal_unit_at_another_result_type_rejects` | a terminal unit bypassed the result type |
 | `a_terminal_uninitialized_marker_rejects` | a terminal marker bypassed it as well |
 
-The other nine cases state the rules this work added:
+The other twelve cases state the rules this work added:
+`a_proc_handle_that_names_another_mailbox_rejects`,
+`a_call_token_of_another_operation_rejects`,
+`a_frame_that_is_not_the_callee_of_its_call_site_rejects`,
 `a_nested_snapshot_of_another_root_type_rejects`,
 `a_world_with_no_machine_rejects`,
 `a_rotated_heap_rejects_as_non_canonical`,
@@ -286,6 +289,9 @@ The other nine cases state the rules this work added:
 `a_container_of_an_older_build_rejects`,
 `an_admitted_image_records_its_admission_identity`, and
 `every_captured_world_of_the_corpus_admits`.
+
+Each case names one rule, and a probe over the suite confirmed that
+every case reports the diagnostic of the rule it states.
 
 The last case admits every capture of the whole corpus, so the negative
 cases state a rule and not a broken helper.
@@ -298,7 +304,7 @@ Two identity cases state the week-7 open question closed:
 
 ### Measurements
 
-- `cargo test --workspace` runs 804 tests and exits 0. The baseline
+- `cargo test --workspace` runs 807 tests and exits 0. The baseline
   before this work was 783.
 - `bench-smoke snapshot_machine_world_3`: size 914 B, machines 3, write
   629 us, load 1.01 ms, restore x20 1.43 ms. The load column now covers
