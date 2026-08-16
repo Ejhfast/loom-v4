@@ -566,6 +566,307 @@ fn a_terminal_uninitialized_marker_rejects() {
 }
 
 // ---------------------------------------------------------------
+// Nested snapshots.
+// ---------------------------------------------------------------
+
+const NESTED_SOURCE: &str = "\
+def go(): Int with Vm
+  a = sys.vm.Vm().from_object(do ||: Int
+    41
+  end, args: ())
+  b = sys.vm.Vm().from_object(do ||: String
+    \"answer\"
+  end, args: ())
+  first = a.snapshot()
+  second = b.snapshot()
+  case first
+  in Ok(_)  then 1
+  in Err(_) then 0
+  end
+end
+
+go()
+";
+
+/// A nested snapshot stays opaque, and its declared root result type
+/// still has to match the `Snapshot[T]` that holds it. Admission reads
+/// the nested container header and never trusts the outer image.
+#[test]
+fn a_nested_snapshot_of_another_root_type_rejects() {
+    let loaded = program(NESTED_SOURCE);
+    let images = boundaries(&loaded, &["Vm"], 120);
+    let image = pick(&images, "two nested snapshots", |image| {
+        image.machines[0]
+            .objects
+            .iter()
+            .filter(|entry| matches!(entry.object, Object::NativeSnapshot(_)))
+            .count()
+            == 2
+    });
+    let mut found: Vec<usize> = Vec::new();
+    for (idx, entry) in image.machines[0].objects.iter().enumerate() {
+        if matches!(entry.object, Object::NativeSnapshot(_)) {
+            found.push(idx);
+        }
+    }
+    let mut broken = image.clone();
+    broken.machines[0].objects.swap(found[0], found[1]);
+    // The swap moves two payloads of equal shape, so the canonical
+    // order stays exact and only the nested root type rule fires.
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+}
+
+// ---------------------------------------------------------------
+// Structure, order, and budget.
+// ---------------------------------------------------------------
+
+/// A snapshot world holds at least its root machine. The decoder can
+/// represent an empty world, and admission rejects it.
+#[test]
+fn a_world_with_no_machine_rejects() {
+    let loaded = program(INIT_SOURCE);
+    let images = boundaries(&loaded, &[], 5);
+    let mut broken = images[0].clone();
+    broken.machines.clear();
+    broken.result_type = [0u8; 32];
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
+}
+
+/// The stored heap is exactly the canonical traversal of its roots.
+///
+/// The rotation keeps every reference valid and every type accurate,
+/// so the canonical-order rule is the one rule left to catch it.
+#[test]
+fn a_rotated_heap_rejects_as_non_canonical() {
+    let loaded = program(SHARED_SOURCE);
+    let images = boundaries(&loaded, &[], 40);
+    let image = pick(&images, "a heap of two objects or more", |image| {
+        image.machines[0].objects.len() >= 2
+    });
+    let mut broken = image.clone();
+    let count = broken.machines[0].objects.len() as u32;
+    // Move every object one place up and renumber every reference.
+    let map = |r: ObjRef| ObjRef {
+        slot: (r.slot + 1) % count,
+        generation: 0,
+    };
+    let machine = &mut broken.machines[0];
+    let mut objects = machine.objects.clone();
+    objects.rotate_right(1);
+    for entry in &mut objects {
+        entry.object = entry
+            .object
+            .remap(map)
+            .unwrap_or_else(|| entry.object.clone());
+    }
+    let value = |v: &mut Value| {
+        if let Value::Obj(r) = v {
+            *v = Value::Obj(map(*r));
+        }
+    };
+    for frame in &mut machine.frames {
+        frame.closure = frame.closure.map(|o| (o + 1) % count);
+    }
+    for v in machine.locals.iter_mut().chain(machine.operands.iter_mut()) {
+        value(v);
+    }
+    for literal in &mut machine.literals {
+        *literal = literal.map(|o| (o + 1) % count);
+    }
+    machine.objects = objects;
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Order));
+}
+
+/// Admission charges one aggregate budget, so a compact container can
+/// never expand into unbounded checking work.
+#[test]
+fn an_admission_budget_that_runs_out_rejects() {
+    let loaded = program(SHARED_SOURCE);
+    let images = boundaries(&loaded, &[], 40);
+    let image = pick(&images, "a heap of two objects or more", |image| {
+        image.machines[0].objects.len() >= 2
+    });
+    let mut budget = lm_vm::snapshot::AdmissionBudget::new(1);
+    let error = lm_vm::snapshot::admit(image.clone(), &loaded, &mut budget)
+        .expect_err("the budget runs out");
+    assert_eq!(error.reason, ImageReason::Budget);
+    // The same image admits under the default budget.
+    let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+    lm_vm::snapshot::admit(image, &loaded, &mut budget).expect("the image admits");
+    assert!(budget.used() > 0);
+}
+
+// ---------------------------------------------------------------
+// The trusted interpreter boundary.
+// ---------------------------------------------------------------
+
+/// Every operation slot an image names is a manifest slot. The runtime
+/// reads the manifest by that slot, so an image that names a slot past
+/// the manifest would index it out of range.
+#[test]
+fn an_operation_slot_past_the_manifest_rejects() {
+    let loaded = program(TERMINAL_SOURCE);
+    let images = boundaries(&loaded, &["Vm"], 60);
+    let image = pick(&images, "a terminal machine", |image| {
+        image
+            .machines
+            .iter()
+            .any(|m| m.state == lm_vm::snapshot::ImageState::Done)
+    });
+    let at = image
+        .machines
+        .iter()
+        .position(|m| m.state == lm_vm::snapshot::ImageState::Done)
+        .expect("one machine is done");
+    let mut broken = image.clone();
+    broken.machines[at].state = lm_vm::snapshot::ImageState::Faulted;
+    broken.machines[at].terminal = Some(ImageTerminal::Fault(lm_vm::FaultRec {
+        code: lm_vm::FaultCode::BoundaryViolation,
+        message: "forged".to_string(),
+        op: Some(lm_abi::OP_COUNT + 7),
+    }));
+    recanonicalize(&mut broken.machines[at]);
+    let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+    let error = lm_vm::snapshot::admit(broken.clone(), &loaded, &mut budget)
+        .expect_err("the operation slot must reject");
+    assert_eq!(error.reason, ImageReason::Code);
+    // The image has no encoding either: the encoder reports the slot
+    // instead of indexing the manifest out of range.
+    assert!(codec::encode(&broken, usize::MAX).is_err());
+}
+
+/// An abstract class is the closed parent of one enum family, and no
+/// verified program allocates one. An instance of it would reach the
+/// exhaustive-case backstop of every dispatch on the family.
+#[test]
+fn an_instance_of_an_abstract_class_rejects() {
+    let source = "\
+def go(): Int
+  a: Option[Int] = None
+  case a
+  in Some(v) then v
+  in None    then 41
+  end
+end
+
+go()
+";
+    let loaded = program(source);
+    let images = boundaries(&loaded, &[], 60);
+    let classes = &loaded.module().classes;
+    // One abstract family with a case class of the same field count.
+    let image = pick(&images, "an instance of an enum case", |image| {
+        image.machines.iter().any(|m| {
+            m.objects.iter().any(|entry| match &entry.object {
+                Object::Instance { class, fields } => {
+                    let parent = classes[*class as usize].parent();
+                    parent.is_some_and(|p| {
+                        classes[p as usize].kind == lm_bytecode::BcClassKind::Abstract
+                            && classes[p as usize].fields.len() == fields.len()
+                    })
+                }
+                _ => false,
+            })
+        })
+    });
+    let mut broken = image.clone();
+    let mut damaged: Option<u32> = None;
+    for machine in &mut broken.machines {
+        for entry in &mut machine.objects {
+            if let Object::Instance { class, fields } = &mut entry.object {
+                let parent = classes[*class as usize].parent();
+                if let Some(parent) = parent {
+                    if classes[parent as usize].kind == lm_bytecode::BcClassKind::Abstract
+                        && classes[parent as usize].fields.len() == fields.len()
+                    {
+                        *class = parent;
+                        damaged = Some(parent);
+                    }
+                }
+            }
+        }
+    }
+    let parent = damaged.expect("the capture holds an enum case instance");
+    // The manifest must name the family, so the abstract rule fires
+    // instead of the manifest rule.
+    let hash = loaded
+        .identity()
+        .expect("the program has an identity")
+        .class_hashes[parent as usize];
+    broken.classes.push((parent, hash));
+    broken.classes.sort_by_key(|(slot, _)| *slot);
+    broken.classes.dedup_by_key(|(slot, _)| *slot);
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
+}
+
+// ---------------------------------------------------------------
+// The admission identity.
+// ---------------------------------------------------------------
+
+/// An old container names an older format or ABI version, and
+/// admission rejects it. Version 1 spelled an uninitialized local as a
+/// unit value, so its images have another meaning.
+#[test]
+fn a_container_of_an_older_build_rejects() {
+    let loaded = program(INIT_SOURCE);
+    let images = boundaries(&loaded, &[], 5);
+    for edit in 0..4usize {
+        let mut broken = images[0].clone();
+        match edit {
+            0 => broken.format -= 1,
+            1 => broken.abi_version -= 1,
+            2 => broken.compiler_abi -= 1,
+            _ => broken.verifier_version -= 1,
+        }
+        let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+        let error = lm_vm::snapshot::admit(broken, &loaded, &mut budget)
+            .expect_err("an older version must reject");
+        assert_eq!(error.reason, ImageReason::Version, "field {edit}");
+        assert_eq!(error.stage, lm_vm::snapshot::ImageStage::Admission);
+    }
+    // The same rule holds at the container stage: an old byte string
+    // never reaches admission.
+    let bytes = codec::encode(&images[0], usize::MAX).expect("the image encodes");
+    let mut old = bytes.clone();
+    old[8..12].copy_from_slice(&1u32.to_le_bytes());
+    let end = old.len() - 32;
+    let hash = codec::container_hash(&old[..end]);
+    old[end..].copy_from_slice(&hash);
+    let error = codec::load_external(&old, &loaded, lm_vm::snapshot::LoadLimits::default())
+        .expect_err("an old container must reject");
+    assert_eq!(error.reason, ImageReason::Version);
+    assert_eq!(error.stage, lm_vm::snapshot::ImageStage::Decode);
+}
+
+/// An admitted image records the program and the ABI it passed
+/// against, beside its canonical bytes.
+#[test]
+fn an_admitted_image_records_its_admission_identity() {
+    let loaded = program(INIT_SOURCE);
+    let images = boundaries(&loaded, &[], 5);
+    let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+    let admitted = lm_vm::snapshot::admit(images[0].clone(), &loaded, &mut budget)
+        .expect("the capture admits");
+    let identity = admitted.identity();
+    assert_eq!(
+        identity.module_semantic,
+        loaded
+            .identity()
+            .expect("the program has an identity")
+            .semantic_hash
+    );
+    assert_eq!(
+        identity.verification,
+        lm_bytecode::identity::verification_hash(loaded.module())
+    );
+    assert_eq!(identity.abi_version, lm_abi::ABI_VERSION);
+    assert_eq!(
+        admitted.origin(),
+        lm_vm::snapshot::Origin::ExternalContainer
+    );
+}
+
+// ---------------------------------------------------------------
 // The unchanged world still admits.
 // ---------------------------------------------------------------
 

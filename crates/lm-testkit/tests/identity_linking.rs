@@ -1311,3 +1311,41 @@ fn a_selector_rename_moves_the_verification_hash() {
         "a class rename must hold the verification hash"
     );
 }
+
+/// A snapshot classification change moves the verification hash of
+/// every module.
+///
+/// `OpDef.snapshot` decides whether a pending instance of one
+/// operation holds live host state, so it changes snapshot and
+/// resource behavior. The operation identity now covers it, the
+/// manifest digest covers the identities, and the verification hash
+/// covers the manifest digest. A verified-code cache and an admitted
+/// snapshot therefore cannot survive that change.
+#[test]
+fn a_snapshot_classification_change_moves_the_verification_hash() {
+    use lm_abi::{
+        identity_of, manifest_digest, manifest_digest_of, op, op_identity, op_name, SnapshotClass,
+        OP_CLOCK_NOW, OP_COUNT,
+    };
+    use lm_bytecode::identity::{verification_hash, verification_hash_with};
+    let module = compile_text("t.lm", "x = 1\nx\n").unwrap();
+    let mut flipped = *op(OP_CLOCK_NOW);
+    flipped.snapshot = SnapshotClass::HostAttachment;
+    let name = op_name(OP_CLOCK_NOW);
+    let mutated: Vec<[u8; 32]> = (0..OP_COUNT)
+        .map(|slot| {
+            if slot == OP_CLOCK_NOW {
+                identity_of(&name, &flipped)
+            } else {
+                op_identity(slot)
+            }
+        })
+        .collect();
+    let manifest = manifest_digest_of(&mutated);
+    assert_ne!(manifest, manifest_digest());
+    assert_ne!(
+        verification_hash_with(manifest, &module),
+        verification_hash(&module),
+        "a classification change must move the verification hash"
+    );
+}

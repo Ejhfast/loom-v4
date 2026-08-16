@@ -513,6 +513,15 @@ pub fn identity_of(name: &str, def: &OpDef) -> [u8; 32] {
 /// The digest of the full manifest: version, groups, and every
 /// operation identity in slot order.
 pub fn manifest_digest() -> [u8; 32] {
+    let identities: Vec<[u8; 32]> = (0..OP_COUNT).map(op_identity).collect();
+    manifest_digest_of(&identities)
+}
+
+/// The digest of one operation identity list.
+///
+/// The call takes the identities, so a test can state what one changed
+/// definition does to the manifest and to every digest above it.
+pub fn manifest_digest_of(identities: &[[u8; 32]]) -> [u8; 32] {
     let mut input = Vec::new();
     input.extend_from_slice(b"lm-operations-manifest-v1\0");
     input.extend_from_slice(&ABI_VERSION.to_le_bytes());
@@ -520,8 +529,8 @@ pub fn manifest_digest() -> [u8; 32] {
         input.extend_from_slice(group.as_bytes());
         input.push(0);
     }
-    for slot in 0..OP_COUNT {
-        input.extend_from_slice(&op_identity(slot));
+    for id in identities {
+        input.extend_from_slice(id);
     }
     sha256(&input)
 }
@@ -592,6 +601,38 @@ mod tests {
             assert_eq!(op_identity(slot), id);
         }
         assert_eq!(manifest_digest(), manifest_digest());
+    }
+
+    /// The snapshot classification is a semantic field, so it takes
+    /// part in the operation identity and in the manifest digest.
+    ///
+    /// The classification decides whether a pending instance holds live
+    /// host state, so a classification-only change is a behavior
+    /// change. An identity that ignored it kept the manifest digest
+    /// stable across that change.
+    #[test]
+    fn a_classification_only_change_moves_the_identity_and_the_manifest() {
+        let slot = OP_CLOCK_NOW;
+        let mut flipped = *op(slot);
+        assert_eq!(flipped.snapshot, SnapshotClass::MachineState);
+        flipped.snapshot = SnapshotClass::HostAttachment;
+        let name = op_name(slot);
+        assert_ne!(identity_of(&name, &flipped), op_identity(slot));
+        let mutated: Vec<[u8; 32]> = (0..OP_COUNT)
+            .map(|s| {
+                if s == slot {
+                    identity_of(&name, &flipped)
+                } else {
+                    op_identity(s)
+                }
+            })
+            .collect();
+        assert_ne!(manifest_digest_of(&mutated), manifest_digest());
+        // Every other field of the definition is unchanged, so the
+        // classification alone moved both digests.
+        assert_eq!(flipped.params, op(slot).params);
+        assert_eq!(flipped.reply, op(slot).reply);
+        assert_eq!(flipped.schema, op(slot).schema);
     }
 
     /// Every operation declares one snapshot classification, and the

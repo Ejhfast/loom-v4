@@ -194,7 +194,10 @@ fn copy_value(
 ) -> Result<Value, FaultCode> {
     let root = match value {
         Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Op(_) => return Ok(value),
-        Value::Uninit => unreachable!("no verified value is uninitialized"),
+        // A verified read never produces the marker, and a local slot
+        // that holds it is unreadable. A caller that still hands one
+        // over takes a local fault instead of a host panic.
+        Value::Uninit => return Err(FaultCode::BoundaryViolation),
         Value::Obj(r) => r,
     };
     let mut scratch = src.take_scratch();
@@ -225,7 +228,10 @@ pub fn copy_within(
 ) -> Result<Value, FaultCode> {
     let root = match value {
         Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Op(_) => return Ok(value),
-        Value::Uninit => unreachable!("no verified value is uninitialized"),
+        // A verified read never produces the marker, and a local slot
+        // that holds it is unreadable. A caller that still hands one
+        // over takes a local fault instead of a host panic.
+        Value::Uninit => return Err(FaultCode::BoundaryViolation),
         Value::Obj(r) => r,
     };
     let mut scratch = heap.take_scratch();

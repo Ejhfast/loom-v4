@@ -1230,6 +1230,21 @@ impl Machine {
         Ok(())
     }
 
+    /// Take the top operand.
+    ///
+    /// The readers below assert the operand type instead of testing it.
+    /// Two facts carry that assertion, and both hold for a restored
+    /// machine as well as a live one:
+    ///
+    /// - the independent verifier proves the operand type at every
+    ///   program point of every executed function;
+    /// - snapshot admission proves that every operand of a stopped
+    ///   frame carries the type the verifier proved at that point, and
+    ///   restore preserves values without retyping them.
+    ///
+    /// An `Image` never reaches this code: only an admitted
+    /// `SnapshotImage` restores. A path that neither fact covers takes
+    /// a local machine fault instead of an assertion.
     fn pop(&mut self) -> Value {
         self.vm.operands.pop().expect("verified stack shape")
     }

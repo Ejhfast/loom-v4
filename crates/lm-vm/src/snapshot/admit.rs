@@ -420,6 +420,28 @@ impl Admit<'_> {
                     )),
                 );
             }
+            // Every operation slot an object names is a manifest slot.
+            // The runtime reads the manifest by that slot, so the whole
+            // pattern is checked here: a call token, a fault value, the
+            // pending request, and a stored terminal fault.
+            for op in [match entry.object {
+                Object::NativeCall { op, .. } => Some(op),
+                Object::NativeFault { op, .. } => op,
+                _ => None,
+            }]
+            .into_iter()
+            .flatten()
+            {
+                if op >= lm_abi::OP_COUNT {
+                    return fail(
+                        ImageReason::Code,
+                        at(&format!(
+                            "object {ordinal} names operation slot {op}, which the manifest has \
+                             not"
+                        )),
+                    );
+                }
+            }
             match &entry.object {
                 Object::Instance { class, fields } => {
                     if *class as usize >= self.module.classes.len() || !self.class_named(*class) {
@@ -428,6 +450,20 @@ impl Admit<'_> {
                             at(&format!(
                                 "object {ordinal} names class slot {class}, which the manifest \
                                  omits"
+                            )),
+                        );
+                    }
+                    // An abstract class is the closed parent of one
+                    // enum family, and no verified program allocates
+                    // one. An instance of it would reach the
+                    // exhaustive-case backstop of every dispatch.
+                    if self.module.classes[*class as usize].kind
+                        == lm_bytecode::BcClassKind::Abstract
+                    {
+                        return fail(
+                            ImageReason::State,
+                            at(&format!(
+                                "object {ordinal} is an instance of abstract class {class}"
                             )),
                         );
                     }
@@ -526,8 +562,17 @@ impl Admit<'_> {
                 object_ref(value, &format!("pending argument {idx}"))?;
             }
         }
-        if let Some(ImageTerminal::Done(value)) = &m.terminal {
-            object_ref(value, "the terminal value")?;
+        match &m.terminal {
+            Some(ImageTerminal::Done(value)) => object_ref(value, "the terminal value")?,
+            Some(ImageTerminal::Fault(rec)) => {
+                if rec.op.is_some_and(|op| op >= lm_abi::OP_COUNT) {
+                    return fail(
+                        ImageReason::Code,
+                        at("the terminal fault names no manifest operation"),
+                    );
+                }
+            }
+            None => {}
         }
         for (idx, value) in m.mailbox.queue.iter().enumerate() {
             object_ref(value, &format!("mailbox message {idx}"))?;

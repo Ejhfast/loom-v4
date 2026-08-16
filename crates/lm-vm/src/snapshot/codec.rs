@@ -61,6 +61,14 @@ pub fn container_hash(prefix: &[u8]) -> [u8; 32] {
 struct Out {
     bytes: Vec<u8>,
     limit: usize,
+    /// The first operation slot the image named that the manifest has
+    /// not.
+    ///
+    /// An `Image` is editable data, so it may name any slot. The
+    /// encoder writes a placeholder identity for such a slot and
+    /// reports the slot afterwards, so encoding an invalid image
+    /// fails instead of indexing the manifest out of range.
+    bad_op: Option<u32>,
 }
 
 impl Out {
@@ -86,6 +94,26 @@ impl Out {
 
     fn hash(&mut self, v: &[u8; 32]) {
         self.bytes.extend_from_slice(v);
+    }
+
+    /// The identity of one operation slot the image names.
+    fn op_identity(&mut self, slot: u32) -> [u8; 32] {
+        if slot >= lm_abi::OP_COUNT {
+            self.bad_op = self.bad_op.or(Some(slot));
+            return [0u8; 32];
+        }
+        lm_abi::op_identity(slot)
+    }
+
+    /// The finished bytes, or the reason the image has no encoding.
+    fn into_bytes(self) -> Result<Vec<u8>, SnapshotFail> {
+        match self.bad_op {
+            None => Ok(self.bytes),
+            Some(slot) => Err(SnapshotFail::Fault(
+                FaultCode::BoundaryViolation,
+                format!("the image names operation slot {slot}, which the manifest has not"),
+            )),
+        }
     }
 
     /// One canonical LEB128 unsigned integer.
@@ -126,7 +154,7 @@ impl Out {
             }
             Value::Op(op) => {
                 self.u8(V_OP);
-                let id = lm_abi::op_identity(op);
+                let id = self.op_identity(op);
                 self.hash(&id);
             }
             Value::Obj(r) => {
@@ -177,6 +205,7 @@ pub fn encode(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
     let mut out = Out {
         bytes: Vec::new(),
         limit,
+        bad_op: None,
     };
     out.bytes.extend_from_slice(&MAGIC);
     out.u32(FORMAT_VERSION);
@@ -203,7 +232,7 @@ pub fn encode(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
     if out.over_limit() {
         return Err(SnapshotFail::LimitExceeded);
     }
-    Ok(out.bytes)
+    out.into_bytes()
 }
 
 /// The fixed prefix length: magic plus four version fields.
@@ -219,6 +248,7 @@ fn section_header(image: &Image) -> Vec<u8> {
     let mut out = Out {
         bytes: Vec::new(),
         limit: usize::MAX,
+        bad_op: None,
     };
     out.leb(image.machines.len() as u64);
     // The root ordinal. The traversal starts at the root, so it is
@@ -233,6 +263,7 @@ fn section_code(image: &Image) -> Vec<u8> {
     let mut out = Out {
         bytes: Vec::new(),
         limit: usize::MAX,
+        bad_op: None,
     };
     out.leb(image.funcs.len() as u64);
     for (slot, hash) in &image.funcs {
@@ -251,6 +282,7 @@ fn section_heaps(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
     let mut out = Out {
         bytes: Vec::new(),
         limit,
+        bad_op: None,
     };
     for machine in &image.machines {
         out.leb(machine.objects.len() as u64);
@@ -262,7 +294,7 @@ fn section_heaps(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
             }
         }
     }
-    Ok(out.bytes)
+    out.into_bytes()
 }
 
 fn encode_object(out: &mut Out, object: &Object) {
@@ -298,7 +330,7 @@ fn encode_object(out: &mut Out, object: &Object) {
         Object::NativeCall { vm, ordinal, op } => {
             out.leb(*vm as u64);
             out.u64(*ordinal);
-            let id = lm_abi::op_identity(*op);
+            let id = out.op_identity(*op);
             out.hash(&id);
         }
         Object::NativeFault { code, message, op } => {
@@ -308,7 +340,7 @@ fn encode_object(out: &mut Out, object: &Object) {
                 None => out.u8(0),
                 Some(slot) => {
                     out.u8(1);
-                    let id = lm_abi::op_identity(*slot);
+                    let id = out.op_identity(*slot);
                     out.hash(&id);
                 }
             }
@@ -329,6 +361,7 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
     let mut out = Out {
         bytes: Vec::new(),
         limit,
+        bad_op: None,
     };
     for machine in &image.machines {
         out.opt(machine.parent);
@@ -376,7 +409,7 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
             None => out.u8(0),
             Some(pending) => {
                 out.u8(1);
-                let id = lm_abi::op_identity(pending.op);
+                let id = out.op_identity(pending.op);
                 out.hash(&id);
                 out.values(&pending.args);
                 out.u64(pending.ordinal);
@@ -396,7 +429,7 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
                     None => out.u8(0),
                     Some(slot) => {
                         out.u8(1);
-                        let id = lm_abi::op_identity(slot);
+                        let id = out.op_identity(slot);
                         out.hash(&id);
                     }
                 }
@@ -423,7 +456,7 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
             return Err(SnapshotFail::LimitExceeded);
         }
     }
-    Ok(out.bytes)
+    out.into_bytes()
 }
 
 fn encode_limits(out: &mut Out, limits: &ImageLimits) {

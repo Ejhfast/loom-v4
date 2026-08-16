@@ -171,9 +171,17 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
 /// section since container version 8, so the digest needs no separate
 /// marker-length field.
 pub fn verification_hash(module: &Module) -> [u8; 32] {
+    verification_hash_with(lm_abi::manifest_digest(), module)
+}
+
+/// The verification hash under one exact manifest digest.
+///
+/// The call takes the digest, so a test can state what one changed
+/// operation definition does to the verification hash of a module.
+pub fn verification_hash_with(manifest: [u8; 32], module: &Module) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(TAG_VERIFICATION);
-    bytes.extend_from_slice(&lm_abi::manifest_digest());
+    bytes.extend_from_slice(&manifest);
     bytes.extend_from_slice(&crate::semantic_section(module));
     sha256(&bytes)
 }
