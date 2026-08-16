@@ -189,7 +189,7 @@ the plain argument form.
 
 ```text
 $ lm run --show-result examples/06-graphs/cycle-digest.lm
-Done(2de09e7c78b3e348f0e0d98f56b5ebbb44a9018abaa4d8596550e51fff0f8930)
+Done(08181cf0449cbb10bcbccb65e3eb151fca169a46f4e89a4480f3e630db27564c)
 
 $ lm run --show-result examples/06-graphs/brace-closure.lm
 Done(42)
@@ -243,18 +243,19 @@ epoch table replaced the bit, so the header lost a field.
 
 ## The digest hash seam
 
-Specification 10.3 names BLAKE3-256. The workspace takes no
-crates.io dependency and hand-rolls its hashes: `lm-abi` carries a
-SHA-256 implementation, and every identity hash in the project uses
-it.
+Specification 10.3 names BLAKE3-256. Through week 7, the workspace
+took no crates.io dependency and hand-rolled its hashes: `lm-abi`
+carries a SHA-256 implementation, and every other identity hash in
+the project uses it.
 
 Week 7 puts the hash behind one function, `lm_graph::digest::hash`,
-and calls the existing SHA-256 there. The canonical encoding, the
+and called the interim SHA-256 there. The canonical encoding, the
 ordinal assignment, the back-references, and the digest cache are the
 real work, and none of them reads the hash. Changing the function
 changes one line and every checked digest output.
 
-The open question below records the three ways to close the gap.
+The decided item below closes the gap. The seam now calls the
+vendored BLAKE3-256.
 
 Float normalization is not implemented, because `Value` has no float
 variant yet. The rule enters with floats.
@@ -556,27 +557,26 @@ the whole table. A swap of the map key and value order fails the test.
 
 ## Open questions
 
-### BLAKE3-256 against the hand-rolled SHA-256
+### BLAKE3-256 against the hand-rolled SHA-256 (decided 2026-08-15)
 
-Specification 10.3 names BLAKE3-256 for the value digest. The
-implementation uses the SHA-256 of `lm-abi` behind one function. The
-three ways to close the gap:
+Specification 10.3 names BLAKE3-256 for the value digest. Week 7
+shipped the SHA-256 of `lm-abi` behind one function. Three options
+existed: hand-roll BLAKE3-256, vendor one dependency, or amend the
+specification to name SHA-256.
 
-1. **Hand-roll BLAKE3-256.** It keeps the zero-dependency rule and
-   costs roughly the size of `lm-abi/src/sha.rs` plus a tree mode. It
-   also puts a security-relevant primitive under this project's
-   maintenance.
-2. **Vendor one dependency.** It is the least code and the most
-   accurate, and it breaks the rule the workspace has held for six
-   weeks. The rule is not written down as normative anywhere; it is a
-   practice.
-3. **Amend the specification to name SHA-256.** Every other identity
-   hash in the project is SHA-256 already, so this would make the
-   document match the implementation and remove one primitive. It
-   also loses the speed BLAKE3 was chosen for.
+Decision: option 2. `lm-graph` now depends on the official `blake3`
+crate. The `vendor/` directory holds the vendored sources, and
+`.cargo/config.toml` replaces the crates.io source with them, so
+the build never touches the network.
 
-This is a specification-versus-implementation disagreement, not a
-documentation defect. The specification is unchanged.
+The reason: a hand-rolled tree hash is a silent-corruption risk in
+pinned identity. The vendored official implementation gets one
+review and then stays hermetic.
+
+The scope is the value digest only. Bytecode, artifact, interface,
+and build-cache identity stay on the SHA-256 of `lm-abi`. The
+implementation now matches the specification, so the specification
+is unchanged.
 
 ### No stable fault code names a resource budget
 

@@ -46,13 +46,14 @@ pub trait CodeIdentity {
 
 /// The digest hash function.
 ///
-/// Specification 10.3 names BLAKE3-256. The workspace hand-rolls its
-/// hashes and takes no external dependency, so the interim function
-/// is the SHA-256 of `lm-abi`. The encoding above is hash-agnostic:
-/// only this one call changes when BLAKE3 lands. `docs/notes/week7.md`
-/// records the open question.
+/// Specification 10.3 names BLAKE3-256, and this function calls the
+/// vendored official `blake3` crate. The scope is the value digest
+/// only: bytecode, artifact, interface, and build-cache identity stay
+/// on the SHA-256 of `lm-abi`. The `DOMAIN` prefix above gives the
+/// domain separation that specification 17.9 asks for.
+/// `docs/notes/week7.md` records the decision.
 pub fn hash(bytes: &[u8]) -> [u8; 32] {
-    lm_abi::sha256(bytes)
+    *blake3::hash(bytes).as_bytes()
 }
 
 /// A visitor that rejects a graph the digest cannot encode.
