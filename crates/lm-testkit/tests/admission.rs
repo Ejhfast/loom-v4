@@ -398,41 +398,52 @@ go()
 fn a_machine_handle_that_names_another_result_type_rejects() {
     let loaded = program(TWO_MACHINES_SOURCE);
     let images = boundaries(&loaded, &["Vm"], 60);
-    let image = pick(&images, "two loaded machines", |image| {
-        image
-            .machines
-            .iter()
-            .filter(|m| m.result_type.is_some())
-            .count()
-            >= 2
-            && image.machines[0]
-                .objects
-                .iter()
-                .filter(|entry| matches!(entry.object, Object::NativeVm { .. }))
-                .count()
-                >= 2
-    });
-    let mut broken = image.clone();
-    // Swap the two machine handles. Every ordinal stays in range, so
-    // only the relational type rule catches it.
-    let mut found: Vec<usize> = Vec::new();
-    for (idx, entry) in broken.machines[0].objects.iter().enumerate() {
-        if matches!(entry.object, Object::NativeVm { .. }) {
-            found.push(idx);
+    // Two machine handles that name two loaded machines of two result
+    // types. The swap then keeps the lifecycle state of both targets,
+    // so only the result-type rule catches it.
+    let pair = |image: &Image| -> Option<(usize, usize)> {
+        let loaded_target = |at: usize| -> Option<u32> {
+            match image.machines[0].objects[at].object {
+                Object::NativeVm { vm } => {
+                    let target = &image.machines[vm as usize];
+                    (target.state != lm_vm::snapshot::ImageState::Empty
+                        && target.result_type.is_some())
+                    .then_some(vm)
+                }
+                _ => None,
+            }
+        };
+        let count = image.machines[0].objects.len();
+        for first in 0..count {
+            for second in first + 1..count {
+                let (Some(a), Some(b)) = (loaded_target(first), loaded_target(second)) else {
+                    continue;
+                };
+                if image.machines[a as usize].result_type != image.machines[b as usize].result_type
+                {
+                    return Some((first, second));
+                }
+            }
         }
-    }
-    assert!(found.len() >= 2, "the capture holds two machine handles");
-    let first = match broken.machines[0].objects[found[0]].object {
+        None
+    };
+    let image = pick(
+        &images,
+        "two loaded machines of two result types",
+        |image| pair(image).is_some(),
+    );
+    let (first_at, second_at) = pair(&image).expect("the capture holds the pair");
+    let target = |at: usize| match image.machines[0].objects[at].object {
         Object::NativeVm { vm } => vm,
         _ => unreachable!("the entry is a machine handle"),
     };
-    let second = match broken.machines[0].objects[found[1]].object {
-        Object::NativeVm { vm } => vm,
-        _ => unreachable!("the entry is a machine handle"),
+    let mut broken = image.clone();
+    broken.machines[0].objects[first_at].object = Object::NativeVm {
+        vm: target(second_at),
     };
-    assert_ne!(first, second);
-    broken.machines[0].objects[found[0]].object = Object::NativeVm { vm: second };
-    broken.machines[0].objects[found[1]].object = Object::NativeVm { vm: first };
+    broken.machines[0].objects[second_at].object = Object::NativeVm {
+        vm: target(first_at),
+    };
     assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
 }
 
@@ -563,6 +574,152 @@ fn a_terminal_uninitialized_marker_rejects() {
     broken.machines[at].terminal = Some(ImageTerminal::Done(Value::Uninit));
     recanonicalize(&mut broken.machines[at]);
     assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+}
+
+/// A proc handle carries the mailbox type and the result type of the
+/// proc it names. The outer object tag proves neither.
+#[test]
+fn a_proc_handle_that_names_another_mailbox_rejects() {
+    let source = "\
+class Inner < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(n) then n
+    in Closed then 0
+    end
+  end
+end
+
+class Outer < Proc[Handle[Int, Int]]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(h)  then 1
+    in Closed  then 0
+    end
+  end
+end
+
+def go(): Int with Proc
+  inner = Inner.spawn()
+  outer = Outer.spawn()
+  outer.send(inner)
+  1
+end
+
+go()
+";
+    let loaded = program(source);
+    let images = boundaries(&loaded, &["Proc"], 80);
+    let image = pick(&images, "two spawned procs", |image| {
+        image.machines.len() >= 3
+            && image.machines[0]
+                .objects
+                .iter()
+                .filter(|entry| matches!(entry.object, Object::NativeHandle { .. }))
+                .count()
+                >= 2
+    });
+    // The root holds one handle to each proc. Swap the two targets, so
+    // a handle names a proc with another mailbox type.
+    let mut found: Vec<usize> = Vec::new();
+    for (idx, entry) in image.machines[0].objects.iter().enumerate() {
+        if matches!(entry.object, Object::NativeHandle { .. }) {
+            found.push(idx);
+        }
+    }
+    let target = |image: &Image, at: usize| match image.machines[0].objects[at].object {
+        Object::NativeHandle { proc, .. } => proc,
+        _ => unreachable!("the entry is a proc handle"),
+    };
+    let first = target(&image, found[0]);
+    let second = target(&image, found[1]);
+    assert_ne!(first, second);
+    let mut broken = image.clone();
+    // The generation comes from the target, so the handle stays live.
+    broken.machines[0].objects[found[0]].object = Object::NativeHandle {
+        proc: second,
+        generation: image.machines[second as usize].generation,
+    };
+    broken.machines[0].objects[found[1]].object = Object::NativeHandle {
+        proc: first,
+        generation: image.machines[first as usize].generation,
+    };
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+}
+
+/// A call token carries the argument view and the reply type of the
+/// exact operation it names.
+#[test]
+fn a_call_token_of_another_operation_rejects() {
+    let source = "\
+def go(): Int with Vm, Rand
+  held = sys.vm.Vm().from_object(do ||: Int with Rand.Int
+    sys.rand.int(0, 10)
+  end, args: ())
+  case held.drive()
+  in Asked(q)
+    case q.as_call(Rand.Int)
+    in Some(call) then call.args()[0]
+    in None       then 0
+    end
+  in Done(_)  then 0
+  in Fault(_) then 0
+  end
+end
+
+go()
+";
+    let loaded = program(source);
+    let images = boundaries(&loaded, &["Vm", "Rand"], 120);
+    let image = pick(&images, "a call token", |image| {
+        image.machines[0]
+            .objects
+            .iter()
+            .any(|entry| matches!(entry.object, Object::NativeCall { .. }))
+    });
+    let at = find_object(&image.machines[0], "call token", |object| {
+        matches!(object, Object::NativeCall { .. })
+    });
+    let mut broken = image.clone();
+    if let Object::NativeCall { vm, op, .. } = broken.machines[0].objects[at as usize].object {
+        assert_eq!(op, lm_abi::OP_RAND_INT);
+        // A stale token is legal, so the token-agreement rule skips it
+        // and the call type rule states the failure on its own.
+        broken.machines[0].objects[at as usize].object = Object::NativeCall {
+            vm,
+            ordinal: u64::MAX,
+            op: lm_abi::OP_CLOCK_NOW,
+        };
+    }
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+}
+
+// ---------------------------------------------------------------
+// The frame chain.
+// ---------------------------------------------------------------
+
+/// A frame names the callee of the call site the frame below stopped
+/// inside. The substitution of one activation comes from that call
+/// site, so a chain that does not agree resolves no type at all.
+#[test]
+fn a_frame_that_is_not_the_callee_of_its_call_site_rejects() {
+    let loaded = program(GENERIC_SOURCE);
+    let images = boundaries(&loaded, &[], 20);
+    let image = pick(&images, "a two-frame chain", |image| {
+        image.machines[0].frames.len() == 2
+    });
+    let mut broken = image.clone();
+    let caller = broken.machines[0].frames[0].func;
+    let locals = loaded.module().funcs[caller as usize].local_count() as usize;
+    // The frame runs the caller function instead of the callee the
+    // call site names. The local arena follows the new frame chain, so
+    // the arena rule stays true and the chain rule fires alone.
+    broken.machines[0].frames[1].func = caller;
+    broken.machines[0].frames[1].block = 0;
+    broken.machines[0].frames[1].ip = 0;
+    broken.machines[0].locals.resize(2 * locals, Value::Uninit);
+    recanonicalize(&mut broken.machines[0]);
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Type));
 }
 
 // ---------------------------------------------------------------
