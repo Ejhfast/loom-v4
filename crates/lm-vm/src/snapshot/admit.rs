@@ -1462,7 +1462,7 @@ impl Admit<'_> {
                 continue;
             }
             budget.charge(1)?;
-            self.check_object(vm, object, ty, work)?;
+            self.check_object(vm, object, ty, budget, work)?;
         }
         Ok(())
     }
@@ -1474,6 +1474,7 @@ impl Admit<'_> {
         vm: u32,
         object: u32,
         ty: u32,
+        budget: &mut AdmissionBudget,
         work: &mut Work,
     ) -> Result<(), ImageError> {
         let declared = self.ty(ty)?;
@@ -1599,14 +1600,14 @@ impl Admit<'_> {
             // admission at its own restore.
             BcType::SnapshotImage => match payload {
                 Object::NativeSnapshot(bytes) => {
-                    self.nested_result_type(bytes, &at)?;
+                    self.nested_result_type(bytes, budget, &at)?;
                     Ok(())
                 }
                 _ => wrong(payload.shape().name),
             },
             BcType::Snapshot(want) => match payload {
                 Object::NativeSnapshot(bytes) => {
-                    let found = self.nested_result_type(bytes, &at)?;
+                    let found = self.nested_result_type(bytes, budget, &at)?;
                     let Some(digest) = self.type_digest(want) else {
                         return fail(
                             ImageReason::Type,
@@ -1752,7 +1753,15 @@ impl Admit<'_> {
     /// The nested image stays opaque: this call decodes its container
     /// and reads the header alone. The nested body passes full
     /// admission at its own restore.
-    fn nested_result_type(&self, bytes: &[u8], at: &str) -> Result<[u8; 32], ImageError> {
+    fn nested_result_type(
+        &self,
+        bytes: &[u8],
+        budget: &mut AdmissionBudget,
+        at: &str,
+    ) -> Result<[u8; 32], ImageError> {
+        // The nested container costs decoding work, so the aggregate
+        // ledger carries it. One unit stands for one 64-byte block.
+        budget.charge(bytes.len() as u64 / 64 + 1)?;
         let nested = codec::decode(bytes, LoadLimits::default()).map_err(|e| {
             ImageError::admission(
                 e.reason,

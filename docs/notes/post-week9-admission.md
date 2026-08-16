@@ -324,6 +324,15 @@ aggregate budget bounds that work, and item 10 shares one budget with
 the nested containers. A cache keyed by container hash would remove the
 repeat; nothing implements one.
 
+#### A substituted snapshot type has no serialized name
+
+`Snapshot[T]` matches its nested container by the semantic digest of
+`T`. A digest exists for a module type entry alone, so a `T` the
+verifier created by substitution has no name to compare. Admission
+rejects such a value instead of accepting it unchecked. No program of
+the corpus builds one, because the type of a held machine comes from a
+function type the module table already carries.
+
 #### A closure a generic body created has no admitted capture list
 
 A closure that a generic function creates carries capture types that
