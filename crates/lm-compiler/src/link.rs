@@ -1110,6 +1110,9 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::BbLen
         | Instr::BbBuild
         | Instr::Freeze
+        | Instr::Digest
+        | Instr::EqDigest
+        | Instr::NeDigest
         | Instr::Jump(_)
         | Instr::JumpIfFalse(_)
         | Instr::JumpIfTrue(_)

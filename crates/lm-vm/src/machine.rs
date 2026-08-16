@@ -121,6 +121,9 @@ pub enum ExecOutcome {
     AsCall { request: ObjRef, op: u32 },
     /// `call.args()`.
     CallArgs { call: ObjRef },
+    /// `value.digest()`. The world resolves code and class identity,
+    /// so the digest never names a numeric slot.
+    Digest { value: ObjRef },
 }
 
 /// The serializable state of one machine.
@@ -844,6 +847,21 @@ impl Machine {
                 // rejected freeze changes nothing.
                 lm_graph::freeze(&mut self.vm.heap, r, &self.config.graph)?;
                 self.push(Value::Obj(r))?;
+            }
+            Instr::Digest => {
+                let r = self.pop_obj();
+                return Ok(ExecOutcome::Digest { value: r });
+            }
+            Instr::EqDigest | Instr::NeDigest => {
+                let b = self.pop_obj();
+                let a = self.pop_obj();
+                // A digest compares by value, never by reference
+                // (specification 6.4).
+                let equal = match (self.vm.heap.get(a), self.vm.heap.get(b)) {
+                    (Object::NativeDigest(x), Object::NativeDigest(y)) => x == y,
+                    _ => unreachable!("verified digest operand"),
+                };
+                self.push(Value::Bool(equal == matches!(instr, Instr::EqDigest)))?;
             }
             Instr::Jump(target) => {
                 let frame = self.vm.frames.last_mut().expect("frame");

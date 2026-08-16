@@ -11,7 +11,9 @@
 use crate::hir::*;
 use lm_bytecode::{BcClass, BcClassKind, BcRow, BcType, Func, Instr, Module, TypeApp, NO_PARENT};
 use lm_source::ast::BinOp;
-use lm_types::{ClassKind, Row, RowElem, Type, TypeId, TypeStore, BOOL, INT, NEVER, STRING, UNIT};
+use lm_types::{
+    ClassKind, Row, RowElem, Type, TypeId, TypeStore, BOOL, DIGEST, INT, NEVER, STRING, UNIT,
+};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -96,6 +98,7 @@ impl<'m> ModLowerer<'m> {
             Type::String => self.intern_type(BcType::Str),
             Type::StringBuilder => self.intern_type(BcType::StringBuilder),
             Type::ByteBuffer => self.intern_type(BcType::ByteBuffer),
+            Type::Digest => self.intern_type(BcType::Digest),
             Type::Class(c) => self.intern_type(BcType::Class(c.0)),
             Type::Inst(c, args) => {
                 let args: Vec<u32> = args.iter().map(|a| self.bc_ty(*a)).collect();
@@ -719,6 +722,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     NativeOp::BbLen => Instr::BbLen,
                     NativeOp::BbBuild => Instr::BbBuild,
                     NativeOp::Freeze => Instr::Freeze,
+                    NativeOp::Digest => Instr::Digest,
                     NativeOp::ListGet | NativeOp::MapGet => unreachable!("handled above"),
                 };
                 self.emit(instr);
@@ -1200,12 +1204,14 @@ fn binary_instr(op: BinOp, operand_ty: TypeId) -> Instr {
         BinOp::Eq => match operand_ty {
             BOOL => Instr::EqBool,
             STRING => Instr::EqStr,
+            DIGEST => Instr::EqDigest,
             INT | NEVER | UNIT => Instr::EqInt,
             _ => Instr::EqRef,
         },
         BinOp::Ne => match operand_ty {
             BOOL => Instr::NeBool,
             STRING => Instr::NeStr,
+            DIGEST => Instr::NeDigest,
             INT | NEVER | UNIT => Instr::NeInt,
             _ => Instr::NeRef,
         },
@@ -1432,7 +1438,9 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::SbBuild
         | Instr::BbLen
         | Instr::BbBuild
-        | Instr::Freeze => (1, 1),
+        | Instr::Freeze
+        | Instr::Digest => (1, 1),
+        Instr::EqDigest | Instr::NeDigest => (2, 1),
         Instr::StoreField(_) => (2, 0),
         Instr::ListAt
         | Instr::ListPush
@@ -1559,6 +1567,9 @@ fn instr_text(instr: &Instr) -> String {
         Instr::BbLen => "BbLen".to_string(),
         Instr::BbBuild => "BbBuild".to_string(),
         Instr::Freeze => "Freeze".to_string(),
+        Instr::Digest => "Digest".to_string(),
+        Instr::EqDigest => "EqDigest".to_string(),
+        Instr::NeDigest => "NeDigest".to_string(),
         Instr::Jump(b) => format!("Jump -> b{b}"),
         Instr::JumpIfFalse(b) => format!("JumpIfFalse -> b{b}"),
         Instr::JumpIfTrue(b) => format!("JumpIfTrue -> b{b}"),
@@ -1614,6 +1625,7 @@ fn type_text(module: &Module, idx: u32) -> String {
         BcType::Str => "String".to_string(),
         BcType::StringBuilder => "StringBuilder".to_string(),
         BcType::ByteBuffer => "ByteBuffer".to_string(),
+        BcType::Digest => "Digest".to_string(),
         BcType::Class(c) => module
             .classes
             .get(*c as usize)

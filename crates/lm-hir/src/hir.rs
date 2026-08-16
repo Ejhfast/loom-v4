@@ -209,6 +209,8 @@ pub enum NativeOp {
     BbLen,
     BbBuild,
     Freeze,
+    /// The canonical digest of one frozen graph.
+    Digest,
 }
 
 /// One piece of an interpolated string.

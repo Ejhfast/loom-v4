@@ -19,8 +19,8 @@ use lm_source::ast::{self, BinOp, ExprKind, PatternKind, StmtKind};
 use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
 use lm_types::{
-    ClassId, ClassKind, Row, Type, TypeId, BOOL, BYTE_BUFFER, INT, NEVER, STRING, STRING_BUILDER,
-    UNIT,
+    ClassId, ClassKind, Row, Type, TypeId, BOOL, BYTE_BUFFER, DIGEST, INT, NEVER, STRING,
+    STRING_BUILDER, UNIT,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -2228,6 +2228,9 @@ impl<'o> FnChecker<'o> {
             if name == "freeze" && args.is_empty() && type_args.is_empty() {
                 return Ok(freeze_expr(recv_h));
             }
+            if name == "digest" && args.is_empty() && type_args.is_empty() {
+                return Ok(digest_expr(recv_h));
+            }
             return Err(Diagnostic::new(
                 "E1026",
                 format!(
@@ -2276,6 +2279,9 @@ impl<'o> FnChecker<'o> {
             (Type::ByteBuffer, "build") => native(NativeOp::BbBuild, vec![], STRING, false),
             _ if name == "freeze" && ctx.store.is_heap(recv_ty) && args.is_empty() => {
                 return Ok(freeze_expr(recv_h));
+            }
+            _ if name == "digest" && ctx.store.is_heap(recv_ty) && args.is_empty() => {
+                return Ok(digest_expr(recv_h));
             }
             _ => {
                 return Err(Diagnostic::new(
@@ -4559,6 +4565,19 @@ fn freeze_expr(recv: HExpr) -> HExpr {
         mutable,
         kind: HExprKind::Native {
             op: NativeOp::Freeze,
+            args: vec![recv],
+        },
+    }
+}
+
+/// The canonical digest of one frozen graph. The result is a frozen
+/// `Digest` value, so it is comparable by value and sendable.
+fn digest_expr(recv: HExpr) -> HExpr {
+    HExpr {
+        ty: DIGEST,
+        mutable: true,
+        kind: HExprKind::Native {
+            op: NativeOp::Digest,
             args: vec![recv],
         },
     }

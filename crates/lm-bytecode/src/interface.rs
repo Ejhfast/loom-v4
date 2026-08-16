@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 
 /// The domain tag of the interface hash.
 const TAG_IFACE: &[u8] = b"lm-iface-v1\0";
@@ -88,6 +88,8 @@ pub enum IfaceType {
     Request,
     PolicyTable,
     EmptyVm,
+    /// The frozen canonical graph digest type.
+    Digest,
     /// One type parameter of the enclosing signature.
     Var(u32),
     /// A class or enum instance named by qualified name.
@@ -316,6 +318,7 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
         IfaceType::Request => out.push(7),
         IfaceType::PolicyTable => out.push(8),
         IfaceType::EmptyVm => out.push(9),
+        IfaceType::Digest => out.push(19),
         IfaceType::Var(i) => {
             out.push(10);
             write_u32(out, *i);
@@ -516,6 +519,7 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
         7 => IfaceType::Request,
         8 => IfaceType::PolicyTable,
         9 => IfaceType::EmptyVm,
+        19 => IfaceType::Digest,
         10 => IfaceType::Var(cur.u32()?),
         11 => {
             let class = decode_qual(cur)?;
@@ -775,6 +779,7 @@ pub fn type_text(ty: &IfaceType) -> String {
         IfaceType::Request => "Request".to_string(),
         IfaceType::PolicyTable => "PolicyTable".to_string(),
         IfaceType::EmptyVm => "EmptyVm".to_string(),
+        IfaceType::Digest => "Digest".to_string(),
         IfaceType::Var(i) => format!("${i}"),
         IfaceType::Named { class, args } => {
             if args.is_empty() {

@@ -605,6 +605,7 @@ impl<'a> Materializer<'a> {
             IfaceType::Str => lm_types::STRING,
             IfaceType::StringBuilder => lm_types::STRING_BUILDER,
             IfaceType::ByteBuffer => lm_types::BYTE_BUFFER,
+            IfaceType::Digest => lm_types::DIGEST,
             IfaceType::Fault => lm_types::FAULT,
             IfaceType::Request => lm_types::REQUEST,
             IfaceType::PolicyTable => lm_types::POLICY_TABLE,

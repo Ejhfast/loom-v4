@@ -108,6 +108,8 @@ pub enum BcType {
     /// An identity-indexed operation value: the manifest operation
     /// slot and the function type index.
     Op(u32, u32),
+    /// The frozen canonical graph digest of one value.
+    Digest,
 }
 
 /// The declaration kind of one class.
@@ -302,6 +304,12 @@ pub enum Instr {
     BbBuild,
     /// Pop an object reference, freeze its graph, push the same reference.
     Freeze,
+    /// Pop a frozen object reference and push its canonical digest.
+    Digest,
+    /// Pop two digests and push their value equality.
+    EqDigest,
+    /// Pop two digests and push their value inequality.
+    NeDigest,
     /// Unconditional jump to a block. Ends the block.
     Jump(u32),
     /// Pop a Bool. Jump to the block when the value is false.
@@ -617,11 +625,10 @@ const MAGIC: &[u8; 4] = b"LMBC";
 
 /// The container format version.
 ///
-/// Version 9 adds the named function bindings to the export section.
-/// A binding maps a qualified name to a function value, so the linker
-/// keeps every name a program declares while it shares one code
-/// object between equal bodies.
-pub const VERSION: u16 = 10;
+/// Version 11 adds the `Digest` type and the three digest
+/// instructions. Every earlier tag keeps its byte, so the change adds
+/// encodings and moves none.
+pub const VERSION: u16 = 11;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -700,6 +707,9 @@ const OP_AS_CALL: u8 = 0x74;
 const OP_CALL_ARGS: u8 = 0x75;
 const OP_FAULT_CODE: u8 = 0x76;
 const OP_UNREACHABLE: u8 = 0x77;
+const OP_DIGEST: u8 = 0x78;
+const OP_EQ_DIGEST: u8 = 0x79;
+const OP_NE_DIGEST: u8 = 0x7a;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -722,6 +732,7 @@ const TY_EMPTY_VM: u8 = 16;
 const TY_VM: u8 = 17;
 const TY_PENDING_CALL: u8 = 18;
 const TY_OP: u8 = 19;
+const TY_DIGEST: u8 = 20;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -963,6 +974,7 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
             out.push(TY_VAR);
             write_u32(out, *i);
         }
+        BcType::Digest => out.push(TY_DIGEST),
         BcType::StringBuilder => out.push(TY_SB),
         BcType::ByteBuffer => out.push(TY_BB),
         BcType::Fault => out.push(TY_FAULT),
@@ -1136,6 +1148,9 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::BbLen => out.push(OP_BB_LEN),
         Instr::BbBuild => out.push(OP_BB_BUILD),
         Instr::Freeze => out.push(OP_FREEZE),
+        Instr::Digest => out.push(OP_DIGEST),
+        Instr::EqDigest => out.push(OP_EQ_DIGEST),
+        Instr::NeDigest => out.push(OP_NE_DIGEST),
         Instr::Jump(block) => {
             out.push(OP_JUMP);
             write_u32(out, *block);
@@ -1705,6 +1720,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
             BcType::Fn(params, muts, ret, row)
         }
         TY_VAR => BcType::Var(cur.u32()?),
+        TY_DIGEST => BcType::Digest,
         TY_SB => BcType::StringBuilder,
         TY_BB => BcType::ByteBuffer,
         TY_FAULT => BcType::Fault,
@@ -1807,6 +1823,9 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_BB_LEN => Instr::BbLen,
         OP_BB_BUILD => Instr::BbBuild,
         OP_FREEZE => Instr::Freeze,
+        OP_DIGEST => Instr::Digest,
+        OP_EQ_DIGEST => Instr::EqDigest,
+        OP_NE_DIGEST => Instr::NeDigest,
         OP_JUMP => Instr::Jump(cur.u32()?),
         OP_JUMP_IF_FALSE => Instr::JumpIfFalse(cur.u32()?),
         OP_JUMP_IF_TRUE => Instr::JumpIfTrue(cur.u32()?),

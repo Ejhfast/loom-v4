@@ -41,6 +41,8 @@ pub const REQUEST: TypeId = TypeId(8);
 pub const POLICY_TABLE: TypeId = TypeId(9);
 /// The unloaded virtual machine handle type.
 pub const EMPTY_VM: TypeId = TypeId(10);
+/// The frozen canonical graph digest type.
+pub const DIGEST: TypeId = TypeId(11);
 
 /// One element of an effect row.
 ///
@@ -76,6 +78,8 @@ pub enum Type {
     Never,
     StringBuilder,
     ByteBuffer,
+    /// The frozen canonical graph digest of one value.
+    Digest,
     /// An instance type of a class without generic parameters.
     Class(ClassId),
     /// An instance type of a generic class applied to arguments.
@@ -160,6 +164,7 @@ impl TypeStore {
         store.intern(Type::Request);
         store.intern(Type::PolicyTable);
         store.intern(Type::EmptyVm);
+        store.intern(Type::Digest);
         store
     }
 
@@ -292,6 +297,7 @@ impl TypeStore {
             "Request" => Some(REQUEST),
             "PolicyTable" => Some(POLICY_TABLE),
             "EmptyVm" => Some(EMPTY_VM),
+            "Digest" => Some(DIGEST),
             _ => None,
         }
     }
@@ -405,6 +411,7 @@ impl TypeStore {
             Type::String
                 | Type::StringBuilder
                 | Type::ByteBuffer
+                | Type::Digest
                 | Type::Class(_)
                 | Type::Inst(_, _)
                 | Type::List(_)
@@ -547,6 +554,7 @@ impl TypeStore {
             Type::Never => "Never".to_string(),
             Type::StringBuilder => "StringBuilder".to_string(),
             Type::ByteBuffer => "ByteBuffer".to_string(),
+            Type::Digest => "Digest".to_string(),
             Type::Class(c) => self.classes[c.0 as usize].name.clone(),
             Type::Inst(c, args) => {
                 let parts: Vec<String> = args.iter().map(|a| self.display(*a)).collect();

@@ -143,11 +143,28 @@ pub struct LoadedModule {
     module: Module,
     dispatch: Vec<DispatchRow>,
     core: lm_bytecode::corepin::CoreLayout,
+    /// The definition hash of every class and function.
+    ///
+    /// The canonical digest names code and classes by verified
+    /// semantic identity, never by a numeric slot of one linked
+    /// program. The identity pass is expensive, so it runs once, on
+    /// the first digest of the process.
+    identity: std::cell::OnceCell<Result<lm_bytecode::identity::ModuleIdentity, String>>,
 }
 
 impl LoadedModule {
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    /// The verified semantic identity of this module.
+    pub fn identity(&self) -> Result<&lm_bytecode::identity::ModuleIdentity, FaultCode> {
+        self.identity
+            .get_or_init(|| {
+                lm_bytecode::identity::module_identity(&self.module).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|_| FaultCode::BoundaryViolation)
     }
 
     pub(crate) fn dispatch(&self) -> &[DispatchRow] {
@@ -365,6 +382,7 @@ fn admit(module: Module) -> LoadedModule {
         module,
         dispatch,
         core,
+        identity: std::cell::OnceCell::new(),
     }
 }
 

@@ -68,8 +68,37 @@ pub enum RootEvent {
     Fault(FaultRec),
 }
 
+/// The verified semantic identity of the loaded code, for the
+/// canonical digest.
+///
+/// A closure holds a numeric function slot and an instance holds a
+/// numeric class slot. Both slots belong to this linked program only,
+/// so the digest encoder reads the definition hash instead.
+struct ModuleCodes<'m> {
+    identity: &'m lm_bytecode::identity::ModuleIdentity,
+}
+
+impl lm_graph::CodeIdentity for ModuleCodes<'_> {
+    fn func_hash(&self, func: u32) -> Result<[u8; 32], FaultCode> {
+        self.identity
+            .func_hashes
+            .get(func as usize)
+            .copied()
+            .ok_or(FaultCode::BoundaryViolation)
+    }
+
+    fn class_hash(&self, class: u32) -> Result<[u8; 32], FaultCode> {
+        self.identity
+            .class_hashes
+            .get(class as usize)
+            .copied()
+            .ok_or(FaultCode::BoundaryViolation)
+    }
+}
+
 /// The world: the loaded code plus every machine.
 pub struct World<'m> {
+    loaded: &'m LoadedModule,
     module: &'m Module,
     dispatch: &'m [crate::DispatchRow],
     core: CoreLayout,
@@ -85,6 +114,7 @@ impl<'m> World<'m> {
         let mut root = Machine::empty(config, None);
         root.load_frame(module, module.entry, Vec::new(), None);
         World {
+            loaded,
             module,
             dispatch: loaded.dispatch(),
             core: loaded.core_layout(),
@@ -279,6 +309,7 @@ impl<'m> World<'m> {
                             self.handle_as_call(act.vm, request, op)
                         }
                         Ok(ExecOutcome::CallArgs { call }) => self.handle_call_args(act.vm, call),
+                        Ok(ExecOutcome::Digest { value }) => self.handle_digest(act.vm, value),
                     }
                 }
                 MachineState::Empty | MachineState::Asked => {
@@ -1158,6 +1189,30 @@ impl<'m> World<'m> {
     }
 
     /// `call.args()` executed by `vm`.
+    /// `value.digest()` executed by `vm`.
+    ///
+    /// The digest mode requires a frozen graph and rejects a live
+    /// holder-local value with `BoundaryViolation`. A frozen object
+    /// never changes, so the heap caches the result.
+    fn handle_digest(&mut self, vm: VmId, value: ObjRef) {
+        let limits = self.config.graph;
+        let loaded = self.loaded;
+        let built = match loaded.identity() {
+            Ok(identity) => {
+                let codes = ModuleCodes { identity };
+                let heap = &mut self.machines[vm as usize].vm.heap;
+                lm_graph::digest_value(heap, Value::Obj(value), &codes, &limits)
+            }
+            Err(code) => Err(code),
+        };
+        let pushed = built
+            .and_then(|bytes| self.machines[vm as usize].alloc(Object::NativeDigest(bytes)))
+            .and_then(|value| self.machines[vm as usize].push(value));
+        if let Err(code) = pushed {
+            self.machines[vm as usize].set_fault(code, "the value has no canonical digest", None);
+        }
+    }
+
     fn handle_call_args(&mut self, vm: VmId, call: ObjRef) {
         let (cv, ordinal, op) = match self.machines[vm as usize].vm.heap.get(call) {
             Object::NativeCall { vm, ordinal, op } => (*vm, *ordinal, *op),

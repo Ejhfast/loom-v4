@@ -644,6 +644,11 @@ impl<'m> Oracle<'m> {
                 self.deep_freeze(root);
                 Ok(values[0].clone())
             }
+            // The oracle has no heap and no code identity, so it
+            // cannot reproduce the canonical digest. A digest program
+            // leaves the differential corpus instead of taking a
+            // second, weaker encoder.
+            NativeOp::Digest => Err(Stop::Limit("digest")),
             NativeOp::ListLen => {
                 let obj = self.as_obj(&values[0])?;
                 let len = match &obj.borrow().kind {

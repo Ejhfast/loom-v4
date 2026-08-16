@@ -340,6 +340,7 @@ impl<'m> Ctx<'m> {
                 | BcType::Fn(_, _, _, _)
                 | BcType::StringBuilder
                 | BcType::ByteBuffer
+                | BcType::Digest
                 | BcType::Fault
                 | BcType::Request
                 | BcType::PolicyTable
@@ -762,7 +763,7 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         };
         match ty {
             BcType::Unit | BcType::Bool | BcType::Int | BcType::Str => {}
-            BcType::StringBuilder | BcType::ByteBuffer => {}
+            BcType::StringBuilder | BcType::ByteBuffer | BcType::Digest => {}
             BcType::Var(_) => {}
             BcType::Class(c) => {
                 if *c as usize >= module.classes.len() {
@@ -2098,6 +2099,28 @@ fn step(
                 return Err(fail(format!("freeze on non-object type {ty}")));
             }
             push(state, ty)?;
+        }
+        Instr::Digest => {
+            let ty = pop(state)?;
+            if !ctx.is_heap(ty) {
+                return Err(fail(format!("digest on non-object type {ty}")));
+            }
+            let idx = {
+                let uni = ctx.uni.borrow();
+                uni.index.get(&BcType::Digest).copied()
+            };
+            let idx = idx.ok_or_else(|| fail("Digest is not in the type table".to_string()))?;
+            push(state, idx)?;
+        }
+        Instr::EqDigest | Instr::NeDigest => {
+            let b = pop(state)?;
+            let a = pop(state)?;
+            if ctx.ty(a) != BcType::Digest || ctx.ty(b) != BcType::Digest {
+                return Err(fail(format!(
+                    "digest comparison on non-digest types {a} and {b}"
+                )));
+            }
+            push(state, TY_BOOL)?;
         }
         Instr::Jump(target) => {
             edge(*target as usize, state.clone())?;

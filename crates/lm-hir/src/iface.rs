@@ -74,6 +74,7 @@ impl Naming<'_> {
             Type::Never => IfaceType::Unit,
             Type::StringBuilder => IfaceType::StringBuilder,
             Type::ByteBuffer => IfaceType::ByteBuffer,
+            Type::Digest => IfaceType::Digest,
             Type::Fault => IfaceType::Fault,
             Type::Request => IfaceType::Request,
             Type::PolicyTable => IfaceType::PolicyTable,

@@ -261,6 +261,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             | BcType::Request
             | BcType::PolicyTable
             | BcType::EmptyVm
+            | BcType::Digest
             | BcType::Var(_) => {}
             BcType::Class(c) => class_ok(*c)?,
             BcType::Inst(c, args) => {
@@ -447,6 +448,9 @@ fn preflight_instr(
         | Instr::BbLen
         | Instr::BbBuild
         | Instr::Freeze
+        | Instr::Digest
+        | Instr::EqDigest
+        | Instr::NeDigest
         | Instr::Return
         | Instr::CallArgs
         | Instr::FaultCode
@@ -1016,6 +1020,7 @@ impl<'a> Resolver<'a> {
             BcType::Request => out.push(14),
             BcType::PolicyTable => out.push(15),
             BcType::EmptyVm => out.push(16),
+            BcType::Digest => out.push(20),
             BcType::Vm(t) => {
                 out.push(17);
                 out.extend_from_slice(&self.type_digest(*t));
@@ -1347,6 +1352,9 @@ impl<'a> Resolver<'a> {
             Instr::CallArgs => out.push(0x75),
             Instr::FaultCode => out.push(0x76),
             Instr::Unreachable => out.push(0x77),
+            Instr::Digest => out.push(0x78),
+            Instr::EqDigest => out.push(0x79),
+            Instr::NeDigest => out.push(0x7a),
         }
     }
 }
