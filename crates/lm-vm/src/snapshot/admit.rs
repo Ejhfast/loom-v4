@@ -454,6 +454,20 @@ impl Admit<'_> {
                     );
                 }
             }
+            // A policy table handle comes from a machine handle, and no
+            // operation mints a handle to the performing machine, so no
+            // machine holds a table handle to itself. A machine that
+            // held one could pass any effect group to itself, past the
+            // fresh default-deny table of specification 17.5. The table
+            // edit path states the same rule at its use site.
+            if matches!(entry.object, Object::NativeTable { vm: target } if target == vm) {
+                return fail(
+                    ImageReason::Reference,
+                    at(&format!(
+                        "object {ordinal} is a policy table handle to its own machine"
+                    )),
+                );
+            }
             // The shape table fixes the frozen state of a born-frozen
             // object, so a mutable one of that shape is not a state
             // the runtime can hold.

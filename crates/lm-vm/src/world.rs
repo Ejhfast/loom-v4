@@ -1698,6 +1698,18 @@ impl<'m> World<'m> {
             Err(crate::snapshot::RestoreFail::LimitExceeded) => self
                 .make_instance(vm, self.core.restore_limit_exceeded, vec![])
                 .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error])),
+            // The check above already answered this case, so the guest
+            // never reaches it. Restore states the rule again for
+            // every caller, and a mismatch here is a boundary fault.
+            Err(crate::snapshot::RestoreFail::OtherProgram) => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::BoundaryViolation,
+                    "the snapshot image was admitted against another program",
+                );
+                return;
+            }
         };
         self.reply_or_fault(vm, op, built);
     }

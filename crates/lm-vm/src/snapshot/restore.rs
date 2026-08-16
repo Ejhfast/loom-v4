@@ -31,24 +31,34 @@ impl World<'_> {
     /// Restore accepts `SnapshotImage` alone, never `Image`. The
     /// admitted state already resolves and carries accurate live
     /// types, so the call repeats no structural check and no type
-    /// check (specification section 8). The caller proves that the
-    /// admission identity names this program.
+    /// check (specification section 8).
+    ///
+    /// The call is public, so it proves the one property admission
+    /// cannot carry across a process: the image passed admission
+    /// against the exact program this world runs. Every build enforces
+    /// that proof. An image of another module names function slots,
+    /// class slots, and literal slots of that other module.
     pub fn restore_image(
         &mut self,
         restorer: VmId,
         target: VmId,
         admitted: &SnapshotImage,
     ) -> Result<VmId, RestoreFail> {
-        debug_assert_eq!(
-            admitted.identity().module_semantic,
-            self.identity()
-                .map(|id| id.semantic_hash)
-                .unwrap_or_default(),
-            "restore reads an image admitted against this exact program"
-        );
+        let running = self.identity().map_err(|_| RestoreFail::OtherProgram)?;
+        let identity = admitted.identity();
+        if identity.module_semantic != running.semantic_hash
+            || identity.verification != lm_bytecode::identity::verification_hash(self.module())
+        {
+            return Err(RestoreFail::OtherProgram);
+        }
         let image = admitted.world();
         let count = image.machines.len();
-        debug_assert!(count > 0, "a checked image holds at least the root");
+        // Admission proves that a world holds at least its root, and
+        // trusted capture always writes one. The rule is cheap and the
+        // indexing below depends on it, so every build states it.
+        if count == 0 {
+            return Err(RestoreFail::OtherProgram);
+        }
         let before = self.machines.len();
         let charged = count - 1;
         // The restorer pays for every machine past the root out of its

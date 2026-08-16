@@ -1388,6 +1388,44 @@ fn an_operation_slot_past_the_manifest_rejects() {
     assert!(codec::encode(&broken, usize::MAX).is_err());
 }
 
+const TABLE_SOURCE: &str = "\
+def go(): Int with Vm, Io
+  held = sys.vm.Vm().from_object(do ||: Int
+    41
+  end, args: ())
+  held.table().pass(Io)
+  case held.run()
+  in Done(v)  then v
+  in Fault(_) then 0
+  end
+end
+
+go()
+";
+
+/// A policy table handle comes from a machine handle, and no operation
+/// mints a handle to the performing machine. A machine that held a
+/// table handle to itself could pass any effect group to itself, past
+/// the fresh default-deny table of specification 17.5.
+#[test]
+fn a_policy_table_handle_to_its_own_machine_rejects() {
+    let loaded = program(TABLE_SOURCE);
+    let images = boundaries(&loaded, &["Vm", "Io"], 80);
+    let image = pick(&images, "a policy table handle", |image| {
+        image.machines[0]
+            .objects
+            .iter()
+            .any(|entry| matches!(entry.object, Object::NativeTable { .. }))
+    });
+    let mut broken = image.clone();
+    for entry in &mut broken.machines[0].objects {
+        if let Object::NativeTable { vm } = &mut entry.object {
+            *vm = 0;
+        }
+    }
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Reference));
+}
+
 /// An abstract class is the closed parent of one enum family, and no
 /// verified program allocates one. An instance of it would reach the
 /// exhaustive-case backstop of every dispatch on the family.
@@ -1518,6 +1556,41 @@ fn an_admitted_image_records_its_admission_identity() {
         admitted.origin(),
         lm_vm::snapshot::Origin::ExternalContainer
     );
+}
+
+/// `World::restore_image` is public, so it proves in every build that
+/// the admitted image names the running program.
+///
+/// The rule was a debug assertion, so a release build performed no
+/// check at all. The image then named function slots, class slots, and
+/// literal slots of another module.
+#[test]
+fn a_restore_of_another_program_rejects() {
+    let captured = program(INIT_SOURCE);
+    let running = program(SHARED_SOURCE);
+    let images = boundaries(&captured, &[], 10);
+    let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+    let admitted = lm_vm::snapshot::admit(images[1].clone(), &captured, &mut budget)
+        .expect("the capture admits against its own program");
+    let mut world = World::new(
+        &running,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let target = world.new_child(0).expect("a child budget");
+    assert_eq!(
+        world.restore_image(0, target, &admitted),
+        Err(lm_vm::snapshot::RestoreFail::OtherProgram)
+    );
+    // The same image restores into the program it names.
+    let mut own = World::new(
+        &captured,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let target = own.new_child(0).expect("a child budget");
+    own.restore_image(0, target, &admitted)
+        .expect("the image restores into its own program");
 }
 
 // ---------------------------------------------------------------
@@ -1690,6 +1763,7 @@ fn gate_corpus() -> Vec<(String, String)> {
         ("call-token-source", CALL_TOKEN_SOURCE),
         ("abstract-source", ABSTRACT_SOURCE),
         ("override-source", OVERRIDE_SOURCE),
+        ("table-source", TABLE_SOURCE),
         ("alias-source", ALIAS_SOURCE),
         ("bag-source", BAG_SOURCE),
         ("subclass-alias-source", SUBCLASS_ALIAS_SOURCE),
