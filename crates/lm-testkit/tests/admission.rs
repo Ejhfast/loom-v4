@@ -1321,3 +1321,280 @@ fn every_captured_world_of_the_corpus_admits() {
         }
     }
 }
+// ---------------------------------------------------------------
+// The gate: every capture of every shipped program admits.
+// ---------------------------------------------------------------
+
+/// The grants the gate gives the root of every program.
+///
+/// A grant widens what one program reaches, so one list serves the
+/// whole corpus and a new program needs no entry here.
+const GATE_GRANTS: [&str; 5] = ["Vm", "Io", "Proc", "Clock", "Rand"];
+
+/// The bytecode boundaries the gate drives for one program.
+const GATE_BOUNDARIES: usize = 400;
+
+/// The shapes round A2 unblocks, with the exact diagnostic each one
+/// carries today.
+///
+/// Both shapes need a type-environment witness in the image:
+///
+/// - a handle names a proc past its constructor. The proc drops its
+///   body closure when it enters the body, and a terminal proc holds
+///   no frame, so the mailbox type follows from nothing;
+/// - a closure or an entry function of a generic body carries types
+///   the activation substituted, and the value records no
+///   substitution.
+///
+/// Every entry is a false rejection. The list is the record of them,
+/// so it stays exact and small. When A2 lands, the list empties and
+/// `the_a2_list_is_the_whole_set_of_false_rejections` states that.
+const A2_BLOCKED: [(&str, &[&str]); 6] = [
+    (
+        "examples/07-procs/worker.lm",
+        &["whose mailbox type is not provable"],
+    ),
+    (
+        "examples/07-procs/mailbox-handle.lm",
+        &["whose mailbox type is not provable"],
+    ),
+    (
+        "examples/07-procs/barrier.lm",
+        &["whose mailbox type is not provable"],
+    ),
+    ("proc-handle", &["whose mailbox type is not provable"]),
+    (
+        "closure-in-a-generic-body",
+        &[
+            "is a closure of another function type",
+            "the frame function does not fit its call site",
+        ],
+    ),
+    (
+        "a-generic-entry-function",
+        &[
+            "is a closure of another function type",
+            "the call site applies another number of type arguments",
+            "the terminal value holds an integer where another type is declared",
+        ],
+    ),
+];
+
+/// A closure built inside a generic body. Its capture and parameter
+/// types name the type variable of the enclosing generic.
+const CLOSURE_IN_GENERIC: &str = "\
+def hold[T](v: T): T
+  g = do ||: T v end
+  g()
+end
+
+hold(41)
+";
+
+/// A machine whose entry function is generic: the frame of the held
+/// machine carries a substitution no call site of the image states.
+const GENERIC_ENTRY: &str = "\
+def hold[T](v: T): Vm[T] with Vm
+  sys.vm.Vm().from_object(do |x: T|: T x end, args: (v,))
+end
+
+def go(): Int with Vm
+  vm = hold(41)
+  case vm.run()
+  in Done(v)  then v
+  in Fault(_) then 0
+  end
+end
+
+go()
+";
+
+/// A proc handle that outlives the constructor of its proc.
+const PROC_HANDLE: &str = "\
+class Worker < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(n)  then n
+    in Closed  then 0
+    end
+  end
+end
+
+def go(): Int with Proc
+  h = Worker.spawn()
+  h.send(7)
+  case h.done()
+  in Done(v)  then v
+  in Fault(_) then 0
+  end
+end
+
+go()
+";
+
+/// Every program the gate drives: the label, the source, and whether
+/// the source came from a file.
+fn gate_corpus() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    // The shipped examples. `examples/05-modules` holds package
+    // projects, and those need the compiler driver instead of one
+    // source file, so the walk skips that tree.
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    collect_lm(&lm_testkit::repo_root().join("examples"), &mut files);
+    files.sort();
+    for path in files {
+        let name = path
+            .strip_prefix(lm_testkit::repo_root())
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if name.starts_with("examples/05-modules/") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("the example reads");
+        out.push((name, source));
+    }
+    // The sources of this suite, plus the two shapes round A2 owns.
+    for (label, source) in [
+        ("generic-source", GENERIC_SOURCE),
+        ("init-source", INIT_SOURCE),
+        ("shared-source", SHARED_SOURCE),
+        ("box-source", BOX_SOURCE),
+        ("two-machines-source", TWO_MACHINES_SOURCE),
+        ("empty-vm-source", EMPTY_VM_SOURCE),
+        ("terminal-source", TERMINAL_SOURCE),
+        ("nested-source", NESTED_SOURCE),
+        ("proc-source", PROC_SOURCE),
+        ("call-token-source", CALL_TOKEN_SOURCE),
+        ("abstract-source", ABSTRACT_SOURCE),
+        ("override-source", OVERRIDE_SOURCE),
+        ("pick-source", PICK_SOURCE),
+        ("faulted-source", FAULTED_SOURCE),
+        ("asked-source", ASKED_SOURCE),
+        ("proc-handle", PROC_HANDLE),
+        ("closure-in-a-generic-body", CLOSURE_IN_GENERIC),
+        ("a-generic-entry-function", GENERIC_ENTRY),
+    ] {
+        out.push((label.to_string(), source.to_string()));
+    }
+    out
+}
+
+/// Collect every `.lm` file below one directory.
+fn collect_lm(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("the directory reads") {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            collect_lm(&path, out);
+        } else if path.extension().map(|e| e == "lm").unwrap_or(false) {
+            out.push(path);
+        }
+    }
+}
+
+/// Drive the whole world of one program and admit every capture.
+///
+/// The call answers one line per capture that did not admit.
+fn gate_sweep(label: &str, source: &str) -> Vec<String> {
+    let bytes = compile_to_bytes("gate.lm", source)
+        .unwrap_or_else(|e| panic!("{label} does not compile: {e}"));
+    let loaded = load_bytes(&bytes).unwrap_or_else(|e| panic!("{label} does not load: {e}"));
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    for grant in GATE_GRANTS {
+        world.allow(grant).expect("the grant names a group");
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut captures = 0usize;
+    for boundary in 0..GATE_BOUNDARIES {
+        let gate = world.next_gate();
+        if let Ok(image) = world.capture_snapshot(gate, 0, false) {
+            captures += 1;
+            if let Err(e) = codec::load_external(
+                image.bytes(),
+                &loaded,
+                lm_vm::snapshot::LoadLimits::default(),
+            ) {
+                out.push(format!("{label} boundary {boundary}: {e}"));
+            }
+        }
+        match world.state_of(0) {
+            lm_vm::MachineState::Ready | lm_vm::MachineState::Waiting => match world.step_root() {
+                RootEvent::Ran | RootEvent::Blocked | RootEvent::Asked(_) => {}
+                _ => break,
+            },
+            lm_vm::MachineState::Blocked => {
+                if world.poll_blocked() == 0 {
+                    match world.runnable_procs().first().copied() {
+                        Some(proc) => {
+                            world.drive_proc(proc);
+                        }
+                        None => break,
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(captures > 0, "{label}: no capture succeeded at all");
+    out
+}
+
+/// The positive control of the whole admission rule.
+///
+/// Trusted capture writes the state of a legal world. Those bytes
+/// must pass the external loader, which repeats every admission rule
+/// with no trust at all. A rule that refuses a legal world is as
+/// serious as a rule that admits a forgery.
+#[test]
+fn every_capture_of_every_shipped_program_admits() {
+    let mut fails: Vec<String> = Vec::new();
+    for (label, source) in gate_corpus() {
+        if A2_BLOCKED.iter().any(|(name, _)| *name == label) {
+            continue;
+        }
+        fails.extend(gate_sweep(&label, &source));
+    }
+    assert!(
+        fails.is_empty(),
+        "{} capture(s) of a legal world did not admit:\n{}",
+        fails.len(),
+        fails.join("\n")
+    );
+}
+
+/// The record of the remaining false rejections.
+///
+/// Each entry fails today, and it fails with exactly the diagnostic
+/// that names the witness round A2 adds. When A2 lands, every entry
+/// admits, this test fails, and the list empties.
+#[test]
+fn the_a2_list_is_the_whole_set_of_false_rejections() {
+    let corpus = gate_corpus();
+    let mut other: Vec<String> = Vec::new();
+    for (label, want) in A2_BLOCKED {
+        let (_, source) = corpus
+            .iter()
+            .find(|(name, _)| name == label)
+            .unwrap_or_else(|| panic!("the gate corpus holds `{label}`"));
+        let fails = gate_sweep(label, source);
+        assert!(
+            !fails.is_empty(),
+            "`{label}` now admits at every boundary; remove it from A2_BLOCKED"
+        );
+        for line in &fails {
+            if !want.iter().any(|w| line.contains(w)) {
+                other.push(line.clone());
+            }
+        }
+    }
+    assert!(
+        other.is_empty(),
+        "{} capture(s) failed with another rule than the one A2 owns:\n{}",
+        other.len(),
+        other.join("\n")
+    );
+}
