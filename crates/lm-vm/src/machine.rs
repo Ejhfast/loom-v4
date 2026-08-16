@@ -6,6 +6,7 @@
 //! that reaches outside the machine returns an `ExecOutcome` for the
 //! world driver.
 
+use crate::resource::ResourceRegistry;
 use crate::{FaultCode, VmConfig};
 use lm_bytecode::{Instr, Module};
 use lm_heap::{Heap, MapIndex, Object};
@@ -36,8 +37,6 @@ pub struct Pending {
     pub args: Vec<Value>,
     /// The holder-token ordinal of this request.
     pub ordinal: u64,
-    /// The host completion token while `waiting`.
-    pub wait_token: Option<u64>,
 }
 
 /// A stored machine fault.
@@ -124,24 +123,28 @@ pub enum ExecOutcome {
     CallArgs { call: ObjRef },
 }
 
-/// One machine.
-pub struct Machine {
+/// The serializable state of one machine.
+///
+/// Every field here is machine state in the sense of specification
+/// 16.4: a snapshot codec can copy the bytes. Specification 17.2
+/// lists the same contents, and it excludes policy tables, live host
+/// callbacks, and live host handles. Those live beside this record in
+/// `Machine` and never enter it.
+///
+/// The interpreter still runs as a method of `Machine`, because
+/// allocation needs the policy roots as well. `docs/notes/week7.md`
+/// records that difference from the specification `execute` entry.
+pub struct VmState {
     pub heap: Heap,
     pub frames: Vec<Frame>,
     pub locals: Vec<Value>,
     pub operands: Vec<Value>,
     pub fuel: u64,
-    pub config: VmConfig,
     pub state: MachineState,
     pub pending: Option<Pending>,
     pub terminal: Option<Terminal>,
-    pub table: PolicyTable,
     pub parent: Option<VmId>,
     pub next_ordinal: u64,
-    /// The number of live activation references to this machine on
-    /// the driver stack. A machine with references rejects control
-    /// methods.
-    pub active: u32,
     /// The per-machine literal string table, indexed by the module
     /// string pool. A literal interns on its first load, stays frozen
     /// from birth, and stays rooted for the machine lifetime, so a
@@ -149,24 +152,49 @@ pub struct Machine {
     pub literals: Vec<Option<ObjRef>>,
 }
 
+/// One machine: its serializable state plus the four kinds of state a
+/// snapshot never copies.
+pub struct Machine {
+    /// The serializable machine state.
+    pub vm: VmState,
+    /// Policy state: the effect table this machine owns. A snapshot
+    /// excludes it (specification 17.2).
+    pub table: PolicyTable,
+    /// Execution ownership: the number of live activation references
+    /// to this machine on the driver stack. A machine with references
+    /// rejects control methods.
+    pub active: u32,
+    /// Active host work and scoped host resources.
+    pub resources: ResourceRegistry,
+    /// Resource control: the limits this machine runs under.
+    pub config: VmConfig,
+    /// Resource control: the number of child machines this machine
+    /// reserved from its own budget.
+    pub children: u32,
+}
+
 impl Machine {
     /// A machine without a loaded entry.
     pub fn empty(config: VmConfig, parent: Option<VmId>) -> Machine {
         Machine {
-            heap: Heap::new(config.heap_bytes),
-            frames: Vec::new(),
-            locals: Vec::new(),
-            operands: Vec::new(),
-            fuel: config.fuel,
-            config,
-            state: MachineState::Empty,
-            pending: None,
-            terminal: None,
+            vm: VmState {
+                heap: Heap::new(config.heap_bytes),
+                frames: Vec::new(),
+                locals: Vec::new(),
+                operands: Vec::new(),
+                fuel: config.fuel,
+                state: MachineState::Empty,
+                pending: None,
+                terminal: None,
+                parent,
+                next_ordinal: 1,
+                literals: Vec::new(),
+            },
             table: PolicyTable::default(),
-            parent,
-            next_ordinal: 1,
             active: 0,
-            literals: Vec::new(),
+            resources: ResourceRegistry::new(config.max_resources),
+            config,
+            children: 0,
         }
     }
 
@@ -192,10 +220,10 @@ impl Machine {
             );
             return;
         }
-        self.locals = args;
-        self.locals.resize(local_count, Value::Unit);
-        self.operands.clear();
-        self.frames.push(Frame {
+        self.vm.locals = args;
+        self.vm.locals.resize(local_count, Value::Unit);
+        self.vm.operands.clear();
+        self.vm.frames.push(Frame {
             func,
             block: 0,
             ip: 0,
@@ -203,30 +231,41 @@ impl Machine {
             base_operand: 0,
             closure,
         });
-        self.state = MachineState::Ready;
+        self.vm.state = MachineState::Ready;
     }
 
     pub fn set_done(&mut self, value: Value) {
-        self.terminal = Some(Terminal::Done(value));
-        self.state = MachineState::Done;
-        self.pending = None;
+        self.vm.terminal = Some(Terminal::Done(value));
+        self.vm.state = MachineState::Done;
+        self.vm.pending = None;
+        self.close_resources();
     }
 
     pub fn set_fault(&mut self, code: FaultCode, message: impl Into<String>, op: Option<u32>) {
-        self.terminal = Some(Terminal::Fault(FaultRec {
+        self.vm.terminal = Some(Terminal::Fault(FaultRec {
             code,
             message: message.into(),
             op,
         }));
-        self.state = MachineState::Faulted;
-        self.pending = None;
+        self.vm.state = MachineState::Faulted;
+        self.vm.pending = None;
+        self.close_resources();
+    }
+
+    /// Close every scoped host resource this machine registered.
+    ///
+    /// Termination calls this. It invokes no guest callback, and it
+    /// never replaces the stored terminal result, so a cleanup does
+    /// not hide an existing machine fault.
+    pub fn close_resources(&mut self) -> usize {
+        self.resources.close_all()
     }
 
     /// Collect garbage now. `extra` holds additional roots that are
     /// not yet stored in the arenas.
     pub fn collect_garbage(&mut self, extra: &[ObjRef]) {
         let roots = self.gc_roots(extra);
-        lm_graph::collect(&mut self.heap, roots);
+        lm_graph::collect(&mut self.vm.heap, roots);
     }
 
     /// Every collection root this machine holds outside its heap.
@@ -236,24 +275,24 @@ impl Machine {
     /// copy needs the same roots.
     pub fn gc_roots(&self, extra: &[ObjRef]) -> Vec<ObjRef> {
         let mut roots: Vec<ObjRef> = Vec::new();
-        for value in self.locals.iter().chain(self.operands.iter()) {
+        for value in self.vm.locals.iter().chain(self.vm.operands.iter()) {
             if let Value::Obj(r) = value {
                 roots.push(*r);
             }
         }
-        for frame in &self.frames {
+        for frame in &self.vm.frames {
             if let Some(r) = frame.closure {
                 roots.push(r);
             }
         }
-        if let Some(pending) = &self.pending {
+        if let Some(pending) = &self.vm.pending {
             for value in &pending.args {
                 if let Value::Obj(r) = value {
                     roots.push(*r);
                 }
             }
         }
-        if let Some(Terminal::Done(Value::Obj(r))) = &self.terminal {
+        if let Some(Terminal::Done(Value::Obj(r))) = &self.vm.terminal {
             roots.push(*r);
         }
         for action in self.table.exact.iter().chain(self.table.group.iter()) {
@@ -262,7 +301,7 @@ impl Machine {
             }
         }
         // Interned literals stay alive for the machine lifetime.
-        roots.extend(self.literals.iter().flatten().copied());
+        roots.extend(self.vm.literals.iter().flatten().copied());
         roots.extend_from_slice(extra);
         roots
     }
@@ -272,24 +311,24 @@ impl Machine {
     /// collection because they are not yet reachable from the arenas.
     pub fn alloc(&mut self, object: Object) -> Result<Value, FaultCode> {
         let cost = object.cost();
-        if self.heap.would_exceed(cost) {
+        if self.vm.heap.would_exceed(cost) {
             let mut extra = Vec::new();
             object.children(&mut extra);
             self.collect_garbage(&extra);
-            if self.heap.would_exceed(cost) {
+            if self.vm.heap.would_exceed(cost) {
                 return Err(FaultCode::HeapLimit);
             }
         }
-        Ok(Value::Obj(self.heap.alloc(object)))
+        Ok(Value::Obj(self.vm.heap.alloc(object)))
     }
 
     /// Make room for `delta` more bytes of growth on an existing
     /// object. `temps` holds values already popped from the arenas.
     fn reserve(&mut self, delta: usize, temps: &[Value]) -> Result<(), FaultCode> {
-        if self.heap.would_exceed(delta) {
+        if self.vm.heap.would_exceed(delta) {
             let extra: Vec<ObjRef> = temps.iter().filter_map(|v| v.as_obj()).collect();
             self.collect_garbage(&extra);
-            if self.heap.would_exceed(delta) {
+            if self.vm.heap.would_exceed(delta) {
                 return Err(FaultCode::HeapLimit);
             }
         }
@@ -306,7 +345,7 @@ impl Machine {
                 if x == y {
                     return true;
                 }
-                match (self.heap.get(x), self.heap.get(y)) {
+                match (self.vm.heap.get(x), self.vm.heap.get(y)) {
                     (Object::Str(s1), Object::Str(s2)) => s1 == s2,
                     _ => false,
                 }
@@ -329,7 +368,7 @@ impl Machine {
                 1u8.hash(&mut h);
                 v.hash(&mut h);
             }
-            Value::Obj(r) => match self.heap.get(r) {
+            Value::Obj(r) => match self.vm.heap.get(r) {
                 Object::Str(s) => {
                     2u8.hash(&mut h);
                     s.hash(&mut h);
@@ -345,20 +384,20 @@ impl Machine {
     /// the hash index. The index is a cache: the call first indexes
     /// the entries appended since the last lookup.
     fn map_lookup(&mut self, r: ObjRef, key: Value) -> Option<usize> {
-        let (built, len) = match self.heap.get(r) {
+        let (built, len) = match self.vm.heap.get(r) {
             Object::Map { entries, index } => (index.built, entries.len()),
             _ => unreachable!("verified map shape"),
         };
         if built < len {
             let mut hashes = Vec::with_capacity(len - built);
             for i in built..len {
-                let k = match self.heap.get(r) {
+                let k = match self.vm.heap.get(r) {
                     Object::Map { entries, .. } => entries[i].0,
                     _ => unreachable!("verified map shape"),
                 };
                 hashes.push(self.key_hash(k));
             }
-            if let Object::Map { index, .. } = self.heap.get_mut(r) {
+            if let Object::Map { index, .. } = self.vm.heap.get_mut(r) {
                 for (offset, hash) in hashes.into_iter().enumerate() {
                     index
                         .table
@@ -370,12 +409,12 @@ impl Machine {
             }
         }
         let hash = self.key_hash(key);
-        let candidates: Vec<u32> = match self.heap.get(r) {
+        let candidates: Vec<u32> = match self.vm.heap.get(r) {
             Object::Map { index, .. } => index.table.get(&hash).cloned().unwrap_or_default(),
             _ => unreachable!("verified map shape"),
         };
         for i in candidates {
-            let k = match self.heap.get(r) {
+            let k = match self.vm.heap.get(r) {
                 Object::Map { entries, .. } => entries[i as usize].0,
                 _ => unreachable!("verified map shape"),
             };
@@ -387,7 +426,7 @@ impl Machine {
     }
 
     fn frozen_guard(&self, r: ObjRef) -> Result<(), FaultCode> {
-        if self.heap.is_frozen(r) {
+        if self.vm.heap.is_frozen(r) {
             Err(FaultCode::FrozenWrite)
         } else {
             Ok(())
@@ -401,14 +440,18 @@ impl Machine {
         module: &Module,
         dispatch: &[crate::DispatchRow],
     ) -> Result<ExecOutcome, FaultCode> {
-        if self.fuel == 0 {
+        if self.vm.fuel == 0 {
             return Err(FaultCode::OutOfFuel);
         }
-        self.fuel -= 1;
-        let frame = self.frames.last().expect("an active frame exists");
+        self.vm.fuel -= 1;
+        let frame = self.vm.frames.last().expect("an active frame exists");
         let func = &module.funcs[frame.func as usize];
         let instr = func.blocks[frame.block as usize][frame.ip as usize];
-        self.frames.last_mut().expect("an active frame exists").ip += 1;
+        self.vm
+            .frames
+            .last_mut()
+            .expect("an active frame exists")
+            .ip += 1;
         match instr {
             Instr::ConstUnit => self.push(Value::Unit)?,
             Instr::ConstBool(v) => self.push(Value::Bool(v))?,
@@ -418,16 +461,16 @@ impl Machine {
                 // allocates one frozen object, and every later load
                 // reuses it. Literals are collection roots.
                 let idx = idx as usize;
-                if self.literals.len() <= idx {
-                    self.literals.resize(idx + 1, None);
+                if self.vm.literals.len() <= idx {
+                    self.vm.literals.resize(idx + 1, None);
                 }
-                let value = match self.literals[idx] {
+                let value = match self.vm.literals[idx] {
                     Some(r) => Value::Obj(r),
                     None => {
                         let text = module.strings[idx].clone();
                         let value = self.alloc(Object::Str(text))?;
                         if let Value::Obj(r) = value {
-                            self.literals[idx] = Some(r);
+                            self.vm.literals[idx] = Some(r);
                         }
                         value
                     }
@@ -435,14 +478,14 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::LoadLocal(slot) => {
-                let base = self.frames.last().expect("frame").base_local;
-                let value = self.locals[(base + slot) as usize];
+                let base = self.vm.frames.last().expect("frame").base_local;
+                let value = self.vm.locals[(base + slot) as usize];
                 self.push(value)?;
             }
             Instr::StoreLocal(slot) => {
                 let value = self.pop();
-                let base = self.frames.last().expect("frame").base_local;
-                self.locals[(base + slot) as usize] = value;
+                let base = self.vm.frames.last().expect("frame").base_local;
+                self.vm.locals[(base + slot) as usize] = value;
             }
             Instr::Pop => {
                 self.pop();
@@ -511,8 +554,8 @@ impl Machine {
             }
             Instr::CallVirtual { selector, argc } | Instr::CallVirtualG { selector, argc, .. } => {
                 let argc = argc as usize;
-                let recv = self.operands[self.operands.len() - 1 - argc];
-                let class = match self.heap.get(recv.as_obj().expect("verified receiver")) {
+                let recv = self.vm.operands[self.vm.operands.len() - 1 - argc];
+                let class = match self.vm.heap.get(recv.as_obj().expect("verified receiver")) {
                     Object::Instance { class, .. } => *class,
                     _ => unreachable!("verified receiver shape"),
                 };
@@ -521,18 +564,18 @@ impl Machine {
             }
             Instr::CallValue { argc } => {
                 let argc = argc as usize;
-                let callee_pos = self.operands.len() - 1 - argc;
-                let callee = self.operands.remove(callee_pos);
+                let callee_pos = self.vm.operands.len() - 1 - argc;
+                let callee = self.vm.operands.remove(callee_pos);
                 let r = callee.as_obj().expect("verified closure value");
-                let target = match self.heap.get(r) {
+                let target = match self.vm.heap.get(r) {
                     Object::Closure { func, .. } => *func,
                     _ => unreachable!("verified closure shape"),
                 };
                 self.push_frame(module, target, argc, Some(r))?;
             }
             Instr::MakeClosure { func, captures } => {
-                let split = self.operands.len() - captures as usize;
-                let captured: Vec<Value> = self.operands.split_off(split);
+                let split = self.vm.operands.len() - captures as usize;
+                let captured: Vec<Value> = self.vm.operands.split_off(split);
                 let value = self.alloc(Object::Closure {
                     func,
                     captures: captured,
@@ -540,9 +583,9 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::LoadCapture(idx) => {
-                let frame = self.frames.last().expect("frame");
+                let frame = self.vm.frames.last().expect("frame");
                 let closure = frame.closure.expect("verified capture context");
-                let value = match self.heap.get(closure) {
+                let value = match self.vm.heap.get(closure) {
                     Object::Closure { captures, .. } => captures[idx as usize],
                     _ => unreachable!("verified closure shape"),
                 };
@@ -557,14 +600,14 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::TupleNew { count, .. } => {
-                let split = self.operands.len() - count as usize;
-                let items: Vec<Value> = self.operands.split_off(split);
+                let split = self.vm.operands.len() - count as usize;
+                let items: Vec<Value> = self.vm.operands.split_off(split);
                 let value = self.alloc(Object::Tuple { items })?;
                 self.push(value)?;
             }
             Instr::TupleGet(index) => {
                 let r = self.pop_obj();
-                let value = match self.heap.get(r) {
+                let value = match self.vm.heap.get(r) {
                     Object::Tuple { items } => items[index as usize],
                     _ => unreachable!("verified tuple shape"),
                 };
@@ -584,7 +627,7 @@ impl Machine {
             }
             Instr::LoadField(field) => {
                 let r = self.pop_obj();
-                let value = match self.heap.get(r) {
+                let value = match self.vm.heap.get(r) {
                     Object::Instance { fields, .. } => fields[field as usize],
                     _ => unreachable!("verified instance shape"),
                 };
@@ -597,20 +640,20 @@ impl Machine {
                 let value = self.pop();
                 let r = self.pop_obj();
                 self.frozen_guard(r)?;
-                match self.heap.get_mut(r) {
+                match self.vm.heap.get_mut(r) {
                     Object::Instance { fields, .. } => fields[field as usize] = value,
                     _ => unreachable!("verified instance shape"),
                 }
             }
             Instr::ListNew { count, .. } => {
-                let split = self.operands.len() - count as usize;
-                let items: Vec<Value> = self.operands.split_off(split);
+                let split = self.vm.operands.len() - count as usize;
+                let items: Vec<Value> = self.vm.operands.split_off(split);
                 let value = self.alloc(Object::List { items })?;
                 self.push(value)?;
             }
             Instr::ListLen => {
                 let r = self.pop_obj();
-                let len = match self.heap.get(r) {
+                let len = match self.vm.heap.get(r) {
                     Object::List { items } => items.len(),
                     _ => unreachable!("verified list shape"),
                 };
@@ -619,7 +662,7 @@ impl Machine {
             Instr::ListAt => {
                 let idx = self.pop_int();
                 let r = self.pop_obj();
-                let value = match self.heap.get(r) {
+                let value = match self.vm.heap.get(r) {
                     Object::List { items } => {
                         if idx < 0 || idx as usize >= items.len() {
                             return Err(FaultCode::IndexOutOfBounds);
@@ -635,16 +678,16 @@ impl Machine {
                 let r = self.pop_obj();
                 self.frozen_guard(r)?;
                 self.reserve(16, &[Value::Obj(r), value])?;
-                match self.heap.get_mut(r) {
+                match self.vm.heap.get_mut(r) {
                     Object::List { items } => items.push(value),
                     _ => unreachable!("verified list shape"),
                 }
-                self.heap.recharge(r);
+                self.vm.heap.recharge(r);
                 self.push(Value::Unit)?;
             }
             Instr::MapNew { count, .. } => {
-                let split = self.operands.len() - 2 * count as usize;
-                let flat: Vec<Value> = self.operands.split_off(split);
+                let split = self.vm.operands.len() - 2 * count as usize;
+                let flat: Vec<Value> = self.vm.operands.split_off(split);
                 let mut entries: Vec<(Value, Value)> = Vec::new();
                 let mut index = MapIndex::default();
                 for pair in flat.chunks(2) {
@@ -674,7 +717,7 @@ impl Machine {
             }
             Instr::MapLen => {
                 let r = self.pop_obj();
-                let len = match self.heap.get(r) {
+                let len = match self.vm.heap.get(r) {
                     Object::Map { entries, .. } => entries.len(),
                     _ => unreachable!("verified map shape"),
                 };
@@ -693,7 +736,7 @@ impl Machine {
                     Some(pos) => pos,
                     None => return Err(FaultCode::MissingKey),
                 };
-                let value = match self.heap.get(r) {
+                let value = match self.vm.heap.get(r) {
                     Object::Map { entries, .. } => entries[pos].1,
                     _ => unreachable!("verified map shape"),
                 };
@@ -706,7 +749,7 @@ impl Machine {
                 self.frozen_guard(r)?;
                 let pos = self.map_lookup(r, key);
                 match pos {
-                    Some(pos) => match self.heap.get_mut(r) {
+                    Some(pos) => match self.vm.heap.get_mut(r) {
                         Object::Map { entries, .. } => entries[pos].1 = value,
                         _ => unreachable!(),
                     },
@@ -714,11 +757,11 @@ impl Machine {
                         // The appended entry joins the index on the
                         // next lookup.
                         self.reserve(32, &[Value::Obj(r), key, value])?;
-                        match self.heap.get_mut(r) {
+                        match self.vm.heap.get_mut(r) {
                             Object::Map { entries, .. } => entries.push((key, value)),
                             _ => unreachable!(),
                         }
-                        self.heap.recharge(r);
+                        self.vm.heap.recharge(r);
                     }
                 }
                 self.push(Value::Unit)?;
@@ -731,7 +774,7 @@ impl Machine {
                 let s = self.pop_obj();
                 let sb = self.pop_obj();
                 self.frozen_guard(sb)?;
-                let text = match self.heap.get(s) {
+                let text = match self.vm.heap.get(s) {
                     Object::Str(text) => text.clone(),
                     _ => unreachable!("verified string shape"),
                 };
@@ -752,7 +795,7 @@ impl Machine {
             }
             Instr::SbBuild => {
                 let sb = self.pop_obj();
-                let text = match self.heap.get(sb) {
+                let text = match self.vm.heap.get(sb) {
                     Object::StrBuilder(text) => text.clone(),
                     _ => unreachable!("verified builder shape"),
                 };
@@ -769,16 +812,16 @@ impl Machine {
                 self.frozen_guard(bb)?;
                 let byte = u8::try_from(v).map_err(|_| FaultCode::IntegerOverflow)?;
                 self.reserve(1, &[Value::Obj(bb)])?;
-                match self.heap.get_mut(bb) {
+                match self.vm.heap.get_mut(bb) {
                     Object::ByteBuf(bytes) => bytes.push(byte),
                     _ => unreachable!("verified buffer shape"),
                 }
-                self.heap.recharge(bb);
+                self.vm.heap.recharge(bb);
                 self.push(Value::Obj(bb))?;
             }
             Instr::BbLen => {
                 let bb = self.pop_obj();
-                let len = match self.heap.get(bb) {
+                let len = match self.vm.heap.get(bb) {
                     Object::ByteBuf(bytes) => bytes.len(),
                     _ => unreachable!("verified buffer shape"),
                 };
@@ -786,7 +829,7 @@ impl Machine {
             }
             Instr::BbBuild => {
                 let bb = self.pop_obj();
-                let bytes = match self.heap.get(bb) {
+                let bytes = match self.vm.heap.get(bb) {
                     Object::ByteBuf(bytes) => bytes.clone(),
                     _ => unreachable!("verified buffer shape"),
                 };
@@ -799,34 +842,34 @@ impl Machine {
                 // The freeze mode validates the whole reachable graph
                 // against its limits before any bit goes on, so a
                 // rejected freeze changes nothing.
-                lm_graph::freeze(&mut self.heap, r, &self.config.graph)?;
+                lm_graph::freeze(&mut self.vm.heap, r, &self.config.graph)?;
                 self.push(Value::Obj(r))?;
             }
             Instr::Jump(target) => {
-                let frame = self.frames.last_mut().expect("frame");
+                let frame = self.vm.frames.last_mut().expect("frame");
                 frame.block = target;
                 frame.ip = 0;
             }
             Instr::JumpIfFalse(target) => {
                 if !self.pop_bool() {
-                    let frame = self.frames.last_mut().expect("frame");
+                    let frame = self.vm.frames.last_mut().expect("frame");
                     frame.block = target;
                     frame.ip = 0;
                 }
             }
             Instr::JumpIfTrue(target) => {
                 if self.pop_bool() {
-                    let frame = self.frames.last_mut().expect("frame");
+                    let frame = self.vm.frames.last_mut().expect("frame");
                     frame.block = target;
                     frame.ip = 0;
                 }
             }
             Instr::Return => {
                 let value = self.pop();
-                let frame = self.frames.pop().expect("frame");
-                self.operands.truncate(frame.base_operand as usize);
-                self.locals.truncate(frame.base_local as usize);
-                if self.frames.is_empty() {
+                let frame = self.vm.frames.pop().expect("frame");
+                self.vm.operands.truncate(frame.base_operand as usize);
+                self.vm.locals.truncate(frame.base_local as usize);
+                if self.vm.frames.is_empty() {
                     return Ok(ExecOutcome::Terminal(value));
                 }
                 self.push(value)?;
@@ -835,13 +878,13 @@ impl Machine {
                 return Err(FaultCode::UnreachableCode);
             }
             Instr::Perform { op, argc } => {
-                let split = self.operands.len() - argc as usize;
-                let args = self.operands.split_off(split);
+                let split = self.vm.operands.len() - argc as usize;
+                let args = self.vm.operands.split_off(split);
                 return Ok(ExecOutcome::Perform { op, args });
             }
             Instr::PerformValue { argc } => {
-                let split = self.operands.len() - argc as usize;
-                let args = self.operands.split_off(split);
+                let split = self.vm.operands.len() - argc as usize;
+                let args = self.vm.operands.split_off(split);
                 let callee = self.pop();
                 let op = match callee {
                     Value::Op(op) => op,
@@ -873,7 +916,7 @@ impl Machine {
             }
             Instr::FaultCode => {
                 let r = self.pop_obj();
-                let code = match self.heap.get(r) {
+                let code = match self.vm.heap.get(r) {
                     Object::NativeFault { code, .. } => *code,
                     _ => unreachable!("verified fault shape"),
                 };
@@ -905,7 +948,7 @@ impl Machine {
             lm_bytecode::BcType::Class(c) | lm_bytecode::BcType::Inst(c, _) => *c,
             _ => unreachable!("verified type-test target"),
         };
-        let mut class = match self.heap.get(r) {
+        let mut class = match self.vm.heap.get(r) {
             Object::Instance { class, .. } => *class,
             _ => unreachable!("verified type-test operand"),
         };
@@ -923,11 +966,11 @@ impl Machine {
     /// Append text to a string builder with a growth reservation.
     fn sb_append(&mut self, sb: ObjRef, text: &str) -> Result<(), FaultCode> {
         self.reserve(text.len(), &[Value::Obj(sb)])?;
-        match self.heap.get_mut(sb) {
+        match self.vm.heap.get_mut(sb) {
             Object::StrBuilder(buf) => buf.push_str(text),
             _ => unreachable!("verified builder shape"),
         }
-        self.heap.recharge(sb);
+        self.vm.heap.recharge(sb);
         self.push(Value::Obj(sb))
     }
 
@@ -941,22 +984,24 @@ impl Machine {
         consume: usize,
         closure: Option<ObjRef>,
     ) -> Result<(), FaultCode> {
-        if self.frames.len() as u32 >= self.config.max_frames {
+        if self.vm.frames.len() as u32 >= self.config.max_frames {
             return Err(FaultCode::StackLimit);
         }
         let func = &module.funcs[callee as usize];
-        let base_local = self.locals.len() as u32;
-        let arg_start = self.operands.len() - consume;
-        let new_locals = self.locals.len() + func.local_count() as usize;
-        if new_locals + self.operands.len() > self.config.max_stack_values as usize {
+        let base_local = self.vm.locals.len() as u32;
+        let arg_start = self.vm.operands.len() - consume;
+        let new_locals = self.vm.locals.len() + func.local_count() as usize;
+        if new_locals + self.vm.operands.len() > self.config.max_stack_values as usize {
             return Err(FaultCode::StackLimit);
         }
-        self.locals.extend_from_slice(&self.operands[arg_start..]);
-        self.operands.truncate(arg_start);
+        self.vm
+            .locals
+            .extend_from_slice(&self.vm.operands[arg_start..]);
+        self.vm.operands.truncate(arg_start);
         // The slots after the parameters start without a value.
-        self.locals.resize(new_locals, Value::Unit);
-        let base_operand = self.operands.len() as u32;
-        self.frames.push(Frame {
+        self.vm.locals.resize(new_locals, Value::Unit);
+        let base_operand = self.vm.operands.len() as u32;
+        self.vm.frames.push(Frame {
             func: callee,
             block: 0,
             ip: 0,
@@ -968,15 +1013,15 @@ impl Machine {
     }
 
     pub fn push(&mut self, value: Value) -> Result<(), FaultCode> {
-        if self.operands.len() + self.locals.len() >= self.config.max_stack_values as usize {
+        if self.vm.operands.len() + self.vm.locals.len() >= self.config.max_stack_values as usize {
             return Err(FaultCode::StackLimit);
         }
-        self.operands.push(value);
+        self.vm.operands.push(value);
         Ok(())
     }
 
     fn pop(&mut self) -> Value {
-        self.operands.pop().expect("verified stack shape")
+        self.vm.operands.pop().expect("verified stack shape")
     }
 
     fn pop_int(&mut self) -> i64 {
@@ -1016,7 +1061,7 @@ impl Machine {
     fn str_compare(&mut self, want_equal: bool) -> Result<(), FaultCode> {
         let b = self.pop_obj();
         let a = self.pop_obj();
-        let equal = match (self.heap.get(a), self.heap.get(b)) {
+        let equal = match (self.vm.heap.get(a), self.vm.heap.get(b)) {
             (Object::Str(s1), Object::Str(s2)) => s1 == s2,
             _ => unreachable!("verified operand type"),
         };

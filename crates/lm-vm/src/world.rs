@@ -118,12 +118,12 @@ impl<'m> World<'m> {
 
     /// Read access to one machine heap, for inspection and tests.
     pub fn heap_of(&self, vm: VmId) -> &Heap {
-        &self.machines[vm as usize].heap
+        &self.machines[vm as usize].vm.heap
     }
 
     /// The state of one machine, for tests.
     pub fn state_of(&self, vm: VmId) -> MachineState {
-        self.machines[vm as usize].state
+        self.machines[vm as usize].vm.state
     }
 
     /// The number of machines, for tests.
@@ -148,7 +148,7 @@ impl<'m> World<'m> {
 
     /// The stored root fault record, for the CLI.
     pub fn root_fault(&self) -> Option<&FaultRec> {
-        match &self.machines[0].terminal {
+        match &self.machines[0].vm.terminal {
             Some(Terminal::Fault(rec)) => Some(rec),
             _ => None,
         }
@@ -159,7 +159,7 @@ impl<'m> World<'m> {
     fn control(&mut self, vm: VmId, mode: StopMode, family: Family) -> RootEvent {
         {
             let m = &self.machines[vm as usize];
-            match m.state {
+            match m.vm.state {
                 MachineState::Done | MachineState::Faulted => {
                     return self.terminal_root_event(vm);
                 }
@@ -182,7 +182,7 @@ impl<'m> World<'m> {
     }
 
     fn terminal_root_event(&self, vm: VmId) -> RootEvent {
-        match &self.machines[vm as usize].terminal {
+        match &self.machines[vm as usize].vm.terminal {
             Some(Terminal::Done(value)) => RootEvent::Done(*value),
             Some(Terminal::Fault(rec)) => RootEvent::Fault(rec.clone()),
             None => unreachable!("a terminal machine stores its result"),
@@ -197,8 +197,8 @@ impl<'m> World<'m> {
         // A waiting machine keeps its state: the loop completes the
         // pending host operation before it executes an instruction.
         let m = &mut self.machines[act.vm as usize];
-        if m.state == MachineState::Ready {
-            m.state = MachineState::Running;
+        if m.vm.state == MachineState::Ready {
+            m.vm.state = MachineState::Running;
         }
         stack.push(act);
     }
@@ -208,7 +208,7 @@ impl<'m> World<'m> {
         loop {
             let top_idx = stack.len() - 1;
             let act = stack[top_idx];
-            let state = self.machines[act.vm as usize].state;
+            let state = self.machines[act.vm as usize].vm.state;
             match state {
                 MachineState::Done | MachineState::Faulted => {
                     if let Some(event) = self.finish(stack, ExitKind::Terminal) {
@@ -239,7 +239,7 @@ impl<'m> World<'m> {
                     }
                 }
                 MachineState::Ready => {
-                    self.machines[act.vm as usize].state = MachineState::Running;
+                    self.machines[act.vm as usize].vm.state = MachineState::Running;
                 }
                 MachineState::Running => {
                     if act.mode == StopMode::OneStep && act.retired {
@@ -288,12 +288,22 @@ impl<'m> World<'m> {
         }
     }
 
+    /// The host completion token of a waiting machine.
+    ///
+    /// The token is host work, so it lives in the resource registry
+    /// beside the machine, never in the serializable `VmState`. The
+    /// pending request ordinal links the two.
     fn wait_token(&self, vm: VmId) -> u64 {
-        self.machines[vm as usize]
-            .pending
-            .as_ref()
-            .and_then(|p| p.wait_token)
-            .expect("a waiting machine records its completion token")
+        let m = &self.machines[vm as usize];
+        let ordinal =
+            m.vm.pending
+                .as_ref()
+                .expect("a waiting machine has a pending perform")
+                .ordinal;
+        m.resources
+            .pending(ordinal)
+            .expect("a waiting machine holds its pending-operation resource")
+            .scope
     }
 
     /// Pop the top activation and deliver its exit event. Return the
@@ -307,8 +317,8 @@ impl<'m> World<'m> {
         // A paused exit leaves the machine holder-controlled.
         if matches!(kind, ExitKind::Ran) {
             let m = &mut self.machines[act.vm as usize];
-            if m.state == MachineState::Running {
-                m.state = MachineState::Ready;
+            if m.vm.state == MachineState::Running {
+                m.vm.state = MachineState::Ready;
             }
         }
         match act.reply_to {
@@ -347,7 +357,7 @@ impl<'m> World<'m> {
             Done(Value),
             Fault,
         }
-        let exit = match &self.machines[mock as usize].terminal {
+        let exit = match &self.machines[mock as usize].vm.terminal {
             Some(Terminal::Done(value)) => MockExit::Done(*value),
             Some(Terminal::Fault(_)) => MockExit::Fault,
             None => unreachable!("a finished mock stores its result"),
@@ -376,7 +386,7 @@ impl<'m> World<'m> {
     }
 
     fn pending_op(&self, vm: VmId) -> Option<u32> {
-        self.machines[vm as usize].pending.as_ref().map(|p| p.op)
+        self.machines[vm as usize].vm.pending.as_ref().map(|p| p.op)
     }
 
     /// Build the terminal event value of `child` in `parent`.
@@ -390,7 +400,7 @@ impl<'m> World<'m> {
             Done(Value),
             Fault(FaultRec),
         }
-        let t = match &self.machines[child as usize].terminal {
+        let t = match &self.machines[child as usize].vm.terminal {
             Some(Terminal::Done(value)) => T::Done(*value),
             Some(Terminal::Fault(rec)) => T::Fault(rec.clone()),
             None => unreachable!("a terminal machine stores its result"),
@@ -473,13 +483,18 @@ impl<'m> World<'m> {
     /// completes now.
     fn install_value_reply(&mut self, vm: VmId, value: Value) {
         let m = &mut self.machines[vm as usize];
-        m.pending = None;
+        // A completed request closes the host attachment it opened.
+        if let Some(pending) = &m.vm.pending {
+            let ordinal = pending.ordinal;
+            m.resources.close_by_ordinal(ordinal);
+        }
+        m.vm.pending = None;
         if let Err(code) = m.push(value) {
             m.set_fault(code, "", None);
             return;
         }
-        if m.state != MachineState::Running {
-            m.state = MachineState::Ready;
+        if m.vm.state != MachineState::Running {
+            m.vm.state = MachineState::Ready;
         }
     }
 
@@ -523,14 +538,9 @@ impl<'m> World<'m> {
         args: Vec<Value>,
     ) -> Option<RootEvent> {
         let m = &mut self.machines[vm as usize];
-        let ordinal = m.next_ordinal;
-        m.next_ordinal += 1;
-        m.pending = Some(Pending {
-            op,
-            args,
-            ordinal,
-            wait_token: None,
-        });
+        let ordinal = m.vm.next_ordinal;
+        m.vm.next_ordinal += 1;
+        m.vm.pending = Some(Pending { op, args, ordinal });
         let top = *stack
             .last()
             .expect("the performing machine is on the stack");
@@ -542,7 +552,7 @@ impl<'m> World<'m> {
             if let Some(p) = act.reply_to {
                 self.machines[p as usize].active -= 1;
             }
-            self.machines[vm as usize].state = MachineState::Asked;
+            self.machines[vm as usize].vm.state = MachineState::Asked;
             match act.reply_to {
                 None => return Some(RootEvent::Asked(ordinal)),
                 Some(parent) => {
@@ -588,14 +598,7 @@ impl<'m> World<'m> {
                     let args = self.host_args(vm);
                     match self.host.start(op, args) {
                         HostStart::Completed(reply) => self.install_host_reply(vm, reply),
-                        HostStart::Waiting(token) => {
-                            let m = &mut self.machines[vm as usize];
-                            m.pending
-                                .as_mut()
-                                .expect("the pending perform waits")
-                                .wait_token = Some(token);
-                            m.state = MachineState::Waiting;
-                        }
+                        HostStart::Waiting(token) => self.start_wait(vm, op, token),
                         HostStart::Failed(message) => {
                             self.machines[vm as usize].set_fault(
                                 FaultCode::HostFault,
@@ -609,16 +612,62 @@ impl<'m> World<'m> {
         }
     }
 
+    /// Record one suspended host operation.
+    ///
+    /// The manifest classifies every operation. An operation declared
+    /// machine state must complete inside the host call, because a
+    /// suspended one would leave a live callback that no snapshot can
+    /// copy. A host that breaks the contract faults the machine.
+    ///
+    /// A suspending operation registers one host attachment in the
+    /// resource registry. Snapshot preflight reads it, and the
+    /// completion or the machine termination closes it.
+    fn start_wait(&mut self, vm: VmId, op: u32, token: u64) {
+        if !lm_abi::op(op).suspends() {
+            self.machines[vm as usize].set_fault(
+                FaultCode::HostFault,
+                format!(
+                    "the host suspended {}, which the manifest declares machine state",
+                    lm_abi::op_name(op)
+                ),
+                Some(op),
+            );
+            return;
+        }
+        let ordinal = self.machines[vm as usize]
+            .vm
+            .pending
+            .as_ref()
+            .expect("the pending perform waits")
+            .ordinal;
+        let m = &mut self.machines[vm as usize];
+        if let Err(code) = m.resources.register(
+            crate::ResourceKind::PendingOperation,
+            vm,
+            token,
+            ordinal,
+            op,
+        ) {
+            m.set_fault(
+                code,
+                "the machine reached its host resource limit",
+                Some(op),
+            );
+            return;
+        }
+        m.vm.state = MachineState::Waiting;
+    }
+
     /// Extract plain-data host arguments from the pending perform.
     fn host_args(&self, vm: VmId) -> Vec<HostArg> {
         let m = &self.machines[vm as usize];
-        let pending = m.pending.as_ref().expect("a pending perform exists");
+        let pending = m.vm.pending.as_ref().expect("a pending perform exists");
         pending
             .args
             .iter()
             .map(|value| match value {
                 Value::Int(v) => HostArg::Int(*v),
-                Value::Obj(r) => match m.heap.get(*r) {
+                Value::Obj(r) => match m.vm.heap.get(*r) {
                     Object::Str(text) => HostArg::Str(text.clone()),
                     _ => unreachable!("verified operation argument shape"),
                 },
@@ -640,7 +689,7 @@ impl<'m> World<'m> {
                         closure,
                     };
                 }
-                Some(Action::Pass) => match m.parent {
+                Some(Action::Pass) => match m.vm.parent {
                     Some(parent) => cur = parent,
                     None => return Resolution::Root,
                 },
@@ -671,6 +720,7 @@ impl<'m> World<'m> {
             }
         };
         let args: Vec<Value> = self.machines[vm as usize]
+            .vm
             .pending
             .as_ref()
             .expect("the mocked perform is pending")
@@ -692,7 +742,7 @@ impl<'m> World<'m> {
             }
         }
         let closure_ref = closure_value.as_obj().expect("a closure is a heap object");
-        let func = match self.machines[id as usize].heap.get(closure_ref) {
+        let func = match self.machines[id as usize].vm.heap.get(closure_ref) {
             Object::Closure { func, .. } => *func,
             _ => unreachable!("a mock handler is a closure"),
         };
@@ -709,10 +759,35 @@ impl<'m> World<'m> {
         );
     }
 
+    /// Reserve one child machine from the budget of `parent`.
+    ///
+    /// The parent holds a child budget. Each reservation charges one
+    /// unit to the parent and hands the rest of the budget to the
+    /// child, so the machine tower can never grow deeper than the
+    /// budget the root minted. The reservation happens before any
+    /// machine record exists, so a refusal changes nothing.
+    ///
+    /// The budget bounds tower depth per branch. It does not bound the
+    /// total machine count across branches; full transitive accounting
+    /// of fuel and heap bytes waits for the proc scheduler.
+    fn reserve_child(&mut self, parent: VmId) -> Option<VmConfig> {
+        let m = &mut self.machines[parent as usize];
+        let budget = m.config.max_children;
+        if m.children >= budget {
+            return None;
+        }
+        m.children += 1;
+        let remaining = budget - m.children;
+        Some(VmConfig {
+            max_children: remaining,
+            ..m.config
+        })
+    }
+
     /// Read one machine handle out of a holder value.
     fn handle_vm(&self, holder: VmId, value: Value) -> VmId {
         let r = value.as_obj().expect("verified handle value");
-        match self.machines[holder as usize].heap.get(r) {
+        match self.machines[holder as usize].vm.heap.get(r) {
             Object::NativeVm { vm } => *vm,
             _ => unreachable!("verified handle shape"),
         }
@@ -721,6 +796,7 @@ impl<'m> World<'m> {
     /// Execute one VM control operation of the machine `vm`.
     fn kernel_exec(&mut self, stack: &mut Vec<Activation>, vm: VmId, op: u32) {
         let args: Vec<Value> = self.machines[vm as usize]
+            .vm
             .pending
             .as_ref()
             .expect("a pending perform exists")
@@ -728,8 +804,23 @@ impl<'m> World<'m> {
             .clone();
         match op {
             lm_abi::OP_VM_NEW => {
+                // The parent reserves the child from its own budget
+                // first. The reservation is fail-atomic: a rejected
+                // reservation creates no machine and charges nothing.
+                let child_config = match self.reserve_child(vm) {
+                    Some(config) => config,
+                    None => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "the parent has no child budget left",
+                        );
+                        return;
+                    }
+                };
                 let child = self.machines.len() as VmId;
-                self.machines.push(Machine::empty(self.config, Some(vm)));
+                self.machines.push(Machine::empty(child_config, Some(vm)));
                 match self.machines[vm as usize].alloc(Object::NativeVm { vm: child }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
                     Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
@@ -737,7 +828,7 @@ impl<'m> World<'m> {
             }
             lm_abi::OP_VM_FROM_OBJECT => {
                 let target = self.handle_vm(vm, args[0]);
-                if self.machines[target as usize].state != MachineState::Empty {
+                if self.machines[target as usize].vm.state != MachineState::Empty {
                     self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is loaded");
                     return;
                 }
@@ -752,7 +843,7 @@ impl<'m> World<'m> {
                 /* become the initial parameter locals. */
                 let mut locals = Vec::new();
                 if let Value::Obj(r) = args[2] {
-                    let items = match self.machines[vm as usize].heap.get(r) {
+                    let items = match self.machines[vm as usize].vm.heap.get(r) {
                         Object::Tuple { items } => items.clone(),
                         _ => unreachable!("verified argument view shape"),
                     };
@@ -767,7 +858,7 @@ impl<'m> World<'m> {
                     }
                 }
                 let closure_ref = program.as_obj().expect("a program value is a closure");
-                let func = match self.machines[target as usize].heap.get(closure_ref) {
+                let func = match self.machines[target as usize].vm.heap.get(closure_ref) {
                     Object::Closure { func, .. } => *func,
                     _ => unreachable!("a program value is a closure"),
                 };
@@ -793,7 +884,7 @@ impl<'m> World<'m> {
                     self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
                     return;
                 }
-                match self.machines[target as usize].state {
+                match self.machines[target as usize].vm.state {
                     MachineState::Empty => {
                         self.fault_caller(
                             vm,
@@ -818,9 +909,9 @@ impl<'m> World<'m> {
                             // with a fresh holder token.
                             let fresh = {
                                 let m = &mut self.machines[target as usize];
-                                let fresh = m.next_ordinal;
-                                m.next_ordinal += 1;
-                                m.pending
+                                let fresh = m.vm.next_ordinal;
+                                m.vm.next_ordinal += 1;
+                                m.vm.pending
                                     .as_mut()
                                     .expect("an asked machine has a pending perform")
                                     .ordinal = fresh;
@@ -837,7 +928,7 @@ impl<'m> World<'m> {
                         }
                     }
                     MachineState::Ready | MachineState::Waiting => {
-                        self.machines[vm as usize].pending = None;
+                        self.machines[vm as usize].vm.pending = None;
                         self.push_activation(
                             stack,
                             Activation {
@@ -865,7 +956,7 @@ impl<'m> World<'m> {
                 let target = self.handle_vm(vm, args[0]);
                 let token = {
                     let r = args[1].as_obj().expect("verified call token");
-                    match self.machines[vm as usize].heap.get(r) {
+                    match self.machines[vm as usize].vm.heap.get(r) {
                         Object::NativeCall { vm, ordinal, op } => (*vm, *ordinal, *op),
                         _ => unreachable!("verified call token shape"),
                     }
@@ -875,6 +966,7 @@ impl<'m> World<'m> {
                 }
                 let pending_ok = {
                     let pending = self.machines[target as usize]
+                        .vm
                         .pending
                         .as_ref()
                         .expect("an asked machine has a pending perform");
@@ -903,7 +995,7 @@ impl<'m> World<'m> {
                 let target = self.handle_vm(vm, args[0]);
                 let token = {
                     let r = args[1].as_obj().expect("verified request token");
-                    match self.machines[vm as usize].heap.get(r) {
+                    match self.machines[vm as usize].vm.heap.get(r) {
                         Object::NativeRequest { vm, ordinal } => (*vm, *ordinal),
                         _ => unreachable!("verified request token shape"),
                     }
@@ -913,6 +1005,7 @@ impl<'m> World<'m> {
                 }
                 let pending_ok = {
                     let pending = self.machines[target as usize]
+                        .vm
                         .pending
                         .as_ref()
                         .expect("an asked machine has a pending perform");
@@ -930,7 +1023,7 @@ impl<'m> World<'m> {
                 if op == lm_abi::OP_VM_REJECT {
                     let rec = {
                         let r = args[2].as_obj().expect("verified fault value");
-                        match self.machines[vm as usize].heap.get(r) {
+                        match self.machines[vm as usize].vm.heap.get(r) {
                             Object::NativeFault { code, message, op } => FaultRec {
                                 code: *code,
                                 message: message.clone(),
@@ -960,7 +1053,7 @@ impl<'m> World<'m> {
             self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
             return false;
         }
-        if self.machines[target as usize].state != MachineState::Asked {
+        if self.machines[target as usize].vm.state != MachineState::Asked {
             // The machine has no pending request, so the caller's
             // token is consumed or stale (specification 12.3).
             self.fault_caller(
@@ -989,7 +1082,7 @@ impl<'m> World<'m> {
         slot: u32,
         mock: Option<Value>,
     ) {
-        let target = match self.machines[vm as usize].heap.get(table) {
+        let target = match self.machines[vm as usize].vm.heap.get(table) {
             Object::NativeTable { vm } => *vm,
             _ => unreachable!("verified table handle shape"),
         };
@@ -1034,14 +1127,15 @@ impl<'m> World<'m> {
 
     /// `request.as_call(op)` executed by `vm`.
     fn handle_as_call(&mut self, vm: VmId, request: ObjRef, op: u32) {
-        let (rv, ordinal) = match self.machines[vm as usize].heap.get(request) {
+        let (rv, ordinal) = match self.machines[vm as usize].vm.heap.get(request) {
             Object::NativeRequest { vm, ordinal } => (*vm, *ordinal),
             _ => unreachable!("verified request shape"),
         };
         let matches = {
             let m = &self.machines[rv as usize];
-            m.state == MachineState::Asked
-                && m.pending
+            m.vm.state == MachineState::Asked
+                && m.vm
+                    .pending
                     .as_ref()
                     .map(|p| p.ordinal == ordinal && p.op == op)
                     .unwrap_or(false)
@@ -1065,14 +1159,15 @@ impl<'m> World<'m> {
 
     /// `call.args()` executed by `vm`.
     fn handle_call_args(&mut self, vm: VmId, call: ObjRef) {
-        let (cv, ordinal, op) = match self.machines[vm as usize].heap.get(call) {
+        let (cv, ordinal, op) = match self.machines[vm as usize].vm.heap.get(call) {
             Object::NativeCall { vm, ordinal, op } => (*vm, *ordinal, *op),
             _ => unreachable!("verified call shape"),
         };
         let matches = {
             let m = &self.machines[cv as usize];
-            m.state == MachineState::Asked
-                && m.pending
+            m.vm.state == MachineState::Asked
+                && m.vm
+                    .pending
                     .as_ref()
                     .map(|p| p.ordinal == ordinal && p.op == op)
                     .unwrap_or(false)
@@ -1086,6 +1181,7 @@ impl<'m> World<'m> {
             return;
         }
         let source_args: Vec<Value> = self.machines[cv as usize]
+            .vm
             .pending
             .as_ref()
             .expect("an asked machine has a pending perform")
@@ -1129,6 +1225,40 @@ impl<'m> World<'m> {
         }
     }
 
+    /// The number of live host resources one machine holds.
+    pub fn resource_count(&self, vm: VmId) -> usize {
+        self.machines[vm as usize].resources.live_count()
+    }
+
+    /// The number of child machines one machine reserved.
+    pub fn child_count(&self, vm: VmId) -> u32 {
+        self.machines[vm as usize].children
+    }
+
+    /// Preflight one machine for a snapshot.
+    ///
+    /// The check reads the resource registry and the guest graph, as
+    /// specification 25.5 requires. A live host attachment on either
+    /// side blocks the copy. On success the call returns the number of
+    /// objects the canonical snapshot traversal ordered.
+    ///
+    /// Week 7 defines no snapshot byte format, so this entry point
+    /// produces the ordinal-assigning walk and the rejection rule
+    /// only.
+    pub fn snapshot_preflight(&mut self, vm: VmId) -> Result<usize, FaultCode> {
+        if self.machines[vm as usize]
+            .resources
+            .live_attachment()
+            .is_some()
+        {
+            return Err(FaultCode::BoundaryViolation);
+        }
+        let roots = self.machines[vm as usize].gc_roots(&[]);
+        let limits = self.config.graph;
+        let m = &mut self.machines[vm as usize];
+        lm_graph::snapshot_ordinals(&mut m.vm.heap, &roots, &limits).map(|order| order.len())
+    }
+
     /// Transfer one value from `src` into `dst` through the graph
     /// engine.
     ///
@@ -1148,7 +1278,13 @@ impl<'m> World<'m> {
         // The destination roots are read before the heap is borrowed:
         // a destination collection during the copy needs them.
         let dst_roots = dst_m.gc_roots(&[]);
-        lm_graph::transfer(&mut src_m.heap, &mut dst_m.heap, &dst_roots, value, &limits)
+        lm_graph::transfer(
+            &mut src_m.vm.heap,
+            &mut dst_m.vm.heap,
+            &dst_roots,
+            value,
+            &limits,
+        )
     }
 }
 
@@ -1176,7 +1312,7 @@ impl<'m> World<'m> {
     /// Render one value of one machine.
     pub fn show_value_of(&self, vm: VmId, value: Value) -> String {
         let mut visited = Vec::new();
-        self.show_value_inner(&self.machines[vm as usize].heap, value, 0, &mut visited)
+        self.show_value_inner(&self.machines[vm as usize].vm.heap, value, 0, &mut visited)
     }
 
     fn show_value_inner(
@@ -1319,14 +1455,14 @@ impl<'m> World<'m> {
         let m = &self.machines[0];
         let mut out = String::new();
         let _ = writeln!(out, "outcome: {}", self.show_outcome(outcome));
-        let s = m.heap.stats();
+        let s = m.vm.heap.stats();
         let _ = writeln!(
             out,
             "heap: live={} slots={} pages={} free={} used_bytes={} cap_bytes={} collections={}",
             s.live, s.slots, s.pages, s.free, s.used_bytes, s.cap_bytes, s.collections
         );
-        let _ = writeln!(out, "frames: {} active", m.frames.len());
-        for frame in &m.frames {
+        let _ = writeln!(out, "frames: {} active", m.vm.frames.len());
+        for frame in &m.vm.frames {
             let _ = writeln!(
                 out,
                 "  frame {} block {} ip {}",
@@ -1336,10 +1472,10 @@ impl<'m> World<'m> {
             );
         }
         let _ = writeln!(out, "objects:");
-        m.heap.for_each_live(|r, frozen, _object| {
+        m.vm.heap.for_each_live(|r, frozen, _object| {
             let state = if frozen { "frozen" } else { "mutable" };
             let mut visited = Vec::new();
-            let object = m.heap.get(r);
+            let object = m.vm.heap.get(r);
             let _ = writeln!(
                 out,
                 "  obj {} gen {} {} {} {}",
@@ -1347,7 +1483,7 @@ impl<'m> World<'m> {
                 r.generation,
                 object.shape().name,
                 state,
-                self.show_value_inner(&m.heap, Value::Obj(r), 0, &mut visited)
+                self.show_value_inner(&m.vm.heap, Value::Obj(r), 0, &mut visited)
             );
         });
         out
@@ -1427,11 +1563,10 @@ mod tests {
             .expect("the handle allocates");
         let mut args = vec![handle];
         args.extend(extra);
-        world.machines[0].pending = Some(Pending {
+        world.machines[0].vm.pending = Some(Pending {
             op,
             args,
             ordinal: 1,
-            wait_token: None,
         });
     }
 
@@ -1440,19 +1575,19 @@ mod tests {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         let mut child = Machine::empty(VmConfig::default(), Some(0));
-        child.state = MachineState::Ready;
+        child.vm.state = MachineState::Ready;
         child.active = 1;
         world.machines.push(child);
         arm_pending(&mut world, lm_abi::OP_VM_RUN, vec![], 1);
         let mut stack = Vec::new();
         world.kernel_exec(&mut stack, 0, lm_abi::OP_VM_RUN);
-        assert_eq!(world.machines[0].state, MachineState::Faulted);
-        match &world.machines[0].terminal {
+        assert_eq!(world.machines[0].vm.state, MachineState::Faulted);
+        match &world.machines[0].vm.terminal {
             Some(Terminal::Fault(rec)) => assert_eq!(rec.code, FaultCode::InvalidVmState),
             other => panic!("expected a fault, got {other:?}"),
         }
         // The controlled machine did not change.
-        assert_eq!(world.machines[1].state, MachineState::Ready);
+        assert_eq!(world.machines[1].vm.state, MachineState::Ready);
         assert_eq!(world.machines[1].active, 1);
         assert!(stack.is_empty());
     }
@@ -1462,12 +1597,11 @@ mod tests {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         let mut child = Machine::empty(VmConfig::default(), Some(0));
-        child.state = MachineState::Asked;
-        child.pending = Some(Pending {
+        child.vm.state = MachineState::Asked;
+        child.vm.pending = Some(Pending {
             op: lm_abi::OP_CLOCK_NOW,
             args: vec![],
             ordinal: 7,
-            wait_token: None,
         });
         world.machines.push(child);
         // A call token with a stale ordinal.
@@ -1486,15 +1620,19 @@ mod tests {
         );
         let mut stack = Vec::new();
         world.kernel_exec(&mut stack, 0, lm_abi::OP_VM_ANSWER);
-        match &world.machines[0].terminal {
+        match &world.machines[0].vm.terminal {
             Some(Terminal::Fault(rec)) => {
                 assert_eq!(rec.code, FaultCode::InvalidRequestToken);
             }
             other => panic!("expected a fault, got {other:?}"),
         }
         // The controlled machine keeps its state and its request.
-        assert_eq!(world.machines[1].state, MachineState::Asked);
-        let pending = world.machines[1].pending.as_ref().expect("still pending");
+        assert_eq!(world.machines[1].vm.state, MachineState::Asked);
+        let pending = world.machines[1]
+            .vm
+            .pending
+            .as_ref()
+            .expect("still pending");
         assert_eq!(pending.ordinal, 7);
     }
 
@@ -1504,12 +1642,11 @@ mod tests {
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         for _ in 0..2 {
             let mut child = Machine::empty(VmConfig::default(), Some(0));
-            child.state = MachineState::Asked;
-            child.pending = Some(Pending {
+            child.vm.state = MachineState::Asked;
+            child.vm.pending = Some(Pending {
                 op: lm_abi::OP_CLOCK_NOW,
                 args: vec![],
                 ordinal: 1,
-                wait_token: None,
             });
             world.machines.push(child);
         }
@@ -1520,13 +1657,13 @@ mod tests {
         arm_pending(&mut world, lm_abi::OP_VM_DISPATCH, vec![token], 1);
         let mut stack = Vec::new();
         world.kernel_exec(&mut stack, 0, lm_abi::OP_VM_DISPATCH);
-        match &world.machines[0].terminal {
+        match &world.machines[0].vm.terminal {
             Some(Terminal::Fault(rec)) => {
                 assert_eq!(rec.code, FaultCode::InvalidRequestToken);
             }
             other => panic!("expected a fault, got {other:?}"),
         }
-        assert_eq!(world.machines[1].state, MachineState::Asked);
-        assert_eq!(world.machines[2].state, MachineState::Asked);
+        assert_eq!(world.machines[1].vm.state, MachineState::Asked);
+        assert_eq!(world.machines[2].vm.state, MachineState::Asked);
     }
 }

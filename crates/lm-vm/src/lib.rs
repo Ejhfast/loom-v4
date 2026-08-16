@@ -12,10 +12,12 @@
 
 mod host;
 mod machine;
+mod resource;
 mod world;
 
 pub use host::{CoreCtor, Host, HostArg, HostStart, HostValue, NullHost, RecordingHost};
-pub use machine::{FaultRec, MachineState, VmId};
+pub use machine::{FaultRec, MachineState, VmId, VmState};
+pub use resource::{ResourceKind, ResourceRecord, ResourceRegistry, ResourceState};
 pub use world::{RootEvent, StopMode, World};
 
 /// The fault codes are manifest content, and the heap and the graph
