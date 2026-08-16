@@ -261,25 +261,33 @@ admission proves one exact type for each object:
 - Admission builds one map from `(machine, object)` to one exact closed
   type. Objects never cross a machine boundary, so the machine ordinal
   completes the key.
-- An instance position normalizes through the concrete class of the
-  object.
-- A mutable object takes the type of its first edge. Every later edge
-  must name that exact type.
-- A frozen object holds no write path, so a later edge may name a
-  supertype of the exact type.
+- An instance edge normalizes through the concrete class of the object.
+  A closure edge normalizes through the declared type of its function.
+- Every other shape takes the type of the edge that reached it. An
+  empty list names no element type, so the object alone answers
+  nothing.
+- The map keeps the most specific type that any edge names. A later
+  edge that is a supertype of the stored type passes. A later edge that
+  is a subtype of the stored type replaces it.
+- Two edges with no subtype relation reject the image.
 
-The mutable rule is invariance. A mutable list at exact type
-`List[Dog]` reached from a `List[Animal]` edge accepts a `Cat` through
-the second edge, so equality is the only sound rule there.
+Language specification section 6 makes class arguments invariant, so
+`List[Int]` and `List[Str]` have no subtype relation and the aliased
+empty list rejects. A `Dog` instance reached from an `Animal` edge
+admits, because the concrete class answers the same exact type at both
+edges.
 
-The same principle governs the relational types of section 5.5. A
+The map keeps the most specific type instead of the first type, so the
+order of the walk does not change the answer. Only `Tuple` and `Fn`
+carry a covariant argument, and both are born frozen, so no mutable
+object takes a supertype through this rule.
+
+The same reasoning governs the relational types of section 5.5. A
 `Vm[T]` reads the terminal value of its target, so a subtype result is
 sound. A `Handle[M,R]` sends and receives its message type, so the
 mailbox type must match exactly.
 
-The map collapses the visited key to `(machine, object)` for a mutable
-object, because one exact type is legal there. Admission charges the
-map to the aggregate admission budget.
+Admission charges the map to the aggregate admission budget.
 
 ### 5.5 Native relational types
 
@@ -314,6 +322,107 @@ restore.
 
 Handle liveness and authority are not type properties. Runtime rules
 continue to enforce them.
+
+### 5.6 Type environment witnesses
+
+The verifier proves one generic body once, with the type variables of
+that body opaque. One activation of the body needs the type arguments
+its call site applied.
+
+A frame with a caller takes those arguments from the call instruction.
+Three positions hold no such evidence:
+
+- the bottom frame of a machine has no call site below it;
+- a closure outlives the frame that created it, and a capture type can
+  name a type variable that the closure signature does not hold;
+- a machine past its constructor holds no proc body and no entry frame,
+  so its mailbox type has no derivation.
+
+Signature unification cannot recover a type variable that appears in a
+capture list alone. The image therefore carries witnesses.
+
+#### A witness is data
+
+A witness carries no trust. Admission validates every witness against
+verified code and against the values the image holds. A witness that
+disagrees with a derivation rejects the image.
+
+Admission uses a witness where the derivation is impossible. Admission
+checks the witness against the derivation everywhere else.
+
+An editor can change a witness and its values together. Admission
+accepts the result when the witness, the code, and the values agree.
+
+#### The witness sites
+
+| State | Witness | Admission |
+| --- | --- | --- |
+| Frame | closed type and effect arguments | substitutes the verified local and operand types |
+| Closure | the creator type environment | substitutes the signature and the capture types |
+| Instance | the concrete class arguments | compares them with the arguments of the edge |
+| Machine | closed result type and mailbox type | checks handles, messages, and terminal values |
+
+An instance witness is evidence for no admission rule, because the edge
+that reaches the object already supplies `Inst(class, args)`. Admission
+checks it because the image carries it, and section 14 states why the
+image carries it.
+
+`Snapshot[T]` carries no witness. The closed type table gives `T` a
+canonical identity, and admission compares that identity with the
+declared root type of the nested container.
+
+#### The closed type table
+
+One canonical table holds every closed type expression. No entry holds
+a free type variable. Each entry has a canonical content digest, so one
+closed type has one identity in every process.
+
+A frame, a closure, an instance, and a machine store one small table
+index. Index zero names the empty environment, so a monomorphic state
+stores zero and performs no type work.
+
+The table belongs to one world. An untrusted restore must never grow
+shared module state. Restore re-interns the records of the image into
+the table of the target world, and it remaps every stored index.
+
+#### Runtime retention
+
+The virtual machine retains a witness before any capture. Capture
+cannot rebuild the environment of a closure that escaped its creator
+frame.
+
+A generic call derives or copies one index. A monomorphic call copies
+zero. The world caches a derived environment by its parent environment
+and its application, so a repeated call reuses one index.
+
+#### Bounds
+
+The language permits polymorphic recursion. A call to `grow[[T]]`
+inside `grow[T]` passes the checker, so a program can create
+environments without bound.
+
+The world caps its environment nodes and its closed type nodes. It
+returns a local resource fault at the cap.
+
+#### Witnesses and value semantics
+
+A witness is provenance. A witness never enters a guest digest,
+semantic equality, or the semantic identity of a value. Two values with
+equal structure stay equal when their witnesses differ.
+
+A copy preserves the witness, because a closure keeps its creator
+environment across a boundary. The two copy paths reconstruct an object
+in `crates/lm-heap/src/shape.rs`, so the rule lands there. `CopyCheck`
+rejects holder-local shapes and reconstructs no value, so the rule does
+not land there.
+
+#### The container
+
+The canonical container carries the witness records and the closed type
+table. The container hash covers their serialized form.
+
+Decoding charges every witness record to the decode budget. Admission
+charges every resolved closed type node to the admission budget.
 
 ## 6. What admission does not prove
 
@@ -488,3 +597,66 @@ mutable `Image` from acting as trusted state.
 > **Images remain editable data. Only an immutable `SnapshotImage` can
 > restore, and admission proves only resolved structure and accurate
 > live types.**
+
+## 14. Future use of the type environment
+
+This section is not normative. It records why section 5.6 builds one
+general mechanism instead of a patch for closure capture types.
+
+The closed type table is the carrier that several later features need.
+Build the carrier generously now, and build no solver.
+
+### 14.1 Type descriptors and reflection
+
+Language specification 17.1 defers the guest forms of
+`SnapshotImage.cast_result` and `SnapshotImage.result_type`, because
+version 0.2 has no `Type[T]` descriptor. Language specification section
+9 already calls `type_descriptor[T]()` a witness.
+
+A canonical closed type with a content digest is the value a `Type[T]`
+descriptor holds. The same table therefore answers a dynamic cast and a
+reflection query.
+
+A generic instance stores its concrete arguments for this reason.
+Admission needs no instance witness, because the edge supplies the
+arguments. A reflection query has no edge to read, so the object must
+answer for itself.
+
+### 14.2 Interfaces
+
+Version 0.2 has no traits. The cost is visible: `std/fmt` pins one
+implementation for each core type, `std/math` spells out one function
+for each numeric type, and collections carry eager methods instead of
+one iterator protocol.
+
+Loom is nominal for user data. A nominal interface with one conformance
+for each type makes the concrete type decide the implementation, so a
+closed type plus a module conformance table answers every dispatch
+question. A method with a receiver already dispatches on the class tag
+of the object, so it needs no witness at all.
+
+The witness answers the calls with no receiver to dispatch on: a
+constructor, a static member, and a conformance of a type with no class
+tag.
+
+No conformance record travels through a call. A design that passes one
+is a design where the type alone cannot decide the implementation, for
+example an orphan conformance, a second conformance of one type, or a
+structural conformance. A nominal language with unique conformance
+needs none of them.
+
+Add interface types to the closed type grammar when interfaces land.
+Derive every conformance from the verified module.
+
+### 14.3 What this asks of section 5.6 now
+
+- Give every closed type node a canonical content digest. A later
+  conformance table keys on that identity.
+- Store one index in a frame, a closure, an instance, and a machine.
+  A later entry can hold more without moving a stored field.
+- Keep the resolved conformance of a generic call inside the
+  environment node when interfaces land. A cached conformance is an
+  optimization of the module lookup, and it changes no call.
+- Keep the witness free of selected behavior while version 0.2 lasts.
+  A witness that selects behavior becomes semantic data, and a guest
+  digest must then cover it.
