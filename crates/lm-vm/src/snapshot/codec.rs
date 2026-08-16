@@ -9,8 +9,14 @@
 //! objects by traversal ordinal, so the bytes never depend on a heap
 //! slot, a scheduler identifier, or an allocation order.
 //!
-//! The decoder is the whole load checklist of specification 17.8. It
-//! runs once, on untrusted bytes.
+//! The decoder protects the host from the byte stream, and it does no
+//! more than that. It proves the container properties of
+//! `docs/specs/snapshot-image-admission.md` section 4: the frame, the
+//! canonical integers, the section bounds, the container hash, and one
+//! `Image` representation for every wire tag. It reads no program, and
+//! it establishes no interpreter invariant. `admit` does that, because
+//! an editor can build the same invalid states with no container
+//! behind them.
 //!
 //! **The decoder rule.** No count in the container ever sizes an
 //! allocation before the reader checks it against the load limits and
@@ -18,15 +24,14 @@
 //! costs at least one byte, so `count > remaining` rejects at once.
 
 use super::{
-    Image, ImageBlock, ImageError, ImageFrame, ImageLimits, ImageMachine, ImageMailbox,
-    ImageObject, ImagePending, ImageReason, ImageState, ImageTerminal, LoadLimits, SnapshotFail,
-    SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER, SECTION_HEAPS,
-    SECTION_MACHINES,
+    AdmissionBudget, Image, ImageBlock, ImageError, ImageFrame, ImageLimits, ImageMachine,
+    ImageMailbox, ImageObject, ImagePending, ImageReason, ImageState, ImageTerminal, LoadLimits,
+    Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER,
+    SECTION_HEAPS, SECTION_MACHINES,
 };
 use crate::LoadedModule;
 use lm_abi::FaultCode;
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
-use lm_bytecode::BcType;
 use lm_heap::{MapIndex, Object};
 use lm_value::{ObjRef, Value};
 
@@ -598,49 +603,19 @@ impl<'b> Cursor<'b> {
     }
 }
 
-/// The context every reference check needs.
-struct Ctx<'m> {
-    module: &'m lm_bytecode::Module,
+/// The context the decoder carries: the load limits and the counts it
+/// already read.
+struct Ctx {
     limits: LoadLimits,
-    funcs: Vec<u32>,
-    classes: Vec<u32>,
     machine_count: u32,
-    /// The verified operand types of every program point of the
-    /// loaded program.
-    frame_types: Option<lm_verify::FrameTypes<'m>>,
-    /// The module type slot of every semantic type digest.
-    ///
-    /// A snapshot names a type by digest, because a numeric type slot
-    /// belongs to one linked program. Two slots with equal digests
-    /// name one type, so the first slot answers for both.
-    types_by_digest: std::collections::HashMap<[u8; 32], u32>,
-}
-
-impl Ctx<'_> {
-    /// One entry of the loaded type table.
-    fn ty(&self, idx: u32) -> &BcType {
-        &self.module.types[idx as usize]
-    }
-
-    fn func_ok(&self, slot: u32) -> bool {
-        self.funcs.binary_search(&slot).is_ok()
-    }
-
-    fn class_ok(&self, slot: u32) -> bool {
-        self.classes.binary_search(&slot).is_ok()
-    }
-
-    /// The module type slot one semantic type digest names.
-    fn type_of_digest(&self, digest: &[u8; 32]) -> Option<u32> {
-        self.types_by_digest.get(digest).copied()
-    }
 }
 
 /// Load one external snapshot container.
 ///
-/// This is the one place that runs the whole checklist of
-/// specification 17.8. It runs once per byte string; a later restore
-/// reads the checked image and repeats nothing.
+/// The call decodes the container, admits the result against the exact
+/// verified module, and seals the admitted image with its canonical
+/// bytes. It runs once per byte string; a later restore reads the
+/// admitted image and repeats nothing (specification 17.8).
 pub fn load_external(
     bytes: &[u8],
     loaded: &LoadedModule,
@@ -656,42 +631,85 @@ pub fn load_external(
             ),
         );
     }
-    let image = decode(bytes, loaded, limits)?;
+    let image = decode(bytes, limits)?;
+    let mut budget = AdmissionBudget::default();
+    let identity = super::admit::prove(&image, loaded, &mut budget)?;
+    // The decoder accepts one byte string for one image, so the bytes
+    // it received are the canonical bytes of the admitted image.
     let hash = container_hash(&bytes[..bytes.len() - 32]);
     Ok(SnapshotImage {
         bytes: std::sync::Arc::new(bytes.to_vec()),
         world: std::sync::Arc::new(image),
         hash,
-        externally_checked: true,
+        identity,
+        origin: Origin::ExternalContainer,
     })
 }
 
-/// Seal one image the writer produced.
+/// Seal one image one consistent cut produced.
 ///
-/// The writer builds the image from trusted verified state, so this
-/// path runs no structural check. It encodes the canonical bytes and
-/// keeps the image beside them.
-pub fn seal(image: Image, limit: usize) -> Result<SnapshotImage, SnapshotFail> {
+/// The cut copies a stopped verified world, so the admission invariant
+/// holds by construction and this path runs no graph check
+/// (specification section 7.2). The constructor stays inside the
+/// snapshot module, so no host code can promote an arbitrary image
+/// through it.
+pub(super) fn from_trusted_capture(
+    image: Image,
+    identity: super::AdmissionIdentity,
+    limit: usize,
+) -> Result<SnapshotImage, SnapshotFail> {
     let bytes = encode(&image, limit)?;
     let hash = container_hash(&bytes[..bytes.len() - 32]);
     Ok(SnapshotImage {
         bytes: std::sync::Arc::new(bytes),
         world: std::sync::Arc::new(image),
         hash,
-        externally_checked: false,
+        identity,
+        origin: Origin::TrustedCapture,
     })
 }
 
-/// Decode and check one container.
-pub fn decode(
-    bytes: &[u8],
-    loaded: &LoadedModule,
-    limits: LoadLimits,
-) -> Result<Image, ImageError> {
-    let identity = loaded
-        .identity()
-        .map_err(|_| ImageError::new(ImageReason::Code, "the program has no verified identity"))?;
-    let module = loaded.module();
+/// Seal one admitted image with its canonical bytes.
+///
+/// `admit` calls this after the proof succeeds, so the bytes and the
+/// admitted world always agree.
+pub(super) fn seal_admitted(
+    image: Image,
+    identity: super::AdmissionIdentity,
+    limit: usize,
+) -> Result<SnapshotImage, ImageError> {
+    let bytes = encode(&image, limit).map_err(|_| {
+        ImageError::admission(
+            ImageReason::LimitExceeded,
+            "the admitted image passes the container byte limit",
+        )
+    })?;
+    let hash = container_hash(&bytes[..bytes.len() - 32]);
+    Ok(SnapshotImage {
+        bytes: std::sync::Arc::new(bytes),
+        world: std::sync::Arc::new(image),
+        hash,
+        identity,
+        origin: Origin::ExternalContainer,
+    })
+}
+
+/// Decode one container into editable image data.
+///
+/// The call proves container properties alone. It reads no program and
+/// it establishes no interpreter invariant, so its result is ordinary
+/// `Image` data that `admit` must still prove.
+pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
+    if bytes.len() > limits.max_bytes {
+        return err(
+            ImageReason::LimitExceeded,
+            format!(
+                "the container holds {} bytes and the load limit is {}",
+                bytes.len(),
+                limits.max_bytes
+            ),
+        );
+    }
     if bytes.len() < prefix_len() + 32 {
         return err(
             ImageReason::Truncated,
@@ -802,13 +820,12 @@ pub fn decode(
     // load limit before any machine vector exists.
     let mut header = section(0);
     let machine_count = header.count(limits.max_machines as u64, "machine")?;
-    if machine_count == 0 {
-        return err(ImageReason::State, "a snapshot world holds no machine");
-    }
     let root = header.leb()?;
     if root != 0 {
+        // One image has one byte string, so the canonical root ordinal
+        // is a container rule.
         return err(
-            ImageReason::State,
+            ImageReason::SectionBounds,
             "the root machine ordinal of a canonical image is zero",
         );
     }
@@ -820,16 +837,11 @@ pub fn decode(
             "the header section holds extra bytes",
         );
     }
-    if module_semantic != identity.semantic_hash {
-        return err(
-            ImageReason::Code,
-            "the image names another program than the loaded one",
-        );
-    }
-    // Section 2: the code manifest. Every referenced slot exists in
-    // the loaded verified program and carries its definition hash.
+    // Section 2: the code manifest. The decoder reads no program, so
+    // it proves the canonical ascending order alone. Admission proves
+    // that every slot exists and carries its definition hash.
     let mut code = section(1);
-    let func_count = code.count(module.funcs.len() as u64, "function")?;
+    let func_count = code.count(limits.max_code_slots as u64, "function")?;
     let mut funcs: Vec<(u32, [u8; 32])> = Vec::new();
     let mut last: Option<u32> = None;
     for _ in 0..func_count {
@@ -837,25 +849,13 @@ pub fn decode(
         let hash = code.hash()?;
         let slot = u32::try_from(slot)
             .map_err(|_| ImageError::new(ImageReason::Code, "a function slot is too large"))?;
-        if slot as usize >= module.funcs.len() {
-            return err(
-                ImageReason::Code,
-                format!("the image names function slot {slot}, which the program has not"),
-            );
-        }
         if last.is_some_and(|l| slot <= l) {
             return err(ImageReason::Code, "the function manifest is not ascending");
         }
         last = Some(slot);
-        if identity.func_hashes[slot as usize] != hash {
-            return err(
-                ImageReason::Code,
-                format!("function slot {slot} carries another definition hash"),
-            );
-        }
         funcs.push((slot, hash));
     }
-    let class_count = code.count(module.classes.len() as u64, "class")?;
+    let class_count = code.count(limits.max_code_slots as u64, "class")?;
     let mut classes: Vec<(u32, [u8; 32])> = Vec::new();
     let mut last: Option<u32> = None;
     for _ in 0..class_count {
@@ -863,60 +863,28 @@ pub fn decode(
         let hash = code.hash()?;
         let slot = u32::try_from(slot)
             .map_err(|_| ImageError::new(ImageReason::Code, "a class slot is too large"))?;
-        if slot as usize >= module.classes.len() {
-            return err(
-                ImageReason::Code,
-                format!("the image names class slot {slot}, which the program has not"),
-            );
-        }
         if last.is_some_and(|l| slot <= l) {
             return err(ImageReason::Code, "the class manifest is not ascending");
         }
         last = Some(slot);
-        if identity.class_hashes[slot as usize] != hash {
-            return err(
-                ImageReason::Code,
-                format!("class slot {slot} carries another definition hash"),
-            );
-        }
         classes.push((slot, hash));
     }
     if code.remaining() != 0 {
         return err(ImageReason::Trailing, "the code section holds extra bytes");
     }
     let ctx = Ctx {
-        module,
         limits,
-        funcs: funcs.iter().map(|(s, _)| *s).collect(),
-        classes: classes.iter().map(|(s, _)| *s).collect(),
         machine_count: machine_count as u32,
-        frame_types: lm_verify::FrameTypes::new(module).ok(),
-        types_by_digest: {
-            let mut map = std::collections::HashMap::new();
-            for (slot, hash) in identity.type_hashes.iter().enumerate() {
-                map.entry(*hash).or_insert(slot as u32);
-            }
-            map
-        },
     };
     // Section 3: the heaps, one per machine, in ordinal order.
     let mut heaps = section(2);
     let mut all_objects: Vec<Vec<ImageObject>> = Vec::new();
-    for vm in 0..machine_count {
+    for _ in 0..machine_count {
         let count = heaps.count(ctx.limits.max_objects as u64, "object")?;
         let mut objects: Vec<ImageObject> = Vec::new();
-        for ordinal in 0..count {
+        for _ in 0..count {
             let frozen = heaps.flag()?;
             let object = decode_object(&mut heaps, &ctx, count as u32)?;
-            if object.shape().born_frozen && !frozen {
-                return err(
-                    ImageReason::State,
-                    format!(
-                        "machine {vm} object {ordinal} is a {} without the frozen bit",
-                        object.shape().name
-                    ),
-                );
-            }
             objects.push(ImageObject { frozen, object });
         }
         all_objects.push(objects);
@@ -927,8 +895,8 @@ pub fn decode(
     // Section 4: the machine records.
     let mut records = section(3);
     let mut machines: Vec<ImageMachine> = Vec::new();
-    for (vm, objects) in all_objects.into_iter().enumerate() {
-        let machine = decode_machine(&mut records, &ctx, vm as u32, objects)?;
+    for objects in all_objects {
+        let machine = decode_machine(&mut records, &ctx, objects)?;
         machines.push(machine);
     }
     if records.remaining() != 0 {
@@ -937,7 +905,7 @@ pub fn decode(
             "the machine section holds extra bytes",
         );
     }
-    let image = Image {
+    Ok(Image {
         format,
         abi_version,
         compiler_abi,
@@ -947,18 +915,7 @@ pub fn decode(
         funcs,
         classes,
         machines,
-    };
-    // The header names the result type of the root machine, and the
-    // machine record names it again. One image states one type.
-    let root_type = image.machines[0].result_type.unwrap_or([0u8; 32]);
-    if root_type != image.result_type {
-        return err(
-            ImageReason::State,
-            "the header and the root machine name two result types",
-        );
-    }
-    check_world(&image)?;
-    Ok(image)
+    })
 }
 
 fn decode_value(cur: &mut Cursor<'_>, objects: u32) -> Read<Value> {
@@ -1045,7 +1002,7 @@ fn decode_fault(cur: &mut Cursor<'_>, limits: &LoadLimits) -> Read<crate::FaultR
     Ok(crate::FaultRec { code, message, op })
 }
 
-fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx<'_>, objects: u32) -> Read<Object> {
+fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx, objects: u32) -> Read<Object> {
     let tag = cur.u8()?;
     let limits = &ctx.limits;
     Ok(match tag {
@@ -1054,23 +1011,7 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx<'_>, objects: u32) -> Read<Obje
             let class = cur.leb()?;
             let class = u32::try_from(class)
                 .map_err(|_| ImageError::new(ImageReason::Code, "a class slot is too large"))?;
-            if !ctx.class_ok(class) {
-                return err(
-                    ImageReason::Code,
-                    format!("an instance names class slot {class}, which the manifest omits"),
-                );
-            }
             let fields = decode_values(cur, objects, limits.max_stack_values as u64, "field")?;
-            let want = ctx.module.classes[class as usize].fields.len();
-            if fields.len() != want {
-                return err(
-                    ImageReason::Layout,
-                    format!(
-                        "an instance of class {class} holds {} fields and the layout has {want}",
-                        fields.len()
-                    ),
-                );
-            }
             Object::Instance { class, fields }
         }
         2 => Object::List {
@@ -1096,23 +1037,7 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx<'_>, objects: u32) -> Read<Obje
             let func = cur.leb()?;
             let func = u32::try_from(func)
                 .map_err(|_| ImageError::new(ImageReason::Code, "a function slot is too large"))?;
-            if !ctx.func_ok(func) {
-                return err(
-                    ImageReason::Code,
-                    format!("a closure names function slot {func}, which the manifest omits"),
-                );
-            }
             let captures = decode_values(cur, objects, limits.max_stack_values as u64, "capture")?;
-            let want = ctx.module.funcs[func as usize].captures.len();
-            if captures.len() != want {
-                return err(
-                    ImageReason::Layout,
-                    format!(
-                        "a closure of function {func} holds {} captures and the code declares {want}",
-                        captures.len()
-                    ),
-                );
-            }
             Object::Closure { func, captures }
         }
         6 => Object::StrBuilder(cur.str(limits.max_string_bytes)?),
@@ -1168,7 +1093,7 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx<'_>, objects: u32) -> Read<Obje
     })
 }
 
-fn machine_ref(cur: &mut Cursor<'_>, ctx: &Ctx<'_>) -> Read<u32> {
+fn machine_ref(cur: &mut Cursor<'_>, ctx: &Ctx) -> Read<u32> {
     let vm = cur.leb()?;
     if vm >= ctx.machine_count as u64 {
         return err(
@@ -1185,8 +1110,7 @@ fn machine_ref(cur: &mut Cursor<'_>, ctx: &Ctx<'_>) -> Read<u32> {
 #[allow(clippy::too_many_lines)]
 fn decode_machine(
     cur: &mut Cursor<'_>,
-    ctx: &Ctx<'_>,
-    vm: u32,
+    ctx: &Ctx,
     objects: Vec<ImageObject>,
 ) -> Read<ImageMachine> {
     let count = objects.len() as u32;
@@ -1223,37 +1147,21 @@ fn decode_machine(
         let func = u32::try_from(func).map_err(|_| {
             ImageError::new(ImageReason::Code, "a frame function slot is too large")
         })?;
-        if !ctx.func_ok(func) {
-            return err(
-                ImageReason::Code,
-                format!("a frame names function slot {func}, which the manifest omits"),
-            );
-        }
-        let code = &ctx.module.funcs[func as usize];
-        let block = cur.leb()?;
-        let ip = cur.leb()?;
-        if block >= code.blocks.len() as u64 {
-            return err(
-                ImageReason::Layout,
-                format!("a frame of function {func} names block {block}, which does not exist"),
-            );
-        }
-        // A machine stops between instructions, so the program counter
-        // names the next instruction of the block. Every block ends
-        // with a terminator, so the counter never reaches the end.
-        if ip >= code.blocks[block as usize].len() as u64 {
-            return err(
-                ImageReason::Layout,
-                format!("a frame of function {func} holds a program counter past its block"),
-            );
-        }
+        // The decoder reads no program, so the block and the program
+        // counter are data here. Admission proves that the pair names
+        // a reachable instruction boundary.
+        let block = u32::try_from(cur.leb()?)
+            .map_err(|_| ImageError::new(ImageReason::Layout, "a frame block is too large"))?;
+        let ip = u32::try_from(cur.leb()?).map_err(|_| {
+            ImageError::new(ImageReason::Layout, "a frame program counter is too large")
+        })?;
         let base_local = cur.leb()?;
         let base_operand = cur.leb()?;
         let closure = cur.opt(count as u64, "frame closure")?;
         frames.push(ImageFrame {
             func,
-            block: block as u32,
-            ip: ip as u32,
+            block,
+            ip,
             base_local: u32::try_from(base_local)
                 .map_err(|_| ImageError::new(ImageReason::Layout, "a local base is too large"))?,
             base_operand: u32::try_from(base_operand).map_err(|_| {
@@ -1264,7 +1172,7 @@ fn decode_machine(
     }
     let locals = decode_values(cur, count, limits.max_stack_values as u64, "local")?;
     let operands = decode_values(cur, count, limits.max_stack_values as u64, "operand")?;
-    let literal_count = cur.count(ctx.module.strings.len() as u64, "literal")?;
+    let literal_count = cur.count(limits.max_code_slots as u64, "literal")?;
     let mut literals: Vec<Option<u32>> = Vec::new();
     for _ in 0..literal_count {
         literals.push(cur.opt(count as u64, "literal")?);
@@ -1323,7 +1231,7 @@ fn decode_machine(
             )
         }
     };
-    let machine = ImageMachine {
+    Ok(ImageMachine {
         parent,
         state,
         scheduler_owned,
@@ -1351,10 +1259,7 @@ fn decode_machine(
             delivered,
         },
         block,
-    };
-    check_machine(&machine, ctx, vm)?;
-    check_types(&machine, ctx, vm)?;
-    Ok(machine)
+    })
 }
 
 fn decode_limits(cur: &mut Cursor<'_>) -> Read<ImageLimits> {
@@ -1371,906 +1276,4 @@ fn decode_limits(cur: &mut Cursor<'_>) -> Read<ImageLimits> {
         max_resources: cur.u32()?,
         mailbox_limit: cur.u32()?,
     })
-}
-
-/// Prove the state rules of one decoded machine.
-fn check_machine(m: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
-    let at = |what: &str| format!("machine {vm}: {what}");
-    // The frame chain. Local bases follow the declared local counts
-    // exactly, and the arenas end where the last frame ends.
-    let mut want_local = 0u64;
-    let mut last_operand = 0u64;
-    for (idx, frame) in m.frames.iter().enumerate() {
-        if frame.base_local as u64 != want_local {
-            return err(
-                ImageReason::Layout,
-                at(&format!("frame {idx} does not start at its local base")),
-            );
-        }
-        if (frame.base_operand as u64) < last_operand {
-            return err(
-                ImageReason::Layout,
-                at(&format!("frame {idx} lowers the operand base")),
-            );
-        }
-        last_operand = frame.base_operand as u64;
-        want_local += ctx.module.funcs[frame.func as usize].local_count() as u64;
-    }
-    if m.locals.len() as u64 != want_local {
-        return err(
-            ImageReason::Layout,
-            at("the local arena does not match the frame chain"),
-        );
-    }
-    if (m.operands.len() as u64) < last_operand {
-        return err(
-            ImageReason::Layout,
-            at("the operand arena ends below the last frame base"),
-        );
-    }
-    if m.locals.len() + m.operands.len() > m.limits.max_stack_values as usize {
-        return err(
-            ImageReason::Layout,
-            at("the arenas together pass the declared stack limit"),
-        );
-    }
-    if m.frames.len() > m.limits.max_frames as usize {
-        return err(ImageReason::Layout, at("the frame count passes its limit"));
-    }
-    // Operands belong to frames. A machine with no frame therefore
-    // carries no operand, so a frameless operand arena holds values
-    // the operand proof never reaches. Reject it rather than leave it
-    // unproven.
-    if m.frames.is_empty() && !m.operands.is_empty() {
-        return err(
-            ImageReason::Layout,
-            at("a machine with no frame holds operands"),
-        );
-    }
-    // The literal table names the module string pool, and a stored
-    // literal holds exactly the pooled text.
-    for (idx, literal) in m.literals.iter().enumerate() {
-        let Some(ordinal) = literal else { continue };
-        match &m.objects[*ordinal as usize].object {
-            Object::Str(text) if *text == ctx.module.strings[idx] => {}
-            _ => {
-                return err(
-                    ImageReason::Reference,
-                    at(&format!("literal {idx} does not hold its pooled string")),
-                )
-            }
-        }
-    }
-    if let Some(body) = m.start_body {
-        if !matches!(m.objects[body as usize].object, Object::Closure { .. }) {
-            return err(ImageReason::Reference, at("the proc body is not a closure"));
-        }
-    }
-    for (idx, frame) in m.frames.iter().enumerate() {
-        if let Some(closure) = frame.closure {
-            if !matches!(m.objects[closure as usize].object, Object::Closure { .. }) {
-                return err(
-                    ImageReason::Reference,
-                    at(&format!(
-                        "frame {idx} names a capture context that is not a closure"
-                    )),
-                );
-            }
-        }
-    }
-    // The state rules of specification 14.3 and 17.6.
-    match m.state {
-        ImageState::Empty => {
-            if !m.frames.is_empty() || m.pending.is_some() || m.terminal.is_some() {
-                return err(
-                    ImageReason::State,
-                    at("an empty machine holds execution state"),
-                );
-            }
-        }
-        ImageState::Ready => {
-            if m.frames.is_empty() {
-                return err(ImageReason::State, at("a ready machine holds no frame"));
-            }
-            if m.pending.is_some() {
-                return err(
-                    ImageReason::State,
-                    at("a ready machine holds a pending request"),
-                );
-            }
-            if m.terminal.is_some() {
-                return err(
-                    ImageReason::State,
-                    at("a ready machine holds a terminal result"),
-                );
-            }
-        }
-        ImageState::Asked | ImageState::Blocked => {
-            if m.frames.is_empty() {
-                return err(ImageReason::State, at("a stopped machine holds no frame"));
-            }
-            if m.pending.is_none() {
-                return err(
-                    ImageReason::State,
-                    at("an asked or blocked machine holds no pending request"),
-                );
-            }
-            if m.terminal.is_some() {
-                return err(
-                    ImageReason::State,
-                    at("an asked or blocked machine holds a terminal result"),
-                );
-            }
-        }
-        ImageState::Done | ImageState::Faulted => {
-            if m.pending.is_some() {
-                return err(
-                    ImageReason::State,
-                    at("a terminal machine holds a pending request"),
-                );
-            }
-            // A machine reaches a terminal only by returning its last
-            // frame, so a terminal machine holds none. The operand
-            // proof skips a terminal machine, so a frame it carried
-            // would hold unproven operands. The frameless-operand rule
-            // above then forces its arenas empty as well.
-            if !m.frames.is_empty() {
-                return err(ImageReason::State, at("a terminal machine holds a frame"));
-            }
-        }
-    }
-    match (&m.state, &m.terminal) {
-        (ImageState::Done, Some(ImageTerminal::Done(_))) => {}
-        (ImageState::Faulted, Some(ImageTerminal::Fault(_))) => {}
-        (ImageState::Done | ImageState::Faulted, _) => {
-            return err(
-                ImageReason::State,
-                at("a terminal machine does not store its result"),
-            )
-        }
-        (_, Some(_)) => {
-            return err(
-                ImageReason::State,
-                at("a live machine stores a terminal result"),
-            )
-        }
-        _ => {}
-    }
-    // A block record exists exactly when the machine is blocked, and
-    // its kind matches the pending proc operation.
-    match (m.state, m.block) {
-        (ImageState::Blocked, Some(block)) => {
-            let op = m
-                .pending
-                .as_ref()
-                .expect("a blocked machine has a request")
-                .op;
-            let ok = match block {
-                ImageBlock::Receive => op == lm_abi::OP_PROC_RECV,
-                ImageBlock::Send { .. } => op == lm_abi::OP_PROC_SEND,
-                ImageBlock::Done { .. } => op == lm_abi::OP_PROC_DONE,
-            };
-            if !ok {
-                return err(
-                    ImageReason::State,
-                    at("the block record does not match the pending operation"),
-                );
-            }
-        }
-        (ImageState::Blocked, None) => {
-            return err(
-                ImageReason::State,
-                at("a blocked machine holds no block record"),
-            )
-        }
-        (_, Some(_)) => {
-            return err(
-                ImageReason::State,
-                at("a machine that is not blocked holds a block record"),
-            )
-        }
-        _ => {}
-    }
-    // The pending request names a legal operation for this state.
-    if let Some(pending) = &m.pending {
-        if lm_abi::op(pending.op).suspends() {
-            return err(
-                ImageReason::State,
-                at("a pending host attachment has no bytes to copy"),
-            );
-        }
-        if pending.ordinal >= m.next_ordinal {
-            return err(
-                ImageReason::State,
-                at("the pending request ordinal is not below the next ordinal"),
-            );
-        }
-    }
-    // The mailbox rules of specification 18.5.
-    if m.mailbox.queue.len() > m.mailbox.limit as usize {
-        return err(
-            ImageReason::Mailbox,
-            at("the accepted queue is longer than the mailbox limit"),
-        );
-    }
-    // Only a proc holds an accepted message. A non-proc machine keeps
-    // a closed empty mailbox, so a queued message on one has no
-    // mailbox type to prove against, and it would sit unchecked.
-    // Reject it instead of trusting it.
-    if !m.is_proc && !m.mailbox.queue.is_empty() {
-        return err(
-            ImageReason::Mailbox,
-            at("a machine that is not a proc holds an accepted message"),
-        );
-    }
-    if m.mailbox.delivered > m.mailbox.accepted {
-        return err(
-            ImageReason::Mailbox,
-            at("the mailbox delivered more messages than it accepted"),
-        );
-    }
-    // The world gate and the paused state.
-    if m.paused && m.scheduler_owned {
-        return err(
-            ImageReason::State,
-            at("a paused proc is not scheduler-owned"),
-        );
-    }
-    if vm == 0 && (m.scheduler_owned || m.paused) {
-        return err(
-            ImageReason::State,
-            at("the restored root is holder-controlled"),
-        );
-    }
-    Ok(())
-}
-
-/// Prove that every captured value carries the shape its declared
-/// type names.
-///
-/// A snapshot copies data, and the interpreter reads that data through
-/// the types the verified code declares. A forged image that put a
-/// string where the code expects an integer would reach an
-/// interpreter path no verified program can reach, so the loader
-/// proves the shape of every value that has a declared type: every
-/// local slot, every operand, every instance field, every closure
-/// capture, every argument of a pending perform, every accepted
-/// message, the stored terminal value, and the elements of every
-/// collection those positions reach.
-///
-/// The walk is iterative and visits each object once, so a deep image
-/// never grows the Rust stack and a cyclic image terminates.
-///
-/// `Unit` and `Uninit` pass at every type: a local slot before its
-/// first store holds unit, and a field before its first assignment
-/// holds the uninitialized marker.
-fn check_types(machine: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
-    let mut work: Vec<(u32, u32)> = Vec::new();
-    let mut seen: Vec<bool> = vec![false; machine.objects.len()];
-    let seed = |value: Value, ty: u32, work: &mut Vec<(u32, u32)>| -> Read<()> {
-        check_shape(machine, ctx, vm, value, ty, work)
-    };
-    // Every local slot names its declared type.
-    for frame in &machine.frames {
-        let func = &ctx.module.funcs[frame.func as usize];
-        for (slot, ty) in func.local_types.iter().enumerate() {
-            let at = frame.base_local as usize + slot;
-            let Some(value) = machine.locals.get(at) else {
-                return err(
-                    ImageReason::Layout,
-                    format!("machine {vm}: the local arena is shorter than the frame chain"),
-                );
-            };
-            seed(*value, *ty, &mut work)?;
-        }
-    }
-    // Every operand of every stopped frame names the type the
-    // verifier proved at that program point.
-    check_operands(machine, ctx, vm, &mut work)?;
-    // Every argument of a pending perform names the type the verifier
-    // proved for it. A perform pops its arguments off the operand
-    // stack into the pending record, so the argument types are the top
-    // of the stack the verifier proved just before the perform, at the
-    // program counter the top frame stopped at.
-    //
-    // This rule holds for every operation kind. A machine control
-    // operation carries no manifest parameter type, but its operands
-    // are typed exactly like every other operand, so the rule reads
-    // them the same way. A forged asked machine on a control operation
-    // would otherwise hand the restorer a wrong-typed argument through
-    // the dispatch path.
-    check_pending_args(machine, ctx, vm, &mut work)?;
-    // A stored terminal value names the declared result type of its
-    // machine. A terminal machine keeps no frame, so the recorded
-    // digest is the only record of that type.
-    //
-    // A `Done` value that is not the unit is proof-bearing, so it must
-    // carry a result type. A forged image with no result type would
-    // otherwise skip this proof and hand a wrong-typed value to a
-    // consumer that reads it at the declared result type. Unit alone
-    // needs no type, because unit passes at every type.
-    if let Some(ImageTerminal::Done(value)) = &machine.terminal {
-        match (&machine.result_type, value) {
-            (Some(digest), _) => match ctx.type_of_digest(digest) {
-                Some(ty) => check_shape(machine, ctx, vm, *value, ty, &mut work).map_err(|e| {
-                    ImageError::new(
-                        e.reason,
-                        format!("machine {vm}: the terminal value has the wrong shape"),
-                    )
-                })?,
-                None => {
-                    return err(
-                        ImageReason::Code,
-                        format!("machine {vm}: the result type names no type of this program"),
-                    )
-                }
-            },
-            (None, Value::Unit) => {}
-            (None, _) => {
-                return err(
-                    ImageReason::State,
-                    format!("machine {vm}: a terminal value carries no result type to prove"),
-                )
-            }
-        }
-    }
-    // Every accepted message names the mailbox type of its proc. The
-    // class table fixes that type, so the rule never reads it from
-    // the image.
-    //
-    // A proc that carries a message must have a provable mailbox type.
-    // The type cannot always be derived: the proc body may be gone, or
-    // the entry frame may declare no proc instance. When it cannot be
-    // derived the queued values have no governing type, so the loader
-    // rejects the image rather than schedule an unproven message. The
-    // non-proc case is rejected earlier, in `check_machine`.
-    if machine.is_proc && !machine.mailbox.queue.is_empty() {
-        let Some(message) = mailbox_type(machine, ctx) else {
-            return err(
-                ImageReason::Mailbox,
-                format!(
-                    "machine {vm}: a proc whose mailbox type cannot be proven holds an \
-                     accepted message"
-                ),
-            );
-        };
-        for value in &machine.mailbox.queue {
-            check_shape(machine, ctx, vm, *value, message, &mut work).map_err(|e| {
-                ImageError::new(
-                    e.reason,
-                    format!("machine {vm}: an accepted message has the wrong shape"),
-                )
-            })?;
-        }
-    }
-    // Every instance field and every closure capture names its
-    // declared type, whatever root reached the object.
-    for (ordinal, entry) in machine.objects.iter().enumerate() {
-        match &entry.object {
-            Object::Instance { class, fields } => {
-                let layout = &ctx.module.classes[*class as usize].fields;
-                for (value, (_, ty)) in fields.iter().zip(layout.iter()) {
-                    check_shape(machine, ctx, vm, *value, *ty, &mut work).map_err(|e| {
-                        ImageError::new(
-                            e.reason,
-                            format!("machine {vm} object {ordinal}: {}", e.detail),
-                        )
-                    })?;
-                }
-            }
-            Object::Closure { func, captures } => {
-                let declared = &ctx.module.funcs[*func as usize].captures;
-                for (value, ty) in captures.iter().zip(declared.iter()) {
-                    check_shape(machine, ctx, vm, *value, *ty, &mut work).map_err(|e| {
-                        ImageError::new(
-                            e.reason,
-                            format!("machine {vm} object {ordinal}: {}", e.detail),
-                        )
-                    })?;
-                }
-            }
-            _ => {}
-        }
-    }
-    // Propagate into the collections the typed positions reach.
-    while let Some((ordinal, ty)) = work.pop() {
-        if seen[ordinal as usize] {
-            continue;
-        }
-        seen[ordinal as usize] = true;
-        let object = &machine.objects[ordinal as usize].object;
-        match (object, ctx.ty(ty)) {
-            (Object::List { items }, BcType::List(elem)) => {
-                for value in items {
-                    check_shape(machine, ctx, vm, *value, *elem, &mut work)?;
-                }
-            }
-            (Object::Tuple { items }, BcType::Tuple(elems)) => {
-                for (value, elem) in items.iter().zip(elems.iter()) {
-                    check_shape(machine, ctx, vm, *value, *elem, &mut work)?;
-                }
-            }
-            (Object::Map { entries, .. }, BcType::Map(key, value)) => {
-                for (k, v) in entries {
-                    check_shape(machine, ctx, vm, *k, *key, &mut work)?;
-                    check_shape(machine, ctx, vm, *v, *value, &mut work)?;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// Prove the operand types of every stopped frame.
-///
-/// A frame stops at one of two points. The top frame of a machine
-/// with no pending request stops before the instruction its program
-/// counter names. Every other frame, and the top frame of a machine
-/// with a pending request, stopped inside the instruction before the
-/// counter: a call moved its arguments into the callee locals, and a
-/// perform moved them into the pending record. In both of those cases
-/// the retained operands are the bottom of the stack the verifier
-/// proved before that instruction.
-///
-/// A terminal machine never executes again, so its arenas are inert
-/// and the rule does not apply.
-fn check_operands(
-    machine: &ImageMachine,
-    ctx: &Ctx<'_>,
-    vm: u32,
-    work: &mut Vec<(u32, u32)>,
-) -> Read<()> {
-    if matches!(machine.state, ImageState::Done | ImageState::Faulted) {
-        return Ok(());
-    }
-    let Some(frames) = ctx.frame_types.as_ref() else {
-        return err(
-            ImageReason::Code,
-            "the program has no verified frame-type reader",
-        );
-    };
-    for (idx, frame) in machine.frames.iter().enumerate() {
-        let top = idx + 1 == machine.frames.len();
-        // The operand region this frame retains.
-        let end = match machine.frames.get(idx + 1) {
-            Some(next) => next.base_operand as usize,
-            None => machine.operands.len(),
-        };
-        let start = frame.base_operand as usize;
-        if end < start || end > machine.operands.len() {
-            return err(
-                ImageReason::Layout,
-                format!("machine {vm}: frame {idx} owns no operand region"),
-            );
-        }
-        let stopped_before_the_counter = top && machine.pending.is_none();
-        let at = if stopped_before_the_counter {
-            frame.ip
-        } else {
-            if frame.ip == 0 {
-                return err(
-                    ImageReason::Layout,
-                    format!("machine {vm}: frame {idx} stopped before its first instruction"),
-                );
-            }
-            frame.ip - 1
-        };
-        let Some(types) = frames.operands_at(frame.func, frame.block, at) else {
-            return err(
-                ImageReason::Layout,
-                format!("machine {vm}: frame {idx} names no reachable program point"),
-            );
-        };
-        let want = end - start;
-        if types.len() < want {
-            return err(
-                ImageReason::Layout,
-                format!(
-                    "machine {vm}: frame {idx} holds {want} operands and the program point \
-                     proves {}",
-                    types.len()
-                ),
-            );
-        }
-        if stopped_before_the_counter && types.len() != want {
-            return err(
-                ImageReason::Layout,
-                format!(
-                    "machine {vm}: frame {idx} holds {want} operands and the program point \
-                     proves {}",
-                    types.len()
-                ),
-            );
-        }
-        for (offset, ty) in types.iter().take(want).enumerate() {
-            let Some(ty) = ty else { continue };
-            check_shape(
-                machine,
-                ctx,
-                vm,
-                machine.operands[start + offset],
-                *ty,
-                work,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-/// Prove the argument types of one pending perform.
-///
-/// A perform pops its arguments off the operand stack into the pending
-/// record, so the top frame stopped inside the perform. The operand
-/// stack the verifier proved just before the perform is the retained
-/// operands at the bottom, which `check_operands` already proved, and
-/// the popped arguments at the top. This rule proves the top.
-///
-/// The count is load-bearing: the number of operands the perform
-/// consumed is fixed by the operation, so a stack that is not the
-/// retained operands plus the recorded arguments does not agree with
-/// the proved program point. The rule reads no manifest parameter
-/// type, so it holds for a machine control operation as well as a
-/// fixed one.
-fn check_pending_args(
-    machine: &ImageMachine,
-    ctx: &Ctx<'_>,
-    vm: u32,
-    work: &mut Vec<(u32, u32)>,
-) -> Read<()> {
-    let Some(pending) = &machine.pending else {
-        return Ok(());
-    };
-    let Some(frames) = ctx.frame_types.as_ref() else {
-        return err(
-            ImageReason::Code,
-            "the program has no verified frame-type reader",
-        );
-    };
-    // A machine with a pending request holds the frame that performed.
-    let Some(top) = machine.frames.last() else {
-        return err(
-            ImageReason::State,
-            format!("machine {vm}: a pending request holds no frame"),
-        );
-    };
-    // The perform stopped inside the instruction before the counter.
-    if top.ip == 0 {
-        return err(
-            ImageReason::Layout,
-            format!("machine {vm}: the pending frame stopped before its first instruction"),
-        );
-    }
-    let Some(types) = frames.operands_at(top.func, top.block, top.ip - 1) else {
-        return err(
-            ImageReason::Layout,
-            format!("machine {vm}: the pending frame names no reachable program point"),
-        );
-    };
-    // The retained operands are the region the top frame still owns.
-    let retained = machine
-        .operands
-        .len()
-        .checked_sub(top.base_operand as usize)
-        .ok_or_else(|| {
-            ImageError::new(
-                ImageReason::Layout,
-                format!("machine {vm}: the pending frame owns no operand region"),
-            )
-        })?;
-    let argc = pending.args.len();
-    // The proved stack is exactly the retained operands plus the
-    // recorded arguments.
-    if types.len() != retained + argc {
-        return err(
-            ImageReason::State,
-            format!(
-                "machine {vm}: the pending request holds {argc} arguments and the program \
-                 point proves {}",
-                types.len().saturating_sub(retained)
-            ),
-        );
-    }
-    for (offset, ty) in types.iter().skip(retained).enumerate() {
-        let Some(ty) = ty else { continue };
-        check_shape(machine, ctx, vm, pending.args[offset], *ty, work).map_err(|e| {
-            ImageError::new(
-                e.reason,
-                format!("machine {vm}: a pending argument has the wrong shape"),
-            )
-        })?;
-    }
-    Ok(())
-}
-
-/// The mailbox message type of one captured proc.
-///
-/// The proc class fixes the type. The stored proc body declares the
-/// proc instance as its first parameter, and the entry frame declares
-/// it after the constructor returns. `None` means the type cannot be
-/// derived from the image: the proc body is gone and the entry frame
-/// declares no proc instance, or the first parameter is not a proc
-/// class. The caller treats `None` as a rejection when the machine
-/// carries a message, so a queued value never sits unproven.
-fn mailbox_type(machine: &ImageMachine, ctx: &Ctx<'_>) -> Option<u32> {
-    let frames = ctx.frame_types.as_ref()?;
-    let func = match machine.start_body {
-        Some(ordinal) => match machine.objects[ordinal as usize].object {
-            Object::Closure { func, .. } => Some(func),
-            _ => None,
-        },
-        None => machine.frames.first().map(|f| f.func),
-    }?;
-    let instance = *frames.params(func)?.first()?;
-    frames.proc_mailbox(instance)
-}
-
-/// Check one value against one declared type index.
-///
-/// A composite type queues the object for the propagation pass. The
-/// rule reads shapes alone, so a type the encoding cannot pin, for
-/// example a generic variable, accepts every value.
-fn check_shape(
-    machine: &ImageMachine,
-    ctx: &Ctx<'_>,
-    vm: u32,
-    value: Value,
-    ty: u32,
-    work: &mut Vec<(u32, u32)>,
-) -> Read<()> {
-    // An unwritten local slot holds unit, and an unassigned field
-    // holds the uninitialized marker. Both pass at every type.
-    if matches!(value, Value::Unit | Value::Uninit) {
-        return Ok(());
-    }
-    let declared = ctx.ty(ty);
-    let wrong = |what: &str| -> Read<()> {
-        err(
-            ImageReason::Layout,
-            format!("machine {vm}: a value of the wrong shape sits where {what} is declared"),
-        )
-    };
-    let object = match value {
-        Value::Bool(_) => {
-            return match declared {
-                BcType::Bool | BcType::Var(_) => Ok(()),
-                _ => wrong("another type"),
-            }
-        }
-        Value::Int(_) => {
-            return match declared {
-                BcType::Int | BcType::Var(_) => Ok(()),
-                _ => wrong("another type"),
-            }
-        }
-        Value::Op(slot) => {
-            return match declared {
-                BcType::Op(op, _) if *op == slot => Ok(()),
-                BcType::Var(_) => Ok(()),
-                _ => wrong("another type"),
-            }
-        }
-        Value::Obj(r) => r.slot,
-        Value::Unit | Value::Uninit => unreachable!("the marker values returned above"),
-    };
-    let payload = &machine.objects[object as usize].object;
-    let ok = match declared {
-        BcType::Var(_) => true,
-        BcType::Str => matches!(payload, Object::Str(_)),
-        BcType::StringBuilder => matches!(payload, Object::StrBuilder(_)),
-        BcType::ByteBuffer => matches!(payload, Object::ByteBuf(_)),
-        BcType::Fault => matches!(payload, Object::NativeFault { .. }),
-        BcType::Request => matches!(payload, Object::NativeRequest { .. }),
-        BcType::PolicyTable => matches!(payload, Object::NativeTable { .. }),
-        BcType::EmptyVm | BcType::Vm(_) => matches!(payload, Object::NativeVm { .. }),
-        BcType::PendingCall(_, _) => matches!(payload, Object::NativeCall { .. }),
-        BcType::Handle(_, _) => matches!(payload, Object::NativeHandle { .. }),
-        BcType::Digest => matches!(payload, Object::NativeDigest(_)),
-        BcType::SnapshotImage | BcType::Snapshot(_) => {
-            matches!(payload, Object::NativeSnapshot(_))
-        }
-        BcType::Fn(_, _, _, _) => matches!(payload, Object::Closure { .. }),
-        BcType::List(_) => {
-            work.push((object, ty));
-            matches!(payload, Object::List { .. })
-        }
-        BcType::Map(_, _) => {
-            work.push((object, ty));
-            matches!(payload, Object::Map { .. })
-        }
-        BcType::Tuple(elems) => {
-            work.push((object, ty));
-            match payload {
-                Object::Tuple { items } => items.len() == elems.len(),
-                _ => false,
-            }
-        }
-        BcType::Class(class) | BcType::Inst(class, _) => match payload {
-            Object::Instance { class: found, .. } => extends(ctx.module, *found, *class),
-            _ => false,
-        },
-        // A scalar type never holds a heap object.
-        BcType::Unit | BcType::Bool | BcType::Int | BcType::Op(_, _) => false,
-    };
-    if ok {
-        Ok(())
-    } else {
-        wrong("another type")
-    }
-}
-
-/// True when `child` equals `ancestor` or inherits it.
-fn extends(module: &lm_bytecode::Module, child: u32, ancestor: u32) -> bool {
-    let mut cur = Some(child);
-    let mut steps = 0usize;
-    while let Some(c) = cur {
-        if c == ancestor {
-            return true;
-        }
-        // The verified class table is well founded, and the step bound
-        // keeps a crafted table from looping here.
-        steps += 1;
-        if steps > module.classes.len() {
-            return false;
-        }
-        cur = module.classes[c as usize].parent();
-    }
-    false
-}
-
-/// Prove that the parent graph is a forest.
-///
-/// Every machine names at most one parent, so the parent pointers form
-/// a functional graph. A cycle in it makes the runtime policy walk of
-/// `resolve_policy` loop forever, because that walk follows the parent
-/// chain with no bound. The parent ordinal is already range-checked at
-/// decode, so this rule adds only the acyclicity, iteratively, with a
-/// three-colour walk that never grows the Rust stack.
-fn check_parent_forest(image: &Image) -> Read<()> {
-    let n = image.machines.len();
-    // 0 unvisited, 1 on the current path, 2 settled.
-    let mut colour = vec![0u8; n];
-    for start in 0..n {
-        if colour[start] != 0 {
-            continue;
-        }
-        let mut path: Vec<usize> = Vec::new();
-        let mut cur = start;
-        loop {
-            match colour[cur] {
-                0 => {
-                    colour[cur] = 1;
-                    path.push(cur);
-                    match image.machines[cur].parent {
-                        Some(parent) => {
-                            let parent = parent as usize;
-                            if parent == cur {
-                                return err(
-                                    ImageReason::State,
-                                    format!("machine {cur} is its own parent"),
-                                );
-                            }
-                            cur = parent;
-                        }
-                        None => break,
-                    }
-                }
-                1 => {
-                    return err(
-                        ImageReason::State,
-                        format!("the parent chain through machine {cur} forms a cycle"),
-                    );
-                }
-                _ => break,
-            }
-        }
-        for node in path {
-            colour[node] = 2;
-        }
-    }
-    Ok(())
-}
-
-/// Prove the rules that need the whole world.
-fn check_world(image: &Image) -> Read<()> {
-    check_parent_forest(image)?;
-    for (vm, machine) in image.machines.iter().enumerate() {
-        // Every handle names a captured machine at its generation.
-        for (ordinal, entry) in machine.objects.iter().enumerate() {
-            if let Object::NativeHandle { proc, generation } = entry.object {
-                let target = &image.machines[proc as usize];
-                if target.generation != generation {
-                    return err(
-                        ImageReason::Reference,
-                        format!(
-                            "machine {vm} object {ordinal} names machine {proc} at generation \
-                             {generation}, and that machine holds {}",
-                            target.generation
-                        ),
-                    );
-                }
-            }
-        }
-        // A request or call token names a machine that holds exactly
-        // that pending request.
-        for (ordinal, entry) in machine.objects.iter().enumerate() {
-            let (target, request, op) = match entry.object {
-                Object::NativeRequest { vm, ordinal } => (vm, Some(ordinal), None),
-                Object::NativeCall { vm, ordinal, op } => (vm, Some(ordinal), Some(op)),
-                _ => continue,
-            };
-            let target = &image.machines[target as usize];
-            let Some(request) = request else { continue };
-            // A stale token is legal: the machine answered the request
-            // already. The rule is that a live token agrees.
-            if target.state == ImageState::Asked {
-                let pending = target
-                    .pending
-                    .as_ref()
-                    .expect("an asked machine holds its request");
-                if pending.ordinal == request && op.is_some_and(|op| op != pending.op) {
-                    return err(
-                        ImageReason::Reference,
-                        format!(
-                            "machine {vm} object {ordinal} names another operation than the \
-                             pending request it points at"
-                        ),
-                    );
-                }
-            }
-        }
-        // A block names a machine that can release it.
-        if let Some(ImageBlock::Send { target } | ImageBlock::Done { target }) = machine.block {
-            if target as usize >= image.machines.len() {
-                return err(ImageReason::Reference, "a block names no captured machine");
-            }
-        }
-        // The heap is exactly the canonical traversal of its roots.
-        check_order(machine, vm as u32)?;
-    }
-    Ok(())
-}
-
-/// Prove that the stored heap is the canonical traversal of its roots.
-///
-/// The walk is iterative, so a deep image never grows the Rust stack.
-/// The check also proves that every stored object is reachable and
-/// that no object is missing.
-fn check_order(machine: &ImageMachine, vm: u32) -> Read<()> {
-    let count = machine.objects.len();
-    let mut seen = vec![false; count];
-    let mut next = 0usize;
-    let roots = super::image_roots(machine);
-    let mut stack: Vec<u32> = roots.iter().rev().copied().collect();
-    let mut children: Vec<ObjRef> = Vec::new();
-    while let Some(r) = stack.pop() {
-        let idx = r as usize;
-        if seen[idx] {
-            continue;
-        }
-        if idx != next {
-            return err(
-                ImageReason::Order,
-                format!(
-                    "machine {vm}: the traversal reaches object {idx} where the canonical \
-                     order needs {next}"
-                ),
-            );
-        }
-        seen[idx] = true;
-        next += 1;
-        children.clear();
-        machine.objects[idx].object.children(&mut children);
-        stack.extend(children.iter().rev().map(|c| c.slot));
-    }
-    if next != count {
-        return err(
-            ImageReason::Order,
-            format!(
-                "machine {vm}: {} stored objects are unreachable",
-                count - next
-            ),
-        );
-    }
-    Ok(())
 }

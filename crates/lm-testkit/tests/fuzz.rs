@@ -249,11 +249,15 @@ fn mutated_snapshot_containers_never_panic_the_loader() {
             // runs under a tight heap and fuel cap: an unproven state
             // that only shows at run time faults or stops, but never
             // panics the interpreter.
-            if let Ok(image) = lm_vm::snapshot::codec::decode(&bytes, &loaded, limits) {
-                accepted += 1;
+            if let Ok(image) = lm_vm::snapshot::codec::decode(&bytes, limits) {
                 let again = lm_vm::snapshot::codec::encode(&image, usize::MAX)
                     .expect("an accepted image encodes");
                 assert_eq!(again, bytes, "an accepted mutant has two spellings");
+                let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+                let Ok(admitted) = lm_vm::snapshot::admit(image, &loaded, &mut budget) else {
+                    continue;
+                };
+                accepted += 1;
                 let mut world = lm_vm::World::new(
                     &loaded,
                     VmConfig {
@@ -265,7 +269,7 @@ fn mutated_snapshot_containers_never_panic_the_loader() {
                     Box::new(lm_vm::RecordingHost::new(1)),
                 );
                 if let Some(target) = world.new_child(0) {
-                    if let Ok(root) = world.restore_image(0, target, &image) {
+                    if let Ok(root) = world.restore_image(0, target, &admitted) {
                         drive_restored(&mut world, root);
                     }
                 }
@@ -401,7 +405,7 @@ fn the_regression_corpus_replays() {
                     // loads; every other seed rejects at the loader.
                     let bytes = std::fs::read(&path).expect("corpus case reads");
                     let (loaded, _) = snapshot_seed();
-                    let out = lm_vm::snapshot::codec::decode(
+                    let out = lm_vm::snapshot::codec::load_external(
                         &bytes,
                         &loaded,
                         lm_vm::snapshot::LoadLimits::default(),
@@ -614,8 +618,9 @@ fn regenerate_fuzz_corpus() {
         let (loaded, container) = snapshot_seed();
         std::fs::write(dir.join("snapshot-world.lms"), &container).expect("corpus writes");
         let limits = lm_vm::snapshot::LoadLimits::default();
-        let image =
-            lm_vm::snapshot::codec::decode(&container, &loaded, limits).expect("the seed loads");
+        let image = lm_vm::snapshot::codec::load_external(&container, &loaded, limits)
+            .expect("the seed loads")
+            .into_image();
         let mut broken = image.clone();
         let mut roots = (
             broken.machines[2].frames[0].closure,
@@ -627,7 +632,7 @@ fn regenerate_fuzz_corpus() {
         let bad =
             lm_vm::snapshot::codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
         assert!(
-            lm_vm::snapshot::codec::decode(&bad, &loaded, limits).is_err(),
+            lm_vm::snapshot::codec::load_external(&bad, &loaded, limits).is_err(),
             "the swapped-root seed must reject"
         );
         std::fs::write(dir.join("snapshot-swapped-roots.lms"), &bad).expect("corpus writes");

@@ -55,14 +55,19 @@ fn reseal(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+/// The rule one container breaks. The call runs decoding and
+/// admission, so a case states one rule whichever stage owns it.
 fn reject(loaded: &LoadedModule, bytes: &[u8]) -> ImageReason {
-    codec::decode(bytes, loaded, LoadLimits::default())
+    codec::load_external(bytes, loaded, LoadLimits::default())
         .expect_err("the container must reject")
         .reason
 }
 
+/// The editable image of one container that decodes and admits.
 fn accept(loaded: &LoadedModule, bytes: &[u8]) -> lm_vm::snapshot::Image {
-    codec::decode(bytes, loaded, LoadLimits::default()).expect("the container loads")
+    codec::load_external(bytes, loaded, LoadLimits::default())
+        .expect("the container loads")
+        .into_image()
 }
 
 /// Write one little-endian 32-bit field.
@@ -161,7 +166,7 @@ fn the_header_rules_reject_precisely() {
         ..LoadLimits::default()
     };
     assert_eq!(
-        codec::decode(&bytes, &loaded, limits)
+        codec::decode(&bytes, limits)
             .expect_err("the count passes the limit")
             .reason,
         ImageReason::LimitExceeded
@@ -170,14 +175,17 @@ fn the_header_rules_reject_precisely() {
     let mut bad = bytes.clone();
     bad[header] = 0x7f;
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Truncated);
-    // Zero machines is no world.
+    // Zero machines leaves every heap byte outside the sections the
+    // header names. The zero-machine world itself is an admission
+    // rule, and `admission.rs` states it.
     let mut bad = bytes.clone();
     bad[header] = 0;
-    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::State);
-    // The root ordinal is zero in a canonical image.
+    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Trailing);
+    // The root ordinal is zero in a canonical image. One image has one
+    // byte string, so the decoder owns that rule.
     let mut bad = bytes.clone();
     bad[header + 1] = 1;
-    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::State);
+    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::SectionBounds);
     // The module semantic hash names this program.
     let mut bad = bytes.clone();
     bad[header + 2] ^= 1;
@@ -226,15 +234,16 @@ fn a_non_canonical_integer_rejects() {
     );
 }
 
+/// The capture context of a frame is the closure that frame runs.
+///
+/// The helper machine holds two closures: the capture context of its
+/// frame and its proc body. The swap keeps every ordinal in range, and
+/// the capture-context rule names the exact position it broke.
+/// `admission.rs` states the canonical-order rule on its own.
 #[test]
-fn a_reordered_heap_rejects_as_non_canonical() {
+fn a_swapped_capture_context_rejects() {
     let (loaded, bytes) = asked_tree();
     let image = accept(&loaded, &bytes);
-    // Swap the two objects of the root heap. Every ordinal stays in
-    // range, so only the canonical-order rule catches it.
-    // The helper machine holds two closures: the capture context of
-    // its frame and its proc body. Swapping the two roots keeps every
-    // shape rule true, so only the canonical-order rule catches it.
     let mut broken = image.clone();
     let frame = broken.machines[2].frames[0].closure;
     let body = broken.machines[2].start_body;
@@ -242,7 +251,7 @@ fn a_reordered_heap_rejects_as_non_canonical() {
     broken.machines[2].frames[0].closure = body;
     broken.machines[2].start_body = frame;
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::Order);
+    assert_eq!(reject(&loaded, &bad), ImageReason::Reference);
 }
 
 #[test]
@@ -442,7 +451,7 @@ go()
 /// string, so a reader can never accept two spellings of one world.
 #[test]
 fn every_single_bit_change_rejects_or_stays_canonical() {
-    let (loaded, bytes) = asked_tree();
+    let (_loaded, bytes) = asked_tree();
     let mut rejected = 0usize;
     let mut accepted = 0usize;
     for at in 0..bytes.len() - 32 {
@@ -450,7 +459,7 @@ fn every_single_bit_change_rejects_or_stays_canonical() {
             let mut bad = bytes.clone();
             bad[at] ^= 1 << bit;
             let bad = reseal(bad);
-            match codec::decode(&bad, &loaded, LoadLimits::default()) {
+            match codec::decode(&bad, LoadLimits::default()) {
                 Err(_) => rejected += 1,
                 Ok(image) => {
                     let again = codec::encode(&image, usize::MAX).expect("the image encodes");
@@ -469,11 +478,11 @@ fn every_single_bit_change_rejects_or_stays_canonical() {
 /// A truncated container never panics and never reads past its end.
 #[test]
 fn every_truncation_rejects() {
-    let (loaded, bytes) = asked_tree();
+    let (_loaded, bytes) = asked_tree();
     for len in 0..bytes.len() {
         let cut = &bytes[..len];
         assert!(
-            codec::decode(cut, &loaded, LoadLimits::default()).is_err(),
+            codec::decode(cut, LoadLimits::default()).is_err(),
             "a container of {len} bytes must reject"
         );
     }
@@ -532,12 +541,12 @@ go()
                 .last_snapshot()
                 .expect("the program captured a world")
                 .clone();
-            let decoded = codec::decode(image.bytes(), &loaded, LoadLimits::default())
-                .expect("the container loads");
-            assert_eq!(decoded.machine_count(), 1);
+            let admitted = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
+                .expect("the container loads and admits");
+            assert_eq!(admitted.world().machine_count(), 1);
             let target = world.new_child(0).expect("the budget holds a child");
             world
-                .restore_image(0, target, &decoded)
+                .restore_image(0, target, &admitted)
                 .expect("the restore builds a world");
         })
         .expect("the thread starts")

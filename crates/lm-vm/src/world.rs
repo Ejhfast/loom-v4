@@ -152,16 +152,18 @@ pub struct World<'m> {
     /// The count instruments the rule of specification 17.8: external
     /// bytes are checked once, and a later restore repeats nothing.
     checks: u64,
-    /// The images this world already trusts, newest first.
+    /// The admitted images this world already holds, newest first.
     ///
     /// A guest holds a snapshot as container bytes. A restore looks
     /// the bytes up by container hash: a hit is an image this process
-    /// wrote or already checked, so the restore reads the decoded
-    /// world and repeats no structural check. A miss runs the external
-    /// loader once. The table is bounded, so a program that captures
-    /// in a loop never grows it; an evicted image is checked again on
-    /// its next restore, which is safe and slower.
-    trusted: Vec<([u8; 32], std::sync::Arc<crate::snapshot::Image>)>,
+    /// captured or already admitted, so the restore reads the admitted
+    /// state and repeats no check. A miss runs the external loader
+    /// once. The table stores `SnapshotImage`, so the type system
+    /// records the admission fact; a bare `Image` can never enter it.
+    /// The table is bounded, so a program that captures in a loop
+    /// never grows it; an evicted image is admitted again on its next
+    /// restore, which is safe and slower.
+    trusted: Vec<([u8; 32], crate::snapshot::SnapshotImage)>,
     /// The last image a guest capture produced in this world.
     ///
     /// `lm snapshot save` writes it, so a program states in its own
@@ -1664,7 +1666,7 @@ impl<'m> World<'m> {
         let image = match self.trusted_image(&hash) {
             Some(image) => image,
             None => match self.load_snapshot_bytes(&bytes) {
-                Ok(image) => image.world_arc(),
+                Ok(image) => image,
                 Err(error) => {
                     self.fault_caller(
                         vm,
@@ -1676,6 +1678,19 @@ impl<'m> World<'m> {
                 }
             },
         };
+        // The admitted state names the program it passed against. This
+        // world runs one program, so a mismatch is a local fault, not
+        // a restore this call trusts.
+        let semantic = self.identity().map(|id| id.semantic_hash);
+        if semantic != Ok(image.identity().module_semantic) {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::BoundaryViolation,
+                "the snapshot image was admitted against another program",
+            );
+            return;
+        }
         let built = match self.restore_image(vm, target, &image) {
             Ok(root) => self.machines[vm as usize]
                 .alloc(Object::NativeVm { vm: root })
@@ -2571,18 +2586,18 @@ impl<'m> World<'m> {
         self.checks += 1;
     }
 
-    /// Remember one image this world trusts.
+    /// Remember one admitted image of this world.
     pub fn trust_image(&mut self, image: &crate::snapshot::SnapshotImage) {
         let hash = image.hash();
         if self.trusted.iter().any(|(h, _)| *h == hash) {
             return;
         }
-        self.trusted.insert(0, (hash, image.world_arc()));
+        self.trusted.insert(0, (hash, image.clone()));
         self.trusted.truncate(TRUSTED_IMAGES);
     }
 
-    /// The trusted image with this container hash.
-    fn trusted_image(&self, hash: &[u8; 32]) -> Option<std::sync::Arc<crate::snapshot::Image>> {
+    /// The admitted image with this container hash.
+    fn trusted_image(&self, hash: &[u8; 32]) -> Option<crate::snapshot::SnapshotImage> {
         self.trusted
             .iter()
             .find(|(h, _)| h == hash)

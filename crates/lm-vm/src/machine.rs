@@ -351,7 +351,11 @@ impl Machine {
         }
         self.result_ty = Some(module.funcs[func as usize].ret);
         self.vm.locals = args;
-        self.vm.locals.resize(local_count, Value::Unit);
+        // A slot past the parameters holds no value yet. The marker
+        // states that fact, so a snapshot never spells an
+        // uninitialized slot as a real unit value. The verifier proves
+        // that no read reaches such a slot before its first store.
+        self.vm.locals.resize(local_count, Value::Uninit);
         self.vm.operands.clear();
         self.vm.frames.push(Frame {
             func,
@@ -1202,8 +1206,10 @@ impl Machine {
             .locals
             .extend_from_slice(&self.vm.operands[arg_start..]);
         self.vm.operands.truncate(arg_start);
-        // The slots after the parameters start without a value.
-        self.vm.locals.resize(new_locals, Value::Unit);
+        // The slots after the parameters start without a value. The
+        // marker states that fact: an uninitialized slot is not a unit
+        // value, and a snapshot keeps the two apart.
+        self.vm.locals.resize(new_locals, Value::Uninit);
         let base_operand = self.vm.operands.len() as u32;
         self.vm.frames.push(Frame {
             func: callee,

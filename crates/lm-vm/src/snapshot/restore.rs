@@ -10,7 +10,9 @@
 //! A failed restore exposes no partial world: the call removes every
 //! machine it added and returns the reservations it took.
 
-use super::{Image, ImageBlock, ImageMachine, ImageState, ImageTerminal, RestoreFail};
+use super::{
+    Image, ImageBlock, ImageMachine, ImageState, ImageTerminal, RestoreFail, SnapshotImage,
+};
 use crate::machine::{
     Block, Frame, Machine, MachineState, Mailbox, Ownership, Pending, Terminal, VmId,
 };
@@ -20,21 +22,31 @@ use lm_heap::Object;
 use lm_value::{ObjRef, Value};
 
 impl World<'_> {
-    /// Build one restored world from a checked image.
+    /// Build one restored world from an admitted image.
     ///
     /// `restorer` is the machine that asked, and `target` is its empty
     /// machine, which becomes the restored root. The call returns the
     /// root machine identifier.
     ///
-    /// This is the trusted path. The image already passed the writer
-    /// or the loader, so the call repeats no structural check
-    /// (specification 17.8).
+    /// Restore accepts `SnapshotImage` alone, never `Image`. The
+    /// admitted state already resolves and carries accurate live
+    /// types, so the call repeats no structural check and no type
+    /// check (specification section 8). The caller proves that the
+    /// admission identity names this program.
     pub fn restore_image(
         &mut self,
         restorer: VmId,
         target: VmId,
-        image: &Image,
+        admitted: &SnapshotImage,
     ) -> Result<VmId, RestoreFail> {
+        debug_assert_eq!(
+            admitted.identity().module_semantic,
+            self.identity()
+                .map(|id| id.semantic_hash)
+                .unwrap_or_default(),
+            "restore reads an image admitted against this exact program"
+        );
+        let image = admitted.world();
         let count = image.machines.len();
         debug_assert!(count > 0, "a checked image holds at least the root");
         let before = self.machines.len();

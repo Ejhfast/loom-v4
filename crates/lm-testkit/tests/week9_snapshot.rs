@@ -51,8 +51,11 @@ fn run_restored(world: &mut World<'_>, root: VmId) -> String {
     }
 }
 
-/// Restore one image into a fresh world of the same program.
-fn restore_into<'m>(loaded: &'m LoadedModule, image: &lm_vm::snapshot::Image) -> (World<'m>, VmId) {
+/// Restore one admitted image into a fresh world of the same program.
+fn restore_into<'m>(
+    loaded: &'m LoadedModule,
+    image: &lm_vm::snapshot::SnapshotImage,
+) -> (World<'m>, VmId) {
     let mut world = world_of(loaded, &["Proc", "Vm", "Clock"]);
     let target = world.new_child(0).expect("the budget holds one child");
     let root = world
@@ -138,16 +141,16 @@ fn a_snapshot_round_trips_at_every_boundary_of_the_example_corpus() {
                 .unwrap_or_else(|e| panic!("{path} boundary {boundary}: capture failed: {e:?}"));
             // The bytes decode, and the decoded image encodes back to
             // exactly the same bytes.
-            let decoded = codec::decode(image.bytes(), &loaded, LoadLimits::default())
+            let admitted = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
                 .unwrap_or_else(|e| panic!("{path} boundary {boundary}: {e}"));
-            let again = codec::encode(&decoded, usize::MAX).expect("the image encodes");
+            let again = codec::encode(admitted.world(), usize::MAX).expect("the image encodes");
             assert_eq!(
                 &again,
                 image.bytes().as_ref(),
                 "{path} boundary {boundary}: the round trip moved the bytes"
             );
             // The restored world finishes with the same result.
-            let (mut fresh, root) = restore_into(&loaded, image.world());
+            let (mut fresh, root) = restore_into(&loaded, &image);
             assert_eq!(
                 run_restored(&mut fresh, root),
                 expected,
@@ -258,7 +261,7 @@ fn every_handle_in_the_bytes_targets_a_captured_machine() {
 fn restore_relocates_every_vm_and_mailbox_root() {
     let loaded = program(&asked_tree_source());
     let image = asked_tree_image(&loaded);
-    let (world, root) = restore_into(&loaded, image.world());
+    let (world, root) = restore_into(&loaded, &image);
     // The restored machines are the ones this restore added.
     let restored: Vec<VmId> = (root..world.machine_count() as VmId).collect();
     assert_eq!(restored.len(), image.world().machine_count());
@@ -353,11 +356,11 @@ fn two_restores_share_nothing_with_each_other_or_the_original() {
     let before = world.machine_count();
     let first_target = world.new_child(0).expect("the budget holds a child");
     let first = world
-        .restore_image(0, first_target, image.world())
+        .restore_image(0, first_target, &image)
         .expect("the first restore builds a world");
     let second_target = world.new_child(0).expect("the budget holds a child");
     let second = world
-        .restore_image(0, second_target, image.world())
+        .restore_image(0, second_target, &image)
         .expect("the second restore builds a world");
     // Each restore added its own machines beside the originals.
     assert_eq!(
@@ -429,7 +432,7 @@ go()
     // the policy table, which no snapshot copies.
     assert_eq!(image.world().machine_count(), 1);
     // The restored table carries no mock and no grant.
-    let (restored, root) = restore_into(&loaded, image.world());
+    let (restored, root) = restore_into(&loaded, image);
     assert_eq!(restored.table_entry_count(root), 0);
 }
 
@@ -438,7 +441,7 @@ go()
 fn a_restored_table_is_default_deny_plus_the_birth_grant() {
     let loaded = program(&asked_tree_source());
     let image = asked_tree_image(&loaded);
-    let (world, root) = restore_into(&loaded, image.world());
+    let (world, root) = restore_into(&loaded, &image);
     // The held root is no proc, so its table is empty.
     assert_eq!(world.table_entry_count(root), 0);
     // The two restored procs carry the `Proc` group and nothing else.
@@ -470,7 +473,7 @@ fn a_failed_restore_exposes_no_partial_world() {
     let target = world.new_child(0).expect("the budget holds one child");
     let before = world.machine_count();
     assert_eq!(
-        world.restore_image(0, target, image.world()),
+        world.restore_image(0, target, &image),
         Err(RestoreFail::LimitExceeded)
     );
     assert_eq!(world.machine_count(), before);
@@ -531,12 +534,12 @@ fn external_bytes_are_checked_once_and_the_trusted_path_checks_nothing() {
         .load_snapshot_bytes(image.bytes())
         .expect("the container loads");
     assert_eq!(world.snapshot_checks(), 1);
-    assert!(checked.externally_checked());
+    assert_eq!(checked.origin(), lm_vm::snapshot::Origin::ExternalContainer);
     // Two restores of the checked image repeat nothing.
     for _ in 0..2 {
         let target = world.new_child(0).expect("the budget holds a child");
         world
-            .restore_image(0, target, checked.world())
+            .restore_image(0, target, &checked)
             .expect("the restore builds a world");
     }
     assert_eq!(world.snapshot_checks(), 1);
@@ -545,10 +548,13 @@ fn external_bytes_are_checked_once_and_the_trusted_path_checks_nothing() {
     let mut fresh = world_of(&loaded, &["Proc", "Vm", "Clock"]);
     drive(&mut fresh);
     assert_eq!(fresh.snapshot_checks(), 0);
-    assert!(!fresh
-        .last_snapshot()
-        .expect("the program captured a world")
-        .externally_checked());
+    assert_eq!(
+        fresh
+            .last_snapshot()
+            .expect("the program captured a world")
+            .origin(),
+        lm_vm::snapshot::Origin::TrustedCapture
+    );
 }
 
 // ---------------------------------------------------------------
@@ -567,13 +573,13 @@ fn a_between_instruction_capture_restores_at_the_same_boundary() {
     let image = world
         .capture_snapshot(gate, 0, false)
         .expect("the capture succeeds");
-    assert_eq!(image.world().root_state(), ImageState::Ready);
+    assert_eq!(image.world().root_state(), Some(ImageState::Ready));
     let frame = &image.world().machines[0].frames[0];
     assert!(
         frame.ip > 0,
         "the program counter names the next instruction"
     );
-    let (mut fresh, root) = restore_into(&loaded, image.world());
+    let (mut fresh, root) = restore_into(&loaded, &image);
     assert_eq!(run_restored(&mut fresh, root), "Done(7)");
 }
 
@@ -589,7 +595,7 @@ fn an_asked_capture_restores_in_asked_and_drive_mints_a_fresh_token() {
     let pending = machine.pending.as_ref().expect("the request survives");
     assert_eq!(lm_abi::op_name(pending.op), "Clock.Now");
     let ordinal = pending.ordinal;
-    let (mut world, root) = restore_into(&loaded, image.world());
+    let (mut world, root) = restore_into(&loaded, &image);
     assert_eq!(world.state_of(root), lm_vm::MachineState::Asked);
     // The restored machine holds the same semantic request. `drive`
     // mints a fresh holder token for it, and no guest instruction
@@ -647,7 +653,7 @@ fn a_holder_paused_proc_restores_paused() {
     let worker = &image.world().machines[1];
     assert!(worker.paused, "the worker restores paused");
     assert!(!worker.scheduler_owned, "a paused proc is holder-owned");
-    let (world, root) = restore_into(&loaded, image.world());
+    let (world, root) = restore_into(&loaded, image);
     assert!(!world.runnable_procs().contains(&(root + 1)));
 }
 
@@ -755,7 +761,7 @@ go()
     assert_eq!(world.show_outcome(&outcome), "Done(1)");
     let image = world.last_snapshot().expect("the program captured a world");
     assert_eq!(image.world().machine_count(), 1);
-    assert_eq!(image.world().root_state(), ImageState::Asked);
+    assert_eq!(image.world().root_state(), Some(ImageState::Asked));
     let pending = image.world().machines[0]
         .pending
         .as_ref()
@@ -763,7 +769,7 @@ go()
     assert_eq!(lm_abi::op_name(pending.op), "Vm.SnapshotSelf");
     // The restored root holds that pending request, so a drive hands
     // the restorer a fresh token instead of running an instruction.
-    let (mut fresh, root) = restore_into(&loaded, image.world());
+    let (mut fresh, root) = restore_into(&loaded, image);
     assert!(matches!(fresh.run_machine(root), RootEvent::Asked(_)));
 }
 
@@ -802,7 +808,7 @@ fn a_capture_past_the_byte_limit_returns_the_typed_error() {
 fn restored_procs_wait_behind_one_world_gate() {
     let loaded = program(&asked_tree_source());
     let image = asked_tree_image(&loaded);
-    let (mut world, root) = restore_into(&loaded, image.world());
+    let (mut world, root) = restore_into(&loaded, &image);
     // Every restored machine sits behind one gate, so the scheduler
     // finds nothing to drive and no block to complete.
     let gate = world.gate_of(root);

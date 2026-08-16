@@ -487,8 +487,8 @@ fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, r
     assert_eq!(again.bytes().len(), size);
     // The load time of the external byte path.
     let load_start = Instant::now();
-    let checked =
-        codec::decode(image.bytes(), &loaded, LoadLimits::default()).expect("the container loads");
+    let checked = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
+        .expect("the container loads and admits");
     let load = load_start.elapsed();
     // The restore time, averaged over the requested count.
     let restore_start = Instant::now();
@@ -507,7 +507,7 @@ fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, r
     eprintln!(
         "bench-smoke {name}: size {size} B, machines {}, write {write:?}, \
          load {load:?}, restore x{restores} {restore:?}",
-        checked.machine_count()
+        checked.world().machine_count()
     );
 }
 

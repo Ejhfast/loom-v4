@@ -198,7 +198,27 @@ impl World<'_> {
         self.release_cut(&report.set, true);
         let image = built?;
         let limit = self.snapshot_byte_limit(root);
-        codec::seal(image, limit)
+        // The cut copies a stopped verified world, so the admission
+        // invariant holds by construction (specification section 7.2).
+        // The constructor stays inside the snapshot module, so no host
+        // code can promote an arbitrary image through this path.
+        let identity = self.admission_identity()?;
+        codec::from_trusted_capture(image, identity, limit)
+    }
+
+    /// The admission identity of the program this world runs.
+    fn admission_identity(&self) -> Result<super::AdmissionIdentity, SnapshotFail> {
+        let identity = self.identity().map_err(|code| {
+            SnapshotFail::Fault(code, "the program has no verified identity".to_string())
+        })?;
+        Ok(super::AdmissionIdentity {
+            module_semantic: identity.semantic_hash,
+            verification: lm_bytecode::identity::verification_hash(self.module()),
+            format: super::FORMAT_VERSION,
+            abi_version: lm_abi::ABI_VERSION,
+            compiler_abi: lm_bytecode::identity::COMPILER_ABI_VERSION,
+            verifier_version: lm_verify::VERIFIER_VERSION,
+        })
     }
 
     /// The byte limit of one snapshot the machine `vm` asks for.

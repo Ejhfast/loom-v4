@@ -12,18 +12,23 @@ use lm_value::Value;
 use std::fmt::Write as _;
 
 /// The one-line verdict of `lm snapshot verify`.
+///
+/// The call reads editable image data, so it never assumes a machine
+/// exists. Inspection of an invalid image stays total.
 pub fn verdict(image: &Image) -> String {
+    let state = match image.root_state() {
+        Some(state) => state.name(),
+        None => "none",
+    };
     format!(
-        "valid: state={} machines={} mailboxes={}",
-        image.root_state().name(),
+        "valid: state={state} machines={} mailboxes={}",
         image.machine_count(),
         image.mailbox_count()
     )
 }
 
-/// A readable dump of one image, one fact per line.
+/// A readable dump of one admitted image and its container.
 pub fn dump(image: &SnapshotImage) -> String {
-    let world = image.world();
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -31,6 +36,16 @@ pub fn dump(image: &SnapshotImage) -> String {
         image.bytes().len(),
         hex(&image.hash())
     );
+    out.push_str(&dump_image(image.world()));
+    out
+}
+
+/// A readable dump of one editable image, one fact per line.
+///
+/// The dump never indexes a table from image data, so it prints an
+/// invalid image without a panic.
+pub fn dump_image(world: &Image) -> String {
+    let mut out = String::new();
     let _ = writeln!(
         out,
         "format {} abi {} compiler {} verifier {}",
@@ -77,7 +92,7 @@ pub fn dump(image: &SnapshotImage) -> String {
             let _ = writeln!(
                 out,
                 "  pending {} ordinal {} args {}",
-                lm_abi::op_name(pending.op),
+                op_text(pending.op),
                 pending.ordinal,
                 pending.args.len()
             );
@@ -178,14 +193,23 @@ fn payload(object: &Object) -> String {
         Object::NativeVm { vm } => format!("machine {vm}"),
         Object::NativeTable { vm } => format!("table of machine {vm}"),
         Object::NativeRequest { vm, ordinal } => format!("request {ordinal} of machine {vm}"),
-        Object::NativeCall { vm, ordinal, op } => format!(
-            "call {ordinal} of machine {vm} for {}",
-            lm_abi::op_name(*op)
-        ),
+        Object::NativeCall { vm, ordinal, op } => {
+            format!("call {ordinal} of machine {vm} for {}", op_text(*op))
+        }
         Object::NativeHandle { proc, generation } => format!("proc {proc}.{generation}"),
         Object::NativeFault { code, message, .. } => format!("{code} {message:?}"),
         Object::NativeDigest(bytes) => hex(bytes),
         Object::NativeSnapshot(image) => format!("nested image {} bytes", image.len()),
+    }
+}
+
+/// The name of one operation slot. Image data may name any slot, so
+/// the dump never indexes the manifest without a bound.
+fn op_text(slot: u32) -> String {
+    if slot < lm_abi::OP_COUNT {
+        lm_abi::op_name(slot)
+    } else {
+        format!("<operation {slot}>")
     }
 }
 
@@ -200,7 +224,7 @@ fn show(value: Value) -> String {
         Value::Unit => "()".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Int(v) => v.to_string(),
-        Value::Op(op) => format!("<op {}>", lm_abi::op_name(op)),
+        Value::Op(op) => format!("<op {}>", op_text(op)),
         Value::Obj(r) => format!("#{}", r.slot),
         Value::Uninit => "<uninit>".to_string(),
     }

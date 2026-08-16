@@ -263,8 +263,8 @@ fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
     let bytes = read_bytes(&options.file)?;
     let host = Box::new(lm_host::CliHost::new(options.rand_seed));
     let mut world = World::new(&loaded, options.config, host);
-    // The external byte path checks the container once. The restore
-    // below reads the checked image and repeats nothing.
+    // The external byte path decodes and admits the container once.
+    // The restore below reads the admitted image and repeats nothing.
     let image = world
         .load_snapshot_bytes(&bytes)
         .map_err(|e| format!("error: the snapshot did not load: {e}\n"))?;
@@ -272,7 +272,7 @@ fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
         .new_child(0)
         .ok_or_else(|| "error: the world has no machine budget left\n".to_string())?;
     let root = world
-        .restore_image(0, target, image.world())
+        .restore_image(0, target, &image)
         .map_err(|e| format!("error: the restore failed: {e:?}\n"))?;
     for grant in &options.allow {
         world

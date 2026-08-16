@@ -1,28 +1,37 @@
 //! Machine-world snapshots: the image, the canonical codec, the
-//! writer, the loader, and restore (specification 17).
+//! writer, admission, and restore (specification 17 and
+//! `docs/specs/snapshot-image-admission.md`).
 //!
-//! An image is one machine world at one moment. The writer builds an
-//! image from trusted live state. The codec turns an image into
-//! canonical container bytes and back. Restore builds a complete
-//! independent world from an image.
+//! The module holds two host states, and the type system keeps them
+//! apart:
 //!
-//! Two paths reach an image, and they stay separate:
+//! - `Image` is editable snapshot data. It supports inspection,
+//!   editing, encoding, and diagnostic tools. It promises nothing
+//!   about references, machine state, or types;
+//! - `SnapshotImage` is the admitted, immutable form. Only admission
+//!   or trusted capture builds one, and only a `SnapshotImage`
+//!   restores.
 //!
-//! - the trusted path. `World::capture_snapshot` builds an image from
+//! Three paths reach an admitted image:
+//!
+//! - trusted capture. `World::capture_snapshot` builds one from
 //!   verified live state. It never decodes bytes;
-//! - the external path. `load_external` decodes untrusted bytes and
-//!   runs the whole checklist of specification 17.8 once. Later
-//!   restores read the checked image and repeat no structural check.
+//! - external loading. `load_external` decodes untrusted bytes, admits
+//!   the result against the exact verified module, and seals it;
+//! - re-admission. An editor turns a `SnapshotImage` back into an
+//!   `Image`, and the edited image passes admission again.
 //!
 //! Nothing in this module touches the filesystem, the clock, or the
 //! network. The command-line tool reads and writes `.lms` files.
 
+pub mod admit;
 pub mod codec;
 pub mod dump;
 pub mod restore;
 pub mod write;
 
-pub use codec::{load_external, seal};
+pub use admit::{admit, AdmissionBudget};
+pub use codec::load_external;
 pub use write::{CutError, CutReport};
 
 use crate::machine::VmId;
@@ -39,7 +48,12 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// section by kind. A later format may add a section kind, for example
 /// a delta section that names its base image by container hash,
 /// without moving any existing section.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 states the initialization of a local slot. A slot that
+/// holds no value spells the uninitialized marker, and version 1
+/// spelled it as a unit value. Admission reads the marker as the
+/// initialization fact, so it cannot admit a version-1 container.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The section kinds, in canonical order.
 ///
@@ -259,25 +273,65 @@ impl Image {
     }
 
     /// The state of the root machine.
-    pub fn root_state(&self) -> ImageState {
-        self.machines[0].state
+    ///
+    /// An editable image may hold no machine at all, so inspection of
+    /// an invalid image stays total.
+    pub fn root_state(&self) -> Option<ImageState> {
+        self.machines.first().map(|m| m.state)
     }
 }
 
-/// One verified image plus its canonical bytes.
+/// Where the bytes of one admitted image came from.
 ///
-/// The bytes and the decoded world always agree: the writer produces
-/// both, and the loader decodes the bytes it received. A restore reads
-/// `world` and never decodes again, which is what specification 17.8
-/// asks for.
+/// The origin supports diagnostics alone. It grants no trust and it
+/// selects no restore path: trusted capture and external loading
+/// produce the same guarantees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A consistent cut of a live verified world produced the bytes.
+    TrustedCapture,
+    /// The external loader decoded and admitted the bytes.
+    ExternalContainer,
+}
+
+/// What one admission proved the image against.
+///
+/// The container hash identifies bytes. It does not say which program
+/// admitted them, so the admitted state carries this record beside the
+/// bytes. Restore compares it with the running program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionIdentity {
+    /// The semantic hash of the program the image runs.
+    pub module_semantic: [u8; 32],
+    /// The verification hash of that exact verified module.
+    pub verification: [u8; 32],
+    pub format: u32,
+    pub abi_version: u32,
+    pub compiler_abi: u32,
+    pub verifier_version: u32,
+}
+
+/// One admitted image plus its canonical bytes.
+///
+/// The fields stay private, so no host code can edit an admitted
+/// image. `into_image` converts back into editable data, and that data
+/// needs admission again before it restores.
+///
+/// The bytes and the admitted world always agree: capture produces
+/// both, and the loader admits the bytes it received. A restore reads
+/// `world` and repeats no structural check, which is what
+/// specification 17.8 asks for.
 #[derive(Debug, Clone)]
 pub struct SnapshotImage {
     bytes: std::sync::Arc<Vec<u8>>,
     world: std::sync::Arc<Image>,
     /// The container hash of the bytes.
     hash: [u8; 32],
-    /// True when the external loader checked these bytes.
-    externally_checked: bool,
+    /// The program and ABI identity this image passed admission
+    /// against.
+    identity: AdmissionIdentity,
+    /// Where the bytes came from. This is provenance, not trust.
+    origin: Origin,
 }
 
 impl SnapshotImage {
@@ -286,14 +340,23 @@ impl SnapshotImage {
         &self.bytes
     }
 
-    /// The decoded machine world.
+    /// The admitted machine world.
     pub fn world(&self) -> &Image {
         &self.world
     }
 
-    /// A shared handle to the decoded machine world.
+    /// A shared handle to the admitted machine world.
     pub fn world_arc(&self) -> std::sync::Arc<Image> {
         self.world.clone()
+    }
+
+    /// One editable copy of the admitted world.
+    ///
+    /// An arbitrary edit destroys every admitted property, so the
+    /// result is ordinary `Image` data. It needs admission again
+    /// before it restores.
+    pub fn into_image(&self) -> Image {
+        (*self.world).clone()
     }
 
     /// The container hash.
@@ -301,9 +364,15 @@ impl SnapshotImage {
         self.hash
     }
 
-    /// True when the bytes came through the external loader.
-    pub fn externally_checked(&self) -> bool {
-        self.externally_checked
+    /// The program and ABI identity this image passed admission
+    /// against.
+    pub fn identity(&self) -> AdmissionIdentity {
+        self.identity
+    }
+
+    /// Where these bytes came from. The value is provenance alone.
+    pub fn origin(&self) -> Origin {
+        self.origin
     }
 
     /// The semantic type digest of the root machine result type.
@@ -356,6 +425,30 @@ pub enum RestoreFail {
     LimitExceeded,
 }
 
+/// The stage that rejected one container.
+///
+/// Decoding protects the host from the byte stream. Admission proves
+/// resolved structure and accurate live types. The two stages report
+/// separately, because an editor can produce an admission failure with
+/// no container behind it (specification section 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageStage {
+    /// The container bytes are malformed or excessive.
+    Decode,
+    /// The image structure does not resolve, or a live type is not
+    /// accurate.
+    Admission,
+}
+
+impl ImageStage {
+    pub fn name(self) -> &'static str {
+        match self {
+            ImageStage::Decode => "decode",
+            ImageStage::Admission => "admission",
+        }
+    }
+}
+
 /// Why the loader rejected untrusted bytes.
 ///
 /// The reason is stable, so a corruption test names the rule it broke.
@@ -393,6 +486,15 @@ pub enum ImageReason {
     Order,
     /// Bytes remain after the last section.
     Trailing,
+    /// Admission cannot derive a type the image needs, or a derived
+    /// type does not match the target it names.
+    ///
+    /// `Layout` names a value that carries the wrong shape for a type
+    /// admission derived. This reason names the other half: the type
+    /// itself has no evidence.
+    Type,
+    /// One aggregate admission budget ran out.
+    Budget,
 }
 
 impl ImageReason {
@@ -412,20 +514,34 @@ impl ImageReason {
             ImageReason::Mailbox => "mailbox",
             ImageReason::Order => "order",
             ImageReason::Trailing => "trailing bytes",
+            ImageReason::Type => "type",
+            ImageReason::Budget => "budget",
         }
     }
 }
 
-/// One load rejection: the rule and a readable detail.
+/// One load rejection: the stage, the rule, and a readable detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageError {
+    pub stage: ImageStage,
     pub reason: ImageReason,
     pub detail: String,
 }
 
 impl ImageError {
+    /// One decode rejection.
     pub fn new(reason: ImageReason, detail: impl Into<String>) -> ImageError {
         ImageError {
+            stage: ImageStage::Decode,
+            reason,
+            detail: detail.into(),
+        }
+    }
+
+    /// One admission rejection.
+    pub fn admission(reason: ImageReason, detail: impl Into<String>) -> ImageError {
+        ImageError {
+            stage: ImageStage::Admission,
             reason,
             detail: detail.into(),
         }
@@ -434,7 +550,13 @@ impl ImageError {
 
 impl std::fmt::Display for ImageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.reason.name(), self.detail)
+        write!(
+            f,
+            "{} {}: {}",
+            self.stage.name(),
+            self.reason.name(),
+            self.detail
+        )
     }
 }
 
@@ -452,6 +574,10 @@ pub struct LoadLimits {
     pub max_stack_values: u32,
     pub max_mailbox: u32,
     pub max_string_bytes: u32,
+    /// The largest code manifest or literal table one container may
+    /// name. The decoder reads no program, so this limit replaces the
+    /// table lengths of the loaded module.
+    pub max_code_slots: u32,
 }
 
 impl Default for LoadLimits {
@@ -464,6 +590,7 @@ impl Default for LoadLimits {
             max_stack_values: 1 << 24,
             max_mailbox: 1 << 20,
             max_string_bytes: 1 << 26,
+            max_code_slots: 1 << 20,
         }
     }
 }
