@@ -451,6 +451,26 @@ impl<'m> World<'m> {
         ))
     }
 
+    /// The number of policy entries the table of one machine holds.
+    ///
+    /// A restored machine starts default-deny, so the count states
+    /// exactly what restore granted.
+    pub fn table_entry_count(&self, vm: VmId) -> usize {
+        let table = &self.machines[vm as usize].table;
+        table.exact.iter().flatten().count() + table.group.iter().flatten().count()
+    }
+
+    /// True when the table of one machine passes one group by name.
+    pub fn table_passes_group(&self, vm: VmId, name: &str) -> bool {
+        let Some(group) = lm_abi::group_by_name(name) else {
+            return false;
+        };
+        matches!(
+            self.machines[vm as usize].table.group[group as usize],
+            Some(Action::Pass)
+        )
+    }
+
     /// The pending operation slot of one machine, for tools.
     pub fn pending_op_of(&self, vm: VmId) -> Option<u32> {
         self.pending_op(vm)
