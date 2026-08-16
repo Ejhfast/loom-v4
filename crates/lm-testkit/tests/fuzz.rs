@@ -197,12 +197,25 @@ fn mutated_snapshot_containers_never_panic_the_loader() {
         let (loaded, base) = snapshot_seed();
         let limits = lm_vm::snapshot::LoadLimits::default();
         let mut accepted = 0usize;
+        let mut sealed = 0usize;
         for _round in 0..ROUNDS * 4 {
             let mut bytes = base.clone();
             for _ in 0..=prng.below(3) {
                 mutate(&mut bytes, &mut prng);
             }
             assert!(bytes.len() <= MAX_CASE_BYTES, "a mutation grew the input");
+            // The container hash is an unkeyed integrity check, so the
+            // real attacker holds a hash-valid crafted image. Reseal
+            // the body, so the structural loader is exercised instead
+            // of the hash gate catching almost every mutant. A
+            // truncated mutant that lost its hash region cannot be
+            // resealed, and it tests the truncation path.
+            if bytes.len() >= 32 {
+                let end = bytes.len() - 32;
+                let hash = lm_vm::snapshot::codec::container_hash(&bytes[..end]);
+                bytes[end..].copy_from_slice(&hash);
+                sealed += 1;
+            }
             // A rejection is fine. An acceptance must restore into a
             // world without a panic, and it must encode back to
             // exactly the bytes it came from.
@@ -225,9 +238,11 @@ fn mutated_snapshot_containers_never_panic_the_loader() {
                 }
             }
         }
-        // The mutation batch damages the container hash almost every
-        // time, so a low acceptance count is expected. The rule is the
-        // absence of a panic, not the count.
+        // The reseal makes every non-truncated mutant reach the
+        // structural loader. The rule is the absence of a panic, not
+        // the counts; the counters state that the resealed path is not
+        // empty and is not trivially all-accept.
+        assert!(sealed > ROUNDS, "most mutants keep a hash region");
         let _ = accepted;
     });
 }

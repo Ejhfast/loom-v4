@@ -1575,6 +1575,16 @@ fn check_machine(m: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
             at("the accepted queue is longer than the mailbox limit"),
         );
     }
+    // Only a proc holds an accepted message. A non-proc machine keeps
+    // a closed empty mailbox, so a queued message on one has no
+    // mailbox type to prove against, and it would sit unchecked.
+    // Reject it instead of trusting it.
+    if !m.is_proc && !m.mailbox.queue.is_empty() {
+        return err(
+            ImageReason::Mailbox,
+            at("a machine that is not a proc holds an accepted message"),
+        );
+    }
     if m.mailbox.delivered > m.mailbox.accepted {
         return err(
             ImageReason::Mailbox,
@@ -1605,8 +1615,9 @@ fn check_machine(m: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
 /// string where the code expects an integer would reach an
 /// interpreter path no verified program can reach, so the loader
 /// proves the shape of every value that has a declared type: every
-/// local slot, every instance field, every closure capture, every
-/// argument of a pending fixed operation, and the elements of every
+/// local slot, every operand, every instance field, every closure
+/// capture, every argument of a pending perform, every accepted
+/// message, the stored terminal value, and the elements of every
 /// collection those positions reach.
 ///
 /// The walk is iterative and visits each object once, so a deep image
@@ -1635,56 +1646,52 @@ fn check_types(machine: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
             seed(*value, *ty, &mut work)?;
         }
     }
-    // Every argument of a pending fixed operation names its declared
-    // parameter type. A machine control operation carries a generic
-    // schema, so the manifest names no type for it.
-    if let Some(pending) = &machine.pending {
-        let def = lm_abi::op(pending.op);
-        if def.kind == lm_abi::OpKind::Fixed {
-            if def.params.len() != pending.args.len() {
-                return err(
-                    ImageReason::State,
-                    format!("machine {vm}: the pending request holds the wrong argument count"),
-                );
-            }
-            for (value, want) in pending.args.iter().zip(def.params.iter()) {
-                let ok = match (value, want) {
-                    (Value::Unit | Value::Uninit, _) => true,
-                    (Value::Int(_), lm_abi::AbiType::Int) => true,
-                    (Value::Obj(r), lm_abi::AbiType::Str) => {
-                        matches!(machine.objects[r.slot as usize].object, Object::Str(_))
-                    }
-                    _ => false,
-                };
-                if !ok {
-                    return err(
-                        ImageReason::Layout,
-                        format!("machine {vm}: a pending argument has the wrong shape"),
-                    );
-                }
-            }
-        }
-    }
     // Every operand of every stopped frame names the type the
     // verifier proved at that program point.
     check_operands(machine, ctx, vm, &mut work)?;
+    // Every argument of a pending perform names the type the verifier
+    // proved for it. A perform pops its arguments off the operand
+    // stack into the pending record, so the argument types are the top
+    // of the stack the verifier proved just before the perform, at the
+    // program counter the top frame stopped at.
+    //
+    // This rule holds for every operation kind. A machine control
+    // operation carries no manifest parameter type, but its operands
+    // are typed exactly like every other operand, so the rule reads
+    // them the same way. A forged asked machine on a control operation
+    // would otherwise hand the restorer a wrong-typed argument through
+    // the dispatch path.
+    check_pending_args(machine, ctx, vm, &mut work)?;
     // A stored terminal value names the declared result type of its
     // machine. A terminal machine keeps no frame, so the recorded
     // digest is the only record of that type.
-    if let (Some(ImageTerminal::Done(value)), Some(digest)) =
-        (&machine.terminal, &machine.result_type)
-    {
-        match ctx.type_of_digest(digest) {
-            Some(ty) => check_shape(machine, ctx, vm, *value, ty, &mut work).map_err(|e| {
-                ImageError::new(
-                    e.reason,
-                    format!("machine {vm}: the terminal value has the wrong shape"),
-                )
-            })?,
-            None => {
+    //
+    // A `Done` value that is not the unit is proof-bearing, so it must
+    // carry a result type. A forged image with no result type would
+    // otherwise skip this proof and hand a wrong-typed value to a
+    // consumer that reads it at the declared result type. Unit alone
+    // needs no type, because unit passes at every type.
+    if let Some(ImageTerminal::Done(value)) = &machine.terminal {
+        match (&machine.result_type, value) {
+            (Some(digest), _) => match ctx.type_of_digest(digest) {
+                Some(ty) => check_shape(machine, ctx, vm, *value, ty, &mut work).map_err(|e| {
+                    ImageError::new(
+                        e.reason,
+                        format!("machine {vm}: the terminal value has the wrong shape"),
+                    )
+                })?,
+                None => {
+                    return err(
+                        ImageReason::Code,
+                        format!("machine {vm}: the result type names no type of this program"),
+                    )
+                }
+            },
+            (None, Value::Unit) => {}
+            (None, _) => {
                 return err(
-                    ImageReason::Code,
-                    format!("machine {vm}: the result type names no type of this program"),
+                    ImageReason::State,
+                    format!("machine {vm}: a terminal value carries no result type to prove"),
                 )
             }
         }
@@ -1853,6 +1860,91 @@ fn check_operands(
                 work,
             )?;
         }
+    }
+    Ok(())
+}
+
+/// Prove the argument types of one pending perform.
+///
+/// A perform pops its arguments off the operand stack into the pending
+/// record, so the top frame stopped inside the perform. The operand
+/// stack the verifier proved just before the perform is the retained
+/// operands at the bottom, which `check_operands` already proved, and
+/// the popped arguments at the top. This rule proves the top.
+///
+/// The count is load-bearing: the number of operands the perform
+/// consumed is fixed by the operation, so a stack that is not the
+/// retained operands plus the recorded arguments does not agree with
+/// the proved program point. The rule reads no manifest parameter
+/// type, so it holds for a machine control operation as well as a
+/// fixed one.
+fn check_pending_args(
+    machine: &ImageMachine,
+    ctx: &Ctx<'_>,
+    vm: u32,
+    work: &mut Vec<(u32, u32)>,
+) -> Read<()> {
+    let Some(pending) = &machine.pending else {
+        return Ok(());
+    };
+    let Some(frames) = ctx.frame_types.as_ref() else {
+        return err(
+            ImageReason::Code,
+            "the program has no verified frame-type reader",
+        );
+    };
+    // A machine with a pending request holds the frame that performed.
+    let Some(top) = machine.frames.last() else {
+        return err(
+            ImageReason::State,
+            format!("machine {vm}: a pending request holds no frame"),
+        );
+    };
+    // The perform stopped inside the instruction before the counter.
+    if top.ip == 0 {
+        return err(
+            ImageReason::Layout,
+            format!("machine {vm}: the pending frame stopped before its first instruction"),
+        );
+    }
+    let Some(types) = frames.operands_at(top.func, top.block, top.ip - 1) else {
+        return err(
+            ImageReason::Layout,
+            format!("machine {vm}: the pending frame names no reachable program point"),
+        );
+    };
+    // The retained operands are the region the top frame still owns.
+    let retained = machine
+        .operands
+        .len()
+        .checked_sub(top.base_operand as usize)
+        .ok_or_else(|| {
+            ImageError::new(
+                ImageReason::Layout,
+                format!("machine {vm}: the pending frame owns no operand region"),
+            )
+        })?;
+    let argc = pending.args.len();
+    // The proved stack is exactly the retained operands plus the
+    // recorded arguments.
+    if types.len() != retained + argc {
+        return err(
+            ImageReason::State,
+            format!(
+                "machine {vm}: the pending request holds {argc} arguments and the program \
+                 point proves {}",
+                types.len().saturating_sub(retained)
+            ),
+        );
+    }
+    for (offset, ty) in types.iter().skip(retained).enumerate() {
+        let Some(ty) = ty else { continue };
+        check_shape(machine, ctx, vm, pending.args[offset], *ty, work).map_err(|e| {
+            ImageError::new(
+                e.reason,
+                format!("machine {vm}: a pending argument has the wrong shape"),
+            )
+        })?;
     }
     Ok(())
 }

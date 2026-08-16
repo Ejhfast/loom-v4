@@ -263,16 +263,33 @@ declared type:
   cannot disagree;
 - every instance field, against the class layout;
 - every closure capture, against the declared capture type;
-- every argument of a pending fixed operation, against the manifest;
+- every argument of a pending perform, against the operand types the
+  verifier proved just before the perform. The rule reads no manifest
+  parameter type, so it covers a machine control operation as well as
+  a fixed one;
 - every accepted message, against the mailbox type the proc class
-  fixes;
+  fixes. A non-proc machine holds no accepted message, so a queued
+  message on one rejects rather than sitting unchecked;
 - the stored terminal value, against the recorded result type of its
-  machine;
+  machine. A `Done` value that is not the unit must carry a result
+  type, so an image that stripped the type cannot skip the proof;
 - the elements of every collection those positions reach.
 
 `Unit` and the uninitialized marker pass at every type, because an
 unwritten local slot holds unit and an unassigned field holds the
 marker.
+
+The pending-argument rule reads the operand types, not the manifest.
+The first version checked a pending argument against the manifest
+parameter type, which exists for a fixed operation alone. A machine
+control operation carries a generic schema, so that rule left the
+arguments of a machine captured `asked` on a control operation
+unchecked, and the restorer reads them through the dispatch path. The
+rule now reads the operand types the verifier proved just before the
+perform, for every operation kind, so a forged control argument
+cannot slip through. This is the contract: a pending argument is
+proved against the verifier's operand type at the perform, and the
+argument count must equal the count the proved program point holds.
 
 ### The recorded result type is a machine field
 
@@ -365,18 +382,20 @@ other machine control operation stays outside `as_call`.
   failure-atomicity directions, the one-time external check, the five
   captured states, the byte limit, the world gate, and the
   deterministic dump diff, and the typed cast.
-- `crates/lm-testkit/tests/week9_image.rs`, 22 cases: the container
+- `crates/lm-testkit/tests/week9_image.rs`, 25 cases: the container
   frame, the section table, the header, the code manifest, canonical
   integers, the canonical heap order, unreachable objects, handle
   generations, machine references, the state rules, the layout rules,
   the mailbox rules, the literal rule, the declared-type rules for
-  locals, fields, operands, messages, and terminal values, a blanket
-  single-bit sweep over the whole container, a truncation sweep, and
-  the deep-graph case on a 256 KiB stack.
-- `crates/lm-testkit/tests/fuzz.rs`, one snapshot surface: four
-  hundred mutation rounds against a real container. An accepted mutant
-  must encode back to exactly the bytes it came from and must restore
-  without a panic.
+  locals, fields, operands, pending arguments, messages, and terminal
+  values, the terminal value with no result type, the non-proc queue,
+  a blanket single-bit sweep over the whole container, a truncation
+  sweep, and the deep-graph case on a 256 KiB stack.
+- `crates/lm-testkit/tests/fuzz.rs`, one snapshot surface: sixteen
+  hundred mutation rounds against a real container. Every non-truncated
+  mutant is resealed, so it reaches the structural loader instead of
+  the container-hash gate. An accepted mutant must encode back to
+  exactly the bytes it came from and must restore without a panic.
 - `tests/fuzz-regressions/`, two container seeds: one valid machine
   world and one whose heap is not in canonical traversal order.
 - `crates/lm-testkit/tests/bench_smoke.rs`, three snapshot entries.
@@ -389,7 +408,8 @@ other machine control operation stays outside `as_call`.
 - `tests/ui/`, 5 new pairs for the row rule, the two arity rules, the
   restore argument rule, and the `Snapshot` type arity.
 
-Test count: 719 before, 777 after.
+Test count: 719 before, 780 after. The three added after the blind
+security review close the loader type-proof gaps F1 and F2.
 
 ## Measurements
 
@@ -460,11 +480,20 @@ which text moves.
 
 `Machine::result_ty` comes from the entry frame at load time. A
 machine that never loaded a frame, for example a captured `EmptyVm`,
-records no result type, and the loader checks nothing for it. It also
-stores no terminal value, so nothing is unchecked in practice. The
-question is whether the field should be part of `VmState` instead of
-`Machine`, which would make it serializable by construction rather
-than by an explicit record.
+records no result type. Such a machine stores no terminal value
+either, because a machine reaches a terminal only by running a frame.
+
+The loader does not take that pairing on trust: a forged image is
+exactly what `load_external` defends against, so a `Done` machine
+whose stored value is not the unit must carry a result type, and the
+loader rejects the image when it is absent. Without the rule a forged
+image could strip the result type and hand a wrong-typed terminal
+value to a consumer that reads it at the declared result type. The
+unit value alone needs no type, because it passes at every type.
+
+The open part is smaller: whether the field should live in `VmState`
+instead of `Machine`, which would make it serializable by
+construction rather than by an explicit record.
 
 ### The receiver-heap fault attribution stays open
 
@@ -496,6 +525,50 @@ references inside an error value.
 
 The week-7 question stands: `OpDef.snapshot` is manifest content, and
 `manifest_digest` does not cover it.
+
+## The blind security review
+
+A blind reviewer read the whole loader. The byte layer held: no panic,
+no unbounded allocation, no hang, and no memory-unsafety across a
+five-hundred-thousand-round reseal fuzzer; the decode is iterative;
+every length and count is checked before an allocation; and the closed
+world holds. The reviewer found three defects in the type proofs, all
+one pattern: a type check keyed on a record that a forged image can
+leave absent.
+
+- **F1, the serious one.** The terminal type proof fired only when the
+  machine recorded a result type. A forged `Done` machine with the
+  result type stripped and an arbitrary value skipped the proof, and
+  the wrong-typed value reached a consumer that reads it at the
+  declared result type. The fix: a `Done` value that is not the unit
+  must carry a result type, and the loader rejects the image when it
+  is absent. `a_terminal_value_without_a_result_type_rejects` reproduces
+  the stripped image and asserts rejection.
+- **F2a.** `mailbox_type` returns `None` for a non-proc machine, so a
+  queue on a non-proc sat unchecked. A restored non-proc gets no birth
+  grant and cannot receive, so the queue is inert; the loader now
+  rejects the image anyway rather than trusting it.
+  `a_non_proc_machine_with_a_queued_message_rejects` states it.
+- **F2b.** Pending arguments were checked against the manifest, which
+  names types for a fixed operation alone, so a machine captured
+  `asked` on a machine control operation carried unchecked arguments.
+  The rule now reads the operand types the verifier proved just before
+  the perform, for every operation kind. The decision above states the
+  contract.
+  `a_pending_argument_of_the_wrong_shape_or_count_rejects` states it.
+- **F3, test methodology.** The committed loader fuzzer mutated the
+  bytes but did not recompute the container hash, so almost every
+  mutant died at the hash gate and the structural loader saw
+  near-zero coverage. The container hash is an unkeyed integrity check,
+  so the real attacker holds a hash-valid crafted image. The fuzzer now
+  reseals every non-truncated mutant, and a probe confirmed the
+  rejections spread across the whole structural surface instead of the
+  hash gate. It stays deterministic and seeded.
+
+The three type fixes share one shape: a value that carries a declared
+type is proved whether or not the record that names the type is
+present. Where the record is absent and the value is not the trivial
+one, the loader rejects.
 
 ## Deferred work
 

@@ -751,3 +751,152 @@ go()
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::Code);
 }
+
+/// A terminal `Done` value that is not the unit must carry a result
+/// type. A forged image with the result type stripped would otherwise
+/// skip the terminal type proof and hand a wrong-typed value to a
+/// consumer that reads it at the declared result type.
+///
+/// The header names the root result type as well, so the strip clears
+/// both: the header agreement passes, and the terminal rule fires
+/// alone.
+#[test]
+fn a_terminal_value_without_a_result_type_rejects() {
+    let source = "\
+def go(): Int with Vm
+  vm = sys.vm.Vm().from_object(do ||: String
+    \"answer\"
+  end, args: ())
+  case vm.run()
+  in Done(_)  then 0
+  in Fault(_) then 0
+  end
+  case vm.snapshot()
+  in Ok(_)  then 1
+  in Err(_) then 0 - 1
+  end
+end
+
+go()
+";
+    let loaded = program(source);
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the grant names a target");
+    lm_proc::run_world(&mut world);
+    let bytes = world
+        .last_snapshot()
+        .expect("the program captured a world")
+        .bytes()
+        .to_vec();
+    let image = accept(&loaded, &bytes);
+    assert!(matches!(
+        image.machines[0].terminal,
+        Some(lm_vm::snapshot::ImageTerminal::Done(lm_value::Value::Obj(
+            _
+        )))
+    ));
+    let mut broken = image.clone();
+    broken.machines[0].result_type = None;
+    broken.result_type = [0u8; 32];
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::State);
+}
+
+/// A machine that is not a proc carries no accepted message. A forged
+/// image that put a queue on a non-proc machine would leave the queue
+/// values unchecked, because a non-proc has no mailbox type to prove
+/// against. The loader rejects it instead.
+#[test]
+fn a_non_proc_machine_with_a_queued_message_rejects() {
+    let (loaded, bytes) = asked_tree();
+    let image = accept(&loaded, &bytes);
+    // The held root is no proc. Move the worker's accepted message
+    // onto it and raise its mailbox limit so only the proc rule fires.
+    assert!(!image.machines[0].is_proc);
+    let message = image.machines[1].mailbox.queue[0];
+    let mut broken = image.clone();
+    broken.machines[0].mailbox.limit = 1;
+    broken.machines[0].mailbox.queue.push(message);
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Mailbox);
+}
+
+/// A machine captured `asked` carries the arguments the perform
+/// popped, and the restorer reads them again when it answers or
+/// dispatches. The loader proves those arguments against the type the
+/// verifier proved for the perform.
+///
+/// The rule reads no manifest parameter type, so it holds for a
+/// machine control operation exactly as it holds for the fixed
+/// operation this case captures. A wrong shape and a wrong count both
+/// reject.
+#[test]
+fn a_pending_argument_of_the_wrong_shape_or_count_rejects() {
+    // The held machine stops `asked` on `Rand.Int`, whose two integer
+    // arguments the perform proved on the operand stack.
+    let source = "\
+def go(): Int with Vm, Rand
+  held = sys.vm.Vm().from_object(do ||: Int with Rand.Int
+    sys.rand.int(0, 10)
+  end, args: ())
+  case held.drive()
+  in Asked(_)  then 0
+  in Done(_)   then 0
+  in Fault(_)  then 0
+  end
+  case held.snapshot()
+  in Ok(_)  then 1
+  in Err(_) then 0 - 1
+  end
+end
+
+go()
+";
+    let loaded = program(source);
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    for grant in ["Vm", "Rand"] {
+        world.allow(grant).expect("the grant names a target");
+    }
+    lm_proc::run_world(&mut world);
+    let bytes = world
+        .last_snapshot()
+        .expect("the program captured a world")
+        .bytes()
+        .to_vec();
+    let image = accept(&loaded, &bytes);
+    let held = image
+        .machines
+        .iter()
+        .position(|m| {
+            m.state == lm_vm::snapshot::ImageState::Asked
+                && m.pending
+                    .as_ref()
+                    .is_some_and(|p| p.op == lm_abi::OP_RAND_INT)
+        })
+        .expect("one machine is asked on Rand.Int");
+    assert_eq!(image.machines[held].pending.as_ref().unwrap().args.len(), 2);
+    // A boolean where the point proves an integer.
+    let mut broken = image.clone();
+    broken.machines[held].pending.as_mut().unwrap().args[0] = lm_value::Value::Bool(true);
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    // One argument too many is a count mismatch against the proved
+    // program point.
+    let mut broken = image.clone();
+    broken.machines[held]
+        .pending
+        .as_mut()
+        .unwrap()
+        .args
+        .push(lm_value::Value::Int(1));
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::State);
+}
