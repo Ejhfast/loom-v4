@@ -153,7 +153,7 @@ pub struct LoadedModule {
     /// semantic identity, never by a numeric slot of one linked
     /// program. The identity pass is expensive, so it runs once, on
     /// the first digest of the process.
-    identity: std::cell::OnceCell<Result<lm_bytecode::identity::ModuleIdentity, String>>,
+    identity: std::sync::OnceLock<Result<lm_bytecode::identity::ModuleIdentity, String>>,
 }
 
 impl LoadedModule {
@@ -386,7 +386,7 @@ fn admit(module: Module) -> LoadedModule {
         module,
         dispatch,
         core,
-        identity: std::cell::OnceCell::new(),
+        identity: std::sync::OnceLock::new(),
     }
 }
 

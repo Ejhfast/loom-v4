@@ -234,23 +234,28 @@ fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport
 /// Load and run one program with the given policy grants.
 fn run_program(options: Options) -> Result<ExitCode, String> {
     let loaded = load_program(&options.file)?;
-    let host = Box::new(lm_host::CliHost::new(options.rand_seed));
-    let mut world = World::new(&loaded, options.config, host);
-    for grant in &options.allow {
-        world
-            .allow(grant)
-            .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
-    }
-    let outcome = lm_proc::run_world(&mut world);
-    let text = world.show_outcome(&outcome);
+    // The whole machine world lives on one worker thread with a
+    // bounded stack, and only the rendered outcome comes back. That
+    // is the thread-backed baseline of specification 22.12.
+    let seed = options.rand_seed;
+    let grants: Vec<&str> = options.allow.iter().map(|g| g.as_str()).collect();
+    let result = lm_proc::run_on_worker(
+        &loaded,
+        options.config,
+        &grants,
+        Box::new(move || Box::new(lm_host::CliHost::new(seed))),
+    )
+    .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
+    let (faulted, text) = (result.faulted, result.text);
     if options.show_result {
         println!("{text}");
-    } else if matches!(outcome, lm_vm::Outcome::Fault(_)) {
+    } else if faulted {
         eprintln!("{text}");
     }
-    match outcome {
-        lm_vm::Outcome::Done(_) => Ok(ExitCode::SUCCESS),
-        lm_vm::Outcome::Fault(_) => Ok(ExitCode::from(1)),
+    if faulted {
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
     }
 }
 

@@ -20,6 +20,12 @@ pub use barrier::{Barrier, BarrierError, BarrierReport};
 
 use lm_vm::{Outcome, ProcStop, RootEvent, VmId, World};
 
+/// The stack of one scheduler worker thread.
+///
+/// The project precedent is 8 MiB, and the interpreter never grows
+/// the Rust stack with guest call depth, so the bound is generous.
+pub const WORKER_STACK: usize = 8 << 20;
+
 /// How the scheduler picks the next machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchedulerMode {
@@ -158,6 +164,57 @@ impl Scheduler {
 /// scheduler.
 pub fn run_world(world: &mut World<'_>) -> Outcome {
     Scheduler::default().run(world)
+}
+
+/// Run one program on a worker thread with a bounded stack.
+///
+/// This is the thread-backed baseline of specification 22.12. Guest
+/// execution leaves the host thread: the whole machine world is
+/// built, driven, and dropped inside one worker with an 8 MiB stack,
+/// and only the rendered outcome comes back. Nothing of the world
+/// crosses the boundary, so no guest reference ever leaves it.
+///
+/// The world is not shared, so this mode changes no semantics. One VM
+/// still never executes concurrently, because one worker owns the
+/// whole world.
+pub fn run_on_worker(
+    loaded: &lm_vm::LoadedModule,
+    config: lm_vm::VmConfig,
+    grants: &[&str],
+    host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
+) -> Result<WorkerOutcome, String> {
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .stack_size(WORKER_STACK)
+            .spawn_scoped(scope, move || {
+                let mut world = World::new(loaded, config, host());
+                for grant in grants {
+                    world.allow(grant)?;
+                }
+                let outcome = Scheduler::default().run(&mut world);
+                Ok(WorkerOutcome {
+                    faulted: matches!(outcome, Outcome::Fault(_)),
+                    text: world.show_outcome(&outcome),
+                })
+            })
+            .map_err(|e| format!("the worker thread did not start: {e}"))?;
+        worker
+            .join()
+            .map_err(|_| "the worker thread panicked".to_string())?
+    })
+}
+
+/// What one worker run reports back.
+///
+/// A terminal value belongs to the heap that produced it, so the
+/// worker renders it and returns text. Nothing of the machine world
+/// crosses the thread boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerOutcome {
+    /// True when the root machine faulted.
+    pub faulted: bool,
+    /// The stable outcome text, for example `Done(42)`.
+    pub text: String,
 }
 
 /// Drive one proc slice at a time until nothing is runnable.
