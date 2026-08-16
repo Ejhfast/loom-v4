@@ -18,4 +18,5 @@ lm-bytecode = { path = "../lm-bytecode" }
 lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }
 lm-vm = { path = "../lm-vm" }
+lm-proc = { path = "../lm-proc" }
 lm-host = { path = "../lm-host" }

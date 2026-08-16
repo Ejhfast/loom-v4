@@ -1,0 +1,9 @@
+[package]
+name = "lm-proc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lm-abi = { path = "../lm-abi" }
+lm-vm = { path = "../lm-vm" }

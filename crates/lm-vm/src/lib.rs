@@ -16,9 +16,9 @@ mod resource;
 mod world;
 
 pub use host::{CoreCtor, Host, HostArg, HostStart, HostValue, NullHost, RecordingHost};
-pub use machine::{FaultRec, MachineState, VmId, VmState};
+pub use machine::{Block, FaultRec, MachineState, Mailbox, Ownership, VmId, VmState};
 pub use resource::{ResourceKind, ResourceRecord, ResourceRegistry, ResourceState};
-pub use world::{RootEvent, StopMode, World};
+pub use world::{MailboxMetrics, ProcStop, RootEvent, StopMode, TraceEvent, World};
 
 /// The fault codes are manifest content, and the heap and the graph
 /// engine name them too. They live in `lm-abi`.
@@ -59,6 +59,9 @@ pub struct VmConfig {
     /// The largest number of live host resources this machine may
     /// register at one time.
     pub max_resources: u32,
+    /// The largest number of accepted messages one proc mailbox may
+    /// hold. A send past the bound blocks the sender.
+    pub mailbox_limit: u32,
 }
 
 impl Default for VmConfig {
@@ -71,6 +74,7 @@ impl Default for VmConfig {
             graph: GraphLimits::default(),
             max_children: 1_024,
             max_resources: 1_024,
+            mailbox_limit: 64,
         }
     }
 }

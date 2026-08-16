@@ -324,6 +324,25 @@ pub enum HExprKind {
         field: u32,
     },
     /// Closure creation. Captures are evaluated in the outer frame.
+    /// `Class.spawn(args...)`, the sugar of specification 18.3.
+    ///
+    /// Lowering expands it into what a user would write: the
+    /// construction function of the proc class, the `on_spawn`
+    /// function, the typed argument tuple, and one `Proc.Spawn`
+    /// perform.
+    Spawn {
+        /// The proc class. Lowering resolves its construction
+        /// function index.
+        class: u32,
+        /// The `on_spawn` function of the proc class.
+        body: u32,
+        /// The function type of the construction function.
+        ctor_ty: TypeId,
+        /// The function type of the `on_spawn` function.
+        body_ty: TypeId,
+        /// The checked constructor arguments.
+        args: Vec<HExpr>,
+    },
     MakeClosure {
         func: u32,
         captures: Vec<HExpr>,

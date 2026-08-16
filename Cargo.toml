@@ -11,6 +11,7 @@ members = [
     "crates/lm-heap",
     "crates/lm-graph",
     "crates/lm-vm",
+    "crates/lm-proc",
     "crates/lm-compiler",
     "crates/lm-cli",
     "crates/lm-host",

@@ -91,6 +91,7 @@ dependencies = [
  "lm-compiler",
  "lm-hir",
  "lm-host",
+ "lm-proc",
  "lm-source",
  "lm-types",
  "lm-value",
@@ -147,6 +148,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lm-proc"
+version = "0.1.0"
+dependencies = [
+ "lm-abi",
+ "lm-vm",
+]
+
+[[package]]
 name = "lm-source"
 version = "0.1.0"
 
@@ -160,6 +169,7 @@ dependencies = [
  "lm-graph",
  "lm-heap",
  "lm-hir",
+ "lm-proc",
  "lm-source",
  "lm-types",
  "lm-value",

@@ -24,8 +24,75 @@ pub enum MachineState {
     Running,
     Asked,
     Waiting,
+    /// A pending proc operation waits on another machine of this
+    /// world: a message, a queue slot, or a terminal result. The
+    /// block is machine state, not a host attachment, because the
+    /// machine it waits on is part of the same machine world.
+    Blocked,
     Done,
     Faulted,
+}
+
+/// Why one machine is blocked on another machine of this world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Block {
+    /// A proc waits for its own mailbox to hold a message or to close.
+    Receive,
+    /// A sender waits for one free slot in the target mailbox.
+    Send { target: VmId, generation: u32 },
+    /// A holder waits for the terminal result of one proc.
+    Done { target: VmId, generation: u32 },
+}
+
+/// Which side owns the execution of one machine (specification 18.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ownership {
+    /// The guest holder drives the machine through `Vm.*`.
+    Holder,
+    /// The scheduler drives the machine. Control and inspection
+    /// through the dormant `Vm` handle fault until `pause()` returns
+    /// ownership.
+    Scheduler,
+}
+
+/// One bounded FIFO mailbox.
+///
+/// The accepted messages live in the receiving machine's own heap, so
+/// they are ordinary machine state: a snapshot copies them with the
+/// heap, and no scheduler record holds a guest reference.
+#[derive(Debug)]
+pub struct Mailbox {
+    /// The largest number of accepted messages the queue may hold.
+    pub limit: u32,
+    /// The accepted messages, in host acceptance order.
+    pub queue: std::collections::VecDeque<Value>,
+    /// True when the mailbox accepts no further message. Queued
+    /// messages still drain, and `Closed` arrives after the drain.
+    pub closed: bool,
+    /// True when a barrier froze acceptance at one cut marker.
+    pub frozen: bool,
+    /// The number of messages the mailbox accepted, for metrics.
+    pub accepted: u64,
+    /// The number of messages `receive` delivered, for metrics.
+    pub delivered: u64,
+}
+
+impl Mailbox {
+    pub fn new(limit: u32) -> Mailbox {
+        Mailbox {
+            limit,
+            queue: std::collections::VecDeque::new(),
+            closed: false,
+            frozen: false,
+            accepted: 0,
+            delivered: 0,
+        }
+    }
+
+    /// True when the mailbox accepts one more message now.
+    pub fn accepts(&self) -> bool {
+        !self.closed && !self.frozen && (self.queue.len() as u32) < self.limit
+    }
 }
 
 /// The one pending-perform record of a machine.
@@ -148,6 +215,11 @@ pub struct VmState {
     pub terminal: Option<Terminal>,
     pub parent: Option<VmId>,
     pub next_ordinal: u64,
+    /// The bounded mailbox of this machine. A machine that is not a
+    /// proc keeps an empty closed mailbox.
+    pub mailbox: Mailbox,
+    /// Why this machine is blocked, when its state is `Blocked`.
+    pub block: Option<Block>,
     /// The per-machine literal string table, indexed by the module
     /// string pool. A literal interns on its first load, stays frozen
     /// from birth, and stays rooted for the machine lifetime, so a
@@ -174,11 +246,37 @@ pub struct Machine {
     /// Resource control: the number of child machines this machine
     /// reserved from its own budget.
     pub children: u32,
+    /// Execution ownership: the holder or the scheduler.
+    pub owner: Ownership,
+    /// The generation of this machine slot. A handle carries the
+    /// generation it was minted with, so a stale handle names a dead
+    /// proc instead of a later machine in the same slot.
+    pub generation: u32,
+    /// True when the scheduler paused this proc and gave the holder a
+    /// live `Vm` handle back.
+    pub paused: bool,
+    /// The barrier that stopped this machine, when one holds it.
+    ///
+    /// A barrier over an overlapping set finds the marker and waits,
+    /// so two barriers never share a machine. A barrier over a
+    /// disjoint set proceeds.
+    pub barrier: Option<u32>,
+    /// The proc body to enter after the constructor frame returns.
+    ///
+    /// A proc constructs its instance inside its own machine
+    /// (specification 18.1), so the launch runs two frames: the
+    /// constructor, then `on_spawn` over the constructed value.
+    pub start_body: Option<ObjRef>,
 }
 
 impl Machine {
     /// A machine without a loaded entry.
     pub fn empty(config: VmConfig, parent: Option<VmId>) -> Machine {
+        Machine::empty_at(config, parent, 0)
+    }
+
+    /// A machine without a loaded entry, at one slot generation.
+    pub fn empty_at(config: VmConfig, parent: Option<VmId>, generation: u32) -> Machine {
         Machine {
             vm: VmState {
                 heap: Heap::new(config.heap_bytes),
@@ -191,6 +289,14 @@ impl Machine {
                 terminal: None,
                 parent,
                 next_ordinal: 1,
+                // A machine that never becomes a proc keeps a closed
+                // mailbox, so no send can reach it.
+                mailbox: {
+                    let mut mailbox = Mailbox::new(0);
+                    mailbox.closed = true;
+                    mailbox
+                },
+                block: None,
                 literals: Vec::new(),
             },
             table: PolicyTable::default(),
@@ -198,6 +304,11 @@ impl Machine {
             resources: ResourceRegistry::new(config.max_resources),
             config,
             children: 0,
+            owner: Ownership::Holder,
+            generation,
+            paused: false,
+            barrier: None,
+            start_body: None,
         }
     }
 
@@ -298,10 +409,21 @@ impl Machine {
         if let Some(Terminal::Done(Value::Obj(r))) = &self.vm.terminal {
             roots.push(*r);
         }
+        // An accepted message lives in this machine's heap until
+        // `receive` delivers it, so the queue is a collection root.
+        for value in &self.vm.mailbox.queue {
+            if let Value::Obj(r) = value {
+                roots.push(*r);
+            }
+        }
         for action in self.table.exact.iter().chain(self.table.group.iter()) {
             if let Some(Action::Mock(r)) = action {
                 roots.push(*r);
             }
+        }
+        // The proc body waits for the constructor frame to return.
+        if let Some(r) = self.start_body {
+            roots.push(r);
         }
         // Interned literals stay alive for the machine lifetime.
         roots.extend(self.vm.literals.iter().flatten().copied());

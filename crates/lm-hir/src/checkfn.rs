@@ -2135,6 +2135,21 @@ impl<'o> FnChecker<'o> {
         if let Some(group) = self.sys_group_of(ctx, recv)? {
             return self.check_sys_call(ctx, group, name, name_span, type_args, args, span);
         }
+        // `Class.spawn(args...)`, the sugar of specification 18.3.
+        if name == "spawn" {
+            if let ExprKind::Name(class_name) = &recv.kind {
+                if let Some(class) = ctx.lookup_type(class_name, &self.env) {
+                    if !type_args.is_empty() {
+                        return Err(Diagnostic::new(
+                            "E1024",
+                            "`spawn` does not take type arguments",
+                            name_span,
+                        ));
+                    }
+                    return self.check_spawn(ctx, class, args, name_span, span);
+                }
+            }
+        }
         // A call into a `use`-bound module: `matrix.det(x)` or the
         // constructor `matrix.Matrix(2, 3)`. The materialized import
         // carries the qualified key, so the ordinary call path
@@ -2165,6 +2180,7 @@ impl<'o> FnChecker<'o> {
                 | Type::PolicyTable
                 | Type::Request
                 | Type::PendingCall(_, _)
+                | Type::Handle(_, _)
                 | Type::Fault
         ) {
             let out =
@@ -2321,6 +2337,99 @@ impl<'o> FnChecker<'o> {
             ty: ret,
             mutable,
             kind: HExprKind::Native { op, args: all_args },
+        })
+    }
+
+    /// Check `Class.spawn(args...)`.
+    ///
+    /// The rule of specification 18.3: the class must inherit
+    /// `Proc[M]` and declare a valid `on_spawn`. The result type is
+    /// `Handle[M, R]`, where `R` is the result of `on_spawn`.
+    fn check_spawn(
+        &mut self,
+        ctx: &mut Ctx,
+        class: u32,
+        args: &[ast::Expr],
+        name_span: Span,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let class_name = ctx.classes[class as usize].name.clone();
+        let proc = *ctx.core_types.get("Proc").expect("the core declares Proc");
+        let mailbox = ctx
+            .store
+            .ancestor_args(lm_types::ClassId(class), &[], lm_types::ClassId(proc))
+            .and_then(|args| args.first().copied())
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "E1026",
+                    format!("`spawn` needs a subclass of `Proc`; `{class_name}` is not one"),
+                    name_span,
+                )
+            })?;
+        let (body, _) = ctx.find_method_owner(class, "on_spawn").ok_or_else(|| {
+            Diagnostic::new(
+                "E1026",
+                format!("the proc class `{class_name}` declares no `on_spawn`"),
+                name_span,
+            )
+        })?;
+        if !body.params.is_empty()
+            || !body.own_type_params.is_empty()
+            || !body.own_effect_params.is_empty()
+        {
+            return Err(Diagnostic::new(
+                "E1026",
+                format!("`{class_name}.on_spawn` must take `self` only and declare no generics"),
+                name_span,
+            ));
+        }
+        // The constructor signature of the proc class.
+        let info = &ctx.classes[class as usize];
+        let (params, muts, names) = match &info.init {
+            Some(init) => (
+                init.params.clone(),
+                init.param_muts.clone(),
+                init.param_names.clone(),
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new()),
+        };
+        let checked = self.check_args_simple(ctx, args, &params, &muts, &names, "spawn", span)?;
+        // The spawner charges `Proc.Spawn` only. The constructor and
+        // the proc body run inside the child machine, so their rows
+        // resolve through the child table and the birth grant.
+        self.charge_op(ctx, lm_abi::OP_PROC_SPAWN, span)?;
+        if !checked.is_empty() {
+            // Lowering reads the interned tuple type of the arguments.
+            let elems: Vec<TypeId> = checked.iter().map(|a| a.ty).collect();
+            ctx.store.intern(Type::Tuple(elems));
+        }
+        // The verifier reads a closure type out of the module type
+        // table, so both function types enter the checker store here
+        // and the lowering pass copies them across.
+        let self_ty = ctx.store.intern(Type::Class(lm_types::ClassId(class)));
+        let ctor_row = ctx.classes[class as usize]
+            .init
+            .as_ref()
+            .map(|init| init.row.clone())
+            .unwrap_or_default();
+        let ctor_ty = ctx.store.intern_fn(params, muts, self_ty, ctor_row);
+        let body_ty = ctx.store.intern_fn(
+            vec![self_ty],
+            vec![body.mut_self],
+            body.ret,
+            body.row.clone(),
+        );
+        let ty = ctx.store.intern(Type::Handle(mailbox, body.ret));
+        Ok(HExpr {
+            ty,
+            mutable: true,
+            kind: HExprKind::Spawn {
+                class,
+                body: body.func,
+                ctor_ty,
+                body_ty,
+                args: checked,
+            },
         })
     }
 
@@ -2870,6 +2979,24 @@ impl<'o> FnChecker<'o> {
         ctx.store.intern(Type::Inst(lm_types::ClassId(class), args))
     }
 
+    /// The instance type of a core enum without type parameters.
+    fn core_class(ctx: &mut Ctx, name: &str) -> TypeId {
+        let class = ctx.core_types[name];
+        ctx.store.intern(Type::Class(lm_types::ClassId(class)))
+    }
+
+    /// Reject arguments on a native method that takes none.
+    fn expect_no_args(name: &str, args: &[ast::Expr], span: Span) -> Result<(), Diagnostic> {
+        if args.is_empty() {
+            return Ok(());
+        }
+        Err(Diagnostic::new(
+            "E1006",
+            format!("`{name}` expects 0 argument(s), found {}", args.len()),
+            span,
+        ))
+    }
+
     /// Check a direct operation call `sys.<group>.<Member>(args)`.
     #[allow(clippy::too_many_arguments)]
     fn check_sys_call(
@@ -3248,6 +3375,7 @@ impl<'o> FnChecker<'o> {
                 | Type::PolicyTable
                 | Type::Request
                 | Type::PendingCall(_, _)
+                | Type::Handle(_, _)
                 | Type::Fault
         ) {
             return Ok(None);
@@ -3459,6 +3587,78 @@ impl<'o> FnChecker<'o> {
                     mutable: true,
                     kind: HExprKind::CallArgs {
                         call: Box::new(recv_h),
+                    },
+                }
+            }
+            (Type::Handle(m, _), "send") => {
+                if m == NEVER {
+                    return Err(Diagnostic::new(
+                        "E1026",
+                        "a proc with no mailbox has no `send` method",
+                        name_span,
+                    ));
+                }
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`send` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let message = self.check_expr(ctx, &args[0], m)?;
+                self.charge_op(ctx, lm_abi::OP_PROC_SEND, span)?;
+                let ty = Self::core_class(ctx, "SendResult");
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_PROC_SEND,
+                        args: vec![recv_h, message],
+                    },
+                }
+            }
+            (Type::Handle(_, _), "close") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_PROC_CLOSE, span)?;
+                let ty = Self::core_class(ctx, "SendResult");
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_PROC_CLOSE,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Handle(_, r), "done") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_PROC_DONE, span)?;
+                let ty = Self::core_inst(ctx, "ProcResult", vec![r]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_PROC_DONE,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Handle(_, r), "pause") | (Type::Handle(_, r), "resume") => {
+                Self::expect_no_args(name, args, span)?;
+                let (op, ok) = if name == "pause" {
+                    (lm_abi::OP_PROC_PAUSE, ctx.store.intern(Type::Vm(r)))
+                } else {
+                    (lm_abi::OP_PROC_RESUME, UNIT)
+                };
+                self.charge_op(ctx, op, span)?;
+                let error = Self::core_class(ctx, "ProcError");
+                let ty = Self::core_inst(ctx, "Result", vec![ok, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op,
+                        args: vec![recv_h],
                     },
                 }
             }

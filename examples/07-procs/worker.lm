@@ -1,0 +1,23 @@
+# One proc with a typed mailbox.
+#
+# The worker receives one message, doubles it, and returns the result.
+# The spawner sends one message, closes the mailbox, and waits for the
+# terminal result.
+
+enum Work
+  Double(value: Int)
+end
+
+class Worker < Proc[Work]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(Double(n)) then n * 2
+    in Closed         then 0
+    end
+  end
+end
+
+h = Worker.spawn()
+h.send(Double(21).freeze())
+h.close()
+h.done()

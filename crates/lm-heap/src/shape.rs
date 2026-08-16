@@ -85,6 +85,10 @@ pub enum Object {
     },
     /// A frozen canonical graph digest. Born frozen.
     NativeDigest([u8; 32]),
+    /// A stable proc reference: the machine identifier and the
+    /// generation of that slot. Born frozen and sendable, so send
+    /// rights travel as data (specification 18.5).
+    NativeHandle { proc: u32, generation: u32 },
 }
 
 /// How a boundary transfer treats one shape.
@@ -248,9 +252,24 @@ const SHAPE_DIGEST: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_HANDLE: ShapeDesc = ShapeDesc {
+    name: "Handle",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    // A handle is a typed designator of one machine of this world.
+    // It crosses a transfer and keeps its target, so send rights
+    // travel as data.
+    boundary: BoundaryPolicy::Sendable,
+    // The identity of a proc is world-local, not value-local, so no
+    // canonical digest can name it.
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 14] = [
+pub const SHAPES: [&ShapeDesc; 15] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -265,6 +284,7 @@ pub const SHAPES: [&ShapeDesc; 14] = [
     &SHAPE_CALL,
     &SHAPE_FAULT,
     &SHAPE_DIGEST,
+    &SHAPE_HANDLE,
 ];
 
 impl Object {
@@ -287,6 +307,7 @@ impl Object {
             Object::NativeCall { .. } => 11,
             Object::NativeFault { .. } => 12,
             Object::NativeDigest(_) => 13,
+            Object::NativeHandle { .. } => 14,
         }
     }
 
@@ -310,7 +331,8 @@ impl Object {
                 Object::NativeVm { .. }
                 | Object::NativeTable { .. }
                 | Object::NativeRequest { .. }
-                | Object::NativeCall { .. } => VALUE_COST,
+                | Object::NativeCall { .. }
+                | Object::NativeHandle { .. } => VALUE_COST,
                 Object::NativeFault { message, .. } => message.len(),
                 Object::NativeDigest(bytes) => bytes.len(),
             }
@@ -338,7 +360,8 @@ impl Object {
             | Object::NativeRequest { .. }
             | Object::NativeCall { .. }
             | Object::NativeFault { .. }
-            | Object::NativeDigest(_) => {}
+            | Object::NativeDigest(_)
+            | Object::NativeHandle { .. } => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
             Object::Map { entries, .. } => {
@@ -366,6 +389,10 @@ impl Object {
                 op: *op,
             },
             Object::NativeDigest(bytes) => Object::NativeDigest(*bytes),
+            Object::NativeHandle { proc, generation } => Object::NativeHandle {
+                proc: *proc,
+                generation: *generation,
+            },
             Object::Tuple { items } => Object::Tuple {
                 items: vec![Value::Unit; items.len()],
             },
@@ -399,7 +426,10 @@ impl Object {
             other => other,
         };
         let out = match self {
-            Object::Str(_) | Object::NativeFault { .. } | Object::NativeDigest(_) => return None,
+            Object::Str(_)
+            | Object::NativeFault { .. }
+            | Object::NativeDigest(_)
+            | Object::NativeHandle { .. } => return None,
             Object::Tuple { items } => Object::Tuple {
                 items: items.iter().map(|v| value(*v)).collect(),
             },
@@ -503,6 +533,10 @@ mod tests {
                 op: Some(1),
             },
             Object::NativeDigest([9; 32]),
+            Object::NativeHandle {
+                proc: 1,
+                generation: 2,
+            },
         ]
     }
 
@@ -592,6 +626,10 @@ mod tests {
                 op: None,
             },
             Object::NativeDigest([0; 32]),
+            Object::NativeHandle {
+                proc: 0,
+                generation: 0,
+            },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {

@@ -55,7 +55,7 @@ pub fn run_world(
             .allow(grant)
             .map_err(|e| format!("allow error: {e}"))?;
     }
-    let outcome = world.run_root();
+    let outcome = lm_proc::run_world(&mut world);
     Ok((world.show_outcome(&outcome), host))
 }
 

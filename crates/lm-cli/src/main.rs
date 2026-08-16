@@ -121,7 +121,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                         .allow(grant)
                         .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
                 }
-                let outcome = world.run_root();
+                let outcome = lm_proc::run_world(&mut world);
                 print!("{}", world.dump_live(&outcome));
                 return Ok(ExitCode::SUCCESS);
             }
@@ -241,7 +241,7 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
             .allow(grant)
             .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
     }
-    let outcome = world.run_root();
+    let outcome = lm_proc::run_world(&mut world);
     let text = world.show_outcome(&outcome);
     if options.show_result {
         println!("{text}");

@@ -654,6 +654,51 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     });
                 }
             }
+            HExprKind::Spawn {
+                class,
+                body,
+                ctor_ty,
+                body_ty,
+                args,
+            } => {
+                // The verifier reads the closure type out of the
+                // module type table, so both function types must be
+                // present before the instruction runs.
+                self.m.bc_ty(*ctor_ty);
+                self.m.bc_ty(*body_ty);
+                // The sugar expands into what a user would write: the
+                // construction function, the proc body, and the typed
+                // argument tuple, then one `Proc.Spawn` perform.
+                self.emit(Instr::MakeClosure {
+                    func: self.m.new_base + *class,
+                    captures: 0,
+                });
+                self.emit(Instr::MakeClosure {
+                    func: *body,
+                    captures: 0,
+                });
+                if args.is_empty() {
+                    self.emit(Instr::ConstUnit);
+                } else {
+                    for arg in args {
+                        self.lower_expr(arg);
+                    }
+                    let tys: Vec<TypeId> = args.iter().map(|a| a.ty).collect();
+                    let tuple = self.m.store.find(&Type::Tuple(tys));
+                    let ty = match tuple {
+                        Some(id) => self.m.bc_ty(id),
+                        None => unreachable!("the checker interned the argument tuple type"),
+                    };
+                    self.emit(Instr::TupleNew {
+                        ty,
+                        count: args.len() as u32,
+                    });
+                }
+                self.emit(Instr::Perform {
+                    op: lm_abi::OP_PROC_SPAWN,
+                    argc: 3,
+                });
+            }
             HExprKind::TupleLit(items) => {
                 for item in items {
                     self.lower_expr(item);
@@ -1088,6 +1133,11 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         HExprKind::MakeClosure { captures, .. } => {
             for c in captures {
                 shift_expr_in_place(c, base, max);
+            }
+        }
+        HExprKind::Spawn { args, .. } => {
+            for a in args {
+                shift_expr_in_place(a, base, max);
             }
         }
         HExprKind::CallValue { callee, args } => {

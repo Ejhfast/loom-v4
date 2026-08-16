@@ -442,6 +442,7 @@ impl<'m> Oracle<'m> {
                 Err(Stop::Fault("UnreachableCode"))
             }
             HExprKind::Perform { .. }
+            | HExprKind::Spawn { .. }
             | HExprKind::OpConst(_)
             | HExprKind::TableEdit { .. }
             | HExprKind::AsCall { .. }
