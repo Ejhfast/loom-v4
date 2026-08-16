@@ -94,27 +94,27 @@ pub fn verify_frozen(
 // Boundary transfer, structural copy, and detached inspection.
 // ---------------------------------------------------------------
 
-/// What a copy demands of the source graph.
+/// What a copy does with the frozen bit of the source graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyMode {
-    /// A boundary transfer. Every reachable object must be frozen.
+    /// A boundary transfer. The copy preserves the frozen bit of
+    /// every source object, so a mutable graph copies as a mutable
+    /// graph (specification 16.1).
     Transfer,
-    /// A detached inspection copy. A mutable source object is
-    /// accepted, and the copy is frozen (specification 16.5).
+    /// A detached inspection copy. The copy is frozen whatever the
+    /// source was (specification 16.5).
     Detach,
 }
 
 /// A visitor that admits only the shapes a copy can carry.
-struct CopyCheck<'h> {
-    heap: &'h Heap,
-    mode: CopyMode,
-}
+///
+/// The frozen bit is not part of this rule. A boundary crossing
+/// copies the graph, and the copy keeps the frozen bit each object
+/// carried. Only a holder-local shape refuses to cross.
+struct CopyCheck;
 
-impl Visitor for CopyCheck<'_> {
-    fn enter(&mut self, r: ObjRef, _: u32, object: &Object) -> Result<(), FaultCode> {
-        if self.mode == CopyMode::Transfer && !self.heap.is_frozen(r) {
-            return Err(FaultCode::UnsendableValue);
-        }
+impl Visitor for CopyCheck {
+    fn enter(&mut self, _: ObjRef, _: u32, object: &Object) -> Result<(), FaultCode> {
         if object.shape().boundary == BoundaryPolicy::HolderLocal {
             return Err(FaultCode::UnsendableValue);
         }
@@ -125,10 +125,9 @@ impl Visitor for CopyCheck<'_> {
 /// Check that every object reachable from `root` satisfies the
 /// boundary rules of a transfer.
 ///
-/// A transfer demands two things of the source graph: the frozen bit
-/// on every object, and a sendable shape on every object. A caller
-/// that has no second heap to copy into still owes both rules, so it
-/// runs this walk instead of the copy.
+/// A transfer demands one thing of the source graph: a sendable shape
+/// on every object. A caller that has no copy to run still owes that
+/// rule, so it runs this walk instead of the copy.
 ///
 /// The walk carries the same `CopyCheck` visitor the copy runs, so
 /// the standalone answer and the copy answer cannot drift.
@@ -138,26 +137,18 @@ pub fn verify_sendable(
     limits: &GraphLimits,
 ) -> Result<GraphCost, FaultCode> {
     let mut scratch = heap.take_scratch();
-    let out = {
-        let view: &Heap = heap;
-        walk(
-            view,
-            &mut scratch,
-            &[root],
-            limits,
-            &mut CopyCheck {
-                heap: view,
-                mode: CopyMode::Transfer,
-            },
-        )
-    };
+    let out = walk(heap, &mut scratch, &[root], limits, &mut CopyCheck);
     heap.put_scratch(scratch);
     out
 }
 
 /// Transfer one value from `src` into `dst`.
 ///
-/// The copy preserves cycles and sharing, and it is failure-atomic
+/// The copy preserves cycles, sharing, and the frozen bit of every
+/// source object. Nothing is shared across the boundary, and the
+/// identity of the source graph does not cross.
+///
+/// The copy is failure-atomic
 /// for the destination heap: a rejected copy frees every shell it
 /// allocated, so the destination keeps its earlier live count and
 /// byte count.
@@ -209,19 +200,110 @@ fn copy_value(
     let mut scratch = src.take_scratch();
     // Pass 1: reach the graph in canonical order and check every
     // shape. Nothing in the destination changes yet.
-    let discovered = {
-        let view: &Heap = src;
-        walk(
-            view,
-            &mut scratch,
-            &[root],
-            limits,
-            &mut CopyCheck { heap: view, mode },
-        )
-    };
-    let result = discovered.and_then(|_| copy_passes(src, dst, dst_roots, &scratch, root));
+    let discovered = walk(src, &mut scratch, &[root], limits, &mut CopyCheck);
+    let result = discovered.and_then(|_| copy_passes(src, dst, dst_roots, &scratch, root, mode));
     src.put_scratch(scratch);
     result
+}
+
+/// Copy one value inside one heap.
+///
+/// A proc may hold its own handle, so a message can name the sending
+/// machine. That send crosses a machine boundary with no second heap
+/// behind it. The boundary rule is the same rule, so the message
+/// copies here as well: the sender and the mailbox never share one
+/// mutable graph.
+///
+/// `roots` holds the entry points of the heap outside itself. The
+/// source graph roots itself for the length of the call, so a
+/// collection during the copy keeps it.
+pub fn copy_within(
+    heap: &mut Heap,
+    roots: &[ObjRef],
+    value: Value,
+    limits: &GraphLimits,
+) -> Result<Value, FaultCode> {
+    let root = match value {
+        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Op(_) => return Ok(value),
+        Value::Uninit => unreachable!("no verified value is uninitialized"),
+        Value::Obj(r) => r,
+    };
+    let mut scratch = heap.take_scratch();
+    // Pass 1 is the shared visitor, so the one-heap answer and the
+    // two-heap answer cannot drift.
+    let discovered = walk(heap, &mut scratch, &[root], limits, &mut CopyCheck);
+    let result = discovered.and_then(|_| {
+        heap.push_host_root(root);
+        let out = copy_passes_within(heap, roots, &scratch, root);
+        heap.pop_host_root(root);
+        out
+    });
+    heap.put_scratch(scratch);
+    result
+}
+
+/// Passes 2 and 3 inside one heap.
+///
+/// The shells allocate first and root themselves, then every child
+/// reference patches through the identity table. A collection between
+/// two allocations therefore keeps the source graph and the partial
+/// copy.
+fn copy_passes_within(
+    heap: &mut Heap,
+    roots: &[ObjRef],
+    scratch: &lm_heap::GraphScratch,
+    root: ObjRef,
+) -> Result<Value, FaultCode> {
+    let order = scratch.order();
+    let mut new_refs: Vec<ObjRef> = Vec::with_capacity(order.len());
+    let mut result = Ok(());
+    for r in order {
+        let shell = heap
+            .get(*r)
+            .shell()
+            .expect("pass 1 admitted sendable shapes only");
+        let cost = shell.cost();
+        if heap.would_exceed(cost) {
+            collect(heap, roots.iter().copied());
+            if heap.would_exceed(cost) {
+                result = Err(FaultCode::HeapLimit);
+                break;
+            }
+        }
+        let new_ref = heap.alloc(shell);
+        heap.push_host_root(new_ref);
+        new_refs.push(new_ref);
+    }
+    if result.is_ok() {
+        // Pass 3: patch children through the identity table.
+        for (old, new) in order.iter().zip(new_refs.iter()) {
+            let patched = heap
+                .get(*old)
+                .remap(|child| new_refs[scratch.ordinal(child.slot) as usize]);
+            if let Some(patched) = patched {
+                *heap.get_mut(*new) = patched;
+                heap.recharge(*new);
+            }
+        }
+    }
+    // Unroot in LIFO order.
+    for r in new_refs.iter().rev() {
+        heap.pop_host_root(*r);
+    }
+    if result.is_err() {
+        // Failure atomicity: free every shell this call allocated.
+        for r in new_refs.iter().rev() {
+            heap.free(*r);
+        }
+        result?;
+    }
+    // The copy carries the frozen bit of its source object.
+    for (old, new) in order.iter().zip(new_refs.iter()) {
+        if heap.is_frozen(*old) {
+            heap.set_frozen(*new);
+        }
+    }
+    Ok(Value::Obj(new_refs[scratch.ordinal(root.slot) as usize]))
 }
 
 /// Passes 2 and 3: allocate the destination shells, then patch every
@@ -232,6 +314,7 @@ fn copy_passes(
     dst_roots: &[ObjRef],
     scratch: &lm_heap::GraphScratch,
     root: ObjRef,
+    mode: CopyMode,
 ) -> Result<Value, FaultCode> {
     let order = scratch.order();
     let mut new_refs: Vec<ObjRef> = Vec::with_capacity(order.len());
@@ -279,10 +362,12 @@ fn copy_passes(
         }
         result?;
     }
-    // Every copied object is frozen: a transfer required a frozen
-    // source, and a detached copy is frozen by rule.
-    for r in &new_refs {
-        dst.set_frozen(*r);
+    // A transfer copy carries the frozen bit of its source object. A
+    // detached copy is frozen by rule (specification 16.5).
+    for (old, new) in order.iter().zip(new_refs.iter()) {
+        if mode == CopyMode::Detach || src.is_frozen(*old) {
+            dst.set_frozen(*new);
+        }
     }
     Ok(Value::Obj(new_refs[scratch.ordinal(root.slot) as usize]))
 }
@@ -469,8 +554,7 @@ mod tests {
     }
 
     /// The two standalone checks answer different questions, and a
-    /// caller that owes the whole boundary rule must run the sendable
-    /// one.
+    /// caller that owes the boundary rule must run the sendable one.
     ///
     /// A machine handle is born frozen and holder local. The frozen
     /// check therefore accepts it, and only the sendable check
@@ -497,18 +581,20 @@ mod tests {
         );
     }
 
-    /// The sendable check keeps the frozen rule too, so it is the
-    /// whole transfer contract and not a second, weaker one.
+    /// The sendable check asks about shapes alone. A mutable graph
+    /// crosses a boundary as a copy, so it passes the check.
     #[test]
-    fn the_sendable_check_keeps_the_frozen_rule() {
+    fn the_sendable_check_admits_a_mutable_graph() {
         let mut heap = Heap::new(1 << 20);
         let leaf = heap.alloc(Object::List { items: vec![] });
         let root = heap.alloc(Object::Tuple {
             items: vec![Value::Obj(leaf)],
         });
         assert_eq!(
-            verify_sendable(&mut heap, root, &limits()),
-            Err(FaultCode::UnsendableValue)
+            verify_sendable(&mut heap, root, &limits())
+                .expect("a mutable graph is sendable")
+                .objects,
+            2
         );
         let ring = frozen_ring(&mut heap, 1, 2);
         assert_eq!(
@@ -545,21 +631,111 @@ mod tests {
         assert_eq!(back, new_root);
     }
 
+    /// A mutable graph crosses as a mutable copy. A holder-local
+    /// shape still refuses to cross.
     #[test]
-    fn transfer_rejects_a_mutable_or_holder_local_graph() {
+    fn transfer_copies_a_mutable_graph_and_rejects_a_holder_local_one() {
         let mut src = Heap::new(1 << 20);
         let mut dst = Heap::new(1 << 20);
-        let mutable = src.alloc(Object::List { items: vec![] });
-        assert_eq!(
-            transfer(&mut src, &mut dst, &[], Value::Obj(mutable), &limits()),
-            Err(FaultCode::UnsendableValue)
-        );
+        let mutable = src.alloc(Object::List {
+            items: vec![Value::Int(1)],
+        });
+        let moved = transfer(&mut src, &mut dst, &[], Value::Obj(mutable), &limits())
+            .expect("a mutable graph crosses");
+        let new_root = moved.as_obj().expect("the copy is an object");
+        assert!(!dst.is_frozen(new_root), "the copy stays mutable");
+        assert_eq!(dst.live_count(), 1);
+        // The copy is a second object: a later source write is not
+        // visible through it.
+        if let Object::List { items } = src.get_mut(mutable) {
+            items.push(Value::Int(2));
+        }
+        src.recharge(mutable);
+        match dst.get(new_root) {
+            Object::List { items } => assert_eq!(items, &vec![Value::Int(1)]),
+            other => panic!("expected a list, got {other:?}"),
+        }
         let handle = src.alloc(Object::NativeVm { vm: 3 });
         assert_eq!(
             transfer(&mut src, &mut dst, &[], Value::Obj(handle), &limits()),
             Err(FaultCode::UnsendableValue)
         );
-        assert_eq!(dst.live_count(), 0);
+        assert_eq!(dst.live_count(), 1);
+    }
+
+    /// The copy carries the frozen bit of each source object, so a
+    /// frozen subgraph inside a mutable wrapper stays frozen and the
+    /// wrapper stays mutable.
+    #[test]
+    fn transfer_preserves_every_frozen_bit() {
+        let mut src = Heap::new(1 << 20);
+        let mut dst = Heap::new(1 << 20);
+        let inner = src.alloc(Object::List {
+            items: vec![Value::Int(7)],
+        });
+        freeze(&mut src, inner, &limits()).expect("the inner list freezes");
+        let outer = src.alloc(Object::List {
+            items: vec![Value::Obj(inner)],
+        });
+        assert!(!src.is_frozen(outer));
+        let moved = transfer(&mut src, &mut dst, &[], Value::Obj(outer), &limits())
+            .expect("the graph crosses");
+        let new_outer = moved.as_obj().expect("the copy is an object");
+        assert!(!dst.is_frozen(new_outer), "the wrapper stays mutable");
+        let new_inner = match dst.get(new_outer) {
+            Object::List { items } => items[0].as_obj().expect("the inner list"),
+            other => panic!("expected a list, got {other:?}"),
+        };
+        assert!(dst.is_frozen(new_inner), "the subgraph stays frozen");
+    }
+
+    /// A one-heap copy applies the same rule and makes a second
+    /// graph, so the source and the copy never share one object.
+    #[test]
+    fn a_copy_inside_one_heap_makes_a_second_graph() {
+        let mut heap = Heap::new(1 << 20);
+        let leaf = heap.alloc(Object::List {
+            items: vec![Value::Int(1)],
+        });
+        let root = heap.alloc(Object::List {
+            items: vec![Value::Obj(leaf), Value::Obj(leaf)],
+        });
+        let copy = copy_within(&mut heap, &[root], Value::Obj(root), &limits())
+            .expect("a mutable graph copies");
+        let new_root = copy.as_obj().expect("the copy is an object");
+        assert_ne!(new_root, root);
+        assert_eq!(heap.live_count(), 4);
+        assert!(!heap.is_frozen(new_root), "the copy stays mutable");
+        // The shared leaf stays one object inside the copy.
+        let (first, second) = match heap.get(new_root) {
+            Object::List { items } => (
+                items[0].as_obj().expect("the first child"),
+                items[1].as_obj().expect("the second child"),
+            ),
+            other => panic!("expected a list, got {other:?}"),
+        };
+        assert_eq!(first, second);
+        assert_ne!(first, leaf);
+        // A write through the source is not visible in the copy.
+        if let Object::List { items } = heap.get_mut(leaf) {
+            items.push(Value::Int(2));
+        }
+        heap.recharge(leaf);
+        match heap.get(first) {
+            Object::List { items } => assert_eq!(items, &vec![Value::Int(1)]),
+            other => panic!("expected a list, got {other:?}"),
+        }
+        // The one-heap path keeps the shape rule of the copy.
+        let handle = heap.alloc(Object::NativeVm { vm: 1 });
+        assert_eq!(
+            copy_within(&mut heap, &[], Value::Obj(handle), &limits()),
+            Err(FaultCode::UnsendableValue)
+        );
+        // A scalar carries no reference and copies as itself.
+        assert_eq!(
+            copy_within(&mut heap, &[], Value::Int(9), &limits()),
+            Ok(Value::Int(9))
+        );
     }
 
     /// A transfer that runs out of destination bytes leaves the
@@ -637,6 +813,30 @@ mod tests {
         dst.pop_host_root(moved_ref);
     }
 
+    /// A one-heap copy that runs out of bytes leaves the heap with
+    /// its earlier live count and byte count.
+    #[test]
+    fn a_failed_copy_inside_one_heap_frees_every_shell() {
+        // A cap that holds the source but not a second copy of it.
+        let mut heap = Heap::new(300);
+        let mut chain = heap.alloc(Object::Str("tail".to_string()));
+        for _ in 0..4 {
+            chain = heap.alloc(Object::Tuple {
+                items: vec![Value::Obj(chain)],
+            });
+        }
+        let before_live = heap.live_count();
+        let before_bytes = heap.used_bytes();
+        assert_eq!(
+            copy_within(&mut heap, &[chain], Value::Obj(chain), &limits()),
+            Err(FaultCode::HeapLimit)
+        );
+        assert_eq!(heap.live_count(), before_live);
+        assert_eq!(heap.used_bytes(), before_bytes);
+        // The source graph survived the collection the copy ran.
+        assert!(heap.try_get(chain).is_some());
+    }
+
     /// Detached inspection copies a mutable graph and freezes the
     /// copy, so inspection never returns a writable reference.
     #[test]
@@ -648,10 +848,6 @@ mod tests {
             items: vec![Value::Obj(leaf), Value::Obj(leaf)],
         });
         assert!(!src.is_frozen(root));
-        assert_eq!(
-            transfer(&mut src, &mut dst, &[], Value::Obj(root), &limits()),
-            Err(FaultCode::UnsendableValue)
-        );
         let copy = detach(&mut src, &mut dst, &[], Value::Obj(root), &limits())
             .expect("inspection copies a mutable graph");
         let new_root = copy.as_obj().expect("the copy is an object");
@@ -782,6 +978,10 @@ mod tests {
         );
         assert_eq!(
             detach(&mut heap, &mut dst, &[], Value::Obj(root), &tight),
+            Err(FaultCode::BoundaryLimit)
+        );
+        assert_eq!(
+            copy_within(&mut heap, &[root], Value::Obj(root), &tight),
             Err(FaultCode::BoundaryLimit)
         );
         assert_eq!(
