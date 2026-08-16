@@ -103,7 +103,7 @@ fn object_table_returns_to_baseline_after_a_collection() {
         heap.alloc(lm_vm::Object::Str(format!("garbage {i}")));
     }
     assert_eq!(heap.live_count(), baseline + 1000);
-    heap.collect([keep]);
+    lm_graph::collect(&mut heap, [keep]);
     assert_eq!(heap.live_count(), baseline);
 }
 

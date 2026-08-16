@@ -8,6 +8,8 @@ members = [
     "crates/lm-bytecode",
     "crates/lm-verify",
     "crates/lm-value",
+    "crates/lm-heap",
+    "crates/lm-graph",
     "crates/lm-vm",
     "crates/lm-compiler",
     "crates/lm-cli",

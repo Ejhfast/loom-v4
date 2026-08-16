@@ -42,6 +42,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "lm-graph"
+version = "0.1.0"
+dependencies = [
+ "lm-abi",
+ "lm-heap",
+ "lm-value",
+]
+
+[[package]]
+name = "lm-heap"
+version = "0.1.0"
+dependencies = [
+ "lm-abi",
+ "lm-value",
+]
+
+[[package]]
 name = "lm-hir"
 version = "0.1.0"
 dependencies = [
@@ -70,6 +87,8 @@ dependencies = [
  "lm-abi",
  "lm-bytecode",
  "lm-compiler",
+ "lm-graph",
+ "lm-heap",
  "lm-hir",
  "lm-source",
  "lm-types",
@@ -103,6 +122,8 @@ version = "0.1.0"
 dependencies = [
  "lm-abi",
  "lm-bytecode",
+ "lm-graph",
+ "lm-heap",
  "lm-value",
  "lm-verify",
 ]

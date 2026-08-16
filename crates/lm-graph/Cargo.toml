@@ -1,13 +1,10 @@
 [package]
-name = "lm-vm"
+name = "lm-graph"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 lm-abi = { path = "../lm-abi" }
-lm-bytecode = { path = "../lm-bytecode" }
-lm-graph = { path = "../lm-graph" }
 lm-heap = { path = "../lm-heap" }
-lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }

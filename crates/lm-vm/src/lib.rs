@@ -10,70 +10,26 @@
 //! Host operations cross one plain-data completion interface defined
 //! in `host`.
 
-mod heap;
 mod host;
 mod machine;
 mod world;
 
-pub use heap::{Heap, HeapStats, Object, ShapeDesc};
 pub use host::{CoreCtor, Host, HostArg, HostStart, HostValue, NullHost, RecordingHost};
 pub use machine::{FaultRec, MachineState, VmId};
 pub use world::{RootEvent, StopMode, World};
+
+/// The fault codes are manifest content, and the heap and the graph
+/// engine name them too. They live in `lm-abi`.
+pub use lm_abi::{FaultCode, SnapshotClass};
+/// The heap, the native shapes, and the graph engine are separate
+/// crates. `lm-vm` re-exports the parts its callers already name.
+pub use lm_graph::{GraphCost, GraphLimits};
+pub use lm_heap::{dump_shapes, BoundaryPolicy, Heap, HeapStats, Object, ShapeDesc};
 
 use lm_bytecode::{DecodeError, Module};
 use lm_value::Value;
 pub use lm_verify::VerifyError;
 use std::fmt;
-
-/// A stable machine-fault code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FaultCode {
-    IntegerOverflow,
-    DivideByZero,
-    OutOfFuel,
-    StackLimit,
-    HeapLimit,
-    FrozenWrite,
-    IndexOutOfBounds,
-    MissingKey,
-    BadCast,
-    PolicyDenied,
-    InvalidVmState,
-    InvalidRequestToken,
-    UnsendableValue,
-    HostFault,
-    /// Implementation subcode: a field was read before its first
-    /// assignment. Checked source programs cannot reach this fault.
-    UninitializedField,
-    /// Implementation subcode: the runtime backstop behind a proven
-    /// exhaustive `case` executed. Checked source programs cannot
-    /// reach this fault.
-    UnreachableCode,
-}
-
-impl fmt::Display for FaultCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            FaultCode::IntegerOverflow => "IntegerOverflow",
-            FaultCode::DivideByZero => "DivideByZero",
-            FaultCode::OutOfFuel => "OutOfFuel",
-            FaultCode::StackLimit => "StackLimit",
-            FaultCode::HeapLimit => "HeapLimit",
-            FaultCode::FrozenWrite => "FrozenWrite",
-            FaultCode::IndexOutOfBounds => "IndexOutOfBounds",
-            FaultCode::MissingKey => "MissingKey",
-            FaultCode::BadCast => "BadCast",
-            FaultCode::PolicyDenied => "PolicyDenied",
-            FaultCode::InvalidVmState => "InvalidVmState",
-            FaultCode::InvalidRequestToken => "InvalidRequestToken",
-            FaultCode::UnsendableValue => "UnsendableValue",
-            FaultCode::HostFault => "HostFault",
-            FaultCode::UninitializedField => "UninitializedField",
-            FaultCode::UnreachableCode => "UnreachableCode",
-        };
-        f.write_str(name)
-    }
-}
 
 /// A terminal execution result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +49,14 @@ pub struct VmConfig {
     pub max_stack_values: u32,
     /// The hard heap cap in logical bytes.
     pub heap_bytes: usize,
+    /// The object, edge, byte, and work limits of every graph mode.
+    pub graph: GraphLimits,
+    /// The largest number of child machines this machine may create.
+    /// A parent reserves a child from its own budget.
+    pub max_children: u32,
+    /// The largest number of live host resources this machine may
+    /// register at one time.
+    pub max_resources: u32,
 }
 
 impl Default for VmConfig {
@@ -102,6 +66,9 @@ impl Default for VmConfig {
             max_frames: 65_536,
             max_stack_values: 4_194_304,
             heap_bytes: 64 << 20,
+            graph: GraphLimits::default(),
+            max_children: 1_024,
+            max_resources: 1_024,
         }
     }
 }

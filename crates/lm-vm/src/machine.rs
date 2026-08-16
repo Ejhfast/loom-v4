@@ -6,9 +6,9 @@
 //! that reaches outside the machine returns an `ExecOutcome` for the
 //! world driver.
 
-use crate::heap::{Heap, MapIndex, Object};
 use crate::{FaultCode, VmConfig};
 use lm_bytecode::{Instr, Module};
+use lm_heap::{Heap, MapIndex, Object};
 use lm_value::{ObjRef, Value};
 use std::hash::{Hash, Hasher};
 
@@ -225,6 +225,16 @@ impl Machine {
     /// Collect garbage now. `extra` holds additional roots that are
     /// not yet stored in the arenas.
     pub fn collect_garbage(&mut self, extra: &[ObjRef]) {
+        let roots = self.gc_roots(extra);
+        lm_graph::collect(&mut self.heap, roots);
+    }
+
+    /// Every collection root this machine holds outside its heap.
+    ///
+    /// A boundary transfer into this machine reads the list before it
+    /// borrows the heap, because a destination collection during the
+    /// copy needs the same roots.
+    pub fn gc_roots(&self, extra: &[ObjRef]) -> Vec<ObjRef> {
         let mut roots: Vec<ObjRef> = Vec::new();
         for value in self.locals.iter().chain(self.operands.iter()) {
             if let Value::Obj(r) = value {
@@ -254,7 +264,7 @@ impl Machine {
         // Interned literals stay alive for the machine lifetime.
         roots.extend(self.literals.iter().flatten().copied());
         roots.extend_from_slice(extra);
-        self.heap.collect(roots);
+        roots
     }
 
     /// Allocate one object. When the cap would be exceeded, collect
@@ -264,7 +274,7 @@ impl Machine {
         let cost = object.cost();
         if self.heap.would_exceed(cost) {
             let mut extra = Vec::new();
-            object.trace_children(&mut extra);
+            object.children(&mut extra);
             self.collect_garbage(&extra);
             if self.heap.would_exceed(cost) {
                 return Err(FaultCode::HeapLimit);
@@ -786,7 +796,10 @@ impl Machine {
             }
             Instr::Freeze => {
                 let r = self.pop_obj();
-                self.heap.freeze(r);
+                // The freeze mode validates the whole reachable graph
+                // against its limits before any bit goes on, so a
+                // rejected freeze changes nothing.
+                lm_graph::freeze(&mut self.heap, r, &self.config.graph)?;
                 self.push(Value::Obj(r))?;
             }
             Instr::Jump(target) => {

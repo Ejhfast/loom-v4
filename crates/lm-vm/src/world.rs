@@ -6,7 +6,6 @@
 //! guest call depth or with nested VM depth. `run`, `step`, and
 //! `drive` are stop modes of this one loop.
 
-use crate::heap::{Heap, Object};
 use crate::host::{CoreCtor, Host, HostArg, HostStart, HostValue};
 use crate::machine::{
     Action, ExecOutcome, FaultRec, Machine, MachineState, Pending, Terminal, VmId,
@@ -14,8 +13,8 @@ use crate::machine::{
 use crate::{FaultCode, LoadedModule, Outcome, VmConfig};
 use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, Module};
+use lm_heap::{Heap, Object};
 use lm_value::{ObjRef, Value};
-use std::collections::HashMap;
 
 /// The fuel budget of one mock handler run.
 const MOCK_FUEL: u64 = 1_000_000;
@@ -1130,124 +1129,26 @@ impl<'m> World<'m> {
         }
     }
 
-    /// Transfer one value from `src` into `dst`.
+    /// Transfer one value from `src` into `dst` through the graph
+    /// engine.
     ///
-    /// The week-4 subset accepts scalars, first-class operation
-    /// values, and deeply frozen graphs of strings, tuples, lists,
-    /// maps, instances, closures, and fault values. It preserves
-    /// cycles and sharing. Everything else faults `UnsendableValue`.
+    /// The transfer mode accepts scalars, first-class operation
+    /// values, and deeply frozen graphs of every sendable shape. It
+    /// preserves cycles and sharing. A holder-local shape or a
+    /// mutable object faults `UnsendableValue`, and a graph past the
+    /// published limits faults `BoundaryLimit`.
     pub(crate) fn transfer(
         &mut self,
         src: VmId,
         dst: VmId,
         value: Value,
     ) -> Result<Value, FaultCode> {
-        let root = match value {
-            Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Op(_) => return Ok(value),
-            Value::Uninit => unreachable!("no verified value is uninitialized"),
-            Value::Obj(r) => r,
-        };
+        let limits = self.config.graph;
         let (src_m, dst_m) = self.two(src, dst);
-        // Pass 1: discover the reachable graph and check sendability.
-        let mut order: Vec<ObjRef> = Vec::new();
-        let mut index: HashMap<u32, usize> = HashMap::new();
-        let mut work = vec![root];
-        while let Some(r) = work.pop() {
-            if index.contains_key(&r.slot) {
-                continue;
-            }
-            if !src_m.heap.is_frozen(r) {
-                return Err(FaultCode::UnsendableValue);
-            }
-            let object = src_m.heap.get(r);
-            match object {
-                Object::Str(_)
-                | Object::Tuple { .. }
-                | Object::List { .. }
-                | Object::Map { .. }
-                | Object::Instance { .. }
-                | Object::Closure { .. }
-                | Object::NativeFault { .. } => {}
-                Object::StrBuilder(_)
-                | Object::ByteBuf(_)
-                | Object::NativeVm { .. }
-                | Object::NativeTable { .. }
-                | Object::NativeRequest { .. }
-                | Object::NativeCall { .. } => return Err(FaultCode::UnsendableValue),
-            }
-            index.insert(r.slot, order.len());
-            order.push(r);
-            object.trace_children(&mut work);
-        }
-        // Pass 2: allocate shells in discovery order, rooted against
-        // destination collections.
-        let mut new_refs: Vec<ObjRef> = Vec::with_capacity(order.len());
-        let mut result = Ok(());
-        for r in &order {
-            let shell = shell_of(src_m.heap.get(*r));
-            let cost = shell.cost();
-            if dst_m.heap.would_exceed(cost) {
-                let mut extra = new_refs.clone();
-                shell.trace_children(&mut extra);
-                dst_m.collect_garbage(&extra);
-                if dst_m.heap.would_exceed(cost) {
-                    result = Err(FaultCode::HeapLimit);
-                    break;
-                }
-            }
-            let new_ref = dst_m.heap.alloc(shell);
-            dst_m.heap.push_host_root(new_ref);
-            new_refs.push(new_ref);
-        }
-        if result.is_ok() {
-            // Pass 3: patch children through the identity map.
-            let map_value = |value: Value| -> Value {
-                match value {
-                    Value::Obj(child) => Value::Obj(new_refs[index[&child.slot]]),
-                    other => other,
-                }
-            };
-            for (old, new) in order.iter().zip(new_refs.iter()) {
-                let patched = match src_m.heap.get(*old) {
-                    Object::Str(_) | Object::NativeFault { .. } => continue,
-                    Object::Tuple { items } => Object::Tuple {
-                        items: items.iter().map(|v| map_value(*v)).collect(),
-                    },
-                    Object::List { items } => Object::List {
-                        items: items.iter().map(|v| map_value(*v)).collect(),
-                    },
-                    Object::Map { entries, .. } => Object::Map {
-                        entries: entries
-                            .iter()
-                            .map(|(k, v)| (map_value(*k), map_value(*v)))
-                            .collect(),
-                        // The destination index rebuilds on the first
-                        // lookup over the copied keys.
-                        index: crate::heap::MapIndex::default(),
-                    },
-                    Object::Instance { class, fields } => Object::Instance {
-                        class: *class,
-                        fields: fields.iter().map(|v| map_value(*v)).collect(),
-                    },
-                    Object::Closure { func, captures } => Object::Closure {
-                        func: *func,
-                        captures: captures.iter().map(|v| map_value(*v)).collect(),
-                    },
-                    _ => unreachable!("pass 1 admitted sendable shapes only"),
-                };
-                *dst_m.heap.get_mut(*new) = patched;
-                dst_m.heap.recharge(*new);
-            }
-        }
-        // Unroot in LIFO order.
-        for r in new_refs.iter().rev() {
-            dst_m.heap.pop_host_root(*r);
-        }
-        result?;
-        let new_root = new_refs[index[&root.slot]];
-        // The copy is as frozen as the source graph.
-        dst_m.heap.freeze(new_root);
-        Ok(Value::Obj(new_root))
+        // The destination roots are read before the heap is borrowed:
+        // a destination collection during the copy needs them.
+        let dst_roots = dst_m.gc_roots(&[]);
+        lm_graph::transfer(&mut src_m.heap, &mut dst_m.heap, &dst_roots, value, &limits)
     }
 }
 
@@ -1256,39 +1157,6 @@ enum Resolution {
     Denied,
     Mock { owner: VmId, closure: ObjRef },
     Root,
-}
-
-/// An empty destination shell of one sendable object. Children are
-/// patched afterwards; the shell keeps the payload sizes so the cost
-/// accounting matches.
-fn shell_of(object: &Object) -> Object {
-    match object {
-        Object::Str(s) => Object::Str(s.clone()),
-        Object::NativeFault { code, message, op } => Object::NativeFault {
-            code: *code,
-            message: message.clone(),
-            op: *op,
-        },
-        Object::Tuple { items } => Object::Tuple {
-            items: vec![Value::Unit; items.len()],
-        },
-        Object::List { items } => Object::List {
-            items: vec![Value::Unit; items.len()],
-        },
-        Object::Map { entries, .. } => Object::Map {
-            entries: vec![(Value::Unit, Value::Unit); entries.len()],
-            index: crate::heap::MapIndex::default(),
-        },
-        Object::Instance { class, fields } => Object::Instance {
-            class: *class,
-            fields: vec![Value::Unit; fields.len()],
-        },
-        Object::Closure { func, captures } => Object::Closure {
-            func: *func,
-            captures: vec![Value::Unit; captures.len()],
-        },
-        _ => unreachable!("pass 1 admitted sendable shapes only"),
-    }
 }
 
 impl<'m> World<'m> {
@@ -1417,6 +1285,7 @@ impl<'m> World<'m> {
                         format!("<call {}>", lm_abi::op_name(*op))
                     }
                     Object::NativeFault { code, .. } => code.to_string(),
+                    Object::NativeDigest(bytes) => render_digest(bytes),
                 }
             }
         }
@@ -1483,6 +1352,15 @@ impl<'m> World<'m> {
         });
         out
     }
+}
+
+/// Render one canonical graph digest as lower-case hexadecimal.
+pub(crate) fn render_digest(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 /// Render a string value with quotation marks and escapes.

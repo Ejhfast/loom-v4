@@ -111,6 +111,7 @@ fn exercise_module(bytes: &[u8]) {
         max_frames: 256,
         max_stack_values: 1 << 16,
         heap_bytes: 1 << 20,
+        ..VmConfig::default()
     };
     let mut vm = Vm::new(&loaded, config);
     let outcome = vm.run();

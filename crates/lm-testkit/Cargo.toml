@@ -13,4 +13,6 @@ lm-compiler = { path = "../lm-compiler" }
 lm-bytecode = { path = "../lm-bytecode" }
 lm-verify = { path = "../lm-verify" }
 lm-value = { path = "../lm-value" }
+lm-graph = { path = "../lm-graph" }
+lm-heap = { path = "../lm-heap" }
 lm-vm = { path = "../lm-vm" }

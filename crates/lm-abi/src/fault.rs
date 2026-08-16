@@ -1,0 +1,110 @@
+//! The stable machine-fault codes.
+//!
+//! A fault code is manifest content: the specification fixes the name
+//! and the meaning of each code, and every layer of the runtime reads
+//! the same set. The codes live beside the operation manifest so the
+//! heap, the graph engine, and the VM can all name them without a
+//! dependency on the VM.
+//!
+//! The code set is not part of `manifest_digest` today. The digest
+//! pins the operation ABI, and an artifact carries no fault table, so
+//! adding a code cannot invalidate an artifact.
+
+use std::fmt;
+
+/// A stable machine-fault code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultCode {
+    IntegerOverflow,
+    DivideByZero,
+    OutOfFuel,
+    StackLimit,
+    HeapLimit,
+    FrozenWrite,
+    IndexOutOfBounds,
+    MissingKey,
+    BadCast,
+    PolicyDenied,
+    InvalidVmState,
+    InvalidRequestToken,
+    UnsendableValue,
+    /// A graph mode reached its object, edge, byte, or work limit.
+    BoundaryLimit,
+    /// A codec or descriptor rule failed. A live host attachment or a
+    /// nondigestible native value raises it.
+    BoundaryViolation,
+    HostFault,
+    /// Implementation subcode: a field was read before its first
+    /// assignment. Checked source programs cannot reach this fault.
+    UninitializedField,
+    /// Implementation subcode: the runtime backstop behind a proven
+    /// exhaustive `case` executed. Checked source programs cannot
+    /// reach this fault.
+    UnreachableCode,
+}
+
+impl fmt::Display for FaultCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            FaultCode::IntegerOverflow => "IntegerOverflow",
+            FaultCode::DivideByZero => "DivideByZero",
+            FaultCode::OutOfFuel => "OutOfFuel",
+            FaultCode::StackLimit => "StackLimit",
+            FaultCode::HeapLimit => "HeapLimit",
+            FaultCode::FrozenWrite => "FrozenWrite",
+            FaultCode::IndexOutOfBounds => "IndexOutOfBounds",
+            FaultCode::MissingKey => "MissingKey",
+            FaultCode::BadCast => "BadCast",
+            FaultCode::PolicyDenied => "PolicyDenied",
+            FaultCode::InvalidVmState => "InvalidVmState",
+            FaultCode::InvalidRequestToken => "InvalidRequestToken",
+            FaultCode::UnsendableValue => "UnsendableValue",
+            FaultCode::BoundaryLimit => "BoundaryLimit",
+            FaultCode::BoundaryViolation => "BoundaryViolation",
+            FaultCode::HostFault => "HostFault",
+            FaultCode::UninitializedField => "UninitializedField",
+            FaultCode::UnreachableCode => "UnreachableCode",
+        };
+        f.write_str(name)
+    }
+}
+
+/// The snapshot classification of one native value or one suspending
+/// operation (specification 16.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotClass {
+    /// The codec can copy the bytes of this value into a snapshot.
+    MachineState,
+    /// The value names live state outside every machine. It has no
+    /// bytes to copy, and it blocks snapshot creation.
+    HostAttachment,
+}
+
+impl fmt::Display for SnapshotClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SnapshotClass::MachineState => "machine-state",
+            SnapshotClass::HostAttachment => "host-attachment",
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codes_print_their_names() {
+        assert_eq!(FaultCode::BoundaryLimit.to_string(), "BoundaryLimit");
+        assert_eq!(
+            FaultCode::BoundaryViolation.to_string(),
+            "BoundaryViolation"
+        );
+    }
+
+    #[test]
+    fn classifications_print_their_names() {
+        assert_eq!(SnapshotClass::MachineState.to_string(), "machine-state");
+        assert_eq!(SnapshotClass::HostAttachment.to_string(), "host-attachment");
+    }
+}

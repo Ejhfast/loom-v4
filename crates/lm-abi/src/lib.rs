@@ -11,8 +11,10 @@
 //! change to any of these changes the digest and therefore the ABI
 //! version.
 
+mod fault;
 mod sha;
 
+pub use fault::{FaultCode, SnapshotClass};
 pub use sha::{sha256, sha256_hex};
 
 /// The manifest ABI version. A signature or membership change must
@@ -83,6 +85,24 @@ pub struct OpDef {
     /// The generic schema text of a `VmControl` entry, for identity
     /// hashing. Empty for `Fixed` entries.
     pub schema: &'static str,
+    /// The snapshot classification of one pending instance of this
+    /// operation (specification 16.4 and 25.5).
+    ///
+    /// `HostAttachment` means the operation may suspend and hold live
+    /// state outside every machine while it waits. `MachineState`
+    /// means the operation always completes inside the host call, so
+    /// it leaves nothing pending for a snapshot to copy. A host that
+    /// suspends a `MachineState` operation breaks the contract, and
+    /// the VM rejects that reply.
+    pub snapshot: SnapshotClass,
+}
+
+impl OpDef {
+    /// True when a pending instance of this operation is a live host
+    /// attachment.
+    pub fn suspends(&self) -> bool {
+        matches!(self.snapshot, SnapshotClass::HostAttachment)
+    }
 }
 
 /// Dense slots for the week-4 operations. The constants match the
@@ -113,6 +133,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[AbiType::Str],
         reply: AbiType::Unit,
         schema: "",
+        snapshot: SnapshotClass::HostAttachment,
     },
     OpDef {
         group: "Io",
@@ -121,6 +142,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[AbiType::Str],
         reply: AbiType::Unit,
         schema: "",
+        snapshot: SnapshotClass::HostAttachment,
     },
     OpDef {
         group: "Io",
@@ -129,6 +151,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::ResultOptionStrIoError,
         schema: "",
+        snapshot: SnapshotClass::HostAttachment,
     },
     OpDef {
         group: "Clock",
@@ -137,6 +160,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Int,
         schema: "",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Clock",
@@ -145,6 +169,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Int,
         schema: "",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Clock",
@@ -153,6 +178,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[AbiType::Int],
         reply: AbiType::Unit,
         schema: "",
+        snapshot: SnapshotClass::HostAttachment,
     },
     OpDef {
         group: "Rand",
@@ -161,6 +187,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[AbiType::Int, AbiType::Int],
         reply: AbiType::Int,
         schema: "",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
@@ -169,6 +196,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "() -> EmptyVm",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
@@ -177,6 +205,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "[A,T,e](EmptyVm, Fn[A,T,e], control A) -> Vm[T]",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
@@ -185,6 +214,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "[T](Vm[T]) -> RunResult[T]",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
@@ -193,6 +223,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "[T](Vm[T]) -> StepEvent[T]",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
@@ -201,6 +232,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "[T](Vm[T]) -> DriveEvent[T]",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
@@ -209,6 +241,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "[T,A,R](Vm[T], PendingCall[A,R], R) -> ()",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
@@ -217,6 +250,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "[T](Vm[T], Request, Fault) -> ()",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
@@ -225,6 +259,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "[T](Vm[T], Request) -> ()",
+        snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
@@ -233,6 +268,7 @@ pub const OPS: [OpDef; 16] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "[T](Vm[T]) -> PolicyTable",
+        snapshot: SnapshotClass::MachineState,
     },
 ];
 
@@ -389,6 +425,28 @@ mod tests {
             assert_eq!(op_identity(slot), id);
         }
         assert_eq!(manifest_digest(), manifest_digest());
+    }
+
+    /// Every operation declares one snapshot classification, and the
+    /// suspending set is exactly the four operations that reach live
+    /// host state. A new operation must join this list on purpose.
+    #[test]
+    fn every_operation_declares_one_snapshot_class() {
+        let suspending: Vec<String> = (0..OP_COUNT)
+            .filter(|slot| op(*slot).suspends())
+            .map(op_name)
+            .collect();
+        assert_eq!(
+            suspending,
+            vec!["Io.Print", "Io.Error", "Io.ReadLine", "Clock.Sleep"]
+        );
+        // A VM control operation runs inside the driver loop, so it
+        // never holds a host attachment.
+        for slot in 0..OP_COUNT {
+            if op(slot).kind == OpKind::VmControl {
+                assert_eq!(op(slot).snapshot, SnapshotClass::MachineState);
+            }
+        }
     }
 
     #[test]
