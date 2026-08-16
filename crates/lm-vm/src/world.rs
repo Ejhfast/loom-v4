@@ -1700,7 +1700,8 @@ impl<'m> World<'m> {
             Err(code) => {
                 // A message that fails the sender-side boundary check
                 // faults the sender (specification 18.4).
-                self.fault_caller(vm, op, code, "the message is not sendable");
+                let text = copy_failure(code, "message");
+                self.fault_caller(vm, op, code, &text);
                 return;
             }
         };
@@ -2393,6 +2394,20 @@ impl<'m> World<'m> {
     }
 }
 
+/// The message of one failed boundary copy.
+///
+/// A copy fails for two different reasons. The graph may hold a value
+/// that never crosses, or the copy may pass a limit. A limit failure
+/// is not a sendability failure, so the two texts differ. The stable
+/// fault code does not change.
+fn copy_failure(code: FaultCode, what: &str) -> String {
+    match code {
+        FaultCode::HeapLimit => format!("the {what} copy exceeded the heap limit"),
+        FaultCode::BoundaryLimit => format!("the {what} copy exceeded the boundary limit"),
+        _ => format!("the {what} is not sendable"),
+    }
+}
+
 /// One resolution of a policy walk.
 enum Resolution {
     Denied,
@@ -2888,6 +2903,24 @@ mod tests {
         assert_eq!(
             world.boundary_copy(0, 1, wrapper),
             Err(FaultCode::UnsendableValue)
+        );
+    }
+
+    /// A failed copy reports its cause. A limit failure must not read
+    /// like a sendability failure.
+    #[test]
+    fn a_copy_failure_names_its_cause() {
+        assert_eq!(
+            copy_failure(FaultCode::UnsendableValue, "message"),
+            "the message is not sendable"
+        );
+        assert_eq!(
+            copy_failure(FaultCode::HeapLimit, "message"),
+            "the message copy exceeded the heap limit"
+        );
+        assert_eq!(
+            copy_failure(FaultCode::BoundaryLimit, "message"),
+            "the message copy exceeded the boundary limit"
         );
     }
 

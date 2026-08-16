@@ -1083,3 +1083,42 @@ fn the_proc_dumps_are_readable_and_deterministic() {
     );
     assert_eq!(dumps(), (outcome, trace, mailboxes));
 }
+
+/// A copy that passes a limit is not a sendability failure. The
+/// sender fault names the limit instead of the shape rule.
+#[test]
+fn a_message_past_the_boundary_limit_names_the_limit() {
+    let source = "class Sink < Proc[[Int]]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(xs) then xs.len()\n\
+                  \x20   in Closed  then 0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  h = Sink.spawn()\n\
+                  h.send([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])\n\
+                  h.done()\n";
+    let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let base = VmConfig::default();
+    let config = VmConfig {
+        // The message costs more bytes than one copy may walk. Every
+        // other graph of this program is smaller.
+        graph: lm_vm::GraphLimits {
+            max_bytes: 120,
+            ..base.graph
+        },
+        ..base
+    };
+    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
+    world.allow("Proc").expect("the grant names a group");
+    let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
+    let outcome = scheduler.run(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Fault(BoundaryLimit)");
+    let fault = world.fault_of(0).expect("the sender faulted");
+    assert_eq!(
+        fault.message,
+        "the message copy exceeded the boundary limit"
+    );
+}
