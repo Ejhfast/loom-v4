@@ -68,7 +68,7 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   - Validate every mailbox message type.
   - Validate pending arguments from pre-perform verifier state.
   - Validate native types through their target relationships.
-  - Validate nested snapshots under the same admission budget.
+  - Keep a nested snapshot opaque; match its declared root type only.
 
   This work implements the docs/specs/snapshot-image-admission.md:156.
 
@@ -173,8 +173,6 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   - Use fallible collection reservation.
   - Add one AdmissionBudget.
   - Charge every resolved type and graph pair.
-  - Share both budgets with nested snapshot admission.
-  - Memoize admitted nested containers by hash and admission identity.
   - Compute verifier states once per function.
   - Reuse those states for every saved frame.
   - Hash the container without copying its prefix.
@@ -266,20 +264,11 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   ## Ordered worklist
 
-  ### 1. Add regression tests and an invariant inventory
+  ### 1. Add regression tests for the known holes
 
-  - Add crafted cases for every current admission hole.
-  - Keep invalid states representable as Image.
-  - Confirm admission rejects each inaccurate type.
-  - Confirm restore cannot accept Image.
-  - Confirm external loading returns only SnapshotImage.
-  - Confirm trusted capture performs no second type scan.
-  - Confirm repeated restore performs no admission scan.
-  - Inventory every interpreter unreachable! and verified expect.
-  - Map each assertion to admission or runtime preservation.
-  - Convert any unmapped assertion into a local fault.
-
-  Cover substituted operands, initialization, shared generic objects, native values, mailboxes, and terminal results.
+  Add crafted cases for substituted operands, initialization, shared
+  generic objects, native values, mailboxes, and terminal results. Keep
+  each invalid state representable as Image.
 
   ### 2. Split decoding from admission
 
@@ -312,9 +301,8 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   - Derive Vm[T] from the target machine.
   - Derive Handle[M,R] from the target proc.
   - Derive PendingCall[A,R] from the pending operation.
-  - Check Snapshot[T] against the nested root result.
-  - Admit nested SnapshotImage values once.
-  - Store admitted nested dependencies with SnapshotImage.
+  - Check Snapshot[T] against the nested container declared root type.
+  - Keep a nested SnapshotImage opaque; admit it at its own restore.
   - Reject missing relational type evidence.
 
   Choose explicit stored identities only when target derivation cannot supply them.
@@ -355,7 +343,7 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   - Commit without fallible work.
   - Restore the exact prior target after failure.
 
-  Add tests for every allocation and reservation failure point.
+  Test that a failure mid-build leaves the target unchanged.
 
   ### 8. Add request epochs and checked counters
 
@@ -393,8 +381,6 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   - Add compact-input expansion tests.
   - Add deep and wide graph tests.
 
-  Measure peak memory and total admission work.
-
   ### 11. Replace scheduler scans
 
   - Add deterministic ready and blocked indexes.
@@ -403,8 +389,7 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   - Move blocking host waits outside scheduling.
   - Remove terminal machines from active indexes.
   - Preserve deterministic interleaving tests.
-
-  Measure one-shot completion across increasing proc counts.
+  - Confirm no full-machine scan remains.
 
   ### 12. Consolidate snapshot capture work
 
@@ -414,8 +399,7 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   - Remove linear ordinal searches.
   - Remove repeated graph walks.
   - Stream encoding and hashing where practical.
-
-  Measure deep, wide, and multi-machine snapshots.
+  - Confirm no linear ordinal search remains.
 
   ## Delivery groups
 
