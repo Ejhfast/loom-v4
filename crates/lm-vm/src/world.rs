@@ -227,6 +227,44 @@ impl<'m> World<'m> {
         self.trace.as_deref().unwrap_or(&[])
     }
 
+    /// A readable dump of the proc trace, one event per line.
+    ///
+    /// Every line names machines by identifier, so the dump repeats
+    /// exactly when the scheduler repeats.
+    pub fn dump_trace(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for event in self.trace() {
+            let _ = writeln!(out, "{}", show_trace_event(event));
+        }
+        out
+    }
+
+    /// A readable dump of the mailbox of every proc machine.
+    pub fn dump_mailboxes(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for vm in 0..self.machines.len() as VmId {
+            if self.machines[vm as usize].owner != Ownership::Scheduler {
+                continue;
+            }
+            let m = self.mailbox_metrics(vm);
+            let _ = writeln!(
+                out,
+                "proc {vm} gen {} limit {} queued {} accepted {} delivered {} \
+                 closed {} frozen {}",
+                self.machines[vm as usize].generation,
+                m.limit,
+                m.queued,
+                m.accepted,
+                m.delivered,
+                m.closed,
+                m.frozen
+            );
+        }
+        out
+    }
+
     fn record(&mut self, event: TraceEvent) {
         if let Some(trace) = &mut self.trace {
             trace.push(event);
@@ -2543,6 +2581,36 @@ impl<'m> World<'m> {
             );
         });
         out
+    }
+}
+
+/// Render one proc trace event as one stable line.
+pub(crate) fn show_trace_event(event: &TraceEvent) -> String {
+    match event {
+        TraceEvent::Spawn {
+            parent,
+            proc,
+            generation,
+        } => format!("spawn parent {parent} proc {proc} gen {generation}"),
+        TraceEvent::Send { from, to, accepted } => {
+            format!("send from {from} to {to} accepted {accepted}")
+        }
+        TraceEvent::Receive { proc, closed } => format!("receive proc {proc} closed {closed}"),
+        TraceEvent::Close { proc, first } => format!("close proc {proc} first {first}"),
+        TraceEvent::Block { vm, block } => {
+            let what = match block {
+                Block::Receive => "receive".to_string(),
+                Block::Send { target, .. } => format!("send target {target}"),
+                Block::Done { target, .. } => format!("done target {target}"),
+            };
+            format!("block vm {vm} on {what}")
+        }
+        TraceEvent::Unblock { vm } => format!("unblock vm {vm}"),
+        TraceEvent::Pause { proc } => format!("pause proc {proc}"),
+        TraceEvent::Resume { proc } => format!("resume proc {proc}"),
+        TraceEvent::Terminal { proc, faulted } => {
+            format!("terminal proc {proc} faulted {faulted}")
+        }
     }
 }
 

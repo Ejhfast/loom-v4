@@ -962,3 +962,46 @@ fn a_proc_runs_under_its_own_fuel_budget() {
         .0;
     assert_eq!(outcome, "Done(\"OutOfFuel\")");
 }
+
+/// The proc trace and the mailbox table both have a readable dump,
+/// and both repeat exactly.
+#[test]
+fn the_proc_dumps_are_readable_and_deterministic() {
+    let source = format!("{ADDER}h = Adder.spawn()\nh.send(1)\nh.send(2)\nh.close()\nh.done()\n");
+    let bytes = compile_to_bytes("proc.lm", &source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let dumps = || {
+        let mut world = World::new(
+            &loaded,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+        );
+        world.trace_procs();
+        world.allow("Proc").expect("the grant names a group");
+        let outcome = Scheduler::default().run(&mut world);
+        (
+            world.show_outcome(&outcome),
+            world.dump_trace(),
+            world.dump_mailboxes(),
+        )
+    };
+    let (outcome, trace, mailboxes) = dumps();
+    assert_eq!(outcome, "Done(Done(3))");
+    assert!(
+        trace.starts_with("spawn parent 0 proc 1 gen 0\n"),
+        "{trace}"
+    );
+    assert!(
+        trace.contains("send from 0 to 1 accepted true\n"),
+        "{trace}"
+    );
+    assert!(trace.contains("close proc 1 first true\n"), "{trace}");
+    assert!(trace.contains("block vm 0 on done target 1\n"), "{trace}");
+    assert!(trace.contains("receive proc 1 closed true\n"), "{trace}");
+    assert!(trace.contains("terminal proc 1 faulted false\n"), "{trace}");
+    assert_eq!(
+        mailboxes,
+        "proc 1 gen 0 limit 64 queued 0 accepted 2 delivered 2 closed true frozen false\n"
+    );
+    assert_eq!(dumps(), (outcome, trace, mailboxes));
+}

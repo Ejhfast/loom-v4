@@ -311,3 +311,35 @@ fn the_class_entry_records_the_parent_type_arguments() {
     let arg = module.classes[int_cell].parent_args[0];
     assert_eq!(module.types[arg as usize], lm_bytecode::BcType::Int);
 }
+
+/// The class listing shows the parent instantiation the class table
+/// records, so the new byte format has a readable dump.
+#[test]
+fn the_class_listing_shows_the_parent_type_arguments() {
+    let module = compile_text(
+        "inherit.lm",
+        "class Cell[T]\n\
+         \x20 def get(self): T\n\
+         \x20   self.get()\n\
+         \x20 end\n\
+         end\n\
+         class IntCell < Cell[Int]\n\
+         end\n\
+         class Window < Range\n\
+         \x20 def init(mut self)\n\
+         \x20   super.init(0, 1)\n\
+         \x20 end\n\
+         end\n\
+         1\n",
+    )
+    .expect("the module compiles");
+    let dump = lm_hir::dump_cfg(&module);
+    assert!(dump.contains("IntCell < Cell[Int]\n"), "{dump}");
+    assert!(dump.contains("Window < Range\n"), "{dump}");
+    // An enum case keeps the implicit identity arguments, so its line
+    // is unchanged.
+    assert!(
+        dump.contains("Option.Some case params 1 < Option\n"),
+        "{dump}"
+    );
+}

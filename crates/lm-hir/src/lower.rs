@@ -1787,9 +1787,23 @@ pub fn dump_cfg(module: &Module) -> String {
         );
     }
     for (cidx, class) in module.classes.iter().enumerate() {
+        // A generic parent carries its type arguments, so the listing
+        // shows the instantiation the class table records.
         let parent = class
             .parent()
-            .map(|p| format!(" < {}", module.classes[p as usize].name))
+            .map(|p| {
+                let args = if class.parent_args.is_empty() {
+                    String::new()
+                } else {
+                    let parts: Vec<String> = class
+                        .parent_args
+                        .iter()
+                        .map(|t| type_text(module, *t))
+                        .collect();
+                    format!("[{}]", parts.join(", "))
+                };
+                format!(" < {}{args}", module.classes[p as usize].name)
+            })
             .unwrap_or_default();
         let kind = match class.kind {
             BcClassKind::Normal => "",
