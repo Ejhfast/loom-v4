@@ -103,6 +103,14 @@ pub struct World<'m> {
     dispatch: &'m [crate::DispatchRow],
     core: CoreLayout,
     machines: Vec<Machine>,
+    /// Retired mock-handler slots, ready for reuse.
+    ///
+    /// A mock machine is ephemeral: no guest value names it, it takes
+    /// no child, and it cannot reach an asked state. One mocked
+    /// perform therefore leaves nothing behind, and the next mock
+    /// takes the same slot. Without the list, a loop of mocked
+    /// performs grows the machine table without any bound.
+    mock_free: Vec<VmId>,
     host: Box<dyn Host>,
     config: VmConfig,
 }
@@ -119,6 +127,7 @@ impl<'m> World<'m> {
             dispatch: loaded.dispatch(),
             core: loaded.core_layout(),
             machines: vec![root],
+            mock_free: Vec::new(),
             host,
             config,
         }
@@ -414,6 +423,18 @@ impl<'m> World<'m> {
                 );
             }
         }
+        self.retire_mock(mock);
+    }
+
+    /// Retire one finished mock machine.
+    ///
+    /// The result already crossed into the target, and no guest value
+    /// names a mock machine, so the record drops its heap now and the
+    /// slot joins the free list.
+    fn retire_mock(&mut self, mock: VmId) {
+        debug_assert!(self.machines[mock as usize].active == 0);
+        self.machines[mock as usize] = Machine::empty(self.config, None);
+        self.mock_free.push(mock);
     }
 
     fn pending_op(&self, vm: VmId) -> Option<u32> {
@@ -734,8 +755,18 @@ impl<'m> World<'m> {
             fuel: MOCK_FUEL,
             ..self.config
         };
-        let id = self.machines.len() as VmId;
-        self.machines.push(Machine::empty(mock_config, None));
+        // Reuse a retired mock slot before the table grows.
+        let id = match self.mock_free.pop() {
+            Some(id) => {
+                self.machines[id as usize] = Machine::empty(mock_config, None);
+                id
+            }
+            None => {
+                let id = self.machines.len() as VmId;
+                self.machines.push(Machine::empty(mock_config, None));
+                id
+            }
+        };
         let moved = if owner == vm {
             // The mock lives in the performing machine's own table.
             self.transfer(vm, id, Value::Obj(closure))

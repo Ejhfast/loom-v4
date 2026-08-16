@@ -230,3 +230,53 @@ go()
         );
     }
 }
+
+/// A mock handler runs in an ephemeral machine. The machine table
+/// must not grow with the number of mocked performs.
+#[test]
+fn mocked_performs_reuse_one_machine_slot() {
+    let source = "\
+def go(count: Int): Int with Vm, Clock.Now
+  vm = sys.vm.Vm().from_object(do |n: Int|: Int with Clock.Now
+    i = 0
+    total = 0
+    while i < n
+      total = total + sys.clock.now()
+      i = i + 1
+    end
+    total
+  end, args: (count,))
+  vm.table().mock(Clock.Now, do ||: Int
+    1
+  end)
+  case vm.run()
+  in Done(v)  then v
+  in Fault(_) then 0 - 1
+  end
+end
+
+go(COUNT)
+";
+    let mut counts = Vec::new();
+    for performs in [10, 2_000] {
+        let text = source.replace("COUNT", &performs.to_string());
+        let bytes = compile_to_bytes("t.lm", &text).expect("the program compiles");
+        let loaded = load_bytes(&bytes).expect("the program loads");
+        let mut world = World::new(
+            &loaded,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+        );
+        world.allow("Vm").expect("the grant names a group");
+        world.allow("Clock").expect("the grant names a group");
+        let outcome = world.run_root();
+        assert_eq!(world.show_outcome(&outcome), format!("Done({performs})"));
+        counts.push(world.machine_count());
+    }
+    // The root, the driven machine, and one reused mock slot.
+    assert_eq!(
+        counts,
+        vec![3, 3],
+        "the machine table grew with the performs"
+    );
+}
