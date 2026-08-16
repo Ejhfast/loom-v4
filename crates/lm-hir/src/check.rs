@@ -876,6 +876,35 @@ pub(crate) fn check_key_type(ctx: &Ctx, key: TypeId, span: Span) -> Result<(), D
     }
 }
 
+/// Check the mailbox message type of every proc class of one module.
+///
+/// `link_class_parents` recorded the message type as the parent
+/// argument. The span comes from the same parent clause, so the
+/// diagnostic points at the written type.
+fn check_mailbox_types(ctx: &Ctx, module: &ast::Module) -> Result<(), Diagnostic> {
+    let Some(proc_class) = ctx.core_types.get("Proc").copied() else {
+        return Ok(());
+    };
+    for class in &module.classes {
+        let Some(clause) = &class.parent else {
+            continue;
+        };
+        // A bare `Proc` parent means `Proc[Never]`, which carries no
+        // written type and no message.
+        let Some(arg) = clause.args.first() else {
+            continue;
+        };
+        let idx = ctx.user_types[&class.name];
+        let meta = ctx.store.class_meta(ClassId(idx));
+        if meta.parent != Some(ClassId(proc_class)) {
+            continue;
+        }
+        let mailbox = meta.parent_args[0];
+        check_mailbox_type(ctx, mailbox, arg.span)?;
+    }
+    Ok(())
+}
+
 /// Reject a mailbox message type that names a holder-local class.
 ///
 /// Every message crosses a machine boundary as a copy. A holder-local
@@ -883,7 +912,8 @@ pub(crate) fn check_key_type(ctx: &Ctx, key: TypeId, span: Span) -> Result<(), D
 /// accept one message. The rule rejects the declaration instead of
 /// the send.
 pub(crate) fn check_mailbox_type(ctx: &Ctx, mailbox: TypeId, span: Span) -> Result<(), Diagnostic> {
-    match ctx.store.holder_local_part(mailbox) {
+    let mut seen: Vec<u32> = Vec::new();
+    match holder_local_part(ctx, mailbox, &mut seen) {
         None => Ok(()),
         Some(part) => Err(Diagnostic::new(
             "E1056",
@@ -894,6 +924,63 @@ pub(crate) fn check_mailbox_type(ctx: &Ctx, mailbox: TypeId, span: Span) -> Resu
             span,
         )),
     }
+}
+
+/// The first holder-local part of one message type.
+///
+/// The walk reads the parts of a composite type, the type arguments
+/// of a generic application, and the declared fields of every class
+/// it reaches. A message carries the whole graph, so a holder-local
+/// field is a holder-local message.
+///
+/// The walk stops at `Handle`, because a handle crosses as a typed
+/// designator and its type arguments name no part of the handle
+/// value.
+fn holder_local_part(ctx: &Ctx, ty: TypeId, seen: &mut Vec<u32>) -> Option<TypeId> {
+    if ctx.store.is_holder_local_native(ty) {
+        return Some(ty);
+    }
+    match ctx.store.get(ty).clone() {
+        Type::List(item) => holder_local_part(ctx, item, seen),
+        Type::Map(key, value) => {
+            holder_local_part(ctx, key, seen).or_else(|| holder_local_part(ctx, value, seen))
+        }
+        Type::Tuple(items) => items.iter().find_map(|t| holder_local_part(ctx, *t, seen)),
+        Type::Class(class) => holder_local_class(ctx, class.0, seen),
+        Type::Inst(class, args) => args
+            .iter()
+            .find_map(|t| holder_local_part(ctx, *t, seen))
+            .or_else(|| holder_local_class(ctx, class.0, seen)),
+        _ => None,
+    }
+}
+
+/// The first holder-local field type of one class.
+///
+/// The walk covers the declared fields, inherited fields included,
+/// and every arm of an enum family. A class graph may hold a cycle,
+/// so `seen` stops a second visit of one class.
+///
+/// A field of a generic parameter type resolves to one type argument
+/// of the application, and `holder_local_part` reads those arguments
+/// before it reaches this walk.
+fn holder_local_class(ctx: &Ctx, class: u32, seen: &mut Vec<u32>) -> Option<TypeId> {
+    if seen.contains(&class) {
+        return None;
+    }
+    seen.push(class);
+    let info = &ctx.classes[class as usize];
+    for field in &info.field_tys {
+        if let Some(part) = holder_local_part(ctx, *field, seen) {
+            return Some(part);
+        }
+    }
+    for arm in &info.arms {
+        if let Some(part) = holder_local_class(ctx, *arm, seen) {
+            return Some(part);
+        }
+    }
+    None
 }
 
 /// Split generic parameters into type names and effect names.
@@ -1012,6 +1099,9 @@ pub fn check_module_with(
     resolve_all_classes(&mut ctx, core, true).map_err(core_defect)?;
     // Pass 2c: resolve user classes and enums in class-index order.
     resolve_all_classes(&mut ctx, module, false)?;
+    // Pass 2d: check every mailbox message type. The walk reads the
+    // declared fields, so it runs after every class resolves.
+    check_mailbox_types(&ctx, module)?;
     // Reserve the entry function index.
     let entry_idx = ctx.funcs.len();
     ctx.funcs.push(None);
@@ -1527,12 +1617,6 @@ fn link_class_parents(
             let mut args = Vec::with_capacity(clause.args.len());
             for arg in &clause.args {
                 args.push(resolve_type(ctx, &env, arg)?);
-            }
-            // A message crosses a machine boundary, and a holder-local
-            // value never crosses one (specification 18.5). The
-            // mailbox type therefore rejects here, at the declaration.
-            if ctx.core_types.get("Proc").copied() == Some(parent) {
-                check_mailbox_type(ctx, args[0], clause.args[0].span)?;
             }
             ctx.store
                 .set_class_parent_args(ClassId(idx), ClassId(parent), args);

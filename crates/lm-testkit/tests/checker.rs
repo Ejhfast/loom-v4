@@ -1,7 +1,7 @@
 //! Focused checker tests: one negative case for each rule, plus
 //! positive coverage for the lowered CFG dump.
 
-use lm_testkit::{compile_text, run_text};
+use lm_testkit::{compile_text, run_allowed, run_text};
 use lm_vm::VmConfig;
 
 fn code_of(source: &str) -> String {
@@ -224,6 +224,42 @@ fn week_two_negative_cases_have_stable_codes() {
     ] {
         assert_eq!(code_of(&mailbox.replace("{}", named)), "E1056", "{named}");
     }
+    // The walk reads the declared fields of a class message type.
+    let holder = "class Holder\n  buf: ByteBuffer\n\
+                  \x20 def init(mut self, buf: ByteBuffer)\n    self.buf = buf\n  end\nend\n";
+    assert_eq!(
+        code_of(&format!("{holder}{}", mailbox.replace("{}", "Holder"))),
+        "E1056"
+    );
+    // The walk reads every arm of an enum message type.
+    let payload = "enum Payload\n  Num(value: Int)\n  Buf(bb: ByteBuffer)\nend\n";
+    assert_eq!(
+        code_of(&format!("{payload}{}", mailbox.replace("{}", "Payload"))),
+        "E1056"
+    );
+}
+
+/// A message type may hold a cycle. The walk visits each class once,
+/// so a recursive class neither loops nor rejects.
+#[test]
+fn a_recursive_message_type_is_accepted() {
+    let source = "class Node\n  value: Int\n  next: Option[Node] = None\n\
+                  \x20 def init(mut self, value: Int)\n    self.value = value\n  end\nend\n\
+                  class Sink < Proc[Node]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(n) then n.value\n\
+                  \x20   in Closed then 0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  h = Sink.spawn()\n\
+                  h.send(Node(4))\n\
+                  h.done()\n";
+    assert_eq!(
+        run_allowed("t.lm", source, &["Proc"]).expect("the program compiles"),
+        "Done(Done(4))"
+    );
 }
 
 #[test]

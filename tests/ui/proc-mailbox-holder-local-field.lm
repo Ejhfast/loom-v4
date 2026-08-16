@@ -1,0 +1,12 @@
+enum Payload
+  Num(value: Int)
+  Buf(bb: ByteBuffer)
+end
+
+class Sink < Proc[Payload]
+  def on_spawn(self): Int with Proc
+    1
+  end
+end
+
+Sink.spawn().done()

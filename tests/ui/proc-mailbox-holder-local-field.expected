@@ -1,0 +1,2 @@
+error[E1056]: a mailbox message type must not name the holder-local type ByteBuffer
+  --> tests/ui/proc-mailbox-holder-local-field.lm:6:19
