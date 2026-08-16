@@ -67,6 +67,16 @@ pub struct VmConfig {
     /// bytes. A capture past the bound returns
     /// `SnapshotLimitExceeded` (specification 17.4).
     pub snapshot_bytes: usize,
+    /// The largest number of closed type nodes one world may hold.
+    ///
+    /// The language permits polymorphic recursion, so a program can
+    /// ask for closed types without bound. A call past the cap takes
+    /// `BoundaryLimit`. The world reads the value from the config of
+    /// its root machine, because one world holds one table.
+    pub max_closed_types: u32,
+    /// The largest number of type environment nodes one world may
+    /// hold. The cap works exactly as the one above.
+    pub max_type_envs: u32,
 }
 
 impl Default for VmConfig {
@@ -81,6 +91,8 @@ impl Default for VmConfig {
             max_resources: 1_024,
             mailbox_limit: 64,
             snapshot_bytes: 64 << 20,
+            max_closed_types: lm_bytecode::closed::DEFAULT_MAX_CLOSED_TYPES,
+            max_type_envs: lm_bytecode::closed::DEFAULT_MAX_TYPE_ENVS,
         }
     }
 }

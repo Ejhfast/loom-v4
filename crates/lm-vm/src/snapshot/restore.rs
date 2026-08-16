@@ -381,6 +381,10 @@ fn clamp(source: &ImageMachine, ceiling: VmConfig) -> VmConfig {
         max_resources: source.limits.max_resources.min(ceiling.max_resources),
         mailbox_limit: source.limits.mailbox_limit.min(ceiling.mailbox_limit),
         snapshot_bytes: ceiling.snapshot_bytes,
+        // The type environment table belongs to one world, so a
+        // restored machine keeps the caps of the world it joins.
+        max_closed_types: ceiling.max_closed_types,
+        max_type_envs: ceiling.max_type_envs,
     }
 }
 

@@ -255,7 +255,7 @@ impl<'m> World<'m> {
             machines: vec![root],
             mock_free: Vec::new(),
             suspended: std::collections::BTreeMap::new(),
-            envs: lm_bytecode::closed::TypeEnvs::default(),
+            envs: lm_bytecode::closed::TypeEnvs::new(config.max_closed_types, config.max_type_envs),
             host,
             config,
             trace: None,
