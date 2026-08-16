@@ -1710,6 +1710,79 @@ end
 go()
 ";
 
+/// A handle that `sys.proc.run` produced. Its mailbox type is `Never`,
+/// and no proc class stands behind it.
+const PROC_RUN_HANDLE: &str = "\
+def go(): Int with Proc, Vm
+  vm = sys.vm.Vm().from_object(do ||: Int 41 + 1 end, args: ())
+  h = sys.proc.run(vm)
+  case h.done()
+  in Done(v)  then v
+  in Fault(_) then 0
+  end
+end
+
+go()
+";
+
+/// A closure inside a closure inside a generic body. The inner capture
+/// type names the variable of the outer generic.
+const NESTED_CLOSURE_IN_GENERIC: &str = "\
+def hold[T](v: T): T
+  outer = do ||: T
+    inner = do ||: T v end
+    inner()
+  end
+  outer()
+end
+
+hold(41)
+";
+
+/// A generic class with a generic field, reached at two arguments.
+const GENERIC_FIELD: &str = "\
+class Box[T]
+  item: T
+
+  def init(mut self, item: T)
+    self.item = item
+  end
+end
+
+class Pair2[A]
+  left: Box[A]
+
+  def init(mut self, left: Box[A])
+    self.left = left
+  end
+end
+
+def go(): Int
+  p = Pair2(Box(41))
+  q = Box(true)
+  if q.item
+    p.left.item + 1
+  else
+    0
+  end
+end
+
+go()
+";
+
+/// Polymorphic recursion, captured while the recursion is live.
+const POLYMORPHIC_RECURSION: &str = "\
+def depth[T](v: T, n: Int): Int
+  if n <= 0
+    0
+  else
+    1 + depth((v, v), n - 1)
+  end
+end
+
+depth(1, 3)
+";
+
 /// Every program the gate drives: the label, the source, and whether
 /// the source came from a file.
 fn gate_corpus() -> Vec<(String, String)> {
@@ -1756,6 +1829,13 @@ fn gate_corpus() -> Vec<(String, String)> {
         ("proc-handle", PROC_HANDLE),
         ("closure-in-a-generic-body", CLOSURE_IN_GENERIC),
         ("a-generic-entry-function", GENERIC_ENTRY),
+        ("proc-run-handle", PROC_RUN_HANDLE),
+        (
+            "nested-closure-in-a-generic-body",
+            NESTED_CLOSURE_IN_GENERIC,
+        ),
+        ("a-generic-field", GENERIC_FIELD),
+        ("polymorphic-recursion", POLYMORPHIC_RECURSION),
     ] {
         out.push((label.to_string(), source.to_string()));
     }

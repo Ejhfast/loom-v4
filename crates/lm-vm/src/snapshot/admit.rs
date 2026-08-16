@@ -1577,14 +1577,29 @@ impl Admit<'_> {
         self.types.is_resolved(closed).then_some(closed)
     }
 
-    /// The mailbox message type of one captured proc.
+    /// The mailbox message type of one captured machine.
     ///
-    /// The proc class fixes the type, and the first parameter of the
-    /// machine body names the proc instance. `None` means the type
+    /// A machine that `Proc.Spawn` launched takes its type from its
+    /// proc class. The class fixes the type, and the first parameter of
+    /// the machine body names the proc instance. `None` means the type
     /// does not follow from the image, and a proc that carries a
     /// message then has no governing type.
+    ///
+    /// Every other machine accepts no message, so its type is `Never`.
+    /// `sys.proc.run` hands the caller exactly that handle: it moves a
+    /// loaded machine to the scheduler, and no proc class stands behind
+    /// it (`crates/lm-hir/src/checkfn.rs`, the `sys.proc.run` surface).
+    /// The lowering spells `Never` as `Unit`, and the verified type
+    /// table starts with `Unit`, so the type resolves for every module.
+    ///
+    /// The rule proves no message of such a machine. `check_state`
+    /// rejects a queued message on a machine that is not a proc, so no
+    /// value reaches the mailbox rule through this answer.
     fn mailbox_type(&self, vm: u32) -> Option<u32> {
         let machine = self.machine(vm);
+        if !machine.is_proc {
+            return Some(self.types.intern(BcType::Unit));
+        }
         let instance = *self.types.params(machine.body_func?)?.first()?;
         let closed = self.subst_at(instance, machine.witness).ok()?;
         self.types.proc_mailbox(closed)
