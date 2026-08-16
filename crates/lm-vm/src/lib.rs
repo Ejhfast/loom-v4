@@ -13,6 +13,7 @@
 mod host;
 mod machine;
 mod resource;
+pub mod snapshot;
 mod world;
 
 pub use host::{CoreCtor, Host, HostArg, HostStart, HostValue, NullHost, RecordingHost};
@@ -62,6 +63,10 @@ pub struct VmConfig {
     /// The largest number of accepted messages one proc mailbox may
     /// hold. A send past the bound blocks the sender.
     pub mailbox_limit: u32,
+    /// The largest snapshot container this machine may write, in
+    /// bytes. A capture past the bound returns
+    /// `SnapshotLimitExceeded` (specification 17.4).
+    pub snapshot_bytes: usize,
 }
 
 impl Default for VmConfig {
@@ -75,6 +80,7 @@ impl Default for VmConfig {
             max_children: 1_024,
             max_resources: 1_024,
             mailbox_limit: 64,
+            snapshot_bytes: 64 << 20,
         }
     }
 }

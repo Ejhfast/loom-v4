@@ -38,13 +38,15 @@ fn every_record_is_plain_data() {
     // The barrier report names machines and counts only.
     let report = BarrierReport {
         set: vec![0, 1],
+        order: vec![0, 1],
         cut: 3,
         objects: 9,
         resumed: true,
     };
     assert_eq!(
         format!("{report:?}"),
-        "BarrierReport { set: [0, 1], cut: 3, objects: 9, resumed: true }"
+        "BarrierReport { set: [0, 1], order: [0, 1], cut: 3, objects: 9, \
+         resumed: true }"
     );
     assert_eq!(format!("{:?}", BarrierError::Overlaps(2)), "Overlaps(2)");
 }

@@ -117,7 +117,7 @@ pub struct World<'m> {
     module: &'m Module,
     dispatch: &'m [crate::DispatchRow],
     core: CoreLayout,
-    machines: Vec<Machine>,
+    pub(crate) machines: Vec<Machine>,
     /// Retired mock-handler slots, ready for reuse.
     ///
     /// A mock machine is ephemeral: no guest value names it, it takes
@@ -141,7 +141,31 @@ pub struct World<'m> {
     trace: Option<Vec<TraceEvent>>,
     /// The monotone mailbox cut marker of this world.
     cut: u64,
+    /// The monotone world-gate marker of this world.
+    ///
+    /// A restore puts every machine it builds behind one gate. The
+    /// first `run`, `step`, or `drive` of the restored root opens that
+    /// gate for the whole restored world (specification 17.5).
+    gate: u32,
+    /// The number of whole-image structural checks this world ran.
+    ///
+    /// The count instruments the rule of specification 17.8: external
+    /// bytes are checked once, and a later restore repeats nothing.
+    checks: u64,
+    /// The images this world already trusts, newest first.
+    ///
+    /// A guest holds a snapshot as container bytes. A restore looks
+    /// the bytes up by container hash: a hit is an image this process
+    /// wrote or already checked, so the restore reads the decoded
+    /// world and repeats no structural check. A miss runs the external
+    /// loader once. The table is bounded, so a program that captures
+    /// in a loop never grows it; an evicted image is checked again on
+    /// its next restore, which is safe and slower.
+    trusted: Vec<([u8; 32], std::sync::Arc<crate::snapshot::Image>)>,
 }
+
+/// The largest number of trusted images one world remembers.
+const TRUSTED_IMAGES: usize = 64;
 
 /// One recorded scheduler event. A trace record names machines by
 /// identifier and generation, never by a guest reference.
@@ -213,6 +237,9 @@ impl<'m> World<'m> {
             config,
             trace: None,
             cut: 0,
+            gate: 0,
+            checks: 0,
+            trusted: Vec::new(),
         }
     }
 
@@ -413,6 +440,8 @@ impl<'m> World<'m> {
     }
 
     fn push_activation(&mut self, stack: &mut Vec<Activation>, act: Activation) {
+        // A restored world runs behind one gate until its root moves.
+        self.open_gate(act.vm);
         self.machines[act.vm as usize].active += 1;
         if let Some(p) = act.reply_to {
             self.machines[p as usize].active += 1;
@@ -1071,7 +1100,7 @@ impl<'m> World<'m> {
     /// The budget bounds tower depth per branch. It does not bound the
     /// total machine count across branches; full transitive accounting
     /// of fuel and heap bytes waits for the proc scheduler.
-    fn reserve_child(&mut self, parent: VmId) -> Option<VmConfig> {
+    pub(crate) fn reserve_child(&mut self, parent: VmId) -> Option<VmConfig> {
         let m = &mut self.machines[parent as usize];
         let budget = m.config.max_children;
         if m.children >= budget {
@@ -1388,6 +1417,37 @@ impl<'m> World<'m> {
                     self.resolve_and_dispatch(stack, target);
                 }
             }
+            lm_abi::OP_VM_SNAPSHOT_HELD => {
+                let target = self.handle_vm(vm, args[0]);
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                self.take_snapshot(vm, op, target, false);
+            }
+            lm_abi::OP_VM_SNAPSHOT_SELF => {
+                // The performing machine is the root of its own world.
+                // The capture runs while `Vm.SnapshotSelf` is pending,
+                // so the restored root holds that request
+                // (specification 17.6).
+                self.take_snapshot(vm, op, vm, true);
+            }
+            lm_abi::OP_VM_LOAD_SNAPSHOT => {
+                // Version 0.2 has no `Bytes` value, so no guest code
+                // can build the argument. The verifier rejects the
+                // instruction; this arm states the same rule for a
+                // hand-built module that reached the kernel.
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::InvalidVmState,
+                    "Vm.LoadSnapshot has no guest form without a Bytes value",
+                );
+            }
+            lm_abi::OP_VM_RESTORE => self.restore_snapshot(vm, op, &args),
             lm_abi::OP_PROC_RUN
             | lm_abi::OP_PROC_SPAWN
             | lm_abi::OP_PROC_SEND
@@ -1398,6 +1458,119 @@ impl<'m> World<'m> {
             | lm_abi::OP_PROC_RESUME => self.proc_exec(vm, op, args),
             _ => unreachable!("every VmControl slot has a kernel rule"),
         }
+    }
+
+    // ------------------------------------------------------------
+    // The snapshot operations of specification 23.5.
+    // ------------------------------------------------------------
+
+    /// Capture one machine world and install the typed result.
+    fn take_snapshot(&mut self, vm: VmId, op: u32, root: VmId, self_root: bool) {
+        let barrier = self.next_gate();
+        let built = match self.capture_snapshot(barrier, root, self_root) {
+            Ok(image) => {
+                self.trust_image(&image);
+                self.machines[vm as usize]
+                    .alloc(Object::NativeSnapshot(image.bytes().clone()))
+                    .and_then(|value| self.make_instance(vm, self.core.result_ok, vec![value]))
+            }
+            Err(crate::snapshot::SnapshotFail::Fault(code, message)) => {
+                self.fault_caller(vm, op, code, &message);
+                return;
+            }
+            Err(fail) => self
+                .build_snapshot_error(vm, &fail)
+                .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error])),
+        };
+        self.reply_or_fault(vm, op, built);
+    }
+
+    /// Build one `SnapshotError` value of specification 17.4.
+    fn build_snapshot_error(
+        &mut self,
+        vm: VmId,
+        fail: &crate::snapshot::SnapshotFail,
+    ) -> Result<Value, FaultCode> {
+        match fail {
+            crate::snapshot::SnapshotFail::LimitExceeded => {
+                self.make_instance(vm, self.core.snapshot_limit_exceeded, vec![])
+            }
+            crate::snapshot::SnapshotFail::ResourceActive { path, kind } => {
+                let items: Vec<Value> = path.iter().map(|p| Value::Int(*p as i64)).collect();
+                let list = self.machines[vm as usize].alloc(Object::List { items })?;
+                // The list holds no root yet, so it stays host-rooted
+                // while the kind string allocates.
+                let list_ref = list.as_obj().expect("a list is a heap object");
+                self.machines[vm as usize].vm.heap.push_host_root(list_ref);
+                let text = self.machines[vm as usize].alloc(Object::Str(kind.clone()));
+                self.machines[vm as usize].vm.heap.pop_host_root(list_ref);
+                let text = text?;
+                self.make_instance(vm, self.core.snapshot_resource_active, vec![list, text])
+            }
+            crate::snapshot::SnapshotFail::Fault(_, message) => {
+                let text = self.machines[vm as usize].alloc(Object::Str(message.clone()))?;
+                self.make_instance(vm, self.core.snapshot_bad_image, vec![text])
+            }
+        }
+    }
+
+    /// `sys.vm.Vm().restore(snap)`.
+    ///
+    /// A guest holds a snapshot as container bytes. Bytes this world
+    /// already wrote or already checked restore through the trusted
+    /// path; any other bytes run the external loader once first, so no
+    /// unchecked image ever builds a world.
+    fn restore_snapshot(&mut self, vm: VmId, op: u32, args: &[Value]) {
+        let target = self.handle_vm(vm, args[0]);
+        if target == vm || self.machines[target as usize].active > 0 {
+            self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+            return;
+        }
+        if self.machines[target as usize].vm.state != MachineState::Empty {
+            self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is loaded");
+            return;
+        }
+        let bytes = {
+            let r = args[1].as_obj().expect("verified snapshot value");
+            match self.machines[vm as usize].vm.heap.get(r) {
+                Object::NativeSnapshot(image) => image.clone(),
+                _ => unreachable!("verified snapshot shape"),
+            }
+        };
+        if bytes.len() < 32 {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::BoundaryViolation,
+                "the snapshot container is shorter than its frame",
+            );
+            return;
+        }
+        let hash = crate::snapshot::codec::container_hash(&bytes[..bytes.len() - 32]);
+        let image = match self.trusted_image(&hash) {
+            Some(image) => image,
+            None => match self.load_snapshot_bytes(&bytes) {
+                Ok(image) => image.world_arc(),
+                Err(error) => {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::BoundaryViolation,
+                        &format!("the snapshot image did not load: {error}"),
+                    );
+                    return;
+                }
+            },
+        };
+        let built = match self.restore_image(vm, target, &image) {
+            Ok(root) => self.machines[vm as usize]
+                .alloc(Object::NativeVm { vm: root })
+                .and_then(|handle| self.make_instance(vm, self.core.result_ok, vec![handle])),
+            Err(crate::snapshot::RestoreFail::LimitExceeded) => self
+                .make_instance(vm, self.core.restore_limit_exceeded, vec![])
+                .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error])),
+        };
+        self.reply_or_fault(vm, op, built);
     }
 
     /// Check that the holder still owns the execution of a machine.
@@ -2123,6 +2296,7 @@ impl<'m> World<'m> {
                     && (m.active == 0 || resumable)
                     && !m.paused
                     && m.barrier.is_none()
+                    && m.gate == 0
                     && state_ok
             })
             .collect()
@@ -2131,6 +2305,24 @@ impl<'m> World<'m> {
     /// True when one machine still holds a suspended activation stack.
     pub fn is_suspended(&self, vm: VmId) -> bool {
         self.suspended.contains_key(&vm)
+    }
+
+    /// The depth of the suspended activation stack of one machine.
+    ///
+    /// Zero means the machine holds none. A depth of one is a machine
+    /// that blocked on its own base activation, and the scheduler
+    /// rebuilds that activation when the block clears.
+    pub fn suspended_len(&self, vm: VmId) -> usize {
+        self.suspended.get(&vm).map(Vec::len).unwrap_or(0)
+    }
+
+    /// Drop the suspended activation stack of one machine.
+    ///
+    /// A restored world holds no driver stack, so a snapshot that
+    /// copied a blocked machine restores it with none. The scheduler
+    /// builds a fresh activation when the block clears.
+    pub fn drop_suspended(&mut self, vm: VmId) {
+        self.suspended.remove(&vm);
     }
 
     /// Drive one scheduler-owned proc until it blocks, waits, or
@@ -2221,6 +2413,81 @@ impl<'m> World<'m> {
         self.cut
     }
 
+    /// The next world-gate marker of this world.
+    pub fn next_gate(&mut self) -> u32 {
+        self.gate += 1;
+        self.gate
+    }
+
+    /// The world gate one machine sits behind, or zero.
+    pub fn gate_of(&self, vm: VmId) -> u32 {
+        self.machines[vm as usize].gate
+    }
+
+    /// Open the world gate of one machine, and of every machine
+    /// behind the same gate.
+    ///
+    /// The first `run`, `step`, or `drive` of a restored root calls
+    /// it, so a restored world starts as one world, never as a set of
+    /// procs that drift apart before the holder resumes them.
+    pub fn open_gate(&mut self, vm: VmId) {
+        let gate = self.machines[vm as usize].gate;
+        if gate == 0 {
+            return;
+        }
+        for machine in &mut self.machines {
+            if machine.gate == gate {
+                machine.gate = 0;
+            }
+        }
+    }
+
+    /// The number of whole-image structural checks this world ran.
+    pub fn snapshot_checks(&self) -> u64 {
+        self.checks
+    }
+
+    /// Record one whole-image structural check.
+    pub(crate) fn record_snapshot_check(&mut self) {
+        self.checks += 1;
+    }
+
+    /// Remember one image this world trusts.
+    pub fn trust_image(&mut self, image: &crate::snapshot::SnapshotImage) {
+        let hash = image.hash();
+        if self.trusted.iter().any(|(h, _)| *h == hash) {
+            return;
+        }
+        self.trusted.insert(0, (hash, image.world_arc()));
+        self.trusted.truncate(TRUSTED_IMAGES);
+    }
+
+    /// The trusted image with this container hash.
+    fn trusted_image(&self, hash: &[u8; 32]) -> Option<std::sync::Arc<crate::snapshot::Image>> {
+        self.trusted
+            .iter()
+            .find(|(h, _)| h == hash)
+            .map(|(_, image)| image.clone())
+    }
+
+    /// Install one external snapshot container into this world.
+    ///
+    /// This is the external byte path of specification 17.8. It runs
+    /// the whole structural checklist once and remembers the checked
+    /// image, so a later restore of the same bytes repeats nothing.
+    /// The trusted in-process path is `capture_snapshot`, and the two
+    /// never share an entry point.
+    pub fn load_snapshot_bytes(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<crate::snapshot::SnapshotImage, crate::snapshot::ImageError> {
+        let limits = crate::snapshot::LoadLimits::default();
+        self.record_snapshot_check();
+        let image = crate::snapshot::codec::load_external(bytes, self.loaded, limits)?;
+        self.trust_image(&image);
+        Ok(image)
+    }
+
     /// The number of machines a barrier may reach.
     pub fn machine_ids(&self) -> Vec<VmId> {
         (0..self.machines.len() as VmId).collect()
@@ -2239,13 +2506,19 @@ impl<'m> World<'m> {
     /// call token. The walk reports all five, so the barrier set
     /// closes over every machine reference a heap can hold.
     ///
-    /// The walk starts at the collection roots, which cover the
-    /// frames, the locals, the operands, the pending arguments, the
-    /// terminal result, and the accepted mailbox queue. The barrier
-    /// closes its set over the result, so every reference in the
-    /// paused state targets a paused machine.
+    /// The walk starts at the snapshot roots, which cover the frame
+    /// closures, the locals, the operands, the pending arguments, the
+    /// terminal result, the accepted mailbox queue, the proc body, and
+    /// the interned literals. It excludes the policy table, because
+    /// specification 17.2 excludes policy tables from a snapshot. A
+    /// machine that only a table-held mock closure names is therefore
+    /// not part of the world.
+    ///
+    /// The result is in canonical object order, first encounter first.
+    /// The machine ordinals of an image read that order, so they never
+    /// depend on a scheduler identifier.
     pub fn machine_references(&mut self, vm: VmId) -> Result<Vec<VmId>, FaultCode> {
-        let roots = self.machines[vm as usize].gc_roots(&[]);
+        let roots = self.machines[vm as usize].snapshot_roots();
         let limits = self.machines[vm as usize].config.graph;
         let order = {
             let m = &mut self.machines[vm as usize];
@@ -2268,7 +2541,6 @@ impl<'m> World<'m> {
                 }
             }
         }
-        out.sort_unstable();
         Ok(out)
     }
 
@@ -2307,9 +2579,8 @@ impl<'m> World<'m> {
     /// side blocks the copy. On success the call returns the number of
     /// objects the canonical snapshot traversal ordered.
     ///
-    /// Week 7 defines no snapshot byte format, so this entry point
-    /// produces the ordinal-assigning walk and the rejection rule
-    /// only.
+    /// The walk reads the snapshot roots, so it covers exactly the
+    /// objects the encoder writes.
     pub fn snapshot_preflight(&mut self, vm: VmId) -> Result<usize, FaultCode> {
         if self.machines[vm as usize]
             .resources
@@ -2318,10 +2589,42 @@ impl<'m> World<'m> {
         {
             return Err(FaultCode::BoundaryViolation);
         }
-        let roots = self.machines[vm as usize].gc_roots(&[]);
+        let roots = self.machines[vm as usize].snapshot_roots();
         let limits = self.machines[vm as usize].config.graph;
         let m = &mut self.machines[vm as usize];
         lm_graph::snapshot_ordinals(&mut m.vm.heap, &roots, &limits).map(|order| order.len())
+    }
+
+    /// The kind name of one live host attachment this machine holds.
+    pub fn live_attachment_kind(&self, vm: VmId) -> Option<String> {
+        self.machines[vm as usize]
+            .resources
+            .live_attachment()
+            .map(|record| match record.kind {
+                crate::ResourceKind::PendingOperation => {
+                    format!("a pending {}", lm_abi::op_name(record.op))
+                }
+            })
+    }
+
+    /// The number of live activation references to one machine.
+    pub fn active_of(&self, vm: VmId) -> u32 {
+        self.machines[vm as usize].active
+    }
+
+    /// The verified semantic identity of the loaded program.
+    pub fn identity(&self) -> Result<&lm_bytecode::identity::ModuleIdentity, FaultCode> {
+        self.loaded.identity()
+    }
+
+    /// The loaded program.
+    pub fn module(&self) -> &Module {
+        self.module
+    }
+
+    /// The resource limits of one machine.
+    pub fn config_of(&self, vm: VmId) -> VmConfig {
+        self.machines[vm as usize].config
     }
 
     /// Transfer one value from `src` into `dst` through the graph

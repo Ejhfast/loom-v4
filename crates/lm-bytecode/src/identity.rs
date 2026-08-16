@@ -113,6 +113,12 @@ fn fail(message: impl Into<String>) -> IdentityError {
 pub struct ModuleIdentity {
     pub class_hashes: Vec<[u8; 32]>,
     pub func_hashes: Vec<[u8; 32]>,
+    /// The semantic digest of every type-table entry.
+    ///
+    /// A snapshot names the result type of its root machine by this
+    /// digest, because a numeric type slot belongs to one linked
+    /// program (specification 17.9).
+    pub type_hashes: Vec<[u8; 32]>,
     pub semantic_hash: [u8; 32],
     /// The largest refinement round count any component needed. A
     /// component with one member needs no round. The value is a
@@ -1888,6 +1894,11 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         .iter()
         .map(|h| h.expect("every function hash is scheduled"))
         .collect();
+    let type_hashes: Vec<[u8; 32]> = state
+        .type_final
+        .iter()
+        .map(|h| h.expect("every type digest is scheduled"))
+        .collect();
     // The module semantic hash: format version, compiler ABI, the
     // operation manifest, the explicit empty import set, the export
     // table (name to definition hash, name-sorted), the named function
@@ -1949,6 +1960,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
     Ok(ModuleIdentity {
         class_hashes,
         func_hashes,
+        type_hashes,
         semantic_hash,
         max_refine_rounds,
     })

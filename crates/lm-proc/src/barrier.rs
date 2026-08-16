@@ -1,15 +1,13 @@
-//! The scheduler barrier of specification 17.3.
+//! The scheduler-facing entry of the snapshot barrier
+//! (specification 17.3).
 //!
-//! The barrier defines one moment of one machine world. It stops the
-//! root and every reachable machine at an instruction boundary, closes
-//! the set over the handles it finds in the stopped state, freezes
-//! mailbox acceptance at one cut marker, records the machine states,
-//! and preflights the host attachments.
-//!
-//! Week 8 defines no snapshot byte format, so the barrier always
-//! resumes the world. It reports the closed set, the cut marker, and
-//! the preflight result, which is what the week-9 encoder consumes.
+//! The cut algorithm itself lives in `lm_vm::snapshot::write`, because
+//! the guest operation `Vm.SnapshotHeld` runs inside the driver loop
+//! and `lm-vm` depends on no scheduler. This module is the entry the
+//! scheduler calls, and it reports what one cut recorded. One world
+//! therefore has exactly one cut algorithm.
 
+use lm_vm::snapshot::{CutError, SnapshotImage};
 use lm_vm::{FaultCode, VmId, World};
 
 /// Why one barrier did not open.
@@ -19,10 +17,27 @@ pub enum BarrierError {
     /// over overlapping worlds serialize; the caller retries.
     Overlaps(VmId),
     /// One machine of the set holds a live host attachment, so the
-    /// codec has no bytes to copy (specification 17.4).
-    ResourceActive(VmId),
+    /// codec has no bytes to copy (specification 17.4). The path
+    /// starts at the root and names machines by ordinal.
+    ResourceActive { path: Vec<u32>, kind: String },
     /// A traversal of one machine reached a graph limit.
     Limit(VmId, FaultCode),
+    /// The world holds a machine no cut can copy.
+    NotCapturable(VmId, String),
+    /// The container passed the configured snapshot byte limit.
+    TooLarge,
+}
+
+impl From<CutError> for BarrierError {
+    fn from(error: CutError) -> BarrierError {
+        match error {
+            CutError::Overlaps(vm) => BarrierError::Overlaps(vm),
+            CutError::ResourceActive { path, kind } => BarrierError::ResourceActive { path, kind },
+            CutError::Limit(vm, code) => BarrierError::Limit(vm, code),
+            CutError::NotCapturable(vm, message) => BarrierError::NotCapturable(vm, message),
+            CutError::TooLarge => BarrierError::TooLarge,
+        }
+    }
 }
 
 /// What one finished barrier recorded.
@@ -31,6 +46,8 @@ pub struct BarrierReport {
     /// Every machine of the closed set, in ascending identifier
     /// order. Every handle in the stopped state targets one of them.
     pub set: Vec<VmId>,
+    /// The canonical machine order: ordinal `i` names `order[i]`.
+    pub order: Vec<VmId>,
     /// The one mailbox acceptance cut of this barrier.
     pub cut: u64,
     /// The number of objects the canonical traversal ordered, summed
@@ -52,84 +69,38 @@ impl Barrier {
         Barrier { id }
     }
 
-    /// Run one barrier from `root`.
+    /// Run one barrier from `root` without encoding.
     ///
     /// The steps follow specification 17.3 in order: stop, close,
     /// freeze, record, preflight, resume. A failure resumes every
     /// machine the barrier stopped, so the original world is
     /// unchanged.
     pub fn run(&self, world: &mut World<'_>, root: VmId) -> Result<BarrierReport, BarrierError> {
-        let mut set: Vec<VmId> = Vec::new();
-        let mut queue: Vec<VmId> = vec![root];
-        // Steps 1 and 2: stop the reachable machines and close the set
-        // over the handles their stopped state holds.
-        while let Some(vm) = queue.pop() {
-            if set.contains(&vm) {
-                continue;
-            }
-            if let Some(other) = world.barrier_of(vm) {
-                if other != self.id {
-                    self.release(world, &set, false);
-                    return Err(BarrierError::Overlaps(vm));
-                }
-            }
-            world.set_barrier(vm, Some(self.id));
-            set.push(vm);
-            if !world.is_live_machine(vm) {
-                continue;
-            }
-            match world.machine_references(vm) {
-                Ok(found) => queue.extend(found),
-                Err(code) => {
-                    self.release(world, &set, false);
-                    return Err(BarrierError::Limit(vm, code));
-                }
-            }
-        }
-        set.sort_unstable();
-        // Step 3: freeze mailbox acceptance for the whole set at one
-        // cut marker.
-        let cut = world.next_cut();
-        for vm in &set {
-            world.freeze_mailbox(*vm, true);
-        }
-        // Steps 4 and 5: record the states and preflight the host
-        // attachments.
-        let mut objects = 0;
-        for vm in &set {
-            if !world.is_live_machine(*vm) {
-                continue;
-            }
-            match world.snapshot_preflight(*vm) {
-                Ok(count) => objects += count,
-                Err(FaultCode::BoundaryViolation) => {
-                    self.release(world, &set, true);
-                    return Err(BarrierError::ResourceActive(*vm));
-                }
-                Err(code) => {
-                    self.release(world, &set, true);
-                    return Err(BarrierError::Limit(*vm, code));
-                }
-            }
-        }
-        // Step 7: week 8 encodes nothing, so the barrier resumes the
+        let report = world.run_cut(self.id, root)?;
+        // The barrier itself encodes nothing, so it resumes the
         // original world here.
-        self.release(world, &set, true);
+        world.release_cut(&report.set, true);
         Ok(BarrierReport {
-            set,
-            cut,
-            objects,
+            set: report.set,
+            order: report.order,
+            cut: report.cut,
+            objects: report.objects,
             resumed: true,
         })
     }
 
-    /// Resume every machine the barrier stopped.
-    fn release(&self, world: &mut World<'_>, set: &[VmId], thaw: bool) {
-        for vm in set {
-            if thaw {
-                world.freeze_mailbox(*vm, false);
-            }
-            world.set_barrier(*vm, None);
-        }
+    /// Run one barrier from `root` and encode the machine world.
+    ///
+    /// This is the writer entry of specification 17.3 step 6. The
+    /// world resumes after the encoding, whatever the encoding
+    /// answered.
+    pub fn capture(
+        &self,
+        world: &mut World<'_>,
+        root: VmId,
+    ) -> Result<SnapshotImage, lm_vm::snapshot::SnapshotFail> {
+        let image = world.capture_snapshot(self.id, root, false)?;
+        world.trust_image(&image);
+        Ok(image)
     }
 }

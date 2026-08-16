@@ -489,6 +489,11 @@ impl<'m> Ctx<'m> {
                 let err = self.intern(BcType::Class(io_error));
                 Ok(self.intern(BcType::Inst(result, vec![opt_str, err])))
             }
+            lm_abi::AbiType::ResultSnapshotImageError => {
+                let image = self.intern(BcType::SnapshotImage);
+                let error = self.plain_inst(self.core.snapshot_error, "SnapshotError")?;
+                self.result_inst(image, error)
+            }
         }
     }
 
@@ -527,6 +532,14 @@ impl<'m> Ctx<'m> {
             ));
         };
         Ok(self.intern(BcType::Class(parent)))
+    }
+
+    /// One `Result[ok, error]` instance type.
+    fn result_inst(&self, ok: u32, error: u32) -> Result<u32, String> {
+        let Some(family) = self.core.result else {
+            return Err("the module does not carry the pinned core Result definition".to_string());
+        };
+        Ok(self.intern(BcType::Inst(family, vec![ok, error])))
     }
 
     /// The mailbox message type of one proc instance type. `None` when
@@ -1516,6 +1529,9 @@ fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_PROC_RECV => 1,
             lm_abi::OP_PROC_SEND => 2,
             lm_abi::OP_PROC_SPAWN => 3,
+            lm_abi::OP_VM_SNAPSHOT_SELF => 0,
+            lm_abi::OP_VM_SNAPSHOT_HELD | lm_abi::OP_VM_LOAD_SNAPSHOT => 1,
+            lm_abi::OP_VM_RESTORE => 2,
             _ => unreachable!("every VmControl slot has an arity"),
         },
     }
@@ -1756,11 +1772,27 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         return Err(err(fidx, at("perform argument count mismatch")));
                     }
                 }
-                Instr::OpConst(op) | Instr::AsCall(op) => {
+                Instr::OpConst(op) => {
                     if *op >= lm_abi::OP_COUNT || lm_abi::op(*op).kind != lm_abi::OpKind::Fixed {
                         return Err(err(
                             fidx,
                             at("first-class operation slot is out of range or not fixed"),
+                        ));
+                    }
+                }
+                // A typed call token names a fixed host operation, or
+                // the receiverless self snapshot. A restored self
+                // snapshot holds that request pending, and the
+                // restorer answers it through the ordinary typed call
+                // path (specification 17.6).
+                Instr::AsCall(op) => {
+                    let answerable = *op < lm_abi::OP_COUNT
+                        && (lm_abi::op(*op).kind == lm_abi::OpKind::Fixed
+                            || *op == lm_abi::OP_VM_SNAPSHOT_SELF);
+                    if !answerable {
+                        return Err(err(
+                            fidx,
+                            at("as_call operation slot is out of range or not answerable"),
                         ));
                     }
                 }
@@ -2664,6 +2696,54 @@ fn step(
                                 .event_inst(ctx.core.recv, "Recv", mailbox)
                                 .map_err(&fail)?;
                             push(state, event)?;
+                        }
+                        lm_abi::OP_VM_SNAPSHOT_HELD => {
+                            let t = pop_vm(state)?;
+                            let snapshot = ctx.intern(BcType::Snapshot(t));
+                            let error = ctx
+                                .plain_inst(ctx.core.snapshot_error, "SnapshotError")
+                                .map_err(&fail)?;
+                            let out = ctx.result_inst(snapshot, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
+                        lm_abi::OP_VM_SNAPSHOT_SELF => {
+                            let image = ctx.intern(BcType::SnapshotImage);
+                            let error = ctx
+                                .plain_inst(ctx.core.snapshot_error, "SnapshotError")
+                                .map_err(&fail)?;
+                            let out = ctx.result_inst(image, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
+                        lm_abi::OP_VM_RESTORE => {
+                            let snapshot = pop(state)?;
+                            let recv = pop(state)?;
+                            if ctx.ty(recv) != BcType::EmptyVm {
+                                return Err(fail(
+                                    "`Vm.Restore` needs an EmptyVm receiver".to_string(),
+                                ));
+                            }
+                            let BcType::Snapshot(t) = ctx.ty(snapshot) else {
+                                return Err(fail(
+                                    "`Vm.Restore` needs a typed snapshot".to_string(),
+                                ));
+                            };
+                            let vm = ctx.intern(BcType::Vm(t));
+                            let error = ctx
+                                .plain_inst(ctx.core.restore_error, "RestoreError")
+                                .map_err(&fail)?;
+                            let out = ctx.result_inst(vm, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
+                        lm_abi::OP_VM_LOAD_SNAPSHOT => {
+                            // The operation takes a `Bytes` value, and
+                            // version 0.2 declares no `Bytes` type. No
+                            // guest form exists, so the instruction has
+                            // no admissible shape.
+                            return Err(fail(
+                                "`Vm.LoadSnapshot` has no guest form in version 0.2: it \
+                                 needs a Bytes value"
+                                    .to_string(),
+                            ));
                         }
                         _ => unreachable!("every VmControl slot has a rule"),
                     }

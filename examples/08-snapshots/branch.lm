@@ -1,0 +1,25 @@
+# Branching execution: one snapshot, two independent worlds.
+#
+# The program steps a machine once, captures its world, and restores
+# the capture twice. Each restore is a complete independent world, so
+# both branches finish the same computation on their own state.
+
+def restore_run(snap: Snapshot[Int]): Int with Vm
+  case sys.vm.Vm().restore(snap)
+  in Ok(restored)
+    case restored.run()
+    in Done(value) then value
+    in Fault(_)    then 0 - 1
+    end
+  in Err(_) then 0 - 2
+  end
+end
+
+vm = sys.vm.Vm().from_object(do ||: Int
+  20 + 22
+end, args: ())
+vm.step()
+case vm.snapshot()
+in Ok(snap) then (restore_run(snap), restore_run(snap))
+in Err(_)   then (0 - 3, 0 - 3)
+end

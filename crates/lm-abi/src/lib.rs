@@ -45,6 +45,10 @@ pub enum AbiType {
     Str,
     /// `Result[Option[String], IoError]`, the `Io.ReadLine` reply.
     ResultOptionStrIoError,
+    /// `Result[SnapshotImage, SnapshotError]`, the `Vm.SnapshotSelf`
+    /// reply. A restored self snapshot is answered through the
+    /// ordinary typed call path, so the reply type has a name here.
+    ResultSnapshotImageError,
 }
 
 impl AbiType {
@@ -55,6 +59,7 @@ impl AbiType {
             AbiType::Int => "Int",
             AbiType::Str => "String",
             AbiType::ResultOptionStrIoError => "Result[Option[String], IoError]",
+            AbiType::ResultSnapshotImageError => "Result[SnapshotImage, SnapshotError]",
         }
     }
 }
@@ -379,7 +384,7 @@ pub const OPS: [OpDef; 28] = [
         member: "SnapshotSelf",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::ResultSnapshotImageError,
         schema: "() -> Result[SnapshotImage, SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },

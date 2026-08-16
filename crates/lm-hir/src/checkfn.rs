@@ -2921,6 +2921,10 @@ impl<'o> FnChecker<'o> {
                 ctx.store
                     .intern(Type::Inst(lm_types::ClassId(result), vec![opt_str, err]))
             }
+            lm_abi::AbiType::ResultSnapshotImageError => {
+                let error = Self::core_class(ctx, "SnapshotError");
+                Self::core_inst(ctx, "Result", vec![lm_types::SNAPSHOT_IMAGE, error])
+            }
         }
     }
 
@@ -3037,6 +3041,33 @@ impl<'o> FnChecker<'o> {
                 mutable: true,
                 kind: HExprKind::Perform {
                     op: lm_abi::OP_VM_NEW,
+                    args: vec![],
+                },
+            });
+        }
+        // `sys.vm.snapshot_self()` performs `Vm.SnapshotSelf`. The
+        // calling function cannot name the enclosing machine result
+        // type, so the reply is an untyped `SnapshotImage`
+        // (specification 17.1).
+        if group == "Vm" && member == "snapshot_self" {
+            if !args.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!(
+                        "`sys.vm.snapshot_self` expects 0 argument(s), found {}",
+                        args.len()
+                    ),
+                    span,
+                ));
+            }
+            self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_SELF, span)?;
+            let error = Self::core_class(ctx, "SnapshotError");
+            let ty = Self::core_inst(ctx, "Result", vec![lm_types::SNAPSHOT_IMAGE, error]);
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_VM_SNAPSHOT_SELF,
                     args: vec![],
                 },
             });
@@ -3196,7 +3227,14 @@ impl<'o> FnChecker<'o> {
     fn as_call_descriptor(&mut self, ctx: &mut Ctx, expr: &ast::Expr) -> Result<u32, Diagnostic> {
         match self.resolve_descriptor_for(expr, "the `as_call` argument") {
             Ok((TargetKind::Exact, slot, name)) => {
-                if lm_abi::op(slot).kind != lm_abi::OpKind::Fixed {
+                // A typed call token names a fixed host operation, or
+                // the receiverless self snapshot. A restored self
+                // snapshot holds that request pending, and the
+                // restorer answers it through the ordinary typed call
+                // path (specification 17.6).
+                let answerable = lm_abi::op(slot).kind == lm_abi::OpKind::Fixed
+                    || slot == lm_abi::OP_VM_SNAPSHOT_SELF;
+                if !answerable {
                     return Err(Diagnostic::new(
                         "E1004",
                         format!(
@@ -3462,6 +3500,53 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform {
                         op,
                         args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Vm(t), "snapshot") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_HELD, span)?;
+                let snapshot = ctx.store.intern(Type::Snapshot(t));
+                let error = Self::core_class(ctx, "SnapshotError");
+                let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SNAPSHOT_HELD,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::EmptyVm, "restore") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`restore` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let snapshot = self.synth_expr(ctx, &args[0])?;
+                let Type::Snapshot(t) = ctx.store.get(snapshot.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`restore` needs a typed snapshot, found {}",
+                            ctx.store.display(snapshot.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                self.charge_op(ctx, lm_abi::OP_VM_RESTORE, span)?;
+                let vm = ctx.store.intern(Type::Vm(t));
+                let error = Self::core_class(ctx, "RestoreError");
+                let ty = Self::core_inst(ctx, "Result", vec![vm, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESTORE,
+                        args: vec![recv_h, snapshot],
                     },
                 }
             }

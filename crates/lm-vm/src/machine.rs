@@ -107,7 +107,7 @@ pub struct Pending {
 }
 
 /// A stored machine fault.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultRec {
     pub code: FaultCode,
     pub message: String,
@@ -261,6 +261,12 @@ pub struct Machine {
     /// so two barriers never share a machine. A barrier over a
     /// disjoint set proceeds.
     pub barrier: Option<u32>,
+    /// The world gate a restore put this machine behind.
+    ///
+    /// Restored procs are scheduler-owned but stopped until the
+    /// first `run`, `step`, or `drive` of the restored root opens the
+    /// gate (specification 17.5). Zero means the gate is open.
+    pub gate: u32,
     /// The proc body to enter after the constructor frame returns.
     ///
     /// A proc constructs its instance inside its own machine
@@ -308,6 +314,7 @@ impl Machine {
             generation,
             paused: false,
             barrier: None,
+            gate: 0,
             start_body: None,
         }
     }
@@ -428,6 +435,54 @@ impl Machine {
         // Interned literals stay alive for the machine lifetime.
         roots.extend(self.vm.literals.iter().flatten().copied());
         roots.extend_from_slice(extra);
+        roots
+    }
+
+    /// The canonical snapshot roots of this machine, in canonical
+    /// order.
+    ///
+    /// The order is the one declaration point of snapshot
+    /// reachability: frame closures, locals, operands, pending
+    /// arguments, the terminal value, the mailbox queue, the proc
+    /// body, and the interned literals.
+    ///
+    /// The list is the collection roots minus the policy-table
+    /// entries. Specification 17.2 excludes policy tables from a
+    /// snapshot, so a machine or an object that only a table-held mock
+    /// closure names is not snapshot content. `machine_references` and
+    /// `snapshot_preflight` read this list, so the closed set and the
+    /// encoder agree on what the world holds.
+    pub fn snapshot_roots(&self) -> Vec<ObjRef> {
+        let mut roots: Vec<ObjRef> = Vec::new();
+        for frame in &self.vm.frames {
+            if let Some(r) = frame.closure {
+                roots.push(r);
+            }
+        }
+        for value in self.vm.locals.iter().chain(self.vm.operands.iter()) {
+            if let Value::Obj(r) = value {
+                roots.push(*r);
+            }
+        }
+        if let Some(pending) = &self.vm.pending {
+            for value in &pending.args {
+                if let Value::Obj(r) = value {
+                    roots.push(*r);
+                }
+            }
+        }
+        if let Some(Terminal::Done(Value::Obj(r))) = &self.vm.terminal {
+            roots.push(*r);
+        }
+        for value in &self.vm.mailbox.queue {
+            if let Value::Obj(r) = value {
+                roots.push(*r);
+            }
+        }
+        if let Some(r) = self.start_body {
+            roots.push(r);
+        }
+        roots.extend(self.vm.literals.iter().flatten().copied());
         roots
     }
 

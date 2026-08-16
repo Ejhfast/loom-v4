@@ -207,7 +207,15 @@ fn a_live_host_attachment_blocks_the_barrier_and_resumes() {
     let error = Barrier::new(1)
         .run(&mut world, 0)
         .expect_err("a live attachment blocks the barrier");
-    assert_eq!(error, BarrierError::ResourceActive(0));
+    // The path starts at the root and names machines by ordinal, so
+    // the error carries no scheduler identifier.
+    assert_eq!(
+        error,
+        BarrierError::ResourceActive {
+            path: vec![0],
+            kind: "a pending Clock.Sleep".to_string()
+        }
+    );
     // Failure resumes every paused machine.
     assert_eq!(world.barrier_of(0), None);
     assert!(!world.mailbox_metrics(0).frozen);

@@ -190,7 +190,7 @@ fn as_call_of_a_vm_control_slot_is_rejected() {
             }
         }
     }
-    assert_rejected(&module, "not fixed");
+    assert_rejected(&module, "not answerable");
 }
 
 #[test]
