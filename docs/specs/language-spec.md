@@ -664,7 +664,7 @@ The VM does not re-check this theorem at run time. Policy remains a separate dyn
 | typed manual replies match the selected operation at the source level | a stale or cross-VM request token; the runtime still validates it |
 | emitted bytecode has typed stack/local states | correctness of externally supplied bytes until the verifier accepts them |
 
-A native ABI declaration may mark a type as scoped. A scoped designator may use local aliases and scoped parameters. It cannot be returned, captured, stored in an ordinary object or collection, frozen, transferred, digested, sent, or snapshotted. Only ABI-declared non-storing parameters may accept it. This is one native capability rule, not a general lifetime system. Bytecode records the scoped marker, and the verifier checks every move into an escaping location.
+A native ABI declaration may mark a type as scoped. The scoped marker is a property of the type. A scoped designator may flow through local aliases, function parameters, and closure parameters. A parameter with a scoped type is a scoped designator inside its callable, and the same escape rule applies there. A scoped designator cannot be returned, captured from an outer scope, stored in an object or collection, frozen, transferred, digested, sent, or snapshotted. A scoped type is not a valid generic type argument. This is one native capability rule, not a general lifetime system. Bytecode records the scoped marker, and the verifier checks every move into an escaping location.
 
 ### 5.14 Checker and verifier construction
 
@@ -710,7 +710,7 @@ files.with_open(path, options) do |file|
 end
 ```
 
-The two trailing forms have identical precedence and evaluation order. A call accepts at most one trailing closure. There is no overload resolution.
+The two trailing forms have identical precedence and evaluation order. A call accepts at most one trailing closure. A trailing closure must start on the same line as the end of the call. A newline after the call ends the statement first (2.2). No postfix suffix may follow a trailing closure. There is no overload resolution.
 
 ### 6.2 Closures
 
@@ -1535,7 +1535,7 @@ The scheduler assigns one canonical proc ordinal to each included proc. An inter
 
 Restore relocates every internal handle to the corresponding restored proc. This includes handles in heaps, frames, locals, operands, closure captures, mailbox values, pending operation arguments, and terminal results.
 
-Restore resolves every external proc reference before any restored VM can run. The current scheduler realm may resolve the reference directly. `RestoreBindings` may supply another typed resolver. An unresolved external reference fails restore atomically. It never becomes an inert handle.
+Restore resolves every external proc reference before any restored VM can run. The current scheduler realm may resolve the reference directly. `RestoreBindings` may supply another typed resolver. Resolution of a known dead proc succeeds. Operations on that handle then return the normal dead-peer results (16.4). Restore fails only for a reference that no realm or binding can resolve. An unresolved external reference fails restore atomically. It never becomes an inert handle.
 
 ### 17.3 Consistent cut
 
@@ -1551,6 +1551,8 @@ One scheduler barrier captures the whole snapshot domain.
 8. It resumes the original domain after success or failure.
 
 A send accepted before the cut appears in the snapshot queue. A send accepted after the cut affects only the original domain. The barrier does not stop unrelated proc domains.
+
+Barriers over disjoint domains may run concurrently. Barriers over overlapping domains serialize in the scheduler. A `Proc.Pause` request on an included proc completes after the barrier ends. A proc that a holder already paused makes the snapshot return `ProcUnavailable`.
 
 A failed snapshot leaves the original domain unchanged. No included proc remains paused after the failure returns.
 
@@ -2464,6 +2466,8 @@ with_open[R,e](
 
 `FileLease` is a scoped designator. It offers `read`, `read_exact`, `read_all`, `read_text`, `write`, `write_all`, `flush`, and `seek`. It has no public `close` method. An open failure returns `Err` without calling the body. A normal body return closes the lease before returning. A close failure returns `Err` instead of the body value.
 
+`with_open` never flattens the body result. A body that returns `Result` gives the caller a nested `Result`. The caller matches both layers with nested patterns (9.2).
+
 A body fault terminates the machine normally. The host-side resource registry closes the lease during VM cleanup. Cleanup invokes no guest callback and does not replace the original terminal fault.
 
 The advanced API remains explicit:
@@ -2873,7 +2877,7 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - `()` is unit. `(T,)` and `(T,U)` are tuple types; the same parenthesized list followed by `->` is a function parameter list. A one-element tuple requires the trailing comma.
 - `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.
 - A left brace followed by a pipe starts a brace closure. Other braces start a map literal. `{}` is an empty map.
-- A trailing closure is valid only after a postfix chain that contains a call suffix. It becomes the final call argument.
+- A trailing closure is valid only after a postfix chain that contains a call suffix. It becomes the final call argument. It must start on the same line as that chain, and no suffix may follow it.
 - A bracket suffix is generic application only where static resolution permits it and normally precedes a call; otherwise it is indexing. Ambiguous source is rejected.
 - A postfix assignment target must be a writable field or index, not an arbitrary call result.
 - Enum arms must precede enum methods. A zero-field constructor such as `None` is recognized from expected/scrutinee context; another bare name is a binding pattern.
