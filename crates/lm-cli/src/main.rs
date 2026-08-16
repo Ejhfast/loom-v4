@@ -154,8 +154,9 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                     Ok(ExitCode::SUCCESS)
                 }
                 _ => Err(format!(
-                    "error: `lm inspect` reads `.lmi` and `.lma` files, or a \
-                     source file with `--live`\n{USAGE}\n"
+                    "error: `lm inspect` reads `.lmi` and `.lma` files, a \
+                     source file with `--live`, or the shape table with \
+                     `--shapes`\n{USAGE}\n"
                 )),
             }
         }
