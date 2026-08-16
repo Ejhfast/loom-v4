@@ -900,3 +900,115 @@ go()
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::State);
 }
+
+// ---------------------------------------------------------------
+// The security re-review: the whole "underivable type" pattern.
+// ---------------------------------------------------------------
+
+/// A proc that carries a message must have a provable mailbox type.
+/// The message shape rule keys on the mailbox type the proc class
+/// fixes, but that type is not always derivable from the image. When
+/// it cannot be derived the queued values have no governing type, so
+/// the loader rejects rather than schedule an unproven message.
+///
+/// The forge makes the held root a proc: its entry frame declares a
+/// `Handle` first parameter, which is not a proc class, so no mailbox
+/// type derives. The non-proc case is a separate rule and a separate
+/// test.
+#[test]
+fn a_proc_with_an_underivable_mailbox_type_and_a_queue_rejects() {
+    let (loaded, bytes) = asked_tree();
+    let image = accept(&loaded, &bytes);
+    // The held root is not a proc, and its entry frame takes a handle,
+    // not a proc instance.
+    assert!(!image.machines[0].is_proc);
+    let mut broken = image.clone();
+    broken.machines[0].is_proc = true;
+    broken.machines[0].mailbox.limit = 1;
+    broken.machines[0].mailbox.queue = vec![lm_value::Value::Int(0x4242_4242)];
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Mailbox);
+}
+
+/// The parent pointers form a forest. A self parent and a cycle both
+/// reject at load, so the runtime policy walk over the parent chain
+/// always terminates.
+#[test]
+fn a_cyclic_parent_graph_rejects() {
+    let (loaded, bytes) = asked_tree();
+    let image = accept(&loaded, &bytes);
+    // A machine that is its own parent.
+    let mut broken = image.clone();
+    broken.machines[1].parent = Some(1);
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::State);
+    // A two-node cycle.
+    let mut broken = image.clone();
+    broken.machines[1].parent = Some(2);
+    broken.machines[2].parent = Some(1);
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::State);
+}
+
+/// A terminal machine holds no frame, and a frameless machine holds no
+/// operand. The operand proof skips a terminal machine, so a frame or
+/// an operand it carried would sit unproven.
+#[test]
+fn a_terminal_machine_with_a_frame_or_a_frameless_operand_rejects() {
+    // A terminal machine with a frame: flip an asked machine to done
+    // while it keeps its frame.
+    let (loaded, bytes) = asked_tree();
+    let image = accept(&loaded, &bytes);
+    assert_eq!(image.machines[0].state, lm_vm::snapshot::ImageState::Asked);
+    assert!(!image.machines[0].frames.is_empty());
+    let mut broken = image.clone();
+    broken.machines[0].state = lm_vm::snapshot::ImageState::Done;
+    broken.machines[0].pending = None;
+    broken.machines[0].terminal = Some(lm_vm::snapshot::ImageTerminal::Done(lm_value::Value::Unit));
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::State);
+
+    // A frameless machine with an operand: a done machine with empty
+    // frames but one operand.
+    let source = "\
+def go(): Int with Vm
+  vm = sys.vm.Vm().from_object(do ||: Int 7 end, args: ())
+  case vm.run()
+  in Done(_)  then 0
+  in Fault(_) then 0
+  end
+  case vm.snapshot()
+  in Ok(_)  then 1
+  in Err(_) then 0 - 1
+  end
+end
+
+go()
+";
+    let loaded = program(source);
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the grant names a target");
+    lm_proc::run_world(&mut world);
+    let bytes = world
+        .last_snapshot()
+        .expect("the program captured a world")
+        .bytes()
+        .to_vec();
+    let image = accept(&loaded, &bytes);
+    // The captured machine is done, frameless, with empty arenas.
+    let done = image
+        .machines
+        .iter()
+        .position(|m| m.state == lm_vm::snapshot::ImageState::Done)
+        .expect("one machine is done");
+    assert!(image.machines[done].frames.is_empty());
+    assert!(image.machines[done].operands.is_empty());
+    let mut broken = image.clone();
+    broken.machines[done].operands.push(lm_value::Value::Int(1));
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+}

@@ -1066,9 +1066,22 @@ impl<'m> World<'m> {
     }
 
     /// Walk the policy chain of `vm` for one exact operation.
+    ///
+    /// The walk follows the parent chain. A cut world proves that chain
+    /// acyclic, so the loop terminates. The step bound is a second
+    /// defense: a chain longer than the machine table has a cycle,
+    /// whatever built the state, so the walk fails closed rather than
+    /// spins.
     fn resolve_policy(&self, vm: VmId, op: u32) -> Resolution {
         let mut cur = vm;
+        let mut steps = 0usize;
         loop {
+            steps += 1;
+            if steps > self.machines.len() {
+                // A well-formed chain visits each machine once, so this
+                // is a cycle. Fail closed.
+                return Resolution::Denied;
+            }
             let m = &self.machines[cur as usize];
             match m.table.lookup(op) {
                 None | Some(Action::Block) => return Resolution::Denied,

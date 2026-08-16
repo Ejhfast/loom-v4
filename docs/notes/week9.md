@@ -382,20 +382,23 @@ other machine control operation stays outside `as_call`.
   failure-atomicity directions, the one-time external check, the five
   captured states, the byte limit, the world gate, and the
   deterministic dump diff, and the typed cast.
-- `crates/lm-testkit/tests/week9_image.rs`, 25 cases: the container
+- `crates/lm-testkit/tests/week9_image.rs`, 28 cases: the container
   frame, the section table, the header, the code manifest, canonical
   integers, the canonical heap order, unreachable objects, handle
   generations, machine references, the state rules, the layout rules,
   the mailbox rules, the literal rule, the declared-type rules for
   locals, fields, operands, pending arguments, messages, and terminal
   values, the terminal value with no result type, the non-proc queue,
-  a blanket single-bit sweep over the whole container, a truncation
-  sweep, and the deep-graph case on a 256 KiB stack.
+  the proc with an underivable mailbox type, the cyclic parent graph,
+  the terminal frame and the frameless operand, a blanket single-bit
+  sweep over the whole container, a truncation sweep, and the
+  deep-graph case on a 256 KiB stack.
 - `crates/lm-testkit/tests/fuzz.rs`, one snapshot surface: sixteen
   hundred mutation rounds against a real container. Every non-truncated
   mutant is resealed, so it reaches the structural loader instead of
   the container-hash gate. An accepted mutant must encode back to
-  exactly the bytes it came from and must restore without a panic.
+  exactly the bytes it came from, and it must restore and run under a
+  tight heap and fuel cap without a panic.
 - `tests/fuzz-regressions/`, two container seeds: one valid machine
   world and one whose heap is not in canonical traversal order.
 - `crates/lm-testkit/tests/bench_smoke.rs`, three snapshot entries.
@@ -408,8 +411,10 @@ other machine control operation stays outside `as_call`.
 - `tests/ui/`, 5 new pairs for the row rule, the two arity rules, the
   restore argument rule, and the `Snapshot` type arity.
 
-Test count: 719 before, 780 after. The three added after the blind
-security review close the loader type-proof gaps F1 and F2.
+Test count: 719 before, 783 after. Three cases followed the first
+security review and three more followed the re-review, closing the
+whole "underivable governing type" pattern in the loader, the parent
+cycle, and the terminal-frame asymmetry.
 
 ## Measurements
 
@@ -526,6 +531,34 @@ references inside an error value.
 The week-7 question stands: `OpDef.snapshot` is manifest content, and
 `manifest_digest` does not cover it.
 
+### The load does not enforce a deep-freeze invariant
+
+The only frozen rule at load is that a born-frozen shape carries the
+frozen bit. The loader does not enforce that every object reachable
+from a frozen object is frozen. The second re-review asked whether the
+iterative reachability walk should add it.
+
+It must not, because deep freeze is not a system invariant. A `Tuple`
+and a `Closure` are born frozen, and their elements need not be: every
+tuple literal is a frozen object over possibly mutable elements. A
+walk that rejected a frozen object with a mutable child would reject
+those valid images.
+
+The invariant the rest of the system relies on is narrower and is
+checked where it is used, not assumed of stored state. `digest` and
+`deep_equal` require the whole reachable graph frozen, and their graph
+modes prove it at the call, rejecting a mutable object with
+`UnsendableValue`. The write barrier reads the frozen bit per object,
+so a mutable child reachable from a frozen parent is writable and the
+parent is not. A forged image that froze a container and left an
+element mutable is therefore inert and sound: no consumer reads the
+element as frozen without the call-time check catching it.
+
+The image cannot separate a born-frozen container from a
+user-deep-frozen graph either, because the frozen bit is one bit. So
+even the narrower "a user-frozen graph is deep-frozen" rule is not
+expressible at load. The question stays recorded rather than enforced.
+
 ## The blind security review
 
 A blind reviewer read the whole loader. The byte layer held: no panic,
@@ -569,6 +602,51 @@ The three type fixes share one shape: a value that carries a declared
 type is proved whether or not the record that names the type is
 present. Where the record is absent and the value is not the trivial
 one, the loader rejects.
+
+### The re-review: the whole pattern, not the representative case
+
+A second uninterrupted review found the first round of fixes closed
+the representative cases, not the pattern. The governing rule is now
+stated plainly: a value in a value-bearing position whose governing
+type cannot be derived is rejected at load, never skipped.
+
+- **The mailbox-queue proof (HIGH).** The F2a fix rejected a non-proc
+  machine with a queue, but a proc whose mailbox type could not be
+  derived from the image still left its queue unproven. The type is
+  underivable when the proc body is gone and the entry frame declares
+  no proc instance, or the first parameter is not a proc class. The
+  loader now rejects any proc that carries a message when the mailbox
+  type does not derive.
+  `a_proc_with_an_underivable_mailbox_type_and_a_queue_rejects` states
+  it.
+- **Parent-chain acyclicity (MEDIUM).** The parent ordinal was range
+  checked but never proven acyclic. A self parent or a cycle decoded,
+  and the runtime policy walk of `resolve_policy` followed the parent
+  chain with no bound, so a live cyclic segment spun forever. Two
+  layers close it: the loader proves the parent graph a forest with an
+  iterative three-colour walk, and `resolve_policy` gained a step bound
+  that fails closed past the machine count. `a_cyclic_parent_graph_rejects`
+  states both the self parent and the two-node cycle.
+- **Terminal frames and frameless operands (LOW).** The operand proof
+  skips a terminal machine, but nothing forbade a terminal machine from
+  carrying a frame, and nothing forbade a frameless machine from
+  carrying operands, so a forged terminal machine could hold unproven
+  operands. The chosen fix forbids both shapes: a terminal machine
+  holds no frame, and a machine with no frame holds no operand. Both
+  are true of every real capture. `a_terminal_machine_with_a_frame_or_a_frameless_operand_rejects`
+  states them.
+- **The deep-freeze question.** Recorded as an open question above:
+  born-frozen containers legitimately hold mutable children, so the
+  invariant is not enforceable at load without rejecting valid images,
+  and the narrower rule the system relies on is checked at the digest
+  and equality call sites instead.
+
+The re-review also asked for the fuzzer to restore and run every
+accepted mutant, not only decode it. It now does, under a tight heap
+and fuel cap and a bounded slice budget. A fifty-thousand-round probe
+accepted 9709 mutants, each re-encoded byte for byte and restored and
+driven without a panic, and rejected the rest across the whole
+structural surface, `mailbox` and `state` included.
 
 ## Deferred work
 

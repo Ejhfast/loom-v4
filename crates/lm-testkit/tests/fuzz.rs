@@ -190,6 +190,33 @@ fn snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
     (loaded, container)
 }
 
+/// Drive one restored world to a stop under a bounded slice budget.
+///
+/// The budget keeps a mutant that would run forever from hanging the
+/// harness. The rule is the absence of a panic; a fault, a block with
+/// no runnable machine, or the budget all stop the drive cleanly.
+fn drive_restored(world: &mut lm_vm::World<'_>, root: lm_vm::VmId) {
+    for _ in 0..10_000 {
+        match world.run_machine(root) {
+            lm_vm::RootEvent::Done(_) | lm_vm::RootEvent::Fault(_) | lm_vm::RootEvent::Asked(_) => {
+                return
+            }
+            lm_vm::RootEvent::Blocked => {
+                if world.poll_blocked() > 0 {
+                    continue;
+                }
+                match world.runnable_procs().first().copied() {
+                    Some(proc) => {
+                        world.drive_proc(proc);
+                    }
+                    None => return,
+                }
+            }
+            lm_vm::RootEvent::Ran | lm_vm::RootEvent::Waiting => return,
+        }
+    }
+}
+
 #[test]
 fn mutated_snapshot_containers_never_panic_the_loader() {
     on_supported_stack(|| {
@@ -218,7 +245,10 @@ fn mutated_snapshot_containers_never_panic_the_loader() {
             }
             // A rejection is fine. An acceptance must restore into a
             // world without a panic, and it must encode back to
-            // exactly the bytes it came from.
+            // exactly the bytes it came from. The restored world then
+            // runs under a tight heap and fuel cap: an unproven state
+            // that only shows at run time faults or stops, but never
+            // panics the interpreter.
             if let Ok(image) = lm_vm::snapshot::codec::decode(&bytes, &loaded, limits) {
                 accepted += 1;
                 let again = lm_vm::snapshot::codec::encode(&image, usize::MAX)
@@ -229,12 +259,15 @@ fn mutated_snapshot_containers_never_panic_the_loader() {
                     VmConfig {
                         fuel: 20_000,
                         heap_bytes: 1 << 20,
+                        max_children: 4_096,
                         ..VmConfig::default()
                     },
                     Box::new(lm_vm::RecordingHost::new(1)),
                 );
                 if let Some(target) = world.new_child(0) {
-                    let _ = world.restore_image(0, target, &image);
+                    if let Ok(root) = world.restore_image(0, target, &image) {
+                        drive_restored(&mut world, root);
+                    }
                 }
             }
         }

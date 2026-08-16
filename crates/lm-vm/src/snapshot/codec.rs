@@ -1417,6 +1417,16 @@ fn check_machine(m: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
     if m.frames.len() > m.limits.max_frames as usize {
         return err(ImageReason::Layout, at("the frame count passes its limit"));
     }
+    // Operands belong to frames. A machine with no frame therefore
+    // carries no operand, so a frameless operand arena holds values
+    // the operand proof never reaches. Reject it rather than leave it
+    // unproven.
+    if m.frames.is_empty() && !m.operands.is_empty() {
+        return err(
+            ImageReason::Layout,
+            at("a machine with no frame holds operands"),
+        );
+    }
     // The literal table names the module string pool, and a stored
     // literal holds exactly the pooled text.
     for (idx, literal) in m.literals.iter().enumerate() {
@@ -1498,6 +1508,14 @@ fn check_machine(m: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
                     ImageReason::State,
                     at("a terminal machine holds a pending request"),
                 );
+            }
+            // A machine reaches a terminal only by returning its last
+            // frame, so a terminal machine holds none. The operand
+            // proof skips a terminal machine, so a frame it carried
+            // would hold unproven operands. The frameless-operand rule
+            // above then forces its arenas empty as well.
+            if !m.frames.is_empty() {
+                return err(ImageReason::State, at("a terminal machine holds a frame"));
             }
         }
     }
@@ -1699,7 +1717,23 @@ fn check_types(machine: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
     // Every accepted message names the mailbox type of its proc. The
     // class table fixes that type, so the rule never reads it from
     // the image.
-    if let Some(message) = mailbox_type(machine, ctx) {
+    //
+    // A proc that carries a message must have a provable mailbox type.
+    // The type cannot always be derived: the proc body may be gone, or
+    // the entry frame may declare no proc instance. When it cannot be
+    // derived the queued values have no governing type, so the loader
+    // rejects the image rather than schedule an unproven message. The
+    // non-proc case is rejected earlier, in `check_machine`.
+    if machine.is_proc && !machine.mailbox.queue.is_empty() {
+        let Some(message) = mailbox_type(machine, ctx) else {
+            return err(
+                ImageReason::Mailbox,
+                format!(
+                    "machine {vm}: a proc whose mailbox type cannot be proven holds an \
+                     accepted message"
+                ),
+            );
+        };
         for value in &machine.mailbox.queue {
             check_shape(machine, ctx, vm, *value, message, &mut work).map_err(|e| {
                 ImageError::new(
@@ -1951,15 +1985,14 @@ fn check_pending_args(
 
 /// The mailbox message type of one captured proc.
 ///
-/// The proc class fixes the type. The entry frame of a proc declares
-/// the proc instance as its first parameter, and the stored proc body
-/// declares it before the constructor returns. A proc with neither,
-/// for example a terminal one, receives no message again, so its
-/// queue is inert and the rule does not apply.
+/// The proc class fixes the type. The stored proc body declares the
+/// proc instance as its first parameter, and the entry frame declares
+/// it after the constructor returns. `None` means the type cannot be
+/// derived from the image: the proc body is gone and the entry frame
+/// declares no proc instance, or the first parameter is not a proc
+/// class. The caller treats `None` as a rejection when the machine
+/// carries a message, so a queued value never sits unproven.
 fn mailbox_type(machine: &ImageMachine, ctx: &Ctx<'_>) -> Option<u32> {
-    if !machine.is_proc || machine.mailbox.queue.is_empty() {
-        return None;
-    }
     let frames = ctx.frame_types.as_ref()?;
     let func = match machine.start_body {
         Some(ordinal) => match machine.objects[ordinal as usize].object {
@@ -2085,8 +2118,62 @@ fn extends(module: &lm_bytecode::Module, child: u32, ancestor: u32) -> bool {
     false
 }
 
+/// Prove that the parent graph is a forest.
+///
+/// Every machine names at most one parent, so the parent pointers form
+/// a functional graph. A cycle in it makes the runtime policy walk of
+/// `resolve_policy` loop forever, because that walk follows the parent
+/// chain with no bound. The parent ordinal is already range-checked at
+/// decode, so this rule adds only the acyclicity, iteratively, with a
+/// three-colour walk that never grows the Rust stack.
+fn check_parent_forest(image: &Image) -> Read<()> {
+    let n = image.machines.len();
+    // 0 unvisited, 1 on the current path, 2 settled.
+    let mut colour = vec![0u8; n];
+    for start in 0..n {
+        if colour[start] != 0 {
+            continue;
+        }
+        let mut path: Vec<usize> = Vec::new();
+        let mut cur = start;
+        loop {
+            match colour[cur] {
+                0 => {
+                    colour[cur] = 1;
+                    path.push(cur);
+                    match image.machines[cur].parent {
+                        Some(parent) => {
+                            let parent = parent as usize;
+                            if parent == cur {
+                                return err(
+                                    ImageReason::State,
+                                    format!("machine {cur} is its own parent"),
+                                );
+                            }
+                            cur = parent;
+                        }
+                        None => break,
+                    }
+                }
+                1 => {
+                    return err(
+                        ImageReason::State,
+                        format!("the parent chain through machine {cur} forms a cycle"),
+                    );
+                }
+                _ => break,
+            }
+        }
+        for node in path {
+            colour[node] = 2;
+        }
+    }
+    Ok(())
+}
+
 /// Prove the rules that need the whole world.
 fn check_world(image: &Image) -> Read<()> {
+    check_parent_forest(image)?;
     for (vm, machine) in image.machines.iter().enumerate() {
         // Every handle names a captured machine at its generation.
         for (ordinal, entry) in machine.objects.iter().enumerate() {
