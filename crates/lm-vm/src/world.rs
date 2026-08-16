@@ -1488,9 +1488,11 @@ impl<'m> World<'m> {
     /// Move one message into a mailbox.
     ///
     /// A proc may hold its own handle, because a handle is sendable
-    /// data. A self send stays inside one heap, so it proves the
-    /// boundary rule with the standalone frozen check instead of a
-    /// copy: the codec has no second heap to copy into.
+    /// data. A self send stays inside one heap, so it has no second
+    /// heap to copy into. It still owes the whole boundary rule, so
+    /// it runs the standalone sendable check, which carries the same
+    /// visitor the copy carries: every object frozen, and every shape
+    /// sendable. The two paths therefore accept the same graphs.
     fn send_copy(&mut self, src: VmId, dst: VmId, value: Value) -> Result<Value, FaultCode> {
         if src != dst {
             return self.transfer(src, dst, value);
@@ -1501,7 +1503,7 @@ impl<'m> World<'m> {
         };
         let limits = self.machines[dst as usize].config.graph;
         let heap = &mut self.machines[dst as usize].vm.heap;
-        lm_graph::verify_frozen(heap, root, &limits)?;
+        lm_graph::verify_sendable(heap, root, &limits)?;
         Ok(value)
     }
 
@@ -2792,8 +2794,8 @@ mod tests {
     }
 
     /// A proc may hold its own handle, so a send can name the sending
-    /// machine. The message stays in one heap, and the boundary rule
-    /// still applies: a mutable graph is not sendable.
+    /// machine. The message stays in one heap, and the whole boundary
+    /// rule still applies.
     ///
     /// The copy path needs two distinct machines, so a same-heap send
     /// would otherwise reach an assertion instead of the rule.
@@ -2803,7 +2805,8 @@ mod tests {
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         // A scalar carries no reference.
         assert_eq!(world.send_copy(0, 0, Value::Int(7)), Ok(Value::Int(7)));
-        // A frozen graph passes the check and stays where it is.
+        // A frozen graph of sendable shapes passes the check and
+        // stays where it is.
         let frozen = world.machines[0]
             .alloc(Object::Str("text".to_string()))
             .expect("the string allocates");
@@ -2814,6 +2817,51 @@ mod tests {
             .expect("the list allocates");
         assert_eq!(
             world.send_copy(0, 0, mutable),
+            Err(FaultCode::UnsendableValue)
+        );
+    }
+
+    /// The self send applies the shape rule as well as the frozen
+    /// rule, so it accepts exactly what a copy accepts.
+    ///
+    /// A machine handle is born frozen and holder local. The frozen
+    /// bit alone would let it into a mailbox, and a cross-heap send
+    /// of the same value rejects it.
+    #[test]
+    fn a_self_send_rejects_a_holder_local_value() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        world
+            .machines
+            .push(Machine::empty(VmConfig::default(), None));
+        let handle = world.machines[0]
+            .alloc(Object::NativeVm { vm: 1 })
+            .expect("the handle allocates");
+        // The frozen bit is set, so only the shape rule can refuse it.
+        let r = handle.as_obj().expect("a handle is a heap object");
+        assert!(world.machines[0].vm.heap.is_frozen(r));
+        assert_eq!(
+            world.send_copy(0, 0, handle),
+            Err(FaultCode::UnsendableValue)
+        );
+        // The cross-heap path gives the same answer.
+        assert_eq!(
+            world.send_copy(0, 1, handle),
+            Err(FaultCode::UnsendableValue)
+        );
+        // A holder-local object inside a frozen container is refused
+        // just as it is at the top of a message.
+        let wrapper = world.machines[0]
+            .alloc(Object::Tuple {
+                items: vec![handle],
+            })
+            .expect("the tuple allocates");
+        assert_eq!(
+            world.send_copy(0, 0, wrapper),
+            Err(FaultCode::UnsendableValue)
+        );
+        assert_eq!(
+            world.send_copy(0, 1, wrapper),
             Err(FaultCode::UnsendableValue)
         );
     }

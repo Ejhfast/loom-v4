@@ -332,7 +332,9 @@ cannot serve this"; the open question below asks for a better one.
   still work. The next `receive` resolves through the dead parent
   table and fails closed with `PolicyDenied`, which is the rule of
   specification 18.6. One test states it, because the shape surprises
-  a reader who expects the handle alone to keep the proc alive.
+  a reader who expects the handle alone to keep the proc alive. The
+  open question below carries the reviewer's argument against the
+  rule.
 
 ## Changed tests
 
@@ -380,8 +382,10 @@ cannot serve this"; the open question below asks for a better one.
 - `crates/lm-testkit/tests/corruption.rs`, 6 new cases for the parent
   type arguments, the `Proc` core role, the handle message type, and
   the receive receiver.
-- `crates/lm-vm/src/world.rs`, 3 cases for the self send, the stale
+- `crates/lm-vm/src/world.rs`, 4 cases for the self send, the stale
   generation, and the retired slot generation.
+- `crates/lm-graph/src/mode.rs`, 2 cases for the standalone sendable
+  check against the standalone frozen check.
 - `crates/lm-testkit/tests/bench_smoke.rs`, four proc entries.
 - `tests/ui/`, 5 new pairs for the spawn, send, and receive rules.
 - `tests/run-pass/core-subclass.lm`, one pair for core-class
@@ -392,7 +396,7 @@ cannot serve this"; the open question below asks for a better one.
   through the tool, the same program from its artifact, and a proc
   package through the build loop.
 
-Test count: 620 before, 707 after.
+Test count: 620 before, 710 after.
 
 ## Measurements
 
@@ -443,11 +447,23 @@ because a handle is sendable data, so `h.send(x)` inside the target
 proc reached that assertion.
 
 The fix is `World::send_copy`. A send between two machines copies, as
-before. A send inside one machine runs the standalone frozen check and
-keeps the value where it is: the codec has no second heap to copy
-into, and the boundary rule is exactly the frozen test. Three record
-level cases state the rule for a scalar, a frozen graph, and a mutable
-graph.
+before. A send inside one machine keeps the value where it is,
+because the codec has no second heap to copy into.
+
+The first version of that path ran the frozen check alone, and the
+independent review found the gap: a transfer demands two things, the
+frozen bit and a sendable shape, and the frozen check answers only
+the first. A machine handle is born frozen and holder local, so the
+frozen check would have let one into a mailbox that a copy refuses.
+No guest program reached the gap, because a mailbox proc carries the
+`Proc` group alone and can mint no holder-local native, but the two
+paths must not differ.
+
+`lm_graph::verify_sendable` closes it. The standalone walk carries the
+same `CopyCheck` visitor the copy carries, so the two answers cannot
+drift. Four record-level cases state the rule: a scalar, a frozen
+sendable graph, a mutable graph, and a holder-local value both at the
+top of a message and inside a frozen container.
 
 ### A machine of a suspended stack stayed in the run set
 
@@ -495,6 +511,32 @@ version, and the week added eight members. The bump to version 2 moved
 `manifest_digest`, and therefore every definition hash, the core pin,
 and the checked digest output.
 
+## The independent review pass
+
+A second reviewer read the whole diff. It found no correctness or
+safety defect, confirmed the ten gates, and validated the self-review
+findings. It asked for one fix and two records, and it stated a
+position on two of the open questions.
+
+### The self-send path admitted a holder-local value (fixed)
+
+The finding and the fix are in the self-review section above. The
+reviewer noted that the gap is unreachable today and named the two
+surfaces that would open it: attenuated send-only handle views, and a
+proc launched through the explicit machine path with more than the
+`Proc` group.
+
+### A receiver heap limit faults the sender (recorded)
+
+`World::send_copy` copies the message into the receiving heap. A
+`HeapLimit` there faults the *sender*, because the whole copy is one
+operation of the sender. The open question below asks whose fault it
+is.
+
+### The barrier set over-approximates through mock closures (recorded)
+
+The carry-forward below states it for the week-9 encoder.
+
 ## Open questions
 
 ### The build-order example omits the freeze
@@ -510,6 +552,57 @@ faults the sender. The alternative is an implicit freeze at send,
 which specification 10.2 rules out ("there is no silent mutable deep
 copy"). The question is whether the build-order example is shorthand
 or a claim about the send rule.
+
+The reviewer's position: specifications 10.2, 10.3, and 16.2 are
+right, and the build-order example is the text that must move. This
+note records the position; the decision belongs to the project owner,
+and neither `docs/specs` nor the build order changed this week.
+
+### Who owns the fault when a receiver heap limit stops a message
+
+`send` copies the message into the receiving heap, and that heap has
+its own cap. A copy that exceeds it faults the sender with
+`HeapLimit` today, because the copy is one operation of the sender
+and every other boundary failure of `send` faults the sender the same
+way. `SendResult` has no arm for it, and `Fault(fault)` names "a dead
+target, cancellation, or another target/host supervisory fault",
+which reads like a target-side condition.
+
+The specification does not say. The two readings are:
+
+- the sender asked for something the world could not do, so the
+  sender faults, which is the codebase convention and what landed;
+- the target could not accept the message, so the sender receives
+  `SendResult.Fault` and keeps running, which lets a supervisor
+  survive an overloaded peer.
+
+The second reading is attractive for supervision, and it needs the
+copy to become failure-atomic from the sender's point of view. The
+transfer is already failure-atomic for the destination heap, so the
+change is small; the semantics decision is not.
+
+### Should a proc still receive after its parent dies
+
+Specification 18.6 says a child table passes through the live parent
+table, and that parent death removes those pass-throughs so future
+requests fail closed. `Proc.Recv` resolves through that chain like
+every other operation, so an orphaned proc cannot receive. Its
+mailbox still accepts, because a mailbox is machine state, so a
+holder can send and close and then read `Fault(PolicyDenied)` from
+`done()`. The behavior follows the text, and one test states it.
+
+The reviewer's position: `Proc.Recv` reads the proc's own mailbox and
+reaches no authority outside the machine, so it is unlike `Io.Print`.
+The specification should anchor it to a root grant, or to the birth
+grant itself, so a proc can drain its mailbox and finish after its
+parent dies. Under the current rule a supervisor cannot hand work to
+a proc and then exit, which is a common shape.
+
+The counter-argument is that the birth grant is an ordinary table
+entry and the pass-through rule is uniform: making one operation
+special would put a second resolution rule beside the first. This
+note records the position; the decision is open, and it is a
+specification change.
 
 ### No stable fault code names a deadlock
 
@@ -546,6 +639,45 @@ which the specification does not state in those words.
 
 The week-7 question stands: `OpDef.snapshot` is manifest content, and
 `manifest_digest` does not cover it.
+
+## Carry-forwards for week 9
+
+### The barrier set over-approximates through mock closures
+
+`World::machine_references` and `World::snapshot_preflight` both walk
+`Machine::gc_roots` (`crates/lm-vm/src/machine.rs`, the mock-handler
+loop near the end of `gc_roots`). That root set includes every
+`Action::Mock` closure a policy table holds, because the collector
+must keep those closures alive.
+
+Specification 17.2 excludes policy tables from snapshot contents, so
+those closures are not snapshot content. The barrier therefore
+over-approximates: a machine that only a table-held mock closure
+names is stopped, frozen, preflighted, and counted in the closed set.
+
+The over-approximation is harmless this week. A larger stopped set is
+still a consistent cut, and the barrier resumes everything it stopped.
+It is not harmless for the week-9 encoder:
+
+- the encoder must not treat table-only reachability as snapshot
+  content, or a restored world would carry policy the specification
+  says restore never carries (17.5, fresh default-deny tables);
+- the machine ordinal assignment must come from a walk over snapshot
+  content, not from the barrier set, or the ordinals would name
+  machines the bytes do not hold.
+
+The clean split is two root sets: the collection roots, which keep
+everything alive, and the snapshot roots, which are the collection
+roots minus the policy-table entries. `World::machine_references` and
+`World::snapshot_preflight` should read the second one.
+
+### The self-send and cross-heap paths must stay in step
+
+`World::send_copy` runs `lm_graph::verify_sendable` for a same-heap
+send and `lm_graph::transfer` for a cross-heap send. Both carry the
+`CopyCheck` visitor of `crates/lm-graph/src/mode.rs`, which is what
+keeps the two answers equal. A new boundary rule must go into that
+visitor, not beside it.
 
 ## Deferred work
 

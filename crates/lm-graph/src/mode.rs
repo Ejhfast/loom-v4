@@ -122,6 +122,39 @@ impl Visitor for CopyCheck<'_> {
     }
 }
 
+/// Check that every object reachable from `root` satisfies the
+/// boundary rules of a transfer.
+///
+/// A transfer demands two things of the source graph: the frozen bit
+/// on every object, and a sendable shape on every object. A caller
+/// that has no second heap to copy into still owes both rules, so it
+/// runs this walk instead of the copy.
+///
+/// The walk carries the same `CopyCheck` visitor the copy runs, so
+/// the standalone answer and the copy answer cannot drift.
+pub fn verify_sendable(
+    heap: &mut Heap,
+    root: ObjRef,
+    limits: &GraphLimits,
+) -> Result<GraphCost, FaultCode> {
+    let mut scratch = heap.take_scratch();
+    let out = {
+        let view: &Heap = heap;
+        walk(
+            view,
+            &mut scratch,
+            &[root],
+            limits,
+            &mut CopyCheck {
+                heap: view,
+                mode: CopyMode::Transfer,
+            },
+        )
+    };
+    heap.put_scratch(scratch);
+    out
+}
+
 /// Transfer one value from `src` into `dst`.
 ///
 /// The copy preserves cycles and sharing, and it is failure-atomic
@@ -432,6 +465,57 @@ mod tests {
         assert_eq!(
             verify_frozen(&mut heap, root, &limits()),
             Err(FaultCode::UnsendableValue)
+        );
+    }
+
+    /// The two standalone checks answer different questions, and a
+    /// caller that owes the whole boundary rule must run the sendable
+    /// one.
+    ///
+    /// A machine handle is born frozen and holder local. The frozen
+    /// check therefore accepts it, and only the sendable check
+    /// rejects it, exactly as a copy would.
+    #[test]
+    fn the_sendable_check_rejects_what_the_frozen_check_admits() {
+        let mut heap = Heap::new(1 << 20);
+        let handle = heap.alloc(Object::NativeVm { vm: 1 });
+        assert!(heap.is_frozen(handle));
+        assert!(verify_frozen(&mut heap, handle, &limits()).is_ok());
+        assert_eq!(
+            verify_sendable(&mut heap, handle, &limits()),
+            Err(FaultCode::UnsendableValue)
+        );
+        // A holder-local object inside a frozen container hides from
+        // the frozen check as well.
+        let wrapper = heap.alloc(Object::Tuple {
+            items: vec![Value::Obj(handle)],
+        });
+        assert!(verify_frozen(&mut heap, wrapper, &limits()).is_ok());
+        assert_eq!(
+            verify_sendable(&mut heap, wrapper, &limits()),
+            Err(FaultCode::UnsendableValue)
+        );
+    }
+
+    /// The sendable check keeps the frozen rule too, so it is the
+    /// whole transfer contract and not a second, weaker one.
+    #[test]
+    fn the_sendable_check_keeps_the_frozen_rule() {
+        let mut heap = Heap::new(1 << 20);
+        let leaf = heap.alloc(Object::List { items: vec![] });
+        let root = heap.alloc(Object::Tuple {
+            items: vec![Value::Obj(leaf)],
+        });
+        assert_eq!(
+            verify_sendable(&mut heap, root, &limits()),
+            Err(FaultCode::UnsendableValue)
+        );
+        let ring = frozen_ring(&mut heap, 1, 2);
+        assert_eq!(
+            verify_sendable(&mut heap, ring, &limits())
+                .expect("the graph is sendable")
+                .objects,
+            2
         );
     }
 
