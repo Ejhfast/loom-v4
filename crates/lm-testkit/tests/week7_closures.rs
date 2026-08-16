@@ -245,3 +245,74 @@ fn a_brace_closure_needs_its_parameter_list() {
     let rendered = compile_text("t.lm", "f = { |x: Int 1 }\nf(1)\n").unwrap_err();
     assert!(rendered.starts_with("error[E1003]"), "{rendered}");
 }
+
+/// The scanner opens a statement block for a brace closure and keeps
+/// a map literal a delimiter. The two nest in every combination.
+#[test]
+fn brace_nesting_survives_every_combination() {
+    // A multi-line brace closure inside a call argument list.
+    let inside_parens = "\
+def apply_twice(f: (Int) -> Int, value: Int): Int
+  f(f(value))
+end
+
+apply_twice({ |x: Int|: Int
+  y = x + 1
+  y
+}, 40)
+";
+    assert_eq!(runs(inside_parens), "Done(42)");
+    // A multi-line map literal inside a brace closure body.
+    let map_inside = "\
+f = { |k: String|: Int
+  m = {
+    \"a\": 1,
+    \"b\": 2
+  }
+  m.at(k)
+}
+
+f(\"b\")
+";
+    assert_eq!(runs(map_inside), "Done(2)");
+    // A brace closure inside a brace closure.
+    let nested = "\
+outer = { |x: Int|: Int
+  inner = { |y: Int|: Int
+    y * 2
+  }
+  inner(x) + 2
+}
+
+outer(20)
+";
+    assert_eq!(runs(nested), "Done(42)");
+    // Each spelling inside the other.
+    let mixed = "\
+a = { |x: Int|: Int
+  g = do |y: Int|: Int
+    y + 1
+  end
+  g(x)
+}
+
+b = do |x: Int|: Int
+  h = { |y: Int|: Int y * 2 }
+  h(x)
+end
+
+a(20) + b(11)
+";
+    assert_eq!(runs(mixed), "Done(43)");
+    // An interpolated string inside a brace closure body. The
+    // interpolation scanner rejects a brace of its own, and its
+    // tokens carry spans into the enclosing source.
+    let interp = "\
+f = { |n: Int|: String
+  \"n is {n}\"
+}
+
+f(42)
+";
+    assert_eq!(runs(interp), "Done(\"n is 42\")");
+}
