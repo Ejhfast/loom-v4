@@ -1182,6 +1182,18 @@ impl<'m> World<'m> {
             1 => Some(Action::Block),
             2 => {
                 let closure = mock.expect("a mock edit carries its handler");
+                // A cross-machine install crosses the boundary, which
+                // proves the whole handler graph frozen. A same-heap
+                // install skips the copy and therefore skips that
+                // proof, which specification 10.3 requires at mock
+                // installation.
+                //
+                // No machine can reach this branch: a table handle
+                // comes from a machine handle, and no operation mints
+                // a handle to the performing machine. The assertion
+                // holds the gap closed until one does.
+                // `docs/notes/week7.md` records it.
+                debug_assert_ne!(target, vm, "a machine cannot hold a table handle to itself");
                 let moved = if target == vm {
                     Ok(closure)
                 } else {

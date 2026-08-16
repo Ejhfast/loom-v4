@@ -71,9 +71,9 @@ they differ only in whether they accept a mutable source.
 The identity table is a per-heap epoch table over the object slots.
 `seen[slot]` holds the walk epoch that last reached the slot, so a new
 walk needs no clearing pass and no hashing. The heap lends the table
-to the engine for the length of one walk and takes it back afterwards,
-so a walk started inside another walk allocates its own table instead
-of sharing one.
+to the engine for the length of one walk. It takes the table back
+afterwards. A walk that starts inside another walk therefore allocates
+its own table instead of sharing one.
 
 ### The migrated paths
 
@@ -222,7 +222,7 @@ private shape table.
 
 The first design kept `Object` in `lm-vm` and gave `lm-graph` a trait
 the VM implements. It was rejected because the mode visitors need the
-concrete shapes, so every mode would have stayed in `lm-vm` and the
+concrete shapes. Every mode would then have stayed in `lm-vm`, and the
 new crate would have held one generic loop and nothing else. The
 "one child-order contract per shape" gate would then have had no
 single home.
@@ -263,10 +263,11 @@ variant yet. The rule enters with floats.
 
 - **Detached inspection and snapshot traversal have no guest entry
   point.** Both are engine modes with their own visitors, limits, and
-  Rust-level tests. Week 7 adds no operation that reads out of another
-  heap beyond `call.args()`, which must stay on the transfer contract,
-  and it defines no snapshot byte format. `World::snapshot_preflight`
-  is the Rust-level entry the week-9 snapshot work will call.
+  Rust-level tests. Week 7 adds one operation that reads out of
+  another heap: `call.args()`, which must stay on the transfer
+  contract. Week 7 also defines no snapshot byte format.
+  `World::snapshot_preflight` is the Rust-level entry the week-9
+  snapshot work calls.
 - **Frozen verification is a standalone mode and a fused check.** The
   production transfer path runs the frozen test inside its copy
   visitor, in the same walk, instead of walking twice. The standalone
@@ -277,8 +278,8 @@ variant yet. The rule enters with floats.
   specification 14.12 would need the root set passed in. The field
   split landed; the entry-point shape did not.
 - **The mark mode publishes unbounded limits.** The heap cap already
-  bounds the object table, and a mark that refused to finish would
-  turn a full heap into a crash instead of a collection. Every other
+  bounds the object table. A mark that refused to finish would turn a
+  full heap into a crash instead of a collection. Every other
   mode uses the published defaults from `VmConfig.graph`.
 - **The child budget bounds tower depth per branch, not the total
   machine count.** Full transitive accounting of fuel and heap bytes
@@ -338,13 +339,19 @@ variant yet. The rule enters with floats.
   failure-atomic transfer, the rooting rule for a later transfer, the
   digest properties, the limit rejection of every mode, and every mode
   on a 50,000-deep chain.
-- `crates/lm-heap/src/shape.rs`, 6 cases: the tag table, the child
+- `crates/lm-heap/src/shape.rs`, 8 cases: the tag table, the child
   order agreeing with the reference flag, holder-local shapes never
-  digestible, no shape a host attachment yet, map child order, and the
-  dump.
+  digestible, no shape a host attachment yet, map child order, the
+  dump, the agreement of the three shape walks, and one sample per
+  shape.
 - `crates/lm-heap/src/lib.rs`, 7 storage cases including the free
   rollback and the digest cache generation rule.
 - `crates/lm-vm/src/resource.rs`, 3 cases for the registry.
+- `crates/lm-vm/src/world.rs`, 1 case for the mock slot that a failed
+  start returns.
+- `crates/lm-verify/src/lib.rs`, 3 cases for the digest typing rules,
+  and `tests/corruption.rs`, 2 cases that patch a real artifact into
+  the same shapes.
 - `crates/lm-abi/src/lib.rs` and `fault.rs`, 3 cases for the
   classification table and the code names.
 - `tests/ui/`, 5 new pairs for the closure rules.
@@ -352,7 +359,7 @@ variant yet. The rule enters with floats.
 - `tests/fuzz-regressions/`, 2 new source seeds for the new parser
   surface.
 
-Test count: 541 before, 612 after.
+Test count: 541 before, 620 after.
 
 ## Measurements
 
@@ -439,10 +446,11 @@ became unpredictable.
 The fix removes the second test. The scanner reports its decision
 through `Tok::LBraceClosure`, and the parser reads the token. The
 lookahead now passes blank space, line ends, and comments, so a
-closure may open on its own line, and the closure header skips the
+closure may open on its own line. The closure header skips the
 separators the scanner emits. One test drives four header layouts
-through the brace form and two through the trailing form, and it keeps
-a map brace a map in every layout, including a pipe inside a comment.
+through the brace form and two through the trailing form. It also
+keeps a map brace a map in every layout, including a pipe inside a
+comment.
 
 ### Every mocked perform leaked one machine record (high)
 
@@ -456,10 +464,10 @@ machine.
 A mock machine is ephemeral. No guest value names it, it takes no
 child, and its own table denies every operation, so it can never reach
 an asked state. The finished record therefore drops its heap as soon
-as its result crosses into the target, and the slot joins a free list
+as its result crosses into the target. The slot then joins a free list
 that the next mock takes. The same program now holds a flat
 thirty-three megabytes from two hundred to two hundred thousand mocked
-performs, and `perform_mock_5k` fell from 34.6 ms to 17.6 ms.
+performs. `perform_mock_5k` fell from 34.6 ms to 17.6 ms.
 
 The defect predates this week. It is recorded here because the week
 introduced `max_children` as the declared machine-count defense and
@@ -485,8 +493,8 @@ the question below.
 
 - The graph limits came from the world where the machine limits apply.
   The digest and the snapshot preflight now read the limits of the
-  machine that asks, and a transfer reads the limits of the
-  destination, which is the heap that pays for the copy.
+  machine that asks. A transfer reads the limits of the destination,
+  which is the heap that pays for the copy.
 - `Vm.New` charged the parent before the handle allocation and never
   refunded a failed one. It refunds now, so the whole call rolls back.
 - A cached digest returns before the walk, so the published limits do
@@ -496,6 +504,55 @@ the question below.
   state loses its completion token, and nothing cancels the host work.
   The `Host` trait has no cancellation entry point, so this waits for
   the asynchronous completion adapters. It is in the deferred list.
+
+## The second independent review pass
+
+A third reading confirmed the suite counts, the hygiene, the migration
+fidelity, the digest injectivity, the scanner fix, and the
+hash-identical closure lowering. It found no blocker. It asked for one
+fix round and three records.
+
+### A failed mock start leaked its machine slot (fixed)
+
+`start_mock` takes its slot before the handler and the arguments
+cross. Both failure paths returned without retiring it, so one failed
+start per perform grew the machine table. It is the same unbounded
+growth the free list closed for the success path. Both paths retire
+the slot now, and one test drives three failed starts and requires one
+slot and one free-list entry after each.
+
+### The two new verifier rules had no negative tests (fixed)
+
+Three unit cases now pin three shapes. They cover the digest of a
+scalar, the digest comparison of two integers and of two strings, and
+a module that omits the result type. Two corruption cases patch a real
+compiled artifact into the same two shapes. Each case pins the exact
+rejection text.
+
+### The self-heap mock install skips the frozen proof (guarded gap)
+
+`handle_table_edit` installs a mock handler. A cross-machine install
+copies the handler across the boundary, and the copy proves the whole
+handler graph frozen. A same-heap install skips the copy, so it also
+skips the proof specification 10.3 requires at mock installation.
+
+No machine reaches that branch. A table handle comes from a machine
+handle, and no operation mints a handle to the performing machine.
+A machine therefore cannot name its own table. The branch carries a debug
+assertion that holds the gap closed until an operation does. The gap
+predates this week, and the fix belongs with whatever operation opens
+the branch, because the right answer is a frozen verification, not a
+self-copy.
+
+### The shape walks now have an enforcing test (fixed)
+
+`Object::children`, `Object::shell`, and `Object::remap` must agree on
+the child order. Nothing tested that. One test walks a sample of every
+shape and requires three facts. `remap` must call its mapper in the
+order `children` reports, an identity remap must rebuild an equal
+object, and a shell must keep the payload cost and hold no reference.
+A second test requires one sample per shape, so the agreement covers
+the whole table. A swap of the map key and value order fails the test.
 
 ## Open questions
 
@@ -595,6 +652,20 @@ into snapshot bytes.
   timers arrive with week 10.
 - A `Digest` method surface: `to_bytes`, `to_text`, and ordering. The
   type carries value equality and display only.
+- Rooting inside `build_host_value`. The builder holds earlier
+  constructor parts in a Rust vector while later parts allocate. That
+  is the hazard class the multi-value transfer fix closed elsewhere.
+  Every reply the manifest declares today is single-part, so no
+  destination collection can run between two parts. A multi-part reply
+  must root the earlier parts before it lands.
+- Semantic code and class identity across a boundary transfer. The
+  gate holds for the digest, which names a function and a class by its
+  definition hash. A transfer still copies the numeric slots raw
+  through `shell` and `remap`. That is sound inside one linked
+  program, and it is byte-identical to the earlier transfer, because
+  every machine of one world runs one module. Cross-program transfer
+  needs the hash resolution of specification 16.3, and it arrives with
+  the code store.
 - Cancellation of a host operation the VM abandons. A host that
   suspends an operation the manifest declares machine state loses its
   completion token, and the `Host` trait has no cancellation entry

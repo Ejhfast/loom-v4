@@ -456,6 +456,108 @@ pub fn dump_shapes() -> String {
 mod tests {
     use super::*;
 
+    /// One sample object per shape, each container holding two
+    /// distinct references so an order swap is visible.
+    fn sample_objects() -> Vec<Object> {
+        let a = ObjRef {
+            slot: 11,
+            generation: 0,
+        };
+        let b = ObjRef {
+            slot: 22,
+            generation: 0,
+        };
+        vec![
+            Object::Str("text".to_string()),
+            Object::Instance {
+                class: 3,
+                fields: vec![Value::Obj(a), Value::Int(1), Value::Obj(b)],
+            },
+            Object::List {
+                items: vec![Value::Obj(a), Value::Obj(b)],
+            },
+            Object::Map {
+                entries: vec![(Value::Obj(a), Value::Obj(b))],
+                index: MapIndex::default(),
+            },
+            Object::Tuple {
+                items: vec![Value::Obj(b), Value::Obj(a)],
+            },
+            Object::Closure {
+                func: 4,
+                captures: vec![Value::Obj(b), Value::Unit, Value::Obj(a)],
+            },
+            Object::StrBuilder("buffer".to_string()),
+            Object::ByteBuf(vec![1, 2, 3]),
+            Object::NativeVm { vm: 1 },
+            Object::NativeTable { vm: 1 },
+            Object::NativeRequest { vm: 1, ordinal: 2 },
+            Object::NativeCall {
+                vm: 1,
+                ordinal: 2,
+                op: 3,
+            },
+            Object::NativeFault {
+                code: FaultCode::HostFault,
+                message: "message".to_string(),
+                op: Some(1),
+            },
+            Object::NativeDigest([9; 32]),
+        ]
+    }
+
+    /// The three shape walks must stay in step.
+    ///
+    /// `children` reports the canonical order, `remap` rebuilds in
+    /// that order, and `shell` keeps the payload sizes. A new shape or
+    /// a reordered field breaks this test before it reaches a graph
+    /// mode, because a copy would otherwise attach a child to the
+    /// wrong position.
+    #[test]
+    fn the_three_shape_walks_agree() {
+        for object in sample_objects() {
+            let name = object.shape().name;
+            let mut listed = Vec::new();
+            object.children(&mut listed);
+            let mut mapped = Vec::new();
+            match object.remap(|r| {
+                mapped.push(r);
+                r
+            }) {
+                Some(rebuilt) => {
+                    assert_eq!(listed, mapped, "{name}: remap order");
+                    assert_eq!(rebuilt, object, "{name}: an identity remap rebuilds it");
+                }
+                // A shape that rebuilds nothing must hold no
+                // reference, or a copy would drop one.
+                None => assert!(listed.is_empty(), "{name}: unmapped children"),
+            }
+            match object.shell() {
+                Some(shell) => {
+                    assert_eq!(shell.cost(), object.cost(), "{name}: shell cost");
+                    assert_eq!(shell.tag(), object.tag(), "{name}: shell tag");
+                    let mut shell_children = Vec::new();
+                    shell.children(&mut shell_children);
+                    assert!(shell_children.is_empty(), "{name}: shell holds a reference");
+                }
+                // Only a holder-local shape refuses a shell.
+                None => assert_eq!(
+                    object.shape().boundary,
+                    BoundaryPolicy::HolderLocal,
+                    "{name}: sendable shape without a shell"
+                ),
+            }
+        }
+    }
+
+    /// Every shape has one sample, so the walk agreement covers the
+    /// whole table.
+    #[test]
+    fn the_samples_cover_every_shape() {
+        let tags: Vec<u8> = sample_objects().iter().map(Object::tag).collect();
+        assert_eq!(tags, (0..SHAPES.len() as u8).collect::<Vec<u8>>());
+    }
+
     #[test]
     fn every_shape_tag_resolves_to_its_own_descriptor() {
         let objects = [
