@@ -63,7 +63,11 @@ pub enum Tok {
     RParen,
     LBracket,
     RBracket,
+    /// A left brace that opens a map literal or a map type.
     LBrace,
+    /// A left brace that opens a brace closure. The scanner makes
+    /// this decision once, so the parser never repeats it.
+    LBraceClosure,
     RBrace,
     Comma,
     Colon,
@@ -132,6 +136,8 @@ impl fmt::Display for Tok {
             Tok::LBracket => "`[`",
             Tok::RBracket => "`]`",
             Tok::LBrace => "`{`",
+            // The reader writes one brace; the split is internal.
+            Tok::LBraceClosure => "`{`",
             Tok::RBrace => "`}`",
             Tok::Comma => "`,`",
             Tok::Colon => "`:`",

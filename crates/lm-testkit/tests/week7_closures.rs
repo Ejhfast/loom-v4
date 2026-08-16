@@ -316,3 +316,48 @@ f(42)
 ";
     assert_eq!(runs(interp), "Done(\"n is 42\")");
 }
+
+/// The scanner makes the brace decision once and reports it through
+/// its own token, so the parser never repeats the test.
+///
+/// A closure brace may open on its own line or after a comment. The
+/// body then keeps its statement separators, whatever the header
+/// layout is. An earlier version tested the brace twice, in bytes and
+/// in tokens, and the two disagreed across a line end.
+#[test]
+fn the_brace_decision_does_not_depend_on_the_header_layout() {
+    let bodies = [
+        "f = { |x: Int|: Int\n  y = x + 1\n  y + 100\n}\n",
+        "f = {\n  |x: Int|: Int\n  y = x + 1\n  y + 100\n}\n",
+        "f = { # a note\n  |x: Int|: Int\n  y = x + 1\n  y + 100\n}\n",
+        "f = {\n  # a note\n  |x: Int|: Int\n  y = x + 1\n  y + 100\n}\n",
+    ];
+    for body in bodies {
+        let source = format!("{body}f(41)\n");
+        assert_eq!(runs(&source), "Done(142)", "{body}");
+    }
+    // The same layouts as a trailing closure.
+    let trailing = [
+        "with_value(41) { |x: Int|\n  y = x + 1\n  y + 100\n}\n",
+        "with_value(41) {\n  |x: Int|\n  y = x + 1\n  y + 100\n}\n",
+    ];
+    for tail in trailing {
+        let source = format!(
+            "def with_value(value: Int, body: (Int) -> Int): Int\n  \
+             body(value)\nend\n\n{tail}"
+        );
+        assert_eq!(runs(&source), "Done(142)", "{tail}");
+    }
+    // A brace that no pipe follows is still a map, whatever the
+    // layout, and `{}` is still the empty map.
+    assert_eq!(
+        runs("m = {\n  \"a\": 1,\n  \"b\": 2\n}\nm.len()\n"),
+        "Done(2)"
+    );
+    assert_eq!(runs("m: {String: Int} = {\n}\nm.len()\n"), "Done(0)");
+    // A pipe inside a comment does not open a closure.
+    assert_eq!(
+        runs("m = { # a pipe | in a comment\n  \"a\": 1\n}\nm.len()\n"),
+        "Done(1)"
+    );
+}

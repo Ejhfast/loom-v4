@@ -85,10 +85,10 @@ impl Parser<'_> {
         !self.text.as_bytes()[lo..hi].contains(&b'\n')
     }
 
-    /// True when the next token opens a closure literal.
+    /// True when the next token opens a closure literal. The scanner
+    /// already separated a closure brace from a map brace.
     fn at_closure(&self) -> bool {
-        matches!(self.peek(), Tok::KwDo)
-            || (matches!(self.peek(), Tok::LBrace) && matches!(self.peek_at(1), Tok::Pipe))
+        matches!(self.peek(), Tok::KwDo | Tok::LBraceClosure)
     }
 
     fn error(&self, code: &'static str, message: impl Into<String>) -> Diagnostic {
@@ -1479,10 +1479,9 @@ impl Parser<'_> {
                     span: open.span.to(close.span),
                 })
             }
-            // A left brace followed by a pipe starts a brace closure.
-            // Every other left brace starts a map literal, and `{}`
-            // stays the empty map (appendix A.1).
-            Tok::LBrace if matches!(self.peek_at(1), Tok::Pipe) => self.closure_expr(),
+            // The scanner separated a closure brace from a map brace,
+            // so `{}` stays the empty map (appendix A.1).
+            Tok::LBraceClosure => self.closure_expr(),
             Tok::LBrace => {
                 let open = self.next();
                 let mut entries = Vec::new();
@@ -1519,13 +1518,16 @@ impl Parser<'_> {
     /// form (specification 6.2).
     fn closure_expr(&mut self) -> Result<Expr, Diagnostic> {
         let (open, close, close_what) = match self.peek() {
-            Tok::LBrace => (self.next(), Tok::RBrace, "`}` to close the closure"),
+            Tok::LBraceClosure => (self.next(), Tok::RBrace, "`}` to close the closure"),
             _ => (
                 self.expect(Tok::KwDo, "`do`")?,
                 Tok::KwEnd,
                 "`end` to close the closure",
             ),
         };
+        // A closure brace may open on its own line, so the header
+        // starts after any separator the scanner emitted.
+        self.skip_newlines();
         self.expect(Tok::Pipe, "`|` to open the parameter list")?;
         let params = if matches!(self.peek(), Tok::Pipe) {
             Vec::new()

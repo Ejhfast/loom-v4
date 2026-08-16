@@ -463,12 +463,26 @@ impl<'a> Scanner<'a> {
     /// closure. Specification appendix A.1: a left brace followed by a
     /// pipe starts a brace closure, and every other left brace starts
     /// a map literal.
+    ///
+    /// This is the one decision. The scanner reports it through
+    /// `Tok::LBraceClosure`, so the parser never repeats the test and
+    /// the two can never disagree. The lookahead passes blank space,
+    /// line ends, and comments, so a closure may open on its own line.
     fn brace_opens_closure(&self) -> bool {
         let mut i = self.pos + 1;
-        while i < self.bytes.len() && matches!(self.bytes[i], b' ' | b'\t' | b'\r') {
-            i += 1;
+        while i < self.bytes.len() {
+            match self.bytes[i] {
+                b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+                b'#' => {
+                    while i < self.bytes.len() && self.bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'|' => return true,
+                _ => return false,
+            }
         }
-        i < self.bytes.len() && self.bytes[i] == b'|'
+        false
     }
 
     fn scan_punct(&mut self, start: usize) -> Result<(), Diagnostic> {
@@ -515,13 +529,13 @@ impl<'a> Scanner<'a> {
                     Tok::RBracket
                 }
                 b'{' => {
-                    let nest = if self.brace_opens_closure() {
-                        Nest::BraceBlock
+                    if self.brace_opens_closure() {
+                        self.nesting.push(Nest::BraceBlock);
+                        Tok::LBraceClosure
                     } else {
-                        Nest::Delim
-                    };
-                    self.nesting.push(nest);
-                    Tok::LBrace
+                        self.nesting.push(Nest::Delim);
+                        Tok::LBrace
+                    }
                 }
                 b'}' => {
                     self.close_brace();
