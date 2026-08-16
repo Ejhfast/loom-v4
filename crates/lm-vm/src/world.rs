@@ -776,6 +776,8 @@ impl<'m> World<'m> {
         let closure_value = match moved {
             Ok(value) => value,
             Err(code) => {
+                // The mock never started, so its slot returns at once.
+                self.retire_mock(id);
                 let op = self.pending_op(vm);
                 self.machines[vm as usize].set_fault(code, "the mock handler is not sendable", op);
                 return;
@@ -803,6 +805,8 @@ impl<'m> World<'m> {
         let moved_args = match moved {
             Ok(values) => values,
             Err(code) => {
+                // The mock never started, so its slot returns at once.
+                self.retire_mock(id);
                 let op = self.pending_op(vm);
                 self.machines[vm as usize].set_fault(
                     code,
@@ -1807,5 +1811,45 @@ mod tests {
         }
         assert_eq!(world.machines[1].vm.state, MachineState::Asked);
         assert_eq!(world.machines[2].vm.state, MachineState::Asked);
+    }
+
+    /// A mock start that fails returns its machine slot at once.
+    ///
+    /// The slot is taken before the handler and the arguments cross,
+    /// so both failure paths must retire it. Without that, one failed
+    /// mock start per perform grows the machine table without bound.
+    #[test]
+    fn a_failed_mock_start_returns_its_machine_slot() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        // A machine handle is holder-local, so it never crosses a
+        // boundary. It stands in for any unsendable handler here.
+        let handle = world.machines[0]
+            .alloc(Object::NativeVm { vm: 0 })
+            .expect("the handle allocates");
+        let unsendable = handle.as_obj().expect("a handle is a heap object");
+        let before = world.machine_count();
+        let mut stack = Vec::new();
+        for ordinal in 1..4 {
+            world.machines[0].vm.terminal = None;
+            world.machines[0].vm.state = MachineState::Ready;
+            world.machines[0].vm.pending = Some(Pending {
+                op: lm_abi::OP_CLOCK_NOW,
+                args: vec![],
+                ordinal,
+            });
+            world.start_mock(&mut stack, 0, 0, unsendable);
+            match &world.machines[0].vm.terminal {
+                Some(Terminal::Fault(rec)) => {
+                    assert_eq!(rec.code, FaultCode::UnsendableValue);
+                }
+                other => panic!("expected a fault, got {other:?}"),
+            }
+            // One slot exists and waits on the free list. A later
+            // failed start reuses it instead of adding another.
+            assert_eq!(world.machine_count(), before + 1, "start {ordinal}");
+            assert_eq!(world.mock_free.len(), 1, "start {ordinal}");
+            assert!(stack.is_empty(), "start {ordinal}");
+        }
     }
 }

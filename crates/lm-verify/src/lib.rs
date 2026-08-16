@@ -3063,6 +3063,54 @@ mod tests {
         assert!(e.message.contains("freeze"), "{e}");
     }
 
+    /// The digest reads a heap graph. A scalar has no graph, so the
+    /// verifier rejects the instruction instead of letting the VM meet
+    /// a value that is not an object.
+    #[test]
+    fn rejects_digest_on_a_scalar() {
+        let mut m = module_with(vec![vec![ConstInt(1), Digest, Return]]);
+        m.types.push(BcType::Digest);
+        m.funcs[0].ret = 4;
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("digest on non-object type"), "{e}");
+    }
+
+    /// A digest comparison reads two digests. Any other operand type
+    /// rejects, so the value comparison in the VM cannot meet a shape
+    /// that carries no digest.
+    #[test]
+    fn rejects_digest_comparison_on_other_types() {
+        let m = module_with(vec![vec![ConstInt(1), ConstInt(2), EqDigest, Return]]);
+        let e = verify_module(&m).unwrap_err();
+        assert!(
+            e.message.contains("digest comparison on non-digest types"),
+            "{e}"
+        );
+        let m = module_with(vec![vec![ConstInt(1), ConstInt(2), NeDigest, Return]]);
+        let e = verify_module(&m).unwrap_err();
+        assert!(
+            e.message.contains("digest comparison on non-digest types"),
+            "{e}"
+        );
+        // A string is a heap value and still not a digest.
+        let m = module_with(vec![vec![ConstStr(0), ConstStr(0), EqDigest, Return]]);
+        let e = verify_module(&m).unwrap_err();
+        assert!(
+            e.message.contains("digest comparison on non-digest types"),
+            "{e}"
+        );
+    }
+
+    /// The digest result type must exist in the module type table.
+    /// A module that omits it rejects instead of resolving to a
+    /// neighbouring type.
+    #[test]
+    fn rejects_digest_without_the_result_type() {
+        let m = module_with(vec![vec![ConstStr(0), Digest, Return]]);
+        let e = verify_module(&m).unwrap_err();
+        assert!(e.message.contains("Digest is not in the type table"), "{e}");
+    }
+
     #[test]
     fn rejects_entry_with_parameters() {
         let mut m = module_with(vec![vec![ConstInt(1), Return]]);

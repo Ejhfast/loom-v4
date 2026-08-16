@@ -90,6 +90,10 @@ t = (id(1), Box(\"a\").get(), s.area10())
 t[2]
 ";
 
+/// A program that digests a frozen graph and compares two integers.
+const DIGEST_SOURCE: &str = "xs = [[1], [2]]\nxs.freeze()\nd = xs.digest()\n\
+     n = xs.len()\nif n == 2\n  d\nelse\n  d\nend\n";
+
 fn valid_bytes() -> Vec<u8> {
     compile_to_bytes("corrupt.lm", SOURCE).unwrap()
 }
@@ -672,4 +676,57 @@ fn cast_that_changes_generic_arguments_is_rejected() {
         &lm_bytecode::encode(&module),
         "changes the generic arguments",
     );
+}
+
+/// A digest program that a corrupted artifact turns into a scalar
+/// digest rejects. The verifier proves the operand is a heap value,
+/// so the VM never meets a value that carries no graph.
+#[test]
+fn digest_on_a_scalar_is_rejected_by_the_verifier() {
+    let bytes = compile_to_bytes("corrupt.lm", DIGEST_SOURCE).unwrap();
+    let mut module = lm_bytecode::decode(&bytes).unwrap();
+    // Feed the digest instruction a constant instead of the graph.
+    let mut patched = false;
+    'outer: for func in &mut module.funcs {
+        for block in &mut func.blocks {
+            for i in 0..block.len() {
+                if matches!(block[i], Instr::Digest) {
+                    block[i - 1] = Instr::ConstInt(1);
+                    patched = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+    assert!(patched, "the sample carries one digest instruction");
+    expect_verify_reject(&lm_bytecode::encode(&module), "digest on non-object type");
+}
+
+/// A corrupted artifact that compares two integers with the digest
+/// comparison rejects. A digest compares by value, so the VM reads
+/// the payload of both operands and needs the proof.
+#[test]
+fn digest_comparison_on_other_types_is_rejected_by_the_verifier() {
+    for (name, forged) in [("EqDigest", Instr::EqDigest), ("NeDigest", Instr::NeDigest)] {
+        let bytes = compile_to_bytes("corrupt.lm", DIGEST_SOURCE).unwrap();
+        let mut module = lm_bytecode::decode(&bytes).unwrap();
+        // Replace the integer comparison with the digest comparison.
+        let mut patched = false;
+        'outer: for func in &mut module.funcs {
+            for block in &mut func.blocks {
+                for instr in block.iter_mut() {
+                    if matches!(instr, Instr::EqInt) {
+                        *instr = forged;
+                        patched = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        assert!(patched, "{name}: the sample compares two integers");
+        expect_verify_reject(
+            &lm_bytecode::encode(&module),
+            "digest comparison on non-digest types",
+        );
+    }
 }
