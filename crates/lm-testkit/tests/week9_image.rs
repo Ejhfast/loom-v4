@@ -1,9 +1,9 @@
-//! Week-9 container suite: the canonical snapshot format and the
-//! load checklist of specification 17.8.
+//! Week-9 container suite: the canonical snapshot format, the
+//! decoding rules, and the admission rules of specification 17.8.
 //!
 //! Every new byte surface owes a corruption test. The cases below
 //! damage one rule at a time and state the exact reason the loader
-//! reports. A blanket sweep then flips every byte of one container and
+//! reports, whichever stage owns that rule. A blanket sweep then flips every byte of one container and
 //! proves that the loader either rejects the result or reads a
 //! different but still canonical image. No input panics.
 

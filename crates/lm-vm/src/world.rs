@@ -147,10 +147,10 @@ pub struct World<'m> {
     /// first `run`, `step`, or `drive` of the restored root opens that
     /// gate for the whole restored world (specification 17.5).
     gate: u32,
-    /// The number of whole-image structural checks this world ran.
+    /// The number of whole-image admissions this world ran.
     ///
     /// The count instruments the rule of specification 17.8: external
-    /// bytes are checked once, and a later restore repeats nothing.
+    /// bytes are admitted once, and a later restore repeats nothing.
     checks: u64,
     /// The admitted images this world already holds, newest first.
     ///
@@ -2606,8 +2606,8 @@ impl<'m> World<'m> {
 
     /// Install one external snapshot container into this world.
     ///
-    /// This is the external byte path of specification 17.8. It runs
-    /// the whole structural checklist once and remembers the checked
+    /// This is the external byte path of specification 17.8. It
+    /// decodes and admits the bytes once and remembers the admitted
     /// image, so a later restore of the same bytes repeats nothing.
     /// The trusted in-process path is `capture_snapshot`, and the two
     /// never share an entry point.

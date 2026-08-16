@@ -193,8 +193,8 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
 
 /// The program one snapshot container belongs to.
 ///
-/// A container names its program by semantic hash, and the load checks
-/// of specification 17.8 read the code hashes of that program. The
+/// A container names its program by semantic hash, and admission
+/// (specification 17.8) reads the code hashes of that program. The
 /// tool therefore needs the program beside the container: `--program`
 /// names it, and the default is the file with the same stem.
 fn program_of(options: &Options) -> Result<String, String> {

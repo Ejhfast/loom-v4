@@ -1514,7 +1514,9 @@ The world is closed by construction. Reachability follows the handles, so every 
 
 The surface spellings lower to distinct exact identities `Vm.SnapshotHeld` and `Vm.SnapshotSelf`. A held call returns `Result[Snapshot[T],SnapshotError]`. A self call returns `Result[SnapshotImage,SnapshotError]`, because the calling function cannot name the enclosing machine result type.
 
-External bytes first pass through `sys.vm.load_snapshot(bytes)`. The loader verifies the bytes once and returns `Result[SnapshotImage,SnapshotError]`.
+External bytes first pass through `sys.vm.load_snapshot(bytes)`. The loader decodes and admits the bytes once and returns `Result[SnapshotImage,SnapshotError]`.
+
+A guest `SnapshotImage` always has admitted host backing. Every path that builds one runs admission (section 17.8) or copies a stopped verified world. Editable snapshot data is a host state with no guest spelling, and it never backs a guest value. `Snapshot[T]` is a typed view over one `SnapshotImage`, so it adds no other state.
 
 ```text
 SnapshotImage.result_type(self) -> TypeView
@@ -1589,28 +1591,41 @@ Snapshot bytes are immutable. One snapshot may produce many restored worlds.
 
 Each restored world is complete and independent. No machine, mailbox, or resource is shared between two restores, or between a restore and the original. Divergence after restore is ordinary execution.
 
-### 17.8 Verification only on load
+### 17.8 Decoding and admission
 
-An in-process snapshot created from trusted verified state may use a trusted restore path. Bytes entering from storage, network, or another process are verified once at load.
+Loading has two stages, and they prove different properties. Decoding protects the host from the byte stream. Admission establishes the interpreter invariant. An editor can build the same invalid state with no container behind it, so admission never trusts a decode result.
 
-Load verification checks:
+Decoding checks:
 
-- magic, version, canonical integers, section bounds, counts, and container hash;
-- resource limits, machine counts, and mailbox counts before allocation;
-- code hashes, code availability, and verified-artifact status;
-- type/class slots and object layouts;
-- object references, frozen flags, lists/maps, cycles, and roots;
-- frame function slots, PCs at instruction boundaries, locals, operands, and return destinations;
-- pending-request identity, argument/reply types, continuation destination, and legal state;
-- machine ordinals, handle types, and reference validity within the image;
-- mailbox types, limits, accepted values, and close state;
-- world-gate and paused-state consistency.
+- magic, version, canonical integers, section bounds, and container hash;
+- every count against a load limit and against the bytes that remain, before any allocation;
+- one representable value for every wire tag.
 
-Successful loading constructs trusted world state. Execution, answering, and later snapshotting do not repeat structural verification. The write barrier and normal dynamic checks remain active because they enforce runtime semantics, not snapshot trust.
+Decoding produces editable snapshot data. That data promises nothing about references, machine state, or types.
+
+Admission uses this rule:
+
+> Editable snapshot data becomes a `SnapshotImage` only when its structure resolves and every live declared type is accurate.
+
+"Declared type" includes the type the bytecode verifier proves at a saved program point. It never means only a type label the data carries.
+
+Structural resolution checks the root machine, every machine and object ordinal, every code and class identity, every frame at a reachable instruction boundary, the frame partition of the local and operand arenas, every object field and element count, every capture context, every literal, every parent chain, every machine reference, and the lifecycle records of every machine.
+
+Type accuracy checks every initialized local, every operand of each stopped frame, every closure capture, every initialized instance field, every pending argument, every accepted mailbox value, every terminal result, every typed native value, and every reachable collection element. Admission derives each type from verified code and resolved layouts. It applies every generic substitution before it checks a value, and it treats an uninitialized slot as a state, not as a type wildcard. A native value that names another machine or record takes its type from that target.
+
+Admission proves no other property. It does not prove termination, useful control state, scheduler fairness, request-token history, external authority, or target-world resources. A strange but structurally valid typed state remains legal.
+
+Restore accepts an admitted `SnapshotImage` alone. Execution, answering, and later snapshotting repeat no structural check and no type check. The write barrier and normal dynamic checks remain active because they enforce runtime semantics, not snapshot trust.
+
+An in-process snapshot of a stopped verified world holds the same invariant by construction, so its capture path repeats no graph check. Origin grants no other trust: both paths produce the same `SnapshotImage` guarantees.
+
+A nested snapshot stays opaque. Admission matches its declared root result type and admits its body at its own restore.
 
 ### 17.9 Canonical form
 
 The canonical snapshot representation uses deterministic section order, little-endian fixed fields where specified, canonical LEB128 counts/integers, object ordinals assigned by root traversal, machine ordinals assigned by deterministic reachability traversal from the root, and BLAKE3-256 domain-separated hashes. Debug/source-map data may be present but does not affect guest semantic identity.
+
+Canonical bytes carry no admission status. The container hash identifies bytes, and the admission status is a fact of one process. Writing a `SnapshotImage` to bytes therefore transfers no trust, and loading those bytes in another process repeats admission (section 17.8).
 
 ---
 
