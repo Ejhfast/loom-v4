@@ -29,7 +29,7 @@ use super::{
 };
 use crate::LoadedModule;
 use lm_bytecode::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
-use lm_bytecode::BcType;
+use lm_bytecode::{BcType, Instr};
 use lm_heap::Object;
 use lm_value::Value;
 use lm_verify::{FramePoint, FrameSlots, ResolvedTypes};
@@ -659,6 +659,16 @@ impl Admit<'_> {
                     at(&format!("frame {idx} does not start at its local base")),
                 );
             }
+            // The operand arena starts where the bottom frame starts.
+            // Specification 5.1 asks for an exact partition of the
+            // arena, so no value sits below the bottom base and no
+            // frame owns a value the program point does not prove.
+            if idx == 0 && frame.base_operand != 0 {
+                return fail(
+                    ImageReason::Layout,
+                    at("frame 0 does not start the operand arena"),
+                );
+            }
             if (frame.base_operand as u64) < last_operand {
                 return fail(
                     ImageReason::Layout,
@@ -1255,16 +1265,97 @@ impl Admit<'_> {
         Ok(())
     }
 
-    /// Prove the operand types of every stopped frame.
+    /// What the instruction one frame stopped inside took off the
+    /// operand stack.
     ///
     /// A frame stops at one of two points. The top frame of a machine
     /// with no pending request stops before the instruction its program
-    /// counter names. Every other frame, and the top frame of a machine
-    /// with a pending request, stopped inside the instruction before
-    /// the counter: a call moved its arguments into the callee locals,
-    /// and a perform moved them into the pending record. In both cases
-    /// the retained operands are the bottom of the stack the verifier
-    /// proved before that instruction.
+    /// counter names, so that instruction consumed nothing. Every other
+    /// frame, and the top frame of a machine with a pending request,
+    /// stopped inside the instruction before the counter.
+    ///
+    /// The first answer counts the operands that instruction popped.
+    /// The second counts the popped operands the pending record keeps.
+    /// The counts come from the instruction alone, so the image states
+    /// neither of them.
+    fn stop_effect(&self, vm: u32, idx: usize) -> Result<(usize, usize), ImageError> {
+        let machine = self.machine(vm);
+        let top = idx + 1 == machine.frames.len();
+        let pending = top.then_some(machine.pending.as_ref()).flatten();
+        if top && pending.is_none() {
+            return Ok((0, 0));
+        }
+        let at = |what: &str| format!("machine {vm}: frame {idx} {what}");
+        let frame = &machine.frames[idx];
+        // Every index below is proved: `check_references` proved the
+        // function, the block, and the program counter of every frame.
+        let block = &self.module.funcs[frame.func as usize].blocks[frame.block as usize];
+        let Some(before) = frame.ip.checked_sub(1) else {
+            return fail(
+                ImageReason::Layout,
+                at("stopped before the first instruction of its block"),
+            );
+        };
+        let instr = block[before as usize];
+        // A call pushes the frame above. A perform records the pending
+        // request. No other instruction leaves a frame stopped, so an
+        // image that names one states a stop the runtime never reaches.
+        let counts = match (instr, pending) {
+            (Instr::Call(callee) | Instr::CallG { func: callee, .. }, None) => {
+                (self.module.funcs[callee as usize].params.len(), 0)
+            }
+            (Instr::CallVirtual { argc, .. } | Instr::CallVirtualG { argc, .. }, None) => {
+                // A virtual call consumes its receiver as well.
+                (argc as usize + 1, 0)
+            }
+            // A closure call consumes the closure value as well.
+            (Instr::CallValue { argc }, None) => (argc as usize + 1, 0),
+            (Instr::Perform { op, argc }, Some(request)) => {
+                if request.op != op {
+                    return fail(
+                        ImageReason::State,
+                        at("stopped inside another operation than the pending request"),
+                    );
+                }
+                (argc as usize, argc as usize)
+            }
+            // A perform through an operation value consumes that value
+            // as well. The proved type of the value names the exact
+            // operation, so the pending record states no operation the
+            // program point does not prove.
+            (Instr::PerformValue { argc }, Some(request)) => {
+                let types = &self.frames_of[vm as usize][idx].operands;
+                let at_op = types.len().checked_sub(argc as usize + 1);
+                let named = match at_op.and_then(|slot| types.get(slot)) {
+                    Some(ty) => matches!(self.ty(*ty)?, BcType::Op(op, _) if op == request.op),
+                    None => false,
+                };
+                if !named {
+                    return fail(
+                        ImageReason::State,
+                        at("stopped inside another operation than the pending request"),
+                    );
+                }
+                (argc as usize + 1, argc as usize)
+            }
+            _ => {
+                return fail(
+                    ImageReason::Layout,
+                    at("did not stop inside a call or a perform"),
+                )
+            }
+        };
+        Ok(counts)
+    }
+
+    /// Prove the operand types of every stopped frame.
+    ///
+    /// The operands a frame retains are the stack the verifier proved
+    /// before the instruction the frame stopped inside, less every
+    /// operand that instruction consumed. The rule is an equality at
+    /// every frame, not the top frame alone: a lower frame that keeps
+    /// one extra value hides that value under the call, and the value
+    /// survives the return with no proved type.
     ///
     /// A terminal machine holds no frame, so the rule reaches nothing
     /// there.
@@ -1276,7 +1367,6 @@ impl Admit<'_> {
     ) -> Result<(), ImageError> {
         let machine = self.machine(vm);
         for (idx, frame) in machine.frames.iter().enumerate() {
-            let top = idx + 1 == machine.frames.len();
             // The operand region this frame retains.
             let end = match machine.frames.get(idx + 1) {
                 Some(next) => next.base_operand as usize,
@@ -1291,14 +1381,22 @@ impl Admit<'_> {
             }
             let types = &self.frames_of[vm as usize][idx].operands;
             let want = end - start;
-            let stopped_before_the_counter = top && machine.pending.is_none();
-            if types.len() < want || (stopped_before_the_counter && types.len() != want) {
+            let (consumed, _) = self.stop_effect(vm, idx)?;
+            let Some(retained) = types.len().checked_sub(consumed) else {
+                return fail(
+                    ImageReason::Layout,
+                    format!(
+                        "machine {vm}: frame {idx} stopped inside an instruction its program \
+                         point cannot supply"
+                    ),
+                );
+            };
+            if want != retained {
                 return fail(
                     ImageReason::Layout,
                     format!(
                         "machine {vm}: frame {idx} holds {want} operands and the program point \
-                         proves {}",
-                        types.len()
+                         proves {retained}"
                     ),
                 );
             }
@@ -1325,10 +1423,10 @@ impl Admit<'_> {
     /// proved, and the popped arguments at the top. This rule proves
     /// the top.
     ///
-    /// The count is load-bearing: the number of operands the perform
-    /// consumed is fixed by the operation, so a stack that is not the
-    /// retained operands plus the recorded arguments does not agree
-    /// with the proved program point. The rule reads no manifest
+    /// The count comes from the perform instruction, never from the
+    /// record: the image states the argument list, and a record that
+    /// holds another number of arguments does not agree with the
+    /// program point the frame names. The rule reads no manifest
     /// parameter type, so it holds for a machine control operation as
     /// well as a fixed one.
     fn check_pending_args(
@@ -1341,38 +1439,36 @@ impl Admit<'_> {
         let Some(pending) = &machine.pending else {
             return Ok(());
         };
-        let Some(top) = machine.frames.last() else {
+        if machine.frames.is_empty() {
             return fail(
                 ImageReason::State,
                 format!("machine {vm}: a pending request holds no frame"),
             );
-        };
-        let types = &self.frames_of[vm as usize][machine.frames.len() - 1].operands;
-        let retained = machine
-            .operands
-            .len()
-            .checked_sub(top.base_operand as usize)
-            .ok_or_else(|| {
-                ImageError::admission(
-                    ImageReason::Layout,
-                    format!("machine {vm}: the pending frame owns no operand region"),
-                )
-            })?;
-        let argc = pending.args.len();
-        // The proved stack is exactly the retained operands plus the
-        // recorded arguments.
-        if types.len() != retained + argc {
+        }
+        let idx = machine.frames.len() - 1;
+        let types = &self.frames_of[vm as usize][idx].operands;
+        let (_, argc) = self.stop_effect(vm, idx)?;
+        if pending.args.len() != argc {
             return fail(
                 ImageReason::State,
                 format!(
-                    "machine {vm}: the pending request holds {argc} arguments and the program \
-                     point proves {}",
-                    types.len().saturating_sub(retained)
+                    "machine {vm}: the pending request holds {} arguments and the perform takes \
+                     {argc}",
+                    pending.args.len()
                 ),
             );
         }
+        // The arguments are the top of the proved stack. A perform
+        // through an operation value keeps that value below them, and
+        // `stop_effect` proved which operation it names.
+        let Some(at) = types.len().checked_sub(argc) else {
+            return fail(
+                ImageReason::Layout,
+                format!("machine {vm}: the perform takes more arguments than the stack proves"),
+            );
+        };
         budget.charge(argc as u64)?;
-        for (offset, ty) in types.iter().skip(retained).enumerate() {
+        for (offset, ty) in types.iter().skip(at).enumerate() {
             self.check_value(
                 vm,
                 pending.args[offset],

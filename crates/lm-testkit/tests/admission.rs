@@ -792,6 +792,93 @@ fn a_frame_that_is_not_the_callee_of_its_call_site_rejects() {
 }
 
 // ---------------------------------------------------------------
+// The operand partition.
+// ---------------------------------------------------------------
+
+const PICK_SOURCE: &str = "\
+def pick(a: Int, b: Int): Int
+  a
+end
+
+def go(): Int
+  xs = [10, 20]
+  xs.at(pick(0, 1))
+end
+
+go()
+";
+
+/// A frame retains exactly the operands its program point proves, less
+/// every operand the instruction it stopped inside consumed.
+///
+/// The edit gives the caller one extra operand under the value the
+/// callee returns. Every type rule passes, because the inserted value
+/// takes the type of the first call argument. The extra value survives
+/// the return, and the caller then reads an integer where the verifier
+/// proved an object.
+#[test]
+fn an_operand_hidden_under_a_call_rejects() {
+    let loaded = program(PICK_SOURCE);
+    let images = boundaries(&loaded, &[], 60);
+    let image = pick(&images, "a call two frames deep", |image| {
+        image.machines[0].frames.len() >= 3
+    });
+    let mut broken = image.clone();
+    let machine = &mut broken.machines[0];
+    let top = machine.frames.len() - 1;
+    let base = machine.frames[top].base_operand as usize;
+    machine.operands.insert(base, Value::Int(0));
+    machine.frames[top].base_operand += 1;
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+}
+
+/// The operand arena starts at the base of the bottom frame. A value
+/// below that base belongs to no frame, so no program point proves it.
+#[test]
+fn a_value_below_the_bottom_frame_base_rejects() {
+    let loaded = program(PICK_SOURCE);
+    let images = boundaries(&loaded, &[], 60);
+    let image = pick(&images, "a machine with a frame", |image| {
+        !image.machines[0].frames.is_empty()
+    });
+    let mut broken = image.clone();
+    let machine = &mut broken.machines[0];
+    machine.operands.insert(0, Value::Int(0x4141_4141));
+    for frame in &mut machine.frames {
+        frame.base_operand += 1;
+    }
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+}
+
+/// The number of arguments one perform records comes from the perform
+/// instruction, never from the record.
+#[test]
+fn a_pending_request_with_another_argument_count_rejects() {
+    let loaded = program(CALL_TOKEN_SOURCE);
+    let images = boundaries(&loaded, &["Vm", "Rand"], 120);
+    let image = pick(&images, "a machine stopped inside a perform", |image| {
+        image
+            .machines
+            .iter()
+            .any(|m| m.pending.as_ref().is_some_and(|p| !p.args.is_empty()))
+    });
+    let at = image
+        .machines
+        .iter()
+        .position(|m| m.pending.as_ref().is_some_and(|p| !p.args.is_empty()))
+        .expect("one machine holds a pending request");
+    let mut broken = image.clone();
+    let pending = broken.machines[at]
+        .pending
+        .as_mut()
+        .expect("the machine holds a pending request");
+    // The extra argument is an immediate, so the heap stays canonical
+    // and the count rule states the failure alone.
+    pending.args.push(Value::Int(0));
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
+}
+
+// ---------------------------------------------------------------
 // Terminal and stopped states.
 // ---------------------------------------------------------------
 
