@@ -1,0 +1,2 @@
+error[E1004]: `restore` needs a typed snapshot, found Int
+  --> tests/ui/restore-needs-a-snapshot.lm:2:28

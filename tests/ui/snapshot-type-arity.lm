@@ -1,0 +1,5 @@
+def go(s: Snapshot[Int, Int]): Int
+  0
+end
+
+0

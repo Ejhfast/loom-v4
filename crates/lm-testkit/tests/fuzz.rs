@@ -159,6 +159,79 @@ fn mutated_modules_never_panic_the_decoder_verifier_or_vm() {
     });
 }
 
+/// The snapshot mutation seed: the checkpoint world, plus its
+/// program.
+///
+/// The dictionary is the container itself. Every mutation starts from
+/// a real image, so the mutants reach the structural rules instead of
+/// stopping at the magic.
+fn snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
+    use lm_vm::{RecordingHost, World};
+    let path = repo_root().join("checkpoints/asked-tree.lm");
+    let text = std::fs::read_to_string(&path).expect("the checkpoint source reads");
+    let bytes = compile_to_bytes(&path.display().to_string(), &text).expect("it compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("it loads");
+    let container = {
+        let mut world = World::new(
+            &loaded,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+        );
+        for grant in ["Proc", "Vm", "Clock"] {
+            world.allow(grant).expect("the grant names a target");
+        }
+        lm_proc::run_world(&mut world);
+        world
+            .last_snapshot()
+            .expect("the program captured a world")
+            .bytes()
+            .to_vec()
+    };
+    (loaded, container)
+}
+
+#[test]
+fn mutated_snapshot_containers_never_panic_the_loader() {
+    on_supported_stack(|| {
+        let mut prng = Prng(SEED ^ 0x5_9a5);
+        let (loaded, base) = snapshot_seed();
+        let limits = lm_vm::snapshot::LoadLimits::default();
+        let mut accepted = 0usize;
+        for _round in 0..ROUNDS * 4 {
+            let mut bytes = base.clone();
+            for _ in 0..=prng.below(3) {
+                mutate(&mut bytes, &mut prng);
+            }
+            assert!(bytes.len() <= MAX_CASE_BYTES, "a mutation grew the input");
+            // A rejection is fine. An acceptance must restore into a
+            // world without a panic, and it must encode back to
+            // exactly the bytes it came from.
+            if let Ok(image) = lm_vm::snapshot::codec::decode(&bytes, &loaded, limits) {
+                accepted += 1;
+                let again = lm_vm::snapshot::codec::encode(&image, usize::MAX)
+                    .expect("an accepted image encodes");
+                assert_eq!(again, bytes, "an accepted mutant has two spellings");
+                let mut world = lm_vm::World::new(
+                    &loaded,
+                    VmConfig {
+                        fuel: 20_000,
+                        heap_bytes: 1 << 20,
+                        ..VmConfig::default()
+                    },
+                    Box::new(lm_vm::RecordingHost::new(1)),
+                );
+                if let Some(target) = world.new_child(0) {
+                    let _ = world.restore_image(0, target, &image);
+                }
+            }
+        }
+        // The mutation batch damages the container hash almost every
+        // time, so a low acceptance count is expected. The rule is the
+        // absence of a panic, not the count.
+        let _ = accepted;
+    });
+}
+
 #[test]
 fn mutated_sources_never_panic_the_scanner_checker_or_lowering() {
     on_supported_stack(|| {
@@ -243,6 +316,7 @@ fn the_regression_corpus_replays() {
         let dir = repo_root().join("tests/fuzz-regressions");
         let mut modules = 0;
         let mut sources = 0;
+        let mut containers = 0;
         for entry in std::fs::read_dir(&dir).expect("the corpus directory exists") {
             let path = entry.expect("directory entry").path();
             match path.extension().and_then(|e| e.to_str()) {
@@ -273,11 +347,31 @@ fn the_regression_corpus_replays() {
                     let _ = lm_testkit::compile_text(&path.display().to_string(), &text);
                     sources += 1;
                 }
+                Some("lms") => {
+                    // Every snapshot case runs against the checkpoint
+                    // program the container names. The valid seed
+                    // loads; every other seed rejects at the loader.
+                    let bytes = std::fs::read(&path).expect("corpus case reads");
+                    let (loaded, _) = snapshot_seed();
+                    let out = lm_vm::snapshot::codec::decode(
+                        &bytes,
+                        &loaded,
+                        lm_vm::snapshot::LoadLimits::default(),
+                    );
+                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    if name == "snapshot-world" {
+                        out.unwrap_or_else(|e| panic!("{} must load: {e}", path.display()));
+                    } else {
+                        assert!(out.is_err(), "{} was accepted", path.display());
+                    }
+                    containers += 1;
+                }
                 _ => {}
             }
         }
         assert!(modules >= 5, "the module corpus shrank: {modules}");
         assert!(sources >= 4, "the source corpus shrank: {sources}");
+        assert!(containers >= 2, "the container corpus shrank: {containers}");
     });
 }
 
@@ -465,6 +559,30 @@ fn regenerate_fuzz_corpus() {
             "the forged local count must be rejected"
         );
         std::fs::write(dir.join("local-count-bomb.lmbc"), bytes).expect("corpus writes");
+    }
+    // Snapshot container seeds: one valid machine world and one
+    // world whose heap is not in canonical traversal order.
+    {
+        let (loaded, container) = snapshot_seed();
+        std::fs::write(dir.join("snapshot-world.lms"), &container).expect("corpus writes");
+        let limits = lm_vm::snapshot::LoadLimits::default();
+        let image =
+            lm_vm::snapshot::codec::decode(&container, &loaded, limits).expect("the seed loads");
+        let mut broken = image.clone();
+        let mut roots = (
+            broken.machines[2].frames[0].closure,
+            broken.machines[2].start_body,
+        );
+        std::mem::swap(&mut roots.0, &mut roots.1);
+        broken.machines[2].frames[0].closure = roots.0;
+        broken.machines[2].start_body = roots.1;
+        let bad =
+            lm_vm::snapshot::codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+        assert!(
+            lm_vm::snapshot::codec::decode(&bad, &loaded, limits).is_err(),
+            "the swapped-root seed must reject"
+        );
+        std::fs::write(dir.join("snapshot-swapped-roots.lms"), &bad).expect("corpus writes");
     }
     // Source seeds: shapes that stressed the scanner and parser.
     std::fs::write(

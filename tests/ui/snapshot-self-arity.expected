@@ -1,0 +1,2 @@
+error[E1006]: `sys.vm.snapshot_self` expects 0 argument(s), found 1
+  --> tests/ui/snapshot-self-arity.lm:2:8

@@ -447,3 +447,153 @@ fn proc_terminal_publication_smoke() {
     assert_eq!(outcome, "Done(40000)");
     eprintln!("bench-smoke proc_terminal_200x200: {elapsed:?}");
 }
+
+// ---------------------------------------------------------------
+// Week-9 snapshot entries, tracked by workload shape.
+//
+// Three shapes cover the cost model: one wide heap in one machine,
+// one deep chain in one machine, and one machine world of three
+// machines. Each entry reports the container size, the write time,
+// the load time, and the restore time.
+// ---------------------------------------------------------------
+
+/// Time one snapshot workload: capture, encode, load, and restore.
+fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, restores: usize) {
+    use lm_vm::snapshot::{codec, LoadLimits};
+    use lm_vm::{RecordingHost, World};
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source).unwrap();
+    let loaded = lm_vm::load_bytes(&bytes).unwrap();
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    for grant in allow {
+        world.allow(grant).unwrap();
+    }
+    lm_proc::run_world(&mut world);
+    let image = world
+        .last_snapshot()
+        .expect("the program captured a world")
+        .clone();
+    let size = image.bytes().len();
+    // The write time of one more capture of the same world.
+    let capture_start = Instant::now();
+    let gate = world.next_gate();
+    let again = world
+        .capture_snapshot(gate, root, false)
+        .expect("the second capture succeeds");
+    let write = capture_start.elapsed();
+    assert_eq!(again.bytes().len(), size);
+    // The load time of the external byte path.
+    let load_start = Instant::now();
+    let checked =
+        codec::decode(image.bytes(), &loaded, LoadLimits::default()).expect("the container loads");
+    let load = load_start.elapsed();
+    // The restore time, averaged over the requested count.
+    let restore_start = Instant::now();
+    for _ in 0..restores {
+        let mut fresh = World::new(
+            &loaded,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+        );
+        let target = fresh.new_child(0).expect("the budget holds a child");
+        fresh
+            .restore_image(0, target, &checked)
+            .expect("the restore builds a world");
+    }
+    let restore = restore_start.elapsed();
+    eprintln!(
+        "bench-smoke {name}: size {size} B, machines {}, write {write:?}, \
+         load {load:?}, restore x{restores} {restore:?}",
+        checked.machine_count()
+    );
+}
+
+/// A wide heap: one machine with ten thousand list elements.
+#[test]
+fn snapshot_wide_heap_smoke() {
+    let source = "\
+def go(): Int with Vm, Clock
+  vm = sys.vm.Vm().from_object(do ||: Int with Clock.Now
+    xs = [0]
+    i = 0
+    while i < 10000
+      xs.push(i)
+      i = i + 1
+    end
+    # The machine stops here with the whole list in its locals.
+    sys.clock.now()
+  end, args: ())
+  case vm.drive()
+  in Asked(_)  then 0
+  in Done(_)   then 0
+  in Fault(_)  then 0
+  end
+  case vm.snapshot()
+  in Ok(_)  then 1
+  in Err(_) then 0 - 1
+  end
+end
+
+go()
+";
+    snapshot_shape("snapshot_wide_heap_10k", source, &["Vm", "Clock"], 1, 4);
+}
+
+/// A deep chain: one machine with a five-thousand-node linked list.
+#[test]
+fn snapshot_deep_chain_smoke() {
+    let source = "\
+class Node
+  value: Int
+  next: Option[Node] = None
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+end
+
+def go(): Int with Vm, Clock
+  vm = sys.vm.Vm().from_object(do ||: Int with Clock.Now
+    head = Node(0)
+    i = 0
+    while i < 5000
+      n = Node(i)
+      n.next = Some(head)
+      head = n
+      i = i + 1
+    end
+    # The machine stops here with the whole chain in its locals.
+    sys.clock.now()
+  end, args: ())
+  case vm.drive()
+  in Asked(_)  then 0
+  in Done(_)   then 0
+  in Fault(_)  then 0
+  end
+  case vm.snapshot()
+  in Ok(_)  then 1
+  in Err(_) then 0 - 1
+  end
+end
+
+go()
+";
+    snapshot_shape("snapshot_deep_chain_5k", source, &["Vm", "Clock"], 1, 4);
+}
+
+/// A machine world: a held root, a worker, and a helper.
+#[test]
+fn snapshot_machine_world_smoke() {
+    let source = std::fs::read_to_string(lm_testkit::repo_root().join("checkpoints/asked-tree.lm"))
+        .expect("the checkpoint source reads");
+    snapshot_shape(
+        "snapshot_machine_world_3",
+        &source,
+        &["Proc", "Vm", "Clock"],
+        3,
+        20,
+    );
+}

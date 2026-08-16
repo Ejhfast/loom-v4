@@ -320,3 +320,127 @@ fn a_proc_package_builds_and_runs() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).ends_with("Done(42)\n"), "{}", stdout(&out));
 }
+
+// ---------------------------------------------------------------
+// Week 9: the snapshot tools.
+// ---------------------------------------------------------------
+
+#[test]
+fn run_branch_prints_two_restored_results() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "examples/08-snapshots/branch.lm",
+        "--allow",
+        "Vm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done((42, 42))\n");
+}
+
+#[test]
+fn run_machine_world_prints_three_equal_results() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "examples/08-snapshots/machine-world.lm",
+        "--allow",
+        "Proc,Vm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done((42, 42, 42))\n");
+}
+
+#[test]
+fn snapshot_verify_reports_the_checkpoint_world() {
+    let out = lm(&["snapshot", "verify", "checkpoints/asked-tree.lms"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "valid: state=asked machines=3 mailboxes=2\n");
+}
+
+#[test]
+fn snapshot_run_restores_the_checkpoint_world() {
+    let out = lm(&[
+        "snapshot",
+        "run",
+        "--allow",
+        "Proc,Vm,Clock",
+        "checkpoints/asked-tree.lms",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // The restored root holds the request the capture preserved.
+    assert_eq!(stdout(&out), "Asked(Clock.Now)\n");
+}
+
+#[test]
+fn snapshot_save_rewrites_the_checkpoint_byte_for_byte() {
+    let dir = std::env::temp_dir().join(format!("lm-snapshot-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the scratch directory exists");
+    let out_path = dir.join("asked-tree.lms");
+    let _ = std::fs::remove_file(&out_path);
+    let out = lm(&[
+        "snapshot",
+        "save",
+        "--allow",
+        "Proc,Vm,Clock",
+        "checkpoints/asked-tree.lm",
+        out_path.to_str().expect("a valid path"),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("valid: state=asked machines=3 mailboxes=2"));
+    // The canonical form is reproducible: the checked-in checkpoint
+    // and a fresh capture are the same byte string.
+    let fresh = std::fs::read(&out_path).expect("the tool wrote the file");
+    let stored = std::fs::read(repo_root().join("checkpoints/asked-tree.lms"))
+        .expect("the checkpoint reads");
+    assert_eq!(fresh, stored);
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn inspect_dumps_the_checkpoint_container() {
+    let out = lm(&["inspect", "checkpoints/asked-tree.lms"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let dump = stdout(&out);
+    assert!(dump.starts_with("container 815 bytes hash "), "{dump}");
+    assert!(dump.contains("machine 0 state asked"), "{dump}");
+    assert!(dump.contains("pending Clock.Now"), "{dump}");
+    assert!(dump.contains("obj 1 Handle frozen proc 1.0"), "{dump}");
+    // The dump repeats exactly.
+    let again = lm(&["inspect", "checkpoints/asked-tree.lms"]);
+    assert_eq!(stdout(&again), dump);
+}
+
+#[test]
+fn inspect_shapes_lists_the_snapshot_shape() {
+    let out = lm(&["inspect", "--shapes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out)
+        .contains("15 Snapshot refs=false born_frozen=true boundary=sendable digestible=false"));
+}
+
+#[test]
+fn snapshot_verify_rejects_a_damaged_container() {
+    let dir = std::env::temp_dir().join(format!("lm-damaged-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the scratch directory exists");
+    // The damaged copy sits beside a copy of its program, so the tool
+    // finds the program the container names.
+    std::fs::copy(
+        repo_root().join("checkpoints/asked-tree.lm"),
+        dir.join("asked-tree.lm"),
+    )
+    .expect("the program copies");
+    let mut bytes = std::fs::read(repo_root().join("checkpoints/asked-tree.lms"))
+        .expect("the checkpoint reads");
+    let at = bytes.len() / 2;
+    bytes[at] ^= 1;
+    let path = dir.join("asked-tree.lms");
+    std::fs::write(&path, &bytes).expect("the damaged copy writes");
+    let out = lm(&["snapshot", "verify", path.to_str().expect("a valid path")]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("container hash"), "{}", stderr(&out));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(dir.join("asked-tree.lm"));
+    let _ = std::fs::remove_dir(&dir);
+}

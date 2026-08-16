@@ -1,0 +1,2 @@
+error[E1006]: `snapshot` expects 0 argument(s), found 1
+  --> tests/ui/snapshot-arity.lm:2:8

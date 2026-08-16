@@ -1,0 +1,8 @@
+def go(): Int with Vm
+  case sys.vm.snapshot_self(1)
+  in Ok(_)  then 1
+  in Err(_) then 0
+  end
+end
+
+0
