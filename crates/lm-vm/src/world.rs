@@ -1562,6 +1562,10 @@ impl<'m> World<'m> {
 
     /// Capture one machine world and install the typed result.
     fn take_snapshot(&mut self, vm: VmId, op: u32, root: VmId, self_root: bool) {
+        // A barrier identifier and a world gate both need one number
+        // this world never repeats, and one monotone counter serves
+        // both. The two live in different machine fields, so a shared
+        // counter never confuses a barrier with a gate.
         let barrier = self.next_gate();
         let built = match self.capture_snapshot(barrier, root, self_root) {
             Ok(image) => {
