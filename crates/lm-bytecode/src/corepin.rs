@@ -44,6 +44,17 @@ pub struct CoreLayout {
     pub drive_asked: Option<u32>,
     pub drive_done: Option<u32>,
     pub drive_fault: Option<u32>,
+    pub recv_msg: Option<u32>,
+    pub recv_closed: Option<u32>,
+    pub send_sent: Option<u32>,
+    pub send_closed: Option<u32>,
+    pub send_fault: Option<u32>,
+    pub proc_done: Option<u32>,
+    pub proc_fault: Option<u32>,
+    pub proc_error_dead: Option<u32>,
+    pub proc_error_not_paused: Option<u32>,
+    pub proc_error_already_paused: Option<u32>,
+    pub proc_error_in_use: Option<u32>,
     /// The enum parent class indices, aligned with the arms above.
     pub option: Option<u32>,
     pub result: Option<u32>,
@@ -51,10 +62,16 @@ pub struct CoreLayout {
     pub run_result: Option<u32>,
     pub step_event: Option<u32>,
     pub drive_event: Option<u32>,
+    pub recv: Option<u32>,
+    pub send_result: Option<u32>,
+    pub proc_result: Option<u32>,
+    pub proc_error: Option<u32>,
+    /// The core class `Proc`, the parent of every proc class.
+    pub proc_class: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 20] = [
+pub const PINNED_LABELS: [&str; 36] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -75,6 +92,22 @@ pub const PINNED_LABELS: [&str; 20] = [
     "DriveEvent.Asked",
     "DriveEvent.Done",
     "DriveEvent.Fault",
+    "Recv",
+    "Recv.Msg",
+    "Recv.Closed",
+    "SendResult",
+    "SendResult.Sent",
+    "SendResult.Closed",
+    "SendResult.Fault",
+    "ProcResult",
+    "ProcResult.Done",
+    "ProcResult.Fault",
+    "ProcError",
+    "ProcError.Dead",
+    "ProcError.NotPaused",
+    "ProcError.AlreadyPaused",
+    "ProcError.InUse",
+    "Proc",
 ];
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
@@ -146,6 +179,22 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "DriveEvent.Asked" => &mut layout.drive_asked,
         "DriveEvent.Done" => &mut layout.drive_done,
         "DriveEvent.Fault" => &mut layout.drive_fault,
+        "Recv" => &mut layout.recv,
+        "Recv.Msg" => &mut layout.recv_msg,
+        "Recv.Closed" => &mut layout.recv_closed,
+        "SendResult" => &mut layout.send_result,
+        "SendResult.Sent" => &mut layout.send_sent,
+        "SendResult.Closed" => &mut layout.send_closed,
+        "SendResult.Fault" => &mut layout.send_fault,
+        "ProcResult" => &mut layout.proc_result,
+        "ProcResult.Done" => &mut layout.proc_done,
+        "ProcResult.Fault" => &mut layout.proc_fault,
+        "ProcError" => &mut layout.proc_error,
+        "ProcError.Dead" => &mut layout.proc_error_dead,
+        "ProcError.NotPaused" => &mut layout.proc_error_not_paused,
+        "ProcError.AlreadyPaused" => &mut layout.proc_error_already_paused,
+        "ProcError.InUse" => &mut layout.proc_error_in_use,
+        "Proc" => &mut layout.proc_class,
         _ => unreachable!("only known labels enter the map"),
     }
 }

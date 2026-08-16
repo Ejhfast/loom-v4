@@ -32,10 +32,23 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/vm.lm"),
     "\n",
+    include_str!("../../../core/proc.lm"),
+    "\n",
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 5] = ["Option", "Result", "Ordering", "Pair", "Range"];
+pub const PRELUDE_TYPES: [&str; 10] = [
+    "Option",
+    "Result",
+    "Ordering",
+    "Pair",
+    "Range",
+    "Proc",
+    "Recv",
+    "SendResult",
+    "ProcResult",
+    "ProcError",
+];
 
 /// The constructor names the prelude places into unqualified scope.
 pub const PRELUDE_CTORS: [&str; 4] = ["Some", "None", "Ok", "Err"];

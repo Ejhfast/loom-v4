@@ -1,0 +1,53 @@
+# Core: procs and mailboxes.
+#
+# A proc is one machine with one private heap, one bounded mailbox,
+# and one terminal result. The supervisory values are ordinary core
+# enums (specification 18.4 and 18.5). `Handle[M, R]` and `Vm[T]` are
+# native holder types declared by the ABI.
+
+enum Recv[M]
+  Msg(message: M)
+  Closed
+end
+
+enum SendResult
+  Sent
+  Closed
+  Fault(fault: Fault)
+
+  def is_sent(self): Bool
+    case self
+    in Sent      then true
+    in Closed    then false
+    in Fault(_)  then false
+    end
+  end
+end
+
+enum ProcResult[R]
+  Done(value: R)
+  Fault(fault: Fault)
+
+  def is_done(self): Bool
+    case self
+    in Done(_)  then true
+    in Fault(_) then false
+    end
+  end
+end
+
+# The ordinary error of a control call on a proc.
+enum ProcError
+  Dead
+  NotPaused
+  AlreadyPaused
+  InUse
+end
+
+# The parent of every proc class. `M` is the mailbox message type.
+# A bare `Proc` parent means `Proc[Never]`: the proc takes no message.
+class Proc[M]
+  def receive(self): Recv[M] with Proc.Recv
+    sys.proc.recv()
+  end
+end

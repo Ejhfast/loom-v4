@@ -137,6 +137,11 @@ impl<'m> ModLowerer<'m> {
                 let r = self.bc_ty(r);
                 self.intern_type(BcType::PendingCall(a, r))
             }
+            Type::Handle(m, r) => {
+                let m = self.bc_ty(m);
+                let r = self.bc_ty(r);
+                self.intern_type(BcType::Handle(m, r))
+            }
             Type::Op(op, f) => {
                 let f = self.bc_ty(f);
                 self.intern_type(BcType::Op(op, f))
@@ -1691,6 +1696,11 @@ fn type_text(module: &Module, idx: u32) -> String {
         BcType::PendingCall(a, r) => format!(
             "PendingCall[{}, {}]",
             type_text(module, *a),
+            type_text(module, *r)
+        ),
+        BcType::Handle(m, r) => format!(
+            "Handle[{}, {}]",
+            type_text(module, *m),
             type_text(module, *r)
         ),
         BcType::Op(op, f) => format!("Op[{}, {}]", op_text(*op), type_text(module, *f)),

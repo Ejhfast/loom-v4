@@ -34,6 +34,9 @@ pub enum FaultCode {
     /// nondigestible native value raises it.
     BoundaryViolation,
     HostFault,
+    /// An operation needed a live proc. The reference names a dead or
+    /// replaced machine (specification 12.3).
+    DeadProc,
     /// Implementation subcode: a field was read before its first
     /// assignment. Checked source programs cannot reach this fault.
     UninitializedField,
@@ -62,6 +65,7 @@ impl fmt::Display for FaultCode {
             FaultCode::BoundaryLimit => "BoundaryLimit",
             FaultCode::BoundaryViolation => "BoundaryViolation",
             FaultCode::HostFault => "HostFault",
+            FaultCode::DeadProc => "DeadProc",
             FaultCode::UninitializedField => "UninitializedField",
             FaultCode::UnreachableCode => "UnreachableCode",
         };

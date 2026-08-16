@@ -123,9 +123,17 @@ pub const OP_VM_ANSWER: OpSlot = 12;
 pub const OP_VM_REJECT: OpSlot = 13;
 pub const OP_VM_DISPATCH: OpSlot = 14;
 pub const OP_VM_TABLE: OpSlot = 15;
+pub const OP_PROC_RUN: OpSlot = 16;
+pub const OP_PROC_SPAWN: OpSlot = 17;
+pub const OP_PROC_SEND: OpSlot = 18;
+pub const OP_PROC_CLOSE: OpSlot = 19;
+pub const OP_PROC_RECV: OpSlot = 20;
+pub const OP_PROC_DONE: OpSlot = 21;
+pub const OP_PROC_PAUSE: OpSlot = 22;
+pub const OP_PROC_RESUME: OpSlot = 23;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 16] = [
+pub const OPS: [OpDef; 24] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -270,6 +278,83 @@ pub const OPS: [OpDef; 16] = [
         schema: "[T](Vm[T]) -> PolicyTable",
         snapshot: SnapshotClass::MachineState,
     },
+    // The proc operations of specification 23.6. Every one of them is
+    // machine state: a blocked proc call waits on another machine of
+    // the same machine world, never on live state outside it. The
+    // scheduler record that carries the block holds proc identifiers
+    // and ordinals only, so a snapshot rebuilds it from the machines.
+    OpDef {
+        group: "Proc",
+        member: "Run",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M,R](Vm[R], Type[M]) -> Handle[M,R]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Proc",
+        member: "Spawn",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M,R,A](Class[Proc[M]], control A) -> Handle[M,R]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Proc",
+        member: "Send",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M,R](Handle[M,R], M) -> SendResult",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Proc",
+        member: "Close",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M,R](Handle[M,R]) -> SendResult",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Proc",
+        member: "Recv",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M](proc self) -> Recv[M]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Proc",
+        member: "Done",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M,R](Handle[M,R]) -> ProcResult[R]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Proc",
+        member: "Pause",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M,R](Handle[M,R]) -> Result[Vm[R], ProcError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Proc",
+        member: "Resume",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M,R](Handle[M,R]) -> Result[(), ProcError]",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -386,6 +471,14 @@ mod tests {
         assert_eq!(op_by_name("Rand.Int"), Some(OP_RAND_INT));
         assert_eq!(op_by_name("Vm.New"), Some(OP_VM_NEW));
         assert_eq!(op_by_name("Vm.Table"), Some(OP_VM_TABLE));
+        assert_eq!(op_by_name("Proc.Run"), Some(OP_PROC_RUN));
+        assert_eq!(op_by_name("Proc.Spawn"), Some(OP_PROC_SPAWN));
+        assert_eq!(op_by_name("Proc.Send"), Some(OP_PROC_SEND));
+        assert_eq!(op_by_name("Proc.Close"), Some(OP_PROC_CLOSE));
+        assert_eq!(op_by_name("Proc.Recv"), Some(OP_PROC_RECV));
+        assert_eq!(op_by_name("Proc.Done"), Some(OP_PROC_DONE));
+        assert_eq!(op_by_name("Proc.Pause"), Some(OP_PROC_PAUSE));
+        assert_eq!(op_by_name("Proc.Resume"), Some(OP_PROC_RESUME));
         assert_eq!(op_by_name("Fs.Open"), None);
     }
 

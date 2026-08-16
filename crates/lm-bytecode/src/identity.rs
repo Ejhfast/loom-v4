@@ -290,7 +290,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
                 check_row(&format!("type {idx}"), row)?;
             }
             BcType::Vm(t) => earlier(*t)?,
-            BcType::PendingCall(a, r) => {
+            BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 earlier(*a)?;
                 earlier(*r)?;
             }
@@ -693,7 +693,7 @@ impl Graph {
                     list.push(s.type_node(*ret));
                 }
                 BcType::Vm(t) => list.push(s.type_node(*t)),
-                BcType::PendingCall(a, r) => {
+                BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                     list.push(s.type_node(*a));
                     list.push(s.type_node(*r));
                 }
@@ -1034,6 +1034,11 @@ impl<'a> Resolver<'a> {
             BcType::PendingCall(a, r) => {
                 out.push(18);
                 out.extend_from_slice(&self.type_digest(*a));
+                out.extend_from_slice(&self.type_digest(*r));
+            }
+            BcType::Handle(m, r) => {
+                out.push(21);
+                out.extend_from_slice(&self.type_digest(*m));
                 out.extend_from_slice(&self.type_digest(*r));
             }
             BcType::Op(op, f) => {

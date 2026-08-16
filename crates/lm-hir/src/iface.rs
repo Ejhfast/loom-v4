@@ -101,6 +101,7 @@ impl Naming<'_> {
             Type::PendingCall(a, r) => {
                 IfaceType::PendingCall(Box::new(self.ty(a)), Box::new(self.ty(r)))
             }
+            Type::Handle(m, r) => IfaceType::Handle(Box::new(self.ty(m)), Box::new(self.ty(r))),
             Type::Op(op, f) => IfaceType::Op(op, Box::new(self.ty(f))),
         }
     }

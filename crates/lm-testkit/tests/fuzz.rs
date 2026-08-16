@@ -445,13 +445,13 @@ fn regenerate_fuzz_corpus() {
         // layout for this module: the string count (4), the type
         // count plus four primitive tags (8), the selector count (4),
         // the application count (4), the import count (4), the core
-        // role table (80), the class count (4), the function count
+        // role table (144), the class count (4), the function count
         // (4), then the function record: type_params, effect_params,
         // the parameter count, the marker count, the result type, the
         // row count, and the capture count (28). The local-type table
         // count follows.
         let sem_at = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
-        let count_at = sem_at + 4 + 8 + 4 + 4 + 4 + 80 + 4 + 4 + 28;
+        let count_at = sem_at + 4 + 8 + 4 + 4 + 4 + 144 + 4 + 4 + 28;
         assert_eq!(
             u32::from_le_bytes(bytes[count_at..count_at + 4].try_into().unwrap()),
             0,

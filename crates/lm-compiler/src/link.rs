@@ -985,6 +985,7 @@ fn reloc_type(ty: &BcType, types: &[u32], classes: &[u32], strings: &[u32]) -> B
         ),
         BcType::Vm(t) => BcType::Vm(types[*t as usize]),
         BcType::PendingCall(a, r) => BcType::PendingCall(types[*a as usize], types[*r as usize]),
+        BcType::Handle(m, r) => BcType::Handle(types[*m as usize], types[*r as usize]),
         BcType::Op(op, f) => BcType::Op(*op, types[*f as usize]),
         other => other.clone(),
     }

@@ -108,6 +108,7 @@ pub enum IfaceType {
     },
     Vm(Box<IfaceType>),
     PendingCall(Box<IfaceType>, Box<IfaceType>),
+    Handle(Box<IfaceType>, Box<IfaceType>),
     Op(u32, Box<IfaceType>),
 }
 
@@ -378,6 +379,11 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
             write_u32(out, *op);
             encode_type(out, f);
         }
+        IfaceType::Handle(m, r) => {
+            out.push(20);
+            encode_type(out, m);
+            encode_type(out, r);
+        }
     }
 }
 
@@ -573,6 +579,11 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
             let op = cur.u32()?;
             let f = decode_type(cur, depth + 1)?;
             IfaceType::Op(op, Box::new(f))
+        }
+        20 => {
+            let m = decode_type(cur, depth + 1)?;
+            let r = decode_type(cur, depth + 1)?;
+            IfaceType::Handle(Box::new(m), Box::new(r))
         }
         other => return Err(DecodeError::BadTypeTag(other)),
     };
@@ -828,6 +839,7 @@ pub fn type_text(ty: &IfaceType) -> String {
             format!("PendingCall[{}, {}]", type_text(a), type_text(r))
         }
         IfaceType::Op(op, f) => format!("Op[op{}, {}]", op, type_text(f)),
+        IfaceType::Handle(m, r) => format!("Handle[{}, {}]", type_text(m), type_text(r)),
     }
 }
 

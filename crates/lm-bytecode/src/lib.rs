@@ -30,7 +30,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 20;
+pub const CORE_ROLE_COUNT: usize = 36;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -105,6 +105,9 @@ pub enum BcType {
     /// A typed pending call: argument-view type index and reply type
     /// index.
     PendingCall(u32, u32),
+    /// A proc handle: mailbox message type index and terminal result
+    /// type index.
+    Handle(u32, u32),
     /// An identity-indexed operation value: the manifest operation
     /// slot and the function type index.
     Op(u32, u32),
@@ -736,6 +739,7 @@ const TY_VM: u8 = 17;
 const TY_PENDING_CALL: u8 = 18;
 const TY_OP: u8 = 19;
 const TY_DIGEST: u8 = 20;
+const TY_HANDLE: u8 = 21;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -995,6 +999,11 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
         BcType::PendingCall(a, r) => {
             out.push(TY_PENDING_CALL);
             write_u32(out, *a);
+            write_u32(out, *r);
+        }
+        BcType::Handle(m, r) => {
+            out.push(TY_HANDLE);
+            write_u32(out, *m);
             write_u32(out, *r);
         }
         BcType::Op(op, f) => {
@@ -1742,6 +1751,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_EMPTY_VM => BcType::EmptyVm,
         TY_VM => BcType::Vm(cur.u32()?),
         TY_PENDING_CALL => BcType::PendingCall(cur.u32()?, cur.u32()?),
+        TY_HANDLE => BcType::Handle(cur.u32()?, cur.u32()?),
         TY_OP => BcType::Op(cur.u32()?, cur.u32()?),
         other => return Err(DecodeError::BadTypeTag(other)),
     };

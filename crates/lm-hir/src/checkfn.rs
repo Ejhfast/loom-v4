@@ -2845,6 +2845,25 @@ impl<'o> FnChecker<'o> {
         self.charge_row(ctx, &row, span)
     }
 
+    /// The mailbox message type of the enclosing proc class, when the
+    /// method belongs to a subclass of the core class `Proc`.
+    fn proc_mailbox_type(&self, ctx: &Ctx) -> Option<TypeId> {
+        let class = self.self_class?;
+        let proc = *ctx.core_types.get("Proc")?;
+        let arity = ctx.classes[class as usize].type_params.len();
+        let own: Vec<TypeId> = (0..arity)
+            .map(|i| {
+                ctx.store
+                    .find(&Type::Var(i as u32))
+                    .expect("a class parameter type is interned")
+            })
+            .collect();
+        let args =
+            ctx.store
+                .ancestor_args(lm_types::ClassId(class), &own, lm_types::ClassId(proc))?;
+        args.first().copied()
+    }
+
     /// An instance type of a core enum found by name.
     fn core_inst(ctx: &mut Ctx, name: &str, args: Vec<TypeId>) -> TypeId {
         let class = ctx.core_types[name];
@@ -2886,6 +2905,75 @@ impl<'o> FnChecker<'o> {
                 kind: HExprKind::Perform {
                     op: lm_abi::OP_VM_NEW,
                     args: vec![],
+                },
+            });
+        }
+        // `sys.proc.recv()` performs `Proc.Recv`. The mailbox type
+        // comes from the enclosing proc class, so the call is valid
+        // only inside a method of a subclass of `Proc[M]`.
+        if group == "Proc" && member == "recv" {
+            if !args.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!(
+                        "`sys.proc.recv` expects 0 argument(s), found {}",
+                        args.len()
+                    ),
+                    span,
+                ));
+            }
+            let mailbox = self.proc_mailbox_type(ctx).ok_or_else(|| {
+                Diagnostic::new(
+                    "E1051",
+                    "`sys.proc.recv` is only valid inside a method of a `Proc` subclass",
+                    name_span,
+                )
+            })?;
+            // The performing proc is the receiver. Its class fixes the
+            // mailbox type, so the verifier reads the class table
+            // instead of a claim at the call site.
+            let receiver = self.synth_self(ctx, span)?;
+            self.charge_op(ctx, lm_abi::OP_PROC_RECV, span)?;
+            let ty = Self::core_inst(ctx, "Recv", vec![mailbox]);
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_PROC_RECV,
+                    args: vec![receiver],
+                },
+            });
+        }
+        // `sys.proc.run(vm)` transfers one loaded machine to the
+        // scheduler. The mailbox-bearing form comes from proc-class
+        // lowering, so this surface chooses `M = Never`.
+        if group == "Proc" && member == "run" {
+            if args.len() != 1 {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!("`sys.proc.run` expects 1 argument(s), found {}", args.len()),
+                    span,
+                ));
+            }
+            let vm = self.synth_expr(ctx, &args[0])?;
+            let Type::Vm(result) = ctx.store.get(vm.ty).clone() else {
+                return Err(Diagnostic::new(
+                    "E1004",
+                    format!(
+                        "`sys.proc.run` needs a loaded machine, found {}",
+                        ctx.store.display(vm.ty)
+                    ),
+                    args[0].span,
+                ));
+            };
+            self.charge_op(ctx, lm_abi::OP_PROC_RUN, span)?;
+            let ty = ctx.store.intern(Type::Handle(NEVER, result));
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_PROC_RUN,
+                    args: vec![vm],
                 },
             });
         }

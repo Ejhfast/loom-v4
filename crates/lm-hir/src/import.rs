@@ -235,7 +235,7 @@ impl<'a> Materializer<'a> {
             IfaceType::List(e) | IfaceType::Vm(e) | IfaceType::Op(_, e) => {
                 self.reserve_type(ctx, e, span)?
             }
-            IfaceType::Map(k, v) | IfaceType::PendingCall(k, v) => {
+            IfaceType::Map(k, v) | IfaceType::PendingCall(k, v) | IfaceType::Handle(k, v) => {
                 self.reserve_type(ctx, k, span)?;
                 self.reserve_type(ctx, v, span)?;
             }
@@ -661,6 +661,11 @@ impl<'a> Materializer<'a> {
                 let a = self.resolve_type(ctx, a, span)?;
                 let r = self.resolve_type(ctx, r, span)?;
                 ctx.store.intern(Type::PendingCall(a, r))
+            }
+            IfaceType::Handle(m, r) => {
+                let m = self.resolve_type(ctx, m, span)?;
+                let r = self.resolve_type(ctx, r, span)?;
+                ctx.store.intern(Type::Handle(m, r))
             }
             IfaceType::Op(op, f) => {
                 let f = self.resolve_type(ctx, f, span)?;

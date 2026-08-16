@@ -272,6 +272,11 @@ impl<'m> Ctx<'m> {
                 let r = self.subst(r, targs, rows);
                 self.intern(BcType::PendingCall(a, r))
             }
+            BcType::Handle(m, r) => {
+                let m = self.subst(m, targs, rows);
+                let r = self.subst(r, targs, rows);
+                self.intern(BcType::Handle(m, r))
+            }
             _ => ty,
         }
     }
@@ -410,6 +415,7 @@ impl<'m> Ctx<'m> {
                 | BcType::EmptyVm
                 | BcType::Vm(_)
                 | BcType::PendingCall(_, _)
+                | BcType::Handle(_, _)
         )
     }
 
@@ -430,7 +436,7 @@ impl<'m> Ctx<'m> {
                     && self.row_vars_bounded(&row, elimit)
             }
             BcType::Vm(t) => self.vars_bounded(t, limit, elimit),
-            BcType::PendingCall(a, r) => {
+            BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 self.vars_bounded(a, limit, elimit) && self.vars_bounded(r, limit, elimit)
             }
             BcType::Op(_, f) => self.vars_bounded(f, limit, elimit),
@@ -507,6 +513,26 @@ impl<'m> Ctx<'m> {
     }
 
     /// One VM event instance type, for example `RunResult[t]`.
+    /// The instance type of one core family without type parameters.
+    fn plain_inst(&self, parent: Option<u32>, what: &str) -> Result<u32, String> {
+        let Some(parent) = parent else {
+            return Err(format!(
+                "the module does not carry the pinned core {what} definition"
+            ));
+        };
+        Ok(self.intern(BcType::Class(parent)))
+    }
+
+    /// The mailbox message type of one proc instance type. `None` when
+    /// the type is not an instance of a subclass of the core class
+    /// `Proc`.
+    fn proc_mailbox(&self, ty: u32) -> Option<u32> {
+        let proc = self.core.proc_class?;
+        let (class, args) = self.as_instance(ty)?;
+        let found = self.ancestor_args(class, &args, proc)?;
+        found.first().copied()
+    }
+
     fn event_inst(&self, parent: Option<u32>, what: &str, arg: u32) -> Result<u32, String> {
         let Some(parent) = parent else {
             return Err(format!(
@@ -610,6 +636,22 @@ const ROLE_DRIVE_EVENT: usize = 16;
 const ROLE_DRIVE_ASKED: usize = 17;
 const ROLE_DRIVE_DONE: usize = 18;
 const ROLE_DRIVE_FAULT: usize = 19;
+const ROLE_RECV: usize = 20;
+const ROLE_RECV_MSG: usize = 21;
+const ROLE_RECV_CLOSED: usize = 22;
+const ROLE_SEND_RESULT: usize = 23;
+const ROLE_SEND_SENT: usize = 24;
+const ROLE_SEND_CLOSED: usize = 25;
+const ROLE_SEND_FAULT: usize = 26;
+const ROLE_PROC_RESULT: usize = 27;
+const ROLE_PROC_DONE: usize = 28;
+const ROLE_PROC_FAULT: usize = 29;
+const ROLE_PROC_ERROR: usize = 30;
+const ROLE_PROC_ERROR_DEAD: usize = 31;
+const ROLE_PROC_ERROR_NOT_PAUSED: usize = 32;
+const ROLE_PROC_ERROR_ALREADY_PAUSED: usize = 33;
+const ROLE_PROC_ERROR_IN_USE: usize = 34;
+const ROLE_PROC_CLASS: usize = 35;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -623,7 +665,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 6] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 10] = [
     (
         ROLE_OPTION,
         1,
@@ -655,10 +697,34 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 6] = [
         &[ROLE_DRIVE_ASKED, ROLE_DRIVE_DONE, ROLE_DRIVE_FAULT],
         "DriveEvent",
     ),
+    (ROLE_RECV, 1, &[ROLE_RECV_MSG, ROLE_RECV_CLOSED], "Recv"),
+    (
+        ROLE_SEND_RESULT,
+        0,
+        &[ROLE_SEND_SENT, ROLE_SEND_CLOSED, ROLE_SEND_FAULT],
+        "SendResult",
+    ),
+    (
+        ROLE_PROC_RESULT,
+        1,
+        &[ROLE_PROC_DONE, ROLE_PROC_FAULT],
+        "ProcResult",
+    ),
+    (
+        ROLE_PROC_ERROR,
+        0,
+        &[
+            ROLE_PROC_ERROR_DEAD,
+            ROLE_PROC_ERROR_NOT_PAUSED,
+            ROLE_PROC_ERROR_ALREADY_PAUSED,
+            ROLE_PROC_ERROR_IN_USE,
+        ],
+        "ProcError",
+    ),
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 14] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 25] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -673,6 +739,17 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 14] = [
     (ROLE_DRIVE_ASKED, &[FieldShape::Request]),
     (ROLE_DRIVE_DONE, &[FieldShape::Var(0)]),
     (ROLE_DRIVE_FAULT, &[FieldShape::Fault]),
+    (ROLE_RECV_MSG, &[FieldShape::Var(0)]),
+    (ROLE_RECV_CLOSED, &[]),
+    (ROLE_SEND_SENT, &[]),
+    (ROLE_SEND_CLOSED, &[]),
+    (ROLE_SEND_FAULT, &[FieldShape::Fault]),
+    (ROLE_PROC_DONE, &[FieldShape::Var(0)]),
+    (ROLE_PROC_FAULT, &[FieldShape::Fault]),
+    (ROLE_PROC_ERROR_DEAD, &[]),
+    (ROLE_PROC_ERROR_NOT_PAUSED, &[]),
+    (ROLE_PROC_ERROR_ALREADY_PAUSED, &[]),
+    (ROLE_PROC_ERROR_IN_USE, &[]),
 ];
 
 /// Prove the shape of every declared core role slot.
@@ -779,6 +856,22 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
                     )));
                 }
             }
+        }
+    }
+    // The proc class is not an enum family. It is one ordinary generic
+    // class with one type parameter, no parent, and no field. The
+    // mailbox rules of `Proc.Spawn` and `Proc.Recv` read the class
+    // table through it, so its shape is proved here.
+    if let Some(idx) = slot(ROLE_PROC_CLASS) {
+        let class = &module.classes[idx as usize];
+        if class.kind != BcClassKind::Normal
+            || class.type_params != 1
+            || class.parent().is_some()
+            || !class.fields.is_empty()
+        {
+            return Err(terr(
+                "the core class `Proc` names a class that is not the proc parent".to_string(),
+            ));
         }
     }
     Ok(())
@@ -910,7 +1003,7 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             }
             BcType::Fault | BcType::Request | BcType::PolicyTable | BcType::EmptyVm => {}
             BcType::Vm(t) => check_ref(*t)?,
-            BcType::PendingCall(a, r) => {
+            BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 check_ref(*a)?;
                 check_ref(*r)?;
             }
@@ -1363,6 +1456,14 @@ fn perform_argc(op: u32) -> u32 {
             lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE | lm_abi::OP_VM_TABLE => 1,
             lm_abi::OP_VM_DISPATCH => 2,
             lm_abi::OP_VM_FROM_OBJECT | lm_abi::OP_VM_ANSWER | lm_abi::OP_VM_REJECT => 3,
+            lm_abi::OP_PROC_RUN
+            | lm_abi::OP_PROC_CLOSE
+            | lm_abi::OP_PROC_DONE
+            | lm_abi::OP_PROC_PAUSE
+            | lm_abi::OP_PROC_RESUME
+            | lm_abi::OP_PROC_RECV => 1,
+            lm_abi::OP_PROC_SEND => 2,
+            lm_abi::OP_PROC_SPAWN => 3,
             _ => unreachable!("every VmControl slot has an arity"),
         },
     }
@@ -2375,6 +2476,131 @@ fn step(
                                 return Err(fail("`Vm.Dispatch` needs a Request".to_string()));
                             }
                             push(state, TY_UNIT)?;
+                        }
+                        lm_abi::OP_PROC_RUN => {
+                            let t = pop_vm(state)?;
+                            // The mailbox-bearing launch is
+                            // `Proc.Spawn`. This form takes no message,
+                            // so `M` is the bottom type, which the
+                            // bytecode encodes as `()`.
+                            let handle = ctx.intern(BcType::Handle(TY_UNIT, t));
+                            push(state, handle)?;
+                        }
+                        lm_abi::OP_PROC_SPAWN => {
+                            let args_ty = pop(state)?;
+                            let body = pop(state)?;
+                            let ctor = pop(state)?;
+                            let BcType::Fn(ctor_params, _, proc_ty, _) = ctx.ty(ctor) else {
+                                return Err(fail(
+                                    "`Proc.Spawn` needs a constructor function".to_string(),
+                                ));
+                            };
+                            // The mailbox type comes from the class
+                            // table, through the proc class the
+                            // constructor builds. No call site can
+                            // claim another one.
+                            let mailbox = ctx.proc_mailbox(proc_ty).ok_or_else(|| {
+                                fail(
+                                    "`Proc.Spawn` needs a constructor of a `Proc` subclass"
+                                        .to_string(),
+                                )
+                            })?;
+                            let BcType::Fn(body_params, _, result, _) = ctx.ty(body) else {
+                                return Err(fail("`Proc.Spawn` needs a body function".to_string()));
+                            };
+                            if body_params.len() != 1 || body_params[0] != proc_ty {
+                                return Err(fail(
+                                    "`Proc.Spawn` body does not take the constructed proc"
+                                        .to_string(),
+                                ));
+                            }
+                            let want = if ctor_params.is_empty() {
+                                TY_UNIT
+                            } else {
+                                ctx.intern(BcType::Tuple(ctor_params))
+                            };
+                            if !ctx.is_subtype(args_ty, want) {
+                                return Err(fail(
+                                    "`Proc.Spawn` arguments do not match the constructor \
+                                     parameters"
+                                        .to_string(),
+                                ));
+                            }
+                            let handle = ctx.intern(BcType::Handle(mailbox, result));
+                            push(state, handle)?;
+                        }
+                        lm_abi::OP_PROC_SEND => {
+                            let message = pop(state)?;
+                            let handle = pop(state)?;
+                            let BcType::Handle(mailbox, _) = ctx.ty(handle) else {
+                                return Err(fail("`Proc.Send` needs a proc handle".to_string()));
+                            };
+                            if !ctx.is_subtype(message, mailbox) {
+                                return Err(fail(format!(
+                                    "`Proc.Send` expects a message of type {mailbox}, \
+                                     found type {message}"
+                                )));
+                            }
+                            let result = ctx
+                                .plain_inst(ctx.core.send_result, "SendResult")
+                                .map_err(&fail)?;
+                            push(state, result)?;
+                        }
+                        lm_abi::OP_PROC_CLOSE => {
+                            let handle = pop(state)?;
+                            if !matches!(ctx.ty(handle), BcType::Handle(_, _)) {
+                                return Err(fail("`Proc.Close` needs a proc handle".to_string()));
+                            }
+                            let result = ctx
+                                .plain_inst(ctx.core.send_result, "SendResult")
+                                .map_err(&fail)?;
+                            push(state, result)?;
+                        }
+                        lm_abi::OP_PROC_DONE => {
+                            let handle = pop(state)?;
+                            let BcType::Handle(_, result) = ctx.ty(handle) else {
+                                return Err(fail("`Proc.Done` needs a proc handle".to_string()));
+                            };
+                            let event = ctx
+                                .event_inst(ctx.core.proc_result, "ProcResult", result)
+                                .map_err(&fail)?;
+                            push(state, event)?;
+                        }
+                        lm_abi::OP_PROC_PAUSE | lm_abi::OP_PROC_RESUME => {
+                            let handle = pop(state)?;
+                            let BcType::Handle(_, result) = ctx.ty(handle) else {
+                                return Err(fail(format!("`{name}` needs a proc handle")));
+                            };
+                            let ok = if op == lm_abi::OP_PROC_PAUSE {
+                                ctx.intern(BcType::Vm(result))
+                            } else {
+                                TY_UNIT
+                            };
+                            let error = ctx
+                                .plain_inst(ctx.core.proc_error, "ProcError")
+                                .map_err(&fail)?;
+                            let Some(result_family) = ctx.core.result else {
+                                return Err(fail(
+                                    "the module does not carry the pinned core Result \
+                                     definition"
+                                        .to_string(),
+                                ));
+                            };
+                            let out = ctx.intern(BcType::Inst(result_family, vec![ok, error]));
+                            push(state, out)?;
+                        }
+                        lm_abi::OP_PROC_RECV => {
+                            // The receiver is the performing proc. Its
+                            // class fixes the mailbox type, so the
+                            // rule reads the class table.
+                            let recv = pop(state)?;
+                            let mailbox = ctx.proc_mailbox(recv).ok_or_else(|| {
+                                fail("`Proc.Recv` needs a `Proc` subclass receiver".to_string())
+                            })?;
+                            let event = ctx
+                                .event_inst(ctx.core.recv, "Recv", mailbox)
+                                .map_err(&fail)?;
+                            push(state, event)?;
                         }
                         _ => unreachable!("every VmControl slot has a rule"),
                     }

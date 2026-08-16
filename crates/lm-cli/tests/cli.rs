@@ -65,7 +65,17 @@ fn disasm_prints_signatures_blocks_and_jump_targets() {
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("fn0 factorial(Int) -> Int"), "{text}");
-    assert!(text.contains("entry fn1"), "{text}");
+    // The entry follows every class method, so the test reads its
+    // index from the dump instead of pinning a constant.
+    let index = text
+        .lines()
+        .find_map(|line| line.strip_prefix("entry fn"))
+        .expect("the dump names the entry function")
+        .to_string();
+    assert!(
+        text.contains(&format!("\nfn{index} <entry>() -> Int")),
+        "{text}"
+    );
     assert!(text.contains("b0:"), "{text}");
     assert!(text.contains("JumpIfFalse -> b"), "{text}");
     assert!(text.contains("; pop 2 push 1"), "{text}");

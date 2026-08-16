@@ -110,6 +110,9 @@ pub enum Type {
     /// A typed pending-call token: the argument view type and the
     /// reply type.
     PendingCall(TypeId, TypeId),
+    /// A proc handle: the mailbox message type and the terminal
+    /// result type of the proc.
+    Handle(TypeId, TypeId),
     /// An identity-indexed first-class operation value: the manifest
     /// operation slot and the callable function type.
     Op(u32, TypeId),
@@ -201,6 +204,11 @@ impl TypeStore {
 
     pub fn get(&self, id: TypeId) -> &Type {
         &self.types[id.0 as usize]
+    }
+
+    /// Look up an interned type without interning a new one.
+    pub fn find(&self, ty: &Type) -> Option<TypeId> {
+        self.index.get(ty).copied()
     }
 
     /// Intern an effect row name, for example `Io.Print` or `Io`.
@@ -494,6 +502,7 @@ impl TypeStore {
                 | Type::EmptyVm
                 | Type::Vm(_)
                 | Type::PendingCall(_, _)
+                | Type::Handle(_, _)
         )
     }
 
@@ -547,6 +556,11 @@ impl TypeStore {
                 let r = self.substitute(r, targs, rowargs);
                 self.intern(Type::PendingCall(a, r))
             }
+            Type::Handle(m, r) => {
+                let m = self.substitute(m, targs, rowargs);
+                let r = self.substitute(r, targs, rowargs);
+                self.intern(Type::Handle(m, r))
+            }
             _ => ty,
         }
     }
@@ -579,6 +593,7 @@ impl TypeStore {
             }
             Type::Vm(t) => self.contains_var(*t),
             Type::PendingCall(a, r) => self.contains_var(*a) || self.contains_var(*r),
+            Type::Handle(m, r) => self.contains_var(*m) || self.contains_var(*r),
             _ => false,
         }
     }
@@ -598,6 +613,7 @@ impl TypeStore {
             }
             Type::Vm(t) => self.contains_effect_var(*t),
             Type::PendingCall(a, r) => self.contains_effect_var(*a) || self.contains_effect_var(*r),
+            Type::Handle(m, r) => self.contains_effect_var(*m) || self.contains_effect_var(*r),
             _ => false,
         }
     }
@@ -667,6 +683,9 @@ impl TypeStore {
             Type::Vm(t) => format!("Vm[{}]", self.display(*t)),
             Type::PendingCall(a, r) => {
                 format!("PendingCall[{}, {}]", self.display(*a), self.display(*r))
+            }
+            Type::Handle(m, r) => {
+                format!("Handle[{}, {}]", self.display(*m), self.display(*r))
             }
             Type::Op(op, f) => {
                 format!("Op[{}, {}]", lm_abi::op_name(*op), self.display(*f))
