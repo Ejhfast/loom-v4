@@ -283,6 +283,11 @@ variant yet. The rule enters with floats.
 - **The child budget bounds tower depth per branch, not the total
   machine count.** Full transitive accounting of fuel and heap bytes
   needs the proc scheduler and waits for week 8.
+- **A control envelope encodes each member independently.**
+  Specification 16.1 says so, so sharing holds inside one transferred
+  value and not across two members of one `args` view. Two members
+  that shared a source subgraph reach the child as two copies. One
+  test locks both halves of the rule.
 - **`World::show_value_inner` is still recursive.** It is display
   only, and it has a depth cap of 32 and an ancestor list. It is the
   one recursive graph walker left, and it is deliberately not a mode:
@@ -308,10 +313,10 @@ variant yet. The rule enters with floats.
 
 ## New tests
 
-- `crates/lm-testkit/tests/week7_graph.rs`, 15 cases: the six migration
-  oracles for cycles and shared subgraphs, five guest digest cases,
-  two semantic-identity gates, the shape-table dump, and the two
-  example outputs.
+- `crates/lm-testkit/tests/week7_graph.rs`, 16 cases: the six
+  migration oracles for cycles and shared subgraphs, five guest digest
+  cases, two semantic-identity gates, the control-envelope rule, the
+  shape-table dump, and the two example outputs.
 - `crates/lm-testkit/tests/week7_resources.rs`, 7 cases: the pending
   operation registry and its cleanup, the host suspension contract,
   the fail-atomic child reservation, budget inheritance, the snapshot
@@ -341,7 +346,7 @@ variant yet. The rule enters with floats.
 - `tests/fuzz-regressions/`, 2 new source seeds for the new parser
   surface.
 
-Test count: 541 before, 608 after.
+Test count: 541 before, 609 after.
 
 ## Measurements
 

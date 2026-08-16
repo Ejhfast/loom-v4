@@ -441,3 +441,44 @@ fn the_shape_table_declares_every_column() {
         assert!(line.contains("children="), "{line}");
     }
 }
+
+/// A control envelope encodes each member independently
+/// (specification 16.1). Sharing therefore holds inside one
+/// transferred value and not across two members of one `args` view.
+#[test]
+fn the_control_envelope_encodes_each_member_independently() {
+    let shared_inside = "\
+def go(): Bool with Vm
+  a = [1, 2]
+  a.freeze()
+  pair = (a, a)
+  pair.freeze()
+  vm = sys.vm.Vm().from_object(do |p: ([Int], [Int])|: Bool
+    p[0] == p[1]
+  end, args: (pair,))
+  case vm.run()
+  in Done(v)  then v
+  in Fault(_) then false
+  end
+end
+
+go()
+";
+    assert_eq!(allowed(shared_inside), "Done(true)");
+    let shared_across = "\
+def go(): Bool with Vm
+  a = [1, 2]
+  a.freeze()
+  vm = sys.vm.Vm().from_object(do |p: [Int], q: [Int]|: Bool
+    p == q
+  end, args: (a, a))
+  case vm.run()
+  in Done(v)  then v
+  in Fault(_) then false
+  end
+end
+
+go()
+";
+    assert_eq!(allowed(shared_across), "Done(false)");
+}
