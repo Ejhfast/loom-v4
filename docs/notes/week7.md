@@ -314,10 +314,10 @@ variant yet. The rule enters with floats.
   operation registry and its cleanup, the host suspension contract,
   the fail-atomic child reservation, budget inheritance, the snapshot
   preflight, and the nested sandbox example on the production path.
-- `crates/lm-testkit/tests/week7_closures.rs`, 11 cases: both
+- `crates/lm-testkit/tests/week7_closures.rs`, 12 cases: both
   spellings encoding identically, every closure part in brace form,
-  trailing closures on every call form, map disambiguation, and five
-  negative rules.
+  trailing closures on every call form, map disambiguation, every
+  brace nesting combination, and five negative rules.
 - `crates/lm-graph/src/engine.rs`, 4 cases: canonical ordinals against
   allocation order, cycle and sharing termination, each limit
   rejecting on its own, and a 100,000-deep chain on a 256 KiB stack.
@@ -327,7 +327,7 @@ variant yet. The rule enters with floats.
 - `crates/lm-heap/src/shape.rs`, 5 cases: the tag table, the child
   order agreeing with the reference flag, holder-local shapes never
   digestible, map child order, and the dump.
-- `crates/lm-heap/src/lib.rs`, 6 storage cases including the free
+- `crates/lm-heap/src/lib.rs`, 7 storage cases including the free
   rollback and the digest cache generation rule.
 - `crates/lm-vm/src/resource.rs`, 3 cases for the registry.
 - `crates/lm-abi/src/lib.rs` and `fault.rs`, 3 cases for the
@@ -337,7 +337,7 @@ variant yet. The rule enters with floats.
 - `tests/fuzz-regressions/`, 2 new source seeds for the new parser
   surface.
 
-Test count: 541 before, 604 after.
+Test count: 541 before, 606 after.
 
 ## Measurements
 
