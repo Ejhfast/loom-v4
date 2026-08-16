@@ -357,14 +357,14 @@ other machine control operation stays outside `as_call`.
 
 ## New tests
 
-- `crates/lm-testkit/tests/week9_snapshot.rs`, 22 cases: the two
+- `crates/lm-testkit/tests/week9_snapshot.rs`, 23 cases: the two
   runnable outputs, the boundary round trip over seven examples, the
   deterministic machine ordinals, the reproducible byte string, the
   closed handle set, handle relocation, multi-shot independence, the
   policy exclusion through a mock closure, the restored table, both
   failure-atomicity directions, the one-time external check, the five
   captured states, the byte limit, the world gate, and the
-  deterministic dump diff.
+  deterministic dump diff, and the typed cast.
 - `crates/lm-testkit/tests/week9_image.rs`, 22 cases: the container
   frame, the section table, the header, the code manifest, canonical
   integers, the canonical heap order, unreachable objects, handle
@@ -389,7 +389,7 @@ other machine control operation stays outside `as_call`.
 - `tests/ui/`, 5 new pairs for the row rule, the two arity rules, the
   restore argument rule, and the `Snapshot` type arity.
 
-Test count: 719 before, 776 after.
+Test count: 719 before, 777 after.
 
 ## Measurements
 

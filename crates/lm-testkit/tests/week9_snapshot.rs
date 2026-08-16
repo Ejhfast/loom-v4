@@ -843,3 +843,25 @@ fn the_dump_is_a_deterministic_diff() {
     let text = lm_vm::snapshot::dump::diff(&first, &other).expect("the two worlds differ");
     assert!(text.starts_with("line 1\n"), "{text}");
 }
+
+/// The typed cast of specification 17.1.
+///
+/// The guest form takes a `Type[T]` descriptor, which version 0.2
+/// does not have. The host form carries the same rule against the
+/// recorded result-type digest.
+#[test]
+fn cast_result_accepts_the_recorded_result_type_alone() {
+    let loaded = program(&asked_tree_source());
+    let image = asked_tree_image(&loaded);
+    let found = image.result_type();
+    assert_ne!(found, [0u8; 32], "the root records its result type");
+    assert!(image.cast_result(found).is_ok());
+    let wrong = [7u8; 32];
+    assert_eq!(
+        image.cast_result(wrong).err(),
+        Some(lm_vm::snapshot::SnapshotTypeError {
+            found,
+            expected: wrong
+        })
+    );
+}
