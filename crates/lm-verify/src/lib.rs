@@ -1882,6 +1882,15 @@ pub struct FramePoint {
     /// counter: a call moved its arguments into the callee locals, and
     /// a perform moved them into the pending record.
     pub before_counter: bool,
+    /// The class of the instance this frame holds in local slot 0.
+    ///
+    /// A method call moves its receiver into that slot, and no
+    /// assignment can rebind `self`, so the slot still holds the value
+    /// the runtime dispatched on. A virtual call site therefore
+    /// resolves its callee from this class, not from the static
+    /// receiver type. `None` marks a frame whose slot 0 holds no
+    /// instance.
+    pub receiver_class: Option<u32>,
 }
 
 /// The resolved types of one stopped frame.
@@ -2095,6 +2104,25 @@ impl<'m> ResolvedTypes<'m> {
     /// marks an instance whose type arguments do not follow from that
     /// position, so admission has no evidence to check its fields.
     pub fn instance_field_types(&self, class: u32, at: u32) -> Option<Vec<u32>> {
+        let own = self.instance_args(class, at)?;
+        let entry = self.ctx.module.classes.get(class as usize)?;
+        Some(
+            entry
+                .fields
+                .iter()
+                .map(|(_, ty)| self.ctx.subst(*ty, &own, &[]))
+                .collect(),
+        )
+    }
+
+    /// The type arguments of one object class, seen at the resolved
+    /// type that reached it.
+    ///
+    /// `class` is the class the object records, and `at` is the
+    /// resolved type of the position that names the object. `None`
+    /// marks an object whose type arguments do not follow from that
+    /// position.
+    fn instance_args(&self, class: u32, at: u32) -> Option<Vec<u32>> {
         let (declared, args) = self.ctx.as_instance(at)?;
         if !self.class_extends(class, declared) {
             return None;
@@ -2116,13 +2144,22 @@ impl<'m> ResolvedTypes<'m> {
         if own.len() != entry.type_params as usize {
             return None;
         }
-        Some(
-            entry
-                .fields
-                .iter()
-                .map(|(_, ty)| self.ctx.subst(*ty, &own, &[]))
-                .collect(),
-        )
+        Some(own)
+    }
+
+    /// The exact instance type of one object, seen at the resolved
+    /// type that reached it.
+    ///
+    /// The answer names the concrete class of the object with the
+    /// arguments that position supplies. Two positions that name one
+    /// object at two class levels therefore normalize to one type.
+    pub fn instance_type(&self, class: u32, at: u32) -> Option<u32> {
+        let own = self.instance_args(class, at)?;
+        Some(if own.is_empty() {
+            self.ctx.intern(BcType::Class(class))
+        } else {
+            self.ctx.intern(BcType::Inst(class, own))
+        })
     }
 
     /// True when every step from `class` up to `ancestor` passes its
@@ -2173,7 +2210,7 @@ impl<'m> ResolvedTypes<'m> {
             let (targs, rows) = if idx == 0 {
                 (Vec::new(), Vec::new())
             } else {
-                self.call_substitution(&frames[idx - 1], &out[idx - 1], point.func)
+                self.call_substitution(&frames[idx - 1], &out[idx - 1], point)
                     .map_err(&fail)?
             };
             if targs.len() != body.type_params as usize || rows.len() != body.effect_params as usize
@@ -2231,9 +2268,10 @@ impl<'m> ResolvedTypes<'m> {
         &self,
         caller: &FramePoint,
         caller_slots: &FrameSlots,
-        callee: u32,
+        point: &FramePoint,
     ) -> Result<(Vec<u32>, Vec<Vec<BcRow>>), String> {
         let module = self.ctx.module;
+        let callee = point.func;
         if caller.before_counter {
             return Err("the caller frame did not stop inside a call".to_string());
         }
@@ -2294,10 +2332,7 @@ impl<'m> ResolvedTypes<'m> {
             }
             Instr::CallVirtual { selector, argc } => {
                 let recv = receiver(*argc)?;
-                let (class, _) = self
-                    .ctx
-                    .as_instance(recv)
-                    .ok_or("the call site receiver is not a class instance")?;
+                let (class, _) = self.dispatch_class(recv, point.receiver_class)?;
                 let target = self
                     .ctx
                     .find_method(class, *selector)
@@ -2311,10 +2346,7 @@ impl<'m> ResolvedTypes<'m> {
                 app,
             } => {
                 let recv = receiver(*argc)?;
-                let (class, class_args) = self
-                    .ctx
-                    .as_instance(recv)
-                    .ok_or("the call site receiver is not a class instance")?;
+                let (class, class_args) = self.dispatch_class(recv, point.receiver_class)?;
                 let target = self
                     .ctx
                     .find_method(class, *selector)
@@ -2352,6 +2384,26 @@ impl<'m> ResolvedTypes<'m> {
             }
             _ => Err("the caller frame did not stop inside a call".to_string()),
         }
+    }
+
+    /// The class one virtual call dispatched on, with its type
+    /// arguments.
+    ///
+    /// A method call reads the concrete class of the receiver value,
+    /// never the static type of the call site. An override therefore
+    /// runs a function the static type does not name. The receiver
+    /// moves into local slot 0 of the callee frame, and no assignment
+    /// can rebind `self`, so that slot still holds it.
+    ///
+    /// `recv` is the proved type of the receiver at the call site, and
+    /// it bounds the class: a receiver value of an unrelated class
+    /// fits no position the caller proved.
+    fn dispatch_class(&self, recv: u32, concrete: Option<u32>) -> Result<(u32, Vec<u32>), String> {
+        let class = concrete.ok_or("the frame holds no receiver value to dispatch on")?;
+        let args = self
+            .instance_args(class, recv)
+            .ok_or("the receiver value is not an instance of its call site type")?;
+        Ok((class, args))
     }
 
     /// The abstract state of one verified body at one stop point.

@@ -177,6 +177,25 @@ fn fail<T>(reason: ImageReason, detail: impl Into<String>) -> Result<T, ImageErr
     Err(ImageError::admission(reason, detail))
 }
 
+/// The class of the instance one frame holds in its first local slot.
+///
+/// A method call moves its receiver into that slot, so the slot names
+/// the class the runtime dispatched on. `None` marks a frame whose
+/// first slot holds no instance, and a virtual call site then has no
+/// receiver to resolve.
+///
+/// Every index the call reads is already proved: `check_references`
+/// proved that every local names an object of its machine.
+fn receiver_class(machine: &ImageMachine, base_local: u32) -> Option<u32> {
+    let Value::Obj(r) = machine.locals.get(base_local as usize)? else {
+        return None;
+    };
+    match machine.objects.get(r.slot as usize)?.object {
+        Object::Instance { class, .. } => Some(class),
+        _ => None,
+    }
+}
+
 /// Prove that the image names this exact verified program.
 ///
 /// An admission identity mismatch rejects. The versions travel inside
@@ -526,9 +545,17 @@ impl Admit<'_> {
             }
             // A machine stops between instructions, so the program
             // counter names the next instruction of the block. Every
-            // block ends with a terminator, so it never reaches the
-            // end.
-            if frame.ip as usize >= code.blocks[frame.block as usize].len() {
+            // block ends with a terminator, so a live frame never
+            // reaches the end. A faulted machine stopped inside the
+            // instruction the counter passed, and the backstop of an
+            // exhaustive case is the last instruction of its block, so
+            // its counter may name the end.
+            let limit = code.blocks[frame.block as usize].len();
+            let past = match m.state {
+                ImageState::Faulted => frame.ip as usize > limit,
+                _ => frame.ip as usize >= limit,
+            };
+            if past {
                 return fail(
                     ImageReason::Layout,
                     at(&format!(
@@ -746,12 +773,18 @@ impl Admit<'_> {
                         at("a terminal machine holds a pending request"),
                     );
                 }
-                // A machine reaches a terminal only by returning its
-                // last frame, so a terminal machine holds none. The
-                // frameless-operand rule above then forces its arenas
-                // empty as well.
-                if !m.frames.is_empty() {
-                    return fail(ImageReason::State, at("a terminal machine holds a frame"));
+                // A machine reaches `Done` only by returning its last
+                // frame, so it holds none. The frameless-operand rule
+                // above then forces its arenas empty as well.
+                //
+                // A fault leaves every frame in place, because the
+                // frames are the record of where the machine stopped.
+                // A faulted machine never executes again, so those
+                // frames are diagnostic state: the rules above prove
+                // their structure and admission derives no type from
+                // them.
+                if m.state == ImageState::Done && !m.frames.is_empty() {
+                    return fail(ImageReason::State, at("a done machine holds a frame"));
                 }
             }
         }
@@ -808,13 +841,13 @@ impl Admit<'_> {
             _ => {}
         }
         // The pending request names a legal operation for this state.
+        //
+        // A request the operation table marks as a host attachment is
+        // legal here. `Asked` records the request before any
+        // attachment opens, and the holder answers it. The live
+        // attachment belongs to `Waiting`, and the capture refuses
+        // that state in `write.rs`, so no image ever carries one.
         if let Some(pending) = &m.pending {
-            if lm_abi::op(pending.op).suspends() {
-                return fail(
-                    ImageReason::State,
-                    at("a pending host attachment has no bytes to copy"),
-                );
-            }
             if pending.ordinal >= m.next_ordinal {
                 return fail(
                     ImageReason::State,
@@ -1020,6 +1053,14 @@ impl Admit<'_> {
     fn resolve_frames(&mut self) -> Result<(), ImageError> {
         let mut out: Vec<Vec<FrameSlots>> = Vec::with_capacity(self.image.machines.len());
         for (vm, machine) in self.image.machines.iter().enumerate() {
+            // A faulted machine stopped inside an instruction that did
+            // not complete, so its arenas are not the state the
+            // verifier proves at any boundary. It never executes
+            // again, so no rule reads a type from its frames.
+            if machine.state == ImageState::Faulted {
+                out.push(Vec::new());
+                continue;
+            }
             let points: Vec<FramePoint> = machine
                 .frames
                 .iter()
@@ -1033,6 +1074,10 @@ impl Admit<'_> {
                     // counter names. Every other frame stopped inside
                     // the instruction before it.
                     before_counter: idx + 1 == machine.frames.len() && machine.pending.is_none(),
+                    // A method call moves its receiver into local slot
+                    // 0 of the callee frame, so the class of that
+                    // value is the class the runtime dispatched on.
+                    receiver_class: receiver_class(machine, frame.base_local),
                 })
                 .collect();
             let slots = self.types.resolve_chain(&points).map_err(|e| {
@@ -1126,6 +1171,15 @@ impl Admit<'_> {
     ) -> Result<(), ImageError> {
         let machine = self.machine(vm);
         let at = |what: &str| format!("machine {vm}: {what}");
+        // A faulted machine keeps its frames as diagnostic state, and
+        // no rule below reads a type from them. `check_state` and
+        // `check_references` already proved their structure.
+        if machine.state == ImageState::Faulted {
+            self.check_terminal(vm, work)?;
+            self.check_mailbox(vm, budget, work)?;
+            self.check_proc_body(vm, work)?;
+            return Ok(());
+        }
         // Every local slot. A slot the verifier proves initialized
         // holds a value of its proved type. A slot it proves
         // uninitialized holds the uninitialized marker, or a value one
@@ -1178,18 +1232,25 @@ impl Admit<'_> {
             })?;
             work.push((vm, closure, ty));
         }
-        // The proc body is a closure the runtime calls with the proc
-        // instance. Its own function type proves its captures.
-        if let Some(body) = machine.start_body {
-            if let Object::Closure { func, .. } = machine.objects[body as usize].object {
-                let ty = self.types.fn_type(func).ok_or_else(|| {
-                    ImageError::admission(
-                        ImageReason::Type,
-                        at("the proc body has no function type"),
-                    )
-                })?;
-                work.push((vm, body, ty));
-            }
+        self.check_proc_body(vm, work)?;
+        Ok(())
+    }
+
+    /// The proc body is a closure the runtime calls with the proc
+    /// instance. Its own function type proves its captures.
+    fn check_proc_body(&self, vm: u32, work: &mut Work) -> Result<(), ImageError> {
+        let machine = self.machine(vm);
+        let Some(body) = machine.start_body else {
+            return Ok(());
+        };
+        if let Object::Closure { func, .. } = machine.objects[body as usize].object {
+            let ty = self.types.fn_type(func).ok_or_else(|| {
+                ImageError::admission(
+                    ImageReason::Type,
+                    format!("machine {vm}: the proc body has no function type"),
+                )
+            })?;
+            work.push((vm, body, ty));
         }
         Ok(())
     }

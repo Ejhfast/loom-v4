@@ -322,6 +322,73 @@ fn a_shared_object_checked_under_a_second_type_rejects() {
 }
 
 // ---------------------------------------------------------------
+// Dynamic dispatch.
+// ---------------------------------------------------------------
+
+const OVERRIDE_SOURCE: &str = "\
+class Animal
+  name: String = \"animal\"
+
+  def speak(self): Int
+    0
+  end
+end
+
+class Dog < Animal
+  def speak(self): Int
+    self.legs() + 1
+  end
+
+  def legs(self): Int
+    4
+  end
+end
+
+def go(): Int
+  a: Animal = Dog()
+  a.speak()
+end
+
+go()
+";
+
+/// A method call dispatches on the class of the receiver value, not on
+/// the static type of the call site. A frame inside an overriding
+/// method therefore names a function the static type does not resolve.
+///
+/// The capture is legal, so it must admit. Before the fix every
+/// snapshot taken inside an override was unrestorable.
+#[test]
+fn a_frame_inside_an_overridden_method_admits() {
+    let loaded = program(OVERRIDE_SOURCE);
+    let images = boundaries(&loaded, &[], 60);
+    // The overriding method is the one `Dog` declares. A frame that
+    // names it never resolves through the static receiver type
+    // `Animal`, because `Animal` resolves the selector to its own
+    // method.
+    let dog = loaded
+        .module()
+        .classes
+        .iter()
+        .find(|c| c.name == "Dog")
+        .expect("the program declares Dog");
+    let overrides: Vec<u32> = dog.methods.iter().map(|(_, func)| *func).collect();
+    let mut count = 0usize;
+    for image in &images {
+        if !image.machines[0]
+            .frames
+            .iter()
+            .any(|f| overrides.contains(&f.func))
+        {
+            continue;
+        }
+        count += 1;
+        assert_eq!(admit(&loaded, image), None, "a frame inside an override");
+    }
+    assert!(count > 0, "no capture stopped inside the override");
+}
+
+// ---------------------------------------------------------------
 // Generic instance fields.
 // ---------------------------------------------------------------
 
@@ -576,11 +643,7 @@ fn a_terminal_uninitialized_marker_rejects() {
     assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
 }
 
-/// A proc handle carries the mailbox type and the result type of the
-/// proc it names. The outer object tag proves neither.
-#[test]
-fn a_proc_handle_that_names_another_mailbox_rejects() {
-    let source = "\
+const PROC_SOURCE: &str = "\
 class Inner < Proc[Int]
   def on_spawn(self): Int with Proc
     case self.receive()
@@ -608,7 +671,12 @@ end
 
 go()
 ";
-    let loaded = program(source);
+
+/// A proc handle carries the mailbox type and the result type of the
+/// proc it names. The outer object tag proves neither.
+#[test]
+fn a_proc_handle_that_names_another_mailbox_rejects() {
+    let loaded = program(PROC_SOURCE);
     let images = boundaries(&loaded, &["Proc"], 80);
     let image = pick(&images, "two spawned procs", |image| {
         image.machines.len() >= 3
@@ -647,11 +715,7 @@ go()
     assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
 }
 
-/// A call token carries the argument view and the reply type of the
-/// exact operation it names.
-#[test]
-fn a_call_token_of_another_operation_rejects() {
-    let source = "\
+const CALL_TOKEN_SOURCE: &str = "\
 def go(): Int with Vm, Rand
   held = sys.vm.Vm().from_object(do ||: Int with Rand.Int
     sys.rand.int(0, 10)
@@ -669,7 +733,12 @@ end
 
 go()
 ";
-    let loaded = program(source);
+
+/// A call token carries the argument view and the reply type of the
+/// exact operation it names.
+#[test]
+fn a_call_token_of_another_operation_rejects() {
+    let loaded = program(CALL_TOKEN_SOURCE);
     let images = boundaries(&loaded, &["Vm", "Rand"], 120);
     let image = pick(&images, "a call token", |image| {
         image.machines[0]
@@ -720,6 +789,124 @@ fn a_frame_that_is_not_the_callee_of_its_call_site_rejects() {
     broken.machines[0].locals.resize(2 * locals, Value::Uninit);
     recanonicalize(&mut broken.machines[0]);
     assert_eq!(admit(&loaded, &broken), Some(ImageReason::Type));
+}
+
+// ---------------------------------------------------------------
+// Terminal and stopped states.
+// ---------------------------------------------------------------
+
+const FAULTED_SOURCE: &str = "\
+def go(): String with Vm
+  vm = sys.vm.Vm().from_object(do || with Io.Print
+    sys.io.print(\"hi\\n\")
+  end, args: ())
+  case vm.run()
+  in Done(_)  then \"done\"
+  in Fault(f) then f.code()
+  end
+end
+
+go()
+";
+
+/// A fault leaves every frame in place, so a faulted machine holds the
+/// frames it stopped in. Those frames are diagnostic state: the machine
+/// never executes again.
+///
+/// The capture is legal, so it must admit. Before the fix every world
+/// that held a faulted machine was unrestorable.
+#[test]
+fn a_faulted_machine_that_holds_frames_admits() {
+    let loaded = program(FAULTED_SOURCE);
+    let images = boundaries(&loaded, &["Vm"], 80);
+    let mut count = 0usize;
+    for image in &images {
+        let faulted = image
+            .machines
+            .iter()
+            .any(|m| m.state == lm_vm::snapshot::ImageState::Faulted && !m.frames.is_empty());
+        if !faulted {
+            continue;
+        }
+        count += 1;
+        assert_eq!(admit(&loaded, image), None, "a faulted machine with frames");
+    }
+    assert!(count > 0, "no capture held a faulted machine with frames");
+}
+
+/// A `Done` machine reaches its terminal by returning its last frame,
+/// so it holds none.
+#[test]
+fn a_done_machine_that_holds_a_frame_rejects() {
+    let loaded = program(TERMINAL_SOURCE);
+    let images = boundaries(&loaded, &["Vm"], 60);
+    let image = pick(&images, "a done machine", |image| {
+        image
+            .machines
+            .iter()
+            .any(|m| m.state == lm_vm::snapshot::ImageState::Done)
+    });
+    let at = image
+        .machines
+        .iter()
+        .position(|m| m.state == lm_vm::snapshot::ImageState::Done)
+        .expect("one machine is done");
+    let live = image
+        .machines
+        .iter()
+        .find(|m| !m.frames.is_empty())
+        .expect("one machine holds a frame");
+    let mut broken = image.clone();
+    broken.machines[at].frames = vec![live.frames[0].clone()];
+    broken.machines[at].frames[0].closure = None;
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
+}
+
+const ASKED_SOURCE: &str = "\
+def go(): Int with Vm, Io
+  vm = sys.vm.Vm().from_object(do ||: Int with Io.Print
+    sys.io.print(\"hi\\n\")
+    41
+  end, args: ())
+  case vm.drive()
+  in Asked(_)  then 1
+  in Done(_)   then 2
+  in Fault(_)  then 3
+  end
+end
+
+go()
+";
+
+/// A machine stopped `Asked` records its request before any host
+/// attachment opens, and the holder answers it. The live attachment
+/// belongs to `Waiting`, and the capture refuses that state.
+///
+/// The capture is legal, so it must admit. Before the fix a machine
+/// stopped on `Io.Print`, `Io.Error`, `Io.ReadLine`, or `Clock.Sleep`
+/// was unrestorable.
+#[test]
+fn an_asked_machine_on_a_host_operation_admits() {
+    let loaded = program(ASKED_SOURCE);
+    let images = boundaries(&loaded, &["Vm", "Io"], 120);
+    let mut count = 0usize;
+    for image in &images {
+        let asked = image.machines.iter().any(|m| {
+            m.state == lm_vm::snapshot::ImageState::Asked
+                && m.pending
+                    .as_ref()
+                    .is_some_and(|p| lm_abi::op(p.op).suspends())
+        });
+        if !asked {
+            continue;
+        }
+        count += 1;
+        assert_eq!(admit(&loaded, image), None, "an asked machine on Io.Print");
+    }
+    assert!(
+        count > 0,
+        "no capture stopped a machine on a host operation"
+    );
 }
 
 // ---------------------------------------------------------------
@@ -895,9 +1082,7 @@ fn an_operation_slot_past_the_manifest_rejects() {
 /// An abstract class is the closed parent of one enum family, and no
 /// verified program allocates one. An instance of it would reach the
 /// exhaustive-case backstop of every dispatch on the family.
-#[test]
-fn an_instance_of_an_abstract_class_rejects() {
-    let source = "\
+const ABSTRACT_SOURCE: &str = "\
 def go(): Int
   a: Option[Int] = None
   case a
@@ -908,7 +1093,10 @@ end
 
 go()
 ";
-    let loaded = program(source);
+
+#[test]
+fn an_instance_of_an_abstract_class_rejects() {
+    let loaded = program(ABSTRACT_SOURCE);
     let images = boundaries(&loaded, &[], 60);
     let classes = &loaded.module().classes;
     // One abstract family with a case class of the same field count.
