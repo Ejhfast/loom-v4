@@ -345,17 +345,17 @@ Test count: 541 before, 608 after.
 
 ## Measurements
 
-`cargo test -p lm-testkit --test bench_smoke -- --nocapture`, debug
-profile, one run each:
+`cargo test -p lm-testkit --test bench_smoke -- --nocapture --exact
+<name>`, debug profile, one entry per process:
 
 | Entry | Before | After |
 |---|---|---|
-| `alloc_gc_100k` | 77.7 ms | 78.1 ms |
-| `list_push_100k` | 69.8 ms | 68.7 ms |
-| `freeze_chain_50k` | — | 51.7 ms |
-| `transfer_graph_20k` | — | 43.0 ms |
-| `digest_graph_20k_plus_1k_cached` | — | 46.4 ms |
-| `mark_sweep_100k_under_256k` | — | 79.0 ms |
+| `alloc_gc_100k` | 77.7 ms | 79.6 ms |
+| `list_push_100k` | 69.8 ms | 70.1 ms |
+| `freeze_chain_50k` | — | 50.1 ms |
+| `transfer_graph_20k` | — | 30.1 ms |
+| `digest_graph_20k_plus_1k_cached` | — | 33.8 ms |
+| `mark_sweep_100k_under_256k` | — | 106.7 ms |
 
 The first migration measurement showed `alloc_gc_100k` at 91.9 ms, an
 eighteen percent regression. The cause was the digest-cache lookup the
