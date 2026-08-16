@@ -1,0 +1,9 @@
+# A trailing closure must start on the same line as the end of the
+# call. The closure below is a separate statement, so the call keeps
+# its written arity.
+def with_value(value: Int, body: (Int) -> Int): Int
+  body(value)
+end
+
+with_value(41)
+  { |x: Int| x + 1 }

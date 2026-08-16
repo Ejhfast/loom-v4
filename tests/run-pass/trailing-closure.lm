@@ -1,0 +1,9 @@
+# A closure after a call on the same line becomes the final argument.
+def with_value(value: Int, body: (Int) -> Int): Int
+  body(value)
+end
+
+doubled = with_value(21) { |x: Int| x * 2 }
+with_value(doubled) do |x: Int|
+  x
+end

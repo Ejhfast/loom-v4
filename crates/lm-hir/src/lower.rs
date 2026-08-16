@@ -722,7 +722,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     NativeOp::BbLen => Instr::BbLen,
                     NativeOp::BbBuild => Instr::BbBuild,
                     NativeOp::Freeze => Instr::Freeze,
-                    NativeOp::Digest => Instr::Digest,
+                    NativeOp::Digest => {
+                        // The result type must exist in the module
+                        // type table before the verifier reads it.
+                        self.m.intern_type(BcType::Digest);
+                        Instr::Digest
+                    }
                     NativeOp::ListGet | NativeOp::MapGet => unreachable!("handled above"),
                 };
                 self.emit(instr);

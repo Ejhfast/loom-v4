@@ -36,6 +36,10 @@ enum Nest {
     /// `loop`, closed by `end`. Newlines inside end statements, so a
     /// block body parses the same way at any delimiter depth.
     Block,
+    /// An open brace closure `{ |x| ... }`. Its body is a statement
+    /// block, so newlines inside end statements, and a right brace
+    /// closes it.
+    BraceBlock,
 }
 
 struct Scanner<'a> {
@@ -445,6 +449,28 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// Close one open brace: a brace closure or a map literal.
+    fn close_brace(&mut self) {
+        if matches!(
+            self.nesting.last(),
+            Some(Nest::Delim) | Some(Nest::BraceBlock)
+        ) {
+            self.nesting.pop();
+        }
+    }
+
+    /// True when the left brace at the current position opens a brace
+    /// closure. Specification appendix A.1: a left brace followed by a
+    /// pipe starts a brace closure, and every other left brace starts
+    /// a map literal.
+    fn brace_opens_closure(&self) -> bool {
+        let mut i = self.pos + 1;
+        while i < self.bytes.len() && matches!(self.bytes[i], b' ' | b'\t' | b'\r') {
+            i += 1;
+        }
+        i < self.bytes.len() && self.bytes[i] == b'|'
+    }
+
     fn scan_punct(&mut self, start: usize) -> Result<(), Diagnostic> {
         let two = |a: u8, b: u8, s: &Scanner| s.peek_byte(0) == a && s.peek_byte(1) == b;
         let tok = if two(b'=', b'=', self) {
@@ -489,11 +515,16 @@ impl<'a> Scanner<'a> {
                     Tok::RBracket
                 }
                 b'{' => {
-                    self.nesting.push(Nest::Delim);
+                    let nest = if self.brace_opens_closure() {
+                        Nest::BraceBlock
+                    } else {
+                        Nest::Delim
+                    };
+                    self.nesting.push(nest);
                     Tok::LBrace
                 }
                 b'}' => {
-                    self.close_delim();
+                    self.close_brace();
                     Tok::RBrace
                 }
                 b',' => Tok::Comma,

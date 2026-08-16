@@ -359,6 +359,9 @@ impl Heap {
         self.collections += 1;
         let mut freed_bytes = 0usize;
         let mut freed = 0usize;
+        // Most heaps hold no digest at all. The lookup per freed slot
+        // costs a hash, so the empty case skips it.
+        let has_digests = !self.digests.is_empty();
         for (page_idx, page) in self.pages.iter_mut().enumerate() {
             for (idx, entry) in page.iter_mut().enumerate() {
                 let slot = (page_idx * PAGE_SLOTS + idx) as u32;
@@ -370,7 +373,9 @@ impl Heap {
                 freed += 1;
                 entry.generation = entry.generation.wrapping_add(1);
                 self.free.push(slot);
-                self.digests.remove(&slot);
+                if has_digests {
+                    self.digests.remove(&slot);
+                }
             }
         }
         self.used_bytes -= freed_bytes;

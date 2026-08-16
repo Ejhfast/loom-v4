@@ -1,0 +1,33 @@
+# A cyclic graph has one canonical digest.
+#
+# The program builds one ring, allocates spare objects, then builds an
+# equal ring. The second ring sits in different heap slots. The digest
+# reads the graph alone, so the two digests are equal and the checked
+# output never moves.
+
+class Node
+  value: Int
+  next: Option[Node] = None
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+end
+
+def ring(first: Int, second: Int): Node
+  a = Node(first)
+  b = Node(second)
+  a.next = Some(b)
+  b.next = Some(a)
+  a.freeze()
+end
+
+first = ring(1, 2)
+spare = [Node(7), Node(8), Node(9)]
+second = ring(1, 2)
+
+if first.digest() == second.digest()
+  second.digest()
+else
+  spare.freeze().digest()
+end

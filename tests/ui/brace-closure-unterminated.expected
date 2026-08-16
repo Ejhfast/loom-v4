@@ -1,0 +1,2 @@
+error[E1003]: expected `}`, found end of file
+  --> tests/ui/brace-closure-unterminated.lm:2:1

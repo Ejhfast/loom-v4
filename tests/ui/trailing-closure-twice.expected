@@ -1,0 +1,2 @@
+error[E1054]: a call accepts at most one trailing closure
+  --> tests/ui/trailing-closure-twice.lm:5:35

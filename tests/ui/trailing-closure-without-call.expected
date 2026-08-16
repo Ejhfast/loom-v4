@@ -1,0 +1,2 @@
+error[E1001]: expected the end of the statement, found `{`
+  --> tests/ui/trailing-closure-without-call.lm:2:3

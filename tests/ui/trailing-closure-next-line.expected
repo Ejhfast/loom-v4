@@ -1,0 +1,2 @@
+error[E1006]: `with_value` expects 2 argument(s), found 1
+  --> tests/ui/trailing-closure-next-line.lm:8:1

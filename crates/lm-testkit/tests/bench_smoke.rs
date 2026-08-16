@@ -258,3 +258,57 @@ fn async_wait_smoke() {
                   case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     timed_world("async_wait_50", source, &["Vm", "Clock.Sleep"], "Done(50)");
 }
+
+// ---------------------------------------------------------------
+// Week-7 graph paths.
+// ---------------------------------------------------------------
+
+#[test]
+fn deep_freeze_smoke() {
+    // The freeze mode walks a 50,000-node chain and sets the bits
+    // after the whole graph validates.
+    let source = "xs: [[Int]] = []\ni = 0\nwhile i < 50000\n  xs.push([i])\n  i = i + 1\nend\n\
+                  xs.freeze()\nxs.len()\n";
+    timed("freeze_chain_50k", source, "Done(50000)");
+}
+
+#[test]
+fn boundary_transfer_smoke() {
+    // A 20,000-node frozen graph crosses one machine boundary.
+    let source = "def go(): Int with Vm\n  \
+                  vm = sys.vm.Vm().from_object(do ||: [[Int]]\n    \
+                  xs: [[Int]] = []\n    i = 0\n    while i < 20000\n      xs.push([i])\n      i = i + 1\n    end\n    \
+                  xs.freeze()\n  end, args: ())\n  \
+                  case vm.run()\n  in Done(xs) then xs.len()\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
+    timed_world("transfer_graph_20k", source, &["Vm"], "Done(20000)");
+}
+
+#[test]
+fn digest_smoke() {
+    // The digest walks and encodes a 20,000-node frozen graph once.
+    // The second call reads the cache on the frozen root.
+    let source = "xs: [[Int]] = []\ni = 0\nwhile i < 20000\n  xs.push([i])\n  i = i + 1\nend\n\
+                  xs.freeze()\n\
+                  d = xs.digest()\n\
+                  same = 0\nj = 0\nwhile j < 1000\n  \
+                  if d == xs.digest()\n    same = same + 1\n  else\n    same = same\n  end\n  \
+                  j = j + 1\nend\nsame\n";
+    timed("digest_graph_20k_plus_1k_cached", source, "Done(1000)");
+}
+
+#[test]
+fn collection_after_the_graph_engine_smoke() {
+    // The mark mode runs under a small cap, so the workload collects
+    // many times over one reusable identity table.
+    let source = "i = 0\ntotal = 0\nwhile i < 100000\n  junk = [i, i, i]\n  \
+                  total = total + junk.len()\n  i = i + 1\nend\ntotal\n";
+    let start = Instant::now();
+    let config = VmConfig {
+        heap_bytes: 256 * 1024,
+        ..VmConfig::default()
+    };
+    let outcome = run_text("bench.lm", source, config).unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(outcome, "Done(300000)");
+    eprintln!("bench-smoke mark_sweep_100k_under_256k: {elapsed:?}");
+}

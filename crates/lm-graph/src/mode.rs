@@ -320,3 +320,347 @@ pub fn snapshot_ordinals(
     heap.put_scratch(scratch);
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lm_heap::MapIndex;
+
+    /// A code-identity stub: the hash of one slot is that slot.
+    struct Slots;
+
+    impl CodeIdentity for Slots {
+        fn func_hash(&self, func: u32) -> Result<[u8; 32], FaultCode> {
+            let mut out = [0u8; 32];
+            out[0] = func as u8;
+            Ok(out)
+        }
+
+        fn class_hash(&self, class: u32) -> Result<[u8; 32], FaultCode> {
+            let mut out = [1u8; 32];
+            out[0] = class as u8;
+            Ok(out)
+        }
+    }
+
+    fn limits() -> GraphLimits {
+        GraphLimits::default()
+    }
+
+    /// Build a frozen two-node cycle and return its root.
+    fn frozen_ring(heap: &mut Heap, first: i64, second: i64) -> ObjRef {
+        let a = heap.alloc(Object::List {
+            items: vec![Value::Int(first)],
+        });
+        let b = heap.alloc(Object::List {
+            items: vec![Value::Int(second), Value::Obj(a)],
+        });
+        if let Object::List { items } = heap.get_mut(a) {
+            items.push(Value::Obj(b));
+        }
+        heap.recharge(a);
+        freeze(heap, a, &limits()).expect("the freeze finishes");
+        a
+    }
+
+    // -----------------------------------------------------------
+    // Mark and freeze.
+    // -----------------------------------------------------------
+
+    #[test]
+    fn collect_keeps_reachable_cycles_and_frees_unreachable_ones() {
+        let mut heap = Heap::new(1 << 20);
+        let keep = frozen_ring(&mut heap, 1, 2);
+        let drop = frozen_ring(&mut heap, 3, 4);
+        assert_eq!(heap.live_count(), 4);
+        collect(&mut heap, [keep]);
+        assert_eq!(heap.live_count(), 2);
+        assert!(heap.try_get(keep).is_some());
+        assert!(heap.try_get(drop).is_none());
+    }
+
+    #[test]
+    fn freeze_preserves_sharing_and_cycles() {
+        let mut heap = Heap::new(1 << 20);
+        let root = frozen_ring(&mut heap, 1, 2);
+        assert!(heap.is_frozen(root));
+        assert_eq!(
+            verify_frozen(&mut heap, root, &limits())
+                .expect("the graph is frozen")
+                .objects,
+            2
+        );
+    }
+
+    /// A rejected freeze sets no bit. The whole graph validates first.
+    #[test]
+    fn a_rejected_freeze_leaves_every_bit_alone() {
+        let mut heap = Heap::new(1 << 20);
+        let leaf = heap.alloc(Object::List { items: vec![] });
+        let root = heap.alloc(Object::List {
+            items: vec![Value::Obj(leaf)],
+        });
+        let tight = GraphLimits {
+            max_objects: 1,
+            ..limits()
+        };
+        assert_eq!(
+            freeze(&mut heap, root, &tight),
+            Err(FaultCode::BoundaryLimit)
+        );
+        assert!(!heap.is_frozen(root));
+        assert!(!heap.is_frozen(leaf));
+    }
+
+    #[test]
+    fn verification_rejects_a_mutable_child() {
+        let mut heap = Heap::new(1 << 20);
+        let leaf = heap.alloc(Object::List { items: vec![] });
+        let root = heap.alloc(Object::Tuple {
+            items: vec![Value::Obj(leaf)],
+        });
+        // A tuple is born frozen, but its child is not.
+        assert!(heap.is_frozen(root));
+        assert_eq!(
+            verify_frozen(&mut heap, root, &limits()),
+            Err(FaultCode::UnsendableValue)
+        );
+    }
+
+    // -----------------------------------------------------------
+    // Transfer, copy, and inspection.
+    // -----------------------------------------------------------
+
+    #[test]
+    fn transfer_preserves_a_cycle_and_its_sharing() {
+        let mut src = Heap::new(1 << 20);
+        let mut dst = Heap::new(1 << 20);
+        let root = frozen_ring(&mut src, 1, 2);
+        let moved = transfer(&mut src, &mut dst, &[], Value::Obj(root), &limits())
+            .expect("the frozen ring crosses");
+        let new_root = moved.as_obj().expect("a copied graph is an object");
+        assert_eq!(dst.live_count(), 2);
+        assert!(dst.is_frozen(new_root));
+        // The ring closes back on the copied root, not on the source.
+        let next = match dst.get(new_root) {
+            Object::List { items } => items[1].as_obj().expect("the next node"),
+            other => panic!("expected a list, got {other:?}"),
+        };
+        let back = match dst.get(next) {
+            Object::List { items } => items[1].as_obj().expect("the back edge"),
+            other => panic!("expected a list, got {other:?}"),
+        };
+        assert_eq!(back, new_root);
+    }
+
+    #[test]
+    fn transfer_rejects_a_mutable_or_holder_local_graph() {
+        let mut src = Heap::new(1 << 20);
+        let mut dst = Heap::new(1 << 20);
+        let mutable = src.alloc(Object::List { items: vec![] });
+        assert_eq!(
+            transfer(&mut src, &mut dst, &[], Value::Obj(mutable), &limits()),
+            Err(FaultCode::UnsendableValue)
+        );
+        let handle = src.alloc(Object::NativeVm { vm: 3 });
+        assert_eq!(
+            transfer(&mut src, &mut dst, &[], Value::Obj(handle), &limits()),
+            Err(FaultCode::UnsendableValue)
+        );
+        assert_eq!(dst.live_count(), 0);
+    }
+
+    /// A transfer that runs out of destination bytes leaves the
+    /// destination exactly as it was.
+    #[test]
+    fn a_failed_transfer_leaves_the_destination_unchanged() {
+        let mut src = Heap::new(1 << 20);
+        // A small destination: the first shells fit, the last does not.
+        let mut dst = Heap::new(200);
+        let anchor = dst.alloc(Object::Str("anchor".to_string()));
+        let before_live = dst.live_count();
+        let before_bytes = dst.used_bytes();
+        let mut chain = src.alloc(Object::Str("tail".to_string()));
+        for _ in 0..8 {
+            chain = src.alloc(Object::Tuple {
+                items: vec![Value::Obj(chain)],
+            });
+        }
+        freeze(&mut src, chain, &limits()).expect("the chain freezes");
+        assert_eq!(
+            transfer(&mut src, &mut dst, &[anchor], Value::Obj(chain), &limits()),
+            Err(FaultCode::HeapLimit)
+        );
+        assert_eq!(dst.live_count(), before_live);
+        assert_eq!(dst.used_bytes(), before_bytes);
+        assert_eq!(dst.get(anchor), &Object::Str("anchor".to_string()));
+    }
+
+    /// Detached inspection copies a mutable graph and freezes the
+    /// copy, so inspection never returns a writable reference.
+    #[test]
+    fn detach_copies_a_mutable_graph_and_freezes_it() {
+        let mut src = Heap::new(1 << 20);
+        let mut dst = Heap::new(1 << 20);
+        let leaf = src.alloc(Object::Str("leaf".to_string()));
+        let root = src.alloc(Object::List {
+            items: vec![Value::Obj(leaf), Value::Obj(leaf)],
+        });
+        assert!(!src.is_frozen(root));
+        assert_eq!(
+            transfer(&mut src, &mut dst, &[], Value::Obj(root), &limits()),
+            Err(FaultCode::UnsendableValue)
+        );
+        let copy = detach(&mut src, &mut dst, &[], Value::Obj(root), &limits())
+            .expect("inspection copies a mutable graph");
+        let new_root = copy.as_obj().expect("the copy is an object");
+        assert!(dst.is_frozen(new_root));
+        // The shared leaf stays one object.
+        assert_eq!(dst.live_count(), 2);
+        // The source keeps its mutable bit.
+        assert!(!src.is_frozen(root));
+    }
+
+    // -----------------------------------------------------------
+    // Canonical digest.
+    // -----------------------------------------------------------
+
+    #[test]
+    fn the_digest_ignores_allocation_order_and_heap_identity() {
+        let mut first = Heap::new(1 << 20);
+        let a = frozen_ring(&mut first, 1, 2);
+        let mut second = Heap::new(1 << 20);
+        // Allocate spare objects, so the equal ring uses other slots.
+        for _ in 0..5 {
+            second.alloc(Object::Str("spare".to_string()));
+        }
+        let b = frozen_ring(&mut second, 1, 2);
+        assert_ne!(a.slot, b.slot);
+        let da = digest_value(&mut first, Value::Obj(a), &Slots, &limits()).expect("a digests");
+        let db = digest_value(&mut second, Value::Obj(b), &Slots, &limits()).expect("b digests");
+        assert_eq!(da, db);
+        // A different ring digests differently.
+        let c = frozen_ring(&mut second, 1, 3);
+        let dc = digest_value(&mut second, Value::Obj(c), &Slots, &limits()).expect("c digests");
+        assert_ne!(da, dc);
+    }
+
+    /// Sharing and cycles are part of the encoding: a shared child and
+    /// two equal children are different graphs.
+    #[test]
+    fn the_digest_separates_sharing_from_equal_copies() {
+        let mut heap = Heap::new(1 << 20);
+        let shared = heap.alloc(Object::Str("x".to_string()));
+        let one = heap.alloc(Object::Tuple {
+            items: vec![Value::Obj(shared), Value::Obj(shared)],
+        });
+        let left = heap.alloc(Object::Str("x".to_string()));
+        let right = heap.alloc(Object::Str("x".to_string()));
+        let two = heap.alloc(Object::Tuple {
+            items: vec![Value::Obj(left), Value::Obj(right)],
+        });
+        let d1 = digest_value(&mut heap, Value::Obj(one), &Slots, &limits()).expect("one digests");
+        let d2 = digest_value(&mut heap, Value::Obj(two), &Slots, &limits()).expect("two digests");
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn the_digest_rejects_mutable_and_nondigestible_graphs() {
+        let mut heap = Heap::new(1 << 20);
+        let mutable = heap.alloc(Object::List { items: vec![] });
+        assert_eq!(
+            digest_value(&mut heap, Value::Obj(mutable), &Slots, &limits()),
+            Err(FaultCode::UnsendableValue)
+        );
+        let handle = heap.alloc(Object::NativeVm { vm: 1 });
+        assert_eq!(
+            digest_value(&mut heap, Value::Obj(handle), &Slots, &limits()),
+            Err(FaultCode::BoundaryViolation)
+        );
+    }
+
+    #[test]
+    fn a_frozen_object_caches_its_digest() {
+        let mut heap = Heap::new(1 << 20);
+        let root = frozen_ring(&mut heap, 1, 2);
+        assert_eq!(heap.digest_cache_len(), 0);
+        let first = digest_value(&mut heap, Value::Obj(root), &Slots, &limits()).expect("digests");
+        assert_eq!(heap.digest_cache_len(), 1);
+        let second = digest_value(&mut heap, Value::Obj(root), &Slots, &limits()).expect("digests");
+        assert_eq!(first, second);
+    }
+
+    /// A map digests in insertion order, key before value, and the
+    /// derived lookup index never enters the encoding.
+    #[test]
+    fn a_map_digests_in_insertion_order() {
+        let mut heap = Heap::new(1 << 20);
+        let build = |heap: &mut Heap, first: i64, second: i64| {
+            let map = heap.alloc(Object::Map {
+                entries: vec![
+                    (Value::Int(first), Value::Int(10)),
+                    (Value::Int(second), Value::Int(20)),
+                ],
+                index: MapIndex::default(),
+            });
+            freeze(heap, map, &GraphLimits::default()).expect("the map freezes");
+            map
+        };
+        let forward = build(&mut heap, 1, 2);
+        let backward = build(&mut heap, 2, 1);
+        let d1 = digest_value(&mut heap, Value::Obj(forward), &Slots, &limits()).expect("digests");
+        let d2 = digest_value(&mut heap, Value::Obj(backward), &Slots, &limits()).expect("digests");
+        assert_ne!(d1, d2);
+    }
+
+    // -----------------------------------------------------------
+    // Limits and snapshot traversal.
+    // -----------------------------------------------------------
+
+    /// Every mode rejects a graph past the published limits.
+    #[test]
+    fn every_mode_rejects_work_past_its_limits() {
+        let mut heap = Heap::new(1 << 20);
+        let root = frozen_ring(&mut heap, 1, 2);
+        let mut dst = Heap::new(1 << 20);
+        let tight = GraphLimits {
+            max_objects: 1,
+            ..limits()
+        };
+        assert_eq!(
+            freeze(&mut heap, root, &tight),
+            Err(FaultCode::BoundaryLimit)
+        );
+        assert_eq!(
+            verify_frozen(&mut heap, root, &tight),
+            Err(FaultCode::BoundaryLimit)
+        );
+        assert_eq!(
+            transfer(&mut heap, &mut dst, &[], Value::Obj(root), &tight),
+            Err(FaultCode::BoundaryLimit)
+        );
+        assert_eq!(
+            detach(&mut heap, &mut dst, &[], Value::Obj(root), &tight),
+            Err(FaultCode::BoundaryLimit)
+        );
+        assert_eq!(
+            digest_value(&mut heap, Value::Obj(root), &Slots, &tight),
+            Err(FaultCode::BoundaryLimit)
+        );
+        assert_eq!(
+            snapshot_ordinals(&mut heap, &[root], &tight),
+            Err(FaultCode::BoundaryLimit)
+        );
+        // The destination never received a shell.
+        assert_eq!(dst.live_count(), 0);
+    }
+
+    #[test]
+    fn snapshot_traversal_orders_the_reachable_graph() {
+        let mut heap = Heap::new(1 << 20);
+        let root = frozen_ring(&mut heap, 1, 2);
+        let order = snapshot_ordinals(&mut heap, &[root], &limits()).expect("the walk finishes");
+        assert_eq!(order.len(), 2);
+        assert_eq!(order[0], root);
+    }
+}

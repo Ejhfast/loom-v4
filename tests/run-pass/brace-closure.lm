@@ -1,0 +1,4 @@
+# Both closure spellings lower to one node.
+increment = { |x: Int|: Int x + 1 }
+thunk = { || 40 }
+increment(increment(thunk()))

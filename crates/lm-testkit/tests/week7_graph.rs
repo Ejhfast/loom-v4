@@ -6,10 +6,15 @@
 //! cover cycles and shared subgraphs, which the week-4 transfer tests
 //! never reached.
 
-use lm_testkit::run_allowed;
+use lm_testkit::{run_allowed, run_text};
+use lm_vm::VmConfig;
 
 fn allowed(source: &str) -> String {
     run_allowed("t.lm", source, &["Vm"]).unwrap()
+}
+
+fn run(name: &str, source: &str) -> String {
+    run_text(name, source, VmConfig::default()).unwrap()
 }
 
 /// The node class the cyclic cases share.
@@ -238,4 +243,106 @@ end
 go()
 ";
     assert_eq!(allowed(source), "Done(true)");
+}
+
+// ---------------------------------------------------------------
+// The canonical digest, from guest code.
+// ---------------------------------------------------------------
+
+/// The digest depends on the graph, never on the heap slots the
+/// objects happen to use.
+#[test]
+fn the_guest_digest_ignores_allocation_order() {
+    let source = format!(
+        "{NODE}
+def ring(): Node
+  a = Node(1)
+  b = Node(2)
+  a.next = Some(b)
+  b.next = Some(a)
+  a.freeze()
+end
+
+first = ring()
+spare = [Node(7), Node(8), Node(9)]
+second = ring()
+first.digest() == second.digest()
+"
+    );
+    assert_eq!(run("t.lm", &source), "Done(true)");
+}
+
+/// A digest compares by value, so two equal digests in different
+/// heap slots are equal. Reference identity would say no.
+#[test]
+fn digest_equality_is_by_value() {
+    let source = "\
+xs = [1, 2, 3]
+xs.freeze()
+ys = [1, 2, 3]
+ys.freeze()
+xs.digest() == ys.digest() and xs != ys
+";
+    assert_eq!(run("t.lm", source), "Done(true)");
+}
+
+/// A digest of a graph that is not frozen faults.
+#[test]
+fn the_digest_needs_a_frozen_graph() {
+    let source = "xs = [1, 2, 3]\nxs.digest()\n";
+    assert_eq!(run("t.lm", source), "Fault(UnsendableValue)");
+}
+
+/// A frozen builder is not digestible: it has no canonical
+/// encoding, so the digest mode rejects it.
+#[test]
+fn the_digest_rejects_a_nondigestible_shape() {
+    let source = "\
+sb = StringBuilder()
+sb.append(\"text\")
+sb.freeze()
+sb.digest()
+";
+    assert_eq!(run("t.lm", source), "Fault(BoundaryViolation)");
+}
+
+/// A different graph shape gives a different digest, and equal
+/// shapes with different contents differ too.
+#[test]
+fn different_graphs_digest_differently() {
+    let source = "\
+a = [1, 2]
+a.freeze()
+b = [2, 1]
+b.freeze()
+c = [[1], [2]]
+c.freeze()
+a.digest() != b.digest() and a.digest() != c.digest()
+";
+    assert_eq!(run("t.lm", source), "Done(true)");
+}
+
+// ---------------------------------------------------------------
+// The Week 7 runnable examples.
+// ---------------------------------------------------------------
+
+#[test]
+fn week7_examples_have_checked_output() {
+    let read = |path: &str| {
+        std::fs::read_to_string(lm_testkit::repo_root().join(path)).expect("example reads")
+    };
+    assert_eq!(
+        run(
+            "cycle-digest.lm",
+            &read("examples/06-graphs/cycle-digest.lm")
+        ),
+        "Done(1173f02447dd8f06c5ff0a87751cf739066baea0819e3b6bfb69aa2e159afa41)"
+    );
+    assert_eq!(
+        run(
+            "brace-closure.lm",
+            &read("examples/06-graphs/brace-closure.lm")
+        ),
+        "Done(42)"
+    );
 }

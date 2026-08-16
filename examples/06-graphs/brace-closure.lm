@@ -1,0 +1,22 @@
+# Both closure spellings lower to one typed node and one bytecode
+# form. A closure that starts on the same line as the end of a call
+# becomes the final argument of that call.
+
+def apply_twice(f: (Int) -> Int, value: Int): Int
+  f(f(value))
+end
+
+def with_value(value: Int, body: (Int) -> Int): Int
+  body(value)
+end
+
+# The brace spelling as an ordinary argument.
+brace = apply_twice({ |x: Int| x + 1 }, 40)
+
+# The same closure as a trailing argument, in both spellings.
+doubled = with_value(brace) { |x: Int| x * 2 }
+halved = with_value(doubled) do |x: Int|
+  x / 2
+end
+
+halved

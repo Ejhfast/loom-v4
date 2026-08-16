@@ -24,6 +24,7 @@ pub const MAX_TUPLE_ARITY: usize = 16;
 pub fn parse(text: &str) -> Result<Module, Diagnostic> {
     let tokens = scan(text)?;
     let mut parser = Parser {
+        text,
         tokens,
         pos: 0,
         depth: 0,
@@ -31,13 +32,16 @@ pub fn parse(text: &str) -> Result<Module, Diagnostic> {
     parser.module()
 }
 
-struct Parser {
+struct Parser<'t> {
+    /// The source text. The trailing-closure rule reads it to decide
+    /// whether a newline separates a call from a following closure.
+    text: &'t str,
     tokens: Vec<Token>,
     pos: usize,
     depth: usize,
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> &Tok {
         &self.tokens[self.pos].tok
     }
@@ -63,6 +67,28 @@ impl Parser {
         while matches!(self.peek(), Tok::Newline) {
             self.pos += 1;
         }
+    }
+
+    /// True when the next token starts on the line that `after` ends
+    /// on.
+    ///
+    /// A trailing closure must start on the same line as the end of
+    /// its call (specification 6.1). The scanner drops newlines
+    /// inside an open delimiter, so the rule reads the source text
+    /// directly instead of looking for a separator token.
+    fn starts_same_line(&self, after: Span) -> bool {
+        let lo = after.hi as usize;
+        let hi = self.peek_span().lo as usize;
+        if hi <= lo || hi > self.text.len() {
+            return true;
+        }
+        !self.text.as_bytes()[lo..hi].contains(&b'\n')
+    }
+
+    /// True when the next token opens a closure literal.
+    fn at_closure(&self) -> bool {
+        matches!(self.peek(), Tok::KwDo)
+            || (matches!(self.peek(), Tok::LBrace) && matches!(self.peek_at(1), Tok::Pipe))
     }
 
     fn error(&self, code: &'static str, message: impl Into<String>) -> Diagnostic {
@@ -163,7 +189,9 @@ impl Parser {
                 self.pos += 1;
                 Ok(())
             }
-            Tok::Eof | Tok::KwEnd | Tok::KwElse | Tok::KwElsif | Tok::KwIn => Ok(()),
+            // A right brace ends the body of a brace closure, so a
+            // one-expression body needs no separator before it.
+            Tok::Eof | Tok::KwEnd | Tok::KwElse | Tok::KwElsif | Tok::KwIn | Tok::RBrace => Ok(()),
             other => Err(self.error(
                 "E1001",
                 format!("expected the end of the statement, found {other}"),
@@ -695,7 +723,10 @@ impl Parser {
                 break;
             }
             if matches!(self.peek(), Tok::Eof) {
-                return Err(self.error("E1003", "expected `end`, found end of file"));
+                // Name the closer the block waits for, so a brace
+                // closure reports `}` and a `do` block reports `end`.
+                let want = stops.first().unwrap_or(&Tok::KwEnd);
+                return Err(self.error("E1003", format!("expected {want}, found end of file")));
             }
             let stmt = self.stmt()?;
             stmts.push(stmt);
@@ -1099,8 +1130,11 @@ impl Parser {
             match self.peek() {
                 Tok::LParen => {
                     let (args, close_span) = self.call_args()?;
-                    let span = expr.span.to(close_span);
-                    expr = self.make_call(expr, Vec::new(), args, span)?;
+                    let (call, trailing) = self.finish_call(expr, Vec::new(), args, close_span)?;
+                    expr = call;
+                    if trailing {
+                        return self.no_suffix_after_trailing(expr);
+                    }
                 }
                 Tok::LBracket
                     if matches!(expr.kind, ExprKind::Name(_) | ExprKind::Field { .. }) =>
@@ -1110,8 +1144,12 @@ impl Parser {
                     match self.try_type_args() {
                         Some(type_args) => {
                             let (args, close_span) = self.call_args()?;
-                            let span = expr.span.to(close_span);
-                            expr = self.make_call(expr, type_args, args, span)?;
+                            let (call, trailing) =
+                                self.finish_call(expr, type_args, args, close_span)?;
+                            expr = call;
+                            if trailing {
+                                return self.no_suffix_after_trailing(expr);
+                            }
                         }
                         None => {
                             expr = self.index_expr(expr)?;
@@ -1136,6 +1174,47 @@ impl Parser {
                 }
                 _ => break,
             }
+        }
+        Ok(expr)
+    }
+
+    /// Build one call and attach an optional trailing closure.
+    ///
+    /// A closure that starts on the same line as the `)` becomes the
+    /// final argument of the call (specification 6.1). A call accepts
+    /// at most one. The flag reports whether one attached.
+    fn finish_call(
+        &mut self,
+        callee: Expr,
+        type_args: Vec<TypeExpr>,
+        mut args: Vec<Expr>,
+        close_span: Span,
+    ) -> Result<(Expr, bool), Diagnostic> {
+        let mut trailing = false;
+        let mut end = close_span;
+        if self.at_closure() && self.starts_same_line(close_span) {
+            let closure = self.closure_expr()?;
+            end = closure.span;
+            args.push(closure);
+            trailing = true;
+            if self.at_closure() && self.starts_same_line(end) {
+                return Err(self.error("E1054", "a call accepts at most one trailing closure"));
+            }
+        }
+        let span = callee.span.to(end);
+        Ok((self.make_call(callee, type_args, args, span)?, trailing))
+    }
+
+    /// Reject any postfix suffix after a trailing closure.
+    fn no_suffix_after_trailing(&mut self, expr: Expr) -> Result<Expr, Diagnostic> {
+        if matches!(self.peek(), Tok::LParen | Tok::LBracket | Tok::Dot) {
+            return Err(self.error(
+                "E1055",
+                format!(
+                    "no suffix may follow a trailing closure, found {}",
+                    self.peek()
+                ),
+            ));
         }
         Ok(expr)
     }
@@ -1264,6 +1343,7 @@ impl Parser {
                         StrPiece::Lit(text) => parts.push(InterpPart::Lit(text)),
                         StrPiece::Expr(tokens) => {
                             let mut sub = Parser {
+                                text: self.text,
                                 tokens,
                                 pos: 0,
                                 depth: 0,
@@ -1399,6 +1479,10 @@ impl Parser {
                     span: open.span.to(close.span),
                 })
             }
+            // A left brace followed by a pipe starts a brace closure.
+            // Every other left brace starts a map literal, and `{}`
+            // stays the empty map (appendix A.1).
+            Tok::LBrace if matches!(self.peek_at(1), Tok::Pipe) => self.closure_expr(),
             Tok::LBrace => {
                 let open = self.next();
                 let mut entries = Vec::new();
@@ -1428,8 +1512,20 @@ impl Parser {
         }
     }
 
+    /// Parse one closure in either spelling.
+    ///
+    /// `do |x| ... end` and `{ |x| ... }` produce the same node, so
+    /// the two spellings reach one typed HIR node and one bytecode
+    /// form (specification 6.2).
     fn closure_expr(&mut self) -> Result<Expr, Diagnostic> {
-        let do_tok = self.expect(Tok::KwDo, "`do`")?;
+        let (open, close, close_what) = match self.peek() {
+            Tok::LBrace => (self.next(), Tok::RBrace, "`}` to close the closure"),
+            _ => (
+                self.expect(Tok::KwDo, "`do`")?,
+                Tok::KwEnd,
+                "`end` to close the closure",
+            ),
+        };
         self.expect(Tok::Pipe, "`|` to open the parameter list")?;
         let params = if matches!(self.peek(), Tok::Pipe) {
             Vec::new()
@@ -1444,8 +1540,8 @@ impl Parser {
             None
         };
         let row = self.row_clause()?;
-        let body = self.block(&[Tok::KwEnd])?;
-        let end_tok = self.expect(Tok::KwEnd, "`end`")?;
+        let body = self.block(std::slice::from_ref(&close))?;
+        let end_tok = self.expect(close, close_what)?;
         Ok(Expr {
             kind: ExprKind::Closure {
                 params,
@@ -1453,7 +1549,7 @@ impl Parser {
                 row,
                 body,
             },
-            span: do_tok.span.to(end_tok.span),
+            span: open.span.to(end_tok.span),
         })
     }
 

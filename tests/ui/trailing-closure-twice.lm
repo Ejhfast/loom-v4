@@ -1,0 +1,5 @@
+def with_value(value: Int, body: (Int) -> Int): Int
+  body(value)
+end
+
+with_value(41) { |x: Int| x + 1 } { |y: Int| y }
