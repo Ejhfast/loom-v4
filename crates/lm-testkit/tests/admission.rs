@@ -650,7 +650,7 @@ fn a_machine_handle_that_names_another_result_type_rejects() {
                 Object::NativeVm { vm } => {
                     let target = &image.machines[vm as usize];
                     (target.state != lm_vm::snapshot::ImageState::Empty
-                        && target.result_type.is_some())
+                        && target.body_func.is_some())
                     .then_some(vm)
                 }
                 _ => None,
@@ -662,8 +662,14 @@ fn a_machine_handle_that_names_another_result_type_rejects() {
                 let (Some(a), Some(b)) = (loaded_target(first), loaded_target(second)) else {
                     continue;
                 };
-                if image.machines[a as usize].result_type != image.machines[b as usize].result_type
-                {
+                // The machine witness names the body function, and the
+                // result type of that function is the machine result
+                // type.
+                let ret = |vm: u32| -> Option<u32> {
+                    let func = image.machines[vm as usize].body_func?;
+                    Some(loaded.module().funcs[func as usize].ret)
+                };
+                if ret(a) != ret(b) {
                     return Some((first, second));
                 }
             }
@@ -719,7 +725,8 @@ fn an_empty_machine_handle_that_names_a_loaded_machine_rejects() {
             && image
                 .machines
                 .iter()
-                .any(|m| m.state != lm_vm::snapshot::ImageState::Empty && m.result_type.is_some())
+                .skip(1)
+                .any(|m| m.state != lm_vm::snapshot::ImageState::Empty && m.body_func.is_some())
             && image.machines[0]
                 .objects
                 .iter()
@@ -732,11 +739,16 @@ fn an_empty_machine_handle_that_names_a_loaded_machine_rejects() {
         .iter()
         .position(|m| m.state == lm_vm::snapshot::ImageState::Empty)
         .expect("one machine is empty") as u32;
+    // The handle lives in machine 0, and no machine ever holds a
+    // handle to itself, so the loaded target is a child machine.
     let full = image
         .machines
         .iter()
-        .position(|m| m.state != lm_vm::snapshot::ImageState::Empty && m.result_type.is_some())
-        .expect("one machine is loaded") as u32;
+        .enumerate()
+        .position(|(at, m)| {
+            at > 0 && m.state != lm_vm::snapshot::ImageState::Empty && m.body_func.is_some()
+        })
+        .expect("one child machine is loaded") as u32;
     let mut broken = image.clone();
     for entry in &mut broken.machines[0].objects {
         if let Object::NativeVm { vm } = &mut entry.object {
@@ -778,7 +790,7 @@ fn a_terminal_unit_at_another_result_type_rejects() {
         |image| {
             image.machines.iter().any(|m| {
                 matches!(m.terminal, Some(ImageTerminal::Done(Value::Obj(_))))
-                    && m.result_type.is_some()
+                    && m.body_func.is_some()
             })
         },
     );
@@ -804,7 +816,7 @@ fn a_terminal_uninitialized_marker_rejects() {
         |image| {
             image.machines.iter().any(|m| {
                 matches!(m.terminal, Some(ImageTerminal::Done(Value::Obj(_))))
-                    && m.result_type.is_some()
+                    && m.body_func.is_some()
             })
         },
     );
@@ -1467,7 +1479,7 @@ fn an_instance_of_an_abstract_class_rejects() {
     let image = pick(&images, "an instance of an enum case", |image| {
         image.machines.iter().any(|m| {
             m.objects.iter().any(|entry| match &entry.object {
-                Object::Instance { class, fields } => {
+                Object::Instance { class, fields, .. } => {
                     let parent = classes[*class as usize].parent();
                     parent.is_some_and(|p| {
                         classes[p as usize].kind == lm_bytecode::BcClassKind::Abstract
@@ -1482,7 +1494,7 @@ fn an_instance_of_an_abstract_class_rejects() {
     let mut damaged: Option<u32> = None;
     for machine in &mut broken.machines {
         for entry in &mut machine.objects {
-            if let Object::Instance { class, fields } = &mut entry.object {
+            if let Object::Instance { class, fields, .. } = &mut entry.object {
                 let parent = classes[*class as usize].parent();
                 if let Some(parent) = parent {
                     if classes[parent as usize].kind == lm_bytecode::BcClassKind::Abstract
@@ -1645,52 +1657,6 @@ const GATE_GRANTS: [&str; 5] = ["Vm", "Io", "Proc", "Clock", "Rand"];
 
 /// The bytecode boundaries the gate drives for one program.
 const GATE_BOUNDARIES: usize = 400;
-
-/// The shapes round A2 unblocks, with the exact diagnostic each one
-/// carries today.
-///
-/// Both shapes need a type-environment witness in the image:
-///
-/// - a handle names a proc past its constructor. The proc drops its
-///   body closure when it enters the body, and a terminal proc holds
-///   no frame, so the mailbox type follows from nothing;
-/// - a closure or an entry function of a generic body carries types
-///   the activation substituted, and the value records no
-///   substitution.
-///
-/// Every entry is a false rejection. The list is the record of them,
-/// so it stays exact and small. When A2 lands, the list empties and
-/// `the_a2_list_is_the_whole_set_of_false_rejections` states that.
-const A2_BLOCKED: [(&str, &[&str]); 6] = [
-    (
-        "examples/07-procs/worker.lm",
-        &["whose mailbox type is not provable"],
-    ),
-    (
-        "examples/07-procs/mailbox-handle.lm",
-        &["whose mailbox type is not provable"],
-    ),
-    (
-        "examples/07-procs/barrier.lm",
-        &["whose mailbox type is not provable"],
-    ),
-    ("proc-handle", &["whose mailbox type is not provable"]),
-    (
-        "closure-in-a-generic-body",
-        &[
-            "is a closure of another function type",
-            "the frame function does not fit its call site",
-        ],
-    ),
-    (
-        "a-generic-entry-function",
-        &[
-            "is a closure of another function type",
-            "the call site applies another number of type arguments",
-            "the terminal value holds an integer where another type is declared",
-        ],
-    ),
-];
 
 /// A closure built inside a generic body. Its capture and parameter
 /// types name the type variable of the enclosing generic.
@@ -1865,13 +1831,15 @@ fn gate_sweep(label: &str, source: &str) -> Vec<String> {
 /// must pass the external loader, which repeats every admission rule
 /// with no trust at all. A rule that refuses a legal world is as
 /// serious as a rule that admits a forgery.
+///
+/// The sweep covers the whole corpus with no exclusion. The three
+/// shapes the type environment witness unblocked stay in the corpus:
+/// a proc handle past the constructor, a closure a generic body built,
+/// and a machine whose entry function is generic.
 #[test]
 fn every_capture_of_every_shipped_program_admits() {
     let mut fails: Vec<String> = Vec::new();
     for (label, source) in gate_corpus() {
-        if A2_BLOCKED.iter().any(|(name, _)| *name == label) {
-            continue;
-        }
         fails.extend(gate_sweep(&label, &source));
     }
     assert!(
@@ -1879,38 +1847,5 @@ fn every_capture_of_every_shipped_program_admits() {
         "{} capture(s) of a legal world did not admit:\n{}",
         fails.len(),
         fails.join("\n")
-    );
-}
-
-/// The record of the remaining false rejections.
-///
-/// Each entry fails today, and it fails with exactly the diagnostic
-/// that names the witness round A2 adds. When A2 lands, every entry
-/// admits, this test fails, and the list empties.
-#[test]
-fn the_a2_list_is_the_whole_set_of_false_rejections() {
-    let corpus = gate_corpus();
-    let mut other: Vec<String> = Vec::new();
-    for (label, want) in A2_BLOCKED {
-        let (_, source) = corpus
-            .iter()
-            .find(|(name, _)| name == label)
-            .unwrap_or_else(|| panic!("the gate corpus holds `{label}`"));
-        let fails = gate_sweep(label, source);
-        assert!(
-            !fails.is_empty(),
-            "`{label}` now admits at every boundary; remove it from A2_BLOCKED"
-        );
-        for line in &fails {
-            if !want.iter().any(|w| line.contains(w)) {
-                other.push(line.clone());
-            }
-        }
-    }
-    assert!(
-        other.is_empty(),
-        "{} capture(s) failed with another rule than the one A2 owns:\n{}",
-        other.len(),
-        other.join("\n")
     );
 }

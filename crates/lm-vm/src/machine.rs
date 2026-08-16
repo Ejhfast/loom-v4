@@ -8,10 +8,21 @@
 
 use crate::resource::ResourceRegistry;
 use crate::{FaultCode, VmConfig};
-use lm_bytecode::{Instr, Module};
+use lm_bytecode::closed::{TypeEnvFull, TypeEnvs};
+use lm_bytecode::{BcType, Instr, Module};
 use lm_heap::{Heap, MapIndex, Object};
-use lm_value::{ObjRef, Value};
+use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 use std::hash::{Hash, Hasher};
+
+/// The fault one machine takes when the type environment table of its
+/// world reaches a cap.
+///
+/// The language permits polymorphic recursion, so a program can ask
+/// for closed types and environments without bound. The cap turns
+/// that into one local resource fault.
+fn env_fault(_: TypeEnvFull) -> FaultCode {
+    FaultCode::BoundaryLimit
+}
 
 /// A dense machine identifier inside one world.
 pub type VmId = u32;
@@ -156,6 +167,47 @@ impl PolicyTable {
     }
 }
 
+/// The type environment of one generic virtual call.
+///
+/// A method of a generic class binds the class arguments first and its
+/// own arguments after them. The receiver object carries its class
+/// arguments, and the declared type of the `self` parameter names the
+/// class that declared the method, so the walk needs no side table.
+fn method_env(
+    module: &Module,
+    envs: &mut TypeEnvs,
+    callee: u32,
+    class: u32,
+    class_env: TypeEnvId,
+    parent: TypeEnvId,
+    app: u32,
+) -> Result<TypeEnvId, TypeEnvFull> {
+    let own = envs.derive(module, parent, app)?;
+    let body = &module.funcs[callee as usize];
+    if body.type_params as usize == envs.env(own).map(|e| e.types.len()).unwrap_or(0) {
+        // The method owner takes no type argument, so the application
+        // of the call site is the whole environment.
+        return Ok(own);
+    }
+    let owner = match body.params.first().map(|p| &module.types[*p as usize]) {
+        Some(BcType::Class(c)) | Some(BcType::Inst(c, _)) => *c,
+        _ => return Ok(own),
+    };
+    let args: Vec<u32> = envs
+        .env(class_env)
+        .map(|e| e.types.clone())
+        .unwrap_or_default();
+    let mut types = envs
+        .ancestor_args(module, class, &args, owner)
+        .unwrap_or_default();
+    let (own_types, own_rows) = envs
+        .env(own)
+        .map(|e| (e.types.clone(), e.rows.clone()))
+        .unwrap_or_default();
+    types.extend(own_types);
+    envs.env_of(types, own_rows)
+}
+
 /// One explicit VM frame.
 pub struct Frame {
     pub func: u32,
@@ -165,6 +217,11 @@ pub struct Frame {
     pub base_operand: u32,
     /// The active closure object for `LoadCapture`.
     pub closure: Option<ObjRef>,
+    /// The type environment of this activation.
+    ///
+    /// The call site supplies it. A monomorphic call copies the empty
+    /// environment, so a monomorphic frame does no type work.
+    pub env: TypeEnvId,
 }
 
 /// Why one instruction left the plain path.
@@ -261,13 +318,26 @@ pub struct Machine {
     /// so two barriers never share a machine. A barrier over a
     /// disjoint set proceeds.
     pub barrier: Option<u32>,
-    /// The declared result type of this machine, as a bytecode type
-    /// index.
+    /// The body function of this machine, as a function slot.
     ///
-    /// The entry frame of a machine declares it. A snapshot records
-    /// the semantic digest of the type, so a loader can prove the
-    /// shape of a stored terminal value after every frame is gone.
-    pub result_ty: Option<u32>,
+    /// The declared result type of the machine is the result type of
+    /// this function, and the first parameter of this function is the
+    /// proc instance of a proc. A machine drops its body closure and
+    /// its frames, so the record is the one lasting evidence of both
+    /// types. A machine that never loaded a frame records `None`.
+    pub body_func: Option<u32>,
+    /// The type environment of the machine body activation.
+    ///
+    /// The machine witness. The two types above close through it, so a
+    /// machine past its constructor still names both.
+    pub witness: TypeEnvId,
+    /// True when `Proc.Spawn` launched this machine.
+    ///
+    /// The flag names the machines that received the birth grant of
+    /// specification 18.3, so a restore mints exactly the same grant.
+    /// It is not derived from the ownership, because `Proc.Run`
+    /// transfers a plain machine to the scheduler and mints no grant.
+    pub is_proc: bool,
     /// The world gate a restore put this machine behind.
     ///
     /// Restored procs are scheduler-owned but stopped until the
@@ -321,7 +391,9 @@ impl Machine {
             generation,
             paused: false,
             barrier: None,
-            result_ty: None,
+            body_func: None,
+            witness: TypeEnvId::EMPTY,
+            is_proc: false,
             gate: 0,
             start_body: None,
         }
@@ -339,6 +411,7 @@ impl Machine {
         func: u32,
         args: Vec<Value>,
         closure: Option<ObjRef>,
+        env: TypeEnvId,
     ) {
         let local_count = module.funcs[func as usize].local_count() as usize;
         if local_count > self.config.max_stack_values as usize {
@@ -349,7 +422,8 @@ impl Machine {
             );
             return;
         }
-        self.result_ty = Some(module.funcs[func as usize].ret);
+        self.body_func = Some(func);
+        self.witness = env;
         self.vm.locals = args;
         // A slot past the parameters holds no value yet. The marker
         // states that fact, so a snapshot never spells an
@@ -364,6 +438,7 @@ impl Machine {
             base_local: 0,
             base_operand: 0,
             closure,
+            env,
         });
         self.vm.state = MachineState::Ready;
     }
@@ -626,12 +701,23 @@ impl Machine {
         }
     }
 
+    /// The type environment of the running frame.
+    #[inline]
+    fn frame_env(&self) -> TypeEnvId {
+        self.vm.frames.last().map(|f| f.env).unwrap_or_default()
+    }
+
     /// Execute exactly one instruction of the current frame.
+    ///
+    /// `envs` is the type environment table of the world. A
+    /// monomorphic instruction never reads it, so a monomorphic
+    /// program performs no type work.
     #[inline(always)]
     pub fn exec_instr(
         &mut self,
         module: &Module,
         dispatch: &[crate::DispatchRow],
+        envs: &mut TypeEnvs,
     ) -> Result<ExecOutcome, FaultCode> {
         if self.vm.fuel == 0 {
             return Err(FaultCode::OutOfFuel);
@@ -741,11 +827,23 @@ impl Machine {
                 let a = self.pop_obj();
                 self.push(Value::Bool(a != b))?;
             }
-            Instr::Call(callee) | Instr::CallG { func: callee, .. } => {
+            // A direct call of a non-generic function copies the empty
+            // environment, so it allocates nothing and reads no table.
+            Instr::Call(callee) => {
                 let argc = module.funcs[callee as usize].params.len();
-                self.push_frame(module, callee, argc, None)?;
+                self.push_frame(module, callee, argc, None, TypeEnvId::EMPTY)?;
             }
-            Instr::CallVirtual { selector, argc } | Instr::CallVirtualG { selector, argc, .. } => {
+            // A generic call derives one environment from the caller
+            // environment and the application of the call site. The
+            // table caches the pair, so a repeated call reuses one
+            // index.
+            Instr::CallG { func: callee, app } => {
+                let argc = module.funcs[callee as usize].params.len();
+                let parent = self.frame_env();
+                let env = envs.derive(module, parent, app).map_err(env_fault)?;
+                self.push_frame(module, callee, argc, None, env)?;
+            }
+            Instr::CallVirtual { selector, argc } => {
                 let argc = argc as usize;
                 let recv = self.vm.operands[self.vm.operands.len() - 1 - argc];
                 let class = match self.vm.heap.get(recv.as_obj().expect("verified receiver")) {
@@ -753,25 +851,56 @@ impl Machine {
                     _ => unreachable!("verified receiver shape"),
                 };
                 let target = dispatch[class as usize].method(selector);
-                self.push_frame(module, target, argc + 1, None)?;
+                self.push_frame(module, target, argc + 1, None, TypeEnvId::EMPTY)?;
             }
+            // A generic virtual call binds the receiver class
+            // arguments first and the own arguments of the method
+            // after them. The receiver object carries its class
+            // arguments, so the runtime reads them from the value it
+            // dispatched on.
+            Instr::CallVirtualG {
+                selector,
+                argc,
+                app,
+            } => {
+                let argc = argc as usize;
+                let recv = self.vm.operands[self.vm.operands.len() - 1 - argc];
+                let (class, class_env) =
+                    match self.vm.heap.get(recv.as_obj().expect("verified receiver")) {
+                        Object::Instance { class, env, .. } => (*class, env.env()),
+                        _ => unreachable!("verified receiver shape"),
+                    };
+                let target = dispatch[class as usize].method(selector);
+                let parent = self.frame_env();
+                let env = method_env(module, envs, target, class, class_env, parent, app)
+                    .map_err(env_fault)?;
+                self.push_frame(module, target, argc + 1, None, env)?;
+            }
+            // A closure call installs the environment the creator
+            // frame held. The call site applies no type argument, so
+            // the closure value is the only evidence.
             Instr::CallValue { argc } => {
                 let argc = argc as usize;
                 let callee_pos = self.vm.operands.len() - 1 - argc;
                 let callee = self.vm.operands.remove(callee_pos);
                 let r = callee.as_obj().expect("verified closure value");
-                let target = match self.vm.heap.get(r) {
-                    Object::Closure { func, .. } => *func,
+                let (target, env) = match self.vm.heap.get(r) {
+                    Object::Closure { func, env, .. } => (*func, env.env()),
                     _ => unreachable!("verified closure shape"),
                 };
-                self.push_frame(module, target, argc, Some(r))?;
+                self.push_frame(module, target, argc, Some(r), env)?;
             }
+            // The closure retains the environment of the frame that
+            // built it. Capture cannot rebuild it later, because the
+            // closure outlives that frame.
             Instr::MakeClosure { func, captures } => {
                 let split = self.vm.operands.len() - captures as usize;
                 let captured: Vec<Value> = self.vm.operands.split_off(split);
+                let env = Witness(self.frame_env());
                 let value = self.alloc(Object::Closure {
                     func,
                     captures: captured,
+                    env,
                 })?;
                 self.push(value)?;
             }
@@ -784,11 +913,28 @@ impl Machine {
                 };
                 self.push(value)?;
             }
-            Instr::New(class) | Instr::NewG { class, .. } => {
+            // A plain class takes no type argument, so the instance
+            // records the empty environment and allocates nothing.
+            Instr::New(class) => {
                 let field_count = module.classes[class as usize].fields.len();
                 let value = self.alloc(Object::Instance {
                     class,
                     fields: vec![Value::Uninit; field_count],
+                    env: Witness::EMPTY,
+                })?;
+                self.push(value)?;
+            }
+            // A generic instance records its own class arguments, so a
+            // later dispatch and a later reflection query read them
+            // from the object itself.
+            Instr::NewG { class, app } => {
+                let field_count = module.classes[class as usize].fields.len();
+                let parent = self.frame_env();
+                let env = envs.derive(module, parent, app).map_err(env_fault)?;
+                let value = self.alloc(Object::Instance {
+                    class,
+                    fields: vec![Value::Uninit; field_count],
+                    env: Witness(env),
                 })?;
                 self.push(value)?;
             }
@@ -1140,9 +1286,10 @@ impl Machine {
         &mut self,
         module: &Module,
         dispatch: &[crate::DispatchRow],
+        envs: &mut TypeEnvs,
     ) -> Result<ExecOutcome, FaultCode> {
         loop {
-            match self.exec_instr(module, dispatch) {
+            match self.exec_instr(module, dispatch, envs) {
                 Ok(ExecOutcome::Continue) => {}
                 outcome => return outcome,
             }
@@ -1191,6 +1338,7 @@ impl Machine {
         callee: u32,
         consume: usize,
         closure: Option<ObjRef>,
+        env: TypeEnvId,
     ) -> Result<(), FaultCode> {
         if self.vm.frames.len() as u32 >= self.config.max_frames {
             return Err(FaultCode::StackLimit);
@@ -1218,6 +1366,7 @@ impl Machine {
             base_local,
             base_operand,
             closure,
+            env,
         });
         Ok(())
     }

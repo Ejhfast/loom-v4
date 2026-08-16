@@ -27,13 +27,14 @@ use super::{
     AdmissionBudget, Image, ImageBlock, ImageError, ImageFrame, ImageLimits, ImageMachine,
     ImageMailbox, ImageObject, ImagePending, ImageReason, ImageState, ImageTerminal, LoadLimits,
     Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER,
-    SECTION_HEAPS, SECTION_MACHINES,
+    SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
 };
 use crate::LoadedModule;
 use lm_abi::FaultCode;
+use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
 use lm_heap::{MapIndex, Object};
-use lm_value::{ObjRef, Value};
+use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 
 /// The domain separator of the container hash.
 const HASH_DOMAIN: &[u8] = b"lm-snapshot-container-v1\0";
@@ -180,11 +181,13 @@ impl Out {
 pub fn encode(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
     let header = section_header(image);
     let code = section_code(image);
+    let types = section_types(image, limit)?;
     let heaps = section_heaps(image, limit)?;
     let machines = section_machines(image, limit)?;
     let payloads = [
         (SECTION_HEADER, header),
         (SECTION_CODE, code),
+        (SECTION_TYPES, types),
         (SECTION_HEAPS, heaps),
         (SECTION_MACHINES, machines),
     ];
@@ -278,6 +281,89 @@ fn section_code(image: &Image) -> Vec<u8> {
     out.bytes
 }
 
+/// The closed type table and the type environment table.
+///
+/// A node names a class by its numeric slot and an effect name by its
+/// module string slot, exactly as a heap object names a class. The
+/// code manifest carries the definition hash of every class the image
+/// names, and admission proves every slot.
+fn section_types(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
+    let mut out = Out {
+        bytes: Vec::new(),
+        limit,
+        bad_op: None,
+    };
+    out.leb(image.types.len() as u64);
+    for node in &image.types {
+        encode_closed_type(&mut out, node);
+        if out.over_limit() {
+            return Err(SnapshotFail::LimitExceeded);
+        }
+    }
+    // Ordinal zero is the empty environment. It carries no payload, so
+    // the table writes the entries after it.
+    out.leb(image.envs.len().saturating_sub(1) as u64);
+    for env in image.envs.iter().skip(1) {
+        out.leb(env.types.len() as u64);
+        for ty in &env.types {
+            out.leb(*ty as u64);
+        }
+        out.leb(env.rows.len() as u64);
+        for row in &env.rows {
+            encode_row(&mut out, row);
+        }
+        if out.over_limit() {
+            return Err(SnapshotFail::LimitExceeded);
+        }
+    }
+    out.into_bytes()
+}
+
+fn encode_row(out: &mut Out, row: &ClosedRow) {
+    out.leb(row.len() as u64);
+    for slot in row {
+        out.leb(*slot as u64);
+    }
+}
+
+fn encode_closed_type(out: &mut Out, node: &ClosedType) {
+    out.u8(lm_bytecode::closed::tag_of(node));
+    let list = |out: &mut Out, ids: &[u32]| {
+        out.leb(ids.len() as u64);
+        for id in ids {
+            out.leb(*id as u64);
+        }
+    };
+    match node {
+        ClosedType::Class(c) => out.leb(*c as u64),
+        ClosedType::Inst(c, args) => {
+            out.leb(*c as u64);
+            list(out, args);
+        }
+        ClosedType::List(e) | ClosedType::Vm(e) | ClosedType::Snapshot(e) => out.leb(*e as u64),
+        ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
+            out.leb(*a as u64);
+            out.leb(*b as u64);
+        }
+        ClosedType::Tuple(elems) => list(out, elems),
+        ClosedType::Fn(params, muts, ret, row) => {
+            out.leb(params.len() as u64);
+            for (param, mutable) in params.iter().zip(muts.iter()) {
+                out.u8(u8::from(*mutable));
+                out.leb(*param as u64);
+            }
+            out.leb(*ret as u64);
+            encode_row(out, row);
+        }
+        ClosedType::Op(op, f) => {
+            let id = out.op_identity(*op);
+            out.hash(&id);
+            out.leb(*f as u64);
+        }
+        _ => {}
+    }
+}
+
 fn section_heaps(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
     let mut out = Out {
         bytes: Vec::new(),
@@ -301,8 +387,9 @@ fn encode_object(out: &mut Out, object: &Object) {
     out.u8(object.tag());
     match object {
         Object::Str(text) => out.str(text),
-        Object::Instance { class, fields } => {
+        Object::Instance { class, fields, env } => {
             out.leb(*class as u64);
+            out.leb(env.env().0 as u64);
             out.values(fields);
         }
         Object::List { items } | Object::Tuple { items } => out.values(items),
@@ -313,8 +400,13 @@ fn encode_object(out: &mut Out, object: &Object) {
                 out.value(*value);
             }
         }
-        Object::Closure { func, captures } => {
+        Object::Closure {
+            func,
+            captures,
+            env,
+        } => {
             out.leb(*func as u64);
+            out.leb(env.env().0 as u64);
             out.values(captures);
         }
         Object::StrBuilder(text) => out.str(text),
@@ -377,13 +469,10 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
             flags |= 4;
         }
         out.u8(flags);
-        match machine.result_type {
-            None => out.u8(0),
-            Some(hash) => {
-                out.u8(1);
-                out.hash(&hash);
-            }
-        }
+        // The machine witness: the body function and the environment
+        // of its activation.
+        out.opt(machine.body_func);
+        out.leb(machine.witness as u64);
         out.u32(machine.generation);
         out.u64(machine.fuel);
         out.u64(machine.next_ordinal);
@@ -397,6 +486,7 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
             out.leb(frame.base_local as u64);
             out.leb(frame.base_operand as u64);
             out.opt(frame.closure);
+            out.leb(frame.env as u64);
         }
         out.values(&machine.locals);
         out.values(&machine.operands);
@@ -641,6 +731,8 @@ impl<'b> Cursor<'b> {
 struct Ctx {
     limits: LoadLimits,
     machine_count: u32,
+    /// The number of type environment entries the image carries.
+    env_count: u32,
 }
 
 /// Load one external snapshot container.
@@ -801,6 +893,7 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
     let want = [
         SECTION_HEADER,
         SECTION_CODE,
+        SECTION_TYPES,
         SECTION_HEAPS,
         SECTION_MACHINES,
     ];
@@ -914,12 +1007,21 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
     if code.remaining() != 0 {
         return err(ImageReason::Trailing, "the code section holds extra bytes");
     }
+    // Section 3: the closed type table and the environment table. Both
+    // precede the heaps, because a heap object names an environment by
+    // its ordinal here.
+    let mut type_section = section(2);
+    let (types, envs) = decode_types(&mut type_section, &limits)?;
+    if type_section.remaining() != 0 {
+        return err(ImageReason::Trailing, "the type section holds extra bytes");
+    }
     let ctx = Ctx {
         limits,
         machine_count: machine_count as u32,
+        env_count: envs.len() as u32,
     };
-    // Section 3: the heaps, one per machine, in ordinal order.
-    let mut heaps = section(2);
+    // Section 4: the heaps, one per machine, in ordinal order.
+    let mut heaps = section(3);
     let mut all_objects: Vec<Vec<ImageObject>> = Vec::new();
     for _ in 0..machine_count {
         let count = heaps.count(ctx.limits.max_objects as u64, "object")?;
@@ -934,8 +1036,8 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
     if heaps.remaining() != 0 {
         return err(ImageReason::Trailing, "the heap section holds extra bytes");
     }
-    // Section 4: the machine records.
-    let mut records = section(3);
+    // Section 5: the machine records.
+    let mut records = section(4);
     let mut machines: Vec<ImageMachine> = Vec::new();
     for objects in all_objects {
         let machine = decode_machine(&mut records, &ctx, objects)?;
@@ -956,8 +1058,146 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
         result_type,
         funcs,
         classes,
+        types,
+        envs,
         machines,
     })
+}
+
+/// Decode the closed type table and the type environment table.
+///
+/// Every count is checked against a load limit and against the bytes
+/// that remain before it sizes an allocation. Every child index must
+/// name an earlier entry, so the table stays a directed acyclic graph
+/// and a walk over one node terminates.
+fn decode_types(
+    cur: &mut Cursor<'_>,
+    limits: &LoadLimits,
+) -> Read<(Vec<ClosedType>, Vec<TypeEnv>)> {
+    let count = cur.count(limits.max_closed_types as u64, "closed type")?;
+    let mut types: Vec<ClosedType> = Vec::new();
+    for idx in 0..count {
+        let node = decode_closed_type(cur, limits, idx as u32)?;
+        types.push(node);
+    }
+    let env_count = cur.count(limits.max_type_envs as u64, "type environment")?;
+    let mut envs: Vec<TypeEnv> = vec![TypeEnv::default()];
+    for _ in 0..env_count {
+        let arity = cur.count(limits.max_closed_types as u64, "environment argument")?;
+        let mut list: Vec<u32> = Vec::new();
+        for _ in 0..arity {
+            list.push(closed_ref(cur, count as u32)?);
+        }
+        let rows_len = cur.count(limits.max_closed_types as u64, "environment row")?;
+        let mut rows: Vec<ClosedRow> = Vec::new();
+        for _ in 0..rows_len {
+            rows.push(decode_row(cur, limits)?);
+        }
+        envs.push(TypeEnv { types: list, rows });
+    }
+    Ok((types, envs))
+}
+
+/// One closed type ordinal below `count`.
+fn closed_ref(cur: &mut Cursor<'_>, count: u32) -> Read<u32> {
+    let id = cur.leb()?;
+    if id >= count as u64 {
+        return err(
+            ImageReason::Reference,
+            format!("a closed type ordinal names entry {id} of {count}"),
+        );
+    }
+    Ok(id as u32)
+}
+
+fn decode_row(cur: &mut Cursor<'_>, limits: &LoadLimits) -> Read<ClosedRow> {
+    let len = cur.count(limits.max_code_slots as u64, "effect row element")?;
+    let mut row: ClosedRow = Vec::new();
+    for _ in 0..len {
+        let slot = u32::try_from(cur.leb()?)
+            .map_err(|_| ImageError::new(ImageReason::Code, "an effect name slot is too large"))?;
+        row.push(slot);
+    }
+    Ok(row)
+}
+
+/// Decode one closed type node. `at` is the ordinal of the node, and
+/// every child must name an earlier ordinal.
+fn decode_closed_type(cur: &mut Cursor<'_>, limits: &LoadLimits, at: u32) -> Read<ClosedType> {
+    let tag = cur.u8()?;
+    let list = |cur: &mut Cursor<'_>| -> Read<Vec<u32>> {
+        let len = cur.count(limits.max_closed_types as u64, "closed type argument")?;
+        let mut out = Vec::new();
+        for _ in 0..len {
+            out.push(closed_ref(cur, at)?);
+        }
+        Ok(out)
+    };
+    Ok(match tag {
+        0 => ClosedType::Unit,
+        1 => ClosedType::Bool,
+        2 => ClosedType::Int,
+        3 => ClosedType::Str,
+        4 => ClosedType::StringBuilder,
+        5 => ClosedType::ByteBuffer,
+        6 => ClosedType::Fault,
+        7 => ClosedType::Request,
+        8 => ClosedType::PolicyTable,
+        9 => ClosedType::EmptyVm,
+        10 => ClosedType::Digest,
+        11 => ClosedType::SnapshotImage,
+        12 => ClosedType::Class(class_slot(cur)?),
+        13 => {
+            let class = class_slot(cur)?;
+            ClosedType::Inst(class, list(cur)?)
+        }
+        14 => ClosedType::List(closed_ref(cur, at)?),
+        15 => {
+            let k = closed_ref(cur, at)?;
+            let v = closed_ref(cur, at)?;
+            ClosedType::Map(k, v)
+        }
+        16 => ClosedType::Tuple(list(cur)?),
+        17 => {
+            let len = cur.count(limits.max_closed_types as u64, "closed parameter")?;
+            let mut params = Vec::new();
+            let mut muts = Vec::new();
+            for _ in 0..len {
+                muts.push(cur.flag()?);
+                params.push(closed_ref(cur, at)?);
+            }
+            let ret = closed_ref(cur, at)?;
+            let row = decode_row(cur, limits)?;
+            ClosedType::Fn(params, muts, ret, row)
+        }
+        18 => ClosedType::Vm(closed_ref(cur, at)?),
+        19 => {
+            let a = closed_ref(cur, at)?;
+            let b = closed_ref(cur, at)?;
+            ClosedType::PendingCall(a, b)
+        }
+        20 => {
+            let a = closed_ref(cur, at)?;
+            let b = closed_ref(cur, at)?;
+            ClosedType::Handle(a, b)
+        }
+        21 => {
+            let op = decode_op(cur)?;
+            ClosedType::Op(op, closed_ref(cur, at)?)
+        }
+        22 => ClosedType::Snapshot(closed_ref(cur, at)?),
+        other => {
+            return err(
+                ImageReason::Layout,
+                format!("the closed type tag {other} is not a canonical tag"),
+            )
+        }
+    })
+}
+
+fn class_slot(cur: &mut Cursor<'_>) -> Read<u32> {
+    u32::try_from(cur.leb()?)
+        .map_err(|_| ImageError::new(ImageReason::Code, "a class slot is too large"))
 }
 
 fn decode_value(cur: &mut Cursor<'_>, objects: u32) -> Read<Value> {
@@ -1050,11 +1290,10 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx, objects: u32) -> Read<Object> 
     Ok(match tag {
         0 => Object::Str(cur.str(limits.max_string_bytes)?),
         1 => {
-            let class = cur.leb()?;
-            let class = u32::try_from(class)
-                .map_err(|_| ImageError::new(ImageReason::Code, "a class slot is too large"))?;
+            let class = class_slot(cur)?;
+            let env = env_ref(cur, ctx)?;
             let fields = decode_values(cur, objects, limits.max_stack_values as u64, "field")?;
-            Object::Instance { class, fields }
+            Object::Instance { class, fields, env }
         }
         2 => Object::List {
             items: decode_values(cur, objects, limits.max_stack_values as u64, "list item")?,
@@ -1079,8 +1318,13 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx, objects: u32) -> Read<Object> 
             let func = cur.leb()?;
             let func = u32::try_from(func)
                 .map_err(|_| ImageError::new(ImageReason::Code, "a function slot is too large"))?;
+            let env = env_ref(cur, ctx)?;
             let captures = decode_values(cur, objects, limits.max_stack_values as u64, "capture")?;
-            Object::Closure { func, captures }
+            Object::Closure {
+                func,
+                captures,
+                env,
+            }
         }
         6 => Object::StrBuilder(cur.str(limits.max_string_bytes)?),
         7 => {
@@ -1135,6 +1379,26 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx, objects: u32) -> Read<Object> 
     })
 }
 
+/// One type environment ordinal of this image, as a witness.
+fn env_ref(cur: &mut Cursor<'_>, ctx: &Ctx) -> Read<Witness> {
+    Ok(Witness(TypeEnvId(env_ordinal(cur, ctx)?)))
+}
+
+/// One type environment ordinal of this image.
+fn env_ordinal(cur: &mut Cursor<'_>, ctx: &Ctx) -> Read<u32> {
+    let env = cur.leb()?;
+    if env >= ctx.env_count as u64 {
+        return err(
+            ImageReason::Reference,
+            format!(
+                "a type environment ordinal names entry {env} of {}",
+                ctx.env_count
+            ),
+        );
+    }
+    Ok(env as u32)
+}
+
 fn machine_ref(cur: &mut Cursor<'_>, ctx: &Ctx) -> Read<u32> {
     let vm = cur.leb()?;
     if vm >= ctx.machine_count as u64 {
@@ -1167,16 +1431,13 @@ fn decode_machine(
     let scheduler_owned = flags & 1 != 0;
     let paused = flags & 2 != 0;
     let is_proc = flags & 4 != 0;
-    let result_type = match cur.u8()? {
+    let body_func = match cur.leb()? {
         0 => None,
-        1 => Some(cur.hash()?),
-        other => {
-            return err(
-                ImageReason::State,
-                format!("the result-type tag {other} is not 0 or 1"),
-            )
-        }
+        raw => Some(u32::try_from(raw - 1).map_err(|_| {
+            ImageError::new(ImageReason::Code, "a body function slot is too large")
+        })?),
     };
+    let witness = env_ordinal(cur, ctx)?;
     let generation = cur.u32()?;
     let fuel = cur.u64()?;
     let next_ordinal = cur.u64()?;
@@ -1200,6 +1461,7 @@ fn decode_machine(
         let base_local = cur.leb()?;
         let base_operand = cur.leb()?;
         let closure = cur.opt(count as u64, "frame closure")?;
+        let env = env_ordinal(cur, ctx)?;
         frames.push(ImageFrame {
             func,
             block,
@@ -1210,6 +1472,7 @@ fn decode_machine(
                 ImageError::new(ImageReason::Layout, "an operand base is too large")
             })?,
             closure,
+            env,
         });
     }
     let locals = decode_values(cur, count, limits.max_stack_values as u64, "local")?;
@@ -1279,7 +1542,8 @@ fn decode_machine(
         scheduler_owned,
         paused,
         is_proc,
-        result_type,
+        body_func,
+        witness,
         generation,
         fuel,
         next_ordinal,

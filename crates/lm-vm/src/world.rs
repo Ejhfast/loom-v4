@@ -114,7 +114,7 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
 /// The world: the loaded code plus every machine.
 pub struct World<'m> {
     loaded: &'m LoadedModule,
-    module: &'m Module,
+    pub(crate) module: &'m Module,
     dispatch: &'m [crate::DispatchRow],
     core: CoreLayout,
     pub(crate) machines: Vec<Machine>,
@@ -135,6 +135,13 @@ pub struct World<'m> {
     /// holds machine identifiers and stop modes only, never a guest
     /// heap reference.
     suspended: std::collections::BTreeMap<VmId, Vec<Activation>>,
+    /// The closed type table and the type environment table of this
+    /// world (`docs/specs/snapshot-image-admission.md` section 5.6).
+    ///
+    /// A frame, a closure, an instance, and a machine store one index
+    /// into it. The table belongs to one world, so an untrusted
+    /// restore never grows shared module state.
+    pub(crate) envs: lm_bytecode::closed::TypeEnvs,
     host: Box<dyn Host>,
     config: VmConfig,
     /// The proc trace, when tracing is on.
@@ -231,7 +238,15 @@ impl<'m> World<'m> {
     pub fn new(loaded: &'m LoadedModule, config: VmConfig, host: Box<dyn Host>) -> World<'m> {
         let module = loaded.module();
         let mut root = Machine::empty(config, None);
-        root.load_frame(module, module.entry, Vec::new(), None);
+        // The entry function of a program takes no type argument, so
+        // the root frame carries the empty environment.
+        root.load_frame(
+            module,
+            module.entry,
+            Vec::new(),
+            None,
+            lm_value::TypeEnvId::EMPTY,
+        );
         World {
             loaded,
             module,
@@ -240,6 +255,7 @@ impl<'m> World<'m> {
             machines: vec![root],
             mock_free: Vec::new(),
             suspended: std::collections::BTreeMap::new(),
+            envs: lm_bytecode::closed::TypeEnvs::default(),
             host,
             config,
             trace: None,
@@ -603,11 +619,14 @@ impl<'m> World<'m> {
                         }
                         continue;
                     }
+                    let module = self.module;
+                    let dispatch = self.dispatch;
+                    let envs = &mut self.envs;
                     let machine = &mut self.machines[act.vm as usize];
                     let outcome = if act.mode == StopMode::OneStep {
-                        machine.exec_instr(self.module, self.dispatch)
+                        machine.exec_instr(module, dispatch, envs)
                     } else {
-                        machine.exec_until_boundary(self.module, self.dispatch)
+                        machine.exec_until_boundary(module, dispatch, envs)
                     };
                     stack[top_idx].retired = true;
                     match outcome {
@@ -854,7 +873,17 @@ impl<'m> World<'m> {
         fields: Vec<Value>,
     ) -> Result<Value, FaultCode> {
         let class = class.expect("the verifier requires the whole core family");
-        self.machines[vm as usize].alloc(Object::Instance { class, fields })
+        // The kernel builds a core enum instance outside `New` and
+        // `NewG`, and it holds no closed form of the class arguments:
+        // those follow from the operation manifest, which `lm-vm` does
+        // not type. The instance therefore records the empty witness,
+        // which states nothing. Admission derives the arguments from
+        // the edge that reaches the value, so no rule depends on it.
+        self.machines[vm as usize].alloc(Object::Instance {
+            class,
+            fields,
+            env: lm_value::Witness::EMPTY,
+        })
     }
 
     /// Install one reply value into a machine whose pending perform
@@ -1180,11 +1209,20 @@ impl<'m> World<'m> {
                 return;
             }
         };
-        let func = match self.machines[id as usize].vm.heap.get(closure_ref) {
-            Object::Closure { func, .. } => *func,
+        // The handler closure carries the environment of the frame
+        // that built it, and the mock body runs under exactly that
+        // environment.
+        let (func, env) = match self.machines[id as usize].vm.heap.get(closure_ref) {
+            Object::Closure { func, env, .. } => (*func, env.env()),
             _ => unreachable!("a mock handler is a closure"),
         };
-        self.machines[id as usize].load_frame(self.module, func, moved_args, Some(closure_ref));
+        self.machines[id as usize].load_frame(
+            self.module,
+            func,
+            moved_args,
+            Some(closure_ref),
+            env,
+        );
         self.push_activation(
             stack,
             Activation {
@@ -1228,11 +1266,11 @@ impl<'m> World<'m> {
             .start_body
             .take()
             .expect("the caller proved a stored proc body");
-        let func = match self.machines[vm as usize].vm.heap.get(body) {
-            Object::Closure { func, .. } => *func,
+        let (func, env) = match self.machines[vm as usize].vm.heap.get(body) {
+            Object::Closure { func, env, .. } => (*func, env.env()),
             _ => unreachable!("a proc body is a closure"),
         };
-        self.machines[vm as usize].load_frame(self.module, func, vec![instance], Some(body));
+        self.machines[vm as usize].load_frame(self.module, func, vec![instance], Some(body), env);
     }
 
     /// Read one machine handle out of a holder value.
@@ -1326,8 +1364,12 @@ impl<'m> World<'m> {
                         }
                     }
                 }
-                let func = match self.machines[target as usize].vm.heap.get(closure_ref) {
-                    Object::Closure { func, .. } => *func,
+                // The program closure carries the environment of the
+                // frame that built it, so a machine whose entry
+                // function is generic records the arguments that frame
+                // applied.
+                let (func, env) = match self.machines[target as usize].vm.heap.get(closure_ref) {
+                    Object::Closure { func, env, .. } => (*func, env.env()),
                     _ => unreachable!("a program value is a closure"),
                 };
                 self.machines[target as usize].load_frame(
@@ -1335,6 +1377,7 @@ impl<'m> World<'m> {
                     func,
                     locals,
                     Some(closure_ref),
+                    env,
                 );
                 match self.machines[vm as usize].alloc(Object::NativeVm { vm: target }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
@@ -1902,9 +1945,17 @@ impl<'m> World<'m> {
         let ctor = moved[0].as_obj().expect("a constructor is a closure");
         let body = moved[1].as_obj().expect("a proc body is a closure");
         let ctor_args: Vec<Value> = moved[2..].to_vec();
-        let func = match self.machines[child as usize].vm.heap.get(ctor) {
-            Object::Closure { func, .. } => *func,
+        let (func, ctor_env) = match self.machines[child as usize].vm.heap.get(ctor) {
+            Object::Closure { func, env, .. } => (*func, env.env()),
             _ => unreachable!("a constructor is a closure"),
+        };
+        // The machine witness names the proc body, never the
+        // constructor: the terminal result of a proc is the result of
+        // its body, and the first parameter of the body is the proc
+        // instance the mailbox type follows from.
+        let (body_func, body_env) = match self.machines[child as usize].vm.heap.get(body) {
+            Object::Closure { func, env, .. } => (*func, env.env()),
+            _ => unreachable!("a proc body is a closure"),
         };
         // The birth grant of specification 18.3. A mailbox-bearing
         // proc needs the `Proc` group to receive, and the spawner
@@ -1917,8 +1968,23 @@ impl<'m> World<'m> {
             m.vm.mailbox = Mailbox::new(limit);
             m.start_body = Some(body);
             m.owner = Ownership::Scheduler;
+            m.is_proc = true;
         }
-        self.machines[child as usize].load_frame(self.module, func, ctor_args, Some(ctor));
+        self.machines[child as usize].load_frame(
+            self.module,
+            func,
+            ctor_args,
+            Some(ctor),
+            ctor_env,
+        );
+        {
+            // `load_frame` recorded the constructor. The machine
+            // witness states the body instead, so the record stays
+            // true after the constructor frame returns.
+            let m = &mut self.machines[child as usize];
+            m.body_func = Some(body_func);
+            m.witness = body_env;
+        }
         let generation = self.machines[child as usize].generation;
         let built = self.machines[vm as usize].alloc(Object::NativeHandle {
             proc: child,
@@ -2950,7 +3016,7 @@ impl<'m> World<'m> {
                             format!("({})", parts.join(", "))
                         }
                     }
-                    Object::Instance { class, fields } => {
+                    Object::Instance { class, fields, .. } => {
                         visited.push(r);
                         let bc = &self.module.classes[*class as usize];
                         let text = if bc.kind == BcClassKind::Case {

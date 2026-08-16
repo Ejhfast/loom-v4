@@ -40,11 +40,11 @@ fn asked_tree() -> (LoadedModule, Vec<u8>) {
 }
 
 /// The fixed container frame: eight magic bytes, four version fields,
-/// one entry count, and four twelve-byte section entries.
+/// one entry count, and five twelve-byte section entries.
 const PREFIX: usize = 8 + 4 * 4;
 const TABLE: usize = PREFIX + 1;
 const ENTRY: usize = 12;
-const BODY: usize = TABLE + 4 * ENTRY;
+const BODY: usize = TABLE + 5 * ENTRY;
 
 /// Recompute the trailing container hash, so a mutation reaches the
 /// structural rules instead of stopping at the hash.
@@ -145,7 +145,7 @@ fn the_section_table_rules_reject_precisely() {
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::SectionBounds);
     // A short last section leaves trailing bytes.
     let mut bad = bytes.clone();
-    let at = TABLE + 3 * ENTRY + 8;
+    let at = TABLE + 4 * ENTRY + 8;
     let length = u32::from_le_bytes(bad[at..at + 4].try_into().expect("four bytes"));
     put_u32(&mut bad, at, length - 1);
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Trailing);
@@ -220,7 +220,7 @@ fn a_non_canonical_integer_rejects() {
     bad[header] |= 0x80;
     bad.insert(header + 1, 0);
     // The insertion moved every later section, so the table moves too.
-    for idx in 0..4 {
+    for idx in 0..5 {
         let at = TABLE + idx * ENTRY + 4;
         let offset = u32::from_le_bytes(bad[at..at + 4].try_into().expect("four bytes"));
         put_u32(&mut bad, at, offset + u32::from(idx > 0));
@@ -741,22 +741,21 @@ go()
         .to_vec();
     let image = accept(&loaded, &bytes);
     assert!(image.machines[0].frames.is_empty());
-    assert!(image.machines[0].result_type.is_some());
+    assert!(image.machines[0].body_func.is_some());
     let mut broken = image.clone();
     broken.machines[0].terminal = Some(lm_vm::snapshot::ImageTerminal::Done(lm_value::Value::Int(
         1,
     )));
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
-    // The header and the root machine state one result type.
+    // The header and the machine witness state one result type.
     let mut broken = image.clone();
     broken.result_type = [7u8; 32];
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::State);
-    // A result type the program does not name rejects.
+    // A body function the manifest does not name rejects.
     let mut broken = image.clone();
-    broken.machines[0].result_type = Some([7u8; 32]);
-    broken.result_type = [7u8; 32];
+    broken.machines[0].body_func = Some(u32::MAX);
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::Code);
 }
@@ -809,7 +808,8 @@ go()
         )))
     ));
     let mut broken = image.clone();
-    broken.machines[0].result_type = None;
+    broken.machines[0].body_func = None;
+    broken.machines[0].witness = 0;
     broken.result_type = [0u8; 32];
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::State);

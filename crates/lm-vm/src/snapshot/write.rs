@@ -16,12 +16,13 @@ use super::{
     codec, Image, ImageBlock, ImageFrame, ImageLimits, ImageMachine, ImageMailbox, ImageObject,
     ImagePending, ImageState, ImageTerminal, SnapshotFail, SnapshotImage,
 };
-use crate::machine::{Block, MachineState, Ownership, Terminal, VmId};
+use crate::machine::{Block, MachineState, Terminal, VmId};
 use crate::world::World;
 use crate::FaultCode;
+use lm_bytecode::closed::{ClosedType, TypeEnv};
 use lm_heap::Object;
-use lm_value::{ObjRef, Value};
-use std::collections::VecDeque;
+use lm_value::{ObjRef, TypeEnvId, Value, Witness};
+use std::collections::{HashMap, VecDeque};
 
 /// What one finished cut recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,7 +359,25 @@ impl World<'_> {
                     funcs.push(frame.func);
                 }
             }
+            // The machine witness names its body function, and a
+            // terminal machine keeps neither a frame nor a body
+            // closure, so the manifest must carry it too.
+            if let Some(func) = machine.body_func {
+                if !funcs.contains(&func) {
+                    funcs.push(func);
+                }
+            }
             machines.push(machine);
+        }
+        // Every class the closed type table names joins the manifest,
+        // so admission resolves it and proves its definition hash.
+        let (types, envs) = self.build_type_tables(&mut machines);
+        for node in &types {
+            if let ClosedType::Class(class) | ClosedType::Inst(class, _) = node {
+                if !classes.contains(class) {
+                    classes.push(*class);
+                }
+            }
         }
         funcs.sort_unstable();
         classes.sort_unstable();
@@ -369,31 +388,154 @@ impl World<'_> {
             .into_iter()
             .map(|slot| (slot, identity.func_hashes[slot as usize]))
             .collect();
+        let class_hashes: Vec<[u8; 32]> = identity.class_hashes.clone();
         let classes: Vec<(u32, [u8; 32])> = classes
             .into_iter()
-            .map(|slot| (slot, identity.class_hashes[slot as usize]))
+            .map(|slot| (slot, class_hashes[slot as usize]))
             .collect();
+        let semantic = identity.semantic_hash;
         // The header names the result type of the root machine, so a
         // tool reads it without walking the machine records. The
-        // loader proves the two agree.
-        let result_type = machines[0].result_type.unwrap_or([0u8; 32]);
-        let _ = root;
+        // loader derives the same digest from the machine witness and
+        // proves the two agree.
+        let result_type = self.machine_result_digest(root, &class_hashes);
         Ok(Image {
             format: super::FORMAT_VERSION,
             abi_version: lm_abi::ABI_VERSION,
             compiler_abi: lm_bytecode::identity::COMPILER_ABI_VERSION,
             verifier_version: lm_verify::VERIFIER_VERSION,
-            module_semantic: self
-                .identity()
-                .map_err(|code| {
-                    SnapshotFail::Fault(code, "the program has no verified identity".to_string())
-                })?
-                .semantic_hash,
+            module_semantic: semantic,
             result_type,
             funcs,
             classes,
+            types,
+            envs,
             machines,
         })
+    }
+
+    /// The canonical digest of the closed result type of one machine.
+    ///
+    /// A machine that never loaded a body function records zeros.
+    fn machine_result_digest(&mut self, vm: VmId, class_hashes: &[[u8; 32]]) -> [u8; 32] {
+        let record = &self.machines[vm as usize];
+        let Some(func) = record.body_func else {
+            return [0u8; 32];
+        };
+        let witness = record.witness;
+        let ret = self.module.funcs[func as usize].ret;
+        let module = self.module;
+        let Ok(closed) = self.envs.close(module, ret, witness) else {
+            return [0u8; 32];
+        };
+        self.envs.digest(module, class_hashes, closed)
+    }
+
+    /// Build the closed type table and the environment table of one
+    /// image, and rewrite every stored witness to an image ordinal.
+    ///
+    /// The world table holds the types of the whole world, so the
+    /// image carries the reachable part alone. The order is the
+    /// canonical walk: machine witness, frames, then objects, for each
+    /// machine in ordinal order. A closed type takes its ordinal in
+    /// post-order, so every child precedes its parent.
+    fn build_type_tables(&self, machines: &mut [ImageMachine]) -> (Vec<ClosedType>, Vec<TypeEnv>) {
+        let mut env_map: HashMap<u32, u32> = HashMap::new();
+        env_map.insert(0, 0);
+        let mut world_envs: Vec<TypeEnvId> = vec![TypeEnvId::EMPTY];
+        let mut order: Vec<u32> = Vec::new();
+        for machine in machines.iter() {
+            order.push(machine.witness);
+            for frame in &machine.frames {
+                order.push(frame.env);
+            }
+            for entry in &machine.objects {
+                if let Object::Instance { env, .. } | Object::Closure { env, .. } = &entry.object {
+                    order.push(env.env().0);
+                }
+            }
+        }
+        for world in order {
+            if env_map.contains_key(&world) {
+                continue;
+            }
+            env_map.insert(world, world_envs.len() as u32);
+            world_envs.push(TypeEnvId(world));
+        }
+        // The closed types, in post-order over the environments.
+        let mut type_map: HashMap<u32, u32> = HashMap::new();
+        let mut types: Vec<ClosedType> = Vec::new();
+        for world in &world_envs {
+            let Some(entry) = self.envs.env(*world) else {
+                continue;
+            };
+            for ty in entry.types.clone() {
+                self.push_closed(ty, &mut type_map, &mut types);
+            }
+        }
+        let envs: Vec<TypeEnv> = world_envs
+            .iter()
+            .map(|world| match self.envs.env(*world) {
+                Some(entry) => TypeEnv {
+                    types: entry
+                        .types
+                        .iter()
+                        .map(|ty| type_map.get(ty).copied().unwrap_or(0))
+                        .collect(),
+                    rows: entry.rows.clone(),
+                },
+                None => TypeEnv::default(),
+            })
+            .collect();
+        let map_env = |world: u32| -> u32 { env_map.get(&world).copied().unwrap_or(0) };
+        for machine in machines.iter_mut() {
+            machine.witness = map_env(machine.witness);
+            for frame in &mut machine.frames {
+                frame.env = map_env(frame.env);
+            }
+            for entry in &mut machine.objects {
+                match &mut entry.object {
+                    Object::Instance { env, .. } | Object::Closure { env, .. } => {
+                        *env = Witness(TypeEnvId(map_env(env.env().0)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (types, envs)
+    }
+
+    /// Give one closed type node and its whole subtree an image
+    /// ordinal, children first.
+    ///
+    /// The walk is iterative, so a deep type never grows the Rust
+    /// stack. A child index of the world table is always smaller than
+    /// its parent, so the walk terminates.
+    fn push_closed(&self, root: u32, map: &mut HashMap<u32, u32>, out: &mut Vec<ClosedType>) {
+        if map.contains_key(&root) {
+            return;
+        }
+        let mut stack: Vec<(u32, bool)> = vec![(root, false)];
+        while let Some((id, expanded)) = stack.pop() {
+            if map.contains_key(&id) {
+                continue;
+            }
+            let Some(node) = self.envs.ty(id) else {
+                continue;
+            };
+            if !expanded {
+                stack.push((id, true));
+                for child in node.children().into_iter().rev() {
+                    if !map.contains_key(&child) {
+                        stack.push((child, false));
+                    }
+                }
+                continue;
+            }
+            let mapped = node.remap(|child| map.get(&child).copied().unwrap_or(0));
+            map.insert(id, out.len() as u32);
+            out.push(mapped);
+        }
     }
 
     /// Build one captured machine record.
@@ -529,6 +671,9 @@ impl World<'_> {
                     Value::Obj(r) => r.slot,
                     _ => unreachable!("a closure maps to an object"),
                 }),
+                // The world environment identifier. `build_type_tables`
+                // rewrites it to an image ordinal.
+                env: f.env.0,
             })
             .collect();
         let block = match m.block {
@@ -545,14 +690,15 @@ impl World<'_> {
         Ok(ImageMachine {
             parent,
             state,
-            scheduler_owned: record.owner == Ownership::Scheduler,
+            scheduler_owned: record.owner == crate::machine::Ownership::Scheduler,
             paused: record.paused,
-            is_proc: record.owner == Ownership::Scheduler || record.paused,
-            result_type: record.result_ty.and_then(|ret| {
-                self.identity()
-                    .ok()
-                    .and_then(|identity| identity.type_hashes.get(ret as usize).copied())
-            }),
+            // The flag names the machines that `Proc.Spawn` launched,
+            // so a restore mints exactly the grant the launch minted.
+            is_proc: record.is_proc,
+            body_func: record.body_func,
+            // The world environment identifier. `build_type_tables`
+            // rewrites it to an image ordinal.
+            witness: record.witness.0,
             generation: record.generation,
             fuel: m.fuel,
             next_ordinal: m.next_ordinal,

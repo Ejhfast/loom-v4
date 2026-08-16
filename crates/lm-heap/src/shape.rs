@@ -10,7 +10,7 @@
 //! definition.
 
 use lm_abi::{FaultCode, SnapshotClass};
-use lm_value::{ObjRef, Value};
+use lm_value::{ObjRef, Value, Witness};
 
 /// Logical byte cost of one object header.
 pub(crate) const HEADER_COST: usize = 32;
@@ -50,7 +50,15 @@ pub enum Object {
     Str(String),
     /// A class instance. Fields follow the class layout. A field holds
     /// `Value::Uninit` before its first assignment.
-    Instance { class: u32, fields: Vec<Value> },
+    ///
+    /// `env` is the witness: the closed type arguments of the class.
+    /// The allocation site supplies them, so a reflection query can
+    /// read them from the object alone.
+    Instance {
+        class: u32,
+        fields: Vec<Value>,
+        env: Witness,
+    },
     /// A growable list.
     List { items: Vec<Value> },
     /// A map with entries in insertion order plus a derived lookup
@@ -62,7 +70,16 @@ pub enum Object {
     /// A fixed-arity immutable tuple. Born frozen.
     Tuple { items: Vec<Value> },
     /// A closure: code index plus captured values. Born frozen.
-    Closure { func: u32, captures: Vec<Value> },
+    ///
+    /// `env` is the witness: the type environment of the frame that
+    /// created the closure. A closure outlives that frame, and a
+    /// capture type can name a type variable the closure signature
+    /// does not hold, so the value must retain the environment.
+    Closure {
+        func: u32,
+        captures: Vec<Value>,
+        env: Witness,
+    },
     /// A string builder.
     StrBuilder(String),
     /// A byte buffer.
@@ -406,6 +423,10 @@ impl Object {
     ///
     /// Children are patched afterwards. The shell keeps the payload
     /// sizes, so the cost accounting matches the final object.
+    ///
+    /// A copy preserves the witness: a closure keeps its creator
+    /// environment across a boundary, and an instance keeps its class
+    /// arguments.
     pub fn shell(&self) -> Option<Object> {
         let shell = match self {
             Object::Str(s) => Object::Str(s.clone()),
@@ -431,13 +452,19 @@ impl Object {
                 entries: vec![(Value::Unit, Value::Unit); entries.len()],
                 index: MapIndex::default(),
             },
-            Object::Instance { class, fields } => Object::Instance {
+            Object::Instance { class, fields, env } => Object::Instance {
                 class: *class,
                 fields: vec![Value::Unit; fields.len()],
+                env: *env,
             },
-            Object::Closure { func, captures } => Object::Closure {
+            Object::Closure {
+                func,
+                captures,
+                env,
+            } => Object::Closure {
                 func: *func,
                 captures: vec![Value::Unit; captures.len()],
+                env: *env,
             },
             _ => return None,
         };
@@ -448,6 +475,9 @@ impl Object {
     ///
     /// The order of `map` calls follows the canonical child order, so
     /// a copy reads the same field order the walk reported.
+    ///
+    /// The rebuilt object keeps its witness, so a closure that crosses
+    /// a boundary keeps the environment of the frame that built it.
     pub fn remap(&self, mut map: impl FnMut(ObjRef) -> ObjRef) -> Option<Object> {
         let mut value = |v: Value| match v {
             Value::Obj(child) => Value::Obj(map(child)),
@@ -474,13 +504,19 @@ impl Object {
                 // over the copied keys.
                 index: MapIndex::default(),
             },
-            Object::Instance { class, fields } => Object::Instance {
+            Object::Instance { class, fields, env } => Object::Instance {
                 class: *class,
                 fields: fields.iter().map(|v| value(*v)).collect(),
+                env: *env,
             },
-            Object::Closure { func, captures } => Object::Closure {
+            Object::Closure {
+                func,
+                captures,
+                env,
+            } => Object::Closure {
                 func: *func,
                 captures: captures.iter().map(|v| value(*v)).collect(),
+                env: *env,
             },
             _ => return None,
         };
@@ -531,6 +567,7 @@ mod tests {
             Object::Instance {
                 class: 3,
                 fields: vec![Value::Obj(a), Value::Int(1), Value::Obj(b)],
+                env: Witness(lm_value::TypeEnvId(5)),
             },
             Object::List {
                 items: vec![Value::Obj(a), Value::Obj(b)],
@@ -545,6 +582,7 @@ mod tests {
             Object::Closure {
                 func: 4,
                 captures: vec![Value::Obj(b), Value::Unit, Value::Obj(a)],
+                env: Witness(lm_value::TypeEnvId(7)),
             },
             Object::StrBuilder("buffer".to_string()),
             Object::ByteBuf(vec![1, 2, 3]),
@@ -614,6 +652,53 @@ mod tests {
         }
     }
 
+    /// The witness of one object, or `None` for a shape that holds
+    /// none.
+    fn witness_of(object: &Object) -> Option<lm_value::TypeEnvId> {
+        match object {
+            Object::Instance { env, .. } | Object::Closure { env, .. } => Some(env.env()),
+            _ => None,
+        }
+    }
+
+    /// A copy preserves the witness.
+    ///
+    /// The two copy paths reconstruct an object: `shell` builds the
+    /// destination and `remap` patches the children. A closure keeps
+    /// the environment of the frame that created it across a machine
+    /// boundary, so both paths carry the witness through.
+    #[test]
+    fn the_two_copy_paths_preserve_the_witness() {
+        for object in sample_objects() {
+            let Some(want) = witness_of(&object) else {
+                continue;
+            };
+            assert_ne!(want, lm_value::TypeEnvId::EMPTY, "the sample is generic");
+            let shell = object.shell().expect("a sendable shape has a shell");
+            assert_eq!(witness_of(&shell), Some(want), "shell");
+            let mapped = object
+                .remap(|r| r)
+                .expect("a shape with references rebuilds");
+            assert_eq!(witness_of(&mapped), Some(want), "remap");
+        }
+    }
+
+    /// A witness is provenance, so it never decides value equality.
+    #[test]
+    fn two_objects_with_other_witnesses_stay_equal() {
+        let one = Object::Closure {
+            func: 1,
+            captures: vec![Value::Int(3)],
+            env: Witness(lm_value::TypeEnvId(1)),
+        };
+        let other = Object::Closure {
+            func: 1,
+            captures: vec![Value::Int(3)],
+            env: Witness(lm_value::TypeEnvId(2)),
+        };
+        assert_eq!(one, other);
+    }
+
     /// Every shape has one sample, so the walk agreement covers the
     /// whole table.
     #[test]
@@ -629,6 +714,7 @@ mod tests {
             Object::Instance {
                 class: 0,
                 fields: vec![],
+                env: Witness::EMPTY,
             },
             Object::List { items: vec![] },
             Object::Map {
@@ -639,6 +725,7 @@ mod tests {
             Object::Closure {
                 func: 0,
                 captures: vec![],
+                env: Witness::EMPTY,
             },
             Object::StrBuilder(String::new()),
             Object::ByteBuf(vec![]),

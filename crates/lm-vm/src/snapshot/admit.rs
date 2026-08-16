@@ -28,11 +28,13 @@ use super::{
     ImageReason, ImageState, ImageTerminal, LoadLimits, SnapshotImage, FORMAT_VERSION,
 };
 use crate::LoadedModule;
+use lm_bytecode::closed::{ClosedType, TypeEnv, TypeEnvs};
 use lm_bytecode::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
-use lm_bytecode::{BcType, Instr};
+use lm_bytecode::{BcRow, BcType, Instr};
 use lm_heap::Object;
 use lm_value::Value;
-use lm_verify::{FramePoint, FrameSlots, ResolvedTypes};
+use lm_verify::{FramePoint, FrameSlots, FrameWitness, ResolvedTypes};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 /// The work one admission may perform.
@@ -157,21 +159,17 @@ pub(super) fn prove(
             format!("the program has no resolved type view: {e}"),
         )
     })?;
+    let tables = resolve_type_tables(image, module, &types, budget)?;
     let mut admit = Admit {
         image,
         module,
         identity,
         types,
-        types_by_digest: {
-            let mut map: HashMap<[u8; 32], u32> = HashMap::new();
-            for (slot, hash) in identity.type_hashes.iter().enumerate() {
-                map.entry(*hash).or_insert(slot as u32);
-            }
-            map
-        },
+        witness: tables,
         result_of: Vec::new(),
         mailbox_of: Vec::new(),
         frames_of: Vec::new(),
+        allocators: RefCell::new(HashMap::new()),
     };
     admit.run(budget)?;
     Ok(AdmissionIdentity {
@@ -260,23 +258,262 @@ fn check_identity(image: &Image, identity: &ModuleIdentity) -> Result<(), ImageE
 /// walk.
 type Work = Vec<(u32, u32, u32)>;
 
+/// The witness tables of one image, resolved against the program.
+///
+/// The image carries one closed type table and one environment table.
+/// The two maps below name the same entries in the two places
+/// admission needs them: the resolved type universe of the verifier,
+/// and one canonical table that answers content digests.
+struct WitnessTables {
+    /// The environment of every image environment ordinal, in the
+    /// resolved type universe.
+    envs: Vec<FrameWitness>,
+    /// One canonical closed type table, for content digests.
+    ///
+    /// Its environment ordinals equal the image ordinals, because
+    /// admission rejects a duplicate environment.
+    canonical: RefCell<TypeEnvs>,
+}
+
 /// The state of one admission pass.
 struct Admit<'m> {
     image: &'m Image,
     module: &'m lm_bytecode::Module,
     identity: &'m ModuleIdentity,
     types: ResolvedTypes<'m>,
-    /// The module type slot of every semantic type digest.
-    ///
-    /// A snapshot names a type by digest, because a numeric type slot
-    /// belongs to one linked program.
-    types_by_digest: HashMap<[u8; 32], u32>,
+    /// The witness tables the image carries.
+    witness: WitnessTables,
     /// The resolved result type of every captured machine.
     result_of: Vec<Option<u32>>,
     /// The resolved mailbox message type of every captured proc.
     mailbox_of: Vec<Option<u32>>,
     /// The resolved slot types of every frame of every machine.
     frames_of: Vec<Vec<FrameSlots>>,
+    /// The classes each function allocates, filled on demand.
+    ///
+    /// `New` and `NewG` are the one allocation path of an instance, so
+    /// the set names the frames that may hold an object under
+    /// construction.
+    allocators: RefCell<HashMap<u32, HashSet<u32>>>,
+}
+
+/// Resolve the closed type table and the environment table of one
+/// image against the program.
+///
+/// The call proves every entry before any later rule reads one: a
+/// child index names an earlier entry, a class slot names a class of
+/// the code manifest, an operation slot names the manifest, and an
+/// effect name slot names the module string pool. It rejects a
+/// duplicate entry in either table, so one image states one table.
+///
+/// Every entry charges the aggregate admission budget.
+fn resolve_type_tables(
+    image: &Image,
+    module: &lm_bytecode::Module,
+    types: &ResolvedTypes<'_>,
+    budget: &mut AdmissionBudget,
+) -> Result<WitnessTables, ImageError> {
+    let mut canonical = TypeEnvs::new(u32::MAX, u32::MAX);
+    let mut universe: Vec<u32> = Vec::with_capacity(image.types.len());
+    let mut canonical_of: Vec<u32> = Vec::with_capacity(image.types.len());
+    let mut seen: HashSet<ClosedType> = HashSet::new();
+    let class_named = |slot: u32| {
+        image
+            .classes
+            .binary_search_by_key(&slot, |(s, _)| *s)
+            .is_ok()
+    };
+    for (at, node) in image.types.iter().enumerate() {
+        budget.charge(1)?;
+        for child in node.children() {
+            if child as usize >= at {
+                return fail(
+                    ImageReason::Reference,
+                    format!("closed type {at} names entry {child}, which is not an earlier one"),
+                );
+            }
+        }
+        if !seen.insert(node.clone()) {
+            return fail(
+                ImageReason::Layout,
+                format!("closed type {at} repeats an earlier entry"),
+            );
+        }
+        match node {
+            ClosedType::Class(class) | ClosedType::Inst(class, _) => {
+                if *class as usize >= module.classes.len() || !class_named(*class) {
+                    return fail(
+                        ImageReason::Code,
+                        format!(
+                            "closed type {at} names class slot {class}, which the manifest omits"
+                        ),
+                    );
+                }
+            }
+            ClosedType::Op(op, _) => {
+                if *op >= lm_abi::OP_COUNT {
+                    return fail(
+                        ImageReason::Code,
+                        format!("closed type {at} names operation slot {op}"),
+                    );
+                }
+            }
+            _ => {}
+        }
+        if let ClosedType::Fn(params, muts, _, row) = node {
+            if params.len() != muts.len() {
+                return fail(
+                    ImageReason::Layout,
+                    format!("closed type {at} holds another marker count than parameters"),
+                );
+            }
+            check_closed_row(module, row, at)?;
+        }
+        let mapped = node.remap(|child| canonical_of[child as usize]);
+        let id = canonical.intern(mapped).map_err(|_| {
+            ImageError::admission(ImageReason::Budget, "the closed type table passed its cap")
+        })?;
+        canonical_of.push(id);
+        universe.push(types.intern(to_bc_type(node, &universe)));
+    }
+    // The environment table. Ordinal zero is the empty environment.
+    let mut envs: Vec<FrameWitness> = Vec::with_capacity(image.envs.len());
+    let mut seen_envs: HashSet<TypeEnv> = HashSet::new();
+    for (at, env) in image.envs.iter().enumerate() {
+        budget.charge(1)?;
+        if at == 0 && !env.is_empty() {
+            return fail(
+                ImageReason::Layout,
+                "environment zero is not the empty environment",
+            );
+        }
+        if !seen_envs.insert(env.clone()) {
+            return fail(
+                ImageReason::Layout,
+                format!("environment {at} repeats an earlier entry"),
+            );
+        }
+        for ty in &env.types {
+            if *ty as usize >= image.types.len() {
+                return fail(
+                    ImageReason::Reference,
+                    format!("environment {at} names closed type {ty}, which the image has not"),
+                );
+            }
+        }
+        for row in &env.rows {
+            check_closed_row(module, row, at)?;
+        }
+        let mapped = TypeEnv {
+            types: env
+                .types
+                .iter()
+                .map(|ty| canonical_of[*ty as usize])
+                .collect(),
+            rows: env.rows.clone(),
+        };
+        let id = canonical.intern_env(mapped).map_err(|_| {
+            ImageError::admission(
+                ImageReason::Budget,
+                "the type environment table passed its cap",
+            )
+        })?;
+        if id.0 as usize != at {
+            return fail(
+                ImageReason::Layout,
+                format!("environment {at} does not take its own ordinal"),
+            );
+        }
+        envs.push(FrameWitness {
+            types: env.types.iter().map(|ty| universe[*ty as usize]).collect(),
+            rows: env
+                .rows
+                .iter()
+                .map(|row| row.iter().map(|slot| BcRow::Op(*slot)).collect())
+                .collect(),
+        });
+    }
+    Ok(WitnessTables {
+        envs,
+        canonical: RefCell::new(canonical),
+    })
+}
+
+/// Prove that one closed effect row names this program and stays
+/// canonical.
+fn check_closed_row(
+    module: &lm_bytecode::Module,
+    row: &[u32],
+    at: usize,
+) -> Result<(), ImageError> {
+    for slot in row {
+        if *slot as usize >= module.strings.len() {
+            return fail(
+                ImageReason::Code,
+                format!("entry {at} names effect name slot {slot}, which the program has not"),
+            );
+        }
+    }
+    if lm_bytecode::closed::canonical_row(module, row.to_vec()) != row {
+        return fail(
+            ImageReason::Layout,
+            format!("entry {at} holds an effect row that is not canonical"),
+        );
+    }
+    Ok(())
+}
+
+/// One verifier effect row as a closed row.
+///
+/// A closed row holds no effect variable, so a row that still names
+/// one has no closed form.
+fn closed_row(module: &lm_bytecode::Module, row: &[BcRow]) -> Option<Vec<u32>> {
+    let mut out: Vec<u32> = Vec::with_capacity(row.len());
+    for elem in row {
+        match elem {
+            BcRow::Op(slot) => out.push(*slot),
+            BcRow::Var(_) => return None,
+        }
+    }
+    Some(lm_bytecode::closed::canonical_row(module, out))
+}
+
+/// One image closed type node, in the resolved type universe.
+///
+/// Every child already has a universe index, because a child names an
+/// earlier entry.
+fn to_bc_type(node: &ClosedType, universe: &[u32]) -> BcType {
+    let map = |id: &u32| universe[*id as usize];
+    match node {
+        ClosedType::Unit => BcType::Unit,
+        ClosedType::Bool => BcType::Bool,
+        ClosedType::Int => BcType::Int,
+        ClosedType::Str => BcType::Str,
+        ClosedType::StringBuilder => BcType::StringBuilder,
+        ClosedType::ByteBuffer => BcType::ByteBuffer,
+        ClosedType::Fault => BcType::Fault,
+        ClosedType::Request => BcType::Request,
+        ClosedType::PolicyTable => BcType::PolicyTable,
+        ClosedType::EmptyVm => BcType::EmptyVm,
+        ClosedType::Digest => BcType::Digest,
+        ClosedType::SnapshotImage => BcType::SnapshotImage,
+        ClosedType::Class(c) => BcType::Class(*c),
+        ClosedType::Inst(c, args) => BcType::Inst(*c, args.iter().map(map).collect()),
+        ClosedType::List(e) => BcType::List(map(e)),
+        ClosedType::Map(k, v) => BcType::Map(map(k), map(v)),
+        ClosedType::Tuple(elems) => BcType::Tuple(elems.iter().map(map).collect()),
+        ClosedType::Fn(params, muts, ret, row) => BcType::Fn(
+            params.iter().map(map).collect(),
+            muts.clone(),
+            map(ret),
+            row.iter().map(|slot| BcRow::Op(*slot)).collect(),
+        ),
+        ClosedType::Vm(t) => BcType::Vm(map(t)),
+        ClosedType::PendingCall(a, r) => BcType::PendingCall(map(a), map(r)),
+        ClosedType::Handle(m, r) => BcType::Handle(map(m), map(r)),
+        ClosedType::Op(op, f) => BcType::Op(*op, map(f)),
+        ClosedType::Snapshot(t) => BcType::Snapshot(map(t)),
+    }
 }
 
 impl Admit<'_> {
@@ -285,7 +522,6 @@ impl Admit<'_> {
             return fail(ImageReason::State, "a snapshot world holds no machine");
         }
         self.check_code_manifest()?;
-        self.check_root_result_type()?;
         for vm in 0..self.image.machines.len() {
             self.check_references(vm as u32)?;
             self.check_state(vm as u32)?;
@@ -294,6 +530,11 @@ impl Admit<'_> {
         self.check_world()?;
         self.resolve_frames()?;
         self.resolve_relations();
+        self.check_machine_witness()?;
+        // The header repeats the root result type, and the witness of
+        // the root machine derives it. The check runs after the
+        // witness rules, so a damaged witness names its own rule.
+        self.check_root_result_type()?;
         let mut work: Work = Vec::new();
         for vm in 0..self.image.machines.len() {
             self.check_types(vm as u32, budget, &mut work)?;
@@ -382,9 +623,14 @@ impl Admit<'_> {
     }
 
     /// The header names the result type of the root machine, and the
-    /// machine record names it again. One image states one type.
+    /// witness of that machine names it again. One image states one
+    /// type.
+    ///
+    /// The header holds the canonical content digest of the closed
+    /// type, so it names a class by definition hash and never by a
+    /// numeric slot of one linked program.
     fn check_root_result_type(&self) -> Result<(), ImageError> {
-        let root = self.image.machines[0].result_type.unwrap_or([0u8; 32]);
+        let root = self.machine_result_digest(0);
         if root != self.image.result_type {
             return fail(
                 ImageReason::State,
@@ -392,6 +638,102 @@ impl Admit<'_> {
             );
         }
         Ok(())
+    }
+
+    /// The canonical digest of the closed result type of one machine.
+    fn machine_result_digest(&self, vm: u32) -> [u8; 32] {
+        let machine = self.machine(vm);
+        let Some(func) = machine.body_func else {
+            return [0u8; 32];
+        };
+        let Some(body) = self.module.funcs.get(func as usize) else {
+            return [0u8; 32];
+        };
+        let mut table = self.witness.canonical.borrow_mut();
+        let env = lm_value::TypeEnvId(machine.witness);
+        let Ok(closed) = table.close(self.module, body.ret, env) else {
+            return [0u8; 32];
+        };
+        table.digest(self.module, &self.identity.class_hashes, closed)
+    }
+
+    /// The canonical digest of one resolved universe type.
+    ///
+    /// The call rebuilds the type inside the canonical table, so the
+    /// answer is the identity a nested container states. `None` marks
+    /// a type that holds a variable, which no closed type can name.
+    fn universe_digest(&self, ty: u32) -> Option<[u8; 32]> {
+        let id = self.universe_closed(ty)?;
+        let mut table = self.witness.canonical.borrow_mut();
+        Some(table.digest(self.module, &self.identity.class_hashes, id))
+    }
+
+    /// One resolved universe type as a canonical closed type index.
+    ///
+    /// Every child index of a universe entry is smaller than the entry
+    /// itself, so the walk terminates.
+    fn universe_closed(&self, ty: u32) -> Option<u32> {
+        let node = self.types.ty(ty)?;
+        let built = match &node {
+            BcType::Unit => ClosedType::Unit,
+            BcType::Bool => ClosedType::Bool,
+            BcType::Int => ClosedType::Int,
+            BcType::Str => ClosedType::Str,
+            BcType::StringBuilder => ClosedType::StringBuilder,
+            BcType::ByteBuffer => ClosedType::ByteBuffer,
+            BcType::Fault => ClosedType::Fault,
+            BcType::Request => ClosedType::Request,
+            BcType::PolicyTable => ClosedType::PolicyTable,
+            BcType::EmptyVm => ClosedType::EmptyVm,
+            BcType::Digest => ClosedType::Digest,
+            BcType::SnapshotImage => ClosedType::SnapshotImage,
+            BcType::Class(c) => ClosedType::Class(*c),
+            BcType::Inst(c, args) => ClosedType::Inst(*c, self.universe_list(args)?),
+            BcType::List(e) => ClosedType::List(self.universe_closed(*e)?),
+            BcType::Map(k, v) => {
+                ClosedType::Map(self.universe_closed(*k)?, self.universe_closed(*v)?)
+            }
+            BcType::Tuple(elems) => ClosedType::Tuple(self.universe_list(elems)?),
+            BcType::Fn(params, muts, ret, row) => ClosedType::Fn(
+                self.universe_list(params)?,
+                muts.clone(),
+                self.universe_closed(*ret)?,
+                closed_row(self.module, row)?,
+            ),
+            BcType::Vm(t) => ClosedType::Vm(self.universe_closed(*t)?),
+            BcType::PendingCall(a, r) => {
+                ClosedType::PendingCall(self.universe_closed(*a)?, self.universe_closed(*r)?)
+            }
+            BcType::Handle(m, r) => {
+                ClosedType::Handle(self.universe_closed(*m)?, self.universe_closed(*r)?)
+            }
+            BcType::Op(op, f) => ClosedType::Op(*op, self.universe_closed(*f)?),
+            BcType::Snapshot(t) => ClosedType::Snapshot(self.universe_closed(*t)?),
+            BcType::Var(_) => return None,
+        };
+        self.witness.canonical.borrow_mut().intern(built).ok()
+    }
+
+    fn universe_list(&self, ids: &[u32]) -> Option<Vec<u32>> {
+        ids.iter()
+            .map(|id| self.universe_closed(*id))
+            .collect::<Option<Vec<u32>>>()
+    }
+
+    /// The witness one image environment ordinal names.
+    fn env_of(&self, env: u32) -> Result<&FrameWitness, ImageError> {
+        self.witness.envs.get(env as usize).ok_or_else(|| {
+            ImageError::admission(
+                ImageReason::Reference,
+                format!("a witness names environment {env}, which the image has not"),
+            )
+        })
+    }
+
+    /// One declared module type under one image environment.
+    fn subst_at(&self, ty: u32, env: u32) -> Result<u32, ImageError> {
+        let held = self.env_of(env)?;
+        Ok(self.types.substitute(ty, &held.types, &held.rows))
     }
 
     /// Every ordinal of one machine names an entry that exists.
@@ -468,6 +810,20 @@ impl Admit<'_> {
                     )),
                 );
             }
+            // A machine handle is holder local, so it never crosses a
+            // boundary, and `Vm.New` is the one operation that mints
+            // one. It gives the handle to the parent and names the
+            // child, so no machine ever holds a handle to itself. The
+            // restored world faults on such a handle, and the rule
+            // states the property instead of relying on that.
+            if matches!(entry.object, Object::NativeVm { vm: target } if target == vm) {
+                return fail(
+                    ImageReason::Reference,
+                    at(&format!(
+                        "object {ordinal} is a machine handle to its own machine"
+                    )),
+                );
+            }
             // The shape table fixes the frozen state of a born-frozen
             // object, so a mutable one of that shape is not a state
             // the runtime can hold.
@@ -502,8 +858,14 @@ impl Admit<'_> {
                     );
                 }
             }
+            // Every witness names an environment of the image, and the
+            // arity of that environment matches the generic arity of
+            // the class or the function the object names.
+            if let Object::Instance { env, .. } | Object::Closure { env, .. } = &entry.object {
+                self.env_of(env.env().0)?;
+            }
             match &entry.object {
-                Object::Instance { class, fields } => {
+                Object::Instance { class, fields, env } => {
                     if *class as usize >= self.module.classes.len() || !self.class_named(*class) {
                         return fail(
                             ImageReason::Code,
@@ -538,8 +900,28 @@ impl Admit<'_> {
                             )),
                         );
                     }
+                    // An instance states the arguments of its own
+                    // class, or it states nothing. The VM kernel
+                    // builds a core enum instance outside `New` and
+                    // `NewG` and records the empty witness there, so
+                    // the empty environment is legal at every arity.
+                    let arity = self.module.classes[*class as usize].type_params as usize;
+                    let held = self.env_of(env.env().0)?.types.len();
+                    if held != 0 && held != arity {
+                        return fail(
+                            ImageReason::Type,
+                            at(&format!(
+                                "object {ordinal} carries a witness of another arity than class \
+                                 {class}"
+                            )),
+                        );
+                    }
                 }
-                Object::Closure { func, captures } => {
+                Object::Closure {
+                    func,
+                    captures,
+                    env,
+                } => {
                     if *func as usize >= self.module.funcs.len() || !self.func_named(*func) {
                         return fail(
                             ImageReason::Code,
@@ -557,6 +939,19 @@ impl Admit<'_> {
                                 "object {ordinal} holds {} captures and function {func} declares \
                                  {want}",
                                 captures.len()
+                            )),
+                        );
+                    }
+                    let body = &self.module.funcs[*func as usize];
+                    let held = self.env_of(env.env().0)?;
+                    if held.types.len() != body.type_params as usize
+                        || held.rows.len() != body.effect_params as usize
+                    {
+                        return fail(
+                            ImageReason::Type,
+                            at(&format!(
+                                "object {ordinal} carries a witness of another arity than \
+                                 function {func}"
                             )),
                         );
                     }
@@ -762,7 +1157,12 @@ impl Admit<'_> {
                 continue;
             };
             match m.objects[closure as usize].object {
-                Object::Closure { func, .. } if func == frame.func => {}
+                // The frame runs that closure, so the two carry one
+                // environment. A frame that named another environment
+                // would read its captures under a substitution the
+                // closure never held.
+                Object::Closure { func, env, .. }
+                    if func == frame.func && env.env().0 == frame.env => {}
                 _ => {
                     return fail(
                         ImageReason::Reference,
@@ -1099,8 +1499,9 @@ impl Admit<'_> {
     ///
     /// The verifier proves a generic body once, with its type
     /// variables opaque. The substitution of one activation comes from
-    /// the call site the frame below stopped inside, so the whole
-    /// chain resolves from its bottom frame upward.
+    /// the call site the frame below stopped inside, and the frame
+    /// witness must agree with it. The bottom frame has no call site
+    /// below it, so its witness answers alone.
     fn resolve_frames(&mut self) -> Result<(), ImageError> {
         let mut out: Vec<Vec<FrameSlots>> = Vec::with_capacity(self.image.machines.len());
         for (vm, machine) in self.image.machines.iter().enumerate() {
@@ -1131,7 +1532,11 @@ impl Admit<'_> {
                     receiver_class: receiver_class(machine, frame.base_local),
                 })
                 .collect();
-            let slots = self.types.resolve_chain(&points).map_err(|e| {
+            let mut held: Vec<FrameWitness> = Vec::with_capacity(machine.frames.len());
+            for frame in &machine.frames {
+                held.push(self.env_of(frame.env)?.clone());
+            }
+            let slots = self.types.resolve_chain(&points, &held).map_err(|e| {
                 ImageError::admission(ImageReason::Type, format!("machine {vm}: {e}"))
             })?;
             out.push(slots);
@@ -1150,9 +1555,9 @@ impl Admit<'_> {
     fn resolve_relations(&mut self) {
         let mut result_of: Vec<Option<u32>> = Vec::with_capacity(self.image.machines.len());
         let mut mailbox_of: Vec<Option<u32>> = Vec::with_capacity(self.image.machines.len());
-        for machine in self.image.machines.iter() {
-            result_of.push(self.machine_result_type(machine));
-            mailbox_of.push(self.mailbox_type(machine));
+        for vm in 0..self.image.machines.len() as u32 {
+            result_of.push(self.machine_result_type(vm));
+            mailbox_of.push(self.mailbox_type(vm));
         }
         self.result_of = result_of;
         self.mailbox_of = mailbox_of;
@@ -1160,53 +1565,87 @@ impl Admit<'_> {
 
     /// The declared terminal result type of one captured machine.
     ///
-    /// The body function of a machine states that type. A proc keeps
-    /// its body closure, and `Proc.Spawn` types its handle from exactly
-    /// that closure, so the two can never disagree. A machine that
-    /// loaded a body without keeping the closure records the type as a
-    /// digest instead.
-    ///
-    /// The result type of a proc is not the recorded digest: a proc
-    /// runs its constructor first, and the record then names the proc
-    /// instance type.
-    fn machine_result_type(&self, machine: &ImageMachine) -> Option<u32> {
-        if let Some(ordinal) = machine.start_body {
-            if let Object::Closure { func, .. } = machine.objects.get(ordinal as usize)?.object {
-                let ret = self.types.result_type(func)?;
-                return self.types.is_resolved(ret).then_some(ret);
-            }
-        }
-        machine
-            .result_type
-            .and_then(|digest| self.types_by_digest.get(&digest).copied())
+    /// The machine witness states the body function and the
+    /// environment of its activation. A machine drops its body closure
+    /// and every frame, so the witness is the one lasting evidence.
+    /// `check_machine_witness` proves the witness against the body
+    /// closure and against the bottom frame wherever one exists.
+    fn machine_result_type(&self, vm: u32) -> Option<u32> {
+        let machine = self.machine(vm);
+        let ret = self.types.result_type(machine.body_func?)?;
+        let closed = self.subst_at(ret, machine.witness).ok()?;
+        self.types.is_resolved(closed).then_some(closed)
     }
 
     /// The mailbox message type of one captured proc.
     ///
-    /// The proc class fixes the type. The stored proc body declares the
-    /// proc instance as its first parameter, and the entry frame
-    /// declares it after the constructor returns. `None` means the type
+    /// The proc class fixes the type, and the first parameter of the
+    /// machine body names the proc instance. `None` means the type
     /// does not follow from the image, and a proc that carries a
     /// message then has no governing type.
-    fn mailbox_type(&self, machine: &ImageMachine) -> Option<u32> {
-        let func = match machine.start_body {
-            Some(ordinal) => match machine.objects.get(ordinal as usize)?.object {
-                Object::Closure { func, .. } => Some(func),
-                _ => None,
-            },
-            None => machine.frames.first().map(|f| f.func),
-        }?;
-        let instance = *self.types.params(func)?.first()?;
-        self.types.proc_mailbox(instance)
+    fn mailbox_type(&self, vm: u32) -> Option<u32> {
+        let machine = self.machine(vm);
+        let instance = *self.types.params(machine.body_func?)?.first()?;
+        let closed = self.subst_at(instance, machine.witness).ok()?;
+        self.types.proc_mailbox(closed)
     }
 
-    /// The semantic type digest of one resolved type.
+    /// Prove the machine witness of every captured machine.
     ///
-    /// A digest exists for a module type entry alone. A type the
-    /// verifier created by substitution has no serialized name, so a
-    /// position that needs one has no evidence.
-    fn type_digest(&self, ty: u32) -> Option<[u8; 32]> {
-        self.identity.type_hashes.get(ty as usize).copied()
+    /// The witness is data, so admission checks it wherever a
+    /// derivation exists. The stored proc body states the body
+    /// function and its environment directly. A machine with no proc
+    /// body runs its own body in its bottom frame, so that frame
+    /// states them instead. A terminal machine holds neither, and the
+    /// witness stands alone there.
+    ///
+    /// A machine that claims the proc birth grant must name a proc
+    /// class through its witness. Without the rule an edited image
+    /// takes the whole `Proc` group at restore.
+    fn check_machine_witness(&self) -> Result<(), ImageError> {
+        for (vm, machine) in self.image.machines.iter().enumerate() {
+            let at = |what: &str| format!("machine {vm}: {what}");
+            if let Some(func) = machine.body_func {
+                if func as usize >= self.module.funcs.len() || !self.func_named(func) {
+                    return fail(
+                        ImageReason::Code,
+                        at("the witness names a function the manifest omits"),
+                    );
+                }
+            }
+            let derived: Option<(u32, u32)> = match machine.start_body {
+                Some(ordinal) => match machine.objects.get(ordinal as usize).map(|o| &o.object) {
+                    Some(Object::Closure { func, env, .. }) => Some((*func, env.env().0)),
+                    _ => None,
+                },
+                // A proc inside its constructor keeps its body
+                // closure, so the branch above answers there. Every
+                // other machine with a frame runs its own body in the
+                // bottom frame.
+                None => machine.frames.first().map(|f| (f.func, f.env)),
+            };
+            if let Some((func, env)) = derived {
+                if machine.body_func != Some(func) || machine.witness != env {
+                    return fail(
+                        ImageReason::Type,
+                        at("the machine witness does not match its body"),
+                    );
+                }
+            }
+            if machine.body_func.is_none() && machine.witness != 0 {
+                return fail(
+                    ImageReason::Type,
+                    at("a machine with no body function names an environment"),
+                );
+            }
+            if machine.is_proc && self.mailbox_of[vm].is_none() {
+                return fail(
+                    ImageReason::Mailbox,
+                    at("a machine that claims the proc grant names no proc class"),
+                );
+            }
+        }
+        Ok(())
     }
 
     // ----------------------------------------------------------
@@ -1289,6 +1728,10 @@ impl Admit<'_> {
                     at("a frame function has no function type"),
                 )
             })?;
+            // The frame witness closes the declared function type, so
+            // a closure of a generic body joins the walk at the type
+            // its activation carries.
+            let ty = self.subst_at(ty, frame.env)?;
             push_work(budget, work, (vm, closure, ty))?;
         }
         self.check_proc_body(vm, budget, work)?;
@@ -1307,13 +1750,14 @@ impl Admit<'_> {
         let Some(body) = machine.start_body else {
             return Ok(());
         };
-        if let Object::Closure { func, .. } = machine.objects[body as usize].object {
+        if let Object::Closure { func, env, .. } = machine.objects[body as usize].object {
             let ty = self.types.fn_type(func).ok_or_else(|| {
                 ImageError::admission(
                     ImageReason::Type,
                     format!("machine {vm}: the proc body has no function type"),
                 )
             })?;
+            let ty = self.subst_at(ty, env.env().0)?;
             push_work(budget, work, (vm, body, ty))?;
         }
         Ok(())
@@ -1553,18 +1997,12 @@ impl Admit<'_> {
         let Some(ImageTerminal::Done(value)) = &machine.terminal else {
             return Ok(());
         };
-        // A terminal machine keeps no frame, so the recorded digest is
-        // the one record of the type its stored result carries.
-        let Some(digest) = machine.result_type else {
+        // A terminal machine keeps no frame, so the witness is the one
+        // record of the type its stored result carries.
+        let Some(ty) = self.result_of[vm as usize] else {
             return fail(
                 ImageReason::State,
                 format!("machine {vm}: a terminal value carries no result type to prove"),
-            );
-        };
-        let Some(ty) = self.types_by_digest.get(&digest).copied() else {
-            return fail(
-                ImageReason::Code,
-                format!("machine {vm}: the result type names no type of this program"),
             );
         };
         self.check_value(
@@ -1685,8 +2123,59 @@ impl Admit<'_> {
                 continue;
             }
             budget.charge(1)?;
-            self.check_object(vm, object, ty, budget, work)?;
+            // The coherence rule runs first. It states the general
+            // property of the object, and every later rule states a
+            // property of one edge, so a shared object that two edges
+            // type differently names that rule instead of the first
+            // edge rule the walk happens to reach.
             self.check_coherence(vm, object, ty, &mut exact, budget)?;
+            self.check_object(vm, object, ty, budget, work)?;
+        }
+        self.check_instance_witness(&exact)
+    }
+
+    /// Prove the witness of every instance the walk reached.
+    ///
+    /// An instance witness is evidence for no admission rule, because
+    /// the edge that reaches the object already supplies
+    /// `Inst(class, args)`. Admission checks it because the image
+    /// carries it, and section 14 of the design states why the image
+    /// carries it: a reflection query has no edge to read.
+    ///
+    /// The check runs after the coherence map settles, so it reads the
+    /// one exact type of the object instead of the first edge the walk
+    /// happened to pop.
+    ///
+    /// The VM kernel builds a core enum instance outside `New` and
+    /// `NewG` and states no arguments there, so the empty witness
+    /// passes at every class.
+    fn check_instance_witness(&self, exact: &HashMap<(u32, u32), u32>) -> Result<(), ImageError> {
+        let mut entries: Vec<(&(u32, u32), &u32)> = exact.iter().collect();
+        entries.sort_unstable();
+        for ((vm, object), ty) in entries {
+            let Object::Instance { class, env, .. } =
+                &self.image.machines[*vm as usize].objects[*object as usize].object
+            else {
+                continue;
+            };
+            let held = &self.env_of(env.env().0)?.types;
+            if held.is_empty() {
+                continue;
+            }
+            let args = self
+                .types
+                .as_instance(*ty)
+                .map(|(_, args)| args)
+                .unwrap_or_default();
+            if *held != args {
+                return fail(
+                    ImageReason::Type,
+                    format!(
+                        "machine {vm} object {object} carries class arguments of class {class} \
+                         that the edge does not name"
+                    ),
+                );
+            }
         }
         Ok(())
     }
@@ -1704,7 +2193,12 @@ impl Admit<'_> {
     fn exact_type(&self, vm: u32, object: u32, ty: u32) -> u32 {
         match self.image.machines[vm as usize].objects[object as usize].object {
             Object::Instance { class, .. } => self.types.instance_type(class, ty).unwrap_or(ty),
-            Object::Closure { func, .. } => self.types.fn_type(func).unwrap_or(ty),
+            // The witness closes the declared function type, so two
+            // edges into one closure normalize to one type.
+            Object::Closure { func, env, .. } => match self.types.fn_type(func) {
+                Some(declared) => self.subst_at(declared, env.env().0).unwrap_or(ty),
+                None => ty,
+            },
             _ => ty,
         }
     }
@@ -1897,10 +2391,13 @@ impl Admit<'_> {
             BcType::Snapshot(want) => match payload {
                 Object::NativeSnapshot(bytes) => {
                     let found = self.nested_result_type(bytes, budget, &at)?;
-                    let Some(digest) = self.type_digest(want) else {
+                    // The closed type table gives the argument a
+                    // canonical identity, and the nested header states
+                    // the same identity for its root.
+                    let Some(digest) = self.universe_digest(want) else {
                         return fail(
                             ImageReason::Type,
-                            format!("{at} holds a snapshot type with no serialized name"),
+                            format!("{at} holds a snapshot type with no closed form"),
                         );
                     };
                     if found == digest {
@@ -1915,16 +2412,22 @@ impl Admit<'_> {
                 _ => wrong(payload.shape().name),
             },
             // A closure carries the captures its function declares. The
-            // declared function type must fit the position that reached
-            // it, so the captures follow from the function alone.
+            // witness closes the declared function type and every
+            // capture type, because a capture type can name a type
+            // variable the closure signature does not hold.
             BcType::Fn(_, _, _, _) => match payload {
-                Object::Closure { func, captures } => {
+                Object::Closure {
+                    func,
+                    captures,
+                    env,
+                } => {
                     let declared_fn = self.types.fn_type(*func).ok_or_else(|| {
                         ImageError::admission(
                             ImageReason::Type,
                             format!("{at} names a function with no function type"),
                         )
                     })?;
+                    let declared_fn = self.subst_at(declared_fn, env.env().0)?;
                     if !self.types.is_subtype(declared_fn, ty) {
                         return fail(
                             ImageReason::Layout,
@@ -1938,12 +2441,12 @@ impl Admit<'_> {
                         )
                     })?;
                     for (idx, (value, capture)) in captures.iter().zip(types.iter()).enumerate() {
-                        // A capture type of a closure a generic body
-                        // created still holds that body's variables,
-                        // and the closure value carries no
-                        // substitution. Admission has no evidence for
-                        // such a capture, so it rejects.
-                        if !self.types.is_resolved(*capture) {
+                        let capture = self.subst_at(*capture, env.env().0)?;
+                        // A capture type that still holds a variable
+                        // after the witness has no decidable value
+                        // set, so admission rejects it instead of
+                        // leaving the capture unchecked.
+                        if !self.types.is_resolved(capture) {
                             return fail(
                                 ImageReason::Type,
                                 format!("{at} capture {idx} has no resolved type"),
@@ -1952,7 +2455,7 @@ impl Admit<'_> {
                         self.check_value(
                             vm,
                             *value,
-                            *capture,
+                            capture,
                             &format!("{at} capture {idx}"),
                             budget,
                             work,
@@ -2014,7 +2517,7 @@ impl Admit<'_> {
             // An instance carries the fields its class layout declares,
             // under the type arguments of the position that named it.
             BcType::Class(_) | BcType::Inst(_, _) => match payload {
-                Object::Instance { class, fields } => {
+                Object::Instance { class, fields, .. } => {
                     let types = self.types.instance_field_types(*class, ty).ok_or_else(|| {
                         ImageError::admission(
                             ImageReason::Type,
@@ -2027,24 +2530,23 @@ impl Admit<'_> {
                             format!("{at} holds another field count than its layout"),
                         );
                     }
+                    let under_construction = fields.contains(&Value::Uninit)
+                        && !self.is_under_construction(vm, object, *class);
+                    if under_construction {
+                        return fail(
+                            ImageReason::State,
+                            format!(
+                                "{at} holds an uninitialized field and is not the object under \
+                                 construction of its machine"
+                            ),
+                        );
+                    }
                     for (idx, (value, field)) in fields.iter().zip(types.iter()).enumerate() {
                         // A field before its first assignment holds the
-                        // uninitialized marker, and a read of it faults
-                        // rather than trusting the slot.
-                        //
-                        // Specification 5.3 asks for a narrower rule:
-                        // the marker is legal only where no
-                        // initialized value is permitted. The image
-                        // carries no evidence for that rule at a
-                        // field. `New` allocates every field as the
-                        // marker and leaves the object on the operand
-                        // stack of the caller, so an object under
-                        // construction is not the receiver of any
-                        // frame. `Freeze` accepts a partly built
-                        // object as well, so the frozen bit answers
-                        // nothing either. A narrower rule would refuse
-                        // legal captures, and worklist round A2 adds
-                        // the witness that would carry it.
+                        // uninitialized marker. The rule above proves
+                        // that the object is the one under
+                        // construction on its own frame stack, so no
+                        // other instance reaches this branch.
                         if *value == Value::Uninit {
                             continue;
                         }
@@ -2078,6 +2580,79 @@ impl Admit<'_> {
                 format!("{at} sits at an unresolved type variable"),
             ),
         }
+    }
+
+    /// True when one instance is the object under construction on the
+    /// frame stack of its own machine.
+    ///
+    /// `New` and `NewG` are the one allocation path of an instance,
+    /// and the compiler emits them inside the construction function of
+    /// the class alone. That function stores the object in one local
+    /// slot, evaluates the field defaults, and calls the initializer
+    /// over it. `self` cannot escape before the initializer assigns
+    /// every required field (`E1029`), and a read before the first
+    /// assignment rejects at the checker (`E1028`). A partly built
+    /// instance therefore sits in a local slot or on the operand stack
+    /// of the frame that allocated it, and nowhere else.
+    ///
+    /// The rule is exactly that: some frame of the machine must name
+    /// the object directly, and the function of that frame must
+    /// allocate the class of the object.
+    fn is_under_construction(&self, vm: u32, object: u32, class: u32) -> bool {
+        let machine = self.machine(vm);
+        let names = |value: &Value| matches!(value, Value::Obj(r) if r.slot == object);
+        for (idx, frame) in machine.frames.iter().enumerate() {
+            if !self.allocates(frame.func, class) {
+                continue;
+            }
+            let local_end = match machine.frames.get(idx + 1) {
+                Some(next) => next.base_local as usize,
+                None => machine.locals.len(),
+            };
+            let operand_end = match machine.frames.get(idx + 1) {
+                Some(next) => next.base_operand as usize,
+                None => machine.operands.len(),
+            };
+            let locals = machine
+                .locals
+                .get(frame.base_local as usize..local_end.min(machine.locals.len()))
+                .unwrap_or(&[]);
+            let operands = machine
+                .operands
+                .get(frame.base_operand as usize..operand_end.min(machine.operands.len()))
+                .unwrap_or(&[]);
+            if locals.iter().any(names) || operands.iter().any(names) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// True when one function allocates instances of one class.
+    ///
+    /// The answer comes from the verified body: `New` and `NewG` name
+    /// the class they allocate. The set is filled on demand, so a
+    /// program pays for the functions its frames name alone.
+    fn allocates(&self, func: u32, class: u32) -> bool {
+        if let Some(known) = self.allocators.borrow().get(&func) {
+            return known.contains(&class);
+        }
+        let mut found: HashSet<u32> = HashSet::new();
+        if let Some(body) = self.module.funcs.get(func as usize) {
+            for block in &body.blocks {
+                for instr in block {
+                    match instr {
+                        Instr::New(c) | Instr::NewG { class: c, .. } => {
+                            found.insert(*c);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let answer = found.contains(&class);
+        self.allocators.borrow_mut().insert(func, found);
+        answer
     }
 
     /// The declared root result type of one nested container.

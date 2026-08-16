@@ -18,8 +18,9 @@ use crate::machine::{
 };
 use crate::world::World;
 use crate::VmConfig;
+use lm_bytecode::closed::TypeEnv;
 use lm_heap::Object;
-use lm_value::{ObjRef, Value};
+use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 
 impl World<'_> {
     /// Build one restored world from an admitted image.
@@ -59,6 +60,12 @@ impl World<'_> {
         if count == 0 {
             return Err(RestoreFail::OtherProgram);
         }
+        // A `TypeEnvId` belongs to one world, so it cannot cross a
+        // container unchanged. The re-intern runs before any machine
+        // exists, so a refused cap leaves the target untouched. The
+        // table itself only interns, so a refusal adds no world state
+        // that a later restore could observe.
+        let env_map = self.reintern_types(image)?;
         let before = self.machines.len();
         let charged = count - 1;
         // The restorer pays for every machine past the root out of its
@@ -95,7 +102,7 @@ impl World<'_> {
         // place.
         self.machines[target as usize].config = clamp(&image.machines[0], ceiling);
         let gate = self.next_gate();
-        let outcome = self.fill_world(image, &ids, restorer, gate);
+        let outcome = self.fill_world(image, &ids, &env_map, restorer, gate);
         if outcome.is_err() {
             // Failure atomicity: drop every machine this call added,
             // return the reservations, and leave the target empty.
@@ -107,28 +114,72 @@ impl World<'_> {
         Ok(target)
     }
 
+    /// Re-intern the type tables of one image into this world.
+    ///
+    /// A `TypeEnvId` belongs to one world, so the call rebuilds every
+    /// record in the table of the target and answers the environment
+    /// map. The target cap governs, so an image can never grow the
+    /// table of the target past its own limit.
+    fn reintern_types(&mut self, image: &Image) -> Result<Vec<TypeEnvId>, RestoreFail> {
+        let module = self.module;
+        let mut types: Vec<u32> = Vec::with_capacity(image.types.len());
+        for node in &image.types {
+            // Every child index names an earlier entry, which
+            // admission proved, so the map already holds it.
+            let mapped = node.remap(|child| types.get(child as usize).copied().unwrap_or(0));
+            let id = self
+                .envs
+                .intern(mapped)
+                .map_err(|_| RestoreFail::LimitExceeded)?;
+            types.push(id);
+        }
+        let mut envs: Vec<TypeEnvId> = Vec::with_capacity(image.envs.len());
+        for env in &image.envs {
+            let entry = TypeEnv {
+                types: env
+                    .types
+                    .iter()
+                    .map(|ty| types.get(*ty as usize).copied().unwrap_or(0))
+                    .collect(),
+                rows: env
+                    .rows
+                    .iter()
+                    .map(|row| lm_bytecode::closed::canonical_row(module, row.clone()))
+                    .collect(),
+            };
+            let id = self
+                .envs
+                .intern_env(entry)
+                .map_err(|_| RestoreFail::LimitExceeded)?;
+            envs.push(id);
+        }
+        Ok(envs)
+    }
+
     /// Fill every restored machine. A failure leaves the caller to
     /// roll the whole world back.
     fn fill_world(
         &mut self,
         image: &Image,
         ids: &[VmId],
+        env_map: &[TypeEnvId],
         restorer: VmId,
         gate: u32,
     ) -> Result<(), RestoreFail> {
         let generations: Vec<u32> = image.machines.iter().map(|m| m.generation).collect();
-        // A snapshot names a type by digest, so the restore maps each
-        // digest back to the type slot of the running program.
-        let mut types: std::collections::HashMap<[u8; 32], u32> = std::collections::HashMap::new();
-        if let Ok(identity) = self.identity() {
-            for (slot, hash) in identity.type_hashes.iter().enumerate() {
-                types.entry(*hash).or_insert(slot as u32);
-            }
-        }
         for (ordinal, source) in image.machines.iter().enumerate() {
             let vm = ids[ordinal];
-            let refs = self.restore_heap(vm, source, ids)?;
-            self.restore_state(vm, source, ids, &generations, &types, &refs, restorer, gate);
+            let refs = self.restore_heap(vm, source, ids, env_map)?;
+            self.restore_state(
+                vm,
+                source,
+                ids,
+                &generations,
+                env_map,
+                &refs,
+                restorer,
+                gate,
+            );
         }
         Ok(())
     }
@@ -145,10 +196,18 @@ impl World<'_> {
         vm: VmId,
         source: &ImageMachine,
         ids: &[VmId],
+        env_map: &[TypeEnvId],
     ) -> Result<Vec<ObjRef>, RestoreFail> {
-        let mut refs: Vec<ObjRef> = Vec::with_capacity(source.objects.len());
-        for entry in &source.objects {
-            let initial = relocate_machines(&entry.object, ids);
+        // Every witness moves into the table of this world first, so
+        // both passes below read one object form.
+        let objects: Vec<Object> = source
+            .objects
+            .iter()
+            .map(|entry| relocate_env(&entry.object, env_map))
+            .collect();
+        let mut refs: Vec<ObjRef> = Vec::with_capacity(objects.len());
+        for object in &objects {
+            let initial = relocate_machines(object, ids);
             let cost = initial.cost();
             let heap = &mut self.machines[vm as usize].vm.heap;
             if heap.would_exceed(cost) {
@@ -158,12 +217,11 @@ impl World<'_> {
         }
         // The second pass patches every child reference. A shape
         // without references keeps the object the first pass built.
-        for (ordinal, entry) in source.objects.iter().enumerate() {
-            if !entry.object.shape().has_refs {
+        for (ordinal, object) in objects.iter().enumerate() {
+            if !object.shape().has_refs {
                 continue;
             }
-            let patched = entry
-                .object
+            let patched = object
                 .remap(|child| refs[child.slot as usize])
                 .expect("a shape with references rebuilds");
             let heap = &mut self.machines[vm as usize].vm.heap;
@@ -187,7 +245,7 @@ impl World<'_> {
         source: &ImageMachine,
         ids: &[VmId],
         generations: &[u32],
-        types: &std::collections::HashMap<[u8; 32], u32>,
+        env_map: &[TypeEnvId],
         refs: &[ObjRef],
         restorer: VmId,
         gate: u32,
@@ -236,9 +294,12 @@ impl World<'_> {
         }
         m.generation = source.generation;
         m.children = source.children;
-        m.result_ty = source
-            .result_type
-            .and_then(|digest| types.get(&digest).copied());
+        m.is_proc = source.is_proc;
+        m.body_func = source.body_func;
+        m.witness = env_map
+            .get(source.witness as usize)
+            .copied()
+            .unwrap_or_default();
         m.gate = gate;
         m.vm.fuel = source.fuel;
         m.vm.next_ordinal = source.next_ordinal;
@@ -252,6 +313,7 @@ impl World<'_> {
                 base_local: f.base_local,
                 base_operand: f.base_operand,
                 closure: f.closure.map(|o| refs[o as usize]),
+                env: env_map.get(f.env as usize).copied().unwrap_or_default(),
             })
             .collect();
         m.vm.locals = source.locals.iter().map(|v| value(*v)).collect();
@@ -319,6 +381,38 @@ fn clamp(source: &ImageMachine, ceiling: VmConfig) -> VmConfig {
         max_resources: source.limits.max_resources.min(ceiling.max_resources),
         mailbox_limit: source.limits.mailbox_limit.min(ceiling.mailbox_limit),
         snapshot_bytes: ceiling.snapshot_bytes,
+    }
+}
+
+/// Rebuild one captured object with its witness relocated.
+///
+/// The image names an environment by its own ordinal, so the copy
+/// moves it to the index the target world interned.
+fn relocate_env(object: &Object, env_map: &[TypeEnvId]) -> Object {
+    let moved = |env: &Witness| -> Witness {
+        Witness(
+            env_map
+                .get(env.env().0 as usize)
+                .copied()
+                .unwrap_or_default(),
+        )
+    };
+    match object {
+        Object::Instance { class, fields, env } => Object::Instance {
+            class: *class,
+            fields: fields.clone(),
+            env: moved(env),
+        },
+        Object::Closure {
+            func,
+            captures,
+            env,
+        } => Object::Closure {
+            func: *func,
+            captures: captures.clone(),
+            env: moved(env),
+        },
+        other => other.clone(),
     }
 }
 

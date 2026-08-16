@@ -1893,6 +1893,20 @@ pub struct FramePoint {
     pub receiver_class: Option<u32>,
 }
 
+/// The type environment one activation carries.
+///
+/// The image states it for every frame. Admission checks it against
+/// the call site below, and it uses it for the bottom frame of a
+/// machine and for a closure call, where no call site states it
+/// (`docs/specs/snapshot-image-admission.md` section 5.6).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FrameWitness {
+    /// The closed type argument of each type parameter, in order.
+    pub types: Vec<u32>,
+    /// The effect-row argument of each effect parameter, in order.
+    pub rows: Vec<Vec<BcRow>>,
+}
+
 /// The resolved types of one stopped frame.
 ///
 /// Every index names one entry of the resolved type universe, and no
@@ -2188,13 +2202,27 @@ impl<'m> ResolvedTypes<'m> {
         }
     }
 
+    /// Substitute type variables and effect variables in one type.
+    ///
+    /// The answer names one entry of the resolved type universe.
+    pub fn substitute(&self, ty: u32, targs: &[u32], rows: &[Vec<BcRow>]) -> u32 {
+        self.ctx.subst(ty, targs, rows)
+    }
+
     /// Resolve the slot types of one whole frame chain.
     ///
-    /// The chain runs from the bottom frame to the top frame. The
-    /// bottom frame carries no call site, so its function must take no
-    /// type argument. Every other frame takes its substitution from
-    /// the call instruction the frame below stopped inside.
-    pub fn resolve_chain(&self, frames: &[FramePoint]) -> Result<Vec<FrameSlots>, ResolveError> {
+    /// The chain runs from the bottom frame to the top frame. Each
+    /// frame carries one witness: the type environment its activation
+    /// holds. The bottom frame carries no call site, and a closure
+    /// call states no type application, so the witness is the only
+    /// evidence there. Every other frame takes its substitution from
+    /// the call instruction the frame below stopped inside, and the
+    /// witness must agree with it.
+    pub fn resolve_chain(
+        &self,
+        frames: &[FramePoint],
+        witness: &[FrameWitness],
+    ) -> Result<Vec<FrameSlots>, ResolveError> {
         let mut out: Vec<FrameSlots> = Vec::with_capacity(frames.len());
         for (idx, point) in frames.iter().enumerate() {
             let fail = |message: String| ResolveError {
@@ -2207,10 +2235,13 @@ impl<'m> ResolvedTypes<'m> {
                 .funcs
                 .get(point.func as usize)
                 .ok_or_else(|| fail("the frame names no function of this program".to_string()))?;
+            let held = witness
+                .get(idx)
+                .ok_or_else(|| fail("the frame carries no type witness".to_string()))?;
             let (targs, rows) = if idx == 0 {
-                (Vec::new(), Vec::new())
+                (held.types.clone(), held.rows.clone())
             } else {
-                self.call_substitution(&frames[idx - 1], &out[idx - 1], point)
+                self.call_substitution(&frames[idx - 1], &out[idx - 1], point, held)
                     .map_err(&fail)?
             };
             if targs.len() != body.type_params as usize || rows.len() != body.effect_params as usize
@@ -2218,6 +2249,11 @@ impl<'m> ResolvedTypes<'m> {
                 return Err(fail(
                     "the call site applies another number of type arguments".to_string(),
                 ));
+            }
+            for ty in &targs {
+                if !self.is_resolved(*ty) {
+                    return Err(fail("the frame witness holds a type variable".to_string()));
+                }
             }
             let state = self.state_at(point).map_err(&fail)?;
             let locals: Vec<Option<u32>> = state
@@ -2264,11 +2300,18 @@ impl<'m> ResolvedTypes<'m> {
     /// instruction names the callee and its type application. The
     /// application is expressed in the type arguments of the caller,
     /// so it substitutes through the resolved caller state first.
+    ///
+    /// `held` is the witness the image states for the callee frame.
+    /// Every call form except a closure call derives the substitution,
+    /// and the witness must equal that derivation. A closure call
+    /// states no application, so the witness answers and the declared
+    /// function type under it must fit the call site.
     fn call_substitution(
         &self,
         caller: &FramePoint,
         caller_slots: &FrameSlots,
         point: &FramePoint,
+        held: &FrameWitness,
     ) -> Result<(Vec<u32>, Vec<Vec<BcRow>>), String> {
         let module = self.ctx.module;
         let callee = point.func;
@@ -2321,14 +2364,24 @@ impl<'m> ResolvedTypes<'m> {
                 Err("the frame does not name the callee of its call site".to_string())
             }
         };
+        // Every derived call form states the substitution, so the
+        // witness the image carries must equal it.
+        let agrees =
+            |derived: (Vec<u32>, Vec<Vec<BcRow>>)| -> Result<(Vec<u32>, Vec<Vec<BcRow>>), String> {
+                if derived.0 != held.types || derived.1 != held.rows {
+                    return Err("the frame witness does not match its call site".to_string());
+                }
+                Ok(derived)
+            };
         match instr {
             Instr::Call(target) => {
                 named(*target)?;
-                Ok((Vec::new(), Vec::new()))
+                agrees((Vec::new(), Vec::new()))
             }
             Instr::CallG { func, app } => {
                 named(*func)?;
-                apply(*app)
+                let derived = apply(*app)?;
+                agrees(derived)
             }
             Instr::CallVirtual { selector, argc } => {
                 let recv = receiver(*argc)?;
@@ -2338,7 +2391,7 @@ impl<'m> ResolvedTypes<'m> {
                     .find_method(class, *selector)
                     .ok_or("the call site selector is not a method of its receiver")?;
                 named(target)?;
-                Ok((Vec::new(), Vec::new()))
+                agrees((Vec::new(), Vec::new()))
             }
             Instr::CallVirtualG {
                 selector,
@@ -2362,25 +2415,25 @@ impl<'m> ResolvedTypes<'m> {
                     .ok_or("the method owner is not an ancestor of the receiver")?;
                 let (own, rows) = apply(*app)?;
                 types.extend(own);
-                Ok((types, rows))
+                agrees((types, rows))
             }
             Instr::CallValue { argc } => {
                 // A closure call names its target through the value on
                 // the stack, so the frame carries the function slot.
-                // The declared function type must fit the call site,
-                // and the body must need no substitution.
+                // The call site applies no type argument, so the
+                // witness of the frame answers. A closure a generic
+                // body created still names the variables of that body,
+                // and the declared function type under the witness
+                // must fit the call site.
                 let callee_ty = receiver(*argc)?;
                 let declared = self
                     .fn_type(callee)
                     .ok_or("the frame names no function of this program")?;
+                let declared = self.ctx.subst(declared, &held.types, &held.rows);
                 if !self.ctx.is_subtype(declared, callee_ty) {
                     return Err("the frame function does not fit its call site".to_string());
                 }
-                let body = &module.funcs[callee as usize];
-                if body.type_params != 0 || body.effect_params != 0 {
-                    return Err("a closure call applies no type argument".to_string());
-                }
-                Ok((Vec::new(), Vec::new()))
+                Ok((held.types.clone(), held.rows.clone()))
             }
             _ => Err("the caller frame did not stop inside a call".to_string()),
         }

@@ -60,6 +60,12 @@ pub fn dump_image(world: &Image) -> String {
     for (slot, hash) in &world.classes {
         let _ = writeln!(out, "class {slot} {}", hex(hash));
     }
+    let _ = writeln!(
+        out,
+        "closed-types {} environments {}",
+        world.types.len(),
+        world.envs.len()
+    );
     for (ordinal, machine) in world.machines.iter().enumerate() {
         let parent = match machine.parent {
             None => "outside".to_string(),
@@ -84,8 +90,8 @@ pub fn dump_image(world: &Image) -> String {
         for (idx, frame) in machine.frames.iter().enumerate() {
             let _ = writeln!(
                 out,
-                "  frame {idx} func {} block {} ip {} locals {} operands {}",
-                frame.func, frame.block, frame.ip, frame.base_local, frame.base_operand
+                "  frame {idx} func {} block {} ip {} locals {} operands {} env {}",
+                frame.func, frame.block, frame.ip, frame.base_local, frame.base_operand, frame.env
             );
         }
         if let Some(pending) = &machine.pending {
@@ -173,8 +179,12 @@ pub fn diff(left: &SnapshotImage, right: &SnapshotImage) -> Option<String> {
 fn payload(object: &Object) -> String {
     match object {
         Object::Str(text) => format!("{text:?}"),
-        Object::Instance { class, fields } => {
-            format!("class {class} fields [{}]", values(fields))
+        Object::Instance { class, fields, env } => {
+            format!(
+                "class {class} env {} fields [{}]",
+                env.env().0,
+                values(fields)
+            )
         }
         Object::List { items } => format!("[{}]", values(items)),
         Object::Tuple { items } => format!("({})", values(items)),
@@ -185,8 +195,16 @@ fn payload(object: &Object) -> String {
                 .collect();
             format!("{{{}}}", parts.join(", "))
         }
-        Object::Closure { func, captures } => {
-            format!("func {func} captures [{}]", values(captures))
+        Object::Closure {
+            func,
+            captures,
+            env,
+        } => {
+            format!(
+                "func {func} env {} captures [{}]",
+                env.env().0,
+                values(captures)
+            )
         }
         Object::StrBuilder(text) => format!("builder len {}", text.len()),
         Object::ByteBuf(bytes) => format!("buffer len {}", bytes.len()),

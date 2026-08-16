@@ -152,7 +152,10 @@ fn encode_object(
             count(out, text.len())?;
             out.extend_from_slice(text.as_bytes());
         }
-        Object::Instance { class, fields } => {
+        // The witness is provenance, not content. A digest that read
+        // it would separate two structurally equal values, so the
+        // encoding names the class and the fields alone.
+        Object::Instance { class, fields, .. } => {
             out.extend_from_slice(&codes.class_hash(*class)?);
             count(out, fields.len())?;
             for field in fields {
@@ -174,7 +177,8 @@ fn encode_object(
                 encode_value(out, *value, scratch)?;
             }
         }
-        Object::Closure { func, captures } => {
+        // The witness stays outside the encoding for the same reason.
+        Object::Closure { func, captures, .. } => {
             out.extend_from_slice(&codes.func_hash(*func)?);
             count(out, captures.len())?;
             for capture in captures {

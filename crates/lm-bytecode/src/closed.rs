@@ -71,6 +71,54 @@ pub enum ClosedType {
     Snapshot(ClosedTypeId),
 }
 
+impl ClosedType {
+    /// Every child index this node names, in canonical order.
+    pub fn children(&self) -> Vec<ClosedTypeId> {
+        match self {
+            ClosedType::Class(_) => Vec::new(),
+            ClosedType::Inst(_, args) | ClosedType::Tuple(args) => args.clone(),
+            ClosedType::List(e) | ClosedType::Vm(e) | ClosedType::Snapshot(e) => vec![*e],
+            ClosedType::Op(_, e) => vec![*e],
+            ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
+                vec![*a, *b]
+            }
+            ClosedType::Fn(params, _, ret, _) => {
+                let mut out = params.clone();
+                out.push(*ret);
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Rebuild this node with every child index remapped.
+    ///
+    /// A restore re-interns the records of an image into the table of
+    /// the target world, so every stored index moves.
+    pub fn remap(&self, map: impl Fn(ClosedTypeId) -> ClosedTypeId) -> ClosedType {
+        match self {
+            ClosedType::Inst(c, args) => {
+                ClosedType::Inst(*c, args.iter().map(|a| map(*a)).collect())
+            }
+            ClosedType::Tuple(elems) => ClosedType::Tuple(elems.iter().map(|e| map(*e)).collect()),
+            ClosedType::List(e) => ClosedType::List(map(*e)),
+            ClosedType::Vm(e) => ClosedType::Vm(map(*e)),
+            ClosedType::Snapshot(e) => ClosedType::Snapshot(map(*e)),
+            ClosedType::Op(op, e) => ClosedType::Op(*op, map(*e)),
+            ClosedType::Map(a, b) => ClosedType::Map(map(*a), map(*b)),
+            ClosedType::PendingCall(a, b) => ClosedType::PendingCall(map(*a), map(*b)),
+            ClosedType::Handle(a, b) => ClosedType::Handle(map(*a), map(*b)),
+            ClosedType::Fn(params, muts, ret, row) => ClosedType::Fn(
+                params.iter().map(|p| map(*p)).collect(),
+                muts.clone(),
+                map(*ret),
+                row.clone(),
+            ),
+            other => other.clone(),
+        }
+    }
+}
+
 /// The type and effect arguments of one activation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct TypeEnv {

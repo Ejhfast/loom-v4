@@ -53,6 +53,10 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// holds no value spells the uninitialized marker, and version 1
 /// spelled it as a unit value. Admission reads the marker as the
 /// initialization fact, so it cannot admit a version-1 container.
+///
+/// Version 2 also carries the type environment witnesses of section
+/// 5.6: one closed type table, one environment table, and one
+/// environment index for each frame, closure, instance, and machine.
 pub const FORMAT_VERSION: u32 = 2;
 
 /// The section kinds, in canonical order.
@@ -62,8 +66,12 @@ pub const FORMAT_VERSION: u32 = 2;
 /// byte string.
 pub const SECTION_HEADER: u32 = 1;
 pub const SECTION_CODE: u32 = 2;
-pub const SECTION_HEAPS: u32 = 3;
-pub const SECTION_MACHINES: u32 = 4;
+/// The closed type table and the type environment table. Heaps and
+/// machine records name an environment by its ordinal here, so the
+/// section precedes both.
+pub const SECTION_TYPES: u32 = 3;
+pub const SECTION_HEAPS: u32 = 4;
+pub const SECTION_MACHINES: u32 = 5;
 
 /// The lifecycle state one captured machine may hold.
 ///
@@ -128,6 +136,13 @@ pub struct ImageFrame {
     pub base_operand: u32,
     /// The capture context, as an object ordinal.
     pub closure: Option<u32>,
+    /// The type environment of this activation, as an ordinal of the
+    /// environment table of the image.
+    ///
+    /// The frame witness. Admission checks it against the call site
+    /// below, and it uses it where no call site exists: the bottom
+    /// frame of a machine has none.
+    pub env: u32,
 }
 
 /// One captured pending request.
@@ -196,18 +211,23 @@ pub struct ImageMachine {
     pub scheduler_owned: bool,
     /// True when a holder paused this proc (specification 17.6).
     pub paused: bool,
-    /// The semantic digest of the declared result type of this
-    /// machine, when its entry frame declared one.
+    /// The body function of this machine, as a function slot.
     ///
-    /// A terminal machine keeps no frame, so the stored digest is the
-    /// only record of the type its stored result carries.
-    pub result_type: Option<[u8; 32]>,
-    /// True when this machine is a proc: a machine with a mailbox
-    /// that a scheduler owns or a holder paused.
+    /// The machine witness, with `witness` below. The declared result
+    /// type of the machine is the result type of this function, and
+    /// the first parameter of this function is the proc instance of a
+    /// proc. A terminal machine keeps no frame and no body closure, so
+    /// the record is the one lasting evidence of both types.
+    pub body_func: Option<u32>,
+    /// The type environment of the machine body activation, as an
+    /// ordinal of the environment table of the image.
+    pub witness: u32,
+    /// True when `Proc.Spawn` launched this machine.
     ///
     /// The flag survives the root normalization of specification
     /// 17.5, so a restored proc world still knows which machines take
-    /// the birth grant of specification 18.3.
+    /// the birth grant of specification 18.3. Admission proves it: the
+    /// witness of a proc must name a proc class.
     pub is_proc: bool,
     pub generation: u32,
     /// The remaining instruction budget.
@@ -251,13 +271,25 @@ pub struct Image {
     pub verifier_version: u32,
     /// The semantic hash of the program this world runs.
     pub module_semantic: [u8; 32],
-    /// The semantic type digest of the root machine result type.
-    /// `SnapshotImage.cast_result` compares it.
+    /// The canonical content digest of the closed root machine result
+    /// type. `SnapshotImage.cast_result` compares it.
+    ///
+    /// The digest names a class by definition hash and an effect by
+    /// text, so it never depends on a numeric slot of one linked
+    /// program. A machine with no body function records zeros.
     pub result_type: [u8; 32],
     /// Every referenced function slot with its definition hash.
     pub funcs: Vec<(u32, [u8; 32])>,
     /// Every referenced class slot with its definition hash.
     pub classes: Vec<(u32, [u8; 32])>,
+    /// The closed type table of this image.
+    ///
+    /// No entry holds a free type variable, and every child index
+    /// names an earlier entry, so a walk over one node terminates.
+    pub types: Vec<lm_bytecode::closed::ClosedType>,
+    /// The type environment table of this image. Ordinal zero is the
+    /// empty environment.
+    pub envs: Vec<lm_bytecode::closed::TypeEnv>,
     pub machines: Vec<ImageMachine>,
 }
 
@@ -580,6 +612,10 @@ pub struct LoadLimits {
     /// name. The decoder reads no program, so this limit replaces the
     /// table lengths of the loaded module.
     pub max_code_slots: u32,
+    /// The largest closed type table one container may carry.
+    pub max_closed_types: u32,
+    /// The largest type environment table one container may carry.
+    pub max_type_envs: u32,
 }
 
 impl Default for LoadLimits {
@@ -593,6 +629,8 @@ impl Default for LoadLimits {
             max_mailbox: 1 << 20,
             max_string_bytes: 1 << 26,
             max_code_slots: 1 << 20,
+            max_closed_types: lm_bytecode::closed::DEFAULT_MAX_CLOSED_TYPES,
+            max_type_envs: lm_bytecode::closed::DEFAULT_MAX_TYPE_ENVS,
         }
     }
 }
