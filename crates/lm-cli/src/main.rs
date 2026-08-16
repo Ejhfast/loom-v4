@@ -26,6 +26,7 @@ const USAGE: &str = "usage:
          [file.lm | file.lma | package directory]
   (`lm build` and `lm run` default to the current directory)
   lm disasm <file.lm | file.lma>
+  lm inspect --shapes
   lm inspect <file.lmi | file.lma>
   lm inspect --live [--fuel N] [--max-frames N] [--heap-bytes N] <file.lm>";
 
@@ -103,7 +104,14 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         "inspect" => {
-            let options = parse_options(rest)?;
+            let options = parse_options_with(rest, Some("."))?;
+            if options.shapes {
+                // The native shape table: the one declaration point
+                // for child order, boundary policy, digestibility,
+                // and snapshot classification.
+                print!("{}", lm_vm::dump_shapes());
+                return Ok(ExitCode::SUCCESS);
+            }
             if options.live {
                 let loaded = load_program(&options.file)?;
                 let host = Box::new(lm_host::CliHost::new(options.rand_seed));
@@ -359,6 +367,7 @@ struct Options {
     file: String,
     show_result: bool,
     live: bool,
+    shapes: bool,
     allow: Vec<String>,
     rand_seed: u64,
     config: VmConfig,
@@ -376,6 +385,7 @@ fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Opt
     let mut file = None;
     let mut show_result = false;
     let mut live = false;
+    let mut shapes = false;
     let mut allow = Vec::new();
     let mut rand_seed = 1;
     let mut config = VmConfig::default();
@@ -384,6 +394,7 @@ fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Opt
         match arg.as_str() {
             "--show-result" => show_result = true,
             "--live" => live = true,
+            "--shapes" => shapes = true,
             "--allow" => {
                 let list = iter
                     .next()
@@ -411,6 +422,7 @@ fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Opt
         file,
         show_result,
         live,
+        shapes,
         allow,
         rand_seed,
         config,

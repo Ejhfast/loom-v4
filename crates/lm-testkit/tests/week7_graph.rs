@@ -346,3 +346,98 @@ fn week7_examples_have_checked_output() {
         "Done(42)"
     );
 }
+
+// ---------------------------------------------------------------
+// Code and class identity.
+// ---------------------------------------------------------------
+
+/// A class crosses the digest by verified semantic identity, never by
+/// its numeric slot. An unrelated class declared first moves the slot
+/// of `Point` and must not move the digest.
+#[test]
+fn a_class_digests_by_semantic_identity_not_by_slot() {
+    let point = "\
+class Point
+  x: Int
+
+  def init(mut self, x: Int)
+    self.x = x
+  end
+end
+
+p = Point(1)
+p.freeze()
+p.digest()
+";
+    let shifted = format!(
+        "\
+class Other
+  y: Int
+
+  def init(mut self, y: Int)
+    self.y = y
+  end
+end
+
+{point}"
+    );
+    let plain = run("t.lm", point);
+    assert_eq!(plain, run("t.lm", &shifted));
+    // A different class body does move the digest.
+    let renamed = "\
+class Point
+  z: Int
+
+  def init(mut self, v: Int)
+    self.z = v
+  end
+end
+
+p = Point(1)
+p.freeze()
+p.digest()
+";
+    assert_ne!(plain, run("t.lm", renamed));
+}
+
+/// A closure crosses the digest by the definition hash of its code,
+/// never by its numeric function slot.
+#[test]
+fn a_closure_digests_by_semantic_identity_not_by_slot() {
+    let closure = "\
+f = do |x: Int|: Int
+  x + 1
+end
+
+pair = (f,)
+pair.freeze()
+pair.digest()
+";
+    let shifted = format!(
+        "\
+def unrelated(n: Int): Int
+  n * 3
+end
+
+{closure}"
+    );
+    let plain = run("t.lm", closure);
+    assert_eq!(plain, run("t.lm", &shifted));
+    // A different body does move the digest.
+    let changed = closure.replace("x + 1", "x + 2");
+    assert_ne!(plain, run("t.lm", &changed));
+}
+
+/// The shape table is one declaration point, and the readable dump
+/// covers every shape.
+#[test]
+fn the_shape_table_declares_every_column() {
+    let dump = lm_vm::dump_shapes();
+    assert_eq!(dump.lines().count(), 14);
+    for line in dump.lines() {
+        assert!(line.contains("boundary="), "{line}");
+        assert!(line.contains("digestible="), "{line}");
+        assert!(line.contains("snapshot="), "{line}");
+        assert!(line.contains("children="), "{line}");
+    }
+}
