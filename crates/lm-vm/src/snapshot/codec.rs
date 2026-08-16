@@ -334,6 +334,9 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
         if machine.paused {
             flags |= 2;
         }
+        if machine.is_proc {
+            flags |= 4;
+        }
         out.u8(flags);
         out.u32(machine.generation);
         out.u64(machine.fuel);
@@ -1148,11 +1151,12 @@ fn decode_machine(
     let state = ImageState::from_tag(cur.u8()?)
         .ok_or_else(|| ImageError::new(ImageReason::State, "a machine state tag is not legal"))?;
     let flags = cur.u8()?;
-    if flags & !0b11 != 0 {
+    if flags & !0b111 != 0 {
         return err(ImageReason::State, "a machine flag byte holds a spare bit");
     }
     let scheduler_owned = flags & 1 != 0;
     let paused = flags & 2 != 0;
+    let is_proc = flags & 4 != 0;
     let generation = cur.u32()?;
     let fuel = cur.u64()?;
     let next_ordinal = cur.u64()?;
@@ -1270,6 +1274,7 @@ fn decode_machine(
         state,
         scheduler_owned,
         paused,
+        is_proc,
         generation,
         fuel,
         next_ordinal,

@@ -182,6 +182,13 @@ pub struct ImageMachine {
     pub scheduler_owned: bool,
     /// True when a holder paused this proc (specification 17.6).
     pub paused: bool,
+    /// True when this machine is a proc: a machine with a mailbox
+    /// that a scheduler owns or a holder paused.
+    ///
+    /// The flag survives the root normalization of specification
+    /// 17.5, so a restored proc world still knows which machines take
+    /// the birth grant of specification 18.3.
+    pub is_proc: bool,
     pub generation: u32,
     /// The remaining instruction budget.
     pub fuel: u64,
@@ -240,13 +247,9 @@ impl Image {
         self.machines.len()
     }
 
-    /// The number of captured mailboxes: the machines the scheduler
-    /// owns or a holder paused, which are exactly the procs.
+    /// The number of captured mailboxes: one per captured proc.
     pub fn mailbox_count(&self) -> usize {
-        self.machines
-            .iter()
-            .filter(|m| m.mailbox.limit > 0 || !m.mailbox.closed)
-            .count()
+        self.machines.iter().filter(|m| m.is_proc).count()
     }
 
     /// The state of the root machine.

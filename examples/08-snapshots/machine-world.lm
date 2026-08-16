@@ -1,0 +1,73 @@
+# A machine world of three machines.
+#
+# The captured world is a held machine, a worker it reaches through a
+# handle in its own locals, and a helper the worker reaches through a
+# handle in its mailbox. No other name binds the helper, so the world
+# closes over the accepted message alone.
+#
+# Each restore gets its own complete copy of all three machines. The
+# original three continue unchanged afterwards.
+#
+# Restore creates no authority (specification 17.5). Every restored
+# machine starts with a fresh default-deny table, so the holder grants
+# the restored root what it needs. A restored proc takes the birth
+# grant of specification 18.3, which is the `Proc` group and nothing
+# else.
+
+class Helper < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(n) then n
+    in Closed then 0
+    end
+  end
+end
+
+class Worker < Proc[Handle[Int, Int]]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(helper)
+      helper.send(20)
+      case helper.done()
+      in Done(v)  then v + 1
+      in Fault(_) then 0 - 1
+      end
+    in Closed then 0
+    end
+  end
+end
+
+def run_held(vm: Vm[Int]): Int with Vm
+  case vm.run()
+  in Done(value) then value
+  in Fault(_)    then 0 - 1
+  end
+end
+
+def restore_run(snap: Snapshot[Int]): Int with Vm, Proc
+  case sys.vm.Vm().restore(snap)
+  in Ok(world)
+    # A restored world starts with no authority at all.
+    world.table().pass(Proc)
+    run_held(world)
+  in Err(_) then 0 - 2
+  end
+end
+
+helper = Helper.spawn()
+worker = Worker.spawn()
+worker.send(helper)
+held = sys.vm.Vm().from_object(do |w: Handle[Handle[Int, Int], Int]|: Int with Proc
+  case w.done()
+  in Done(v)  then v * 2
+  in Fault(_) then 0 - 1
+  end
+end, args: (worker,))
+held.table().pass(Proc)
+case held.snapshot()
+in Ok(snap)
+  first = restore_run(snap)
+  second = restore_run(snap)
+  (first, second, run_held(held))
+in Err(_) then (0 - 3, 0 - 3, 0 - 3)
+end

@@ -1,0 +1,51 @@
+# The checkpoint source of `checkpoints/asked-tree.lms`.
+#
+# The captured world holds three machines: a held root that stopped in
+# `asked`, a worker it names in its locals, and a helper the worker
+# reaches through a handle in its mailbox. Two of the three carry a
+# mailbox, so `lm snapshot verify` reports two mailboxes.
+#
+#   lm snapshot save --allow Proc,Vm,Clock \
+#     checkpoints/asked-tree.lm checkpoints/asked-tree.lms
+#   lm snapshot verify checkpoints/asked-tree.lms
+
+class Helper < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(n) then n
+    in Closed then 0
+    end
+  end
+end
+
+class Worker < Proc[Handle[Int, Int]]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(helper)
+      helper.send(20)
+      case helper.done()
+      in Done(v)  then v + 1
+      in Fault(_) then 0 - 1
+      end
+    in Closed then 0
+    end
+  end
+end
+
+helper = Helper.spawn()
+worker = Worker.spawn()
+worker.send(helper)
+held = sys.vm.Vm().from_object(do |w: Handle[Handle[Int, Int], Int]|: Int with Clock
+  sys.clock.now()
+end, args: (worker,))
+# `drive` stops the held machine before the policy lookup, so it holds
+# its pending request when the capture runs.
+case held.drive()
+in Asked(_)
+  case held.snapshot()
+  in Ok(_)  then 1
+  in Err(_) then 0 - 1
+  end
+in Done(_)  then 0 - 2
+in Fault(_) then 0 - 3
+end

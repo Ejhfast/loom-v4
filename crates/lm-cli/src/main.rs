@@ -28,7 +28,11 @@ const USAGE: &str = "usage:
   lm disasm <file.lm | file.lma>
   lm inspect --shapes
   lm inspect <file.lmi | file.lma>
-  lm inspect --live [--fuel N] [--max-frames N] [--heap-bytes N] <file.lm>";
+  lm inspect --live [--fuel N] [--max-frames N] [--heap-bytes N] <file.lm>
+  lm inspect <file.lms> [--program <file.lm | file.lma>]
+  lm snapshot save [--allow LIST] <file.lm> <out.lms>
+  lm snapshot verify [--program <file.lm | file.lma>] <file.lms>
+  lm snapshot run [--allow LIST] [--program <file>] <file.lms>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -125,6 +129,11 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 print!("{}", world.dump_live(&outcome));
                 return Ok(ExitCode::SUCCESS);
             }
+            if extension(&options.file) == "lms" {
+                let image = load_image(&options)?;
+                print!("{}", lm_vm::snapshot::dump::dump(&image));
+                return Ok(ExitCode::SUCCESS);
+            }
             match extension(&options.file) {
                 "lmi" => {
                     let bytes = read_bytes(&options.file)?;
@@ -160,7 +169,158 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 )),
             }
         }
+        "snapshot" => {
+            let Some((action, rest)) = rest.split_first() else {
+                return Err(format!("error: `lm snapshot` needs an action\n{USAGE}\n"));
+            };
+            match action.as_str() {
+                "save" => snapshot_save(rest),
+                "verify" => {
+                    let options = parse_options(rest)?;
+                    let image = load_image(&options)?;
+                    println!("{}", lm_vm::snapshot::dump::verdict(image.world()));
+                    Ok(ExitCode::SUCCESS)
+                }
+                "run" => snapshot_run(rest),
+                other => Err(format!(
+                    "error: unknown snapshot action `{other}`\n{USAGE}\n"
+                )),
+            }
+        }
         other => Err(format!("error: unknown command `{other}`\n{USAGE}\n")),
+    }
+}
+
+/// The program one snapshot container belongs to.
+///
+/// A container names its program by semantic hash, and the load checks
+/// of specification 17.8 read the code hashes of that program. The
+/// tool therefore needs the program beside the container: `--program`
+/// names it, and the default is the file with the same stem.
+fn program_of(options: &Options) -> Result<String, String> {
+    if let Some(path) = &options.program {
+        return Ok(path.clone());
+    }
+    let base = Path::new(&options.file).with_extension("");
+    for ext in ["lma", "lm"] {
+        let candidate = base.with_extension(ext);
+        if candidate.is_file() {
+            return Ok(candidate.display().to_string());
+        }
+    }
+    Err(format!(
+        "error: no program found beside `{}`; name it with `--program`\n",
+        options.file
+    ))
+}
+
+/// Load and check one snapshot container against its program.
+fn load_image(options: &Options) -> Result<lm_vm::snapshot::SnapshotImage, String> {
+    let program = program_of(options)?;
+    let loaded = load_program(&program)?;
+    let bytes = read_bytes(&options.file)?;
+    lm_vm::snapshot::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
+        .map_err(|e| format!("error: the snapshot did not load: {e}\n"))
+}
+
+/// Run one program and write the last snapshot it captured.
+fn snapshot_save(args: &[String]) -> Result<ExitCode, String> {
+    let mut options = parse_options(args)?;
+    let out = options
+        .extra
+        .take()
+        .ok_or_else(|| format!("error: `lm snapshot save` needs an output file\n{USAGE}\n"))?;
+    let loaded = load_program(&options.file)?;
+    let host = Box::new(lm_host::CliHost::new(options.rand_seed));
+    let mut world = World::new(&loaded, options.config, host);
+    for grant in &options.allow {
+        world
+            .allow(grant)
+            .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    let Some(image) = world.last_snapshot() else {
+        return Err(format!(
+            "error: `{}` captured no snapshot; the outcome was {}\n",
+            options.file,
+            world.show_outcome(&outcome)
+        ));
+    };
+    let bytes = image.bytes().to_vec();
+    let verdict = lm_vm::snapshot::dump::verdict(image.world());
+    write_atomic(Path::new(&out), &bytes)?;
+    println!("wrote {out}");
+    println!("  {} bytes", bytes.len());
+    println!("  {verdict}");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Restore one snapshot container and drive the restored world.
+fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
+    let options = parse_options(args)?;
+    let program = program_of(&options)?;
+    let loaded = load_program(&program)?;
+    let bytes = read_bytes(&options.file)?;
+    let host = Box::new(lm_host::CliHost::new(options.rand_seed));
+    let mut world = World::new(&loaded, options.config, host);
+    // The external byte path checks the container once. The restore
+    // below reads the checked image and repeats nothing.
+    let image = world
+        .load_snapshot_bytes(&bytes)
+        .map_err(|e| format!("error: the snapshot did not load: {e}\n"))?;
+    let target = world
+        .new_child(0)
+        .ok_or_else(|| "error: the world has no machine budget left\n".to_string())?;
+    let root = world
+        .restore_image(0, target, image.world())
+        .map_err(|e| format!("error: the restore failed: {e:?}\n"))?;
+    for grant in &options.allow {
+        world
+            .allow_on(root, grant)
+            .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
+        world
+            .allow(grant)
+            .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
+    }
+    // The restored world runs beside the machine that restored it, so
+    // the tool drives the restored root and the scheduler drives the
+    // restored procs.
+    loop {
+        match world.run_machine(root) {
+            lm_vm::RootEvent::Done(value) => {
+                println!("Done({})", world.show_value_of(root, value));
+                return Ok(ExitCode::SUCCESS);
+            }
+            lm_vm::RootEvent::Fault(rec) => {
+                println!("Fault({})", rec.code);
+                return Ok(ExitCode::from(1));
+            }
+            lm_vm::RootEvent::Asked(_) => {
+                let op = world
+                    .pending_op_of(root)
+                    .expect("an asked machine holds its request");
+                println!("Asked({})", lm_abi::op_name(op));
+                return Ok(ExitCode::SUCCESS);
+            }
+            lm_vm::RootEvent::Blocked => {
+                if world.poll_blocked() > 0 {
+                    continue;
+                }
+                match world.runnable_procs().first().copied() {
+                    Some(proc) => {
+                        world.drive_proc(proc);
+                    }
+                    None => {
+                        println!("Fault(HostFault)");
+                        return Ok(ExitCode::from(1));
+                    }
+                }
+            }
+            lm_vm::RootEvent::Ran | lm_vm::RootEvent::Waiting => {
+                println!("Fault(HostFault)");
+                return Ok(ExitCode::from(1));
+            }
+        }
     }
 }
 
@@ -371,6 +531,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 struct Options {
     file: String,
+    /// A second positional input, for example the output of
+    /// `lm snapshot save`.
+    extra: Option<String>,
+    /// The program one snapshot container belongs to.
+    program: Option<String>,
     show_result: bool,
     live: bool,
     shapes: bool,
@@ -389,6 +554,8 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
 /// inside a package.
 fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Options, String> {
     let mut file = None;
+    let mut extra = None;
+    let mut program = None;
     let mut show_result = false;
     let mut live = false;
     let mut shapes = false;
@@ -407,6 +574,13 @@ fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Opt
                     .ok_or_else(|| "error: `--allow` needs a list of grants\n".to_string())?;
                 allow.extend(list.split(',').map(|s| s.trim().to_string()));
             }
+            "--program" => {
+                program = Some(
+                    iter.next()
+                        .ok_or_else(|| "error: `--program` needs a file\n".to_string())?
+                        .clone(),
+                );
+            }
             "--rand-seed" => rand_seed = flag_value(&mut iter, "--rand-seed")?,
             "--fuel" => config.fuel = flag_value(&mut iter, "--fuel")?,
             "--max-frames" => config.max_frames = flag_value(&mut iter, "--max-frames")?,
@@ -415,8 +589,12 @@ fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Opt
                 return Err(format!("error: unknown option `{other}`\n{USAGE}\n"));
             }
             other => {
-                if file.replace(other.to_string()).is_some() {
-                    return Err(format!("error: more than one input file\n{USAGE}\n"));
+                if file.is_none() {
+                    file = Some(other.to_string());
+                } else if extra.is_none() {
+                    extra = Some(other.to_string());
+                } else {
+                    return Err(format!("error: more than two input files\n{USAGE}\n"));
                 }
             }
         }
@@ -426,6 +604,8 @@ fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Opt
         .ok_or_else(|| format!("error: no input file\n{USAGE}\n"))?;
     Ok(Options {
         file,
+        extra,
+        program,
         show_result,
         live,
         shapes,

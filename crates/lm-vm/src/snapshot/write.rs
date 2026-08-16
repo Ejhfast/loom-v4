@@ -543,6 +543,7 @@ impl World<'_> {
             state,
             scheduler_owned: record.owner == Ownership::Scheduler,
             paused: record.paused,
+            is_proc: record.owner == Ownership::Scheduler || record.paused,
             generation: record.generation,
             fuel: m.fuel,
             next_ordinal: m.next_ordinal,

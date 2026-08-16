@@ -190,6 +190,19 @@ impl World<'_> {
             Ownership::Holder
         };
         m.paused = source.paused;
+        // Every restored machine starts with a fresh default-deny
+        // table (specification 17.5). A restored proc takes the birth
+        // grant of specification 18.3 on top of it, exactly as
+        // `Proc.Spawn` mints it: the `Proc` group and nothing else.
+        // Without it a restored proc could not read its own mailbox,
+        // and the restored world would be a copy that cannot run.
+        // The grant carries no authority of its own: the chain still
+        // resolves through the table of the restoring machine.
+        if source.is_proc {
+            let group =
+                lm_abi::group_by_name("Proc").expect("the manifest declares the Proc group");
+            m.table.group[group as usize] = Some(crate::machine::Action::Pass);
+        }
         m.generation = source.generation;
         m.children = source.children;
         m.gate = gate;

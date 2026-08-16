@@ -162,6 +162,11 @@ pub struct World<'m> {
     /// in a loop never grows it; an evicted image is checked again on
     /// its next restore, which is safe and slower.
     trusted: Vec<([u8; 32], std::sync::Arc<crate::snapshot::Image>)>,
+    /// The last image a guest capture produced in this world.
+    ///
+    /// `lm snapshot save` writes it, so a program states in its own
+    /// source which world a checkpoint holds.
+    last_image: Option<crate::snapshot::SnapshotImage>,
 }
 
 /// The largest number of trusted images one world remembers.
@@ -240,6 +245,7 @@ impl<'m> World<'m> {
             gate: 0,
             checks: 0,
             trusted: Vec::new(),
+            last_image: None,
         }
     }
 
@@ -389,6 +395,70 @@ impl<'m> World<'m> {
     /// Retire one root instruction with automatic policy.
     pub fn step_root(&mut self) -> RootEvent {
         self.control(0, StopMode::OneStep, Family::Step)
+    }
+
+    /// Drive one machine of this world to a terminal result, a block,
+    /// or a pending request. Tools call it; guest holders drive
+    /// through `Vm.*` performs.
+    ///
+    /// A restored world lives beside the machine that restored it, so
+    /// `lm snapshot run` needs an entry that names a machine other
+    /// than the root.
+    pub fn run_machine(&mut self, vm: VmId) -> RootEvent {
+        if self.suspended.contains_key(&vm) {
+            return self.resume_stack(vm);
+        }
+        match self.machines[vm as usize].vm.state {
+            MachineState::Blocked => RootEvent::Blocked,
+            MachineState::Asked => {
+                let ordinal = self.machines[vm as usize]
+                    .vm
+                    .pending
+                    .as_ref()
+                    .expect("an asked machine holds its request")
+                    .ordinal;
+                RootEvent::Asked(ordinal)
+            }
+            MachineState::Empty => RootEvent::Ran,
+            _ => self.control(vm, StopMode::RunToTerminal, Family::Run),
+        }
+    }
+
+    /// Create one empty child machine of `parent`, for tools.
+    ///
+    /// The reservation charges the parent budget, exactly as `Vm.New`
+    /// charges it for guest code.
+    pub fn new_child(&mut self, parent: VmId) -> Option<VmId> {
+        let config = self.reserve_child(parent)?;
+        let id = self.machines.len() as VmId;
+        self.machines.push(Machine::empty(config, Some(parent)));
+        Some(id)
+    }
+
+    /// Grant one root policy target to one machine, for tools.
+    pub fn allow_on(&mut self, vm: VmId, name: &str) -> Result<(), String> {
+        let table = &mut self.machines[vm as usize].table;
+        if let Some(op) = lm_abi::op_by_name(name) {
+            table.exact[op as usize] = Some(Action::Pass);
+            return Ok(());
+        }
+        if let Some(group) = lm_abi::group_by_name(name) {
+            table.group[group as usize] = Some(Action::Pass);
+            return Ok(());
+        }
+        Err(format!(
+            "`{name}` is not an operation or group in the operation manifest"
+        ))
+    }
+
+    /// The pending operation slot of one machine, for tools.
+    pub fn pending_op_of(&self, vm: VmId) -> Option<u32> {
+        self.pending_op(vm)
+    }
+
+    /// The last image a guest capture produced in this world.
+    pub fn last_snapshot(&self) -> Option<&crate::snapshot::SnapshotImage> {
+        self.last_image.as_ref()
     }
 
     /// The stored root fault record, for the CLI.
@@ -1470,6 +1540,7 @@ impl<'m> World<'m> {
         let built = match self.capture_snapshot(barrier, root, self_root) {
             Ok(image) => {
                 self.trust_image(&image);
+                self.last_image = Some(image.clone());
                 self.machines[vm as usize]
                     .alloc(Object::NativeSnapshot(image.bytes().clone()))
                     .and_then(|value| self.make_instance(vm, self.core.result_ok, vec![value]))
