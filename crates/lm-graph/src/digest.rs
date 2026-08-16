@@ -88,7 +88,7 @@ pub fn compute(
     let mut out: Vec<u8> = Vec::with_capacity(DOMAIN.len() + 64 + order.len() * 16);
     out.extend_from_slice(DOMAIN);
     encode_value(&mut out, value, scratch)?;
-    out.extend_from_slice(&(order.len() as u32).to_le_bytes());
+    count(&mut out, order.len())?;
     for r in order {
         encode_object(&mut out, heap.get(*r), scratch, codes)?;
     }
@@ -127,8 +127,15 @@ fn encode_value(out: &mut Vec<u8>, value: Value, scratch: &GraphScratch) -> Resu
     Ok(())
 }
 
-fn count(out: &mut Vec<u8>, n: usize) {
-    out.extend_from_slice(&(n as u32).to_le_bytes());
+/// Write one length prefix.
+///
+/// Every payload carries its length, so the encoding stays
+/// unambiguous. A length past the 32-bit prefix has no encoding, so
+/// it rejects instead of wrapping into a different graph.
+fn count(out: &mut Vec<u8>, n: usize) -> Result<(), FaultCode> {
+    let n = u32::try_from(n).map_err(|_| FaultCode::BoundaryViolation)?;
+    out.extend_from_slice(&n.to_le_bytes());
+    Ok(())
 }
 
 /// Write one object: its shape tag and then its canonical payload.
@@ -141,18 +148,18 @@ fn encode_object(
     out.push(object.tag());
     match object {
         Object::Str(text) => {
-            count(out, text.len());
+            count(out, text.len())?;
             out.extend_from_slice(text.as_bytes());
         }
         Object::Instance { class, fields } => {
             out.extend_from_slice(&codes.class_hash(*class)?);
-            count(out, fields.len());
+            count(out, fields.len())?;
             for field in fields {
                 encode_value(out, *field, scratch)?;
             }
         }
         Object::List { items } | Object::Tuple { items } => {
-            count(out, items.len());
+            count(out, items.len())?;
             for item in items {
                 encode_value(out, *item, scratch)?;
             }
@@ -160,7 +167,7 @@ fn encode_object(
         Object::Map { entries, .. } => {
             // Insertion order, key before value. The derived lookup
             // index never enters the encoding.
-            count(out, entries.len());
+            count(out, entries.len())?;
             for (key, value) in entries {
                 encode_value(out, *key, scratch)?;
                 encode_value(out, *value, scratch)?;
@@ -168,16 +175,16 @@ fn encode_object(
         }
         Object::Closure { func, captures } => {
             out.extend_from_slice(&codes.func_hash(*func)?);
-            count(out, captures.len());
+            count(out, captures.len())?;
             for capture in captures {
                 encode_value(out, *capture, scratch)?;
             }
         }
         Object::NativeFault { code, message, op } => {
             let name = code.to_string();
-            count(out, name.len());
+            count(out, name.len())?;
             out.extend_from_slice(name.as_bytes());
-            count(out, message.len());
+            count(out, message.len())?;
             out.extend_from_slice(message.as_bytes());
             match op {
                 None => out.push(0),
