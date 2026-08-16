@@ -199,6 +199,27 @@ verifier, and the dispatch rows:
 | `load_tiny` | 8,848 | 0.0367 |
 | `load_generated_256` | 74,093 | 0.2138 |
 
+## The dispatch floor
+
+Three measurements bound what one instruction costs, which is the
+input to any question about opcode shape.
+
+| Measurement | Cost |
+| --- | ---: |
+| One instruction, from bodies that differ by two instructions | 2.4 to 2.65 ns |
+| `xs.len()` above a constant, so one load plus one native op | 4.22 ns |
+| One interpolation, which allocates | 147 ns |
+
+An O(1) native accessor is therefore close to pure dispatch: the
+operation itself reads a length and does no work. An allocating
+operation costs about sixty times the dispatch floor.
+
+The consequence for the operation surface: a second dispatch inside
+one opcode costs a fraction of the 2.4 ns floor, which is a fifth to a
+third of an O(1) accessor and under one percent of an allocating
+operation. The opcode space is not the constraint either, with about
+120 of 256 opcodes used.
+
 ## What this run does not cover
 
 - One host and one build. There is no committed distribution and no
