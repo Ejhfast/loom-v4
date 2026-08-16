@@ -8,6 +8,7 @@
 //! `lm-verify` validates tables, types, rows, type applications,
 //! jumps, calls, and stack shapes.
 
+pub mod closed;
 pub mod corepin;
 pub mod hash;
 pub mod identity;

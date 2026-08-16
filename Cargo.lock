@@ -80,6 +80,7 @@ name = "lm-bytecode"
 version = "0.1.0"
 dependencies = [
  "lm-abi",
+ "lm-value",
 ]
 
 [[package]]
