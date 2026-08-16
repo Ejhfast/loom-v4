@@ -628,3 +628,56 @@ go()
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
 }
+
+/// An operand holds the type the verifier proved at that program
+/// point. The rule reads the same abstract interpretation the
+/// verifier runs, so the loader and the verifier cannot disagree.
+#[test]
+fn an_operand_of_the_wrong_shape_or_count_rejects() {
+    let source = "\
+def go(): Int with Vm
+  vm = sys.vm.Vm().from_object(do ||: Int
+    20 + 22
+  end, args: ())
+  vm.step()
+  vm.step()
+  case vm.snapshot()
+  in Ok(_)  then 1
+  in Err(_) then 0 - 1
+  end
+end
+
+go()
+";
+    let loaded = program(source);
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the grant names a target");
+    lm_proc::run_world(&mut world);
+    let bytes = world
+        .last_snapshot()
+        .expect("the program captured a world")
+        .bytes()
+        .to_vec();
+    let image = accept(&loaded, &bytes);
+    // Two integer constants sit on the operand stack.
+    assert_eq!(image.machines[0].operands.len(), 2);
+    // A boolean where the point proves an integer.
+    let mut broken = image.clone();
+    broken.machines[0].operands[0] = lm_value::Value::Bool(true);
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    // One operand too many.
+    let mut broken = image.clone();
+    broken.machines[0].operands.push(lm_value::Value::Int(1));
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    // One operand too few.
+    let mut broken = image.clone();
+    broken.machines[0].operands.pop();
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+}

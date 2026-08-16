@@ -1821,7 +1821,17 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
             }
         }
     }
-    // Dataflow pass: reconstruct types at every reachable block entry.
+    dataflow(ctx, func, fidx)?;
+    Ok(())
+}
+
+/// Reconstruct the abstract state at every reachable block entry.
+///
+/// The pass is the type proof of one function body. It also serves the
+/// snapshot loader, which reads the operand types of a stopped frame
+/// from exactly this state, so the loader and the verifier can never
+/// disagree about what a program point holds.
+fn dataflow(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<Vec<Option<State>>, VerifyError> {
     let mut states: Vec<Option<State>> = vec![None; func.blocks.len()];
     let mut locals = vec![None; func.local_count() as usize];
     for (i, p) in func.params.iter().enumerate() {
@@ -1850,7 +1860,70 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
             )?;
         }
     }
-    Ok(())
+    Ok(states)
+}
+
+/// The operand types of one verified program point.
+///
+/// A snapshot records the operand arena of a stopped machine, and the
+/// loader proves the shape of every value in it. The types come from
+/// the same abstract interpretation the verifier runs.
+///
+/// The reader builds one instance per module and asks it once per
+/// captured frame, so the structural pass runs once per load.
+pub struct FrameTypes<'m> {
+    ctx: Ctx<'m>,
+}
+
+impl<'m> FrameTypes<'m> {
+    /// Build the reader for one verified module.
+    pub fn new(module: &'m Module) -> Result<FrameTypes<'m>, VerifyError> {
+        Ok(FrameTypes {
+            ctx: verify_structure(module)?,
+        })
+    }
+
+    /// The operand-stack types just before instruction `ip` of block
+    /// `block` of function `func`, as module type-table indices.
+    ///
+    /// `None` in a slot marks a type the verifier created by
+    /// substitution, which the module table does not name. Such a slot
+    /// accepts every value.
+    ///
+    /// The call returns `None` when the point is not a reachable
+    /// program point of a verified body.
+    pub fn operands_at(&self, func: u32, block: u32, ip: u32) -> Option<Vec<Option<u32>>> {
+        let module = self.ctx.module;
+        let body = module.funcs.get(func as usize)?;
+        let states = dataflow(&self.ctx, body, func).ok()?;
+        let entry = states.get(block as usize)?.clone()?;
+        let instrs = body.blocks.get(block as usize)?;
+        if ip as usize > instrs.len() {
+            return None;
+        }
+        let mut state = entry;
+        for (iidx, instr) in instrs.iter().enumerate().take(ip as usize) {
+            step(
+                &self.ctx,
+                body,
+                func,
+                block as usize,
+                iidx,
+                instr,
+                &mut state,
+                |_, _| Ok(()),
+            )
+            .ok()?;
+        }
+        let count = module.types.len() as u32;
+        Some(
+            state
+                .stack
+                .iter()
+                .map(|ty| if *ty < count { Some(*ty) } else { None })
+                .collect(),
+        )
+    }
 }
 
 /// Merge an edge state into a target block. Queue the block again when

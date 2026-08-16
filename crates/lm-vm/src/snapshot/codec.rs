@@ -598,6 +598,9 @@ struct Ctx<'m> {
     funcs: Vec<u32>,
     classes: Vec<u32>,
     machine_count: u32,
+    /// The verified operand types of every program point of the
+    /// loaded program.
+    frame_types: Option<lm_verify::FrameTypes<'m>>,
 }
 
 impl Ctx<'_> {
@@ -869,6 +872,7 @@ pub fn decode(
         funcs: funcs.iter().map(|(s, _)| *s).collect(),
         classes: classes.iter().map(|(s, _)| *s).collect(),
         machine_count: machine_count as u32,
+        frame_types: lm_verify::FrameTypes::new(module).ok(),
     };
     // Section 3: the heaps, one per machine, in ordinal order.
     let mut heaps = section(2);
@@ -1591,13 +1595,34 @@ fn check_types(machine: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
     // schema, so the manifest names no type for it.
     if let Some(pending) = &machine.pending {
         let def = lm_abi::op(pending.op);
-        if def.kind == lm_abi::OpKind::Fixed && def.params.len() != pending.args.len() {
-            return err(
-                ImageReason::State,
-                format!("machine {vm}: the pending request holds the wrong argument count"),
-            );
+        if def.kind == lm_abi::OpKind::Fixed {
+            if def.params.len() != pending.args.len() {
+                return err(
+                    ImageReason::State,
+                    format!("machine {vm}: the pending request holds the wrong argument count"),
+                );
+            }
+            for (value, want) in pending.args.iter().zip(def.params.iter()) {
+                let ok = match (value, want) {
+                    (Value::Unit | Value::Uninit, _) => true,
+                    (Value::Int(_), lm_abi::AbiType::Int) => true,
+                    (Value::Obj(r), lm_abi::AbiType::Str) => {
+                        matches!(machine.objects[r.slot as usize].object, Object::Str(_))
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    return err(
+                        ImageReason::Layout,
+                        format!("machine {vm}: a pending argument has the wrong shape"),
+                    );
+                }
+            }
         }
     }
+    // Every operand of every stopped frame names the type the
+    // verifier proved at that program point.
+    check_operands(machine, ctx, vm, &mut work)?;
     // Every instance field and every closure capture names its
     // declared type, whatever root reached the object.
     for (ordinal, entry) in machine.objects.iter().enumerate() {
@@ -1652,6 +1677,102 @@ fn check_types(machine: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
                 }
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Prove the operand types of every stopped frame.
+///
+/// A frame stops at one of two points. The top frame of a machine
+/// with no pending request stops before the instruction its program
+/// counter names. Every other frame, and the top frame of a machine
+/// with a pending request, stopped inside the instruction before the
+/// counter: a call moved its arguments into the callee locals, and a
+/// perform moved them into the pending record. In both of those cases
+/// the retained operands are the bottom of the stack the verifier
+/// proved before that instruction.
+///
+/// A terminal machine never executes again, so its arenas are inert
+/// and the rule does not apply.
+fn check_operands(
+    machine: &ImageMachine,
+    ctx: &Ctx<'_>,
+    vm: u32,
+    work: &mut Vec<(u32, u32)>,
+) -> Read<()> {
+    if matches!(machine.state, ImageState::Done | ImageState::Faulted) {
+        return Ok(());
+    }
+    let Some(frames) = ctx.frame_types.as_ref() else {
+        return err(
+            ImageReason::Code,
+            "the program has no verified frame-type reader",
+        );
+    };
+    for (idx, frame) in machine.frames.iter().enumerate() {
+        let top = idx + 1 == machine.frames.len();
+        // The operand region this frame retains.
+        let end = match machine.frames.get(idx + 1) {
+            Some(next) => next.base_operand as usize,
+            None => machine.operands.len(),
+        };
+        let start = frame.base_operand as usize;
+        if end < start || end > machine.operands.len() {
+            return err(
+                ImageReason::Layout,
+                format!("machine {vm}: frame {idx} owns no operand region"),
+            );
+        }
+        let stopped_before_the_counter = top && machine.pending.is_none();
+        let at = if stopped_before_the_counter {
+            frame.ip
+        } else {
+            if frame.ip == 0 {
+                return err(
+                    ImageReason::Layout,
+                    format!("machine {vm}: frame {idx} stopped before its first instruction"),
+                );
+            }
+            frame.ip - 1
+        };
+        let Some(types) = frames.operands_at(frame.func, frame.block, at) else {
+            return err(
+                ImageReason::Layout,
+                format!("machine {vm}: frame {idx} names no reachable program point"),
+            );
+        };
+        let want = end - start;
+        if types.len() < want {
+            return err(
+                ImageReason::Layout,
+                format!(
+                    "machine {vm}: frame {idx} holds {want} operands and the program point \
+                     proves {}",
+                    types.len()
+                ),
+            );
+        }
+        if stopped_before_the_counter && types.len() != want {
+            return err(
+                ImageReason::Layout,
+                format!(
+                    "machine {vm}: frame {idx} holds {want} operands and the program point \
+                     proves {}",
+                    types.len()
+                ),
+            );
+        }
+        for (offset, ty) in types.iter().take(want).enumerate() {
+            let Some(ty) = ty else { continue };
+            check_shape(
+                machine,
+                ctx,
+                vm,
+                machine.operands[start + offset],
+                *ty,
+                work,
+            )?;
         }
     }
     Ok(())
