@@ -26,6 +26,7 @@ use super::{
 use crate::LoadedModule;
 use lm_abi::FaultCode;
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
+use lm_bytecode::BcType;
 use lm_heap::{MapIndex, Object};
 use lm_value::{ObjRef, Value};
 
@@ -600,6 +601,11 @@ struct Ctx<'m> {
 }
 
 impl Ctx<'_> {
+    /// One entry of the loaded type table.
+    fn ty(&self, idx: u32) -> &BcType {
+        &self.module.types[idx as usize]
+    }
+
     fn func_ok(&self, slot: u32) -> bool {
         self.funcs.binary_search(&slot).is_ok()
     }
@@ -1298,6 +1304,7 @@ fn decode_machine(
         block,
     };
     check_machine(&machine, ctx, vm)?;
+    check_types(&machine, ctx, vm)?;
     Ok(machine)
 }
 
@@ -1539,6 +1546,228 @@ fn check_machine(m: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
         );
     }
     Ok(())
+}
+
+/// Prove that every captured value carries the shape its declared
+/// type names.
+///
+/// A snapshot copies data, and the interpreter reads that data through
+/// the types the verified code declares. A forged image that put a
+/// string where the code expects an integer would reach an
+/// interpreter path no verified program can reach, so the loader
+/// proves the shape of every value that has a declared type: every
+/// local slot, every instance field, every closure capture, every
+/// argument of a pending fixed operation, and the elements of every
+/// collection those positions reach.
+///
+/// The walk is iterative and visits each object once, so a deep image
+/// never grows the Rust stack and a cyclic image terminates.
+///
+/// `Unit` and `Uninit` pass at every type: a local slot before its
+/// first store holds unit, and a field before its first assignment
+/// holds the uninitialized marker.
+fn check_types(machine: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
+    let mut work: Vec<(u32, u32)> = Vec::new();
+    let mut seen: Vec<bool> = vec![false; machine.objects.len()];
+    let seed = |value: Value, ty: u32, work: &mut Vec<(u32, u32)>| -> Read<()> {
+        check_shape(machine, ctx, vm, value, ty, work)
+    };
+    // Every local slot names its declared type.
+    for frame in &machine.frames {
+        let func = &ctx.module.funcs[frame.func as usize];
+        for (slot, ty) in func.local_types.iter().enumerate() {
+            let at = frame.base_local as usize + slot;
+            let Some(value) = machine.locals.get(at) else {
+                return err(
+                    ImageReason::Layout,
+                    format!("machine {vm}: the local arena is shorter than the frame chain"),
+                );
+            };
+            seed(*value, *ty, &mut work)?;
+        }
+    }
+    // Every argument of a pending fixed operation names its declared
+    // parameter type. A machine control operation carries a generic
+    // schema, so the manifest names no type for it.
+    if let Some(pending) = &machine.pending {
+        let def = lm_abi::op(pending.op);
+        if def.kind == lm_abi::OpKind::Fixed && def.params.len() != pending.args.len() {
+            return err(
+                ImageReason::State,
+                format!("machine {vm}: the pending request holds the wrong argument count"),
+            );
+        }
+    }
+    // Every instance field and every closure capture names its
+    // declared type, whatever root reached the object.
+    for (ordinal, entry) in machine.objects.iter().enumerate() {
+        match &entry.object {
+            Object::Instance { class, fields } => {
+                let layout = &ctx.module.classes[*class as usize].fields;
+                for (value, (_, ty)) in fields.iter().zip(layout.iter()) {
+                    check_shape(machine, ctx, vm, *value, *ty, &mut work).map_err(|e| {
+                        ImageError::new(
+                            e.reason,
+                            format!("machine {vm} object {ordinal}: {}", e.detail),
+                        )
+                    })?;
+                }
+            }
+            Object::Closure { func, captures } => {
+                let declared = &ctx.module.funcs[*func as usize].captures;
+                for (value, ty) in captures.iter().zip(declared.iter()) {
+                    check_shape(machine, ctx, vm, *value, *ty, &mut work).map_err(|e| {
+                        ImageError::new(
+                            e.reason,
+                            format!("machine {vm} object {ordinal}: {}", e.detail),
+                        )
+                    })?;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Propagate into the collections the typed positions reach.
+    while let Some((ordinal, ty)) = work.pop() {
+        if seen[ordinal as usize] {
+            continue;
+        }
+        seen[ordinal as usize] = true;
+        let object = &machine.objects[ordinal as usize].object;
+        match (object, ctx.ty(ty)) {
+            (Object::List { items }, BcType::List(elem)) => {
+                for value in items {
+                    check_shape(machine, ctx, vm, *value, *elem, &mut work)?;
+                }
+            }
+            (Object::Tuple { items }, BcType::Tuple(elems)) => {
+                for (value, elem) in items.iter().zip(elems.iter()) {
+                    check_shape(machine, ctx, vm, *value, *elem, &mut work)?;
+                }
+            }
+            (Object::Map { entries, .. }, BcType::Map(key, value)) => {
+                for (k, v) in entries {
+                    check_shape(machine, ctx, vm, *k, *key, &mut work)?;
+                    check_shape(machine, ctx, vm, *v, *value, &mut work)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Check one value against one declared type index.
+///
+/// A composite type queues the object for the propagation pass. The
+/// rule reads shapes alone, so a type the encoding cannot pin, for
+/// example a generic variable, accepts every value.
+fn check_shape(
+    machine: &ImageMachine,
+    ctx: &Ctx<'_>,
+    vm: u32,
+    value: Value,
+    ty: u32,
+    work: &mut Vec<(u32, u32)>,
+) -> Read<()> {
+    // An unwritten local slot holds unit, and an unassigned field
+    // holds the uninitialized marker. Both pass at every type.
+    if matches!(value, Value::Unit | Value::Uninit) {
+        return Ok(());
+    }
+    let declared = ctx.ty(ty);
+    let wrong = |what: &str| -> Read<()> {
+        err(
+            ImageReason::Layout,
+            format!("machine {vm}: a value of the wrong shape sits where {what} is declared"),
+        )
+    };
+    let object = match value {
+        Value::Bool(_) => {
+            return match declared {
+                BcType::Bool | BcType::Var(_) => Ok(()),
+                _ => wrong("another type"),
+            }
+        }
+        Value::Int(_) => {
+            return match declared {
+                BcType::Int | BcType::Var(_) => Ok(()),
+                _ => wrong("another type"),
+            }
+        }
+        Value::Op(slot) => {
+            return match declared {
+                BcType::Op(op, _) if *op == slot => Ok(()),
+                BcType::Var(_) => Ok(()),
+                _ => wrong("another type"),
+            }
+        }
+        Value::Obj(r) => r.slot,
+        Value::Unit | Value::Uninit => unreachable!("the marker values returned above"),
+    };
+    let payload = &machine.objects[object as usize].object;
+    let ok = match declared {
+        BcType::Var(_) => true,
+        BcType::Str => matches!(payload, Object::Str(_)),
+        BcType::StringBuilder => matches!(payload, Object::StrBuilder(_)),
+        BcType::ByteBuffer => matches!(payload, Object::ByteBuf(_)),
+        BcType::Fault => matches!(payload, Object::NativeFault { .. }),
+        BcType::Request => matches!(payload, Object::NativeRequest { .. }),
+        BcType::PolicyTable => matches!(payload, Object::NativeTable { .. }),
+        BcType::EmptyVm | BcType::Vm(_) => matches!(payload, Object::NativeVm { .. }),
+        BcType::PendingCall(_, _) => matches!(payload, Object::NativeCall { .. }),
+        BcType::Handle(_, _) => matches!(payload, Object::NativeHandle { .. }),
+        BcType::Digest => matches!(payload, Object::NativeDigest(_)),
+        BcType::SnapshotImage | BcType::Snapshot(_) => {
+            matches!(payload, Object::NativeSnapshot(_))
+        }
+        BcType::Fn(_, _, _, _) => matches!(payload, Object::Closure { .. }),
+        BcType::List(_) => {
+            work.push((object, ty));
+            matches!(payload, Object::List { .. })
+        }
+        BcType::Map(_, _) => {
+            work.push((object, ty));
+            matches!(payload, Object::Map { .. })
+        }
+        BcType::Tuple(elems) => {
+            work.push((object, ty));
+            match payload {
+                Object::Tuple { items } => items.len() == elems.len(),
+                _ => false,
+            }
+        }
+        BcType::Class(class) | BcType::Inst(class, _) => match payload {
+            Object::Instance { class: found, .. } => extends(ctx.module, *found, *class),
+            _ => false,
+        },
+        // A scalar type never holds a heap object.
+        BcType::Unit | BcType::Bool | BcType::Int | BcType::Op(_, _) => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        wrong("another type")
+    }
+}
+
+/// True when `child` equals `ancestor` or inherits it.
+fn extends(module: &lm_bytecode::Module, child: u32, ancestor: u32) -> bool {
+    let mut cur = Some(child);
+    let mut steps = 0usize;
+    while let Some(c) = cur {
+        if c == ancestor {
+            return true;
+        }
+        // The verified class table is well founded, and the step bound
+        // keeps a crafted table from looping here.
+        steps += 1;
+        if steps > module.classes.len() {
+            return false;
+        }
+        cur = module.classes[c as usize].parent();
+    }
+    false
 }
 
 /// Prove the rules that need the whole world.

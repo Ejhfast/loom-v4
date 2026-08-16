@@ -544,3 +544,87 @@ go()
         .join()
         .expect("no Rust stack overflow");
 }
+
+// ---------------------------------------------------------------
+// The declared-type rules.
+// ---------------------------------------------------------------
+
+/// A local slot holds a value of its declared type. A forged image
+/// that put an integer where the code declares a handle would reach an
+/// interpreter path no verified program can reach.
+#[test]
+fn a_local_of_the_wrong_shape_rejects() {
+    let (loaded, bytes) = asked_tree();
+    let image = accept(&loaded, &bytes);
+    assert_eq!(image.machines[0].locals.len(), 1);
+    let mut broken = image.clone();
+    broken.machines[0].locals[0] = lm_value::Value::Int(1);
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+}
+
+/// An instance field holds a value of its declared type, whatever
+/// root reached the object.
+#[test]
+fn an_instance_field_of_the_wrong_shape_rejects() {
+    let source = "\
+class Box
+  label: String
+  count: Int
+
+  def init(mut self, label: String, count: Int)
+    self.label = label
+    self.count = count
+  end
+end
+
+def go(): Int with Vm, Clock
+  vm = sys.vm.Vm().from_object(do ||: Int with Clock.Now
+    b = Box(\"tag\", 3)
+    sys.clock.now()
+  end, args: ())
+  vm.table().pass(Clock)
+  case vm.drive()
+  in Asked(_)  then 0
+  in Done(_)   then 0
+  in Fault(_)  then 0
+  end
+  case vm.snapshot()
+  in Ok(_)  then 1
+  in Err(_) then 0 - 1
+  end
+end
+
+go()
+";
+    let loaded = program(source);
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    for grant in ["Vm", "Clock"] {
+        world.allow(grant).expect("the grant names a target");
+    }
+    lm_proc::run_world(&mut world);
+    let bytes = world
+        .last_snapshot()
+        .expect("the program captured a world")
+        .bytes()
+        .to_vec();
+    let image = accept(&loaded, &bytes);
+    let mut broken = image.clone();
+    let mut damaged = false;
+    for entry in &mut broken.machines[0].objects {
+        if let lm_heap::Object::Instance { fields, .. } = &mut entry.object {
+            if !fields.is_empty() {
+                // The first field is the `String` label.
+                fields[0] = lm_value::Value::Int(9);
+                damaged = true;
+            }
+        }
+    }
+    assert!(damaged, "the capture holds the boxed instance");
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+}
