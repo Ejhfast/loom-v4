@@ -707,6 +707,76 @@ impl Machine {
         self.vm.frames.last().map(|f| f.env).unwrap_or_default()
     }
 
+    /// Push the frame of one generic call.
+    ///
+    /// The three generic instructions live outside `exec_instr`, so
+    /// the hot instruction body stays the size it had before the
+    /// witness landed. A monomorphic program never reaches them.
+    #[inline(never)]
+    fn call_generic(
+        &mut self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        callee: u32,
+        app: u32,
+    ) -> Result<(), FaultCode> {
+        let argc = module.funcs[callee as usize].params.len();
+        let parent = self.frame_env();
+        let env = envs.derive(module, parent, app).map_err(env_fault)?;
+        self.push_frame(module, callee, argc, None, env)
+    }
+
+    /// Push the frame of one generic virtual call.
+    ///
+    /// The receiver object carries its class arguments, so the
+    /// environment binds them first and the own arguments of the
+    /// method after them.
+    #[inline(never)]
+    fn call_virtual_generic(
+        &mut self,
+        module: &Module,
+        dispatch: &[crate::DispatchRow],
+        envs: &mut TypeEnvs,
+        selector: u32,
+        argc: u32,
+        app: u32,
+    ) -> Result<(), FaultCode> {
+        let argc = argc as usize;
+        let recv = self.vm.operands[self.vm.operands.len() - 1 - argc];
+        let (class, class_env) = match self.vm.heap.get(recv.as_obj().expect("verified receiver")) {
+            Object::Instance { class, env, .. } => (*class, env.env()),
+            _ => unreachable!("verified receiver shape"),
+        };
+        let target = dispatch[class as usize].method(selector);
+        let parent = self.frame_env();
+        let env =
+            method_env(module, envs, target, class, class_env, parent, app).map_err(env_fault)?;
+        self.push_frame(module, target, argc + 1, None, env)
+    }
+
+    /// Allocate one instance of a generic class.
+    ///
+    /// The instance records its own class arguments, so a later
+    /// dispatch and a later reflection query read them from the object
+    /// itself.
+    #[inline(never)]
+    fn new_generic(
+        &mut self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        class: u32,
+        app: u32,
+    ) -> Result<Value, FaultCode> {
+        let field_count = module.classes[class as usize].fields.len();
+        let parent = self.frame_env();
+        let env = envs.derive(module, parent, app).map_err(env_fault)?;
+        self.alloc(Object::Instance {
+            class,
+            fields: vec![Value::Uninit; field_count],
+            env: Witness(env),
+        })
+    }
+
     /// Execute exactly one instruction of the current frame.
     ///
     /// `envs` is the type environment table of the world. A
@@ -838,10 +908,7 @@ impl Machine {
             // table caches the pair, so a repeated call reuses one
             // index.
             Instr::CallG { func: callee, app } => {
-                let argc = module.funcs[callee as usize].params.len();
-                let parent = self.frame_env();
-                let env = envs.derive(module, parent, app).map_err(env_fault)?;
-                self.push_frame(module, callee, argc, None, env)?;
+                self.call_generic(module, envs, callee, app)?;
             }
             Instr::CallVirtual { selector, argc } => {
                 let argc = argc as usize;
@@ -863,18 +930,7 @@ impl Machine {
                 argc,
                 app,
             } => {
-                let argc = argc as usize;
-                let recv = self.vm.operands[self.vm.operands.len() - 1 - argc];
-                let (class, class_env) =
-                    match self.vm.heap.get(recv.as_obj().expect("verified receiver")) {
-                        Object::Instance { class, env, .. } => (*class, env.env()),
-                        _ => unreachable!("verified receiver shape"),
-                    };
-                let target = dispatch[class as usize].method(selector);
-                let parent = self.frame_env();
-                let env = method_env(module, envs, target, class, class_env, parent, app)
-                    .map_err(env_fault)?;
-                self.push_frame(module, target, argc + 1, None, env)?;
+                self.call_virtual_generic(module, dispatch, envs, selector, argc, app)?;
             }
             // A closure call installs the environment the creator
             // frame held. The call site applies no type argument, so
@@ -928,14 +984,7 @@ impl Machine {
             // later dispatch and a later reflection query read them
             // from the object itself.
             Instr::NewG { class, app } => {
-                let field_count = module.classes[class as usize].fields.len();
-                let parent = self.frame_env();
-                let env = envs.derive(module, parent, app).map_err(env_fault)?;
-                let value = self.alloc(Object::Instance {
-                    class,
-                    fields: vec![Value::Uninit; field_count],
-                    env: Witness(env),
-                })?;
+                let value = self.new_generic(module, envs, class, app)?;
                 self.push(value)?;
             }
             Instr::TupleNew { count, .. } => {
@@ -1440,5 +1489,25 @@ impl Machine {
             _ => unreachable!("verified operand type"),
         };
         self.push(Value::Bool(equal == want_equal))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The memory cost of one type environment witness.
+    ///
+    /// A frame stores one index, and the closure and the instance
+    /// payloads store one each. `Object` is a Rust enum, so its size
+    /// is the size of its largest variant, and the witness fits the
+    /// existing padding of both payload variants.
+    #[test]
+    fn the_witness_costs_one_index_and_no_object_growth() {
+        assert_eq!(std::mem::size_of::<Witness>(), 4);
+        assert_eq!(std::mem::size_of::<Frame>(), 36);
+        // The map payload is the largest variant, so it fixes the
+        // object size and the two witnesses cost nothing there.
+        assert_eq!(std::mem::size_of::<Object>(), 80);
     }
 }
