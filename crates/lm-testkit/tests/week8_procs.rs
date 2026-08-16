@@ -836,3 +836,47 @@ fn a_closure_may_capture_a_handle() {
                   (first, h.done())\n";
     assert_eq!(run(source), "Done((Sent, Done(4)))");
 }
+
+/// `on_spawn` may come from an ancestor of the proc class. The body
+/// function then declares that ancestor as its receiver, and the
+/// constructed instance satisfies it.
+#[test]
+fn a_proc_class_may_inherit_its_on_spawn() {
+    let source = "class Base < Proc[Int]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(n)\n\
+                  \x20     n\n\
+                  \x20   in Closed\n\
+                  \x20     0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  class Derived < Base\n\
+                  end\n\
+                  d = Derived.spawn()\n\
+                  d.send(6)\n\
+                  d.close()\n\
+                  d.done()\n";
+    assert_eq!(run(source), "Done(Done(6))");
+}
+
+/// `spawn` works inside a generic callable. The construction function
+/// and the proc body declare no generic parameter, so their
+/// signatures are closed and any scope may close over them.
+#[test]
+fn spawn_works_inside_a_generic_function() {
+    let source = "class W < Proc\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   1\n\
+                  \x20 end\n\
+                  end\n\
+                  def launch[T](x: T): Handle[Never, Int] with Proc.Spawn\n\
+                  \x20 W.spawn()\n\
+                  end\n\
+                  case launch(1).done()\n\
+                  in Done(v)  then v\n\
+                  in Fault(_) then 0\n\
+                  end\n";
+    assert_eq!(run(source), "Done(1)");
+}

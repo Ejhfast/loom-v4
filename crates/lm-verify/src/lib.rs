@@ -1636,8 +1636,16 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                     if target.captures.len() != *captures as usize {
                         return Err(err(fidx, at("closure capture count mismatch")));
                     }
-                    if target.type_params != func.type_params
-                        || target.effect_params != func.effect_params
+                    // A closure body shares the generic scope of the
+                    // function that creates it, so it must keep the
+                    // same arity. A target that declares no generic
+                    // parameter at all has no free variable to bind:
+                    // its signature is closed, so any scope may close
+                    // over it. The `spawn` sugar takes that path.
+                    let closed = target.type_params == 0 && target.effect_params == 0;
+                    if !closed
+                        && (target.type_params != func.type_params
+                            || target.effect_params != func.effect_params)
                     {
                         return Err(err(
                             fidx,
@@ -2508,7 +2516,10 @@ fn step(
                             let BcType::Fn(body_params, _, result, _) = ctx.ty(body) else {
                                 return Err(fail("`Proc.Spawn` needs a body function".to_string()));
                             };
-                            if body_params.len() != 1 || body_params[0] != proc_ty {
+                            // The body may come from an ancestor of the
+                            // proc class, so the constructed instance
+                            // must satisfy its receiver, not equal it.
+                            if body_params.len() != 1 || !ctx.is_subtype(proc_ty, body_params[0]) {
                                 return Err(fail(
                                     "`Proc.Spawn` body does not take the constructed proc"
                                         .to_string(),

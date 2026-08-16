@@ -2189,7 +2189,7 @@ impl<'o> FnChecker<'o> {
         }
         // Class and enum methods first, then the universal `freeze`.
         if let Some((class, class_args)) = class_of(ctx, recv_ty) {
-            if let Some((sig, owner_args)) = ctx.find_method_owner(class, name) {
+            if let Some((sig, owner_args, _)) = ctx.find_method_owner(class, name) {
                 if sig.name == "init" {
                     return Err(Diagnostic::new(
                         "E1026",
@@ -2366,16 +2366,18 @@ impl<'o> FnChecker<'o> {
                     name_span,
                 )
             })?;
-        let (body, _) = ctx.find_method_owner(class, "on_spawn").ok_or_else(|| {
-            Diagnostic::new(
-                "E1026",
-                format!("the proc class `{class_name}` declares no `on_spawn`"),
-                name_span,
-            )
-        })?;
+        let (body, body_owner_args, body_owner) =
+            ctx.find_method_owner(class, "on_spawn").ok_or_else(|| {
+                Diagnostic::new(
+                    "E1026",
+                    format!("the proc class `{class_name}` declares no `on_spawn`"),
+                    name_span,
+                )
+            })?;
         if !body.params.is_empty()
             || !body.own_type_params.is_empty()
             || !body.own_effect_params.is_empty()
+            || !body_owner_args.is_empty()
         {
             return Err(Diagnostic::new(
                 "E1026",
@@ -2413,8 +2415,12 @@ impl<'o> FnChecker<'o> {
             .map(|init| init.row.clone())
             .unwrap_or_default();
         let ctor_ty = ctx.store.intern_fn(params, muts, self_ty, ctor_row);
+        // `on_spawn` may come from an ancestor. The body function then
+        // declares that ancestor as its receiver, and the constructed
+        // instance is a subclass of it.
+        let body_self = ctx.store.intern(Type::Class(lm_types::ClassId(body_owner)));
         let body_ty = ctx.store.intern_fn(
-            vec![self_ty],
+            vec![body_self],
             vec![body.mut_self],
             body.ret,
             body.row.clone(),
@@ -2524,7 +2530,7 @@ impl<'o> FnChecker<'o> {
         }
         // The superclass method is read in the subclass view.
         let arity = ctx.classes[cidx as usize].type_params.len();
-        let (sig, owner_args) = ctx
+        let (sig, owner_args, _) = ctx
             .lookup_method(parent, parent_args, arity, name)
             .ok_or_else(|| {
                 Diagnostic::new(

@@ -524,14 +524,14 @@ impl Ctx {
         None
     }
 
-    /// Find a method by name and return the type arguments of the
-    /// declaring class, seen from `class`. The list is empty when the
-    /// declaring class has no type parameters.
+    /// Find a method by name and return the declaring class with its
+    /// type arguments, seen from `class`. The argument list is empty
+    /// when the declaring class has no type parameters.
     pub(crate) fn find_method_owner(
         &mut self,
         class: u32,
         name: &str,
-    ) -> Option<(MethodSig, Vec<TypeId>)> {
+    ) -> Option<(MethodSig, Vec<TypeId>, u32)> {
         let arity = self.classes[class as usize].type_params.len();
         self.lookup_method(class, Vec::new(), arity, name)
     }
@@ -546,7 +546,7 @@ impl Ctx {
         args: Vec<TypeId>,
         arity: usize,
         name: &str,
-    ) -> Option<(MethodSig, Vec<TypeId>)> {
+    ) -> Option<(MethodSig, Vec<TypeId>, u32)> {
         let mut cur = start;
         let mut cur_args = args;
         loop {
@@ -557,10 +557,10 @@ impl Ctx {
                 .cloned();
             if let Some(sig) = found {
                 if cur_args.is_empty() {
-                    return Some((sig, cur_args));
+                    return Some((sig, cur_args, cur));
                 }
                 let sig = self.substitute_method(&sig, &cur_args, arity);
-                return Some((sig, cur_args));
+                return Some((sig, cur_args, cur));
             }
             let meta = self.store.class_meta(ClassId(cur));
             let parent = meta.parent?;
@@ -1769,7 +1769,7 @@ fn resolve_class(
         if let Some(p) = parent {
             let inherited = ctx
                 .lookup_method(p, parent_args.clone(), type_names.len(), &method.name)
-                .map(|(sig, _)| sig);
+                .map(|(sig, _, _)| sig);
             if let Some(base) = inherited {
                 let same_params = base.params == msig.params
                     && base.param_muts == msig.param_muts

@@ -296,6 +296,12 @@ impl<'m> World<'m> {
     /// Drive the root machine to a terminal result or to a block.
     /// The scheduler of `lm-proc` calls it.
     pub fn drive_root(&mut self) -> RootEvent {
+        // A barrier stops the machines of its set for the length of
+        // one call, so no scheduler slice runs inside one.
+        debug_assert!(
+            self.machines[0].barrier.is_none(),
+            "a barrier holds the root machine"
+        );
         if self.suspended.contains_key(&0) {
             return self.resume_stack(0);
         }
