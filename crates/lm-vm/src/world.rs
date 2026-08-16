@@ -2024,8 +2024,13 @@ impl<'m> World<'m> {
         (0..self.machines.len() as VmId)
             .filter(|vm| {
                 let m = &self.machines[*vm as usize];
+                // A machine with a suspended stack holds the execution
+                // references of that stack, so its own base activation
+                // is the one that resumes it. Every other machine of
+                // the stack stays out of the run set.
+                let resumable = self.suspended.contains_key(vm);
                 m.owner == Ownership::Scheduler
-                    && m.active == 0
+                    && (m.active == 0 || resumable)
                     && !m.paused
                     && m.barrier.is_none()
                     && matches!(

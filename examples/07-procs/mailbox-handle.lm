@@ -1,0 +1,42 @@
+# A handle travels through another proc mailbox.
+#
+# The relay receives the adder handle as an ordinary message. The copy
+# names the same proc, so the relay reaches the adder that the root
+# spawned.
+
+class Adder < Proc[Int]
+  total: Int = 0
+
+  def on_spawn(mut self): Int with Proc
+    loop do
+      case self.receive()
+      in Msg(n)
+        self.total = self.total + n
+      in Closed
+        return self.total
+      end
+    end
+    # The `Closed` arm returns, so this tail never runs.
+    self.total
+  end
+end
+
+class Relay < Proc[Handle[Int, Int]]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(target)
+      target.send(7)
+      target.close()
+      1
+    in Closed
+      0
+    end
+  end
+end
+
+adder = Adder.spawn()
+adder.send(5)
+relay = Relay.spawn()
+relay.send(adder)
+relay.close()
+(relay.done(), adder.done())

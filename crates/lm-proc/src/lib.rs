@@ -93,15 +93,16 @@ impl Scheduler {
     /// runnable machine and a blocked root is a deadlock: every
     /// blocked machine faults, and the root fault becomes the result.
     pub fn run(&mut self, world: &mut World<'_>) -> Outcome {
+        self.stop = None;
         loop {
             self.stats.root_slices += 1;
             match world.drive_root() {
                 RootEvent::Done(value) => {
-                    self.stop = Some(StopReason::RootTerminal);
+                    self.stop.get_or_insert(StopReason::RootTerminal);
                     return Outcome::Done(value);
                 }
                 RootEvent::Fault(rec) => {
-                    self.stop = Some(StopReason::RootTerminal);
+                    self.stop.get_or_insert(StopReason::RootTerminal);
                     return Outcome::Fault(rec.code);
                 }
                 RootEvent::Blocked => {}

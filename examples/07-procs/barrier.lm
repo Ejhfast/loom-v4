@@ -1,0 +1,39 @@
+# Three machines: the root, a worker, and a helper.
+#
+# The root never binds the helper handle. It sends the handle straight
+# into the worker mailbox, so a barrier from the root reaches the
+# helper only through that accepted message.
+
+class Helper < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(n)
+      n
+    in Closed
+      0
+    end
+  end
+end
+
+class Worker < Proc[Handle[Int, Int]]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(helper)
+      helper.send(5)
+      helper.close()
+      case helper.done()
+      in Done(v)
+        v
+      in Fault(_)
+        0 - 1
+      end
+    in Closed
+      0
+    end
+  end
+end
+
+worker = Worker.spawn()
+worker.send(Helper.spawn())
+worker.close()
+worker.done()

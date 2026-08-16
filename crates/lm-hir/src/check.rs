@@ -717,6 +717,18 @@ pub(crate) fn resolve_type(
                 let result = resolve_type(ctx, env, &args[0])?;
                 Ok(ctx.store.intern(Type::Vm(result)))
             }
+            "Handle" => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1024",
+                        format!("`Handle` takes 2 type arguments, found {}", args.len()),
+                        ty.span,
+                    ));
+                }
+                let mailbox = resolve_type(ctx, env, &args[0])?;
+                let result = resolve_type(ctx, env, &args[1])?;
+                Ok(ctx.store.intern(Type::Handle(mailbox, result)))
+            }
             "List" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
@@ -1467,6 +1479,15 @@ fn link_class_parents(
                     format!("the parent class `{pname}` must be declared before the subclass"),
                     *pspan,
                 ));
+            }
+            // A bare `Proc` parent is sugar for `Proc[Never]`: the
+            // proc takes no message (specification 18.1).
+            let bare_proc =
+                clause.args.is_empty() && ctx.core_types.get("Proc").copied() == Some(parent);
+            if bare_proc {
+                ctx.store
+                    .set_class_parent_args(ClassId(idx), ClassId(parent), vec![NEVER]);
+                continue;
             }
             // A generic parent carries one type argument per parameter.
             // The subclass declares no type parameters, so the
