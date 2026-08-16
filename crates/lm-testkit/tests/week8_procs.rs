@@ -880,3 +880,85 @@ fn spawn_works_inside_a_generic_function() {
                   end\n";
     assert_eq!(run(source), "Done(1)");
 }
+
+/// A handle may leave a proc as its terminal result, and it still
+/// names the same machine. The proc it names outlives its spawner, so
+/// specification 18.6 closes the pass-through: the mailbox still
+/// accepts, and the next request of the orphan fails closed.
+#[test]
+fn a_proc_that_outlives_its_spawner_loses_its_pass_through() {
+    let source = "class Inner < Proc[Int]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(n)\n\
+                  \x20     n\n\
+                  \x20   in Closed\n\
+                  \x20     0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  class Maker < Proc\n\
+                  \x20 def on_spawn(self): Handle[Int, Int] with Proc\n\
+                  \x20   Inner.spawn()\n\
+                  \x20 end\n\
+                  end\n\
+                  case Maker.spawn().done()\n\
+                  in Done(h)\n\
+                  \x20 first = h.send(3)\n\
+                  \x20 second = h.close()\n\
+                  \x20 case h.done()\n\
+                  \x20 in Done(v)  then \"done {v}\"\n\
+                  \x20 in Fault(f) then \"{f.code()} {first.is_sent()} {second.is_sent()}\"\n\
+                  \x20 end\n\
+                  in Fault(f)\n\
+                  \x20 f.code()\n\
+                  end\n";
+    assert_eq!(run(source), "Done(\"PolicyDenied true true\")");
+}
+
+/// Two procs that wait for each other deadlock. The scheduler faults
+/// every blocked machine, so no run hangs.
+#[test]
+fn two_waiting_procs_deadlock_without_hanging() {
+    let source = "class A < Proc[Int]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(n)\n\
+                  \x20     n\n\
+                  \x20   in Closed\n\
+                  \x20     0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  a = A.spawn()\n\
+                  b = A.spawn()\n\
+                  (a.done(), b.done())\n";
+    assert_eq!(run(source), "Fault(HostFault)");
+}
+
+/// A proc runs under its own fuel budget, and exhaustion is a value
+/// for its holder.
+#[test]
+fn a_proc_runs_under_its_own_fuel_budget() {
+    let source = "class Spin < Proc\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   i = 0\n\
+                  \x20   while i < 100000\n\
+                  \x20     i = i + 1\n\
+                  \x20   end\n\
+                  \x20   i\n\
+                  \x20 end\n\
+                  end\n\
+                  case Spin.spawn().done()\n\
+                  in Done(v)  then \"{v}\"\n\
+                  in Fault(f) then f.code()\n\
+                  end\n";
+    let config = VmConfig {
+        fuel: 400,
+        ..VmConfig::default()
+    };
+    let outcome = lm_testkit::run_world("proc.lm", source, &["Proc"], config)
+        .expect("the program compiles")
+        .0;
+    assert_eq!(outcome, "Done(\"OutOfFuel\")");
+}

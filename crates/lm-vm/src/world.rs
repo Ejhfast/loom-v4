@@ -2179,14 +2179,18 @@ impl<'m> World<'m> {
         self.machines[vm as usize].vm.state != MachineState::Empty
     }
 
-    /// Every machine one machine names, through a `Vm` handle or a
-    /// proc handle in its reachable state.
+    /// Every machine one machine names in its reachable state.
+    ///
+    /// Five native shapes name a machine: a machine handle, a proc
+    /// handle, a policy-table handle, a request token, and a typed
+    /// call token. The walk reports all five, so the barrier set
+    /// closes over every machine reference a heap can hold.
     ///
     /// The walk starts at the collection roots, which cover the
     /// frames, the locals, the operands, the pending arguments, the
     /// terminal result, and the accepted mailbox queue. The barrier
-    /// closes its set over the result, so every handle in the paused
-    /// state targets a paused machine.
+    /// closes its set over the result, so every reference in the
+    /// paused state targets a paused machine.
     pub fn machine_references(&mut self, vm: VmId) -> Result<Vec<VmId>, FaultCode> {
         let roots = self.machines[vm as usize].gc_roots(&[]);
         let limits = self.machines[vm as usize].config.graph;
@@ -2198,7 +2202,10 @@ impl<'m> World<'m> {
         let mut out: Vec<VmId> = Vec::new();
         for r in order {
             let target = match heap.get(r) {
-                Object::NativeVm { vm } => Some(*vm),
+                Object::NativeVm { vm }
+                | Object::NativeTable { vm }
+                | Object::NativeRequest { vm, .. }
+                | Object::NativeCall { vm, .. } => Some(*vm),
                 Object::NativeHandle { proc, .. } => Some(*proc),
                 _ => None,
             };

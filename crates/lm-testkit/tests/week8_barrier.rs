@@ -261,3 +261,42 @@ fn every_handle_in_the_set_targets_a_member_of_the_set() {
         }
     }
 }
+
+/// Five native shapes name a machine. The barrier set closes over all
+/// five, so a machine that only a policy-table handle names still
+/// joins the set.
+#[test]
+fn the_set_closes_over_every_machine_reference_shape() {
+    let source = "def go(): Int with Vm, Clock.Now\n\
+                  \x20 table = sys.vm.Vm().from_object(do ||: Int 1 end, args: ()).table()\n\
+                  \x20 table.pass(Clock.Now)\n\
+                  \x20 case sys.vm.Vm().from_object(do ||: Int 2 end, args: ()).run()\n\
+                  \x20 in Done(v)  then v\n\
+                  \x20 in Fault(_) then 0\n\
+                  \x20 end\n\
+                  end\n\
+                  go()\n";
+    let (loaded, ()) = world_of(source);
+    let mut world = ready_world(&loaded, &["Vm", "Clock.Now"]);
+    // Step until both machines exist and the table handle is live.
+    let mut ready = false;
+    for _ in 0..2048 {
+        world.step_root();
+        if world.machine_count() == 3 {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "the program creates two machines");
+    let report = Barrier::new(1)
+        .run(&mut world, 0)
+        .expect("the barrier opens");
+    // The table handle alone names the first machine, so the set
+    // still reaches it.
+    assert!(report.set.contains(&1), "{:?}", report.set);
+    for vm in &report.set {
+        for target in world.machine_references(*vm).expect("the walk finishes") {
+            assert!(report.set.contains(&target), "{:?}", report.set);
+        }
+    }
+}
