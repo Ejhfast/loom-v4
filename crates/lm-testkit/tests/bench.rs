@@ -191,6 +191,105 @@ fn bench_language_operations() {
         "s = \"\"\ni = 0\nwhile i < 200000\n  s = \"v{i}\"\n  i = i + 1\nend\ns\n",
         base,
     );
+
+    // Mixed integer arithmetic: multiply, divide, and modulo.
+    report(
+        "arith_mix",
+        1_000_000,
+        "i = 1\ns = 0\nwhile i < 1000001\n  s = s + i * 3 / 2 % 7\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // One taken branch and one untaken branch per iteration.
+    report(
+        "branch",
+        1_000_000,
+        "i = 0\ns = 0\nwhile i < 1000000\n  if i % 2 == 0\n    s = s + 1\n  else\n    s = s - 1\n  end\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // Recursion: the call path with a growing activation stack.
+    report(
+        "recursion",
+        1_000_000,
+        "def down(n: Int): Int\n  if n <= 0\n    0\n  else\n    down(n - 1) + 1\n  end\nend\n\
+         i = 0\ns = 0\nwhile i < 1000\n  s = s + down(1000)\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // A virtual call that resolves on an inherited method.
+    report(
+        "inherit_call",
+        1_000_000,
+        "class Base\n  step: Int = 1\n  def bump(self, n: Int): Int\n    n + self.step\n  end\nend\n\
+         class Derived < Base\nend\n\
+         d = Derived()\ni = 0\ns = 0\nwhile i < 1000000\n  s = d.bump(s)\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // A closure that captures a local, against the free closure above.
+    report(
+        "closure_capture",
+        1_000_000,
+        "k = 7\ni = 0\ns = 0\nwhile i < 1000000\n  f = do |x: Int|: Int x + k end\n  s = f(s)\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // A generic call: the type application path.
+    report(
+        "generic_call",
+        1_000_000,
+        "def pick[T](a: T, b: T): T\n  a\nend\n\
+         i = 0\ns = 0\nwhile i < 1000000\n  s = pick(s + 1, 0)\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // Enum construction plus a `case` dispatch over two arms.
+    report(
+        "enum_case",
+        1_000_000,
+        "enum Step\n  Up(v: Int)\n  Down(v: Int)\nend\n\
+         i = 0\ns = 0\nwhile i < 1000000\n  e: Step = Up(1)\n  \
+         s = s + case e\n  in Up(v) then v\n  in Down(v) then 0 - v\n  end\n  i = i + 1\nend\ns\n",
+        base,
+    );
+
+    // The non-faulting list access: a native op that builds a core
+    // `Option`, then a `case` over it.
+    report(
+        "option_case",
+        1_000_000,
+        "xs: [Int] = []\ni = 0\nwhile i < 1000\n  xs.push(i)\n  i = i + 1\nend\n\
+         j = 0\ns = 0\nwhile j < 1000000\n  \
+         s = s + case xs.get(j % 1000)\n  in Some(v) then v\n  in None then 0\n  end\n  j = j + 1\nend\ns\n",
+        base,
+    );
+
+    // A map with string keys, against the integer-key cases above.
+    report(
+        "map_str_lookup",
+        500_000,
+        "m: {String: Int} = {}\ni = 0\nwhile i < 1000\n  m.put(\"k{i}\", i)\n  i = i + 1\nend\n\
+         j = 0\ns = 0\nwhile j < 500000\n  s = s + m.at(\"k500\")\n  j = j + 1\nend\ns\n",
+        base,
+    );
+
+    // The string builder: the growable path the String methods will
+    // use once specification 24.6 lands.
+    report(
+        "string_builder",
+        500_000,
+        "b = StringBuilder()\ni = 0\nwhile i < 500000\n  b.append(\"x\")\n  i = i + 1\nend\nb.build()\n",
+        base,
+    );
+
+    // The byte buffer.
+    report(
+        "byte_buffer",
+        500_000,
+        "b = ByteBuffer()\ni = 0\nwhile i < 500000\n  b.append(65)\n  i = i + 1\nend\nb.len()\n",
+        base,
+    );
 }
 
 // ---------------------------------------------------------------
@@ -219,29 +318,129 @@ fn checker_source(n: usize) -> String {
     out
 }
 
+/// `n` independent classes, each with two fields and two methods.
+fn class_source(n: usize) -> String {
+    let mut out = String::new();
+    for i in 0..n {
+        out.push_str(&format!(
+            "class C{i}\n  a: Int = {i}\n  b: String = \"c{i}\"\n  \
+             def sum(self, k: Int): Int\n    self.a + k\n  end\n  \
+             def name(self): String\n    self.b\n  end\nend\n"
+        ));
+    }
+    out.push_str("x = C0()\nx.sum(1)\n");
+    out
+}
+
+/// One inheritance chain `n` deep. Every level overrides nothing, so
+/// the checker resolves each method through the chain.
+fn inherit_source(n: usize) -> String {
+    let mut out =
+        String::from("class L0\n  v: Int = 0\n  def get(self): Int\n    self.v\n  end\nend\n");
+    for i in 1..n {
+        out.push_str(&format!("class L{i} < L{}\nend\n", i - 1));
+    }
+    out.push_str(&format!("x = L{}()\nx.get()\n", n - 1));
+    out
+}
+
+/// `n` generic functions, each instantiated at two types.
+fn generic_source(n: usize) -> String {
+    let mut out = String::new();
+    for i in 0..n {
+        out.push_str(&format!("def g{i}[T](a: T, b: T): T\n  a\nend\n"));
+    }
+    let mut body = String::from("s = 0\n");
+    for i in 0..n {
+        body.push_str(&format!("s = s + g{i}(1, 2)\n"));
+        body.push_str(&format!("t{i} = g{i}(\"a\", \"b\")\n"));
+    }
+    out.push_str(&body);
+    out.push_str("s\n");
+    out
+}
+
+/// A chain of `n` assignments whose types flow through generic calls.
+/// Each step must infer its type argument from the step before.
+fn inference_source(n: usize) -> String {
+    let mut out = String::from("def thru[T](x: T): T\n  x\nend\nv0 = 1\n");
+    for i in 1..n {
+        out.push_str(&format!("v{i} = thru(v{}) + 1\n", i - 1));
+    }
+    out.push_str(&format!("v{}\n", n - 1));
+    out
+}
+
+/// One enum of `n` arms and one `case` that covers every arm.
+fn enum_source(n: usize) -> String {
+    let mut out = String::from("enum E\n");
+    for i in 0..n {
+        out.push_str(&format!("  A{i}(v: Int)\n"));
+    }
+    out.push_str("end\ndef pick(e: E): Int\n  case e\n");
+    for i in 0..n {
+        out.push_str(&format!("  in A{i}(v) then v + {i}\n"));
+    }
+    out.push_str("  end\nend\ne: E = A0(1)\npick(e)\n");
+    out
+}
+
+/// One function whose body is `n` statements, against `n` functions.
+fn wide_body_source(n: usize) -> String {
+    let mut out = String::from("def big(): Int\n  s = 0\n");
+    for i in 0..n {
+        out.push_str(&format!("  s = s + {i}\n"));
+    }
+    out.push_str("  s\nend\nbig()\n");
+    out
+}
+
+/// One generated shape: a name, a source generator, and the sizes
+/// the benchmarks run it at.
+type Shape = (&'static str, fn(usize) -> String, Vec<usize>);
+
+/// Every generated shape, for the checker and the verifier.
+fn shapes() -> Vec<Shape> {
+    vec![
+        (
+            "methods_and_chain",
+            checker_source as fn(usize) -> String,
+            vec![16, 64, 256, 1024],
+        ),
+        ("classes", class_source, vec![16, 64, 256]),
+        ("inherit_chain", inherit_source, vec![16, 64, 256]),
+        ("generics", generic_source, vec![16, 64, 256]),
+        ("inference_chain", inference_source, vec![16, 64, 256]),
+        ("enum_case_arms", enum_source, vec![16, 64, 256]),
+        ("wide_body", wide_body_source, vec![64, 256, 1024]),
+    ]
+}
+
 #[test]
 #[ignore]
 fn bench_typechecking() {
-    println!("LOOM\tcase\tdefs\tlines\tms\tlines_per_s");
-    for n in [16usize, 64, 256, 1024] {
-        let source = checker_source(n);
-        let lines = source.lines().count();
-        let mut runs: Vec<Duration> = Vec::new();
-        for round in 0..=ROUNDS {
-            let start = Instant::now();
-            let module = lm_testkit::compile_text("bench.lm", &source)
-                .unwrap_or_else(|e| panic!("the generated source must compile:\n{e}"));
-            let elapsed = start.elapsed();
-            std::hint::black_box(module.funcs.len());
-            if round > 0 {
-                runs.push(elapsed);
+    println!("LOOM\tshape\tn\tlines\tms\tlines_per_s");
+    for (name, make, sizes) in shapes() {
+        for n in sizes {
+            let source = make(n);
+            let lines = source.lines().count();
+            let mut runs: Vec<Duration> = Vec::new();
+            for round in 0..=ROUNDS {
+                let start = Instant::now();
+                let module = lm_testkit::compile_text("bench.lm", &source)
+                    .unwrap_or_else(|e| panic!("the generated `{name}` must compile:\n{e}"));
+                let elapsed = start.elapsed();
+                std::hint::black_box(module.funcs.len());
+                if round > 0 {
+                    runs.push(elapsed);
+                }
             }
+            let ms = median(runs).as_secs_f64() * 1e3;
+            println!(
+                "LOOM\t{name}\t{n}\t{lines}\t{ms:.3}\t{:.0}",
+                lines as f64 / (ms / 1e3)
+            );
         }
-        let ms = median(runs).as_secs_f64() * 1e3;
-        println!(
-            "LOOM\tcheck_and_lower\t{n}\t{lines}\t{ms:.3}\t{:.0}",
-            lines as f64 / (ms / 1e3)
-        );
     }
 }
 
@@ -253,22 +452,17 @@ fn bench_typechecking() {
 #[ignore]
 fn bench_verification() {
     println!("LOOM\tcase\tbytes\tfuncs\tms\tmib_per_s");
-    let cases: Vec<(&str, String)> = vec![
-        (
-            "tiny",
-            "def f(n: Int): Int\n  n + 1\nend\nf(41)\n".to_string(),
-        ),
-        (
-            "class_small",
-            "class Counter\n  value: Int = 0\n  \
-          def add(mut self, n: Int): Int\n    self.value = self.value + n\n    self.value\n  end\n\
-          end\nc = Counter()\nc.add(1)\n"
-                .to_string(),
-        ),
-        ("generated_64", checker_source(64)),
-        ("generated_256", checker_source(256)),
-        ("generated_1024", checker_source(1024)),
-    ];
+    let mut cases: Vec<(String, String)> = vec![(
+        "tiny".to_string(),
+        "def f(n: Int): Int\n  n + 1\nend\nf(41)\n".to_string(),
+    )];
+    // Every generated shape at two sizes, so verification meets the
+    // same variety the checker does.
+    for (name, make, sizes) in shapes() {
+        for n in [sizes[0], *sizes.last().expect("a shape has a size")] {
+            cases.push((format!("{name}_{n}"), make(n)));
+        }
+    }
     for (name, source) in cases {
         let bytes = lm_testkit::compile_to_bytes("bench.lm", &source).expect("compiles");
         let module = lm_bytecode::decode(&bytes).expect("decodes");

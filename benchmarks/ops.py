@@ -194,11 +194,200 @@ CASES = [
 def main():
     import sys
 
+    # The recursion case descends 1000 frames, which meets the default
+    # limit exactly.
+    sys.setrecursionlimit(20000)
     print(f"# CPython {sys.version.split()[0]}")
     print("CPY\tcase\titers\tns_per_op\ttotal_ms")
     for name, fn, iterations in CASES:
         per_op, total_ms = measure(fn, iterations)
         print(f"CPY\t{name}\t{iterations}\t{per_op:.1f}\t{total_ms:.3f}")
+
+
+# ---------------------------------------------------------------
+# The cases added in the second pass.
+#
+# Three have no exact CPython analogue, and the table marks them:
+# `generic_call` runs a plain function, because CPython erases type
+# arguments; `enum_case` runs a `match` over a tagged class; and
+# `option_case` runs the `None` check that stands in for `Option`.
+# Read those three ratios as indicative, not as a like-for-like.
+# ---------------------------------------------------------------
+
+
+def arith_mix():
+    i = 1
+    s = 0
+    while i < 1000001:
+        s = s + i * 3 // 2 % 7
+        i = i + 1
+    return s
+
+
+def branch():
+    i = 0
+    s = 0
+    while i < 1000000:
+        if i % 2 == 0:
+            s = s + 1
+        else:
+            s = s - 1
+        i = i + 1
+    return s
+
+
+def down(n):
+    if n <= 0:
+        return 0
+    return down(n - 1) + 1
+
+
+def recursion():
+    i = 0
+    s = 0
+    while i < 1000:
+        s = s + down(1000)
+        i = i + 1
+    return s
+
+
+class Base:
+    def __init__(self):
+        self.step = 1
+
+    def bump(self, n):
+        return n + self.step
+
+
+class Derived(Base):
+    pass
+
+
+def inherit_call():
+    d = Derived()
+    i = 0
+    s = 0
+    while i < 1000000:
+        s = d.bump(s)
+        i = i + 1
+    return s
+
+
+def closure_capture():
+    k = 7
+    i = 0
+    s = 0
+    while i < 1000000:
+        f = lambda x: x + k  # noqa: E731 - the Loom case builds a closure too
+        s = f(s)
+        i = i + 1
+    return s
+
+
+def pick(a, b):
+    return a
+
+
+def generic_call():
+    i = 0
+    s = 0
+    while i < 1000000:
+        s = pick(s + 1, 0)
+        i = i + 1
+    return s
+
+
+class Up:
+    __match_args__ = ("v",)
+
+    def __init__(self, v):
+        self.v = v
+
+
+class Down:
+    __match_args__ = ("v",)
+
+    def __init__(self, v):
+        self.v = v
+
+
+def enum_case():
+    i = 0
+    s = 0
+    while i < 1000000:
+        e = Up(1)
+        match e:
+            case Up(v):
+                s = s + v
+            case Down(v):
+                s = s - v
+        i = i + 1
+    return s
+
+
+def option_case():
+    xs = []
+    i = 0
+    while i < 1000:
+        xs.append(i)
+        i = i + 1
+    j = 0
+    s = 0
+    while j < 1000000:
+        v = xs[j % 1000] if (j % 1000) < len(xs) else None
+        if v is not None:
+            s = s + v
+        j = j + 1
+    return s
+
+
+def map_str_lookup():
+    m = {}
+    i = 0
+    while i < 1000:
+        m[f"k{i}"] = i
+        i = i + 1
+    j = 0
+    s = 0
+    while j < 500000:
+        s = s + m["k500"]
+        j = j + 1
+    return s
+
+
+def string_builder():
+    parts = []
+    i = 0
+    while i < 500000:
+        parts.append("x")
+        i = i + 1
+    return "".join(parts)
+
+
+def byte_buffer():
+    b = bytearray()
+    i = 0
+    while i < 500000:
+        b.append(65)
+        i = i + 1
+    return len(b)
+
+
+CASES.extend(
+    [
+        ("arith_mix", arith_mix, 1000000),
+        ("branch", branch, 1000000),
+        ("recursion", recursion, 1000000),
+        ("inherit_call", inherit_call, 1000000),
+        ("closure_capture", closure_capture, 1000000),
+        ("generic_call", generic_call, 1000000),
+        ("enum_case", enum_case, 1000000),
+        ("option_case", option_case, 1000000),
+        ("map_str_lookup", map_str_lookup, 500000),
+        ("string_builder", string_builder, 500000),
+        ("byte_buffer", byte_buffer, 500000),
+    ]
+)
 
 
 if __name__ == "__main__":
