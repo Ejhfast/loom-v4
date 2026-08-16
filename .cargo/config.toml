@@ -1,0 +1,8 @@
+# Hermetic build source. The build must read dependencies from the
+# committed vendor/ directory and must not touch the network.
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

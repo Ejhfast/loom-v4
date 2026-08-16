@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+blake3 = "1"
 lm-abi = { path = "../lm-abi" }
 lm-heap = { path = "../lm-heap" }
 lm-value = { path = "../lm-value" }
