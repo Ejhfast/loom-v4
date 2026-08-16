@@ -297,7 +297,7 @@ Negative UI examples show non-exhaustive enums, escaping uninitialized `self`, i
 ### Land
 
 - Canonical operation/group manifest; generated `sys` object; identity-indexed `Op`; `PERFORM`; row checking against direct/callee/higher-order effects; independent verifier row reconstruction.
-- Dense exact/group policy arrays with default block, transitive `pass`, pure frozen `mock`, and live table editing.
+- Dense exact/group policy arrays with default block, transitive `pass`, pure `mock`, and live table editing.
 - Public native `EmptyVm`/`Vm[T]`, typed load/restore transitions, `step`, terminal `run`, `drive`, states, wait completions, stack views, fuel/limits, reentrancy checks, and one internal stop-mode interpreter loop.
 - Typed `Request.as_call(op) -> PendingCall[Args,Reply]`; typed `answer`; token-checked `reject`/`dispatch`; no `Answer(Any)` path.
 - Initial host operations: `Io.Print`, `Io.Error`, `Io.ReadLine`, `Clock.Now`, `Clock.Monotonic`, `Clock.Sleep`, and deterministic `Rand.Bytes`/`Rand.Int` adapters.

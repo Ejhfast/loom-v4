@@ -1145,7 +1145,7 @@ Hosts may redact message and trace details while preserving the stable code.
 | `BadOperationReply` | answer did not match declared reply type |
 | `BadCast` | failed `as T` |
 | `BoundaryViolation` | codec or descriptor rule violated |
-| `UnsendableValue` | holder-local or nonsendable value crossed a boundary |
+| `UnsendableValue` | holder-local or nonsendable value crossed a boundary; unfrozen graph reached `digest()` or `deep_equal` |
 | `MalformedArtifact` | invalid artifact/bytecode |
 | `MalformedSnapshot` | invalid snapshot/machine-world image |
 | `LinkMismatch` | link binding incompatible |
@@ -1291,7 +1291,7 @@ end
 
 `WaitView` is inspection-only because automatic policy has already accepted and dispatched that operation. `Request` appears only on the manual path before policy lookup.
 
-Events are frozen boundary views. Before terminal success is published, the value crosses transfer mode. A mutable result copies, and the holder receives a mutable copy. A holder-local or nonsendable result converts the controlled machine to `Fault(UnsendableValue)`.
+An event holds no reference into the controlled machine. Its native parts, `WaitView`, `Request`, and `Fault`, are frozen views. Before terminal success is published, the value crosses transfer mode. A mutable result copies, and the holder receives a mutable copy. A holder-local or nonsendable result converts the controlled machine to `Fault(UnsendableValue)`.
 
 ### 14.5 `step`
 
@@ -1575,7 +1575,7 @@ The returned root VM is holder-controlled. Restored procs are scheduler-owned bu
 
 ### 17.6 Paused, pending, and self snapshots
 
-A snapshot taken between instructions restores between those instructions. A snapshot in `asked` preserves operation, frozen arguments, reply type, destination, continuation PC, and ordinal. The holder calls `drive()` once to obtain a fresh `Request` token. No guest instruction runs.
+A snapshot taken between instructions restores between those instructions. A snapshot in `asked` preserves operation, arguments, reply type, destination, continuation PC, and ordinal. The holder calls `drive()` once to obtain a fresh `Request` token. No guest instruction runs.
 
 A machine in `waiting` holds a pending host operation, which is a live host attachment. It blocks the snapshot with `ResourceActive`. The caller retries after the operation completes.
 
@@ -2046,7 +2046,7 @@ Depth never consumes the Rust stack. Every mode has object, edge, byte, and work
 
 ### 22.11 Policy representation
 
-A policy table contains one dense exact-action vector indexed by operation slot and one dense group-action vector indexed by group slot. An action is a compact tagged record for block, pass, or mock. Mock records hold verified code, frozen captures, and a work budget.
+A policy table contains one dense exact-action vector indexed by operation slot and one dense group-action vector indexed by group slot. An action is a compact tagged record for block, pass, or mock. Mock records hold verified code, a sendable capture graph, and a work budget.
 
 The default block action requires no allocation. Live edits replace one action under the table's synchronization primitive. A running VM reads an immutable action snapshot for the current perform; revocation affects the next lookup.
 
