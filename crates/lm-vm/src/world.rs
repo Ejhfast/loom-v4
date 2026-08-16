@@ -757,22 +757,30 @@ impl<'m> World<'m> {
             .expect("the mocked perform is pending")
             .args
             .clone();
-        let mut moved_args = Vec::with_capacity(args.len());
-        for arg in args {
-            match self.transfer(vm, id, arg) {
-                Ok(value) => moved_args.push(value),
-                Err(code) => {
-                    let op = self.pending_op(vm);
-                    self.machines[vm as usize].set_fault(
-                        code,
-                        "an operation argument is not sendable",
-                        op,
-                    );
-                    return;
-                }
-            }
-        }
+        // The handler is not reachable from the mock machine yet, so
+        // it stays rooted while the arguments cross.
         let closure_ref = closure_value.as_obj().expect("a closure is a heap object");
+        self.machines[id as usize]
+            .vm
+            .heap
+            .push_host_root(closure_ref);
+        let moved = self.transfer_all(vm, id, &args);
+        self.machines[id as usize]
+            .vm
+            .heap
+            .pop_host_root(closure_ref);
+        let moved_args = match moved {
+            Ok(values) => values,
+            Err(code) => {
+                let op = self.pending_op(vm);
+                self.machines[vm as usize].set_fault(
+                    code,
+                    "an operation argument is not sendable",
+                    op,
+                );
+                return;
+            }
+        };
         let func = match self.machines[id as usize].vm.heap.get(closure_ref) {
             Object::Closure { func, .. } => *func,
             _ => unreachable!("a mock handler is a closure"),
@@ -872,23 +880,33 @@ impl<'m> World<'m> {
                 };
                 // The argument view: unit, or a tuple whose elements
                 /* become the initial parameter locals. */
+                let closure_ref = program.as_obj().expect("a program value is a closure");
                 let mut locals = Vec::new();
                 if let Value::Obj(r) = args[2] {
                     let items = match self.machines[vm as usize].vm.heap.get(r) {
                         Object::Tuple { items } => items.clone(),
                         _ => unreachable!("verified argument view shape"),
                     };
-                    for item in items {
-                        match self.transfer(vm, target, item) {
-                            Ok(value) => locals.push(value),
-                            Err(code) => {
-                                self.fault_caller(vm, op, code, "an argument is not sendable");
-                                return;
-                            }
+                    // The program is not reachable from the target
+                    // machine yet, so it stays rooted while the
+                    // arguments cross.
+                    self.machines[target as usize]
+                        .vm
+                        .heap
+                        .push_host_root(closure_ref);
+                    let moved = self.transfer_all(vm, target, &items);
+                    self.machines[target as usize]
+                        .vm
+                        .heap
+                        .pop_host_root(closure_ref);
+                    match moved {
+                        Ok(values) => locals = values,
+                        Err(code) => {
+                            self.fault_caller(vm, op, code, "an argument is not sendable");
+                            return;
                         }
                     }
                 }
-                let closure_ref = program.as_obj().expect("a program value is a closure");
                 let func = match self.machines[target as usize].vm.heap.get(closure_ref) {
                     Object::Closure { func, .. } => *func,
                     _ => unreachable!("a program value is a closure"),
@@ -1245,21 +1263,10 @@ impl<'m> World<'m> {
         let built = if source_args.is_empty() {
             Ok(Value::Unit)
         } else {
-            let mut items = Vec::with_capacity(source_args.len());
-            let mut failed = None;
-            for arg in source_args {
-                match self.transfer(cv, vm, arg) {
-                    Ok(value) => items.push(value),
-                    Err(code) => {
-                        failed = Some(code);
-                        break;
-                    }
-                }
-            }
-            match failed {
-                Some(code) => Err(code),
-                None => self.machines[vm as usize].alloc(Object::Tuple { items }),
-            }
+            // The tuple allocation reads its own children as roots,
+            // so the values need no root after `transfer_all`.
+            self.transfer_all(cv, vm, &source_args)
+                .and_then(|items| self.machines[vm as usize].alloc(Object::Tuple { items }))
         };
         match built.and_then(|value| self.machines[vm as usize].push(value).map(|_| ())) {
             Ok(()) => {}
@@ -1322,6 +1329,45 @@ impl<'m> World<'m> {
     /// preserves cycles and sharing. A holder-local shape or a
     /// mutable object faults `UnsendableValue`, and a graph past the
     /// published limits faults `BoundaryLimit`.
+    /// Transfer several values from `src` into `dst`.
+    ///
+    /// Each result stays rooted in the destination while the next
+    /// value crosses. A destination collection during a later copy
+    /// frees every object its roots do not reach, and a copied value
+    /// that no machine field holds yet is one of those.
+    pub(crate) fn transfer_all(
+        &mut self,
+        src: VmId,
+        dst: VmId,
+        values: &[Value],
+    ) -> Result<Vec<Value>, FaultCode> {
+        let mut moved: Vec<Value> = Vec::with_capacity(values.len());
+        let mut result = Ok(());
+        for value in values {
+            match self.transfer(src, dst, *value) {
+                Ok(value) => {
+                    if let Some(r) = value.as_obj() {
+                        self.machines[dst as usize].vm.heap.push_host_root(r);
+                    }
+                    moved.push(value);
+                }
+                Err(code) => {
+                    result = Err(code);
+                    break;
+                }
+            }
+        }
+        // Unroot in LIFO order. The caller stores the results in a
+        // machine field before the next allocation.
+        for value in moved.iter().rev() {
+            if let Some(r) = value.as_obj() {
+                self.machines[dst as usize].vm.heap.pop_host_root(r);
+            }
+        }
+        result?;
+        Ok(moved)
+    }
+
     pub(crate) fn transfer(
         &mut self,
         src: VmId,

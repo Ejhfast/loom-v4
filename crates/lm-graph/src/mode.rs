@@ -131,6 +131,11 @@ impl Visitor for CopyCheck<'_> {
 ///
 /// `dst_roots` holds the destination entry points outside its heap.
 /// A destination collection during the copy reads them.
+///
+/// The result is not rooted. A caller that copies several values into
+/// one destination must root each result before it copies the next
+/// one, because a collection during a later copy frees every
+/// destination object the roots do not reach.
 pub fn transfer(
     src: &mut Heap,
     dst: &mut Heap,
@@ -494,6 +499,55 @@ mod tests {
         assert_eq!(dst.live_count(), before_live);
         assert_eq!(dst.used_bytes(), before_bytes);
         assert_eq!(dst.get(anchor), &Object::Str("anchor".to_string()));
+    }
+
+    /// A destination collection during one copy frees an earlier
+    /// result that no root reaches. The caller must root each result
+    /// before it copies the next value.
+    #[test]
+    fn a_later_transfer_needs_the_earlier_result_rooted() {
+        let payload = |heap: &mut Heap, text: &str| {
+            let leaf = heap.alloc(Object::Str(text.to_string()));
+            heap.alloc(Object::Tuple {
+                items: vec![Value::Obj(leaf)],
+            })
+        };
+        let build = || {
+            let mut src = Heap::new(1 << 20);
+            let first = payload(&mut src, "first payload");
+            let second = payload(&mut src, "second payload");
+            freeze(&mut src, first, &limits()).expect("the first graph freezes");
+            freeze(&mut src, second, &limits()).expect("the second graph freezes");
+            (src, first, second)
+        };
+        // A cap that holds one payload but not two.
+        let (mut src, first, second) = build();
+        let one = src.get(first).cost() + src.get(second).cost();
+        let mut dst = Heap::new(one + 40);
+        let moved = transfer(&mut src, &mut dst, &[], Value::Obj(first), &limits())
+            .expect("the first graph crosses");
+        let moved_ref = moved.as_obj().expect("the copy is an object");
+        // Without a root, the second copy collects the first away.
+        transfer(&mut src, &mut dst, &[], Value::Obj(second), &limits())
+            .expect("the second graph crosses");
+        assert!(
+            dst.try_get(moved_ref).is_none(),
+            "an unrooted earlier result must not survive"
+        );
+
+        // With a root, the first result survives every later copy.
+        let (mut src, first, second) = build();
+        let mut dst = Heap::new(one + 40);
+        let moved = transfer(&mut src, &mut dst, &[], Value::Obj(first), &limits())
+            .expect("the first graph crosses");
+        let moved_ref = moved.as_obj().expect("the copy is an object");
+        dst.push_host_root(moved_ref);
+        let out = transfer(&mut src, &mut dst, &[], Value::Obj(second), &limits());
+        assert!(dst.try_get(moved_ref).is_some(), "a rooted result survives");
+        // The destination cannot hold both, so the second copy stops
+        // at the heap limit and leaves the first one whole.
+        assert_eq!(out, Err(FaultCode::HeapLimit));
+        dst.pop_host_root(moved_ref);
     }
 
     /// Detached inspection copies a mutable graph and freezes the

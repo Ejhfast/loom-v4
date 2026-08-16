@@ -181,3 +181,52 @@ fn the_nested_sandbox_example_runs_unchanged() {
         "Done(123)"
     );
 }
+
+/// Several arguments cross one boundary under a tight heap cap. The
+/// machine must reach a terminal outcome, never a panic, whatever the
+/// cap allows.
+#[test]
+fn many_arguments_cross_one_boundary_under_pressure() {
+    let source = "\
+def build(n: Int): [[Int]]
+  xs: [[Int]] = []
+  i = 0
+  while i < n
+    xs.push([i, i])
+    i = i + 1
+  end
+  xs.freeze()
+end
+
+def go(): Int with Vm
+  a = build(8)
+  b = build(8)
+  c = build(8)
+  vm = sys.vm.Vm().from_object(do |p: [[Int]], q: [[Int]], r: [[Int]]|: Int
+    p.len() + q.len() + r.len()
+  end, args: (a, b, c))
+  case vm.run()
+  in Done(v)  then v
+  in Fault(_) then 0 - 1
+  end
+end
+
+go()
+";
+    let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
+    for cap in (2_000usize..24_000).step_by(250) {
+        let loaded = load_bytes(&bytes).expect("the program loads");
+        let config = VmConfig {
+            heap_bytes: cap,
+            ..VmConfig::default()
+        };
+        let mut world = World::new(&loaded, config, Box::new(lm_vm::NullHost));
+        world.allow("Vm").expect("the grant names a group");
+        let outcome = world.run_root();
+        let text = world.show_outcome(&outcome);
+        assert!(
+            text == "Done(24)" || text == "Done(-1)" || text == "Fault(HeapLimit)",
+            "cap {cap} gave {text}"
+        );
+    }
+}
