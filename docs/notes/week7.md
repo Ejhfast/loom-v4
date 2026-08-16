@@ -62,9 +62,11 @@ mode reads reachability and order from it.
 - an explicit work list, so depth never reaches the Rust stack.
 
 A mode adds only its own result state, through the `Visitor` trait.
-The eight modes are mark, deep freeze, frozen verification, boundary
-transfer, structural copy, canonical digest, detached inspection, and
-snapshot traversal.
+The eight modes of specification 22.10 are mark, deep freeze, frozen
+verification, boundary transfer, structural copy, canonical digest,
+detached inspection, and snapshot traversal. Structural copy and
+detached inspection share one implementation with a `CopyMode` flag:
+they differ only in whether they accept a mutable source.
 
 The identity table is a per-heap epoch table over the object slots.
 `seen[slot]` holds the walk epoch that last reached the slot, so a new
