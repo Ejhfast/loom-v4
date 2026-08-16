@@ -339,6 +339,15 @@ fn mock_runs_pure_and_bounded() {
         vm.table().mock(Clock.Now, do ||: Int base end)\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(42)");
+    // Installation boundary-copies the handler, so a mutable capture
+    // crosses and a later write into the source misses the copy.
+    let source = "def go(): Int with Vm\n  \
+        xs = [7]\n  \
+        vm = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
+        vm.table().mock(Clock.Now, do ||: Int xs.len() + 40 end)\n  \
+        xs.push(1)\n  \
+        case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done(41)");
 }
 
 #[test]

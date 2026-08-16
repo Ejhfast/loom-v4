@@ -150,6 +150,24 @@ fn a_self_send_copies_the_message_inside_one_heap() {
     assert_eq!(run(source), "Done(Done(2))");
 }
 
+/// A terminal proc result crosses as a copy. The holder receives a
+/// mutable copy when the proc returned a mutable graph.
+#[test]
+fn a_mutable_terminal_proc_result_crosses_as_a_mutable_copy() {
+    let source = "class Maker < Proc\n\
+                  \x20 def on_spawn(self): [Int] with Proc\n\
+                  \x20   [1, 2, 3]\n\
+                  \x20 end\n\
+                  end\n\
+                  case Maker.spawn().done()\n\
+                  in Done(xs)\n\
+                  \x20 xs.push(4)\n\
+                  \x20 xs.len()\n\
+                  in Fault(_) then 0 - 1\n\
+                  end\n";
+    assert_eq!(run(source), "Done(4)");
+}
+
 /// The mailbox limit is checked before the copy. A send past the
 /// bound blocks the sender until the proc frees one slot.
 #[test]
