@@ -2052,14 +2052,19 @@ impl<'m> World<'m> {
                 // is the one that resumes it. Every other machine of
                 // the stack stays out of the run set.
                 let resumable = self.suspended.contains_key(vm);
+                // A running machine is one that a suspended stack
+                // left mid flight. Only its own base activation may
+                // pick it up again.
+                let state_ok = match m.vm.state {
+                    MachineState::Ready | MachineState::Waiting => true,
+                    MachineState::Running => resumable,
+                    _ => false,
+                };
                 m.owner == Ownership::Scheduler
                     && (m.active == 0 || resumable)
                     && !m.paused
                     && m.barrier.is_none()
-                    && matches!(
-                        m.vm.state,
-                        MachineState::Ready | MachineState::Running | MachineState::Waiting
-                    )
+                    && state_ok
             })
             .collect()
     }

@@ -777,3 +777,62 @@ fn a_proc_may_spawn_a_proc() {
                   end\n";
     assert_eq!(run(source), "Done(6)");
 }
+
+/// A holder-driven nested machine may block on a proc. The whole
+/// activation stack stops, the scheduler runs the proc, and the
+/// stored stack resumes where it stopped.
+#[test]
+fn a_nested_machine_may_block_on_a_proc() {
+    let source = "class Q < Proc[Int]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(n)\n\
+                  \x20     n\n\
+                  \x20   in Closed\n\
+                  \x20     0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  h = Q.spawn()\n\
+                  h.send(9)\n\
+                  h.close()\n\
+                  vm = sys.vm.Vm().from_object(do ||: Int with Proc\n\
+                  \x20 case h.done()\n\
+                  \x20 in Done(v)  then v\n\
+                  \x20 in Fault(_) then 0 - 2\n\
+                  \x20 end\n\
+                  end, args: ())\n\
+                  vm.table().pass(Proc)\n\
+                  case vm.run()\n\
+                  in Done(v)  then v\n\
+                  in Fault(_) then 0 - 1\n\
+                  end\n";
+    assert_eq!(
+        run_allowed("proc.lm", source, &["Proc", "Vm"]).expect("the program compiles"),
+        "Done(9)"
+    );
+}
+
+/// A handle is a frozen sendable designator, so a closure may capture
+/// one and carry it into another machine.
+#[test]
+fn a_closure_may_capture_a_handle() {
+    let source = "class Q < Proc[Int]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(n)\n\
+                  \x20     n\n\
+                  \x20   in Closed\n\
+                  \x20     0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  h = Q.spawn()\n\
+                  f = do ||: SendResult with Proc.Send\n\
+                  \x20 h.send(4)\n\
+                  end\n\
+                  first = f()\n\
+                  h.close()\n\
+                  (first, h.done())\n";
+    assert_eq!(run(source), "Done((Sent, Done(4)))");
+}
