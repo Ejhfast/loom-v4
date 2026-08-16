@@ -566,3 +566,41 @@ fn the_spawner_charges_the_spawn_operation_only() {
                   h.done()\n";
     assert_eq!(run(source), "Done(Done(4))");
 }
+
+/// A handle is sendable data, so one proc may reach another proc that
+/// a mailbox message named. The message crosses one boundary only.
+#[test]
+fn a_proc_reaches_a_peer_it_learned_from_a_message() {
+    let source = "class Echo < Proc[Int]\n\
+                  \x20 seen: Int = 0\n\
+                  \x20 def on_spawn(mut self): Int with Proc\n\
+                  \x20   loop do\n\
+                  \x20     case self.receive()\n\
+                  \x20     in Msg(n)\n\
+                  \x20       self.seen = self.seen + n\n\
+                  \x20     in Closed\n\
+                  \x20       return self.seen\n\
+                  \x20     end\n\
+                  \x20   end\n\
+                  \x20   self.seen\n\
+                  \x20 end\n\
+                  end\n\
+                  class Sender < Proc[Handle[Int, Int]]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(target)\n\
+                  \x20     target.send(3)\n\
+                  \x20     target.close()\n\
+                  \x20     1\n\
+                  \x20   in Closed\n\
+                  \x20     0\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  e = Echo.spawn()\n\
+                  s = Sender.spawn()\n\
+                  s.send(e)\n\
+                  s.close()\n\
+                  (s.done(), e.done())\n";
+    assert_eq!(run(source), "Done((Done(1), Done(3)))");
+}

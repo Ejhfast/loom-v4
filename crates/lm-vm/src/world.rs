@@ -583,7 +583,10 @@ impl<'m> World<'m> {
     /// slot joins the free list.
     fn retire_mock(&mut self, mock: VmId) {
         debug_assert!(self.machines[mock as usize].active == 0);
-        self.machines[mock as usize] = Machine::empty(self.config, None);
+        // The slot takes a new generation, so a reference minted for
+        // the retired record names a dead machine, never the next one.
+        let generation = self.machines[mock as usize].generation.wrapping_add(1);
+        self.machines[mock as usize] = Machine::empty_at(self.config, None, generation);
         self.mock_free.push(mock);
     }
 
@@ -1438,6 +1441,26 @@ impl<'m> World<'m> {
         self.record(TraceEvent::Block { vm, block });
     }
 
+    /// Move one message into a mailbox.
+    ///
+    /// A proc may hold its own handle, because a handle is sendable
+    /// data. A self send stays inside one heap, so it proves the
+    /// boundary rule with the standalone frozen check instead of a
+    /// copy: the codec has no second heap to copy into.
+    fn send_copy(&mut self, src: VmId, dst: VmId, value: Value) -> Result<Value, FaultCode> {
+        if src != dst {
+            return self.transfer(src, dst, value);
+        }
+        let Some(root) = value.as_obj() else {
+            // A scalar carries no reference, so it is always sendable.
+            return Ok(value);
+        };
+        let limits = self.machines[dst as usize].config.graph;
+        let heap = &mut self.machines[dst as usize].vm.heap;
+        lm_graph::verify_frozen(heap, root, &limits)?;
+        Ok(value)
+    }
+
     /// Execute one proc operation of the machine `vm`.
     fn proc_exec(&mut self, vm: VmId, op: u32, args: Vec<Value>) {
         match op {
@@ -1607,7 +1630,7 @@ impl<'m> World<'m> {
             );
             return;
         }
-        let moved = match self.transfer(vm, proc, args[1]) {
+        let moved = match self.send_copy(vm, proc, args[1]) {
             Ok(value) => value,
             Err(code) => {
                 // A message that fails the sender-side boundary check
@@ -2680,6 +2703,73 @@ mod tests {
         }
         assert_eq!(world.machines[1].vm.state, MachineState::Asked);
         assert_eq!(world.machines[2].vm.state, MachineState::Asked);
+    }
+
+    /// A proc may hold its own handle, so a send can name the sending
+    /// machine. The message stays in one heap, and the boundary rule
+    /// still applies: a mutable graph is not sendable.
+    ///
+    /// The copy path needs two distinct machines, so a same-heap send
+    /// would otherwise reach an assertion instead of the rule.
+    #[test]
+    fn a_self_send_proves_the_boundary_rule_without_a_copy() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        // A scalar carries no reference.
+        assert_eq!(world.send_copy(0, 0, Value::Int(7)), Ok(Value::Int(7)));
+        // A frozen graph passes the check and stays where it is.
+        let frozen = world.machines[0]
+            .alloc(Object::Str("text".to_string()))
+            .expect("the string allocates");
+        assert_eq!(world.send_copy(0, 0, frozen), Ok(frozen));
+        // A mutable graph is not sendable.
+        let mutable = world.machines[0]
+            .alloc(Object::List { items: vec![] })
+            .expect("the list allocates");
+        assert_eq!(
+            world.send_copy(0, 0, mutable),
+            Err(FaultCode::UnsendableValue)
+        );
+    }
+
+    /// A stale generation names a dead proc, never the machine that
+    /// took the slot later.
+    ///
+    /// A proc slot is not reused today, so no guest program reaches
+    /// this state. The rule is the defense that keeps it that way, so
+    /// it is tested at the record level.
+    #[test]
+    fn a_stale_generation_names_a_dead_proc() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let mut proc = Machine::empty_at(VmConfig::default(), Some(0), 3);
+        proc.vm.state = MachineState::Ready;
+        proc.owner = crate::machine::Ownership::Scheduler;
+        world.machines.push(proc);
+        assert!(world.proc_alive(1, 3));
+        assert!(world.proc_running(1, 3));
+        // A reference minted before the slot moved on is stale.
+        assert!(!world.proc_alive(1, 2));
+        assert!(!world.proc_running(1, 2));
+        // A reference past the table is stale as well, and the bound
+        // check runs before the generation read.
+        assert!(!world.proc_alive(9, 0));
+    }
+
+    /// A retired mock slot takes a new generation, so a reference to
+    /// the retired record never names its replacement.
+    #[test]
+    fn a_retired_slot_takes_a_new_generation() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        world
+            .machines
+            .push(Machine::empty(VmConfig::default(), None));
+        assert_eq!(world.generation_of(1), 0);
+        world.retire_mock(1);
+        assert_eq!(world.generation_of(1), 1);
+        assert!(!world.proc_alive(1, 0));
+        assert!(world.proc_alive(1, 1));
     }
 
     /// A mock start that fails returns its machine slot at once.
