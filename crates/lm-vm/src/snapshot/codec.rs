@@ -711,11 +711,20 @@ pub(super) fn seal_admitted(
     identity: super::AdmissionIdentity,
     limit: usize,
 ) -> Result<SnapshotImage, ImageError> {
-    let bytes = encode(&image, limit).map_err(|_| {
-        ImageError::admission(
+    // The encoder has two failures, and they break two rules. A
+    // container past its byte limit breaks the limit rule. An
+    // operation slot the manifest has not breaks the code rule, and
+    // reporting it as a limit names the wrong rule.
+    let bytes = encode(&image, limit).map_err(|error| match error {
+        SnapshotFail::LimitExceeded => ImageError::admission(
             ImageReason::LimitExceeded,
             "the admitted image passes the container byte limit",
-        )
+        ),
+        SnapshotFail::Fault(_, detail) => ImageError::admission(ImageReason::Code, detail),
+        SnapshotFail::ResourceActive { kind, .. } => ImageError::admission(
+            ImageReason::State,
+            format!("the admitted image holds a live {kind} attachment"),
+        ),
     })?;
     let hash = container_hash(&bytes[..bytes.len() - 32]);
     Ok(SnapshotImage {

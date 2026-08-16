@@ -1388,6 +1388,23 @@ fn an_operation_slot_past_the_manifest_rejects() {
     assert!(codec::encode(&broken, usize::MAX).is_err());
 }
 
+/// The seal reports the rule the encoder broke. A container past its
+/// byte limit breaks the limit rule, and an operation slot the manifest
+/// has not breaks the code rule.
+#[test]
+fn a_sealed_image_past_the_byte_limit_reports_the_limit_rule() {
+    let loaded = program(SHARED_SOURCE);
+    let images = boundaries(&loaded, &[], 40);
+    let image = pick(&images, "a heap of two objects or more", |image| {
+        image.machines[0].objects.len() >= 2
+    });
+    let mut budget = lm_vm::snapshot::AdmissionBudget::default().with_byte_limit(64);
+    let error = lm_vm::snapshot::admit(image, &loaded, &mut budget)
+        .expect_err("the container passes the byte limit");
+    assert_eq!(error.reason, ImageReason::LimitExceeded);
+    assert_eq!(error.stage, lm_vm::snapshot::ImageStage::Admission);
+}
+
 const TABLE_SOURCE: &str = "\
 def go(): Int with Vm, Io
   held = sys.vm.Vm().from_object(do ||: Int

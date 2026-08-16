@@ -2031,6 +2031,20 @@ impl Admit<'_> {
                         // A field before its first assignment holds the
                         // uninitialized marker, and a read of it faults
                         // rather than trusting the slot.
+                        //
+                        // Specification 5.3 asks for a narrower rule:
+                        // the marker is legal only where no
+                        // initialized value is permitted. The image
+                        // carries no evidence for that rule at a
+                        // field. `New` allocates every field as the
+                        // marker and leaves the object on the operand
+                        // stack of the caller, so an object under
+                        // construction is not the receiver of any
+                        // frame. `Freeze` accepts a partly built
+                        // object as well, so the frozen bit answers
+                        // nothing either. A narrower rule would refuse
+                        // legal captures, and worklist round A2 adds
+                        // the witness that would carry it.
                         if *value == Value::Uninit {
                             continue;
                         }

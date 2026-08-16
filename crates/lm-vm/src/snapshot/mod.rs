@@ -345,11 +345,6 @@ impl SnapshotImage {
         &self.world
     }
 
-    /// A shared handle to the admitted machine world.
-    pub fn world_arc(&self) -> std::sync::Arc<Image> {
-        self.world.clone()
-    }
-
     /// One editable copy of the admitted world.
     ///
     /// An arbitrary edit destroys every admitted property, so the
