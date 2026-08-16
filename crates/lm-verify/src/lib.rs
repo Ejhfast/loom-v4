@@ -1863,40 +1863,187 @@ fn dataflow(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<Vec<Option<State>>,
     Ok(states)
 }
 
-/// The operand types of one verified program point.
+// ----------------------------------------------------------------
+// The resolved-type view.
+// ----------------------------------------------------------------
+
+/// One stopped frame of a captured machine.
 ///
-/// A snapshot records the operand arena of a stopped machine, and the
-/// loader proves the shape of every value in it. The types come from
-/// the same abstract interpretation the verifier runs.
-///
-/// The reader builds one instance per module and asks it once per
-/// captured frame, so the structural pass runs once per load.
-pub struct FrameTypes<'m> {
-    ctx: Ctx<'m>,
+/// The point names one instruction boundary of one verified body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FramePoint {
+    pub func: u32,
+    pub block: u32,
+    pub ip: u32,
+    /// True when the frame stopped before the instruction its program
+    /// counter names.
+    ///
+    /// Every other frame stopped inside the instruction before the
+    /// counter: a call moved its arguments into the callee locals, and
+    /// a perform moved them into the pending record.
+    pub before_counter: bool,
 }
 
-impl<'m> FrameTypes<'m> {
-    /// Build the reader for one verified module.
-    pub fn new(module: &'m Module) -> Result<FrameTypes<'m>, VerifyError> {
-        Ok(FrameTypes {
+/// The resolved types of one stopped frame.
+///
+/// Every index names one entry of the resolved type universe, and no
+/// entry holds an unresolved type variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameSlots {
+    /// The proved type of each local slot of the frame, in slot order.
+    /// `None` marks a slot the verifier proves holds no value.
+    ///
+    /// A `None` slot can still hold a value: one path of a merge may
+    /// have stored one. The verified body cannot read that slot before
+    /// its next store, so the value has no proved type. `declared`
+    /// bounds it.
+    pub locals: Vec<Option<u32>>,
+    /// The declared type of each local slot of the frame, in slot
+    /// order. Every store fits the declared type, so it bounds every
+    /// value the slot ever held.
+    pub declared: Vec<u32>,
+    /// The whole proved operand stack of the frame at its stop point.
+    pub operands: Vec<u32>,
+    /// The type arguments of this activation.
+    pub targs: Vec<u32>,
+    /// The effect-row arguments of this activation.
+    pub rows: Vec<Vec<BcRow>>,
+}
+
+/// Why one frame chain has no resolved types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveError {
+    /// The frame index the failure names.
+    pub frame: usize,
+    pub message: String,
+}
+
+impl fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "frame {}: {}", self.frame, self.message)
+    }
+}
+
+/// The read-only resolved-type view of one verified module.
+///
+/// The verifier proves each function body once, with the type
+/// variables of a generic body opaque. A captured frame names one
+/// activation of such a body, so its slot types need the substitution
+/// the call site applied. The chain resolver reads that substitution
+/// from the caller frame, so a resolved type never holds a variable
+/// and no slot becomes an unchecked slot.
+///
+/// The view owns the extended type universe: the module type table
+/// plus every type the verifier creates by substitution. Index `i`
+/// below the module table length is module type `i`.
+///
+/// The dataflow of one function runs once and serves every saved frame
+/// of that function.
+pub struct ResolvedTypes<'m> {
+    ctx: Ctx<'m>,
+    states: RefCell<HashMap<u32, std::rc::Rc<Vec<Option<State>>>>>,
+    var_free: RefCell<HashMap<u32, bool>>,
+}
+
+impl<'m> ResolvedTypes<'m> {
+    /// Build the view for one verified module.
+    pub fn new(module: &'m Module) -> Result<ResolvedTypes<'m>, VerifyError> {
+        Ok(ResolvedTypes {
             ctx: verify_structure(module)?,
+            states: RefCell::new(HashMap::new()),
+            var_free: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// The module this view reads.
+    pub fn module(&self) -> &'m Module {
+        self.ctx.module
+    }
+
+    /// One entry of the resolved type universe.
+    pub fn ty(&self, idx: u32) -> Option<BcType> {
+        let uni = self.ctx.uni.borrow();
+        uni.types.get(idx as usize).cloned()
+    }
+
+    /// The number of entries the universe holds.
+    pub fn type_count(&self) -> u32 {
+        self.ctx.uni.borrow().types.len() as u32
+    }
+
+    /// Add one type to the universe and return its index.
+    pub fn intern(&self, ty: BcType) -> u32 {
+        self.ctx.intern(ty)
+    }
+
+    /// True when a value of type `found` is valid where the code
+    /// expects type `expected`.
+    pub fn is_subtype(&self, found: u32, expected: u32) -> bool {
+        self.ctx.is_subtype(found, expected)
+    }
+
+    /// True when `child` equals `ancestor` or inherits it.
+    pub fn class_extends(&self, child: u32, ancestor: u32) -> bool {
+        if child as usize >= self.ctx.module.classes.len()
+            || ancestor as usize >= self.ctx.module.classes.len()
+        {
+            return false;
+        }
+        self.ctx.class_extends(child, ancestor)
+    }
+
+    /// The nominal class and type arguments of one instance type.
+    pub fn as_instance(&self, ty: u32) -> Option<(u32, Vec<u32>)> {
+        self.ctx.as_instance(ty)
+    }
+
+    /// True when the type holds no unresolved type variable.
+    ///
+    /// A resolved type carries every generic substitution, so
+    /// admission can decide it. A type that still holds a variable has
+    /// no decidable value set, and admission rejects it instead of
+    /// treating the slot as unchecked.
+    pub fn is_resolved(&self, ty: u32) -> bool {
+        if let Some(known) = self.var_free.borrow().get(&ty) {
+            return *known;
+        }
+        let Some(entry) = self.ty(ty) else {
+            return false;
+        };
+        // Every child index of a universe entry is smaller than the
+        // entry itself, so the walk terminates.
+        let free = match entry {
+            BcType::Var(_) => false,
+            BcType::List(e) | BcType::Vm(e) | BcType::Snapshot(e) | BcType::Op(_, e) => {
+                self.is_resolved(e)
+            }
+            BcType::Map(a, b) | BcType::PendingCall(a, b) | BcType::Handle(a, b) => {
+                self.is_resolved(a) && self.is_resolved(b)
+            }
+            BcType::Tuple(elems) | BcType::Inst(_, elems) => {
+                elems.iter().all(|e| self.is_resolved(*e))
+            }
+            BcType::Fn(params, _, ret, _) => {
+                params.iter().all(|p| self.is_resolved(*p)) && self.is_resolved(ret)
+            }
+            _ => true,
+        };
+        self.var_free.borrow_mut().insert(ty, free);
+        free
     }
 
     /// The mailbox message type of one proc instance type.
     ///
-    /// The class table fixes the message type of a proc, so a
-    /// snapshot loader reads it there instead of trusting the image.
-    /// `None` marks a type that is not an instance of a subclass of
-    /// the core class `Proc`, or a message type the module table does
-    /// not name.
+    /// The class table fixes the message type of a proc, so a snapshot
+    /// reader takes it there instead of trusting the image. `None`
+    /// marks a type that is not an instance of a subclass of the core
+    /// class `Proc`.
     pub fn proc_mailbox(&self, ty: u32) -> Option<u32> {
-        let mailbox = self.ctx.proc_mailbox(ty)?;
-        (mailbox < self.ctx.module.types.len() as u32).then_some(mailbox)
+        self.ctx.proc_mailbox(ty)
     }
 
     /// The declared parameter types of one function.
-    pub fn params(&self, func: u32) -> Option<&[u32]> {
+    pub fn params(&self, func: u32) -> Option<&'m [u32]> {
         self.ctx
             .module
             .funcs
@@ -1904,46 +2051,365 @@ impl<'m> FrameTypes<'m> {
             .map(|f| f.params.as_slice())
     }
 
-    /// The operand-stack types just before instruction `ip` of block
-    /// `block` of function `func`, as module type-table indices.
-    ///
-    /// `None` in a slot marks a type the verifier created by
-    /// substitution, which the module table does not name. Such a slot
-    /// accepts every value.
-    ///
-    /// The call returns `None` when the point is not a reachable
-    /// program point of a verified body.
-    pub fn operands_at(&self, func: u32, block: u32, ip: u32) -> Option<Vec<Option<u32>>> {
-        let module = self.ctx.module;
-        let body = module.funcs.get(func as usize)?;
-        let states = dataflow(&self.ctx, body, func).ok()?;
-        let entry = states.get(block as usize)?.clone()?;
-        let instrs = body.blocks.get(block as usize)?;
-        if ip as usize > instrs.len() {
+    /// The declared capture types of one function.
+    pub fn captures(&self, func: u32) -> Option<&'m [u32]> {
+        self.ctx
+            .module
+            .funcs
+            .get(func as usize)
+            .map(|f| f.captures.as_slice())
+    }
+
+    /// The declared result type of one function.
+    pub fn result_type(&self, func: u32) -> Option<u32> {
+        self.ctx.module.funcs.get(func as usize).map(|f| f.ret)
+    }
+
+    /// The function value type of one function slot.
+    pub fn fn_type(&self, func: u32) -> Option<u32> {
+        let f = self.ctx.module.funcs.get(func as usize)?;
+        Some(self.ctx.intern(BcType::Fn(
+            f.params.clone(),
+            f.param_muts.clone(),
+            f.ret,
+            f.row.clone(),
+        )))
+    }
+
+    /// The argument-view type and the reply type of one manifest
+    /// operation, as `PendingCall[A, R]` names them.
+    pub fn pending_call_types(&self, op: u32) -> Option<(u32, u32)> {
+        if op >= lm_abi::OP_COUNT {
             return None;
         }
+        let view = self.ctx.op_args_view(op).ok()?;
+        let reply = self.ctx.abi_ty(lm_abi::op(op).reply).ok()?;
+        Some((view, reply))
+    }
+
+    /// The field types of one instance, seen at the resolved type that
+    /// reached it.
+    ///
+    /// `class` is the class the object records, and `at` is the
+    /// resolved type of the position that names the object. `None`
+    /// marks an instance whose type arguments do not follow from that
+    /// position, so admission has no evidence to check its fields.
+    pub fn instance_field_types(&self, class: u32, at: u32) -> Option<Vec<u32>> {
+        let (declared, args) = self.ctx.as_instance(at)?;
+        if !self.class_extends(class, declared) {
+            return None;
+        }
+        let entry = self.ctx.module.classes.get(class as usize)?;
+        // A generic class declares no parent, and an enum case passes
+        // the arguments of its family through unchanged. The arguments
+        // of the object class therefore follow from the position, or
+        // the class takes none at all.
+        let own: Vec<u32> = if class == declared {
+            args
+        } else if entry.type_params == 0 {
+            Vec::new()
+        } else if self.passes_args_through(class, declared) {
+            args
+        } else {
+            return None;
+        };
+        if own.len() != entry.type_params as usize {
+            return None;
+        }
+        Some(
+            entry
+                .fields
+                .iter()
+                .map(|(_, ty)| self.ctx.subst(*ty, &own, &[]))
+                .collect(),
+        )
+    }
+
+    /// True when every step from `class` up to `ancestor` passes its
+    /// type arguments through unchanged.
+    fn passes_args_through(&self, class: u32, ancestor: u32) -> bool {
+        let mut cur = class;
+        let mut steps = 0usize;
+        loop {
+            if cur == ancestor {
+                return true;
+            }
+            steps += 1;
+            if steps > self.ctx.module.classes.len() {
+                return false;
+            }
+            let entry = &self.ctx.module.classes[cur as usize];
+            let Some(parent) = entry.parent() else {
+                return false;
+            };
+            if !entry.parent_args.is_empty()
+                || self.ctx.module.classes[parent as usize].type_params != entry.type_params
+            {
+                return false;
+            }
+            cur = parent;
+        }
+    }
+
+    /// Resolve the slot types of one whole frame chain.
+    ///
+    /// The chain runs from the bottom frame to the top frame. The
+    /// bottom frame carries no call site, so its function must take no
+    /// type argument. Every other frame takes its substitution from
+    /// the call instruction the frame below stopped inside.
+    pub fn resolve_chain(&self, frames: &[FramePoint]) -> Result<Vec<FrameSlots>, ResolveError> {
+        let mut out: Vec<FrameSlots> = Vec::with_capacity(frames.len());
+        for (idx, point) in frames.iter().enumerate() {
+            let fail = |message: String| ResolveError {
+                frame: idx,
+                message,
+            };
+            let body = self
+                .ctx
+                .module
+                .funcs
+                .get(point.func as usize)
+                .ok_or_else(|| fail("the frame names no function of this program".to_string()))?;
+            let (targs, rows) = if idx == 0 {
+                (Vec::new(), Vec::new())
+            } else {
+                self.call_substitution(&frames[idx - 1], &out[idx - 1], point.func)
+                    .map_err(&fail)?
+            };
+            if targs.len() != body.type_params as usize || rows.len() != body.effect_params as usize
+            {
+                return Err(fail(
+                    "the call site applies another number of type arguments".to_string(),
+                ));
+            }
+            let state = self.state_at(point).map_err(&fail)?;
+            let locals: Vec<Option<u32>> = state
+                .locals
+                .iter()
+                .map(|slot| slot.map(|ty| self.ctx.subst(ty, &targs, &rows)))
+                .collect();
+            let declared: Vec<u32> = body
+                .local_types
+                .iter()
+                .map(|ty| self.ctx.subst(*ty, &targs, &rows))
+                .collect();
+            let operands: Vec<u32> = state
+                .stack
+                .iter()
+                .map(|ty| self.ctx.subst(*ty, &targs, &rows))
+                .collect();
+            for ty in locals
+                .iter()
+                .flatten()
+                .chain(declared.iter())
+                .chain(operands.iter())
+            {
+                if !self.is_resolved(*ty) {
+                    return Err(fail(
+                        "a slot type still holds a type variable after substitution".to_string(),
+                    ));
+                }
+            }
+            out.push(FrameSlots {
+                locals,
+                declared,
+                operands,
+                targs,
+                rows,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The type arguments one call site applies to its callee.
+    ///
+    /// The caller stopped inside its call instruction, so that
+    /// instruction names the callee and its type application. The
+    /// application is expressed in the type arguments of the caller,
+    /// so it substitutes through the resolved caller state first.
+    fn call_substitution(
+        &self,
+        caller: &FramePoint,
+        caller_slots: &FrameSlots,
+        callee: u32,
+    ) -> Result<(Vec<u32>, Vec<Vec<BcRow>>), String> {
+        let module = self.ctx.module;
+        if caller.before_counter {
+            return Err("the caller frame did not stop inside a call".to_string());
+        }
+        if caller.ip == 0 {
+            return Err("the caller frame stopped before its first instruction".to_string());
+        }
+        let body = module
+            .funcs
+            .get(caller.func as usize)
+            .ok_or("the caller frame names no function of this program")?;
+        let block = body
+            .blocks
+            .get(caller.block as usize)
+            .ok_or("the caller frame names no block of its function")?;
+        let instr = block
+            .get(caller.ip as usize - 1)
+            .ok_or("the caller frame names no instruction of its block")?;
+        let receiver = |argc: u32| -> Result<u32, String> {
+            caller_slots
+                .operands
+                .len()
+                .checked_sub(argc as usize + 1)
+                .and_then(|at| caller_slots.operands.get(at).copied())
+                .ok_or_else(|| "the call site proves no receiver".to_string())
+        };
+        let apply = |app: u32| -> Result<(Vec<u32>, Vec<Vec<BcRow>>), String> {
+            let entry = module
+                .apps
+                .get(app as usize)
+                .ok_or("the call site names no type application")?;
+            let types = entry
+                .types
+                .iter()
+                .map(|ty| self.ctx.subst(*ty, &caller_slots.targs, &caller_slots.rows))
+                .collect();
+            let rows = entry
+                .rows
+                .iter()
+                .map(|row| self.ctx.row_subst(row, &caller_slots.rows))
+                .collect();
+            Ok((types, rows))
+        };
+        let named = |target: u32| -> Result<(), String> {
+            if target == callee {
+                Ok(())
+            } else {
+                Err("the frame does not name the callee of its call site".to_string())
+            }
+        };
+        match instr {
+            Instr::Call(target) => {
+                named(*target)?;
+                Ok((Vec::new(), Vec::new()))
+            }
+            Instr::CallG { func, app } => {
+                named(*func)?;
+                apply(*app)
+            }
+            Instr::CallVirtual { selector, argc } => {
+                let recv = receiver(*argc)?;
+                let (class, _) = self
+                    .ctx
+                    .as_instance(recv)
+                    .ok_or("the call site receiver is not a class instance")?;
+                let target = self
+                    .ctx
+                    .find_method(class, *selector)
+                    .ok_or("the call site selector is not a method of its receiver")?;
+                named(target)?;
+                Ok((Vec::new(), Vec::new()))
+            }
+            Instr::CallVirtualG {
+                selector,
+                argc,
+                app,
+            } => {
+                let recv = receiver(*argc)?;
+                let (class, class_args) = self
+                    .ctx
+                    .as_instance(recv)
+                    .ok_or("the call site receiver is not a class instance")?;
+                let target = self
+                    .ctx
+                    .find_method(class, *selector)
+                    .ok_or("the call site selector is not a method of its receiver")?;
+                named(target)?;
+                let owner = self
+                    .ctx
+                    .method_owner(class, *selector)
+                    .ok_or("the call site selector has no declaring class")?;
+                let mut types = self
+                    .ctx
+                    .ancestor_args(class, &class_args, owner)
+                    .ok_or("the method owner is not an ancestor of the receiver")?;
+                let (own, rows) = apply(*app)?;
+                types.extend(own);
+                Ok((types, rows))
+            }
+            Instr::CallValue { argc } => {
+                // A closure call names its target through the value on
+                // the stack, so the frame carries the function slot.
+                // The declared function type must fit the call site,
+                // and the body must need no substitution.
+                let callee_ty = receiver(*argc)?;
+                let declared = self
+                    .fn_type(callee)
+                    .ok_or("the frame names no function of this program")?;
+                if !self.ctx.is_subtype(declared, callee_ty) {
+                    return Err("the frame function does not fit its call site".to_string());
+                }
+                let body = &module.funcs[callee as usize];
+                if body.type_params != 0 || body.effect_params != 0 {
+                    return Err("a closure call applies no type argument".to_string());
+                }
+                Ok((Vec::new(), Vec::new()))
+            }
+            _ => Err("the caller frame did not stop inside a call".to_string()),
+        }
+    }
+
+    /// The abstract state of one verified body at one stop point.
+    fn state_at(&self, point: &FramePoint) -> Result<State, String> {
+        let module = self.ctx.module;
+        let body = module
+            .funcs
+            .get(point.func as usize)
+            .ok_or("the frame names no function of this program")?;
+        let states = self.dataflow_of(point.func)?;
+        let entry = states
+            .get(point.block as usize)
+            .ok_or("the frame names no block of its function")?
+            .clone()
+            .ok_or("the frame names an unreachable block")?;
+        let instrs = &body.blocks[point.block as usize];
+        let stop = if point.before_counter {
+            point.ip as usize
+        } else {
+            (point.ip as usize)
+                .checked_sub(1)
+                .ok_or("the frame stopped before its first instruction")?
+        };
+        if stop > instrs.len() {
+            return Err("the frame counter names no instruction boundary".to_string());
+        }
         let mut state = entry;
-        for (iidx, instr) in instrs.iter().enumerate().take(ip as usize) {
+        for (iidx, instr) in instrs.iter().enumerate().take(stop) {
             step(
                 &self.ctx,
                 body,
-                func,
-                block as usize,
+                point.func,
+                point.block as usize,
                 iidx,
                 instr,
                 &mut state,
                 |_, _| Ok(()),
             )
-            .ok()?;
+            .map_err(|e| e.message)?;
         }
-        let count = module.types.len() as u32;
-        Some(
-            state
-                .stack
-                .iter()
-                .map(|ty| if *ty < count { Some(*ty) } else { None })
-                .collect(),
-        )
+        Ok(state)
+    }
+
+    /// The block entry states of one function. The pass runs once for
+    /// each function and serves every saved frame of that function.
+    fn dataflow_of(&self, func: u32) -> Result<std::rc::Rc<Vec<Option<State>>>, String> {
+        if let Some(states) = self.states.borrow().get(&func) {
+            return Ok(states.clone());
+        }
+        let body = self
+            .ctx
+            .module
+            .funcs
+            .get(func as usize)
+            .ok_or("the frame names no function of this program")?;
+        let states = std::rc::Rc::new(dataflow(&self.ctx, body, func).map_err(|e| e.message)?);
+        self.states.borrow_mut().insert(func, states.clone());
+        Ok(states)
     }
 }
 
