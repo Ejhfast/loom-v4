@@ -405,6 +405,9 @@ impl<'m> World<'m> {
     /// `lm snapshot run` needs an entry that names a machine other
     /// than the root.
     pub fn run_machine(&mut self, vm: VmId) -> RootEvent {
+        // The first run, step, or drive of a restored root opens the
+        // world gate, whatever the root state is.
+        self.open_gate(vm);
         if self.suspended.contains_key(&vm) {
             return self.resume_stack(vm);
         }
@@ -1337,6 +1340,9 @@ impl<'m> World<'m> {
                 if !self.expect_holder_owned(vm, op, target) {
                     return;
                 }
+                // The first run, step, or drive of a restored root
+                // opens the world gate (specification 17.5).
+                self.open_gate(target);
                 match self.machines[target as usize].vm.state {
                     MachineState::Empty => {
                         self.fault_caller(
@@ -2341,7 +2347,12 @@ impl<'m> World<'m> {
     pub fn poll_blocked(&mut self) -> usize {
         let ready: Vec<VmId> = (0..self.machines.len() as VmId)
             .filter(|vm| {
-                self.machines[*vm as usize].vm.state == MachineState::Blocked
+                // A machine behind a world gate makes no move at all,
+                // not even a completed block. The first run, step, or
+                // drive of the restored root opens the gate
+                // (specification 17.5).
+                self.machines[*vm as usize].gate == 0
+                    && self.machines[*vm as usize].vm.state == MachineState::Blocked
                     && self.block_ready(*vm)
             })
             .collect();

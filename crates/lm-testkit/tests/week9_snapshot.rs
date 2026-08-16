@@ -792,3 +792,54 @@ fn a_capture_past_the_byte_limit_returns_the_typed_error() {
     let outcome = drive(&mut world);
     assert_eq!(world.show_outcome(&outcome), "Done(2)");
 }
+
+// ---------------------------------------------------------------
+// The world gate and the deterministic dump.
+// ---------------------------------------------------------------
+
+/// A restored world runs nothing until the restored root moves.
+#[test]
+fn restored_procs_wait_behind_one_world_gate() {
+    let loaded = program(&asked_tree_source());
+    let image = asked_tree_image(&loaded);
+    let (mut world, root) = restore_into(&loaded, image.world());
+    // Every restored machine sits behind one gate, so the scheduler
+    // finds nothing to drive and no block to complete.
+    let gate = world.gate_of(root);
+    assert_ne!(gate, 0);
+    for vm in [root, root + 1, root + 2] {
+        assert_eq!(world.gate_of(vm), gate, "machine {vm}");
+    }
+    assert!(world.runnable_procs().is_empty());
+    assert_eq!(world.poll_blocked(), 0);
+    assert_eq!(world.mailbox_metrics(root + 1).delivered, 0);
+    // The first drive of the restored root opens the gate for the
+    // whole restored world.
+    world.run_machine(root);
+    for vm in [root, root + 1, root + 2] {
+        assert_eq!(world.gate_of(vm), 0, "machine {vm}");
+    }
+    assert_eq!(world.runnable_procs(), vec![root + 1, root + 2]);
+}
+
+/// The readable dump is a deterministic diff surface: two captures of
+/// one world produce no difference, and a changed world names the
+/// first line that moved.
+#[test]
+fn the_dump_is_a_deterministic_diff() {
+    let loaded = program(&asked_tree_source());
+    let first = asked_tree_image(&loaded);
+    let second = asked_tree_image(&loaded);
+    assert_eq!(lm_vm::snapshot::dump::diff(&first, &second), None);
+    // A world that ran one more instruction differs on one line.
+    let other = {
+        let mut world = world_of(&loaded, &["Proc", "Vm", "Clock"]);
+        drive(&mut world);
+        let gate = world.next_gate();
+        world
+            .capture_snapshot(gate, 1, false)
+            .expect("the worker captures")
+    };
+    let text = lm_vm::snapshot::dump::diff(&first, &other).expect("the two worlds differ");
+    assert!(text.starts_with("line 1\n"), "{text}");
+}

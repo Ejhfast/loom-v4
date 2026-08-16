@@ -125,6 +125,35 @@ pub fn dump(image: &SnapshotImage) -> String {
     out
 }
 
+/// The deterministic difference between two dumps.
+///
+/// The dump is one fact per line and it repeats exactly, so a line
+/// comparison is a stable diff. The result names the first line the
+/// two images do not share, or `None` when the two are equal.
+pub fn diff(left: &SnapshotImage, right: &SnapshotImage) -> Option<String> {
+    let a = dump(left);
+    let b = dump(right);
+    if a == b {
+        return None;
+    }
+    let mut lines_a = a.lines();
+    let mut lines_b = b.lines();
+    let mut at = 1usize;
+    loop {
+        match (lines_a.next(), lines_b.next()) {
+            (None, None) => return None,
+            (Some(x), Some(y)) if x == y => at += 1,
+            (x, y) => {
+                return Some(format!(
+                    "line {at}\n  left  {}\n  right {}",
+                    x.unwrap_or("<end>"),
+                    y.unwrap_or("<end>")
+                ))
+            }
+        }
+    }
+}
+
 /// The canonical payload of one captured object, as readable text.
 fn payload(object: &Object) -> String {
     match object {
