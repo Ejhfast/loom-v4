@@ -243,6 +243,44 @@ Rust call stack.
 Admission charges every visited pair and resolved type to one aggregate
 admission budget.
 
+#### Object type coherence
+
+One typed edge proves that edge alone. A shared object that satisfies
+two different types at two different edges still breaks the interpreter
+invariant.
+
+An edited image can point one `List[Int]` local and one `List[Str]`
+local at the same empty mutable list. Each edge passes, because the
+list holds no element. Verified code then appends an integer through
+the first local and reads a string through the second local. A generic
+instance with an empty `List[T]` field carries the same defect.
+
+Type accuracy must stay true after every verified mutation, so
+admission proves one exact type for each object:
+
+- Admission builds one map from `(machine, object)` to one exact closed
+  type. Objects never cross a machine boundary, so the machine ordinal
+  completes the key.
+- An instance position normalizes through the concrete class of the
+  object.
+- A mutable object takes the type of its first edge. Every later edge
+  must name that exact type.
+- A frozen object holds no write path, so a later edge may name a
+  supertype of the exact type.
+
+The mutable rule is invariance. A mutable list at exact type
+`List[Dog]` reached from a `List[Animal]` edge accepts a `Cat` through
+the second edge, so equality is the only sound rule there.
+
+The same principle governs the relational types of section 5.5. A
+`Vm[T]` reads the terminal value of its target, so a subtype result is
+sound. A `Handle[M,R]` sends and receives its message type, so the
+mailbox type must match exactly.
+
+The map collapses the visited key to `(machine, object)` for a mutable
+object, because one exact type is legal there. Admission charges the
+map to the aggregate admission budget.
+
 ### 5.5 Native relational types
 
 Some native types depend on another machine or another record. Their
