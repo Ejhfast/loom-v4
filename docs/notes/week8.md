@@ -163,7 +163,9 @@ order:
    stopped state, through the canonical snapshot traversal over the
    collection roots, which cover the frames, the locals, the operands,
    the pending arguments, the terminal result, and the accepted
-   mailbox queue;
+   mailbox queue. Five native shapes name a machine: a machine
+   handle, a proc handle, a policy-table handle, a request token, and
+   a typed call token. The walk reports all five;
 3. it freezes mailbox acceptance for the whole set at one cut marker;
 4. it records the machine states;
 5. it preflights the host attachments through the resource registry;
@@ -176,7 +178,7 @@ serialize and barriers over disjoint worlds proceed. A frozen mailbox
 accepts no message: the sender blocks instead, so the accepted queue
 at the cut is exactly what an encoder would copy.
 
-### Tracing and metrics
+### Tracing, metrics, and dumps
 
 `World::trace_procs` turns on an ordered proc trace: spawn, send,
 receive, close, block, unblock, pause, resume, and terminal. Every
@@ -184,6 +186,11 @@ record names a machine by identifier and generation.
 `World::mailbox_metrics` reports the bound, the queue length, the
 accepted count, the delivered count, the close flag, and the freeze
 flag.
+
+Every new format has a readable dump. `World::dump_trace` prints one
+line per event, `World::dump_mailboxes` prints one line per proc, and
+the class listing of `lm disasm` shows the parent instantiation the
+class table records. All three repeat exactly.
 
 ### Parent lifetime
 
@@ -315,6 +322,17 @@ cannot serve this"; the open question below asks for a better one.
   hold its own handle, because a handle is sendable data. The copy
   path needs two distinct machines, so a same-heap send runs the
   standalone frozen check instead.
+- **`pause` on a blocked proc returns `InUse`.** A blocked machine
+  holds the execution references of its suspended activation stack,
+  and the pause rule reads that count. Handing the holder a machine
+  with a stored stack needs a rule for what `run` does to it, and
+  this slice does not define one.
+- **A proc that outlives its spawner keeps its mailbox and loses its
+  pass-through.** The mailbox is machine state, so `send` and `close`
+  still work. The next `receive` resolves through the dead parent
+  table and fails closed with `PolicyDenied`, which is the rule of
+  specification 18.6. One test states it, because the shape surprises
+  a reader who expects the handle alone to keep the proc alive.
 
 ## Changed tests
 
@@ -340,19 +358,20 @@ cannot serve this"; the open question below asks for a better one.
 
 ## New tests
 
-- `crates/lm-testkit/tests/week8_inherit.rs`, 17 cases: seven for
-  core-class inheritance and ten for generic-parent inheritance,
+- `crates/lm-testkit/tests/week8_inherit.rs`, 18 cases: seven for
+  core-class inheritance and eleven for generic-parent inheritance,
   including the arity rules, the unbound argument, the override rules,
-  and the recorded class entry.
-- `crates/lm-testkit/tests/week8_procs.rs`, 32 cases: the mailbox
+  the recorded class entry, and the class listing.
+- `crates/lm-testkit/tests/week8_procs.rs`, 38 cases: the mailbox
   model rules, the handle rules, the spawn rules, ownership, pause and
   resume, parent death, revocation, determinism, the deadlock rule,
-  the nested block, the birth grant, the child budget, and the three
-  example outputs.
-- `crates/lm-testkit/tests/week8_barrier.rs`, 8 cases: the closed set,
+  the nested block, the birth grant, the child budget, the fuel
+  budget, the readable dumps, and the three example outputs.
+- `crates/lm-testkit/tests/week8_barrier.rs`, 9 cases: the closed set,
   the mailbox cut, the frozen mailbox, overlapping and disjoint
-  barriers, the live host attachment, the run set, and the closed-set
-  gate stated directly.
+  barriers, the live host attachment, the run set, the closed-set gate
+  stated directly, and the closure over all five machine-reference
+  shapes.
 - `crates/lm-testkit/tests/week8_worker.rs`, 3 cases: the worker
   thread against the host thread, deep guest recursion on the bounded
   stack, and a bad grant reported instead of a panic.
@@ -370,7 +389,7 @@ cannot serve this"; the open question below asks for a better one.
 - `tests/fuzz-regressions/`, 2 new source seeds for the generic parent
   and the proc surface.
 
-Test count: 620 before, 696 after.
+Test count: 620 before, 704 after.
 
 ## Measurements
 
@@ -438,6 +457,33 @@ The fix reads the suspended table: a machine is runnable when its own
 stack is the stored one, or when it holds no execution reference at
 all. A running machine is one that a suspended stack left mid flight,
 so only its own base activation may pick it up again.
+
+### Two spawn shapes reached the verifier instead of a diagnostic
+
+A proc class that inherits its `on_spawn` and a `spawn` inside a
+generic callable both compiled and then failed in the verifier. Both
+now work.
+
+An inherited `on_spawn` declares its own class as the receiver, and
+the constructed instance is a subclass of it. The spawn rule compares
+by subtyping now, and the checker records the declaring class so the
+right closure type reaches the module type table.
+
+The closure rule said a closure body must keep the enclosing generic
+arity. That is right for a closure body, which shares the generic
+scope of the function that creates it. It is wrong for a target that
+declares no generic parameter at all: such a signature holds no free
+variable, because the signature rule already bounds every variable by
+the target's own arity. The rule now admits a closed target from any
+scope, which is what the `spawn` sugar needs.
+
+### The barrier set missed three machine reference shapes
+
+The first walk followed machine handles and proc handles. A
+policy-table handle, a request token, and a typed call token also
+name a machine, and each can be the only reference a heap holds. The
+walk follows all five now, and one test builds a world where a table
+handle alone names a machine.
 
 ### The manifest version did not move
 
