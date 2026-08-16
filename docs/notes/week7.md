@@ -283,6 +283,9 @@ variant yet. The rule enters with floats.
 - **The child budget bounds tower depth per branch, not the total
   machine count.** Full transitive accounting of fuel and heap bytes
   needs the proc scheduler and waits for week 8.
+- **No native shape is a host attachment.** The snapshot rejection
+  rule in the graph therefore has nothing to reject yet, and one test
+  states the fact. Week 10 adds files and sockets, which change it.
 - **A control envelope encodes each member independently.**
   Specification 16.1 says so, so sharing holds inside one transferred
   value and not across two members of one `args` view. Two members
@@ -317,15 +320,17 @@ variant yet. The rule enters with floats.
   migration oracles for cycles and shared subgraphs, five guest digest
   cases, two semantic-identity gates, the control-envelope rule, the
   shape-table dump, and the two example outputs.
-- `crates/lm-testkit/tests/week7_resources.rs`, 7 cases: the pending
+- `crates/lm-testkit/tests/week7_resources.rs`, 8 cases: the pending
   operation registry and its cleanup, the host suspension contract,
   the fail-atomic child reservation, budget inheritance, the snapshot
-  preflight, the nested sandbox example on the production path, and
-  three arguments crossing one boundary over ninety heap caps.
-- `crates/lm-testkit/tests/week7_closures.rs`, 12 cases: both
+  preflight, the nested sandbox example on the production path, three
+  arguments crossing one boundary over ninety heap caps, and the mock
+  machine slot reuse.
+- `crates/lm-testkit/tests/week7_closures.rs`, 13 cases: both
   spellings encoding identically, every closure part in brace form,
   trailing closures on every call form, map disambiguation, every
-  brace nesting combination, and five negative rules.
+  brace nesting combination, the header layouts, and five negative
+  rules.
 - `crates/lm-graph/src/engine.rs`, 4 cases: canonical ordinals against
   allocation order, cycle and sharing termination, each limit
   rejecting on its own, and a 100,000-deep chain on a 256 KiB stack.
@@ -333,9 +338,10 @@ variant yet. The rule enters with floats.
   failure-atomic transfer, the rooting rule for a later transfer, the
   digest properties, the limit rejection of every mode, and every mode
   on a 50,000-deep chain.
-- `crates/lm-heap/src/shape.rs`, 5 cases: the tag table, the child
+- `crates/lm-heap/src/shape.rs`, 6 cases: the tag table, the child
   order agreeing with the reference flag, holder-local shapes never
-  digestible, map child order, and the dump.
+  digestible, no shape a host attachment yet, map child order, and the
+  dump.
 - `crates/lm-heap/src/lib.rs`, 7 storage cases including the free
   rollback and the digest cache generation rule.
 - `crates/lm-vm/src/resource.rs`, 3 cases for the registry.
@@ -346,7 +352,7 @@ variant yet. The rule enters with floats.
 - `tests/fuzz-regressions/`, 2 new source seeds for the new parser
   surface.
 
-Test count: 541 before, 609 after.
+Test count: 541 before, 612 after.
 
 ## Measurements
 
@@ -356,6 +362,7 @@ Test count: 541 before, 609 after.
 | Entry | Before | After |
 |---|---|---|
 | `alloc_gc_100k` | 77.7 ms | 79.6 ms |
+| `perform_mock_5k` | 34.6 ms | 17.6 ms |
 | `list_push_100k` | 69.8 ms | 70.1 ms |
 | `freeze_chain_50k` | — | 50.1 ms |
 | `transfer_graph_20k` | — | 30.1 ms |
@@ -412,6 +419,84 @@ length prefix. `count` cast a `usize` length, so a length past
 reachable size, so no reachable graph hit it; the cast was still a
 hole in an encoding whose whole value is that it is unambiguous.
 
+## The independent review pass
+
+A second reviewer read the whole diff. It found two high defects, one
+medium, and four low items. It found nothing in the mechanical
+`.vm.` rewrite, nothing in the engine soundness, nothing in the new
+verifier rules, and no reachable new panic site.
+
+### The scanner and the parser tested the brace twice (high)
+
+`Scanner::brace_opens_closure` classified a brace by raw bytes, and
+`Parser::at_closure` classified it again by the next token. The two
+disagreed across a line end, because a map brace drops every newline
+inside it. A closure that opened on its own line, or after a comment,
+therefore lost its statement separators. A one-expression body still
+ran; a two-expression body reported a wrong diagnostic, and the rule
+became unpredictable.
+
+The fix removes the second test. The scanner reports its decision
+through `Tok::LBraceClosure`, and the parser reads the token. The
+lookahead now passes blank space, line ends, and comments, so a
+closure may open on its own line, and the closure header skips the
+separators the scanner emits. One test drives four header layouts
+through the brace form and two through the trailing form, and it keeps
+a map brace a map in every layout, including a pipe inside a comment.
+
+### Every mocked perform leaked one machine record (high)
+
+`start_mock` pushed one `Machine` per resolved mock perform, and
+nothing ever removed it. A loop of mocked performs grew the machine
+table without any bound: the reviewer measured about one gigabyte for
+two hundred thousand mocked calls. The heap cap, the fuel budget, and
+the new child budget all missed it, because none of them counts a mock
+machine.
+
+A mock machine is ephemeral. No guest value names it, it takes no
+child, and its own table denies every operation, so it can never reach
+an asked state. The finished record therefore drops its heap as soon
+as its result crosses into the target, and the slot joins a free list
+that the next mock takes. The same program now holds a flat
+thirty-three megabytes from two hundred to two hundred thousand mocked
+performs, and `perform_mock_5k` fell from 34.6 ms to 17.6 ms.
+
+The defect predates this week. It is recorded here because the week
+introduced `max_children` as the declared machine-count defense and
+left this path outside it.
+
+### The snapshot rejection rule has nothing to reject (medium)
+
+`SnapshotCheck` rejects `SnapshotClass::HostAttachment`, and all
+fourteen shapes declare `MachineState`, so the visitor never fires.
+That is the intended state, and the simplifications section says so,
+but nothing enforced it. One test now states the fact, so a shape that
+becomes a host attachment must land with the test that proves the
+rejection.
+
+The reviewer also asked whether `NativeVm`, `NativeTable`,
+`NativeRequest`, and `NativeCall` are machine state. Specification
+16.4 answers three of them: a held machine handle is a machine
+reference inside the snapshot world, and 17.2 lists pending requests
+inside snapshot contents. The policy-table handle is the open one; see
+the question below.
+
+### The four low items
+
+- The graph limits came from the world where the machine limits apply.
+  The digest and the snapshot preflight now read the limits of the
+  machine that asks, and a transfer reads the limits of the
+  destination, which is the heap that pays for the copy.
+- `Vm.New` charged the parent before the handle allocation and never
+  refunded a failed one. It refunds now, so the whole call rolls back.
+- A cached digest returns before the walk, so the published limits do
+  not run again. One lookup is under every limit and the frozen bit is
+  monotonic, so the answer stays true. The code says so now.
+- A host that suspends an operation the manifest declares machine
+  state loses its completion token, and nothing cancels the host work.
+  The `Host` trait has no cancellation entry point, so this waits for
+  the asynchronous completion adapters. It is in the deferred list.
+
 ## Open questions
 
 ### BLAKE3-256 against the hand-rolled SHA-256
@@ -459,6 +544,17 @@ it would move every definition hash and the core image pin. The
 question is whether a classification change is an ABI change. It
 changes what a host may do, so the argument for including it is real.
 
+### A policy-table handle in snapshot bytes
+
+Specification 16.4 makes a held machine handle a machine reference
+inside the snapshot world. Specification 17.2 excludes policy tables
+from snapshot contents, and 17.5 gives a restored world fresh
+authority. A `PolicyTable` handle therefore names a thing the
+snapshot does not copy. Week 7 classifies it as machine state, on the
+reading that the handle relocates to the fresh table of the restored
+machine. The specification does not say that, and the alternative is
+a third classification the binary rule has no room for.
+
 ### A trailing closure after a labeled argument
 
 Specification 6.1 says labeled arguments follow positional arguments,
@@ -499,5 +595,12 @@ into snapshot bytes.
   timers arrive with week 10.
 - A `Digest` method surface: `to_bytes`, `to_text`, and ordering. The
   type carries value equality and display only.
+- Cancellation of a host operation the VM abandons. A host that
+  suspends an operation the manifest declares machine state loses its
+  completion token, and the `Host` trait has no cancellation entry
+  point. It arrives with the asynchronous completion adapters.
+- A budget over mock machines. The free list bounds the memory, and
+  the concurrent mock depth is the activation stack depth, so no
+  separate budget landed.
 - Committed benchmark distributions, `cargo-fuzz` targets, Miri, and
   CI workflow files stay deferred as before.
