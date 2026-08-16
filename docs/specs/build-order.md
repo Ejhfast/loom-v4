@@ -647,7 +647,6 @@ end
 
 h = Worker.spawn()
 h.send(Double(21))
-h.close()
 h.done()
 ```
 

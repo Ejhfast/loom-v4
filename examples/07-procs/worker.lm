@@ -1,8 +1,8 @@
 # One proc with a typed mailbox.
 #
 # The worker receives one message, doubles it, and returns the result.
-# The spawner sends one message, closes the mailbox, and waits for the
-# terminal result.
+# The spawner sends one message and waits for the terminal result. One
+# request and one reply need no close.
 
 enum Work
   Double(value: Int)
@@ -19,5 +19,4 @@ end
 
 h = Worker.spawn()
 h.send(Double(21))
-h.close()
 h.done()

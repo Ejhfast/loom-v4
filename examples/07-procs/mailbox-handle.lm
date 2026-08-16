@@ -26,6 +26,8 @@ class Relay < Proc[Handle[Int, Int]]
     case self.receive()
     in Msg(target)
       target.send(7)
+      # The adder drains a stream. `close` ends the stream, and the
+      # loop of the adder exits on `Closed`.
       target.close()
       1
     in Closed
@@ -37,6 +39,6 @@ end
 adder = Adder.spawn()
 adder.send(5)
 relay = Relay.spawn()
+# The relay receives one message and finishes, so it needs no close.
 relay.send(adder)
-relay.close()
 (relay.done(), adder.done())

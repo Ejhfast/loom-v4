@@ -924,6 +924,9 @@ fn spawn_works_inside_a_generic_function() {
 /// names the same machine. The proc it names outlives its spawner, so
 /// specification 18.6 closes the pass-through: the mailbox still
 /// accepts, and the next request of the orphan fails closed.
+///
+/// The fault message names the cause, because the code alone reads
+/// like an ordinary denial.
 #[test]
 fn a_proc_that_outlives_its_spawner_loses_its_pass_through() {
     let source = "class Inner < Proc[Int]\n\
@@ -953,6 +956,24 @@ fn a_proc_that_outlives_its_spawner_loses_its_pass_through() {
                   \x20 f.code()\n\
                   end\n";
     assert_eq!(run(source), "Done(\"PolicyDenied true true\")");
+    // The guest reads the stable code only, so the message is read
+    // from the orphan machine itself. Machine 1 is the maker, and
+    // machine 2 is the proc that outlived it.
+    let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Proc").expect("the grant names a group");
+    let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
+    scheduler.run(&mut world);
+    let fault = world.fault_of(2).expect("the orphan faulted");
+    assert_eq!(
+        fault.message,
+        "the operation Proc.Recv lost its pass through: the parent machine is gone"
+    );
 }
 
 /// Two procs that wait for each other deadlock. The scheduler faults

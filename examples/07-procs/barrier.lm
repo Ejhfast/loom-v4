@@ -20,7 +20,6 @@ class Worker < Proc[Handle[Int, Int]]
     case self.receive()
     in Msg(helper)
       helper.send(5)
-      helper.close()
       case helper.done()
       in Done(v)
         v
@@ -35,5 +34,4 @@ end
 
 worker = Worker.spawn()
 worker.send(Helper.spawn())
-worker.close()
 worker.done()

@@ -366,7 +366,12 @@ impl<'m> World<'m> {
 
     /// The stored root fault record, for the CLI.
     pub fn root_fault(&self) -> Option<&FaultRec> {
-        match &self.machines[0].vm.terminal {
+        self.fault_of(0)
+    }
+
+    /// The stored fault record of one machine.
+    pub fn fault_of(&self, vm: VmId) -> Option<&FaultRec> {
+        match &self.machines[vm as usize].vm.terminal {
             Some(Terminal::Fault(rec)) => Some(rec),
             _ => None,
         }
@@ -839,6 +844,19 @@ impl<'m> World<'m> {
                     Some(op),
                 );
             }
+            Resolution::DeadParent => {
+                // The denial has one cause the holder cannot see from
+                // the code alone, so the message names it.
+                self.machines[vm as usize].set_fault(
+                    FaultCode::PolicyDenied,
+                    format!(
+                        "the operation {} lost its pass through: \
+                         the parent machine is gone",
+                        lm_abi::op_name(op)
+                    ),
+                    Some(op),
+                );
+            }
             Resolution::Mock { owner, closure } => self.start_mock(stack, vm, owner, closure),
             Resolution::Root => {
                 if lm_abi::op(op).kind == lm_abi::OpKind::VmControl {
@@ -948,7 +966,7 @@ impl<'m> World<'m> {
                             self.machines[parent as usize].vm.state,
                             MachineState::Done | MachineState::Faulted
                         ) {
-                            return Resolution::Denied;
+                            return Resolution::DeadParent;
                         }
                         cur = parent;
                     }
@@ -2378,7 +2396,13 @@ impl<'m> World<'m> {
 /// One resolution of a policy walk.
 enum Resolution {
     Denied,
-    Mock { owner: VmId, closure: ObjRef },
+    /// The pass-through chain reached a parent machine that is gone.
+    /// The request fails closed (specification 18.6).
+    DeadParent,
+    Mock {
+        owner: VmId,
+        closure: ObjRef,
+    },
     Root,
 }
 
