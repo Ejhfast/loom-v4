@@ -518,11 +518,15 @@ This week consolidates those paths. It does not replace them.
 
 - Add `lm-graph` with one non-recursive traversal engine and one
   deterministic child-order contract per native shape.
-- Move mark, freeze, frozen verification, transfer/copy, canonical
-  digest, detached inspection, and snapshot traversal behind that
-  contract.
+- Move the existing mark, deep freeze, and transfer/copy paths behind
+  that contract.
+- Build canonical digest, frozen verification, detached inspection,
+  and snapshot traversal as new modes of the same engine. No digest of
+  runtime values exists today.
 - Keep the current heap, three-pass transfer behavior, and nested VM
   driver as migration oracles until the new paths match them.
+- Add a cyclic and shared-subgraph transfer test before the migration
+  starts. The current transfer tests cover flat graphs only.
 - Preserve cycles and sharing; add canonical traversal ordinals,
   bounded work tables, stable map semantics, and digest caching on
   frozen objects.
@@ -698,6 +702,9 @@ an unrelated reachable handle stays outside the owned tree.
   its Week 7 snapshot policy.
 - Add typed `RestoreBindings` for resource slots, external proc
   resolvers, pending waits, and per-proc table plans.
+- Add one test-only checkpointable resource kind in `lm-testkit`. It
+  is the first `RestoreSlot` consumer and proves slot binding end to
+  end before any host extension exists.
 - Return ordinary typed errors for expected snapshot and restore
   blockers. No unresolved resource becomes an inert guest value.
 - Give every restored VM a fresh default-deny table. Restore internal
@@ -808,8 +815,9 @@ valid: state=asked procs=3 mailboxes=2 external_procs=1
 case files.with_open(path, ReadOnly()) { |file|
   file.read_text(max_bytes: 1_000_000)
 }
-in Ok(text) then sys.io.print(text)
-in Err(error) then sys.io.error(error.message())
+in Ok(Ok(text))   then sys.io.print(text)
+in Ok(Err(error)) then sys.io.error(error.message())
+in Err(error)     then sys.io.error(error.message())
 end
 ```
 
