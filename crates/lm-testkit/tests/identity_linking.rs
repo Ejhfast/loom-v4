@@ -1349,3 +1349,68 @@ fn a_snapshot_classification_change_moves_the_verification_hash() {
         "a classification change must move the verification hash"
     );
 }
+
+/// Every field of one operation definition reaches its identity.
+///
+/// The identity encoder once read `params` and `reply` for a `Fixed`
+/// entry and `schema` for a `VmControl` entry alone. `Vm.SnapshotSelf`
+/// is `VmControl` with a reply the verifier reads, so that reply could
+/// change and move no digest at all.
+#[test]
+fn every_field_of_one_operation_definition_moves_its_identity() {
+    use lm_abi::{
+        identity_of, op, op_identity, op_name, AbiType, OpKind, SnapshotClass, OP_CLOCK_NOW,
+        OP_VM_SNAPSHOT_SELF,
+    };
+    // The reply of one `VmControl` entry.
+    let name = op_name(OP_VM_SNAPSHOT_SELF);
+    let mut edited = *op(OP_VM_SNAPSHOT_SELF);
+    assert_eq!(edited.kind, OpKind::VmControl);
+    assert_ne!(edited.reply, AbiType::Unit);
+    edited.reply = AbiType::Unit;
+    assert_ne!(
+        identity_of(&name, &edited),
+        op_identity(OP_VM_SNAPSHOT_SELF),
+        "a VmControl reply change must move the operation identity"
+    );
+    // The parameters of one `VmControl` entry.
+    let mut edited = *op(OP_VM_SNAPSHOT_SELF);
+    edited.params = &[AbiType::Int];
+    assert_ne!(
+        identity_of(&name, &edited),
+        op_identity(OP_VM_SNAPSHOT_SELF),
+        "a VmControl parameter change must move the operation identity"
+    );
+    // The schema of one `Fixed` entry, and every other field of it.
+    let name = op_name(OP_CLOCK_NOW);
+    let base = *op(OP_CLOCK_NOW);
+    let mut edits = Vec::new();
+    let mut with_schema = base;
+    with_schema.schema = "() -> Int";
+    edits.push(("schema", with_schema));
+    let mut with_kind = base;
+    with_kind.kind = OpKind::VmControl;
+    edits.push(("kind", with_kind));
+    let mut with_group = base;
+    with_group.group = "Rand";
+    edits.push(("group", with_group));
+    let mut with_member = base;
+    with_member.member = "Later";
+    edits.push(("member", with_member));
+    let mut with_params = base;
+    with_params.params = &[AbiType::Str];
+    edits.push(("params", with_params));
+    let mut with_reply = base;
+    with_reply.reply = AbiType::Str;
+    edits.push(("reply", with_reply));
+    let mut with_snapshot = base;
+    with_snapshot.snapshot = SnapshotClass::HostAttachment;
+    edits.push(("snapshot", with_snapshot));
+    for (field, edited) in edits {
+        assert_ne!(
+            identity_of(&name, &edited),
+            op_identity(OP_CLOCK_NOW),
+            "a change of `{field}` must move the operation identity"
+        );
+    }
+}

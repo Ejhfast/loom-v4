@@ -22,9 +22,9 @@ pub use sha::{sha256, sha256_hex};
 ///
 /// Version 2 adds the eight proc operations of specification 23.6.
 /// Version 3 adds the four snapshot operations of specification 23.5.
-/// Version 4 adds the snapshot classification to the operation
-/// identity, so a classification-only change moves every dependent
-/// digest.
+/// Version 4 hashes every field of one operation definition into its
+/// identity, the snapshot classification included. A change to any
+/// field of a definition now moves every dependent digest.
 pub const ABI_VERSION: u32 = 4;
 
 /// A dense group slot: the index in `GROUPS`.
@@ -78,6 +78,16 @@ pub enum OpKind {
     /// verifier applies a built-in rule per slot. It is not
     /// first-class and cannot be mocked.
     VmControl,
+}
+
+impl OpKind {
+    /// The canonical text of the kind, for identity hashing.
+    pub fn tag(self) -> &'static str {
+        match self {
+            OpKind::Fixed => "fixed",
+            OpKind::VmControl => "vm-control",
+        }
+    }
 }
 
 /// One manifest entry.
@@ -473,40 +483,51 @@ pub fn op_identity(slot: OpSlot) -> [u8; 32] {
     identity_of(&op_name(slot), op(slot))
 }
 
+/// One length-prefixed field of an identity encoding.
+///
+/// The length prefix keeps two field lists apart, so no pair of
+/// definitions shares one byte string.
+fn id_field(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
 /// The stable identity hash of one operation definition.
 ///
-/// The hash covers every semantic field of the definition. The
-/// snapshot classification is one of them: it decides whether a
-/// pending instance holds live host state, so it changes snapshot and
-/// resource behavior. A classification-only change therefore moves the
-/// operation identity, the manifest digest, and the verification hash
-/// of every module that names the operation.
+/// The hash covers every field of `OpDef`, through one common encoder.
+/// The encoder lists the fields of the structure, not the fields one
+/// variant happens to use, so a later variant cannot omit a field.
+///
+/// An earlier encoder read `params` and `reply` for a `Fixed` entry and
+/// `schema` for a `VmControl` entry. `Vm.SnapshotSelf` is `VmControl`
+/// with a reply the verifier reads, so that reply could change and move
+/// no digest.
+///
+/// The snapshot classification is one field of the same list. It
+/// decides whether a pending instance holds live host state, so it
+/// changes snapshot and resource behavior. A change to any field moves
+/// the operation identity, the manifest digest, and the verification
+/// hash of every module that names the operation.
 ///
 /// The call takes the definition, so a test can hash a changed
 /// definition without a second manifest.
 pub fn identity_of(name: &str, def: &OpDef) -> [u8; 32] {
     let mut input = Vec::new();
-    input.extend_from_slice(b"lm-operation-v2\0");
+    input.extend_from_slice(b"lm-operation-v3\0");
     input.extend_from_slice(&ABI_VERSION.to_le_bytes());
-    input.extend_from_slice(name.as_bytes());
-    input.push(0);
-    match def.kind {
-        OpKind::Fixed => {
-            input.push(0);
-            for p in def.params {
-                input.extend_from_slice(p.text().as_bytes());
-                input.push(0);
-            }
-            input.push(0xff);
-            input.extend_from_slice(def.reply.text().as_bytes());
-        }
-        OpKind::VmControl => {
-            input.push(1);
-            input.extend_from_slice(def.schema.as_bytes());
-        }
+    // The qualified name, then every field of `OpDef` in declaration
+    // order. Add the new field here when `OpDef` grows one.
+    id_field(&mut input, name.as_bytes());
+    id_field(&mut input, def.group.as_bytes());
+    id_field(&mut input, def.member.as_bytes());
+    id_field(&mut input, def.kind.tag().as_bytes());
+    id_field(&mut input, &(def.params.len() as u64).to_le_bytes());
+    for param in def.params {
+        id_field(&mut input, param.text().as_bytes());
     }
-    input.push(0xfe);
-    input.extend_from_slice(def.snapshot.tag().as_bytes());
+    id_field(&mut input, def.reply.text().as_bytes());
+    id_field(&mut input, def.schema.as_bytes());
+    id_field(&mut input, def.snapshot.tag().as_bytes());
     sha256(&input)
 }
 
