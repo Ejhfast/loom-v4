@@ -1883,6 +1883,27 @@ impl<'m> FrameTypes<'m> {
         })
     }
 
+    /// The mailbox message type of one proc instance type.
+    ///
+    /// The class table fixes the message type of a proc, so a
+    /// snapshot loader reads it there instead of trusting the image.
+    /// `None` marks a type that is not an instance of a subclass of
+    /// the core class `Proc`, or a message type the module table does
+    /// not name.
+    pub fn proc_mailbox(&self, ty: u32) -> Option<u32> {
+        let mailbox = self.ctx.proc_mailbox(ty)?;
+        (mailbox < self.ctx.module.types.len() as u32).then_some(mailbox)
+    }
+
+    /// The declared parameter types of one function.
+    pub fn params(&self, func: u32) -> Option<&[u32]> {
+        self.ctx
+            .module
+            .funcs
+            .get(func as usize)
+            .map(|f| f.params.as_slice())
+    }
+
     /// The operand-stack types just before instruction `ip` of block
     /// `block` of function `func`, as module type-table indices.
     ///

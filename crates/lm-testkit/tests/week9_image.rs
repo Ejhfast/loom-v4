@@ -681,3 +681,17 @@ go()
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
 }
+
+/// An accepted message names the mailbox type of its proc. The class
+/// table fixes that type, so the rule never reads it from the image.
+#[test]
+fn an_accepted_message_of_the_wrong_shape_rejects() {
+    let (loaded, bytes) = asked_tree();
+    let image = accept(&loaded, &bytes);
+    // The worker mailbox holds the helper handle.
+    assert_eq!(image.machines[1].mailbox.queue.len(), 1);
+    let mut broken = image.clone();
+    broken.machines[1].mailbox.queue[0] = lm_value::Value::Int(1);
+    let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+}

@@ -1623,6 +1623,19 @@ fn check_types(machine: &ImageMachine, ctx: &Ctx<'_>, vm: u32) -> Read<()> {
     // Every operand of every stopped frame names the type the
     // verifier proved at that program point.
     check_operands(machine, ctx, vm, &mut work)?;
+    // Every accepted message names the mailbox type of its proc. The
+    // class table fixes that type, so the rule never reads it from
+    // the image.
+    if let Some(message) = mailbox_type(machine, ctx) {
+        for value in &machine.mailbox.queue {
+            check_shape(machine, ctx, vm, *value, message, &mut work).map_err(|e| {
+                ImageError::new(
+                    e.reason,
+                    format!("machine {vm}: an accepted message has the wrong shape"),
+                )
+            })?;
+        }
+    }
     // Every instance field and every closure capture names its
     // declared type, whatever root reached the object.
     for (ordinal, entry) in machine.objects.iter().enumerate() {
@@ -1776,6 +1789,29 @@ fn check_operands(
         }
     }
     Ok(())
+}
+
+/// The mailbox message type of one captured proc.
+///
+/// The proc class fixes the type. The entry frame of a proc declares
+/// the proc instance as its first parameter, and the stored proc body
+/// declares it before the constructor returns. A proc with neither,
+/// for example a terminal one, receives no message again, so its
+/// queue is inert and the rule does not apply.
+fn mailbox_type(machine: &ImageMachine, ctx: &Ctx<'_>) -> Option<u32> {
+    if !machine.is_proc || machine.mailbox.queue.is_empty() {
+        return None;
+    }
+    let frames = ctx.frame_types.as_ref()?;
+    let func = match machine.start_body {
+        Some(ordinal) => match machine.objects[ordinal as usize].object {
+            Object::Closure { func, .. } => Some(func),
+            _ => None,
+        },
+        None => machine.frames.first().map(|f| f.func),
+    }?;
+    let instance = *frames.params(func)?.first()?;
+    frames.proc_mailbox(instance)
 }
 
 /// Check one value against one declared type index.
