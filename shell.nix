@@ -10,6 +10,10 @@ pkgs.mkShell {
     clippy
     rust-analyzer
     git
+    # CPython is the frame of reference for the language-operation
+    # benchmarks. It runs the same workload as the Loom program, so a
+    # ratio says whether a number is reasonable for an interpreter.
+    python3
   ];
 
   RUST_BACKTRACE = "1";
