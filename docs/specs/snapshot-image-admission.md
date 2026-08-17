@@ -3,7 +3,7 @@
 Status: normative. The implementation follows it.
 
 Section 5.2 replaced an earlier design that made admission prove every
-declared type. `docs/notes/post-week9-admission.md` records why that
+declared type. `docs/notes/fixes-post-week9.md` records why that
 design failed and what replaced it.
 
 This document refines `language-spec.md` sections 17.1, 17.8, and

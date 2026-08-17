@@ -1,19 +1,18 @@
-# Post-week-9 admission status
+# Fixes after week 9
 
 This note states the snapshot and virtual machine design after week 9.
-`worklist.md` holds the worklist. `docs/specs/snapshot-image-admission.md`
-holds the normative design.
+`docs/specs/snapshot-image-admission.md` holds the normative design.
 
-The work has three delivery groups:
+The work ran in three parts:
 
-- group A separates decoding from admission, and hardens the virtual
-  machine against a wrong-typed value;
-- group B contains failures and resources;
-- group C removes the known scaling defects.
+- decoding separates from admission, and the virtual machine hardens
+  against a wrong-typed value;
+- restore and the world contain their failures and their resources;
+- the scheduler drops its machine scans.
 
-Group A is complete. Groups B and C hold worklist items 7 to 12.
+One task stays open. "Deferred work" below states it.
 
-## Group A
+## Admission and the hardened virtual machine
 
 ### The two host states
 
@@ -105,6 +104,19 @@ Two states stay representable. An empty container reached under two
 argument lists satisfies both, and a restored frame can carry any
 environment. A read of either takes a fault.
 
+**A world that restored nothing checks no boundary.** Ordinary
+execution builds every value through verified code, and the verifier
+proved the type of each one at the program point that built it. A
+restore is the one path that states a value the verifier never saw, so
+`World::restored_any` turns the check on when a restore commits.
+
+The flag names the world rather than one machine. A machine-level rule
+must follow the source of each value, and a value reaches a boundary
+from a heap, a mailbox, or a host reply, so each source needs its own
+record. A per-machine rule that reads the receiving machine is wrong: a
+restored machine that spawns a child passes its values into a machine
+no restore built.
+
 ### The type environment
 
 `crates/lm-bytecode/src/closed.rs` holds `ClosedType`, `TypeEnv`, and
@@ -158,7 +170,7 @@ Polymorphic recursion is legal, so a program can deepen a closed type
 as it runs. Such a program takes a local fault at the depth limit or at
 the node cap.
 
-### Group B containment
+### Failure and resource containment
 
 Restore uses a detached `RestorePlan`. Preparation builds every heap,
 machine record, relocation table, and effective limit before commit.
@@ -189,6 +201,29 @@ and new budgets when the trusted cache has no admitted image.
 
 Container hashing streams the domain and prefix. The external loader
 uses the validated stored hash and does not hash the prefix again.
+
+### The scheduler indexes its tasks
+
+`crates/lm-vm/src/schedule.rs` holds the scheduler view. A ready index
+names the tasks that can run. A blocked index names the tasks that wait
+on each wake source: a mailbox message, mailbox capacity, or a terminal
+result. `ScheduleEvents` coalesces the state changes one execution
+slice produced, so a completion wakes the tasks that completion
+affects.
+
+The scheduler scanned every machine for a runnable or blocked proc
+before this change, and it allocated one vector for each scan. A
+terminal record stayed in the scan set.
+
+Each task runs one bounded quantum and requeues. A host wait stays
+outside the scheduler, so one proc waiting on a host completion leaves
+the others runnable.
+
+The indexes pay for themselves once a world holds many procs.
+`proc_spawn_500` runs 31 percent faster. A world of two or three procs
+pays the index maintenance and skips no scan worth avoiding, so
+`proc_send_receive_20k` and `proc_pause_resume_5k` each cost about 10
+percent more. The crossing point between the two is not measured.
 
 ### Versions
 
@@ -265,47 +300,51 @@ deep chain of 5000 instances is 125415 bytes, and a machine world of
 three machines is 843 bytes.
 
 Benchmarks: `cargo test --release -p lm-testkit --test bench_smoke --
---nocapture --test-threads=1`. Each figure is the median of seven
-passes. The spread column is the range of those seven passes, as a
-percentage of the median, so a reader can tell a real movement from
-measurement noise.
+--nocapture --test-threads=1`.
 
-| Entry | Median | Spread |
+Read the method before the figures. A benchmark of this suite varies by
+5 to 50 percent between passes of one unchanged binary, and one build
+directory can run 24 percent faster than another for the same commit.
+A comparison of two commits therefore holds only when it alternates
+between them inside one build directory, in one session. Every figure
+below comes from five alternating rounds of that shape, reported as the
+median of each side.
+
+Against `c87f9de`, the tree before this work:
+
+| Entry | Before | After |
 | --- | --- | --- |
-| `alloc_gc_100k` | 8.64 ms | 11% |
-| `async_wait_50` | 0.60 ms | 42% |
-| `build_2_modules` | 1.45 ms | 14% |
-| `digest_graph_20k_plus_1k_cached` | 3.65 ms | 18% |
-| `drive_interception_5k` | 3.23 ms | 14% |
-| `freeze_chain_50k` | 6.23 ms | 18% |
-| `list_push_100k` | 4.75 ms | 20% |
-| `literal_loop_200k` | 5.72 ms | 4% |
-| `many_class_load_300` | 1.51 ms | 21% |
-| `map_insert_4000` | 0.85 ms | 52% |
-| `map_insert_32000` | 5.50 ms | 33% |
-| `map_put_300` | 0.31 ms | 51% |
-| `mark_sweep_100k_under_256k` | 9.84 ms | 12% |
-| `nested_vm_run_40` | 0.40 ms | 55% |
-| `perform_block_300` | 1.14 ms | 50% |
-| `perform_exact_pass_20k` | 1.59 ms | 12% |
-| `perform_group_pass_20k` | 1.56 ms | 23% |
-| `perform_mock_5k` | 2.32 ms | 7% |
-| `proc_pause_resume_5k` | 2.49 ms | 13% |
-| `proc_send_receive_20k` | 13.57 ms | 14% |
-| `proc_spawn_500` | 1.62 ms | 9% |
-| `proc_terminal_200x200` | 2.92 ms | 18% |
-| `transfer_graph_20k` | 5.58 ms | 3% |
-| `virtual_call_100k` | 7.95 ms | 14% |
+| `proc_spawn_500` | 2.06 ms | 1.36 ms |
+| `virtual_call_100k` | 8.23 ms | 8.29 ms |
+| `transfer_graph_20k` | 4.95 ms | 4.95 ms |
+| `proc_pause_resume_5k` | 1.50 ms | 1.77 ms |
+| `perform_group_pass_20k` | 1.32 ms | 1.54 ms |
+| `perform_exact_pass_20k` | 1.29 ms | 1.52 ms |
+| `perform_mock_5k` | 2.17 ms | 2.51 ms |
+| `alloc_gc_100k` | 7.88 ms | 8.68 ms |
+| `drive_interception_5k` | 2.50 ms | 3.05 ms |
+| `mark_sweep_100k_under_256k` | 8.43 ms | 9.89 ms |
+| `proc_terminal_200x200` | 3.14 ms | 3.64 ms |
+| `proc_send_receive_20k` | 8.39 ms | 11.20 ms |
 
-The spread of several entries passes 30 percent, so a single pass of
-this suite states little. Read a movement of one entry against its own
-spread.
+`proc_spawn_500` runs 31 percent faster, from the scheduler indexes.
+The interpreter core holds: `virtual_call_100k` and `literal_loop_200k`
+stay where they were, so the fallible value readers cost nothing
+measurable. `transfer_graph_20k` returns to its baseline.
 
-One entry moved past its spread when the shared heap ledger landed.
-`mark_sweep_100k_under_256k` rose about 7 percent, and its spread is
-12 percent, so the movement is near the edge of the measurement. The
-sweep releases each object into the ledger, which is the same shape as
-the charge on each allocation.
+Three costs remain, and each has a known cause:
+
+- the type environment adds about 18 percent to a message-passing
+  program. `Frame`, `Object`, and `Machine` each carry one identifier,
+  and a generic call derives one;
+- the shared heap ledger adds 10 to 17 percent to allocation and
+  collection. Each allocation charges the ledger, and each sweep
+  releases it;
+- the scheduler indexes add about 10 percent to a world of two or three
+  procs, which pays the index maintenance and skips no scan.
+
+`proc_send_receive_20k` carries all three, so it stands 33 percent
+above its baseline.
 
 ## Open questions
 
@@ -360,11 +399,39 @@ bounds it.
 
 ## Deferred work
 
-- Worklist items 11 and 12 belong to group C.
+### Consolidate the snapshot capture work
+
+This task is the one item of this effort that nothing implements.
+
+`World::capture_snapshot` walks the machine references of a world
+several times. It repeats the object traversal during ordering,
+preflight, and encoding. Several lookups use `Vec::contains` and
+`Vec::position`, so a wide machine world approaches quadratic work.
+
+The task:
+
+- add one reusable `CapturePlan`;
+- record the deterministic machine order once, and store the
+  machine-to-ordinal index;
+- record each machine object order once, and store the
+  object-to-ordinal index;
+- reuse the preflight facts during encoding;
+- reserve the final container once;
+- stream the section hashing where the format allows it;
+- charge the capture work to one aggregate budget;
+- confirm that no linear ordinal search remains.
+
+The measured cost today sits in the write column of the snapshot
+benchmarks. `snapshot_deep_chain_5k` writes 5001 objects, and a wide
+machine world is the shape that suffers, so the task needs a benchmark
+with many machines before it can show a result.
+
+### Other deferred items
+
 - Nested snapshots use lazy admission and independent load budgets.
-- Interfaces, conformance, dispatch, and a guest `Type[T]` stay outside
-  group A. Specification section 14 records what `ClosedType` leaves in
-  place for them.
+- Interfaces, conformance, dispatch, and a guest `Type[T]` stay
+  outside this work. Specification section 14 records what
+  `ClosedType` leaves in place for them.
 
 ## Maintenance
 
