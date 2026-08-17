@@ -1,13 +1,16 @@
 # Post-week-9 admission status
 
-This note records the supplementary correctness work that follows week
-9. The worklist and the issue analysis live in `worklist.md`. The
-normative design lives in `docs/specs/snapshot-image-admission.md`.
+This note records the correctness work that follows week 9. The
+worklist and the issue analysis live in `worklist.md`. The normative
+design lives in `docs/specs/snapshot-image-admission.md`.
 
-The work runs in three delivery groups. Group A establishes the
-snapshot admission boundary. Group B establishes failure and resource
-containment. Group C removes the known scaling defects. Each group
-writes its own section below.
+The work runs in three delivery groups:
+
+- group A establishes the snapshot admission boundary;
+- group B establishes failure and resource containment;
+- group C removes the known scaling defects.
+
+Each group writes its own section below.
 
 ## Group A: the admission boundary
 
@@ -15,26 +18,27 @@ Group A covers worklist items 1 to 6. It answers issues 1, 2, and 8 of
 `worklist.md`.
 
 Group A ran in three rounds. The first round built the boundary. An
-independent review found three blockers. The second round fixed them.
-The third round added type environment witnesses, which closed the
-last false rejections.
+independent review then found three blockers. The second round fixed
+them. The third round added type environment witnesses.
 
 ### The versions
 
 The operation manifest ABI version moves to 4. The operation identity
-now covers every field of one operation definition, and the manifest
-rule makes a semantic field change an ABI change.
+now covers every field of one operation definition. The manifest rule
+makes a change to a semantic field an ABI change.
 
 The snapshot container format version moves to 2. Version 2 states the
-initialization of a local slot, and it carries the type table of
-section 5.6. Version 1 spelled an uninitialized slot as a unit value.
+initialization of a local slot. Version 2 also carries the closed type
+table of specification section 5.6.
 
-The bytecode, interface, compiler ABI, and verifier versions hold. No
-verifier rule changed, and the instruction set gained no field.
+The bytecode, interface, compiler ABI, and verifier versions hold. The
+verifier rules stay as they were. The instruction set stays as it was.
 
-`core/pinned-core-defs.txt` moved, because every definition hash covers
-the manifest digest. `core/pinned-hash.txt` holds, because the core
-image bytes carry no manifest digest.
+`core/pinned-core-defs.txt` moved. Every definition hash covers the
+manifest digest, and the manifest digest moved.
+
+`core/pinned-hash.txt` holds. The core image encoding covers source
+content alone.
 
 ## What landed
 
@@ -43,25 +47,27 @@ image bytes carry no manifest digest.
 `Image` is editable snapshot data. `SnapshotImage` is the admitted,
 immutable form. The type system now records the admission fact:
 
-- `codec::decode(bytes, limits)` proves container properties. It reads
-  no program and returns `Image`.
+- `codec::decode(bytes, limits)` proves container properties. It works
+  from the bytes and the limits alone, and it returns `Image`.
 - `admit(image, module, budget)` proves resolved structure and accurate
   live types. It returns `SnapshotImage`.
-- `load_external(bytes, module, limits)` runs both stages and seals the
+- `load_external(bytes, module, limits)` runs both stages. It seals the
   bytes it received.
-- `SnapshotImage` holds private fields. `into_image` is the one way
-  back to editable data.
+- `SnapshotImage` holds private fields. `into_image` returns editable
+  data, and that data needs admission again.
 - `World::restore_image` accepts `&SnapshotImage`. The trusted image
   cache stores `SnapshotImage`.
 - The trusted capture constructor stays inside the snapshot module.
 
-`Origin` records the source of the bytes. No code reads `Origin` to
-select a path or to grant trust.
+`Origin` records the source of the bytes. `Origin` serves diagnostics
+alone. Trusted capture and external loading give the same guarantees.
 
 ### Complete type admission
 
-Admission derives every type from verified code, resolved layouts, and
-validated witnesses. It proves these positions:
+Admission derives every type from three sources: verified code,
+resolved layouts, and validated witnesses.
+
+Admission proves these positions:
 
 - every local slot of every frame;
 - every operand of every stopped frame;
@@ -75,16 +81,18 @@ validated witnesses. It proves these positions:
 - every element of every collection those positions reach.
 
 `lm_verify::ResolvedTypes` replaces `FrameTypes`. It exposes the
-extended type universe as a read-only view, and it resolves a whole
-frame chain at once. The previous reader mapped every substituted type
-to `None`, and admission then skipped those slots. The new reader keeps
-every substitution.
+extended type universe as a read-only view. It resolves a whole frame
+chain in one call.
 
-The dataflow of one function runs once for each admission. The previous
-reader recomputed it for each saved frame.
+The previous reader mapped a substituted type to `None`. Admission then
+skipped that slot. The new reader keeps every substitution.
 
-Admission checks the unit value and the uninitialized marker against
-their declared types. The previous rule accepted both at every type.
+The dataflow of one function now runs once for each admission. The
+previous reader recomputed it for each saved frame.
+
+Admission checks the unit value against its declared type. Admission
+checks the uninitialized marker the same way. The previous rule
+accepted both values at every type.
 
 ### Type environment witnesses
 
@@ -93,15 +101,16 @@ that body opaque. One activation needs the type arguments its call site
 applied.
 
 A frame with a caller takes those arguments from the call instruction.
-Three positions hold no call site:
+Three positions lack a call site:
 
 - the bottom frame of a machine, when its entry function is generic;
 - a closure that outlived the frame that created it;
-- a machine past its constructor, because `enter_proc_body` takes the
-  proc body closure and a terminal machine holds no frame.
+- a machine past its constructor. `enter_proc_body` takes the proc body
+  closure, and a terminal machine drops every frame.
 
-Signature unification recovers no type variable that appears in a
-capture list alone. The image therefore carries witnesses.
+A capture list can name a type variable that the closure signature
+omits. Signature unification therefore fails at that position. The
+image carries witnesses for these three positions.
 
 `crates/lm-bytecode/src/closed.rs` holds the closed type grammar, the
 type environment table, and the interning rules. Every node carries a
@@ -109,148 +118,158 @@ content digest, so one closed type has one identity in every process.
 
 A frame, a closure, an instance, and a machine each store one index.
 Index zero names the empty environment. A monomorphic state stores
-zero, allocates nothing, and performs no type work.
+index zero and performs plain execution.
 
 The table belongs to one world. Restore re-interns every record of the
 image into the table of the target world, and it remaps every index. A
-world caps its environment nodes and its closed type nodes, and it
-returns a local fault at the cap.
+world caps its environment nodes and its closed type nodes. It returns
+a local fault at the cap.
 
-A witness is data. Admission uses a witness where no derivation exists.
-Admission checks the witness against the derivation everywhere else.
+A witness is data. Admission uses a witness at the three positions
+above. Admission checks the witness against the derivation everywhere
+else.
 
-A witness never enters a guest digest, semantic equality, or the
+A witness stays outside guest digests, semantic equality, and the
 semantic identity of a value. The two copy paths in
-`crates/lm-heap/src/shape.rs` preserve it, so a closure keeps its
-creator environment across a boundary.
+`crates/lm-heap/src/shape.rs` keep it, so a closure keeps its creator
+environment across a boundary.
 
 ### Object type coherence
 
 One typed edge proves that edge. Two locals typed `List[Int]` and
 `List[Str]` can name one empty mutable list. Each edge passed, because
-the list held no element. Verified code then appended an integer
-through the first local and read a string through the second local.
+the list was empty. Verified code then appended an integer through the
+first local. It read a string through the second local.
 
-Admission now assigns each `(machine, object)` one exact closed type.
-An instance edge normalizes through the concrete class of the object. A
-closure edge normalizes through the declared type of its function. The
-map keeps the most specific type that any edge names, so the order of
-the walk does not change the answer.
+Admission now gives each `(machine, object)` one exact closed type. An
+instance edge normalizes through the concrete class of the object. A
+closure edge normalizes through the declared type of its function.
 
-Class arguments are invariant, so `List[Int]` and `List[Str]` have no
-subtype relation and the aliased list rejects. A `Dog` instance reached
+The map keeps the most specific type that any edge names. The order of
+the walk therefore leaves the answer the same.
+
+Class arguments are invariant. `List[Int]` and `List[Str]` are
+unrelated types, so the aliased list rejects. A `Dog` instance reached
 from an `Animal` edge admits.
 
 ### The operand partition
 
 The first round required an exact operand count for the top frame
-alone. Every lower frame took an inequality. An attacker inserted one
-value at the base of the top frame and raised that base by one. The
-inserted value then matched the type of the first call argument, so
-every type rule passed. After the callee returned, the extra value
-survived on the stack, and `ListAt` popped an integer where the
-verifier proved an object. That reached a trusted assertion in the
-interpreter.
+alone. Every lower frame took an inequality.
+
+An attacker inserted one value at the base of the top frame, and raised
+that base by one. The inserted value matched the type of the first call
+argument, so every type rule passed. The extra value survived the
+return of the callee. `ListAt` then popped an integer where the
+verifier proved an object, and reached a trusted assertion.
 
 Admission now derives the exact retained region of every frame. It
 takes the proved stack depth at the point the frame stopped. It
-subtracts every operand the suspended instruction consumed. A call
-consumes its arguments. A virtual call consumes its receiver. A
-`CallValue` consumes its closure. A perform consumes its arguments.
+subtracts every operand the suspended instruction consumed:
 
-Admission also proves that the bottom frame starts at operand zero, so
-the frames partition the arena exactly.
+- a call consumes its arguments;
+- a virtual call also consumes its receiver;
+- a `CallValue` also consumes its closure;
+- a perform consumes its arguments.
+
+Admission also proves that the bottom frame starts at operand zero. The
+frames therefore partition the arena exactly.
 
 ### The operation identity
 
 `identity_of` encodes every field of one operation definition through
 one common path. The snapshot classification is one of those fields.
 The classification decides whether a pending instance holds live host
-state, so a classification-only change is a behavior change.
+state, so a change to it changes behavior.
 
-The previous hash covered the discriminant and the schema text for a
-machine control operation. It covered no parameter type and no reply
-type. `Vm.SnapshotSelf` declares a reply the verifier reads, so that
-reply moved no digest.
+The previous hash covered two items for a machine control operation:
+the kind discriminant and the schema text. A change to the reply type
+of `Vm.SnapshotSelf` therefore kept the same hash. The verifier reads
+that reply type.
 
-The manifest digest covers the identities. The verification hash covers
-the manifest digest. A change to any field now invalidates every
-verified-code cache entry and every admitted snapshot.
+The manifest digest covers the operation identities. The verification
+hash covers the manifest digest. A change to any field now invalidates
+every verified-code cache entry and every admitted snapshot.
 
 ### The trusted interpreter boundary
 
-The audit of the interpreter assertions found these uncovered paths:
+The audit of the interpreter assertions found five uncovered paths:
 
-- an image named an operation slot the manifest omits, through a call
+- an image named an operation slot past the manifest, through a call
   token, a fault value, or a stored terminal fault;
 - an image held an instance of an abstract enum family;
-- the graph copy asserted that no value holds the uninitialized marker;
-- `verdict` indexed the root machine of an image with no machine;
-- the dump named an operation slot with no bound.
+- the graph copy asserted that every value carries a real payload;
+- `verdict` indexed the root machine of an image with zero machines;
+- the dump named an operation slot past the manifest.
 
-Admission proves the first two. The graph copy returns a local fault.
-The last two are total.
+Admission proves the first two cases. The graph copy returns a local
+fault. `verdict` and the dump are total.
 
 `World::restore_image` proves the admission identity in every build.
-The previous rule used a debug assertion, so a release build performed
-no check and the image named the slots of another module.
+The previous rule used a debug assertion, so a release build accepted
+an image that named the slots of another module.
 
-Admission rejects a policy table handle that names its own machine, and
-a machine handle that names its own machine.
+Admission rejects a policy table handle that names its own machine. It
+rejects a machine handle that names its own machine.
 
-An instance holds the uninitialized marker only while it is the object
-under construction. `New` allocates every field as the marker, and the
-synthesized construction function holds the object in one local through
-the defaults and the initializer. `E1029` forbids `self` from escaping
-before the initializer assigns every required field. The rule therefore
-reads: some frame of the machine names the object, and the function of
-that frame allocates that class.
+An instance holds the uninitialized marker only during construction.
+`New` allocates every field as the marker. The synthesized construction
+function holds the object in one local through the defaults and the
+initializer. `E1029` requires the initializer to assign every required
+field before `self` escapes. The rule therefore reads: one frame of the
+machine names the object, and the function of that frame allocates that
+class.
 
 ## The decisions and the rejected alternatives
 
-### A generic frame resolves from its caller, and a witness answers the rest
+### A generic frame resolves from its caller
 
 The first candidate rejected every frame whose function takes a type
 argument. A probe over the test suite counted 58 checks of a frame
 inside a generic function. Every one of those frames sat above a caller
-frame in the same image, and every caller stopped inside `CallG` or
+frame in the same image. Every caller stopped inside `CallG` or
 `CallVirtualG`. The candidate therefore refused legal worlds.
 
 The chain resolver reads the substitution from the call site. The
-witness answers the three positions with no call site.
+witness answers the three positions that lack a call site.
 
 ### The initialization fact uses the existing marker
 
 Specification 5.3 allows a marker, a bitmap, or explicit slot state.
 The container already carries `Uninit`, and an instance field already
-uses it. The interpreter filled an unwritten local slot with the unit
-value, so the image told the two apart in no way.
+uses it.
+
+The interpreter filled an unwritten local slot with the unit value. An
+image therefore spelled an empty slot and a real unit value the same
+way.
 
 The virtual machine now fills such a slot with the marker. The wire
-format gains no field. The format version still moves, because a
-version-1 image carries another meaning.
+format keeps its field list. The format version still moves, because a
+version-1 image carries the other meaning.
 
 ### A slot with no proved type keeps its declared type
 
 The verifier merges an initialized path with an uninitialized path into
-"no value". The runtime slot can still hold the value the first path
-stored, and no verified read reaches it before the next store. A rule
-that demanded the marker in every such slot would refuse real captures.
+one "no value" state. The runtime slot can still hold the value the
+first path stored. Every verified read reaches that slot after the next
+store. A rule that demanded the marker in every such slot would refuse
+real captures.
 
 Admission checks the value against the declared slot type. Every store
-fits that type, so it bounds every value the slot ever held.
+fits that type, so the declared type bounds every value the slot ever
+held.
 
-### The mailbox type of a machine with no proc class is `Never`
+### A machine without a proc class has the mailbox type `Never`
 
-`sys.proc.run` moves a loaded machine to the scheduler and answers a
-`Handle[Never, R]`. No proc class stands behind that machine.
+`sys.proc.run` moves a loaded machine to the scheduler. It answers a
+`Handle[Never, R]`. A proc class stands behind a spawned proc alone.
 
-A machine that `Proc.Spawn` did not launch accepts no message, so its
-mailbox type is `Never`. The lowering spells `Never` as `Unit`, and the
-verified type table starts with `Unit`.
+A machine keeps a mailbox after `Proc.Spawn` launches it. Every other
+machine has the mailbox type `Never`. The lowering spells `Never` as
+`Unit`, and the verified type table starts with `Unit`.
 
-The rule proves no value. `check_state` rejects a queued message on a
-machine that is not a proc.
+`check_state` rejects a queued message on a machine outside the proc
+set. That rule keeps every stored message governed by a proc class.
 
 ### `is_proc` names the machines a spawn launched
 
@@ -262,53 +281,53 @@ A forged image therefore took the whole `Proc` group.
 mints the grant. A machine that claims the flag must name a proc class
 through its witness.
 
-A machine from `sys.proc.run` now records `is_proc = false`, and a
-restore grants it no group. That machine holds no mailbox, so the
-previous grant gave it authority it never used.
+A machine from `sys.proc.run` now records `is_proc = false`. A restore
+gives it the fresh default-deny table alone. Such a machine holds a
+`Never` mailbox, so the previous grant gave it unused authority.
 
 ### A faulted machine keeps its frames
 
-A faulted machine never executes again, so its frames are diagnostic
-state. Admission checks their structure. It requires no resumable
-verifier state for them.
+A faulted machine stops for good, so its frames are diagnostic state.
+Admission checks the structure of those frames. It requires a resumable
+verifier state for a live machine alone.
 
-The rule that a terminal machine holds no frame now covers a `Done`
+The rule that a terminal machine drops every frame now covers a `Done`
 machine alone.
 
-### An `Asked` machine holds no live attachment
+### An `Asked` machine holds a request, and the holder answers it
 
-`Asked` records a request before any host attachment starts, and the
-holder answers it. `Waiting` holds the live attachment, and the capture
-refuses that state with `ResourceActive`.
+`Asked` records a request before the host attachment starts. `Waiting`
+holds the live attachment, and the capture refuses `Waiting` with
+`ResourceActive`.
 
 The previous rule rejected every pending request whose operation
-suspends. It refused a machine stopped `Asked` on `Io.Print`,
+suspends. It therefore refused a machine stopped `Asked` on `Io.Print`,
 `Io.Error`, `Io.ReadLine`, or `Clock.Sleep`. Two shipped examples
 failed at every capture past their first perform.
 
 ### `Layout` and `Type` name two failures
 
-`Layout` names a value that carries the wrong shape for a type
-admission derived. `Type` names a failure of the type itself:
-admission derives no type, or the derived type disagrees with its
-target. The split keeps every corruption test resolving to its rule.
+`Layout` names a value that carries the wrong shape for a type that
+admission derived. `Type` names a failure of the type itself. The
+evidence for the type is missing, or the derived type disagrees with
+its target. The split keeps every corruption test resolving to its
+rule.
 
 ### The canonical-order rule runs last
 
 Every earlier rule states a property of one position. An edit that
 breaks a type usually drops an object out of the reachable set, so an
 order-first pass reported the traversal. The order rule now runs after
-the type walk, and each diagnostic names the position the edit broke.
+the type walk. Each diagnostic then names the position the edit broke.
 
 ## What the reviews found
 
 An independent review of the first round found three blockers.
 
 - **The operand partition.** A forged frame reached a host panic. The
-  section above states the fix. The defect also existed before this
-  work.
+  section above states the fix. The defect predates this work.
 - **A handle to a finished proc.** `enter_proc_body` takes the proc
-  body closure, so a proc past its constructor derived no mailbox type.
+  body closure, so a proc past its constructor lost its mailbox type.
   Three shipped proc examples failed. The machine witness closed it.
 - **A frame inside an overridden method.** The callee resolver read the
   static receiver type, so it found the statically visible method. A
@@ -316,22 +335,22 @@ An independent review of the first round found three blockers.
   of the receiver value, which sits in local slot 0 of the callee
   frame.
 
-The review found four further defects at HIGH: a closure built inside a
-generic body, a machine whose entry function is generic, the release
-build of the restore identity check, and the operation identity fields.
-Every one of them is closed above.
+The review found four defects at HIGH: a closure built inside a generic
+body, a machine whose entry function is generic, the release build of
+the restore identity check, and the operation identity fields. The
+sections above close all four.
 
-Two rules refused legal worlds before this work. Those are the faulted
-frames and the `Asked` machine above. Both failed shipped examples, and
-both reproduce against the tree before group A.
+Two rules refused legal worlds before this work. The faulted frames and
+the `Asked` machine above are those rules. Both failed shipped
+examples, and both reproduce against the tree before group A.
 
 ## The tests
 
 `crates/lm-testkit/tests/admission.rs` holds 37 cases.
 `crates/lm-testkit/tests/witness.rs` holds the witness rules.
 
-Ten cases crafted the known type holes, and all ten admitted against
-the tree before this work:
+Ten cases crafted the known type holes. All ten admitted against the
+tree before this work:
 
 | Case | The hole it closes |
 | --- | --- |
@@ -351,17 +370,22 @@ the tree before this work:
 `every_capture_of_every_shipped_program_admits` is the gate of the
 acceptance direction. It walks `examples/` recursively and adds 25
 crafted sources. It captures each program at every boundary of a
-bounded prefix, and it passes the canonical bytes through the external
+bounded prefix. It passes the canonical bytes through the external
 loader. Every capture must admit.
 
-The gate holds the shapes this work unblocked: a proc handle past the
-constructor, a closure a generic body built, a machine whose entry
-function is generic, a `sys.proc.run` handle, a closure inside a
-closure inside a generic body, a generic class with a generic field,
-and polymorphic recursion captured while it runs.
+The gate holds the shapes this work unblocked:
 
-The gate ran with an exclusion list during the second round. That list
-named the false rejections the witness round closed, and it is empty.
+- a proc handle past the constructor;
+- a closure that a generic body built;
+- a machine whose entry function is generic;
+- a `sys.proc.run` handle;
+- a closure inside a closure inside a generic body;
+- a generic class with a generic field;
+- polymorphic recursion, captured while it runs.
+
+The gate carried an exclusion list during the second round. That list
+named the false rejections that the witness round closed. The list is
+empty now, and the gate covers the whole corpus.
 
 ### The other new cases
 
@@ -373,13 +397,13 @@ forged proc flag, the self policy table, the self machine handle, the
 uninitialized field outside construction, the restore of another
 program, the budget of a wide container, and the type environment cap.
 
-The witness cases state the three invariants: a witness enters no guest
-digest, the two copy paths preserve a witness, and a witness that
+The witness cases state three invariants. A witness stays outside a
+guest digest. The two copy paths keep a witness. A witness that
 disagrees with its derivation rejects.
 
 Two identity cases state the week-7 open question closed. A
 classification-only change moves the operation identity and the
-manifest. It also moves the verification hash.
+manifest digest. It also moves the verification hash.
 
 Test count: 783 before this work, 848 after.
 
@@ -396,9 +420,9 @@ Test count: 783 before this work, 848 after.
 | heap `Entry` | 104 B | 104 B |
 | `Machine` | 720 B | 736 B |
 
-The `Map` variant fixes the size of `Object`, so the two witnesses cost
-nothing there. `Object::cost()` holds, so no heap byte accounting
-moved.
+The `Map` variant fixes the size of `Object`, so the two witnesses fit
+inside the existing padding. `Object::cost()` holds, so the heap byte
+accounting holds.
 
 ### The container sizes
 
@@ -409,9 +433,9 @@ moved.
 | machine world, three machines | 914 B | 843 B |
 
 The deep chain grows 8.7 percent. It carries one witness ordinal for
-each instance and for each closure. The machine world shrinks, because
-the machine record drops a 32-byte result-type digest and gains two
-small fields.
+each instance and for each closure. The machine world shrinks. Its
+machine record drops a 32-byte result-type digest and gains two small
+fields.
 
 ### The engine benchmarks
 
@@ -430,27 +454,34 @@ column carries the signal.
 | `proc_pause_resume_5k` | 1.75 ms | 1.84 ms |
 | `proc_terminal_200x200` | 3.42 ms | 3.41 ms |
 
-Every entry except `proc_send_receive_20k` sits inside the noise of the
-measurement. The open question below records that entry.
+Eight entries sit inside the noise of the measurement. The open
+question below records `proc_send_receive_20k`.
 
-The performance targets hold. A monomorphic call copies index zero and
-allocates nothing. A repeated generic call reuses one cached index. No
-dynamic type check runs during execution. No value carries a resolved
-type vector. Capture and admission each expand once under a cap.
+The performance targets hold:
+
+- a monomorphic call copies index zero and allocates nothing;
+- a repeated generic call reuses one cached index;
+- execution runs its ordinary path, with static types alone;
+- a value carries its payload alone;
+- capture and admission each expand once, under a cap.
 
 ## Open questions
 
 ### The cost of `proc_send_receive_20k`
 
-That entry costs about 10 percent more in release and about 27 percent
-more in debug. The cause is unknown.
+That entry costs about 10 percent more in release. It costs about 27
+percent more in debug. The cause stays unknown.
 
-These experiments explain none of it: the program performs no generic
-call, so it reads and writes the environment table in no place; padding
-experiments in the base tree reproduce none of the cost; and boxing the
-world table removes none of it. Moving the three generic instructions
-out of the inlined instruction body recovered about ten points of the
-debug figure.
+Three experiments failed to find the cause:
+
+- the program runs monomorphic code, so it leaves the environment table
+  untouched;
+- padding experiments in the base tree reproduce a flat cost;
+- a boxed world table keeps the same cost.
+
+One change helped. Moving the three generic instructions out of the
+inlined instruction body recovered about ten points of the debug
+figure.
 
 The entry is a constant factor on one workload. Worklist items 7, 11,
 and 12 hold the scaling defects, so this entry waits.
@@ -460,17 +491,17 @@ and 12 hold the scaling defects, so this entry waits.
 The kernel builds `Option`, `Result`, `RunResult`, `StepEvent`,
 `DriveEvent`, `Recv`, and `ProcResult` instances outside `New` and
 `NewG`. Their class arguments follow from the operation manifest reply
-types, and `lm-vm` reads no manifest typing, so the kernel records the
-empty environment.
+types. `lm-vm` reads the manifest as data alone, so the kernel records
+the empty environment.
 
-Admission accepts an empty witness at any class, and it rejects a
-non-empty witness that disagrees with its edge. The instance witness is
-evidence for no admission rule, so this weakens no proof. A later
-reflection query on a core enum value would read its arguments from the
-edge instead.
+Admission accepts an empty witness at any class. It rejects a non-empty
+witness that disagrees with its edge. The instance witness serves
+reflection, so every admission proof holds without it. A later
+reflection query on a core enum value reads its arguments from the edge
+instead.
 
-Two answers exist: carry the manifest reply types inside `lm-vm`, or
-derive the witness at the perform.
+Two answers exist. The first carries the manifest reply types inside
+`lm-vm`. The second derives the witness at the perform.
 
 ### The nested container decodes on each admission
 
@@ -504,7 +535,7 @@ Section 5.4 of the sidecar specification records the reasoning.
   container byte limit. Item 10 sizes it beside a `DecodeBudget`,
   shares one ledger with nested containers, and adds the compact-input
   expansion tests.
-- The decode stage still uses `LoadLimits` and per-list caps. Item 10
+- The decode stage uses `LoadLimits` and per-list caps. Item 10
   replaces them with one aggregate ledger and fallible reservations.
 - Admission builds one `ResolvedTypes` for each call, so a repeated
   admission of one module repeats the structural verifier pass. A
@@ -516,8 +547,8 @@ Section 5.4 of the sidecar specification records the reasoning.
 ## Maintenance
 
 `checkpoints/asked-tree.lms` and `tests/fuzz-regressions/*.lms` match
-`*.lms` in `.gitignore`, so no commit carries them. A fresh checkout
-regenerates both:
+`*.lms` in `.gitignore`, so the commits leave them out. A fresh
+checkout regenerates both:
 
 ```sh
 nix-shell --run "cargo run -p lm-cli -- snapshot save --allow Proc,Vm,Clock \
@@ -530,11 +561,11 @@ container. That statement is wrong, and this note corrects it.
 
 ## Specification edits this work needs
 
-`docs/notes/week9.md` states that the container carries no type table.
-The container now carries one. The format table there needs the fifth
-section and the renumbered heap and machine sections. The header
-result-type field is now a closed-type content digest.
+`docs/notes/week9.md` states that the container omits a type table. The
+container carries one now. The format table there needs the fifth
+section, and it needs the renumbered heap and machine sections. The header result-type field is now a closed-type content
+digest.
 
 `docs/specs/build-order.md` week 9 must use `SnapshotImage` for the
-admitted host state and `Image` for the editable decoded state.
-Specification section 12 of the sidecar asks for both edits.
+admitted host state. It must use `Image` for the editable decoded
+state. Section 12 of the sidecar specification asks for both edits.
