@@ -1898,7 +1898,7 @@ impl<'m> World<'m> {
     }
 
     /// Attach the aggregate heap ledger before a second machine exists.
-    fn share_heap_budget(&mut self) -> bool {
+    pub(crate) fn share_heap_budget(&mut self) -> bool {
         if self.heap_shared {
             return true;
         }
@@ -3774,6 +3774,13 @@ impl<'m> World<'m> {
         }
     }
 
+    /// Retire one scheduler-owned proc.
+    ///
+    /// This batch can still hold an earlier ready event for the same
+    /// task. The scheduler drains removals first and ready events
+    /// last, and it answers a ready event by reading the live task
+    /// status. A retired proc reports `Dormant` there, so the
+    /// scheduler drops it again. The stale event needs no removal.
     fn deactivate_scheduler_proc(&mut self, key: TaskKey) {
         if self.scheduler_procs.remove(key) {
             self.emit_removed(key);
@@ -4035,6 +4042,10 @@ impl<'m> World<'m> {
     ///
     /// The scheduler never drives a machine a barrier holds, so the
     /// machine stays at the instruction boundary the barrier found.
+    ///
+    /// A held machine reports `Dormant`, so an earlier ready event in
+    /// this batch is harmless. `deactivate_scheduler_proc` states the
+    /// rule.
     pub fn set_barrier(&mut self, vm: VmId, barrier: Option<u32>) {
         self.machines[vm as usize].barrier = barrier;
         let Some(key) = self.task_key(vm) else {

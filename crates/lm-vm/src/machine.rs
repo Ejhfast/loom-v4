@@ -908,8 +908,24 @@ impl Machine {
             return Err(FaultCode::OutOfFuel);
         }
         self.vm.fuel -= 1;
-        // SnapshotImage construction proves that each saved code
-        // position resolves. Verified control flow preserves it.
+        // The fetch indexes the code tables without a bounds test.
+        // Four rules together prove that every reachable position
+        // resolves:
+        //
+        // 1. `LoadedModule` construction is the only path to
+        //    execution, and it admits a module only when the import
+        //    table is empty. An imported function is the one function
+        //    that carries no body, so an executable module has none.
+        // 2. `verify_module` therefore skips no function, and
+        //    `verify_func` rejects a function with no blocks.
+        // 3. `verify_func` ends every block with a terminator,
+        //    forbids a terminator before the end, and bounds every
+        //    branch target. So a live frame never steps past its
+        //    block, and `Call`, `New`, and `ConstStr` name a real row.
+        // 4. Snapshot admission checks the function, the block, and
+        //    the counter of each restored frame.
+        //
+        // Change any one of those rules and restore the bounds test.
         let frame = self.vm.frames.last().ok_or(BAD_STATE)?;
         let instr =
             module.funcs[frame.func as usize].blocks[frame.block as usize][frame.ip as usize];

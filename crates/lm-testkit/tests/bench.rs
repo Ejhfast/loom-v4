@@ -81,6 +81,22 @@ fn report(name: &str, iterations: u64, source: &str, base: Duration) {
     );
 }
 
+/// Report one case that runs inside a `World`.
+///
+/// The cases above build a bare `Vm`. Every tool builds a `World`,
+/// and a `World` adds the aggregate ledgers and the activation loop.
+/// A program with no proc runs one machine there, so this case
+/// measures the path a plain `lm run` takes.
+fn report_world(name: &str, iterations: u64, source: &str, expected: &str) {
+    let total = time_world(source, &[], config(), expected);
+    let per = total.as_nanos() as f64 / iterations as f64;
+    println!(
+        "LOOM\t{name}\t{iterations}\t{:.1}\t{:.3}",
+        per,
+        total.as_secs_f64() * 1e3
+    );
+}
+
 /// Time one proc program. Compile and load stay outside the timed region.
 fn time_world(source: &str, grants: &[&str], config: VmConfig, expected: &str) -> Duration {
     let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
@@ -314,6 +330,24 @@ fn bench_language_operations() {
         500_000,
         "b = ByteBuffer()\ni = 0\nwhile i < 500000\n  b.append(65)\n  i = i + 1\nend\nb.len()\n",
         base,
+    );
+
+    // The two cases below run the same workload inside a `World`.
+    // The allocating case reports the heap ledger cost, and the
+    // integer case reports the activation loop cost alone.
+    report_world(
+        "world_class_init",
+        500_000,
+        "class Point\n  x: Int = 0\n  y: Int = 0\n  def init(mut self, x: Int, y: Int)\n    \
+         self.x = x\n    self.y = y\n  end\nend\n\
+         i = 0\ns = 0\nwhile i < 500000\n  p = Point(i, i)\n  s = s + p.x\n  i = i + 1\nend\ns\n",
+        "Done(124999750000)",
+    );
+    report_world(
+        "world_int_loop",
+        1_000_000,
+        "i = 0\ns = 0\nwhile i < 1000000\n  s = s + i\n  i = i + 1\nend\ns\n",
+        "Done(499999500000)",
     );
 }
 

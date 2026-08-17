@@ -28,7 +28,14 @@ pub(crate) const ENTRY_COST: usize = 2 * VALUE_COST;
 /// counts the indexed prefix, and lookups extend it on demand.
 /// Iteration, display, equality, and digest semantics never read it.
 /// It holds no object references, so every graph mode skips it by
-/// design. The logical entry cost covers one bounded slot per entry.
+/// design.
+///
+/// The table doubles at a load factor of two thirds, so it holds
+/// between 1.5 and 3 slots for each entry. One slot is 16 bytes, and
+/// `ENTRY_COST` charges 32 bytes for each entry, so the charge covers
+/// the table at the low end and falls under it at the high end. The
+/// gap is bounded and small, and the previous hash table was larger
+/// at every load factor.
 #[derive(Debug, Clone, Default)]
 pub struct MapIndex {
     /// The number of entries the table already indexes.
