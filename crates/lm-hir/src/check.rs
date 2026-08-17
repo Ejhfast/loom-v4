@@ -30,6 +30,8 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/errors.lm"),
     "\n",
+    include_str!("../../../core/fs.lm"),
+    "\n",
     include_str!("../../../core/vm.lm"),
     "\n",
     include_str!("../../../core/proc.lm"),
@@ -39,7 +41,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 12] = [
+pub const PRELUDE_TYPES: [&str; 15] = [
     "Option",
     "Result",
     "Ordering",
@@ -52,10 +54,27 @@ pub const PRELUDE_TYPES: [&str; 12] = [
     "ProcError",
     "SnapshotError",
     "RestoreError",
+    "FsError",
+    "OpenOptions",
+    "SeekFrom",
 ];
 
 /// The constructor names the prelude places into unqualified scope.
-pub const PRELUDE_CTORS: [&str; 4] = ["Some", "None", "Ok", "Err"];
+pub const PRELUDE_CTORS: [&str; 13] = [
+    "Some",
+    "None",
+    "Ok",
+    "Err",
+    "ReadOnly",
+    "WriteOnly",
+    "ReadWrite",
+    "Create",
+    "CreateTruncate",
+    "Append",
+    "Start",
+    "Current",
+    "End",
+];
 
 /// Checker options. `prelude` controls only unqualified name
 /// resolution; the core image itself never depends on it.

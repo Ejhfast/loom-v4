@@ -6,7 +6,9 @@
 //! guest call depth or with nested VM depth. `run`, `step`, and
 //! `drive` are stop modes of this one loop.
 
-use crate::host::{CoreCtor, Host, HostArg, HostCompletion, HostStart, HostValue};
+use crate::host::{
+    CoreCtor, Host, HostArg, HostCompletion, HostOpenOptions, HostSeekFrom, HostStart, HostValue,
+};
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, Machine, MachineState, Mailbox, Ownership, Pending,
     PolicyCursor, RoutedRequest, Terminal, VmId,
@@ -83,7 +85,7 @@ pub(crate) struct GateGroup {
 }
 
 /// Why one activation exits.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitKind {
     Terminal,
     Ran,
@@ -148,6 +150,18 @@ struct PreparedRestoreReply {
     value: Value,
     handle: ObjRef,
     reply: ObjRef,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FileBacking {
+    Host(u64),
+    Driver(VmId),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FileResource {
+    owner: VmId,
+    backing: FileBacking,
 }
 
 impl WorldBudget {
@@ -220,6 +234,10 @@ pub struct World<'m> {
     /// restore never grows shared module state.
     pub(crate) envs: lm_bytecode::closed::TypeEnvs,
     host: Box<dyn Host>,
+    /// Open file resources, keyed by unforgeable world identifiers.
+    files: std::collections::BTreeMap<u64, FileResource>,
+    /// The next file resource identifier. Zero marks a closed handle.
+    next_file: u64,
     config: VmConfig,
     /// Aggregate limits and current resource charges.
     budget: WorldBudget,
@@ -391,6 +409,8 @@ impl<'m> World<'m> {
             gate_groups: Vec::new(),
             envs: lm_bytecode::closed::TypeEnvs::new(config.max_closed_types, config.max_type_envs),
             host,
+            files: std::collections::BTreeMap::new(),
+            next_file: 1,
             config,
             budget,
             heap_shared: !local_heap_is_aggregate,
@@ -616,6 +636,41 @@ impl<'m> World<'m> {
     /// Retire one root instruction with automatic policy.
     pub fn step_root(&mut self) -> RootEvent {
         self.control(0, StopMode::OneStep, Family::Step)
+    }
+
+    /// Run a controlled machine until one snapshot can exclude live resources.
+    ///
+    /// `fuel` counts retired guest instructions. The call never waits
+    /// for an unavailable external completion.
+    pub fn snapshot_wait(
+        &mut self,
+        root: VmId,
+        mut fuel: u64,
+    ) -> Result<crate::snapshot::SnapshotImage, crate::snapshot::SnapshotFail> {
+        loop {
+            let barrier = self.next_gate();
+            let active = match self.capture_snapshot(barrier, root, false) {
+                Ok(image) => return Ok(image),
+                Err(fail @ crate::snapshot::SnapshotFail::ResourceActive { .. }) => fail,
+                Err(fail) => return Err(fail),
+            };
+            if fuel == 0 {
+                return Err(active);
+            }
+            if !matches!(
+                self.machines[root as usize].vm.state,
+                MachineState::Ready | MachineState::Waiting
+            ) {
+                return Err(active);
+            }
+            let before = self.budget.fuel;
+            let _ = self.control(root, StopMode::OneStep, Family::Step);
+            let retired = before.saturating_sub(self.budget.fuel);
+            if retired == 0 {
+                return Err(active);
+            }
+            fuel = fuel.saturating_sub(retired);
+        }
     }
 
     /// Drive one machine of this world to a terminal result, a block,
@@ -1227,6 +1282,9 @@ impl<'m> World<'m> {
             return Some(RootEvent::Ran);
         };
         self.release_activation(act);
+        if kind == ExitKind::Terminal {
+            self.close_files_for_machine(act.vm);
+        }
         match act.reply_to {
             None => Some(match kind {
                 ExitKind::Terminal => self.terminal_root_event(act.vm),
@@ -1522,12 +1580,24 @@ impl<'m> World<'m> {
     /// Install one reply value into a machine whose pending perform
     /// completes now.
     fn install_value_reply(&mut self, vm: VmId, value: Value) {
+        self.install_value_reply_with_file_close(vm, value, true);
+    }
+
+    /// Install one reply and apply a successful file close.
+    fn install_value_reply_with_file_close(&mut self, vm: VmId, value: Value, close_host: bool) {
+        let file = (self.pending_op(vm) == Some(lm_abi::OP_FS_CLOSE)
+            && self.value_is_result_ok(vm, value))
+        .then(|| self.pending_file_resource(vm))
+        .flatten();
         if let Err(code) = self.check_reply(vm, value) {
             self.machines[vm as usize].set_fault(
                 code,
                 "the reply does not carry the type of its perform",
                 None,
             );
+            if let Some(resource) = file {
+                self.retire_file(resource, close_host);
+            }
             return;
         }
         let m = &mut self.machines[vm as usize];
@@ -1539,18 +1609,22 @@ impl<'m> World<'m> {
         m.vm.pending = None;
         if let Err(code) = m.push(value) {
             m.set_fault(code, "", None);
-            return;
-        }
-        if m.vm.state != MachineState::Running {
+        } else if m.vm.state != MachineState::Running {
             m.vm.state = MachineState::Ready;
+        }
+        if let Some(resource) = file {
+            self.retire_file(resource, close_host);
         }
     }
 
     /// Convert one host reply into a guest value and install it.
     fn install_host_reply(&mut self, vm: VmId, reply: HostValue) {
         match self.build_host_value(vm, &reply) {
-            Ok(value) => self.install_value_reply(vm, value),
+            Ok(value) => self.install_value_reply_with_file_close(vm, value, false),
             Err(code) => self.machines[vm as usize].set_fault(code, "", None),
+        }
+        if self.machines[vm as usize].vm.state == MachineState::Faulted {
+            self.close_files_for_machine(vm);
         }
     }
 
@@ -1559,6 +1633,10 @@ impl<'m> World<'m> {
             HostValue::Unit => Ok(Value::Unit),
             HostValue::Int(v) => Ok(Value::Int(*v)),
             HostValue::Str(s) => self.machines[vm as usize].alloc(Object::Str(s.clone())),
+            HostValue::Bytes(bytes) => {
+                self.machines[vm as usize].alloc(Object::Bytes(bytes.clone()))
+            }
+            HostValue::File(token) => self.build_host_file(vm, *token),
             HostValue::Ctor(ctor, parts) => {
                 let mut fields = Vec::with_capacity(parts.len());
                 for part in parts {
@@ -1570,10 +1648,230 @@ impl<'m> World<'m> {
                     CoreCtor::Ok => self.core.result_ok,
                     CoreCtor::Err => self.core.result_err,
                     CoreCtor::IoErrorFailed => self.core.io_error_failed,
+                    CoreCtor::FsErrorClosed => self.core.fs_error_closed,
+                    CoreCtor::FsErrorFailed => self.core.fs_error_failed,
                 };
                 self.make_instance(vm, class, fields)
             }
         }
+    }
+
+    /// Register one host file and build its guest handle.
+    fn build_host_file(&mut self, vm: VmId, token: u64) -> Result<Value, FaultCode> {
+        let resource = self.next_file;
+        self.next_file = resource.checked_add(1).ok_or(FaultCode::IntegerOverflow)?;
+        if let Err(code) = self.machines[vm as usize].resources.register(
+            crate::ResourceKind::File,
+            vm,
+            resource,
+            u64::MAX,
+            lm_abi::OP_FS_OPEN,
+        ) {
+            self.host.close_file(token);
+            return Err(code);
+        }
+        self.files.insert(
+            resource,
+            FileResource {
+                owner: vm,
+                backing: FileBacking::Host(token),
+            },
+        );
+        match self.machines[vm as usize].alloc(Object::NativeFileHandle { resource }) {
+            Ok(value) => Ok(value),
+            Err(code) => {
+                self.retire_file(resource, true);
+                Err(code)
+            }
+        }
+    }
+
+    /// Remove one file resource. Close its host token when requested.
+    fn retire_file(&mut self, resource: u64, close_host: bool) -> bool {
+        let Some(file) = self.files.remove(&resource) else {
+            return false;
+        };
+        if close_host {
+            match file.backing {
+                FileBacking::Host(token) => {
+                    self.host.close_file(token);
+                }
+                FileBacking::Driver(_) => {}
+            }
+        }
+        if let Some(machine) = self.machines.get_mut(file.owner as usize) {
+            machine
+                .resources
+                .close_kind(crate::ResourceKind::File, resource);
+        }
+        true
+    }
+
+    /// Close every file resource owned or serviced by one machine.
+    fn close_files_for_machine(&mut self, machine: VmId) {
+        let resources: Vec<u64> = self
+            .files
+            .iter()
+            .filter_map(|(resource, file)| {
+                let serviced =
+                    matches!(file.backing, FileBacking::Driver(driver) if driver == machine);
+                (file.owner == machine || serviced).then_some(*resource)
+            })
+            .collect();
+        for resource in resources {
+            self.retire_file(resource, true);
+        }
+    }
+
+    /// Return the file resource in the first pending argument.
+    fn pending_file_resource(&self, vm: VmId) -> Option<u64> {
+        let machine = self.machines.get(vm as usize)?;
+        let value = *machine.vm.pending.as_ref()?.args.first()?;
+        let reference = value.as_obj()?;
+        match machine.vm.heap.get(reference) {
+            Object::NativeFileHandle { resource } => Some(*resource),
+            _ => None,
+        }
+    }
+
+    fn file_handle_resource(&self, holder: VmId, value: Value) -> Option<u64> {
+        let reference = value.as_obj()?;
+        match self.machines[holder as usize].vm.heap.get(reference) {
+            Object::NativeFileHandle { resource } => Some(*resource),
+            _ => None,
+        }
+    }
+
+    fn resource_control(&self, holder: VmId, value: Value) -> Option<(VmId, u64)> {
+        let reference = value.as_obj()?;
+        match self.machines[holder as usize].vm.heap.get(reference) {
+            Object::NativeResourceHandle { surface, resource } => Some((*surface, *resource)),
+            _ => None,
+        }
+    }
+
+    fn value_is_result_ok(&self, holder: VmId, value: Value) -> bool {
+        value.as_obj().is_some_and(|reference| {
+            matches!(
+                self.machines[holder as usize].vm.heap.get(reference),
+                Object::Instance { class, .. } if Some(*class) == self.core.result_ok
+            )
+        })
+    }
+
+    fn build_resource_control(
+        &mut self,
+        holder: VmId,
+        surface: VmId,
+        resource: u64,
+    ) -> Result<Value, FaultCode> {
+        self.machines[holder as usize].alloc(Object::NativeResourceHandle { surface, resource })
+    }
+
+    /// Find every live file resource in one controlled machine world.
+    fn controlled_file_resources(&mut self, root: VmId) -> Result<Vec<u64>, FaultCode> {
+        let mut machines = Vec::new();
+        let mut queue = std::collections::VecDeque::from([root]);
+        while let Some(machine) = queue.pop_front() {
+            if machines.contains(&machine) {
+                continue;
+            }
+            machines.push(machine);
+            for target in self.machine_references(machine)? {
+                if !machines.contains(&target) {
+                    queue.push_back(target);
+                }
+            }
+        }
+        let mut resources = std::collections::BTreeSet::new();
+        for (resource, file) in &self.files {
+            if machines.contains(&file.owner) {
+                resources.insert(*resource);
+            }
+        }
+        for machine in machines {
+            let order = self.snapshot_object_order(machine)?;
+            let heap = &self.machines[machine as usize].vm.heap;
+            for reference in order {
+                let resource = match heap.get(reference) {
+                    Object::NativeFileHandle { resource }
+                    | Object::NativeResourceHandle { resource, .. } => *resource,
+                    _ => continue,
+                };
+                if self.files.contains_key(&resource) {
+                    resources.insert(resource);
+                }
+            }
+        }
+        Ok(resources.into_iter().collect())
+    }
+
+    fn build_resource_list(
+        &mut self,
+        holder: VmId,
+        surface: VmId,
+        resources: &[u64],
+    ) -> Result<Value, FaultCode> {
+        let mut items = Vec::with_capacity(resources.len());
+        let mut roots = Vec::with_capacity(resources.len());
+        for resource in resources {
+            match self.build_resource_control(holder, surface, *resource) {
+                Ok(value) => {
+                    let reference = value.as_obj().ok_or(FaultCode::MalformedState)?;
+                    self.machines[holder as usize]
+                        .vm
+                        .heap
+                        .push_host_root(reference);
+                    roots.push(reference);
+                    items.push(value);
+                }
+                Err(code) => {
+                    for root in roots {
+                        self.machines[holder as usize].vm.heap.pop_host_root(root);
+                    }
+                    return Err(code);
+                }
+            }
+        }
+        let list = self.machines[holder as usize].alloc(Object::List { items });
+        for root in roots {
+            self.machines[holder as usize].vm.heap.pop_host_root(root);
+        }
+        list
+    }
+
+    fn register_driver_file(&mut self, owner: VmId, driver: VmId) -> Result<u64, FaultCode> {
+        self.machines[owner as usize].resources.prepare_register()?;
+        let resource = self.next_file;
+        self.next_file = resource.checked_add(1).ok_or(FaultCode::IntegerOverflow)?;
+        self.machines[owner as usize].resources.register(
+            crate::ResourceKind::File,
+            owner,
+            resource,
+            u64::MAX,
+            lm_abi::OP_FS_OPEN,
+        )?;
+        self.files.insert(
+            resource,
+            FileResource {
+                owner,
+                backing: FileBacking::Driver(driver),
+            },
+        );
+        Ok(resource)
+    }
+
+    /// Build the ordinary result for a closed file operation.
+    fn closed_file_reply(&mut self, vm: VmId) -> Result<Value, FaultCode> {
+        let closed = self.make_instance(vm, self.core.fs_error_closed, vec![])?;
+        self.make_instance(vm, self.core.result_err, vec![closed])
+    }
+
+    /// Build one ordinary file-service failure.
+    fn failed_file_reply(&mut self, vm: VmId, message: &str) -> Result<Value, FaultCode> {
+        let message = self.machines[vm as usize].alloc(Object::Str(message.to_string()))?;
+        let error = self.make_instance(vm, self.core.fs_error_failed, vec![message])?;
+        self.make_instance(vm, self.core.result_err, vec![error])
     }
 
     /// Handle one perform of `vm`: record the pending request, then
@@ -1805,6 +2103,39 @@ impl<'m> World<'m> {
                 if lm_abi::op(op).kind == lm_abi::OpKind::VmControl {
                     self.kernel_exec(stack, vm, op, dispatch_mode);
                 } else {
+                    if matches!(
+                        op,
+                        lm_abi::OP_FS_READ
+                            | lm_abi::OP_FS_WRITE
+                            | lm_abi::OP_FS_SEEK
+                            | lm_abi::OP_FS_FLUSH
+                            | lm_abi::OP_FS_CLOSE
+                    ) && self
+                        .pending_file_resource(vm)
+                        .is_none_or(|resource| !self.files.contains_key(&resource))
+                    {
+                        let built = self.closed_file_reply(vm);
+                        self.reply_or_fault(vm, op, built);
+                        return None;
+                    }
+                    let driver = self.pending_file_resource(vm).and_then(|resource| {
+                        self.files
+                            .get(&resource)
+                            .and_then(|file| match file.backing {
+                                FileBacking::Driver(driver) => Some(driver),
+                                FileBacking::Host(_) => None,
+                            })
+                    });
+                    if let Some(driver) = driver {
+                        let built = self.failed_file_reply(
+                            vm,
+                            &format!(
+                                "a file backed by driver machine {driver} reached the root host"
+                            ),
+                        );
+                        self.reply_or_fault(vm, op, built);
+                        return None;
+                    }
                     let args = match self.host_args(vm) {
                         Ok(args) => args,
                         Err(code) => {
@@ -1905,9 +2236,7 @@ impl<'m> World<'m> {
 
     /// Extract plain-data host arguments from the pending perform.
     ///
-    /// A host operation takes integers and strings alone. A restored
-    /// machine states its own pending arguments, so a value of another
-    /// shape stops the machine instead of the host.
+    /// Extract only plain data and opaque host tokens.
     fn host_args(&self, vm: VmId) -> Result<Vec<HostArg>, FaultCode> {
         let m = &self.machines[vm as usize];
         let pending = m.vm.pending.as_ref().ok_or(FaultCode::MalformedState)?;
@@ -1918,6 +2247,74 @@ impl<'m> World<'m> {
                 Value::Int(v) => Ok(HostArg::Int(*v)),
                 Value::Obj(r) => match m.vm.heap.get(*r) {
                     Object::Str(text) => Ok(HostArg::Str(text.clone())),
+                    Object::Bytes(bytes) => Ok(HostArg::Bytes(bytes.clone())),
+                    Object::NativeFileHandle { resource } => {
+                        let file = self.files.get(resource).ok_or(FaultCode::TypeMismatch)?;
+                        match file.backing {
+                            FileBacking::Host(token) => Ok(HostArg::File(token)),
+                            FileBacking::Driver(_) => Err(FaultCode::TypeMismatch),
+                        }
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.open_read_only && fields.is_empty() =>
+                    {
+                        Ok(HostArg::OpenOptions(HostOpenOptions::ReadOnly))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.open_write_only && fields.is_empty() =>
+                    {
+                        Ok(HostArg::OpenOptions(HostOpenOptions::WriteOnly))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.open_read_write && fields.is_empty() =>
+                    {
+                        Ok(HostArg::OpenOptions(HostOpenOptions::ReadWrite))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.open_create && fields.is_empty() =>
+                    {
+                        Ok(HostArg::OpenOptions(HostOpenOptions::Create))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.open_create_truncate && fields.is_empty() =>
+                    {
+                        Ok(HostArg::OpenOptions(HostOpenOptions::CreateTruncate))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.open_append && fields.is_empty() =>
+                    {
+                        Ok(HostArg::OpenOptions(HostOpenOptions::Append))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.seek_start =>
+                    {
+                        match fields.as_slice() {
+                            [Value::Int(offset)] => {
+                                Ok(HostArg::SeekFrom(HostSeekFrom::Start(*offset)))
+                            }
+                            _ => Err(FaultCode::TypeMismatch),
+                        }
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.seek_current =>
+                    {
+                        match fields.as_slice() {
+                            [Value::Int(offset)] => {
+                                Ok(HostArg::SeekFrom(HostSeekFrom::Current(*offset)))
+                            }
+                            _ => Err(FaultCode::TypeMismatch),
+                        }
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.seek_end =>
+                    {
+                        match fields.as_slice() {
+                            [Value::Int(offset)] => {
+                                Ok(HostArg::SeekFrom(HostSeekFrom::End(*offset)))
+                            }
+                            _ => Err(FaultCode::TypeMismatch),
+                        }
+                    }
                     _ => Err(FaultCode::TypeMismatch),
                 },
                 _ => Err(FaultCode::TypeMismatch),
@@ -2552,6 +2949,165 @@ impl<'m> World<'m> {
                     Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
                 }
             }
+            lm_abi::OP_VM_HANDLES => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                let built = self
+                    .controlled_file_resources(target)
+                    .and_then(|resources| self.build_resource_list(vm, target, &resources));
+                self.reply_or_fault(vm, op, built);
+            }
+            lm_abi::OP_VM_RESOURCE => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                let Some(resource) = self.file_handle_resource(vm, args[1]) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a file handle",
+                    );
+                    return;
+                };
+                let built = self.build_resource_control(vm, target, resource);
+                self.reply_or_fault(vm, op, built);
+            }
+            lm_abi::OP_VM_MINT_FILE => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|reference| {
+                    match self.machines[vm as usize].vm.heap.get(reference) {
+                        Object::NativeCall {
+                            vm,
+                            ordinal,
+                            op: call_op,
+                        } => Some((*vm, *ordinal, *call_op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                let Some(sink) =
+                    self.reply_sink(vm, op, surface, token.0, token.1, Some(lm_abi::OP_FS_OPEN))
+                else {
+                    return;
+                };
+                let resource = match self.register_driver_file(sink.target, vm) {
+                    Ok(resource) => resource,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the resource limit is full");
+                        return;
+                    }
+                };
+                let built = self.machines[sink.target as usize]
+                    .alloc(Object::NativeFileHandle { resource })
+                    .and_then(|handle| {
+                        self.make_instance(sink.target, self.core.result_ok, vec![handle])
+                    });
+                let reply = match built {
+                    Ok(reply) => reply,
+                    Err(code) => {
+                        self.retire_file(resource, false);
+                        self.fault_caller(vm, op, code, "the file reply allocation failed");
+                        return;
+                    }
+                };
+                let control = match self.build_resource_control(vm, surface, resource) {
+                    Ok(control) => control,
+                    Err(code) => {
+                        self.retire_file(resource, false);
+                        self.fault_caller(vm, op, code, "the resource control allocation failed");
+                        return;
+                    }
+                };
+                self.install_value_reply(sink.target, reply);
+                if self.machines[sink.target as usize].vm.state == MachineState::Faulted {
+                    self.retire_file(resource, false);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the minted reply did not match Fs.Open",
+                    );
+                    return;
+                }
+                self.consume_reply_sink(sink);
+                self.install_value_reply(vm, control);
+            }
+            lm_abi::OP_VM_RESOURCE_SAME => {
+                let Some((_left_surface, left)) = self.resource_control(vm, args[0]) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the receiver is not a resource control",
+                    );
+                    return;
+                };
+                let Some((_right_surface, right)) = self.resource_control(vm, args[1]) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a resource control",
+                    );
+                    return;
+                };
+                let same = left == right && self.files.contains_key(&left);
+                self.install_value_reply(vm, Value::Bool(same));
+            }
+            lm_abi::OP_VM_RESOURCE_IS_OPEN
+            | lm_abi::OP_VM_RESOURCE_CLOSE
+            | lm_abi::OP_VM_RESOURCE_KIND => {
+                let Some((_surface, resource)) = self.resource_control(vm, args[0]) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the receiver is not a resource control",
+                    );
+                    return;
+                };
+                match op {
+                    lm_abi::OP_VM_RESOURCE_IS_OPEN => {
+                        let open = self.files.contains_key(&resource);
+                        self.install_value_reply(vm, Value::Bool(open));
+                    }
+                    lm_abi::OP_VM_RESOURCE_CLOSE => {
+                        let closed = self.retire_file(resource, true);
+                        self.install_value_reply(vm, Value::Bool(closed));
+                    }
+                    _ => {
+                        let built =
+                            self.machines[vm as usize].alloc(Object::Str("file".to_string()));
+                        self.reply_or_fault(vm, op, built);
+                    }
+                }
+            }
             lm_abi::OP_VM_ANSWER => {
                 let Some(surface) = self.vm_arg(vm, op, args[0]) else {
                     return;
@@ -2662,6 +3218,29 @@ impl<'m> World<'m> {
                 }
                 self.take_snapshot(vm, op, target, false);
             }
+            lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let Value::Int(fuel) = args[1] else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the fuel argument is not an integer",
+                    );
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                let result = self.snapshot_wait(target, fuel.max(0) as u64);
+                self.install_snapshot_result(vm, op, result);
+            }
             lm_abi::OP_VM_SNAPSHOT_SELF => {
                 // The performing machine is the root of its own world.
                 // The capture runs while `Vm.SnapshotSelf` is pending,
@@ -2670,15 +3249,12 @@ impl<'m> World<'m> {
                 self.take_snapshot(vm, op, vm, true);
             }
             lm_abi::OP_VM_LOAD_SNAPSHOT => {
-                // Version 0.2 has no `Bytes` value, so no guest code
-                // can build the argument. The verifier rejects the
-                // instruction; this arm states the same rule for a
-                // hand-built module that reached the kernel.
+                // This build has no guest snapshot decoder.
                 self.fault_caller(
                     vm,
                     op,
                     FaultCode::InvalidVmState,
-                    "Vm.LoadSnapshot has no guest form without a Bytes value",
+                    "Vm.LoadSnapshot is not available in this build",
                 );
             }
             lm_abi::OP_VM_RESTORE => self.restore_snapshot(vm, op, args),
@@ -2713,7 +3289,17 @@ impl<'m> World<'m> {
         // both. The two live in different machine fields, so a shared
         // counter never confuses a barrier with a gate.
         let barrier = self.next_gate();
-        let built = match self.capture_snapshot(barrier, root, self_root) {
+        let result = self.capture_snapshot(barrier, root, self_root);
+        self.install_snapshot_result(vm, op, result);
+    }
+
+    fn install_snapshot_result(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        result: Result<crate::snapshot::SnapshotImage, crate::snapshot::SnapshotFail>,
+    ) {
+        let built = match result {
             Ok(image) => {
                 self.trust_image(&image);
                 self.last_image = Some(image.clone());
@@ -4627,6 +5213,7 @@ impl<'m> World<'m> {
                 | Object::NativeRequest { vm, .. }
                 | Object::NativeCall { vm, .. } => Some(*vm),
                 Object::NativeHandle { proc, .. } => Some(*proc),
+                Object::NativeResourceHandle { surface, .. } => Some(*surface),
                 _ => None,
             };
             if let Some(target) = target {
@@ -4700,22 +5287,54 @@ impl<'m> World<'m> {
         {
             return Err(FaultCode::BoundaryViolation);
         }
+        let order = self.snapshot_object_order(vm)?;
+        let heap = &self.machines[vm as usize].vm.heap;
+        for reference in &order {
+            let resource = match heap.get(*reference) {
+                Object::NativeFileHandle { resource }
+                | Object::NativeResourceHandle { resource, .. } => Some(*resource),
+                _ => None,
+            };
+            if resource.is_some_and(|resource| self.files.contains_key(&resource)) {
+                return Err(FaultCode::BoundaryViolation);
+            }
+        }
+        Ok(order.len())
+    }
+
+    fn snapshot_object_order(&mut self, vm: VmId) -> Result<Vec<ObjRef>, FaultCode> {
         let roots = self.machines[vm as usize].snapshot_roots();
         let limits = self.machines[vm as usize].config.graph;
-        let m = &mut self.machines[vm as usize];
-        lm_graph::snapshot_ordinals(&mut m.vm.heap, &roots, &limits).map(|order| order.len())
+        let machine = &mut self.machines[vm as usize];
+        lm_graph::snapshot_ordinals(&mut machine.vm.heap, &roots, &limits)
     }
 
     /// The kind name of one live host attachment this machine holds.
-    pub fn live_attachment_kind(&self, vm: VmId) -> Option<String> {
-        self.machines[vm as usize]
+    pub fn live_attachment_kind(&mut self, vm: VmId) -> Option<String> {
+        let registered = self.machines[vm as usize]
             .resources
             .live_attachment()
             .map(|record| match record.kind {
                 crate::ResourceKind::PendingOperation => {
                     format!("a pending {}", lm_abi::op_name(record.op))
                 }
-            })
+                crate::ResourceKind::File => "file handle".to_string(),
+            });
+        if registered.is_some() {
+            return registered;
+        }
+        let order = self.snapshot_object_order(vm).ok()?;
+        let heap = &self.machines[vm as usize].vm.heap;
+        order.into_iter().find_map(|reference| {
+            let resource = match heap.get(reference) {
+                Object::NativeFileHandle { resource }
+                | Object::NativeResourceHandle { resource, .. } => *resource,
+                _ => return None,
+            };
+            self.files
+                .contains_key(&resource)
+                .then(|| "file handle".to_string())
+        })
     }
 
     /// The number of live activation references to one machine.
@@ -4995,6 +5614,17 @@ impl<'m> World<'m> {
                     }
                     Object::StrBuilder(buf) => format!("<StringBuilder len {}>", buf.len()),
                     Object::ByteBuf(bytes) => format!("<ByteBuffer len {}>", bytes.len()),
+                    Object::Bytes(bytes) => format!("<Bytes len {}>", bytes.len()),
+                    Object::NativeFileHandle { resource } => {
+                        if *resource == 0 {
+                            "<file closed>".to_string()
+                        } else {
+                            format!("<file {resource}>")
+                        }
+                    }
+                    Object::NativeResourceHandle { surface, resource } => {
+                        format!("<resource {resource} of machine {surface}>")
+                    }
                     Object::NativeVm { vm } => format!("<vm {vm}>"),
                     Object::NativeTable { vm } => format!("<table {vm}>"),
                     Object::NativeRequest { .. } => "<request>".to_string(),

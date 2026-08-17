@@ -40,6 +40,7 @@ enum OKind {
     Closure { func: u32, captures: Vec<OV> },
     Sb(String),
     Bb(Vec<u8>),
+    Bytes(Vec<u8>),
 }
 
 /// Why evaluation left the normal path.
@@ -203,7 +204,10 @@ impl<'m> Oracle<'m> {
     }
 
     fn alloc(&self, kind: OKind) -> OV {
-        let frozen = matches!(kind, OKind::Tuple(_) | OKind::Closure { .. });
+        let frozen = matches!(
+            kind,
+            OKind::Tuple(_) | OKind::Closure { .. } | OKind::Bytes(_)
+        );
         OV::Obj(Rc::new(RefCell::new(OObj { frozen, kind })))
     }
 
@@ -799,6 +803,29 @@ impl<'m> Oracle<'m> {
                     Err(_) => Err(Stop::Fault("BadCast")),
                 }
             }
+            NativeOp::BytesNew => match &values[0] {
+                OV::Str(text) => Ok(self.alloc(OKind::Bytes(text.as_bytes().to_vec()))),
+                _ => Err(Stop::Limit("bytes construction from a non-string")),
+            },
+            NativeOp::BytesLen => {
+                let obj = self.as_obj(&values[0])?;
+                let len = match &obj.borrow().kind {
+                    OKind::Bytes(bytes) => bytes.len(),
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                Ok(OV::Int(len as i64))
+            }
+            NativeOp::BytesText => {
+                let obj = self.as_obj(&values[0])?;
+                let bytes = match &obj.borrow().kind {
+                    OKind::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                match String::from_utf8(bytes) {
+                    Ok(text) => Ok(OV::Str(Rc::new(text))),
+                    Err(_) => Err(Stop::Fault("BadCast")),
+                }
+            }
         }
     }
 
@@ -843,7 +870,7 @@ impl<'m> Oracle<'m> {
                     }
                 }
                 OKind::Closure { captures, .. } => captures.iter().for_each(&mut push),
-                OKind::Sb(_) | OKind::Bb(_) => {}
+                OKind::Sb(_) | OKind::Bb(_) | OKind::Bytes(_) => {}
             }
         }
     }
@@ -953,6 +980,7 @@ impl<'m> Oracle<'m> {
                     }
                     OKind::Sb(buf) => format!("<StringBuilder len {}>", buf.len()),
                     OKind::Bb(bytes) => format!("<ByteBuffer len {}>", bytes.len()),
+                    OKind::Bytes(bytes) => format!("<Bytes len {}>", bytes.len()),
                 }
             }
         }

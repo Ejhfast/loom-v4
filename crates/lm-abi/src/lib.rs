@@ -23,9 +23,10 @@ pub use sha::{sha256, sha256_hex};
 /// Version 2 adds the eight proc operations of specification 23.6.
 /// Version 3 adds the four snapshot operations of specification 23.5.
 /// Version 4 hashes every field of one operation definition into its
-/// identity, the snapshot classification included. A change to any
-/// field of a definition now moves every dependent digest.
-pub const ABI_VERSION: u32 = 4;
+/// identity. Version 5 adds immutable bytes, file handles, and the
+/// first six filesystem operations. Version 6 adds holder resource
+/// controls and fuel-bounded snapshot waiting.
+pub const ABI_VERSION: u32 = 6;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -46,12 +47,20 @@ pub enum AbiType {
     Unit,
     Int,
     Str,
+    Bytes,
+    FileHandle,
+    OpenOptions,
+    SeekFrom,
     /// `Result[Option[String], IoError]`, the `Io.ReadLine` reply.
     ResultOptionStrIoError,
     /// `Result[SnapshotImage, SnapshotError]`, the `Vm.SnapshotSelf`
     /// reply. A restored self snapshot is answered through the
     /// ordinary typed call path, so the reply type has a name here.
     ResultSnapshotImageError,
+    ResultFileHandleFsError,
+    ResultBytesFsError,
+    ResultIntFsError,
+    ResultUnitFsError,
 }
 
 impl AbiType {
@@ -61,8 +70,16 @@ impl AbiType {
             AbiType::Unit => "()",
             AbiType::Int => "Int",
             AbiType::Str => "String",
+            AbiType::Bytes => "Bytes",
+            AbiType::FileHandle => "FileHandle",
+            AbiType::OpenOptions => "OpenOptions",
+            AbiType::SeekFrom => "SeekFrom",
             AbiType::ResultOptionStrIoError => "Result[Option[String], IoError]",
             AbiType::ResultSnapshotImageError => "Result[SnapshotImage, SnapshotError]",
+            AbiType::ResultFileHandleFsError => "Result[FileHandle, FsError]",
+            AbiType::ResultBytesFsError => "Result[Bytes, FsError]",
+            AbiType::ResultIntFsError => "Result[Int, FsError]",
+            AbiType::ResultUnitFsError => "Result[(), FsError]",
         }
     }
 }
@@ -156,9 +173,23 @@ pub const OP_VM_SNAPSHOT_HELD: OpSlot = 24;
 pub const OP_VM_SNAPSHOT_SELF: OpSlot = 25;
 pub const OP_VM_LOAD_SNAPSHOT: OpSlot = 26;
 pub const OP_VM_RESTORE: OpSlot = 27;
+pub const OP_FS_OPEN: OpSlot = 28;
+pub const OP_FS_READ: OpSlot = 29;
+pub const OP_FS_WRITE: OpSlot = 30;
+pub const OP_FS_SEEK: OpSlot = 31;
+pub const OP_FS_FLUSH: OpSlot = 32;
+pub const OP_FS_CLOSE: OpSlot = 33;
+pub const OP_VM_HANDLES: OpSlot = 34;
+pub const OP_VM_RESOURCE: OpSlot = 35;
+pub const OP_VM_MINT_FILE: OpSlot = 36;
+pub const OP_VM_RESOURCE_IS_OPEN: OpSlot = 37;
+pub const OP_VM_RESOURCE_CLOSE: OpSlot = 38;
+pub const OP_VM_RESOURCE_KIND: OpSlot = 39;
+pub const OP_VM_SNAPSHOT_WAIT_HELD: OpSlot = 40;
+pub const OP_VM_RESOURCE_SAME: OpSlot = 41;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 28] = [
+pub const OPS: [OpDef; 42] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -419,6 +450,132 @@ pub const OPS: [OpDef; 28] = [
         schema: "[T](EmptyVm, Snapshot[T]) -> Result[Vm[T], RestoreError]",
         snapshot: SnapshotClass::MachineState,
     },
+    OpDef {
+        group: "Fs",
+        member: "Open",
+        kind: OpKind::Fixed,
+        params: &[AbiType::Str, AbiType::OpenOptions],
+        reply: AbiType::ResultFileHandleFsError,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "Read",
+        kind: OpKind::Fixed,
+        params: &[AbiType::FileHandle, AbiType::Int],
+        reply: AbiType::ResultBytesFsError,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "Write",
+        kind: OpKind::Fixed,
+        params: &[AbiType::FileHandle, AbiType::Bytes],
+        reply: AbiType::ResultIntFsError,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "Seek",
+        kind: OpKind::Fixed,
+        params: &[AbiType::FileHandle, AbiType::SeekFrom],
+        reply: AbiType::ResultIntFsError,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "Flush",
+        kind: OpKind::Fixed,
+        params: &[AbiType::FileHandle],
+        reply: AbiType::ResultUnitFsError,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Fs",
+        member: "Close",
+        kind: OpKind::Fixed,
+        params: &[AbiType::FileHandle],
+        reply: AbiType::ResultUnitFsError,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Vm",
+        member: "Handles",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](Vm[T]) -> List[ResourceHandle]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "Resource",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](Vm[T], FileHandle) -> ResourceHandle",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "MintFile",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](Vm[T], PendingCall[(String, OpenOptions), Result[FileHandle, FsError]]) -> ResourceHandle",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ResourceIsOpen",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "(ResourceHandle) -> Bool",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ResourceClose",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "(ResourceHandle) -> Bool",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ResourceKind",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "(ResourceHandle) -> String",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "SnapshotWaitHeld",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](Vm[T], Int) -> Result[Snapshot[T], SnapshotError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ResourceSame",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "(ResourceHandle, ResourceHandle) -> Bool",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -583,7 +740,9 @@ mod tests {
         assert_eq!(op_by_name("Vm.SnapshotSelf"), Some(OP_VM_SNAPSHOT_SELF));
         assert_eq!(op_by_name("Vm.LoadSnapshot"), Some(OP_VM_LOAD_SNAPSHOT));
         assert_eq!(op_by_name("Vm.Restore"), Some(OP_VM_RESTORE));
-        assert_eq!(op_by_name("Fs.Open"), None);
+        assert_eq!(op_by_name("Fs.Open"), Some(OP_FS_OPEN));
+        assert_eq!(op_by_name("Fs.Close"), Some(OP_FS_CLOSE));
+        assert_eq!(op_by_name("Vm.ResourceSame"), Some(OP_VM_RESOURCE_SAME));
     }
 
     #[test]
@@ -657,7 +816,7 @@ mod tests {
     }
 
     /// Every operation declares one snapshot classification, and the
-    /// suspending set is exactly the four operations that reach live
+    /// suspending set is exactly the operations that reach live
     /// host state. A new operation must join this list on purpose.
     #[test]
     fn every_operation_declares_one_snapshot_class() {
@@ -667,7 +826,18 @@ mod tests {
             .collect();
         assert_eq!(
             suspending,
-            vec!["Io.Print", "Io.Error", "Io.ReadLine", "Clock.Sleep"]
+            vec![
+                "Io.Print",
+                "Io.Error",
+                "Io.ReadLine",
+                "Clock.Sleep",
+                "Fs.Open",
+                "Fs.Read",
+                "Fs.Write",
+                "Fs.Seek",
+                "Fs.Flush",
+                "Fs.Close",
+            ]
         );
         // A VM control operation runs inside the driver loop, so it
         // never holds a host attachment.

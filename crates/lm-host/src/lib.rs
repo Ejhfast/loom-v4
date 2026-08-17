@@ -1,8 +1,8 @@
 //! Root host operations for the command line.
 //!
 //! `CliHost` implements the `lm-vm` completion interface over the
-//! real process: stdout, stderr, stdin, the system clocks, and a
-//! seeded deterministic PRNG. `lm-vm` never depends on this crate;
+//! real process. It handles standard streams, clocks, files, and a
+//! seeded deterministic PRNG. `lm-vm` never depends on this crate.
 //! `lm-cli` wires it in.
 //!
 //! `Clock.Sleep` uses the asynchronous completion channel: `start`
@@ -10,9 +10,12 @@
 //! the deadline passed; `wait` blocks until it passes. Week 9 makes
 //! the channel truly asynchronous; the shape is already in place.
 
-use lm_vm::{CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostStart, HostValue};
+use lm_vm::{
+    CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostOpenOptions, HostSeekFrom,
+    HostStart, HostValue,
+};
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Seek, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The command-line root host.
@@ -21,6 +24,8 @@ pub struct CliHost {
     rand_state: u64,
     sleeps: HashMap<u64, (CompletionKey, Instant)>,
     next_token: u64,
+    files: HashMap<u64, std::fs::File>,
+    next_file: u64,
 }
 
 impl CliHost {
@@ -31,6 +36,8 @@ impl CliHost {
             rand_state: rand_seed.max(1),
             sleeps: HashMap::new(),
             next_token: 1,
+            files: HashMap::new(),
+            next_file: 1,
         }
     }
 
@@ -54,6 +61,22 @@ fn io_error(message: String) -> HostValue {
         )],
     )
 }
+
+fn fs_ok(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn fs_error(message: String) -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(
+            CoreCtor::FsErrorFailed,
+            vec![HostValue::Str(message)],
+        )],
+    )
+}
+
+const MAX_FILE_IO_BYTES: usize = 16 << 20;
 
 impl Host for CliHost {
     fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
@@ -133,6 +156,162 @@ impl Host for CliHost {
                 let value = low.wrapping_add((self.next_rand() % span) as i64);
                 HostStart::Completed(HostValue::Int(value))
             }
+            lm_abi::OP_FS_OPEN => {
+                let (Some(HostArg::Str(path)), Some(HostArg::OpenOptions(options))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.Open needs a path and options".to_string());
+                };
+                let mut open = std::fs::OpenOptions::new();
+                match options {
+                    HostOpenOptions::ReadOnly => {
+                        open.read(true);
+                    }
+                    HostOpenOptions::WriteOnly => {
+                        open.write(true);
+                    }
+                    HostOpenOptions::ReadWrite => {
+                        open.read(true).write(true);
+                    }
+                    HostOpenOptions::Create => {
+                        open.read(true).write(true).create(true);
+                    }
+                    HostOpenOptions::CreateTruncate => {
+                        open.read(true).write(true).create(true).truncate(true);
+                    }
+                    HostOpenOptions::Append => {
+                        open.write(true).create(true).append(true);
+                    }
+                }
+                match open.open(path) {
+                    Ok(file) => {
+                        let token = self.next_file;
+                        let Some(next) = token.checked_add(1) else {
+                            return HostStart::Failed(
+                                "the file token space is exhausted".to_string(),
+                            );
+                        };
+                        self.next_file = next;
+                        self.files.insert(token, file);
+                        HostStart::Completed(fs_ok(HostValue::File(token)))
+                    }
+                    Err(error) => {
+                        HostStart::Completed(fs_error(format!("file open failed: {error}")))
+                    }
+                }
+            }
+            lm_abi::OP_FS_READ => {
+                let (Some(HostArg::File(token)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.Read needs a file and count".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(fs_error(
+                        "the read count is negative".to_string(),
+                    ));
+                };
+                if count > MAX_FILE_IO_BYTES {
+                    return HostStart::Completed(fs_error(
+                        "the read count is too large".to_string(),
+                    ));
+                }
+                let Some(file) = self.files.get_mut(token) else {
+                    return HostStart::Completed(fs_error(
+                        "the file token is not open".to_string(),
+                    ));
+                };
+                let mut bytes = vec![0; count];
+                match file.read(&mut bytes) {
+                    Ok(read) => {
+                        bytes.truncate(read);
+                        HostStart::Completed(fs_ok(HostValue::Bytes(bytes)))
+                    }
+                    Err(error) => {
+                        HostStart::Completed(fs_error(format!("file read failed: {error}")))
+                    }
+                }
+            }
+            lm_abi::OP_FS_WRITE => {
+                let (Some(HostArg::File(token)), Some(HostArg::Bytes(bytes))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.Write needs a file and bytes".to_string());
+                };
+                let Some(file) = self.files.get_mut(token) else {
+                    return HostStart::Completed(fs_error(
+                        "the file token is not open".to_string(),
+                    ));
+                };
+                match file.write(bytes) {
+                    Ok(written) => HostStart::Completed(fs_ok(HostValue::Int(written as i64))),
+                    Err(error) => {
+                        HostStart::Completed(fs_error(format!("file write failed: {error}")))
+                    }
+                }
+            }
+            lm_abi::OP_FS_SEEK => {
+                let (Some(HostArg::File(token)), Some(HostArg::SeekFrom(from))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.Seek needs a file and origin".to_string());
+                };
+                let Some(file) = self.files.get_mut(token) else {
+                    return HostStart::Completed(fs_error(
+                        "the file token is not open".to_string(),
+                    ));
+                };
+                let from = match from {
+                    HostSeekFrom::Start(offset) => match u64::try_from(*offset) {
+                        Ok(offset) => std::io::SeekFrom::Start(offset),
+                        Err(_) => {
+                            return HostStart::Completed(fs_error(
+                                "the seek position is invalid".to_string(),
+                            ))
+                        }
+                    },
+                    HostSeekFrom::Current(offset) => std::io::SeekFrom::Current(*offset),
+                    HostSeekFrom::End(offset) => std::io::SeekFrom::End(*offset),
+                };
+                match file.seek(from) {
+                    Ok(position) => match i64::try_from(position) {
+                        Ok(position) => HostStart::Completed(fs_ok(HostValue::Int(position))),
+                        Err(_) => HostStart::Completed(fs_error(
+                            "the seek position is too large".to_string(),
+                        )),
+                    },
+                    Err(error) => {
+                        HostStart::Completed(fs_error(format!("file seek failed: {error}")))
+                    }
+                }
+            }
+            lm_abi::OP_FS_FLUSH => {
+                let Some(HostArg::File(token)) = args.first() else {
+                    return HostStart::Failed("Fs.Flush needs a file".to_string());
+                };
+                let Some(file) = self.files.get_mut(token) else {
+                    return HostStart::Completed(fs_error(
+                        "the file token is not open".to_string(),
+                    ));
+                };
+                match file.flush() {
+                    Ok(()) => HostStart::Completed(fs_ok(HostValue::Unit)),
+                    Err(error) => {
+                        HostStart::Completed(fs_error(format!("file flush failed: {error}")))
+                    }
+                }
+            }
+            lm_abi::OP_FS_CLOSE => {
+                let Some(HostArg::File(token)) = args.first() else {
+                    return HostStart::Failed("Fs.Close needs a file".to_string());
+                };
+                if self.files.remove(token).is_none() {
+                    return HostStart::Completed(fs_error(
+                        "the file token is not open".to_string(),
+                    ));
+                }
+                HostStart::Completed(fs_ok(HostValue::Unit))
+            }
             _ => HostStart::Failed(format!(
                 "the command-line host does not implement {}",
                 lm_abi::op_name(op)
@@ -173,11 +352,23 @@ impl Host for CliHost {
             value: HostValue::Unit,
         })
     }
+
+    fn close_file(&mut self, token: u64) -> bool {
+        self.files.remove(&token).is_some()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TempFile(std::path::PathBuf);
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 
     fn completion() -> CompletionKey {
         CompletionKey {
@@ -186,6 +377,17 @@ mod tests {
                 generation: 0,
             },
             ordinal: 1,
+        }
+    }
+
+    fn fs_ok_value(start: HostStart) -> HostValue {
+        match start {
+            HostStart::Completed(HostValue::Ctor(CoreCtor::Ok, mut values))
+                if values.len() == 1 =>
+            {
+                values.pop().expect("the success value exists")
+            }
+            other => panic!("expected one filesystem success, found {other:?}"),
         }
     }
 
@@ -230,5 +432,74 @@ mod tests {
         };
         assert_eq!(host.wait().map(|completion| completion.token), Some(token));
         assert_eq!(host.poll(), None);
+    }
+
+    #[test]
+    fn files_round_trip_through_the_command_line_host() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time follows the epoch")
+            .as_nanos();
+        let path = TempFile(
+            std::env::temp_dir().join(format!("loom-host-{}-{unique}.tmp", std::process::id())),
+        );
+        let path_text = path.0.to_string_lossy().into_owned();
+        let mut host = CliHost::new(1);
+
+        let token = match fs_ok_value(host.start(
+            completion(),
+            lm_abi::OP_FS_OPEN,
+            vec![
+                HostArg::Str(path_text),
+                HostArg::OpenOptions(HostOpenOptions::CreateTruncate),
+            ],
+        )) {
+            HostValue::File(token) => token,
+            other => panic!("expected a file token, found {other:?}"),
+        };
+        assert_eq!(
+            fs_ok_value(host.start(
+                completion(),
+                lm_abi::OP_FS_WRITE,
+                vec![HostArg::File(token), HostArg::Bytes(b"hello".to_vec())],
+            )),
+            HostValue::Int(5)
+        );
+        assert_eq!(
+            fs_ok_value(host.start(
+                completion(),
+                lm_abi::OP_FS_FLUSH,
+                vec![HostArg::File(token)],
+            )),
+            HostValue::Unit
+        );
+        assert_eq!(
+            fs_ok_value(host.start(
+                completion(),
+                lm_abi::OP_FS_SEEK,
+                vec![
+                    HostArg::File(token),
+                    HostArg::SeekFrom(HostSeekFrom::Start(0))
+                ],
+            )),
+            HostValue::Int(0)
+        );
+        assert_eq!(
+            fs_ok_value(host.start(
+                completion(),
+                lm_abi::OP_FS_READ,
+                vec![HostArg::File(token), HostArg::Int(5)],
+            )),
+            HostValue::Bytes(b"hello".to_vec())
+        );
+        assert_eq!(
+            fs_ok_value(host.start(
+                completion(),
+                lm_abi::OP_FS_CLOSE,
+                vec![HostArg::File(token)],
+            )),
+            HostValue::Unit
+        );
+        assert_eq!(std::fs::read(&path.0).expect("the file reads"), b"hello");
     }
 }

@@ -786,6 +786,10 @@ valid: state=asked machines=3 mailboxes=2
 
 ## Week 10 — Scoped files, external resources, time, random, and TCP
 
+Week 10 starts with the handle foundation in
+`docs/specs/handles.md`. Later slices add scoped leases, broader host
+operations, and TCP.
+
 ### Land
 
 - Add the full operation manifest for I/O, filesystem, clock, random,
@@ -794,6 +798,10 @@ valid: state=asked machines=3 mailboxes=2
   enums.
 - Add typed resource-registry entries for every live host resource and
   pending host continuation.
+- Add typed handle values and holder-local resource controls.
+- Let a holder enumerate and close resources in its controlled world.
+- Let a driver return an existing handle or mint a driver-backed
+  handle for a current typed request.
 - Add pure `std/path` and explicit finite root policy profiles.
 - Add `FileLease` as a scoped native designator and
   `std/fs.with_open` as the standard file entry point.
@@ -804,6 +812,9 @@ valid: state=asked machines=3 mailboxes=2
 - Keep explicit read, write, seek, flush, and close on `FileHandle`.
 - Register every live raw file handle as a host attachment. A live
   attachment blocks snapshot creation.
+- Keep closed handle values as ordinary machine state. Restored closed
+  handles remain closed.
+- Add fuel-bounded snapshot waiting for transient resource state.
 - Register live TCP streams and listeners the same way. Do not reopen
   a connection silently.
 - Defer checkpointable file and connection types with explicit
@@ -855,7 +866,9 @@ random answers produce byte-for-byte repeatable output.
 - Scoped designators cannot escape through source or bytecode.
 - Cleanup runs on normal return and VM termination.
 - Cleanup invokes no guest callback.
-- No file or socket becomes an inert guest value.
+- No live file or socket enters snapshot bytes.
+- A closed handle carries no host authority and returns a typed closed
+  error.
 - No wrapper hides or widens its exact underlying row.
 - Platform error mapping has cross-platform golden tests.
 - Async completions are single-use and safe after cancellation or VM

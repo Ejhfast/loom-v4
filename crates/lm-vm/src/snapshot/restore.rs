@@ -487,6 +487,9 @@ fn relocate_metadata(object: &mut Object, ids: &[VmId], env_map: &[TypeEnvId]) {
         Object::NativeHandle { proc, .. } => {
             *proc = ids[*proc as usize];
         }
+        Object::NativeResourceHandle { surface, .. } => {
+            *surface = ids[*surface as usize];
+        }
         _ => {}
     }
 }

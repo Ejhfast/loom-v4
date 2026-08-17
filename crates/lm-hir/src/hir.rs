@@ -210,6 +210,9 @@ pub enum NativeOp {
     BbAppend,
     BbLen,
     BbBuild,
+    BytesNew,
+    BytesLen,
+    BytesText,
     Freeze,
     /// The canonical digest of one frozen graph.
     Digest,

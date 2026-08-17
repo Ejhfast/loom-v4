@@ -631,6 +631,11 @@ impl World<'_> {
                     proc: self.require_ordinal(proc, ordinal_of)?,
                     generation,
                 },
+                Object::NativeFileHandle { .. } => Object::NativeFileHandle { resource: 0 },
+                Object::NativeResourceHandle { surface, .. } => Object::NativeResourceHandle {
+                    surface: self.require_ordinal(surface, ordinal_of)?,
+                    resource: 0,
+                },
                 other => other.remap(map).unwrap_or(other),
             };
             objects.push(ImageObject { frozen, object });

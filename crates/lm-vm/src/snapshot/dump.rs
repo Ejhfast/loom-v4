@@ -219,6 +219,7 @@ fn payload(object: &Object) -> String {
         }
         Object::StrBuilder(text) => format!("builder len {}", text.len()),
         Object::ByteBuf(bytes) => format!("buffer len {}", bytes.len()),
+        Object::Bytes(bytes) => format!("bytes len {}", bytes.len()),
         Object::NativeVm { vm } => format!("machine {vm}"),
         Object::NativeTable { vm } => format!("table of machine {vm}"),
         Object::NativeRequest { vm, ordinal } => format!("request {ordinal} of machine {vm}"),
@@ -229,6 +230,10 @@ fn payload(object: &Object) -> String {
         Object::NativeFault { code, message, .. } => format!("{code} {message:?}"),
         Object::NativeDigest(bytes) => hex(bytes),
         Object::NativeSnapshot(image) => format!("nested image {} bytes", image.len()),
+        Object::NativeFileHandle { resource } => format!("file resource {resource}"),
+        Object::NativeResourceHandle { surface, resource } => {
+            format!("resource {resource} of machine {surface}")
+        }
     }
 }
 

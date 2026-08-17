@@ -1,0 +1,35 @@
+# Store a closed resource control in a snapshot.
+
+def request_memory_file(): Int with Fs.Open
+  case sys.fs.open("memory.txt", ReadOnly)
+  in Ok(_)  then 1
+  in Err(_) then 0
+  end
+end
+
+def capture_closed_control(): Bool with Vm
+  program = do ||: Int with Fs.Open
+    request_memory_file()
+  end
+  child = sys.vm.Vm().from_object(program, args: ())
+  case child.drive()
+  in Asked(request)
+    case request.as_call(Fs.Open)
+    in Some(call)
+      control = child.mint_file(call)
+      if not control.close()
+        return false
+      end
+      saved = sys.vm.snapshot_self().is_ok()
+      saved and
+        not control.is_open() and
+        not control.same_resource(control) and
+        control.kind() == "file"
+    in None then false
+    end
+  in Done(_)  then false
+  in Fault(_) then false
+  end
+end
+
+capture_closed_control()

@@ -543,6 +543,9 @@ impl<'m> Ctx<'m> {
                 | BcType::Handle(_, _)
                 | BcType::SnapshotImage
                 | BcType::Snapshot(_)
+                | BcType::Bytes
+                | BcType::FileHandle
+                | BcType::ResourceHandle
         )
     }
 
@@ -606,6 +609,10 @@ impl<'m> Ctx<'m> {
             lm_abi::AbiType::Unit => Ok(TY_UNIT),
             lm_abi::AbiType::Int => Ok(TY_INT),
             lm_abi::AbiType::Str => Ok(TY_STR),
+            lm_abi::AbiType::Bytes => Ok(self.intern(BcType::Bytes)),
+            lm_abi::AbiType::FileHandle => Ok(self.intern(BcType::FileHandle)),
+            lm_abi::AbiType::OpenOptions => self.plain_inst(self.core.open_options, "OpenOptions"),
+            lm_abi::AbiType::SeekFrom => self.plain_inst(self.core.seek_from, "SeekFrom"),
             lm_abi::AbiType::ResultOptionStrIoError => {
                 let (Some(option), Some(result), Some(io_error)) =
                     (self.core.option, self.core.result, self.core.io_error)
@@ -622,6 +629,24 @@ impl<'m> Ctx<'m> {
                 let image = self.intern(BcType::SnapshotImage);
                 let error = self.plain_inst(self.core.snapshot_error, "SnapshotError")?;
                 self.result_inst(image, error)
+            }
+            lm_abi::AbiType::ResultFileHandleFsError => {
+                let ok = self.intern(BcType::FileHandle);
+                let error = self.plain_inst(self.core.fs_error, "FsError")?;
+                self.result_inst(ok, error)
+            }
+            lm_abi::AbiType::ResultBytesFsError => {
+                let ok = self.intern(BcType::Bytes);
+                let error = self.plain_inst(self.core.fs_error, "FsError")?;
+                self.result_inst(ok, error)
+            }
+            lm_abi::AbiType::ResultIntFsError => {
+                let error = self.plain_inst(self.core.fs_error, "FsError")?;
+                self.result_inst(TY_INT, error)
+            }
+            lm_abi::AbiType::ResultUnitFsError => {
+                let error = self.plain_inst(self.core.fs_error, "FsError")?;
+                self.result_inst(TY_UNIT, error)
             }
         }
     }
@@ -694,10 +719,8 @@ impl<'m> Ctx<'m> {
 /// The verifier version. It takes part in the verified-code cache
 /// key: a rule change invalidates every cached admission.
 ///
-/// Version 5 adds generic parent dispatch rules. Version 6 adds the
-/// snapshot core rules. Version 7 adds perform reply types. Version 8
-/// fixes generic parent subtype and join rules.
-pub const VERIFIER_VERSION: u32 = 8;
+/// Version 9 adds byte types, resource types, and their operations.
+pub const VERIFIER_VERSION: u32 = 9;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -807,6 +830,20 @@ const ROLE_SNAPSHOT_LIMIT_EXCEEDED: usize = 38;
 const ROLE_SNAPSHOT_BAD_IMAGE: usize = 39;
 const ROLE_RESTORE_ERROR: usize = 40;
 const ROLE_RESTORE_LIMIT_EXCEEDED: usize = 41;
+const ROLE_FS_ERROR: usize = 42;
+const ROLE_FS_ERROR_CLOSED: usize = 43;
+const ROLE_FS_ERROR_FAILED: usize = 44;
+const ROLE_OPEN_OPTIONS: usize = 45;
+const ROLE_OPEN_READ_ONLY: usize = 46;
+const ROLE_OPEN_WRITE_ONLY: usize = 47;
+const ROLE_OPEN_READ_WRITE: usize = 48;
+const ROLE_OPEN_CREATE: usize = 49;
+const ROLE_OPEN_CREATE_TRUNCATE: usize = 50;
+const ROLE_OPEN_APPEND: usize = 51;
+const ROLE_SEEK_FROM: usize = 52;
+const ROLE_SEEK_START: usize = 53;
+const ROLE_SEEK_CURRENT: usize = 54;
+const ROLE_SEEK_END: usize = 55;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -814,6 +851,7 @@ enum FieldShape {
     /// The type variable at this position of the family arity.
     Var(u32),
     Str,
+    Int,
     Fault,
     Request,
     /// A list of integers, for example the bounded machine path of
@@ -823,7 +861,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 12] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 15] = [
     (
         ROLE_OPTION,
         1,
@@ -895,10 +933,35 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 12] = [
         &[ROLE_RESTORE_LIMIT_EXCEEDED],
         "RestoreError",
     ),
+    (
+        ROLE_FS_ERROR,
+        0,
+        &[ROLE_FS_ERROR_CLOSED, ROLE_FS_ERROR_FAILED],
+        "FsError",
+    ),
+    (
+        ROLE_OPEN_OPTIONS,
+        0,
+        &[
+            ROLE_OPEN_READ_ONLY,
+            ROLE_OPEN_WRITE_ONLY,
+            ROLE_OPEN_READ_WRITE,
+            ROLE_OPEN_CREATE,
+            ROLE_OPEN_CREATE_TRUNCATE,
+            ROLE_OPEN_APPEND,
+        ],
+        "OpenOptions",
+    ),
+    (
+        ROLE_SEEK_FROM,
+        0,
+        &[ROLE_SEEK_START, ROLE_SEEK_CURRENT, ROLE_SEEK_END],
+        "SeekFrom",
+    ),
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 29] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 40] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -931,6 +994,17 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 29] = [
     (ROLE_SNAPSHOT_LIMIT_EXCEEDED, &[]),
     (ROLE_SNAPSHOT_BAD_IMAGE, &[FieldShape::Str]),
     (ROLE_RESTORE_LIMIT_EXCEEDED, &[]),
+    (ROLE_FS_ERROR_CLOSED, &[]),
+    (ROLE_FS_ERROR_FAILED, &[FieldShape::Str]),
+    (ROLE_OPEN_READ_ONLY, &[]),
+    (ROLE_OPEN_WRITE_ONLY, &[]),
+    (ROLE_OPEN_READ_WRITE, &[]),
+    (ROLE_OPEN_CREATE, &[]),
+    (ROLE_OPEN_CREATE_TRUNCATE, &[]),
+    (ROLE_OPEN_APPEND, &[]),
+    (ROLE_SEEK_START, &[FieldShape::Int]),
+    (ROLE_SEEK_CURRENT, &[FieldShape::Int]),
+    (ROLE_SEEK_END, &[FieldShape::Int]),
 ];
 
 /// Prove the shape of every declared core role slot.
@@ -1027,6 +1101,7 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
                 let ok = match want {
                     FieldShape::Var(i) => found == &BcType::Var(*i),
                     FieldShape::Str => found == &BcType::Str,
+                    FieldShape::Int => found == &BcType::Int,
                     FieldShape::Fault => found == &BcType::Fault,
                     FieldShape::Request => found == &BcType::Request,
                     // The element index is read through `get`, because
@@ -1109,7 +1184,12 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         };
         match ty {
             BcType::Unit | BcType::Bool | BcType::Int | BcType::Str => {}
-            BcType::StringBuilder | BcType::ByteBuffer | BcType::Digest => {}
+            BcType::StringBuilder
+            | BcType::ByteBuffer
+            | BcType::Digest
+            | BcType::Bytes
+            | BcType::FileHandle
+            | BcType::ResourceHandle => {}
             BcType::Var(_) => {}
             BcType::Class(c) => {
                 if *c as usize >= module.classes.len() {
@@ -1670,7 +1750,14 @@ fn perform_argc(op: u32) -> u32 {
         lm_abi::OpKind::Fixed => def.params.len() as u32,
         lm_abi::OpKind::VmControl => match op {
             lm_abi::OP_VM_NEW => 0,
-            lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE | lm_abi::OP_VM_TABLE => 1,
+            lm_abi::OP_VM_RUN
+            | lm_abi::OP_VM_STEP
+            | lm_abi::OP_VM_DRIVE
+            | lm_abi::OP_VM_TABLE
+            | lm_abi::OP_VM_HANDLES
+            | lm_abi::OP_VM_RESOURCE_IS_OPEN
+            | lm_abi::OP_VM_RESOURCE_CLOSE
+            | lm_abi::OP_VM_RESOURCE_KIND => 1,
             lm_abi::OP_VM_DISPATCH => 2,
             lm_abi::OP_VM_FROM_OBJECT | lm_abi::OP_VM_ANSWER | lm_abi::OP_VM_REJECT => 3,
             lm_abi::OP_PROC_RUN
@@ -1683,7 +1770,11 @@ fn perform_argc(op: u32) -> u32 {
             lm_abi::OP_PROC_SPAWN => 3,
             lm_abi::OP_VM_SNAPSHOT_SELF => 0,
             lm_abi::OP_VM_SNAPSHOT_HELD | lm_abi::OP_VM_LOAD_SNAPSHOT => 1,
-            lm_abi::OP_VM_RESTORE => 2,
+            lm_abi::OP_VM_RESTORE
+            | lm_abi::OP_VM_RESOURCE
+            | lm_abi::OP_VM_MINT_FILE
+            | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
+            | lm_abi::OP_VM_RESOURCE_SAME => 2,
             _ => unreachable!("every VmControl slot has an arity"),
         },
     }
@@ -2621,6 +2712,29 @@ fn step(
             }
             push(state, TY_STR)?;
         }
+        Instr::BytesNew => {
+            pop_expect(state, TY_STR)?;
+            let idx = {
+                let uni = ctx.uni.borrow();
+                uni.index.get(&BcType::Bytes).copied()
+            };
+            let idx = idx.ok_or_else(|| fail("Bytes is not in the type table".to_string()))?;
+            push(state, idx)?;
+        }
+        Instr::BytesLen => {
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("len on non-bytes type {bytes}")));
+            }
+            push(state, TY_INT)?;
+        }
+        Instr::BytesText => {
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("text on non-bytes type {bytes}")));
+            }
+            push(state, TY_STR)?;
+        }
         Instr::Freeze => {
             let ty = pop(state)?;
             if !ctx.is_heap(ty) {
@@ -2737,6 +2851,64 @@ fn step(
                             pop_vm(state)?;
                             let table = ctx.intern(BcType::PolicyTable);
                             push(state, table)?;
+                        }
+                        lm_abi::OP_VM_HANDLES => {
+                            pop_vm(state)?;
+                            let control = ctx.intern(BcType::ResourceHandle);
+                            let list = ctx.intern(BcType::List(control));
+                            push(state, list)?;
+                        }
+                        lm_abi::OP_VM_RESOURCE => {
+                            let handle = pop(state)?;
+                            pop_vm(state)?;
+                            if ctx.ty(handle) != BcType::FileHandle {
+                                return Err(fail("`Vm.Resource` needs a FileHandle".to_string()));
+                            }
+                            let control = ctx.intern(BcType::ResourceHandle);
+                            push(state, control)?;
+                        }
+                        lm_abi::OP_VM_MINT_FILE => {
+                            let call = pop(state)?;
+                            pop_vm(state)?;
+                            let args = ctx.op_args_view(lm_abi::OP_FS_OPEN).map_err(&fail)?;
+                            let reply = ctx
+                                .abi_ty(lm_abi::op(lm_abi::OP_FS_OPEN).reply)
+                                .map_err(&fail)?;
+                            if ctx.ty(call) != BcType::PendingCall(args, reply) {
+                                return Err(fail(
+                                    "`Vm.MintFile` needs an Fs.Open call".to_string(),
+                                ));
+                            }
+                            let control = ctx.intern(BcType::ResourceHandle);
+                            push(state, control)?;
+                        }
+                        lm_abi::OP_VM_RESOURCE_IS_OPEN | lm_abi::OP_VM_RESOURCE_CLOSE => {
+                            let control = pop(state)?;
+                            if ctx.ty(control) != BcType::ResourceHandle {
+                                return Err(fail(format!("`{name}` needs a ResourceHandle")));
+                            }
+                            push(state, TY_BOOL)?;
+                        }
+                        lm_abi::OP_VM_RESOURCE_KIND => {
+                            let control = pop(state)?;
+                            if ctx.ty(control) != BcType::ResourceHandle {
+                                return Err(fail(
+                                    "`Vm.ResourceKind` needs a ResourceHandle".to_string(),
+                                ));
+                            }
+                            push(state, TY_STR)?;
+                        }
+                        lm_abi::OP_VM_RESOURCE_SAME => {
+                            let other = pop(state)?;
+                            let control = pop(state)?;
+                            if ctx.ty(control) != BcType::ResourceHandle
+                                || ctx.ty(other) != BcType::ResourceHandle
+                            {
+                                return Err(fail(
+                                    "`Vm.ResourceSame` needs two ResourceHandle values".to_string(),
+                                ));
+                            }
+                            push(state, TY_BOOL)?;
                         }
                         lm_abi::OP_VM_ANSWER => {
                             let value = pop(state)?;
@@ -2912,6 +3084,16 @@ fn step(
                             let out = ctx.result_inst(snapshot, error).map_err(&fail)?;
                             push(state, out)?;
                         }
+                        lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
+                            pop_expect(state, TY_INT)?;
+                            let t = pop_vm(state)?;
+                            let snapshot = ctx.intern(BcType::Snapshot(t));
+                            let error = ctx
+                                .plain_inst(ctx.core.snapshot_error, "SnapshotError")
+                                .map_err(&fail)?;
+                            let out = ctx.result_inst(snapshot, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
                         lm_abi::OP_VM_SNAPSHOT_SELF => {
                             let image = ctx.intern(BcType::SnapshotImage);
                             let error = ctx
@@ -2941,14 +3123,9 @@ fn step(
                             push(state, out)?;
                         }
                         lm_abi::OP_VM_LOAD_SNAPSHOT => {
-                            // The operation takes a `Bytes` value, and
-                            // version 0.2 declares no `Bytes` type. No
-                            // guest form exists, so the instruction has
-                            // no admissible shape.
+                            // This build has no guest snapshot decoder.
                             return Err(fail(
-                                "`Vm.LoadSnapshot` has no guest form in version 0.2: it \
-                                 needs a Bytes value"
-                                    .to_string(),
+                                "`Vm.LoadSnapshot` is not available in this build".to_string(),
                             ));
                         }
                         _ => unreachable!("every VmControl slot has a rule"),

@@ -74,10 +74,24 @@ pub struct CoreLayout {
     pub snapshot_bad_image: Option<u32>,
     pub restore_error: Option<u32>,
     pub restore_limit_exceeded: Option<u32>,
+    pub fs_error: Option<u32>,
+    pub fs_error_closed: Option<u32>,
+    pub fs_error_failed: Option<u32>,
+    pub open_options: Option<u32>,
+    pub open_read_only: Option<u32>,
+    pub open_write_only: Option<u32>,
+    pub open_read_write: Option<u32>,
+    pub open_create: Option<u32>,
+    pub open_create_truncate: Option<u32>,
+    pub open_append: Option<u32>,
+    pub seek_from: Option<u32>,
+    pub seek_start: Option<u32>,
+    pub seek_current: Option<u32>,
+    pub seek_end: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 42] = [
+pub const PINNED_LABELS: [&str; 56] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -120,6 +134,20 @@ pub const PINNED_LABELS: [&str; 42] = [
     "SnapshotError.BadImage",
     "RestoreError",
     "RestoreError.RestoreLimitExceeded",
+    "FsError",
+    "FsError.Closed",
+    "FsError.Failed",
+    "OpenOptions",
+    "OpenOptions.ReadOnly",
+    "OpenOptions.WriteOnly",
+    "OpenOptions.ReadWrite",
+    "OpenOptions.Create",
+    "OpenOptions.CreateTruncate",
+    "OpenOptions.Append",
+    "SeekFrom",
+    "SeekFrom.Start",
+    "SeekFrom.Current",
+    "SeekFrom.End",
 ];
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
@@ -213,6 +241,20 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "SnapshotError.BadImage" => &mut layout.snapshot_bad_image,
         "RestoreError" => &mut layout.restore_error,
         "RestoreError.RestoreLimitExceeded" => &mut layout.restore_limit_exceeded,
+        "FsError" => &mut layout.fs_error,
+        "FsError.Closed" => &mut layout.fs_error_closed,
+        "FsError.Failed" => &mut layout.fs_error_failed,
+        "OpenOptions" => &mut layout.open_options,
+        "OpenOptions.ReadOnly" => &mut layout.open_read_only,
+        "OpenOptions.WriteOnly" => &mut layout.open_write_only,
+        "OpenOptions.ReadWrite" => &mut layout.open_read_write,
+        "OpenOptions.Create" => &mut layout.open_create,
+        "OpenOptions.CreateTruncate" => &mut layout.open_create_truncate,
+        "OpenOptions.Append" => &mut layout.open_append,
+        "SeekFrom" => &mut layout.seek_from,
+        "SeekFrom.Start" => &mut layout.seek_start,
+        "SeekFrom.Current" => &mut layout.seek_current,
+        "SeekFrom.End" => &mut layout.seek_end,
         _ => unreachable!("only known labels enter the map"),
     }
 }

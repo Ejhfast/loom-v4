@@ -13,6 +13,29 @@ use std::collections::BTreeMap;
 pub enum HostArg {
     Int(i64),
     Str(String),
+    Bytes(Vec<u8>),
+    File(u64),
+    OpenOptions(HostOpenOptions),
+    SeekFrom(HostSeekFrom),
+}
+
+/// One portable file-open mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostOpenOptions {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+    Create,
+    CreateTruncate,
+    Append,
+}
+
+/// One portable file-seek origin and offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostSeekFrom {
+    Start(i64),
+    Current(i64),
+    End(i64),
 }
 
 /// One core constructor a host reply may name.
@@ -23,6 +46,8 @@ pub enum CoreCtor {
     Ok,
     Err,
     IoErrorFailed,
+    FsErrorClosed,
+    FsErrorFailed,
 }
 
 /// One plain-data operation reply. `Ctor` builds a pinned core enum
@@ -32,6 +57,8 @@ pub enum HostValue {
     Unit,
     Int(i64),
     Str(String),
+    Bytes(Vec<u8>),
+    File(u64),
     Ctor(CoreCtor, Vec<HostValue>),
 }
 
@@ -67,6 +94,10 @@ pub trait Host {
     fn poll(&mut self) -> Option<HostCompletion>;
     /// Wait for the next completion.
     fn wait(&mut self) -> Option<HostCompletion>;
+    /// Close one file token during forced resource cleanup.
+    fn close_file(&mut self, _token: u64) -> bool {
+        false
+    }
 }
 
 /// A host without any implementation. Every started operation fails.
@@ -89,10 +120,10 @@ impl Host for NullHost {
     }
 }
 
-/// A deterministic in-memory host for tests. Print and Error append
-/// to buffers; Clock.Now counts calls; Clock.Sleep completes through
-/// the asynchronous completion channel after a fixed number of
-/// polls; Rand.Int is a seeded PRNG.
+/// A deterministic in-memory host for tests.
+///
+/// It records output and provides input, clocks, random values, and
+/// in-memory files. Sleep completes after a fixed number of polls.
 pub struct RecordingHost {
     pub printed: Vec<String>,
     pub errors: Vec<String>,
@@ -102,6 +133,34 @@ pub struct RecordingHost {
     rand_state: u64,
     sleeps: BTreeMap<u64, (CompletionKey, u32)>,
     next_token: u64,
+    files: BTreeMap<String, Vec<u8>>,
+    file_handles: BTreeMap<u64, MemoryFile>,
+    next_file: u64,
+}
+
+#[derive(Debug)]
+struct MemoryFile {
+    path: String,
+    cursor: usize,
+    readable: bool,
+    writable: bool,
+    append: bool,
+}
+
+const MAX_FILE_IO_BYTES: usize = 16 << 20;
+
+fn fs_ok(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn fs_failed(message: impl Into<String>) -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(
+            CoreCtor::FsErrorFailed,
+            vec![HostValue::Str(message.into())],
+        )],
+    )
 }
 
 impl Default for RecordingHost {
@@ -121,7 +180,20 @@ impl RecordingHost {
             rand_state: seed.max(1),
             sleeps: BTreeMap::new(),
             next_token: 1,
+            files: BTreeMap::new(),
+            file_handles: BTreeMap::new(),
+            next_file: 1,
         }
+    }
+
+    /// Set one in-memory file before execution.
+    pub fn set_file(&mut self, path: impl Into<String>, bytes: Vec<u8>) {
+        self.files.insert(path.into(), bytes);
+    }
+
+    /// Read one in-memory file after execution.
+    pub fn file(&self, path: &str) -> Option<&[u8]> {
+        self.files.get(path).map(Vec::as_slice)
     }
 
     fn next_rand(&mut self) -> u64 {
@@ -188,6 +260,149 @@ impl Host for RecordingHost {
                 let value = low + (self.next_rand() % span) as i64;
                 HostStart::Completed(HostValue::Int(value))
             }
+            lm_abi::OP_FS_OPEN => {
+                let (Some(HostArg::Str(path)), Some(HostArg::OpenOptions(options))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.Open needs a path and options".to_string());
+                };
+                let (readable, writable, append, create, truncate) = match options {
+                    HostOpenOptions::ReadOnly => (true, false, false, false, false),
+                    HostOpenOptions::WriteOnly => (false, true, false, false, false),
+                    HostOpenOptions::ReadWrite => (true, true, false, false, false),
+                    HostOpenOptions::Create => (true, true, false, true, false),
+                    HostOpenOptions::CreateTruncate => (true, true, false, true, true),
+                    HostOpenOptions::Append => (false, true, true, true, false),
+                };
+                if !create && !self.files.contains_key(path) {
+                    return HostStart::Completed(fs_failed("the file does not exist"));
+                }
+                let file = self.files.entry(path.clone()).or_default();
+                if truncate {
+                    file.clear();
+                }
+                let cursor = if append { file.len() } else { 0 };
+                let token = self.next_file;
+                let Some(next) = token.checked_add(1) else {
+                    return HostStart::Failed("the file token space is exhausted".to_string());
+                };
+                self.next_file = next;
+                self.file_handles.insert(
+                    token,
+                    MemoryFile {
+                        path: path.clone(),
+                        cursor,
+                        readable,
+                        writable,
+                        append,
+                    },
+                );
+                HostStart::Completed(fs_ok(HostValue::File(token)))
+            }
+            lm_abi::OP_FS_READ => {
+                let (Some(HostArg::File(token)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.Read needs a file and count".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(fs_failed("the read count is negative"));
+                };
+                if count > MAX_FILE_IO_BYTES {
+                    return HostStart::Completed(fs_failed("the read count is too large"));
+                }
+                let (files, handles) = (&self.files, &mut self.file_handles);
+                let Some(handle) = handles.get_mut(token) else {
+                    return HostStart::Completed(fs_failed("the file token is not open"));
+                };
+                if !handle.readable {
+                    return HostStart::Completed(fs_failed("the file is not readable"));
+                }
+                let Some(file) = files.get(&handle.path) else {
+                    return HostStart::Completed(fs_failed("the file does not exist"));
+                };
+                let end = handle.cursor.saturating_add(count).min(file.len());
+                let bytes = file[handle.cursor..end].to_vec();
+                handle.cursor = end;
+                HostStart::Completed(fs_ok(HostValue::Bytes(bytes)))
+            }
+            lm_abi::OP_FS_WRITE => {
+                let (Some(HostArg::File(token)), Some(HostArg::Bytes(bytes))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.Write needs a file and bytes".to_string());
+                };
+                let (files, handles) = (&mut self.files, &mut self.file_handles);
+                let Some(handle) = handles.get_mut(token) else {
+                    return HostStart::Completed(fs_failed("the file token is not open"));
+                };
+                if !handle.writable {
+                    return HostStart::Completed(fs_failed("the file is not writable"));
+                }
+                let Some(file) = files.get_mut(&handle.path) else {
+                    return HostStart::Completed(fs_failed("the file does not exist"));
+                };
+                if handle.append {
+                    handle.cursor = file.len();
+                }
+                let Some(end) = handle.cursor.checked_add(bytes.len()) else {
+                    return HostStart::Completed(fs_failed("the write position is too large"));
+                };
+                if end > file.len() {
+                    file.resize(end, 0);
+                }
+                file[handle.cursor..end].copy_from_slice(bytes);
+                handle.cursor = end;
+                HostStart::Completed(fs_ok(HostValue::Int(bytes.len() as i64)))
+            }
+            lm_abi::OP_FS_SEEK => {
+                let (Some(HostArg::File(token)), Some(HostArg::SeekFrom(from))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Fs.Seek needs a file and origin".to_string());
+                };
+                let (files, handles) = (&self.files, &mut self.file_handles);
+                let Some(handle) = handles.get_mut(token) else {
+                    return HostStart::Completed(fs_failed("the file token is not open"));
+                };
+                let Some(file) = files.get(&handle.path) else {
+                    return HostStart::Completed(fs_failed("the file does not exist"));
+                };
+                let base = match from {
+                    HostSeekFrom::Start(_) => 0i128,
+                    HostSeekFrom::Current(_) => handle.cursor as i128,
+                    HostSeekFrom::End(_) => file.len() as i128,
+                };
+                let offset = match from {
+                    HostSeekFrom::Start(offset)
+                    | HostSeekFrom::Current(offset)
+                    | HostSeekFrom::End(offset) => i128::from(*offset),
+                };
+                let position = base + offset;
+                let Ok(position) = usize::try_from(position) else {
+                    return HostStart::Completed(fs_failed("the seek position is invalid"));
+                };
+                handle.cursor = position;
+                HostStart::Completed(fs_ok(HostValue::Int(position as i64)))
+            }
+            lm_abi::OP_FS_FLUSH => {
+                let Some(HostArg::File(token)) = args.first() else {
+                    return HostStart::Failed("Fs.Flush needs a file".to_string());
+                };
+                if !self.file_handles.contains_key(token) {
+                    return HostStart::Completed(fs_failed("the file token is not open"));
+                }
+                HostStart::Completed(fs_ok(HostValue::Unit))
+            }
+            lm_abi::OP_FS_CLOSE => {
+                let Some(HostArg::File(token)) = args.first() else {
+                    return HostStart::Failed("Fs.Close needs a file".to_string());
+                };
+                if self.file_handles.remove(token).is_none() {
+                    return HostStart::Completed(fs_failed("the file token is not open"));
+                }
+                HostStart::Completed(fs_ok(HostValue::Unit))
+            }
             _ => HostStart::Failed(format!(
                 "the test host does not implement {}",
                 lm_abi::op_name(op)
@@ -227,6 +442,10 @@ impl Host for RecordingHost {
             value: HostValue::Unit,
         })
     }
+
+    fn close_file(&mut self, token: u64) -> bool {
+        self.file_handles.remove(&token).is_some()
+    }
 }
 
 /// A shared recording host, so a test keeps access to the buffers
@@ -242,5 +461,9 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
 
     fn wait(&mut self) -> Option<HostCompletion> {
         self.borrow_mut().wait()
+    }
+
+    fn close_file(&mut self, token: u64) -> bool {
+        self.borrow_mut().close_file(token)
     }
 }

@@ -1,0 +1,64 @@
+# Give a child one file that the parent already opened.
+
+def read_shared_file(): String with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("virtual.txt", ReadOnly)
+  in Ok(file)
+    text = case file.read(1024)
+    in Ok(bytes)  then bytes.text()
+    in Err(error)
+      return error.message()
+    end
+    case file.close()
+    in Ok(_)      then text
+    in Err(error) then error.message()
+    end
+  in Err(error) then error.message()
+  end
+end
+
+def answer_open(vm: Vm[String], file: FileHandle): Bool with Vm
+  case vm.drive()
+  in Asked(request)
+    case request.as_call(Fs.Open)
+    in Some(call)
+      vm.answer(call, Ok(file))
+      true
+    in None
+      vm.dispatch(request)
+      false
+    end
+  in Done(_)  then false
+  in Fault(_) then false
+  end
+end
+
+def demonstrate_shared_handle(): String with Vm, Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("message.txt", ReadOnly)
+  in Ok(parent_file)
+    program = do ||: String with Fs.Open, Fs.Read, Fs.Close
+      read_shared_file()
+    end
+    child = sys.vm.Vm().from_object(program, args: ())
+    child.table().pass(Fs.Read)
+    child.table().pass(Fs.Close)
+
+    if not answer_open(child, parent_file)
+      return "the child did not request a file"
+    end
+
+    text = case child.run()
+    in Done(value) then value
+    in Fault(_)
+      return "the child faulted"
+    end
+
+    case parent_file.read(1)
+    in Err(Closed) then text
+    in Err(error)  then error.message()
+    in Ok(_)       then "the child did not close the shared file"
+    end
+  in Err(error) then error.message()
+  end
+end
+
+demonstrate_shared_handle()

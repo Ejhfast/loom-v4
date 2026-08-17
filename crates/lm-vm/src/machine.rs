@@ -1427,6 +1427,33 @@ impl Machine {
                 let value = self.alloc(Object::Str(text))?;
                 self.push(value)?;
             }
+            Instr::BytesNew => {
+                let string = self.pop_obj()?;
+                let bytes = match self.vm.heap.get(string) {
+                    Object::Str(text) => text.as_bytes().to_vec(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let value = self.alloc(Object::Bytes(bytes))?;
+                self.push(value)?;
+            }
+            Instr::BytesLen => {
+                let bytes = self.pop_obj()?;
+                let len = match self.vm.heap.get(bytes) {
+                    Object::Bytes(bytes) => bytes.len(),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Int(len as i64))?;
+            }
+            Instr::BytesText => {
+                let bytes = self.pop_obj()?;
+                let text = match self.vm.heap.get(bytes) {
+                    Object::Bytes(bytes) => String::from_utf8(bytes.clone()),
+                    _ => return Err(BAD_TYPE),
+                }
+                .map_err(|_| FaultCode::BadCast)?;
+                let value = self.alloc(Object::Str(text))?;
+                self.push(value)?;
+            }
             Instr::Freeze => {
                 let r = self.pop_obj()?;
                 // The freeze mode validates the whole reachable graph

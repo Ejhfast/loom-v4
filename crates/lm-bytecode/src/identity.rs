@@ -70,8 +70,9 @@ use std::collections::HashMap;
 /// the canonical class identity encoding. Version 7 adds the
 /// `SnapshotImage` and `Snapshot` type tags. Version 8 adds the reply
 /// type of the two perform instructions to the instruction encoding
-/// and to the canonical identity encoding.
-pub const COMPILER_ABI_VERSION: u32 = 8;
+/// and to the canonical identity encoding. Version 9 adds the three
+/// resource types. Version 10 adds the three byte instructions.
+pub const COMPILER_ABI_VERSION: u32 = 10;
 
 /// The refinement work budget of one component.
 ///
@@ -279,6 +280,9 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             | BcType::EmptyVm
             | BcType::Digest
             | BcType::SnapshotImage
+            | BcType::Bytes
+            | BcType::FileHandle
+            | BcType::ResourceHandle
             | BcType::Var(_) => {}
             BcType::Class(c) => class_ok(*c)?,
             BcType::Inst(c, args) => {
@@ -471,6 +475,9 @@ fn preflight_instr(
         | Instr::BbAppend
         | Instr::BbLen
         | Instr::BbBuild
+        | Instr::BytesNew
+        | Instr::BytesLen
+        | Instr::BytesText
         | Instr::Freeze
         | Instr::Digest
         | Instr::EqDigest
@@ -1070,6 +1077,9 @@ impl<'a> Resolver<'a> {
                 out.push(23);
                 out.extend_from_slice(&self.type_digest(*t));
             }
+            BcType::Bytes => out.push(24),
+            BcType::FileHandle => out.push(25),
+            BcType::ResourceHandle => out.push(26),
             BcType::Op(op, f) => {
                 out.push(19);
                 out.extend_from_slice(&op.to_le_bytes());
@@ -1360,6 +1370,9 @@ impl<'a> Resolver<'a> {
             Instr::BbLen => out.push(0x57),
             Instr::BbBuild => out.push(0x58),
             Instr::Freeze => out.push(0x59),
+            Instr::BytesNew => out.push(0x5a),
+            Instr::BytesLen => out.push(0x5b),
+            Instr::BytesText => out.push(0x5c),
             Instr::Jump(b) => {
                 out.push(0x31);
                 u(out, *b);

@@ -209,6 +209,10 @@ fn encode_object(
             }
         }
         Object::NativeDigest(bytes) => out.extend_from_slice(bytes),
+        Object::Bytes(bytes) => {
+            count(out, bytes.len())?;
+            out.extend_from_slice(bytes);
+        }
         // The walk rejected every other shape as nondigestible.
         _ => return Err(FaultCode::BoundaryViolation),
     }

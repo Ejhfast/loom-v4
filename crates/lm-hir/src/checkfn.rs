@@ -138,6 +138,7 @@ enum Callee {
     },
     NativeSb,
     NativeBb,
+    NativeBytes,
     /// `List[T]()` with explicit arguments.
     ListCtor(TypeId),
     /// `Map[K, V]()` with explicit arguments.
@@ -1551,6 +1552,24 @@ impl<'o> FnChecker<'o> {
                     },
                 })
             }
+            Callee::NativeBytes => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`Bytes` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let text = self.check_expr(ctx, &args[0], STRING)?;
+                Ok(HExpr {
+                    ty: lm_types::BYTES,
+                    mutable: false,
+                    kind: HExprKind::Native {
+                        op: NativeOp::BytesNew,
+                        args: vec![text],
+                    },
+                })
+            }
             Callee::ListCtor(elem) => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new(
@@ -1642,6 +1661,7 @@ impl<'o> FnChecker<'o> {
         match name {
             "StringBuilder" => return Ok(Callee::NativeSb),
             "ByteBuffer" => return Ok(Callee::NativeBb),
+            "Bytes" => return Ok(Callee::NativeBytes),
             "List" => {
                 if type_args.len() == 1 {
                     let elem = resolve_type(ctx, &self.env.clone(), &type_args[0])?;
@@ -2181,6 +2201,7 @@ impl<'o> FnChecker<'o> {
                 | Type::Request
                 | Type::PendingCall(_, _)
                 | Type::Handle(_, _)
+                | Type::ResourceHandle
                 | Type::Fault
         ) {
             let out =
@@ -2266,6 +2287,39 @@ impl<'o> FnChecker<'o> {
         }
         // Native methods on collections and builders.
         let store_ty = ctx.store.get(recv_ty).clone();
+        if store_ty == Type::FileHandle {
+            let op = match name {
+                "read" => lm_abi::OP_FS_READ,
+                "write" => lm_abi::OP_FS_WRITE,
+                "seek" => lm_abi::OP_FS_SEEK,
+                "flush" => lm_abi::OP_FS_FLUSH,
+                "close" => lm_abi::OP_FS_CLOSE,
+                _ => {
+                    return Err(Diagnostic::new(
+                        "E1026",
+                        format!("the type FileHandle has no method named `{name}`"),
+                        name_span,
+                    ))
+                }
+            };
+            let def = lm_abi::op(op);
+            let params: Vec<TypeId> = def
+                .params
+                .iter()
+                .skip(1)
+                .map(|param| Self::abi_type_id(ctx, *param))
+                .collect();
+            let muts = vec![false; params.len()];
+            let checked = self.check_args_simple(ctx, args, &params, &muts, &[], name, span)?;
+            self.charge_op(ctx, op, span)?;
+            let mut all_args = vec![recv_h];
+            all_args.extend(checked);
+            return Ok(HExpr {
+                ty: Self::abi_type_id(ctx, def.reply),
+                mutable: true,
+                kind: HExprKind::Perform { op, args: all_args },
+            });
+        }
         let native = |op: NativeOp, params: Vec<TypeId>, ret: TypeId, needs_mut: bool| {
             (op, params, ret, needs_mut)
         };
@@ -2294,6 +2348,8 @@ impl<'o> FnChecker<'o> {
             }
             (Type::ByteBuffer, "len") => native(NativeOp::BbLen, vec![], INT, false),
             (Type::ByteBuffer, "build") => native(NativeOp::BbBuild, vec![], STRING, false),
+            (Type::Bytes, "len") => native(NativeOp::BytesLen, vec![], INT, false),
+            (Type::Bytes, "text") => native(NativeOp::BytesText, vec![], STRING, false),
             _ if name == "freeze" && ctx.store.is_heap(recv_ty) && args.is_empty() => {
                 return Ok(freeze_expr(recv_h));
             }
@@ -2910,6 +2966,10 @@ impl<'o> FnChecker<'o> {
             lm_abi::AbiType::Unit => UNIT,
             lm_abi::AbiType::Int => INT,
             lm_abi::AbiType::Str => STRING,
+            lm_abi::AbiType::Bytes => lm_types::BYTES,
+            lm_abi::AbiType::FileHandle => lm_types::FILE_HANDLE,
+            lm_abi::AbiType::OpenOptions => Self::core_class(ctx, "OpenOptions"),
+            lm_abi::AbiType::SeekFrom => Self::core_class(ctx, "SeekFrom"),
             lm_abi::AbiType::ResultOptionStrIoError => {
                 let option = ctx.core_types["Option"];
                 let result = ctx.core_types["Result"];
@@ -2924,6 +2984,22 @@ impl<'o> FnChecker<'o> {
             lm_abi::AbiType::ResultSnapshotImageError => {
                 let error = Self::core_class(ctx, "SnapshotError");
                 Self::core_inst(ctx, "Result", vec![lm_types::SNAPSHOT_IMAGE, error])
+            }
+            lm_abi::AbiType::ResultFileHandleFsError => {
+                let error = Self::core_class(ctx, "FsError");
+                Self::core_inst(ctx, "Result", vec![lm_types::FILE_HANDLE, error])
+            }
+            lm_abi::AbiType::ResultBytesFsError => {
+                let error = Self::core_class(ctx, "FsError");
+                Self::core_inst(ctx, "Result", vec![lm_types::BYTES, error])
+            }
+            lm_abi::AbiType::ResultIntFsError => {
+                let error = Self::core_class(ctx, "FsError");
+                Self::core_inst(ctx, "Result", vec![INT, error])
+            }
+            lm_abi::AbiType::ResultUnitFsError => {
+                let error = Self::core_class(ctx, "FsError");
+                Self::core_inst(ctx, "Result", vec![UNIT, error])
             }
         }
     }
@@ -3398,7 +3474,7 @@ impl<'o> FnChecker<'o> {
     }
 
     /// Check the native methods of the VM control surface: EmptyVm,
-    /// Vm[T], PolicyTable, Request, PendingCall, and Fault receivers.
+    /// Vm[T], resource controls, and the other VM control receivers.
     /// Return `None` when the receiver type has no such method.
     #[allow(clippy::too_many_arguments)]
     fn check_control_method(
@@ -3420,6 +3496,7 @@ impl<'o> FnChecker<'o> {
                 | Type::Request
                 | Type::PendingCall(_, _)
                 | Type::Handle(_, _)
+                | Type::ResourceHandle
                 | Type::Fault
         ) {
             return Ok(None);
@@ -3518,6 +3595,31 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (Type::Vm(t), "snapshot_wait") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`snapshot_wait` expects 1 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let fuel = self.check_expr(ctx, &args[0], INT)?;
+                self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_WAIT_HELD, span)?;
+                let snapshot = ctx.store.intern(Type::Snapshot(t));
+                let error = Self::core_class(ctx, "SnapshotError");
+                let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SNAPSHOT_WAIT_HELD,
+                        args: vec![recv_h, fuel],
+                    },
+                }
+            }
             (Type::EmptyVm, "restore") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
@@ -3565,6 +3667,66 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform {
                         op: lm_abi::OP_VM_TABLE,
                         args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Vm(_), "handles") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_HANDLES, span)?;
+                let ty = ctx.store.intern(Type::List(lm_types::RESOURCE_HANDLE));
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_HANDLES,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Vm(_), "resource") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`resource` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let handle = self.check_expr(ctx, &args[0], lm_types::FILE_HANDLE)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE,
+                        args: vec![recv_h, handle],
+                    },
+                }
+            }
+            (Type::Vm(_), "mint_file") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`mint_file` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let want_args = Self::op_args_type(ctx, lm_abi::OP_FS_OPEN);
+                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_FS_OPEN).reply);
+                if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`mint_file` needs a current Fs.Open call",
+                        args[0].span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_MINT_FILE, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_MINT_FILE,
+                        args: vec![recv_h, call],
                     },
                 }
             }
@@ -3750,6 +3912,64 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform {
                         op,
                         args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::ResourceHandle, "is_open") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_IS_OPEN, span)?;
+                HExpr {
+                    ty: BOOL,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE_IS_OPEN,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::ResourceHandle, "close") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_CLOSE, span)?;
+                HExpr {
+                    ty: BOOL,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE_CLOSE,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::ResourceHandle, "kind") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_KIND, span)?;
+                HExpr {
+                    ty: STRING,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE_KIND,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::ResourceHandle, "same_resource") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`same_resource` expects 1 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let other = self.check_expr(ctx, &args[0], lm_types::RESOURCE_HANDLE)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_SAME, span)?;
+                HExpr {
+                    ty: BOOL,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE_SAME,
+                        args: vec![recv_h, other],
                     },
                 }
             }

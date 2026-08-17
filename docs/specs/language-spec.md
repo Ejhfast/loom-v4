@@ -1532,7 +1532,7 @@ Each live proc reference has a proc identity and a generation in the reference i
 
 Snapshot context is different from transfer context. A snapshot copies a whole machine world (17.1). A proc handle and a held machine handle are machine references inside that world, so the snapshot copies them and their targets together.
 
-Every other native value is one of two kinds. **Machine state** has bytes the codec can copy: data graphs, code, classes, descriptors, and snapshots. A **host attachment** names live state outside every machine: an open file, a socket, or a pending host operation. A host attachment has no bytes to copy. A live attachment blocks snapshot creation with an ordinary typed error (17.4). No resource ever becomes an inert guest value.
+Every other native value is one of two kinds. **Machine state** has bytes the codec can copy: data graphs, code, classes, descriptors, snapshots, and closed resource handles. A **host attachment** names live state outside every machine: an open file, a socket, or a pending host operation. A host attachment has no bytes to copy. A live attachment blocks snapshot creation with an ordinary typed error (17.4). A closed resource handle carries no host authority. Its operations return the ordinary closed-resource error.
 
 ### 16.5 Inspection
 
@@ -1588,7 +1588,7 @@ A snapshot contains format and ABI versions, code manifests, type tables, heaps,
 
 It also contains pending requests, nested control edges, routed requests, mailboxes, terminal results, machine references, and a container hash.
 
-It excludes policy tables, root grants, live host callbacks, host thread identity, executor tasks, mutex/channel storage, wake objects, and live OS handles.
+It excludes policy tables, root grants, live host callbacks, host thread identity, executor tasks, mutex/channel storage, wake objects, and live OS handles. It can include closed resource handles.
 
 The encoder assigns one canonical machine ordinal to each captured machine. A handle in snapshot bytes stores that ordinal and its static type. Restore relocates every handle to the corresponding restored machine. This covers handles in heaps, frames, locals, operands, closure captures, mailbox values, pending arguments, and terminal results. Relocation is implementation work and is not observable from guest code.
 
@@ -1621,7 +1621,7 @@ ResourceActive(machine_path, resource_kind)
 SnapshotLimitExceeded
 ```
 
-`ResourceActive` reports a live host attachment: an open file or socket handle, an active `FileLease` scope, or a pending host operation in `waiting`. Such state lives in the host, not in any machine, so the codec has no bytes to copy. The language never reopens a host resource silently. The machine path is bounded and starts at the root. The caller closes or finishes the attachment and retries at a later boundary.
+`ResourceActive` reports a live host attachment: an open file or socket handle, an active `FileLease` scope, or a pending host operation in `waiting`. Such state lives in the host, not in any machine, so the codec has no bytes to copy. The language never reopens a host resource silently. The machine path is bounded and starts at the root. The caller closes or finishes the attachment and retries at a later boundary. A closed handle value does not block the copy.
 
 `SnapshotLimitExceeded` reports a capture past the configured snapshot byte limit.
 
@@ -2183,7 +2183,7 @@ Fs.Remove      (String) -> Result[(), FsError]
 Fs.Rename      (String, String) -> Result[(), FsError]
 ```
 
-A `FileHandle` is live only in the host binding that created it. It is a host attachment and blocks snapshot creation while open. The standard library never reopens a raw file handle silently. A later version may define a checkpointable file type with an explicit restore contract.
+A live `FileHandle` names one resource entry and one service binding. The binding can belong to the root host or a driver. Every alias closes together. An open entry blocks snapshot creation. A closed handle remains typed machine state and restores as closed. The standard library never reopens a raw file handle silently. A later version may define a checkpointable file type with an explicit restore contract.
 
 ### 23.3 Clock and randomness
 
@@ -2229,9 +2229,19 @@ Vm.Reject[T]             (Vm[T], Request, Fault) -> ()
 Vm.Dispatch[T]           (Vm[T], Request) -> ()
 Vm.Stack[T]              (Vm[T]) -> [FrameView]
 Vm.Table[T]              (Vm[T]) -> PolicyTable
+Vm.Handles[T]            (Vm[T]) -> [ResourceHandle]
+Vm.Resource[T]           (Vm[T], FileHandle) -> ResourceHandle
+Vm.MintFile[T]           (Vm[T], PendingCall[(String, OpenOptions),
+                           Result[FileHandle, FsError]]) -> ResourceHandle
+Vm.ResourceIsOpen        (ResourceHandle) -> Bool
+Vm.ResourceClose         (ResourceHandle) -> Bool
+Vm.ResourceKind          (ResourceHandle) -> String
+Vm.ResourceSame          (ResourceHandle, ResourceHandle) -> Bool
 Vm.SetLimits[T]          (Vm[T], Limits) -> ()
 Vm.AddFuel[T]            (Vm[T], Int) -> ()
 Vm.SnapshotHeld[T]       (Vm[T])
+                          -> Result[Snapshot[T], SnapshotError]
+Vm.SnapshotWaitHeld[T]   (Vm[T], Int)
                           -> Result[Snapshot[T], SnapshotError]
 Vm.SnapshotSelf          ()
                           -> Result[SnapshotImage, SnapshotError]
@@ -2242,6 +2252,15 @@ Vm.Restore[T]            (EmptyVm, Snapshot[T])
 ```
 
 The held and receiverless forms use separate exact operation identities because their honest result types differ, while sharing one serializer/host implementation family. `SnapshotImage.cast_result(type_descriptor[T]())` checks the hidden result `TypeId` and returns `Result[Snapshot[T],SnapshotTypeError]`; typed restore accepts only the checked view.
+
+`Vm.Handles` returns controls for the live resources in the controlled
+machine world. A resource control stays with its holder.
+
+`Vm.ResourceSame` matches two controls only while their shared entry
+is live. A closed control never matches.
+
+`Vm.SnapshotWaitHeld` spends guest instruction fuel. It returns when
+a snapshot succeeds, fuel ends, or the machine cannot progress.
 
 ### 23.6 Proc operations
 
@@ -2529,7 +2548,7 @@ open_handle(path, options)
   -> Result[FileHandle,FsError] with Fs.Open
 ```
 
-`FileHandle` has explicit read, write, seek, flush, and close methods. A live `FileHandle` is a host attachment and blocks snapshot creation. A host extension may define a distinct checkpointable file type with an explicit restore contract in a later version.
+`FileHandle` has explicit read, write, seek, flush, and close methods. A live `FileHandle` is a host attachment and blocks snapshot creation. A closed handle remains in machine state and returns `FsError.Closed`. A host extension may define a distinct checkpointable file type with an explicit restore contract in a later version.
 
 Top-level helpers include `read`, `read_text`, `write`, `write_text`, `stat`, `read_dir`, `create_dir`, `remove`, and `rename`. They use scoped handles internally and retain the exact underlying rows.
 

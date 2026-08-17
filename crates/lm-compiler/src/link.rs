@@ -1128,6 +1128,9 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::BbAppend
         | Instr::BbLen
         | Instr::BbBuild
+        | Instr::BytesNew
+        | Instr::BytesLen
+        | Instr::BytesText
         | Instr::Freeze
         | Instr::Digest
         | Instr::EqDigest

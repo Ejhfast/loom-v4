@@ -460,6 +460,10 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.leb(bytes.len() as u64);
             out.bytes.extend_from_slice(bytes);
         }
+        Object::Bytes(bytes) => {
+            out.leb(bytes.len() as u64);
+            out.bytes.extend_from_slice(bytes);
+        }
         Object::NativeVm { vm } | Object::NativeTable { vm } => out.leb(*vm as u64),
         Object::NativeRequest { vm, ordinal } => {
             out.leb(*vm as u64);
@@ -491,6 +495,11 @@ fn encode_object(out: &mut Out, object: &Object) {
         Object::NativeSnapshot(image) => {
             out.leb(image.len() as u64);
             out.bytes.extend_from_slice(image);
+        }
+        Object::NativeFileHandle { resource } => out.u64(*resource),
+        Object::NativeResourceHandle { surface, resource } => {
+            out.leb(*surface as u64);
+            out.u64(*resource);
         }
     }
 }
@@ -1311,6 +1320,9 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
             ClosedType::Op(op, closed_ref(cur, at)?)
         }
         22 => ClosedType::Snapshot(closed_ref(cur, at)?),
+        23 => ClosedType::Bytes,
+        24 => ClosedType::FileHandle,
+        25 => ClosedType::ResourceHandle,
         other => {
             return err(
                 ImageReason::Layout,
@@ -1499,6 +1511,18 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 cur.copy_bytes(source, "nested image bytes")?,
             ))
         }
+        16 => {
+            let count = cur.count(limits.max_string_bytes as u64, "byte")?;
+            let source = cur.take(count)?;
+            Object::Bytes(cur.copy_bytes(source, "bytes")?)
+        }
+        17 => Object::NativeFileHandle {
+            resource: cur.u64()?,
+        },
+        18 => Object::NativeResourceHandle {
+            surface: machine_ref(cur, ctx)?,
+            resource: cur.u64()?,
+        },
         other => {
             return err(
                 ImageReason::Layout,

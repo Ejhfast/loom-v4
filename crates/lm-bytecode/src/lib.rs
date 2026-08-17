@@ -31,7 +31,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 42;
+pub const CORE_ROLE_COUNT: usize = 56;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -119,6 +119,12 @@ pub enum BcType {
     /// One snapshot of a machine world, typed by the terminal result
     /// type index of its root machine.
     Snapshot(u32),
+    /// Immutable binary data.
+    Bytes,
+    /// A typed file resource designator.
+    FileHandle,
+    /// A holder-local resource-management designator.
+    ResourceHandle,
 }
 
 /// The declaration kind of one class.
@@ -314,6 +320,12 @@ pub enum Instr {
     BbLen,
     /// Pop a buffer, decode UTF-8, and push a string. Faults `BadCast`.
     BbBuild,
+    /// Pop a string and push its immutable UTF-8 bytes.
+    BytesNew,
+    /// Pop immutable bytes and push their length.
+    BytesLen,
+    /// Pop immutable bytes, decode UTF-8, and push a string.
+    BytesText,
     /// Pop an object reference, freeze its graph, push the same reference.
     Freeze,
     /// Pop a frozen object reference and push its canonical digest.
@@ -651,9 +663,10 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 11 adds the `Digest` type and the three digest
 /// instructions. Version 13 adds the `SnapshotImage` and `Snapshot`
 /// types. Version 14 adds the reply type index of the two perform
-/// instructions. Every earlier tag keeps its byte, so each change adds
-/// encodings and moves none.
-pub const VERSION: u16 = 14;
+/// instructions. Version 15 adds bytes, file handles, resource
+/// controls, and three byte instructions. Every earlier tag keeps its
+/// byte, so each change adds encodings and moves none.
+pub const VERSION: u16 = 15;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -717,6 +730,9 @@ const OP_BB_APPEND: u8 = 0x56;
 const OP_BB_LEN: u8 = 0x57;
 const OP_BB_BUILD: u8 = 0x58;
 const OP_FREEZE: u8 = 0x59;
+const OP_BYTES_NEW: u8 = 0x5a;
+const OP_BYTES_LEN: u8 = 0x5b;
+const OP_BYTES_TEXT: u8 = 0x5c;
 const OP_CALL_G: u8 = 0x60;
 const OP_CALL_VIRTUAL_G: u8 = 0x61;
 const OP_NEW_G: u8 = 0x62;
@@ -761,6 +777,9 @@ const TY_DIGEST: u8 = 20;
 const TY_HANDLE: u8 = 21;
 const TY_SNAPSHOT_IMAGE: u8 = 22;
 const TY_SNAPSHOT: u8 = 23;
+const TY_BYTES: u8 = 24;
+const TY_FILE_HANDLE: u8 = 25;
+const TY_RESOURCE_HANDLE: u8 = 26;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -1032,6 +1051,9 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
             out.push(TY_SNAPSHOT);
             write_u32(out, *t);
         }
+        BcType::Bytes => out.push(TY_BYTES),
+        BcType::FileHandle => out.push(TY_FILE_HANDLE),
+        BcType::ResourceHandle => out.push(TY_RESOURCE_HANDLE),
         BcType::Op(op, f) => {
             out.push(TY_OP);
             write_u32(out, *op);
@@ -1189,6 +1211,9 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::BbAppend => out.push(OP_BB_APPEND),
         Instr::BbLen => out.push(OP_BB_LEN),
         Instr::BbBuild => out.push(OP_BB_BUILD),
+        Instr::BytesNew => out.push(OP_BYTES_NEW),
+        Instr::BytesLen => out.push(OP_BYTES_LEN),
+        Instr::BytesText => out.push(OP_BYTES_TEXT),
         Instr::Freeze => out.push(OP_FREEZE),
         Instr::Digest => out.push(OP_DIGEST),
         Instr::EqDigest => out.push(OP_EQ_DIGEST),
@@ -1782,6 +1807,9 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_HANDLE => BcType::Handle(cur.u32()?, cur.u32()?),
         TY_SNAPSHOT_IMAGE => BcType::SnapshotImage,
         TY_SNAPSHOT => BcType::Snapshot(cur.u32()?),
+        TY_BYTES => BcType::Bytes,
+        TY_FILE_HANDLE => BcType::FileHandle,
+        TY_RESOURCE_HANDLE => BcType::ResourceHandle,
         TY_OP => BcType::Op(cur.u32()?, cur.u32()?),
         other => return Err(DecodeError::BadTypeTag(other)),
     };
@@ -1875,6 +1903,9 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_BB_APPEND => Instr::BbAppend,
         OP_BB_LEN => Instr::BbLen,
         OP_BB_BUILD => Instr::BbBuild,
+        OP_BYTES_NEW => Instr::BytesNew,
+        OP_BYTES_LEN => Instr::BytesLen,
+        OP_BYTES_TEXT => Instr::BytesText,
         OP_FREEZE => Instr::Freeze,
         OP_DIGEST => Instr::Digest,
         OP_EQ_DIGEST => Instr::EqDigest,

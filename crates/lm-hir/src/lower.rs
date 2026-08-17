@@ -98,6 +98,9 @@ impl<'m> ModLowerer<'m> {
             Type::String => self.intern_type(BcType::Str),
             Type::StringBuilder => self.intern_type(BcType::StringBuilder),
             Type::ByteBuffer => self.intern_type(BcType::ByteBuffer),
+            Type::Bytes => self.intern_type(BcType::Bytes),
+            Type::FileHandle => self.intern_type(BcType::FileHandle),
+            Type::ResourceHandle => self.intern_type(BcType::ResourceHandle),
             Type::Digest => self.intern_type(BcType::Digest),
             Type::Class(c) => self.intern_type(BcType::Class(c.0)),
             Type::Inst(c, args) => {
@@ -789,6 +792,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     NativeOp::BbAppend => Instr::BbAppend,
                     NativeOp::BbLen => Instr::BbLen,
                     NativeOp::BbBuild => Instr::BbBuild,
+                    NativeOp::BytesNew => {
+                        self.m.intern_type(BcType::Bytes);
+                        Instr::BytesNew
+                    }
+                    NativeOp::BytesLen => Instr::BytesLen,
+                    NativeOp::BytesText => Instr::BytesText,
                     NativeOp::Freeze => Instr::Freeze,
                     NativeOp::Digest => {
                         // The result type must exist in the module
@@ -1519,6 +1528,9 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::SbBuild
         | Instr::BbLen
         | Instr::BbBuild
+        | Instr::BytesNew
+        | Instr::BytesLen
+        | Instr::BytesText
         | Instr::Freeze
         | Instr::Digest => (1, 1),
         Instr::EqDigest | Instr::NeDigest => (2, 1),
@@ -1647,6 +1659,9 @@ fn instr_text(instr: &Instr) -> String {
         Instr::BbAppend => "BbAppend".to_string(),
         Instr::BbLen => "BbLen".to_string(),
         Instr::BbBuild => "BbBuild".to_string(),
+        Instr::BytesNew => "BytesNew".to_string(),
+        Instr::BytesLen => "BytesLen".to_string(),
+        Instr::BytesText => "BytesText".to_string(),
         Instr::Freeze => "Freeze".to_string(),
         Instr::Digest => "Digest".to_string(),
         Instr::EqDigest => "EqDigest".to_string(),
@@ -1706,6 +1721,9 @@ fn type_text(module: &Module, idx: u32) -> String {
         BcType::Str => "String".to_string(),
         BcType::StringBuilder => "StringBuilder".to_string(),
         BcType::ByteBuffer => "ByteBuffer".to_string(),
+        BcType::Bytes => "Bytes".to_string(),
+        BcType::FileHandle => "FileHandle".to_string(),
+        BcType::ResourceHandle => "ResourceHandle".to_string(),
         BcType::Digest => "Digest".to_string(),
         BcType::Class(c) => module
             .classes

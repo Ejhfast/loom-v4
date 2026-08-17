@@ -707,6 +707,7 @@ impl Admit<'_> {
                 Object::NativeVm { vm } | Object::NativeTable { vm } => Some(vm),
                 Object::NativeRequest { vm, .. } | Object::NativeCall { vm, .. } => Some(vm),
                 Object::NativeHandle { proc, .. } => Some(proc),
+                Object::NativeResourceHandle { surface, .. } => Some(surface),
                 _ => None,
             };
             if let Some(target) = target {
@@ -756,6 +757,18 @@ impl Admit<'_> {
                     at(&format!(
                         "object {ordinal} is a {} without the frozen bit",
                         entry.object.shape().name
+                    )),
+                );
+            }
+            if matches!(
+                entry.object,
+                Object::NativeFileHandle { resource } | Object::NativeResourceHandle { resource, .. }
+                    if resource != 0
+            ) {
+                return fail(
+                    ImageReason::State,
+                    at(&format!(
+                        "object {ordinal} carries a live resource identifier"
                     )),
                 );
             }

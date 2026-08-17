@@ -59,7 +59,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// environment index for each frame, closure, instance, and machine.
 ///
 /// Version 3 carries nested control edges and routed requests.
-pub const FORMAT_VERSION: u32 = 3;
+/// Version 4 carries bytes and closed file handle values.
+pub const FORMAT_VERSION: u32 = 4;
 
 /// The section kinds, in canonical order.
 ///

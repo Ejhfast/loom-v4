@@ -1,0 +1,107 @@
+# Back a child file with bytes that the parent owns.
+
+class MemoryFile
+  control: ResourceHandle
+  contents: Bytes
+
+  def init(mut self, control: ResourceHandle, contents: Bytes)
+    self.control = control
+    self.contents = contents
+  end
+end
+
+def read_memory_file(): String with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("memory.txt", ReadOnly)
+  in Ok(file)
+    text = case file.read(1024)
+    in Ok(bytes)  then bytes.text()
+    in Err(error)
+      return error.message()
+    end
+    case file.close()
+    in Ok(_)      then text
+    in Err(error) then error.message()
+    end
+  in Err(error) then error.message()
+  end
+end
+
+def mint_memory_file(vm: Vm[String]): Result[MemoryFile, String] with Vm
+  case vm.drive()
+  in Asked(request)
+    case request.as_call(Fs.Open)
+    in Some(call)
+      control = vm.mint_file(call)
+      Ok(MemoryFile(control, Bytes("parent memory")))
+    in None
+      vm.dispatch(request)
+      Err("the child did not request a file")
+    end
+  in Done(_)  then Err("the child completed before opening a file")
+  in Fault(_) then Err("the child faulted before opening a file")
+  end
+end
+
+def serve_file_request(vm: Vm[String], request: Request, file: MemoryFile): Bool with Vm
+  case request.as_call(Fs.Read)
+  in Some(call)
+    args = call.args()
+    requested = vm.resource(args[0])
+    if not requested.same_resource(file.control)
+      vm.answer(call, Err(Failed("the file does not belong to this driver")))
+    elsif args[1] < file.contents.len()
+      vm.answer(call, Err(Failed("the read limit is too small")))
+    else
+      vm.answer(call, Ok(file.contents))
+    end
+    true
+  in None
+    case request.as_call(Fs.Close)
+    in Some(call)
+      args = call.args()
+      requested = vm.resource(args[0])
+      if requested.same_resource(file.control)
+        vm.answer(call, Ok(()))
+      else
+        vm.answer(call, Err(Failed("the file does not belong to this driver")))
+      end
+      true
+    in None then false
+    end
+  end
+end
+
+def drive_memory_file(vm: Vm[String], file: MemoryFile): String with Vm
+  loop do
+    case vm.drive()
+    in Asked(request)
+      if not serve_file_request(vm, request, file)
+        vm.dispatch(request)
+      end
+    in Done(text)
+      return text
+    in Fault(_)
+      return "the child faulted"
+    end
+  end
+  "the driver stopped"
+end
+
+def demonstrate_memory_file(): String with Vm
+  program = do ||: String with Fs.Open, Fs.Read, Fs.Close
+    read_memory_file()
+  end
+  child = sys.vm.Vm().from_object(program, args: ())
+  case mint_memory_file(child)
+  in Ok(file)
+    text = drive_memory_file(child, file)
+    if file.control.is_open()
+      "the child did not close the memory file"
+    else
+      text
+    end
+  in Err(message) then message
+  end
+end
+
+demonstrate_memory_file()

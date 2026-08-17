@@ -190,6 +190,8 @@ pub enum Object {
     StrBuilder(String),
     /// A byte buffer.
     ByteBuf(Vec<u8>),
+    /// Immutable binary data. Born frozen.
+    Bytes(Vec<u8>),
     /// A holder-local handle to one machine in the world registry.
     /// The static type separates `EmptyVm` and `Vm[T]` views.
     NativeVm { vm: u32 },
@@ -219,6 +221,10 @@ pub enum Object {
     /// share the storage. Specification 16.1 permits that, because no
     /// program can observe the difference.
     NativeSnapshot(std::sync::Arc<Vec<u8>>),
+    /// A file resource designator. Zero marks a closed handle.
+    NativeFileHandle { resource: u64 },
+    /// A holder-local control for one file resource.
+    NativeResourceHandle { surface: u32, resource: u64 },
 }
 
 /// How a boundary transfer treats one shape.
@@ -412,9 +418,39 @@ const SHAPE_SNAPSHOT: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_BYTES: ShapeDesc = ShapeDesc {
+    name: "Bytes",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: true,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_FILE_HANDLE: ShapeDesc = ShapeDesc {
+    name: "FileHandle",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_RESOURCE_HANDLE: ShapeDesc = ShapeDesc {
+    name: "ResourceHandle",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::HolderLocal,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 16] = [
+pub const SHAPES: [&ShapeDesc; 19] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -431,6 +467,9 @@ pub const SHAPES: [&ShapeDesc; 16] = [
     &SHAPE_DIGEST,
     &SHAPE_HANDLE,
     &SHAPE_SNAPSHOT,
+    &SHAPE_BYTES,
+    &SHAPE_FILE_HANDLE,
+    &SHAPE_RESOURCE_HANDLE,
 ];
 
 impl Object {
@@ -511,6 +550,12 @@ impl Object {
                 copied.extend_from_slice(bytes);
                 Object::ByteBuf(copied)
             }
+            Object::Bytes(bytes) => {
+                let mut copied = Vec::new();
+                copied.try_reserve_exact(bytes.len())?;
+                copied.extend_from_slice(bytes);
+                Object::Bytes(copied)
+            }
             Object::NativeVm { vm } => Object::NativeVm { vm: *vm },
             Object::NativeTable { vm } => Object::NativeTable { vm: *vm },
             Object::NativeRequest { vm, ordinal } => Object::NativeRequest {
@@ -533,6 +578,13 @@ impl Object {
                 generation: *generation,
             },
             Object::NativeSnapshot(image) => Object::NativeSnapshot(image.clone()),
+            Object::NativeFileHandle { resource } => Object::NativeFileHandle {
+                resource: *resource,
+            },
+            Object::NativeResourceHandle { surface, resource } => Object::NativeResourceHandle {
+                surface: *surface,
+                resource: *resource,
+            },
         })
     }
 
@@ -557,6 +609,9 @@ impl Object {
             Object::NativeDigest(_) => 13,
             Object::NativeHandle { .. } => 14,
             Object::NativeSnapshot(_) => 15,
+            Object::Bytes(_) => 16,
+            Object::NativeFileHandle { .. } => 17,
+            Object::NativeResourceHandle { .. } => 18,
         }
     }
 
@@ -577,11 +632,13 @@ impl Object {
                 Object::Closure { captures, .. } => captures.len() * VALUE_COST,
                 Object::StrBuilder(s) => s.len(),
                 Object::ByteBuf(b) => b.len(),
+                Object::Bytes(b) => b.len(),
                 Object::NativeVm { .. }
                 | Object::NativeTable { .. }
                 | Object::NativeRequest { .. }
                 | Object::NativeCall { .. }
                 | Object::NativeHandle { .. } => VALUE_COST,
+                Object::NativeFileHandle { .. } | Object::NativeResourceHandle { .. } => VALUE_COST,
                 Object::NativeFault { message, .. } => message.len(),
                 Object::NativeDigest(bytes) => bytes.len(),
                 Object::NativeSnapshot(image) => image.len(),
@@ -612,7 +669,10 @@ impl Object {
             | Object::NativeFault { .. }
             | Object::NativeDigest(_)
             | Object::NativeHandle { .. }
-            | Object::NativeSnapshot(_) => {}
+            | Object::NativeSnapshot(_)
+            | Object::Bytes(_)
+            | Object::NativeFileHandle { .. }
+            | Object::NativeResourceHandle { .. } => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
             Object::Map { entries, .. } => {
@@ -650,6 +710,10 @@ impl Object {
             },
             // The bytes never change, so the copy shares the storage.
             Object::NativeSnapshot(image) => Object::NativeSnapshot(image.clone()),
+            Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
+            Object::NativeFileHandle { resource } => Object::NativeFileHandle {
+                resource: *resource,
+            },
             Object::Tuple { items } => Object::Tuple {
                 items: vec![Value::Unit; items.len()],
             },
@@ -697,6 +761,7 @@ impl Object {
             | Object::NativeDigest(_)
             | Object::NativeHandle { .. }
             | Object::NativeSnapshot(_) => return None,
+            Object::Bytes(_) | Object::NativeFileHandle { .. } => return None,
             Object::Tuple { items } => Object::Tuple {
                 items: items.iter().map(|v| value(*v)).collect(),
             },
@@ -838,6 +903,12 @@ mod tests {
                 generation: 2,
             },
             Object::NativeSnapshot(std::sync::Arc::new(vec![7, 8, 9])),
+            Object::Bytes(vec![1, 2, 3]),
+            Object::NativeFileHandle { resource: 4 },
+            Object::NativeResourceHandle {
+                surface: 1,
+                resource: 4,
+            },
         ]
     }
 
@@ -988,6 +1059,12 @@ mod tests {
                 generation: 0,
             },
             Object::NativeSnapshot(std::sync::Arc::new(Vec::new())),
+            Object::Bytes(Vec::new()),
+            Object::NativeFileHandle { resource: 0 },
+            Object::NativeResourceHandle {
+                surface: 0,
+                resource: 0,
+            },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1038,14 +1115,12 @@ mod tests {
         }
     }
 
-    /// No native shape is a host attachment today: the week-7 shapes
-    /// are data, code, descriptors, and holder-local designators, and
-    /// every live host state sits outside the guest heap. The
-    /// snapshot rejection rule therefore has nothing to reject yet.
-    /// A shape that becomes a host attachment, such as an open file,
-    /// must land with the test that proves the rejection.
+    /// Native shapes contain no host state.
+    ///
+    /// A live file entry stays outside the heap. Snapshot preflight
+    /// checks the entry before it writes a closed handle marker.
     #[test]
-    fn no_native_shape_is_a_host_attachment_yet() {
+    fn native_shapes_contain_only_machine_state() {
         for shape in SHAPES {
             assert_eq!(
                 shape.snapshot,
@@ -1085,11 +1160,8 @@ mod tests {
     /// snapshots among the sendable values, and specification 16.4
     /// calls a snapshot machine state with bytes the codec can copy.
     ///
-    /// Version 0.2 has no `Bytes` shape. A byte literal rejects at
-    /// the scanner, and no operation mints one. A later `Bytes` shape
-    /// must choose its column here, and specification 16.2 calls
-    /// bytes sendable. A guest-level `Snapshot.to_bytes` needs that
-    /// shape, so the method waits for it.
+    /// Immutable bytes and file handles are sendable. A resource
+    /// control stays with its holder.
     #[test]
     fn every_shape_declares_its_boundary_column() {
         let mut sendable: Vec<&str> = Vec::new();
@@ -1103,13 +1175,22 @@ mod tests {
         assert_eq!(
             sendable,
             vec![
-                "String", "Instance", "List", "Map", "Tuple", "Closure", "Fault", "Digest",
-                "Handle", "Snapshot",
+                "String",
+                "Instance",
+                "List",
+                "Map",
+                "Tuple",
+                "Closure",
+                "Fault",
+                "Digest",
+                "Handle",
+                "Snapshot",
+                "Bytes",
+                "FileHandle",
             ]
         );
-        // A builder holds a growable private buffer and produces an
-        // immutable output (specification 22.9). The four handles are
-        // holder-local control values (16.4).
+        // A builder holds a private mutable buffer.
+        // Control designators stay with their holder.
         assert_eq!(
             holder_local,
             vec![
@@ -1119,6 +1200,7 @@ mod tests {
                 "PolicyTable",
                 "Request",
                 "PendingCall",
+                "ResourceHandle",
             ]
         );
     }

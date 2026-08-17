@@ -1,0 +1,20 @@
+# Read one file through an explicit file handle.
+
+def read_file(path: String): String with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open(path, ReadOnly)
+  in Ok(file)
+    case file.read(1024)
+    in Ok(bytes)
+      case file.close()
+      in Ok(_)      then bytes.text()
+      in Err(error) then error.message()
+      end
+    in Err(error)
+      file.close()
+      error.message()
+    end
+  in Err(error) then error.message()
+  end
+end
+
+read_file("message.txt")

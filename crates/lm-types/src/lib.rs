@@ -45,6 +45,12 @@ pub const EMPTY_VM: TypeId = TypeId(10);
 pub const DIGEST: TypeId = TypeId(11);
 /// One verified snapshot image whose result type is not yet checked.
 pub const SNAPSHOT_IMAGE: TypeId = TypeId(12);
+/// Immutable binary data.
+pub const BYTES: TypeId = TypeId(13);
+/// A typed file resource designator.
+pub const FILE_HANDLE: TypeId = TypeId(14);
+/// A holder-local resource-management designator.
+pub const RESOURCE_HANDLE: TypeId = TypeId(15);
 
 /// One element of an effect row.
 ///
@@ -80,6 +86,8 @@ pub enum Type {
     Never,
     StringBuilder,
     ByteBuffer,
+    /// Immutable binary data.
+    Bytes,
     /// The frozen canonical graph digest of one value.
     Digest,
     /// An instance type of a class without generic parameters.
@@ -123,6 +131,10 @@ pub enum Type {
     /// One snapshot of a machine world, typed by the terminal result
     /// type of its root machine.
     Snapshot(TypeId),
+    /// A file resource designator.
+    FileHandle,
+    /// A holder-local resource-management designator.
+    ResourceHandle,
     /// An identity-indexed first-class operation value: the manifest
     /// operation slot and the callable function type.
     Op(u32, TypeId),
@@ -186,6 +198,9 @@ impl TypeStore {
         store.intern(Type::EmptyVm);
         store.intern(Type::Digest);
         store.intern(Type::SnapshotImage);
+        store.intern(Type::Bytes);
+        store.intern(Type::FileHandle);
+        store.intern(Type::ResourceHandle);
         store
     }
 
@@ -367,6 +382,9 @@ impl TypeStore {
             "EmptyVm" => Some(EMPTY_VM),
             "Digest" => Some(DIGEST),
             "SnapshotImage" => Some(SNAPSHOT_IMAGE),
+            "Bytes" => Some(BYTES),
+            "FileHandle" => Some(FILE_HANDLE),
+            "ResourceHandle" => Some(RESOURCE_HANDLE),
             _ => None,
         }
     }
@@ -502,6 +520,7 @@ impl TypeStore {
             Type::String
                 | Type::StringBuilder
                 | Type::ByteBuffer
+                | Type::Bytes
                 | Type::Digest
                 | Type::Class(_)
                 | Type::Inst(_, _)
@@ -518,6 +537,8 @@ impl TypeStore {
                 | Type::Handle(_, _)
                 | Type::SnapshotImage
                 | Type::Snapshot(_)
+                | Type::FileHandle
+                | Type::ResourceHandle
         )
     }
 
@@ -540,6 +561,7 @@ impl TypeStore {
                 | Type::EmptyVm
                 | Type::Vm(_)
                 | Type::PendingCall(_, _)
+                | Type::ResourceHandle
         )
     }
 
@@ -681,6 +703,7 @@ impl TypeStore {
             Type::Never => "Never".to_string(),
             Type::StringBuilder => "StringBuilder".to_string(),
             Type::ByteBuffer => "ByteBuffer".to_string(),
+            Type::Bytes => "Bytes".to_string(),
             Type::Digest => "Digest".to_string(),
             Type::Class(c) => self.classes[c.0 as usize].name.clone(),
             Type::Inst(c, args) => {
@@ -724,6 +747,8 @@ impl TypeStore {
             Type::Vm(t) => format!("Vm[{}]", self.display(*t)),
             Type::SnapshotImage => "SnapshotImage".to_string(),
             Type::Snapshot(t) => format!("Snapshot[{}]", self.display(*t)),
+            Type::FileHandle => "FileHandle".to_string(),
+            Type::ResourceHandle => "ResourceHandle".to_string(),
             Type::PendingCall(a, r) => {
                 format!("PendingCall[{}, {}]", self.display(*a), self.display(*r))
             }

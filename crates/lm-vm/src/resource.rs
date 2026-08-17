@@ -5,9 +5,8 @@
 //! machine, the scope identity, the pending operation ordinal, and the
 //! cleanup state (specification 25.5).
 //!
-//! Week 7 registers one kind: a pending suspending operation. A guest
-//! value never names a record, so no guest code can forge one, and a
-//! record can outlive the guest wrapper that started it.
+//! The registry tracks pending operations and open file resources.
+//! Guest code cannot forge a record.
 //!
 //! Snapshot preflight reads this registry beside the guest graph. A
 //! live host attachment blocks a snapshot.
@@ -65,6 +64,8 @@ pub enum ResourceKind {
     /// One suspending host operation that has not completed. The
     /// scope identity is the host completion token.
     PendingOperation,
+    /// One open file resource.
+    File,
 }
 
 impl ResourceKind {
@@ -73,6 +74,7 @@ impl ResourceKind {
         match self {
             // A live completion callback has no bytes to copy.
             ResourceKind::PendingOperation => SnapshotClass::HostAttachment,
+            ResourceKind::File => SnapshotClass::HostAttachment,
         }
     }
 }
@@ -213,11 +215,29 @@ impl ResourceRegistry {
         false
     }
 
+    /// Close one live record with this kind and scope.
+    pub fn close_kind(&mut self, kind: ResourceKind, scope: u64) -> bool {
+        for record in &mut self.records {
+            if record.state == ResourceState::Live && record.kind == kind && record.scope == scope {
+                record.state = ResourceState::Closed;
+                self.closed = self.closed.saturating_add(1);
+                if let Some(budget) = &self.budget {
+                    budget.give(1);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     /// Close the live record of one pending request ordinal. Return
     /// true when a record closed.
     pub fn close_by_ordinal(&mut self, ordinal: u64) -> bool {
         for record in &mut self.records {
-            if record.state == ResourceState::Live && record.ordinal == ordinal {
+            if record.state == ResourceState::Live
+                && record.kind == ResourceKind::PendingOperation
+                && record.ordinal == ordinal
+            {
                 record.state = ResourceState::Closed;
                 self.closed = self.closed.saturating_add(1);
                 if let Some(budget) = &self.budget {
