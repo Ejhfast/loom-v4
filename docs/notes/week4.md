@@ -116,7 +116,7 @@ the changed tests, one incident, and the deferred work.
   parentheses ends its statements at newlines. Labeled call
   arguments parse; in this week the checker accepted only `args:` on
   `from_object`. The post-week-4 fix set added general labeled
-  arguments (docs/notes/fixes-post-week4.md).
+  arguments (docs/notes/week4-fixes.md).
 - Class constructor patterns: `Pair(a, b)` and user classes
   destructure the named scrutinee class in declaration order, with
   nested patterns.

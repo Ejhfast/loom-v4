@@ -1,4 +1,4 @@
-# Fixes after week 9
+# Week 9 Fixes
 
 This note states the snapshot and virtual machine design after week 9.
 `docs/specs/snapshot-image-admission.md` holds the normative design.

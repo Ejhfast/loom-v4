@@ -176,7 +176,7 @@ no runtime no-arm backstop; the static exhaustiveness proof is the
 single guard, and a hardening fault is planned with the week 4
 format work. Sibling-arm injection was top level only, so a nested
 arm-typed scrutinee reported a spurious `E1042`; the post-week-4 fix
-set made the injection recursive (docs/notes/fixes-post-week4.md).
+set made the injection recursive (docs/notes/week4-fixes.md).
 An explicit row on a closure argument does not bind an effect
 variable; performs arrive in week 4 and the binding rule lands
 there.

@@ -24,7 +24,7 @@ table holds sixteen shapes. The snapshot container format version is
 1.
 
 The work after week 9 moved several of these numbers.
-`docs/notes/fixes-post-week9.md` records the current values: the
+`docs/notes/week9-fixes.md` records the current values: the
 bytecode format is 14, the compiler ABI is 8, the verifier is 8, the
 operation manifest ABI is 4, and the snapshot container format is 2.
 
@@ -339,7 +339,7 @@ other machine control operation stays outside `as_call`.
   type the image needs. A cross-program restore would need the table,
   and it would need much more besides. The work after week 9 reversed
   this: container format 2 carries a closed type table, and
-  `docs/notes/fixes-post-week9.md` states why.
+  `docs/notes/week9-fixes.md` states why.
 - **`Vm.LoadSnapshot` has no guest form.** The operation takes a
   `Bytes` value, and version 0.2 declares no `Bytes` type. The
   verifier rejects the instruction with that reason. The host and the

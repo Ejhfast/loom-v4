@@ -4,6 +4,10 @@ This note records the benchmark suite, the method, and the numbers of
 one run. The suite lives in `crates/lm-testkit/tests/bench.rs` and
 `benchmarks/ops.py`.
 
+The runtime performance work of week 9 supersedes the numbers below.
+`docs/notes/week9-bench.md` holds the current values. This note keeps
+the analysis of each shape and the scaling probes.
+
 ## How to run
 
 ```sh

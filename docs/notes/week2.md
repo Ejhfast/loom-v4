@@ -95,7 +95,7 @@ and the deferred work.
 
 - Map lookup was a linear scan over the insertion-order entries.
   The post-week-4 fix set added the hash index; see
-  docs/notes/fixes-post-week4.md. Insertion order, equality, and
+  docs/notes/week4-fixes.md. Insertion order, equality, and
   display do not depend on this choice.
 - An interpolation expression cannot contain a string literal or a
   brace. The scanner rejects these forms with `E0006`.
@@ -108,7 +108,7 @@ and the deferred work.
 - Function types did not carry `mut` parameter markers in this week.
   The post-week-4 fix set closed the hole: function types and
   function records now carry the markers, and call sites check the
-  argument capability. See docs/notes/fixes-post-week4.md.
+  argument capability. See docs/notes/week4-fixes.md.
 - The verifier does not prove field initialization across the
   `<new>`/`init` function boundary. Fields start with an internal
   uninitialized marker, and a field read of that marker faults

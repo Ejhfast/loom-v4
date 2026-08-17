@@ -1,4 +1,4 @@
-# Post-Week-4 Fixes
+# Week 4 Fixes
 
 This note records the fix set for the user-reported findings. The
 findings came from the week-3 build. Each entry states the status on
