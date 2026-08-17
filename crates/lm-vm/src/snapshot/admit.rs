@@ -1337,7 +1337,22 @@ impl Admit<'_> {
         // attachment opens, and the holder answers it. The live
         // attachment belongs to `Waiting`, and the capture refuses
         // that state in `write.rs`, so no image ever carries one.
+        //
+        // `Machine::new` starts the request counter at one, so the
+        // runtime mints no ordinal zero. A container that states zero
+        // gives a restored machine one request the runtime cannot
+        // produce, and later code reads the counter as a live value.
+        // Both fields therefore take a lower bound here.
+        if m.next_ordinal == 0 {
+            return fail(ImageReason::State, at("the next request ordinal is zero"));
+        }
         if let Some(pending) = &m.pending {
+            if pending.ordinal == 0 {
+                return fail(
+                    ImageReason::State,
+                    at("the pending request ordinal is zero"),
+                );
+            }
             if pending.ordinal >= m.next_ordinal {
                 return fail(
                     ImageReason::State,

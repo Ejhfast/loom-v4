@@ -784,6 +784,54 @@ fn malformed_routed_snapshot_state_rejects() {
     assert_eq!(error.reason, ImageReason::State);
 }
 
+/// The runtime mints request ordinals from one, so zero names a
+/// request no live machine can hold.
+#[test]
+fn a_zero_request_ordinal_rejects() {
+    let loaded = program(&asked_tree_source());
+    let image = asked_tree_image(&loaded);
+    assert_eq!(image.world().machines[0].state, ImageState::Asked);
+
+    // A stored pending ordinal of zero.
+    let mut broken = image.clone().into_image();
+    broken.machines[0]
+        .pending
+        .as_mut()
+        .expect("the asked machine holds a request")
+        .ordinal = 0;
+    let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    let error = codec::load_external(&bytes, &loaded, LoadLimits::default())
+        .expect_err("the zero pending ordinal rejects");
+    assert_eq!(error.reason, ImageReason::State);
+    assert!(
+        error.detail.contains("the pending request ordinal is zero"),
+        "another rule refused the image: {}",
+        error.detail
+    );
+
+    // A stored counter of zero. The restored machine would mint zero
+    // for its next request, so the counter takes the same bound. The
+    // case needs a machine with no pending request, because the upper
+    // bound above already refuses that pairing.
+    let idle = image
+        .world()
+        .machines
+        .iter()
+        .position(|m| m.pending.is_none())
+        .expect("one captured machine holds no pending request");
+    let mut broken = image.clone().into_image();
+    broken.machines[idle].next_ordinal = 0;
+    let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    let error = codec::load_external(&bytes, &loaded, LoadLimits::default())
+        .expect_err("the zero next ordinal rejects");
+    assert_eq!(error.reason, ImageReason::State);
+    assert!(
+        error.detail.contains("the next request ordinal is zero"),
+        "another rule refused the image: {}",
+        error.detail
+    );
+}
+
 /// A terminal machine restores terminal, and its stored result
 /// crosses.
 #[test]
