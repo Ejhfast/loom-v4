@@ -677,6 +677,31 @@ another, a `Vm[T]` that names a machine of another result type, and a
 handle that names a machine with another mailbox type. Each one faults
 `TypeMismatch` after restore, and the host survives.
 
+### A type nests no deeper than 128
+
+A type child names an earlier table entry, so a table of N entries can
+nest N deep. Every walk over a type costs at least its depth, and
+`Ctx::join` costs the square of it, because the join tests the subtype
+relation at each level. A crafted artifact therefore turned a small
+type table into a denial of service on the `lm check` path.
+
+`verify_structure` now computes the depth of each type table entry in
+one forward pass, and rejects a module past `MAX_TYPE_DEPTH`.
+`TypeEnvs::intern` stores the depth of each closed type node, and
+returns `TypeEnvFull` past `MAX_CLOSED_DEPTH`. Both bounds are 128.
+
+The bound covers the runtime as well as the two decoders. Polymorphic
+recursion deepens a closed type as a program runs, so such a program
+now takes a local fault at depth 128.
+
+Real code nests far below 128. `crates/lm-testkit/tests/complexity.rs`
+builds the deepest type of the suite, at about 80.
+
+The bound is the layer that closes this defect class. Each walk over a
+type was hardened one at a time, and the next walk anyone writes would
+have reopened the abort. A bounded depth keeps a recursive walk inside
+the Rust stack, so a later walk needs no iterative form.
+
 ### The recursion defect
 
 Eight walks recursed on the Rust stack over a type a user can make

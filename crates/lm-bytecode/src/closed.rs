@@ -153,6 +153,14 @@ pub const DEFAULT_MAX_CLOSED_TYPES: u32 = 1 << 16;
 /// The default environment node cap of one world.
 pub const DEFAULT_MAX_TYPE_ENVS: u32 = 1 << 16;
 
+/// The deepest a closed type may nest.
+///
+/// A walk over a closed type costs at least its depth. The bound keeps
+/// every walk cheap, and it keeps a recursive walk inside the Rust
+/// stack. Polymorphic recursion deepens a type as a program runs, so
+/// the bound also states where such a program takes a local fault.
+pub const MAX_CLOSED_DEPTH: u32 = 128;
+
 /// The domain separator of one closed type digest.
 const DIGEST_DOMAIN: &[u8] = b"lm-closed-type-v1\0";
 
@@ -173,6 +181,11 @@ pub struct TypeEnvs {
     closed: HashMap<(u32, TypeEnvId), ClosedTypeId>,
     /// The content digest of each closed type node, filled on demand.
     digests: Vec<Option<[u8; 32]>>,
+    /// The nesting depth of each closed type node.
+    ///
+    /// A child always holds a lower identifier, so `intern` reads the
+    /// depth of each child and stores one more than the largest.
+    depths: Vec<u32>,
     max_types: u32,
     max_envs: u32,
 }
@@ -197,6 +210,7 @@ impl TypeEnvs {
             derived: HashMap::new(),
             closed: HashMap::new(),
             digests: Vec::new(),
+            depths: Vec::new(),
             max_types,
             max_envs: max_envs.max(1),
         };
@@ -248,9 +262,24 @@ impl TypeEnvs {
         if self.types.len() as u32 >= self.max_types {
             return Err(TypeEnvFull { types: true });
         }
+        // The depth of this node is one past its deepest child. A walk
+        // over a closed type costs at least its depth, so the bound
+        // keeps every walk cheap and keeps a recursive walk inside the
+        // Rust stack.
+        let mut depth = 1u32;
+        for child in node.children() {
+            let Some(child_depth) = self.depths.get(child as usize) else {
+                return Err(TypeEnvFull { types: true });
+            };
+            depth = depth.max(child_depth + 1);
+        }
+        if depth > MAX_CLOSED_DEPTH {
+            return Err(TypeEnvFull { types: true });
+        }
         let id = self.types.len() as ClosedTypeId;
         self.types.push(node.clone());
         self.digests.push(None);
+        self.depths.push(depth);
         self.type_index.insert(node, id);
         Ok(id)
     }
@@ -623,7 +652,7 @@ impl TypeEnvs {
 }
 
 /// The child type indices of one module type, in declaration order.
-fn bc_children(node: &BcType, out: &mut Vec<u32>) {
+pub fn bc_children(node: &BcType, out: &mut Vec<u32>) {
     match node {
         BcType::Inst(_, args) | BcType::Tuple(args) => out.extend(args),
         BcType::List(e) | BcType::Vm(e) | BcType::Snapshot(e) | BcType::Op(_, e) => out.push(*e),
@@ -834,29 +863,46 @@ mod tests {
     /// recursion is legal, and capture digests the closed result type
     /// of every machine.
     #[test]
-    fn a_deeply_nested_closed_type_never_recurses() {
+    fn a_closed_type_past_the_depth_bound_rejects() {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(|| {
-                const DEPTH: u32 = 50_000;
                 let mut m = module();
-                // `[[[ ... [Int] ... ]]]`, nested `DEPTH` deep.
+                // `[[[ ... [Int] ... ]]]`, one level past the bound.
                 m.types = vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str];
                 let mut deep = 2u32;
-                for _ in 0..DEPTH {
+                for _ in 0..MAX_CLOSED_DEPTH {
                     m.types.push(BcType::List(deep));
                     deep = (m.types.len() - 1) as u32;
                 }
                 let mut table = TypeEnvs::new(u32::MAX, u32::MAX);
-                let closed = table.close(&m, deep, TypeEnvId::EMPTY).expect("closed");
-                let digest = table.digest(&m, &[], closed);
-                assert_ne!(digest, [0u8; 32]);
-                // The cached answer is the same answer.
-                assert_eq!(table.digest(&m, &[], closed), digest);
+                assert_eq!(
+                    table.close(&m, deep, TypeEnvId::EMPTY),
+                    Err(TypeEnvFull { types: true })
+                );
             })
             .expect("thread starts")
             .join()
             .expect("no Rust stack overflow");
+    }
+
+    #[test]
+    fn a_closed_type_at_the_depth_bound_digests() {
+        let mut m = module();
+        // `Int` is depth 1, so `MAX_CLOSED_DEPTH - 1` list levels
+        // reach the bound exactly.
+        m.types = vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str];
+        let mut deep = 2u32;
+        for _ in 0..(MAX_CLOSED_DEPTH - 1) {
+            m.types.push(BcType::List(deep));
+            deep = (m.types.len() - 1) as u32;
+        }
+        let mut table = TypeEnvs::new(u32::MAX, u32::MAX);
+        let closed = table.close(&m, deep, TypeEnvId::EMPTY).expect("closed");
+        let digest = table.digest(&m, &[], closed);
+        assert_ne!(digest, [0u8; 32]);
+        // The cached answer is the same answer.
+        assert_eq!(table.digest(&m, &[], closed), digest);
     }
 
     #[test]

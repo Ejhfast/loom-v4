@@ -27,6 +27,22 @@ const MAX_TUPLE_ARITY: usize = 16;
 /// forged `local_count` before any allocation is sized from it.
 const MAX_LOCAL_SLOTS: u32 = 65_536;
 
+/// The deepest a type may nest.
+///
+/// A type child names an earlier table entry, so a table of N entries
+/// can nest N deep. Every walk over a type costs at least its depth,
+/// and `Ctx::join` costs the square of it, because the join tests the
+/// subtype relation at each level. A crafted artifact therefore turns
+/// a small type table into a denial of service.
+///
+/// The bound makes a deep type unrepresentable. It also keeps a
+/// recursive walk safe, so a later walk needs no iterative form to stay
+/// inside the Rust stack.
+///
+/// Real code nests far below this limit. `lm-bytecode` bounds an
+/// interface type at 32 for the same reason.
+const MAX_TYPE_DEPTH: u32 = 128;
+
 /// The largest dataflow footprint of one function: block count times
 /// local slots. The bound keeps hostile inputs from demanding an
 /// unbounded state table.
@@ -1194,6 +1210,29 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         if let BcType::Class(c) = ty {
             class_ty[*c as usize] = Some(idx as u32);
         }
+    }
+    // Bound the nesting depth of the type table. A type child names an
+    // earlier entry, so one forward pass gives the depth of each entry.
+    let mut depth: Vec<u32> = Vec::with_capacity(module.types.len());
+    let mut kids: Vec<u32> = Vec::new();
+    for (idx, ty) in module.types.iter().enumerate() {
+        kids.clear();
+        lm_bytecode::closed::bc_children(ty, &mut kids);
+        let mut own = 1u32;
+        for child in &kids {
+            let Some(child_depth) = depth.get(*child as usize) else {
+                return Err(terr(format!(
+                    "type {idx} references type {child}, which is not an earlier entry"
+                )));
+            };
+            own = own.max(child_depth + 1);
+        }
+        if own > MAX_TYPE_DEPTH {
+            return Err(terr(format!(
+                "type {idx} nests {own} deep, and the limit is {MAX_TYPE_DEPTH}"
+            )));
+        }
+        depth.push(own);
     }
     let ctx = Ctx {
         module,
@@ -3884,24 +3923,43 @@ mod tests {
         assert!(!ctx.is_subtype(7, 6), "an IntBox fits no Box[String]");
     }
 
-    /// A deeply nested type table never grows the Rust stack.
+    /// A type table nests no deeper than `MAX_TYPE_DEPTH`.
     ///
     /// An artifact states its own type table, and a hand-built one can
-    /// nest a type as deeply as the table holds entries. Every type
-    /// walk of the verifier is iterative, so the pass answers on a
-    /// small stack instead of aborting the host.
+    /// nest a type as deeply as the table holds entries. Every walk
+    /// over a type costs at least its depth, and `join` costs the
+    /// square of it. The bound therefore makes a deep type
+    /// unrepresentable instead of hardening each walk against one.
     #[test]
-    fn a_deeply_nested_type_table_never_recurses() {
+    fn a_type_table_past_the_depth_bound_rejects() {
+        let mut types = base_types();
+        let mut deep = TY_INT;
+        for _ in 0..MAX_TYPE_DEPTH {
+            types.push(BcType::List(deep));
+            deep = (types.len() - 1) as u32;
+        }
+        let mut m = module_with(vec![vec![ConstInt(0), Return]]);
+        m.types = types;
+        let error = verify_module(&m).expect_err("a type past the bound rejects");
+        assert!(
+            format!("{error:?}").contains("nests"),
+            "the diagnostic names the depth rule: {error:?}"
+        );
+    }
+
+    /// Every type walk answers at the bound on a small stack.
+    #[test]
+    fn a_type_table_at_the_depth_bound_walks_on_a_small_stack() {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(|| {
-                const DEPTH: u32 = 20_000;
+                // `Var(0)` is depth 1, so this many list levels reach
+                // the bound exactly.
+                const DEPTH: u32 = MAX_TYPE_DEPTH - 1;
                 // `join` tests the subtype relation at each level, so
-                // its cost grows with the square of the depth. That
-                // cost predates this work, and the smaller depth keeps
-                // the case quick while it still overruns a small Rust
-                // stack.
-                const JOIN_DEPTH: u32 = 4_000;
+                // its cost grows with the square of the depth. The
+                // bound keeps that cost small.
+                const JOIN_DEPTH: u32 = MAX_TYPE_DEPTH - 2;
                 let class = |name: &str, parent: u32| BcClass {
                     name: name.to_string(),
                     key: name.to_string(),
