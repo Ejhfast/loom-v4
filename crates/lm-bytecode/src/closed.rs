@@ -502,22 +502,6 @@ impl TypeEnvs {
         }
     }
 
-    /// The mailbox message type of one closed proc instance type.
-    ///
-    /// `None` marks a type that is not an instance of a subclass of the
-    /// core class `Proc`.
-    pub fn proc_mailbox(
-        &mut self,
-        module: &Module,
-        proc_class: Option<u32>,
-        ty: ClosedTypeId,
-    ) -> Option<ClosedTypeId> {
-        let proc = proc_class?;
-        let (class, args) = self.as_instance(ty)?;
-        let found = self.ancestor_args(module, class, &args, proc)?;
-        found.first().copied()
-    }
-
     /// The canonical content digest of one closed type node.
     ///
     /// The digest names a class by its verified definition hash, an

@@ -2097,6 +2097,8 @@ fn gate_corpus() -> Vec<(String, String)> {
         ),
         ("a-generic-field", GENERIC_FIELD),
         ("polymorphic-recursion", POLYMORPHIC_RECURSION),
+        ("read-list-source", READ_LIST_SOURCE),
+        ("two-classes-source", TWO_CLASSES_SOURCE),
     ] {
         out.push((label.to_string(), source.to_string()));
     }

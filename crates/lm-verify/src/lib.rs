@@ -3848,6 +3848,42 @@ mod tests {
         assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
     }
 
+    /// A class that inherits an instantiated generic parent fits that
+    /// exact application and no other.
+    ///
+    /// `IntBox` inherits `Box[Int]` and takes no type parameter of its
+    /// own. A rule that compared class names alone accepted it at a
+    /// `Box[String]` position. The subtype rule walks the arguments,
+    /// so the plain class position and the application position both
+    /// answer the same relation.
+    #[test]
+    fn an_inherited_generic_parent_fits_one_application() {
+        let class = |name: &str, parent: u32, args: Vec<u32>, params: u32| BcClass {
+            name: name.to_string(),
+            key: name.to_string(),
+            parent,
+            parent_args: args,
+            type_params: params,
+            kind: lm_bytecode::BcClassKind::Normal,
+            fields: vec![],
+            methods: vec![],
+        };
+        let mut m = module_with(vec![vec![ConstInt(0), Return]]);
+        m.types = base_types();
+        m.types.push(BcType::Var(0)); // 4
+        m.types.push(BcType::Inst(0, vec![TY_INT])); // 5 Box[Int]
+        m.types.push(BcType::Inst(0, vec![TY_STR])); // 6 Box[String]
+        m.types.push(BcType::Class(1)); // 7 IntBox
+        m.classes = vec![
+            class("Box", NO_PARENT, vec![], 1),
+            class("IntBox", 0, vec![TY_INT], 0),
+        ];
+        let core = lm_bytecode::corepin::declared_layout(&m);
+        let ctx = verify_tables(&m, core).expect("the tables verify");
+        assert!(ctx.is_subtype(7, 5), "an IntBox fits Box[Int]");
+        assert!(!ctx.is_subtype(7, 6), "an IntBox fits no Box[String]");
+    }
+
     /// A deeply nested type table never grows the Rust stack.
     ///
     /// An artifact states its own type table, and a hand-built one can

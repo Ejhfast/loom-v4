@@ -1646,4 +1646,21 @@ mod tests {
         // object size and the two witnesses cost nothing there.
         assert_eq!(std::mem::size_of::<Object>(), 80);
     }
+
+    /// A fallible operand reader costs no register.
+    ///
+    /// Every typed reader of the interpreter answers
+    /// `Result<_, FaultCode>` instead of asserting the tag. The value
+    /// tag holds a niche, so the fault code fits inside the value and
+    /// the return keeps the size it had.
+    #[test]
+    fn a_fallible_read_keeps_the_value_size() {
+        assert_eq!(std::mem::size_of::<FaultCode>(), 1);
+        assert_eq!(std::mem::size_of::<Value>(), 16);
+        assert_eq!(std::mem::size_of::<Result<Value, FaultCode>>(), 16);
+        assert_eq!(std::mem::size_of::<Result<ObjRef, FaultCode>>(), 12);
+        assert_eq!(std::mem::size_of::<Result<bool, FaultCode>>(), 2);
+        // An integer read pays one word, because `i64` has no niche.
+        assert_eq!(std::mem::size_of::<Result<i64, FaultCode>>(), 16);
+    }
 }

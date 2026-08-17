@@ -131,6 +131,16 @@ total.
 | `check_state` block rule | `pending.expect("a blocked machine has a request")` | an admission rejection |
 | `check_world` token rule | `pending.expect("an asked machine holds its request")` | a matched pattern |
 
+### `crates/lm-verify/src/lib.rs`
+
+The verifier reads a decoded artifact, and a hand-built artifact
+chooses the depth of its type table. Five walks recursed on the Rust
+stack: `subst`, `is_subtype`, `join`, `vars_bounded`, and the closed
+walks of `crates/lm-bytecode/src/closed.rs`. Each one now carries its
+own stack. `a_deeply_nested_type_table_never_recurses` and
+`a_deeply_nested_closed_type_never_recurses` run them on a 256 KiB
+stack.
+
 ## Part 2: the assertions that stay, and the rule that carries each
 
 ### `Heap::get`, `Heap::get_mut`, `Heap::is_frozen`, `Heap::set_frozen`, `Heap::recharge`, `Heap::free`
@@ -231,9 +241,16 @@ program point pops.
 
 `Machine::pop` therefore returns `Result<Value, FaultCode>`.
 `size_of::<Result<Value, FaultCode>>()` is 16 bytes, exactly
-`size_of::<Value>()`, because the value tag holds a niche. The change
-costs about 8 percent on the two collection-dominated benchmarks and
-stays inside the measurement noise everywhere else.
+`size_of::<Value>()`, because the value tag holds a niche.
+`a_fallible_read_keeps_the_value_size` in `machine.rs` records every
+figure.
+
+The change costs about 8 percent on the two collection-dominated
+benchmarks and stays inside the measurement noise everywhere else. An
+infallible `pop` that answers `Value::Uninit` on an empty arena
+recovers those 8 points, and every typed reader rejects that marker, so
+it contains the same states. It is a silent fallback, which the
+engineering rules of `CLAUDE.md` refuse, so the fault stays.
 
 Note what the fault does and does not add. A pop past the region of
 one frame still reads the operand a lower frame owns, in both designs.
