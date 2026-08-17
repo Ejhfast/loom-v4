@@ -6,7 +6,8 @@ holds the worklist and the issue analysis.
 
 The work has three delivery groups:
 
-- group A separates decoding from admission, and proves live types;
+- group A separates decoding from admission, and hardens the virtual
+  machine against a wrong-typed value;
 - group B contains failures and resources;
 - group C removes the known scaling defects.
 
@@ -14,6 +15,12 @@ The work has three delivery groups:
 
 Group A covers worklist items 1 to 6, and answers `worklist.md` issues
 1, 2, and 8.
+
+**Read the section "The type proof gave way to a hardened VM" before
+this one.** Group A built a complete type proof over image data. A
+later change deleted that proof. This section records what group A
+built and why, because the history explains the change. The structural
+half of group A stands. The type half is gone.
 
 Group A landed in three parts. The first part separated decoding from
 admission. An independent review then found three serious defects. The
@@ -530,6 +537,181 @@ target whose result type is a subtype. A `Handle[M,R]` sends and
 receives its message type, so `admit` requires an exact mailbox type.
 Specification section 5.4 records the reasoning.
 
+## The type proof gave way to a hardened VM
+
+Group A proved the type of every live value in an image. Admission
+derived each expected type from the image, and an attacker writes the
+image. Three independent reviews each found new holes in that
+derivation. Two of the holes rejected legal programs: ordinary tuple
+aliasing, and a plain `vm.run().is_done()`.
+
+The proof was load-bearing for one reason. The interpreter held about
+90 trusted assertions, and a wrong type reached one of them as a host
+panic. `exec_instr` already returned `Result<ExecOutcome, FaultCode>`,
+and most assertions sat in the fallback arm of a match that already
+tested the tag. Converting them costs one changed jump target.
+
+The design now has three parts.
+
+**The interpreter tests each tag.** Every reader of a typed value
+raises a machine fault on a mismatch. `crates/lm-vm/ASSERTIONS.md`
+lists each assertion that became a fault, each assertion that stays,
+and the rule that carries the ones that stay.
+
+**The world checks each VM boundary.** A value that crosses a VM
+boundary is checked against the type the receiving code expects. The
+expected type comes from the `reply_ty` field of `Perform` and
+`PerformValue`, substituted through the type environment of the
+performing frame. The verifier proves that `reply_ty` agrees with the
+type at that program point. Both inputs therefore come from verified
+code, and the image supplies neither.
+
+**Admission proves structure alone.** The object coherence map, the
+instance witness check, the machine witness derivation, the deep graph
+type walk, and `lm_verify::ResolvedTypes` are deleted.
+
+The closed type table and the witnesses stay. They give a live generic
+frame its concrete types, and a later `Type[T]` surface reads them.
+Admission checks them structurally alone.
+
+### The versions
+
+The bytecode format version moves from 13 to 14, because `Perform` and
+`PerformValue` gained `reply_ty`. The compiler ABI version moves from 7
+to 8. The verifier version moves from 6 to 7.
+
+`FORMAT_VERSION` stays at 2. The admission identity covers the verifier
+version, so a version-2 container of the older build rejects on that
+field.
+
+`crates/lm-abi/src/fault.rs` gains `TypeMismatch` and `MalformedState`.
+Both join the stable table of language specification 12.3.
+
+### Decisions
+
+**`check_operands` went, and `Machine::pop` faults.** The exact operand
+count came from the same verifier dataflow as the type proof. Keeping
+it would have kept `ResolvedTypes` alive.
+
+**The boundary check descends every element and every field.** A
+shallow check would pass all four of the type-confusion cases, because
+each one hides its wrong value one level inside `RunResult[T]`,
+`Recv[M]`, a list, or a field.
+
+**A native handle takes a shape test alone.** Its arguments name
+another machine, another operation, or a function body. Each handle
+later produces a value that crosses a boundary of its own, and that
+read carries the check.
+
+**The check rides on `install_value_reply`, not on the copy walk.**
+`send_copy` deduplicates by object, so a check there would test each
+object at the first type that reached it. A mailbox receive and a
+restore copy nothing at all, so a check on the copy walk would miss the
+restored container.
+
+**A mailbox message is checked at the receive.** The send-side type
+would come from the operand stack. `Recv[M]` at the receive comes from
+the live perform of the receiver, and it covers a restored mailbox as
+well.
+
+### Two defects the assertion inventory found
+
+`DispatchRow::method` subtracted a base from a selector under a debug
+assertion alone. The receiver class comes from a heap object, so a
+restored machine could drive that subtraction below zero and index far
+out of range in a release build. The call answers `Option` now.
+
+`World::two` asserted that its two machines differ. A restored world
+can name one machine on both sides of a crossing, so `transfer` routes
+an equal pair to the one-heap copy.
+
+### Measurements
+
+`cargo test --workspace` runs 857 tests and exits 0.
+
+`FaultCode` is 1 byte. `Value` is 16 bytes, and its tag holds a niche,
+so `Result<Value, FaultCode>` is also 16 bytes. A fallible read
+therefore returns in the registers that carried the value before.
+`a_fallible_read_keeps_the_value_size` pins each size.
+
+Hardening alone costs 7 percent on `alloc_gc_100k`, 7 percent on
+`mark_sweep_100k_under_256k`, and 9 percent on `freeze_chain_50k`. An
+experiment isolated all of that cost to `Machine::pop`.
+
+The whole change, in release, against commit `38280f4`:
+
+| Entry | Before | After |
+| --- | --- | --- |
+| `alloc_gc_100k` | 7.86 ms | 8.43 ms |
+| `mark_sweep_100k_under_256k` | 8.96 ms | 9.19 ms |
+| `freeze_chain_50k` | 6.11 ms | 5.93 ms |
+| `transfer_graph_20k` | 4.74 ms | 5.78 ms |
+| `digest_graph_20k` | 3.45 ms | 3.31 ms |
+| `virtual_call_100k` | 8.17 ms | 7.91 ms |
+| `list_push_100k` | 4.82 ms | 4.56 ms |
+| `perform_exact_pass_20k` | 1.35 ms | 1.46 ms |
+| `proc_send_receive_20k` | 9.30 ms | 10.13 ms |
+| `drive_interception_5k` | 2.33 ms | 2.71 ms |
+| `proc_spawn_500` | 2.24 ms | 1.98 ms |
+| `proc_terminal_200x200` | 3.00 ms | 2.83 ms |
+| snapshot load, machine world | 104 us | 67 us |
+| snapshot load, wide heap 10k | 733 us | 159 us |
+| snapshot load, deep chain 5k | 5.30 ms | 0.88 ms |
+
+`transfer_graph_20k` and `drive_interception_5k` carry the deep
+boundary check. The snapshot load column falls because the graph type
+walk is gone.
+
+### The fuzz result
+
+`mutated_snapshot_images_never_panic_the_runtime` mutates a decoded
+`Image` structurally, then re-canonicalizes the heap so each mutant
+reaches the runtime rules. Of 3200 mutants, 2468 admit and restore, and
+1198 execute instructions. Zero mutants panic. Each case runs under a
+1 MiB heap, 20000 fuel, and a 10-second clock, so the case proves no
+hang as well.
+
+Four type-confusion cases run as direct tests. A local typed `[Int]`
+that names a list of strings, an instance of one class at a position of
+another, a `Vm[T]` that names a machine of another result type, and a
+handle that names a machine with another mailbox type. Each one faults
+`TypeMismatch` after restore, and the host survives.
+
+### The recursion defect
+
+Eight walks recursed on the Rust stack over a type a user can make
+deep. A 24799 byte container aborted the host on an 8 MiB stack.
+
+`ResolvedTypes::is_resolved` and `Admit::universe_closed` went with the
+type proof. `TypeEnvs::digest`, `TypeEnvs::close`, `Ctx::is_subtype`,
+`Ctx::subst`, `Ctx::join`, and `Ctx::vars_bounded` are iterative now.
+
+`Ctx::is_subtype` predates this work, and a crafted artifact reaches
+it. `TypeEnvs::digest` is reachable from a legal program, because
+polymorphic recursion is legal and `World::machine_result_digest`
+recurses over the world table at capture time.
+
+Two cases build a type nested 20000 and 50000 deep, and run every walk
+on a 256 KiB stack.
+
+### Future optimizations
+
+**Restore the operand depth check and make `Machine::pop` infallible.**
+`pop` carries 7 to 9 percent on three benchmarks, and it covers one
+narrow case: an operand arena that is completely empty. A pop that
+reads past its own frame into a lower frame is caught by neither
+design, and the typed readers contain that case by testing the tag.
+
+The verifier dataflow computes stack depth beside the types it proves.
+Depth is a structural fact. An admission rule that proves the arena
+holds exactly the operands the program point requires would make an
+empty-arena pop unrepresentable, and `pop` could return `Value` again.
+
+The cost is that admission keeps a slice of the verifier dataflow. That
+slice is far smaller than the type proof, and it carries no derivation
+that an attacker influences.
+
+
 ## Deferred work
 
 - Worklist items 7 to 12 belong to groups B and C.
@@ -561,13 +743,22 @@ nix-shell --run "cargo test -p lm-testkit --test fuzz regenerate_fuzz_corpus -- 
 `docs/notes/week9.md` calls `checkpoints/asked-tree.lms` a checked-in
 container. That statement is wrong, and this note corrects it.
 
-## Specification edits this work needs
+## Specification edits this work made
 
-`docs/notes/week9.md` states that the container omits a type table. The
-container carries one now. Its format table needs the fifth section,
-and needs the renumbered heap and machine sections. Its header
-result-type field is now a `ClosedType` content digest.
+`docs/specs/snapshot-image-admission.md` section 5 states the new
+admission rule. Section 5.2 replaces the type accuracy rules. Sections
+5.4 and 5.5 are deleted. Section 5.6 states that a witness is a runtime
+carrier. Sections 6, 8, 11, and 13 follow.
 
-`docs/specs/build-order.md` week 9 must name `SnapshotImage` as the
-admitted host state, and `Image` as the editable decoded state.
-Specification section 12 asks for both edits.
+`docs/specs/language-spec.md` section 12.3 gains `TypeMismatch` and
+`MalformedState`.
+
+`docs/specs/build-order.md` week 9 names `SnapshotImage` as the
+admitted host state, and states that admission proves structure.
+
+`docs/notes/week9.md` records the moved versions, and marks the
+"container carries no type table" simplification as reversed.
+
+One edit stays open. The `docs/notes/week9.md` format table still lists
+four sections. Container format 2 holds five, and the heap and machine
+sections moved to kinds 4 and 5.

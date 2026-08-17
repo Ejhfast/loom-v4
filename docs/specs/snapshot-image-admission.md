@@ -1,7 +1,10 @@
 # Snapshot Image Admission
 
-Status: normative for the work it describes. The current implementation
-does not yet separate decoded and admitted host states.
+Status: normative. The implementation follows it.
+
+Section 5.2 replaced an earlier design that made admission prove every
+declared type. `docs/notes/post-week9-admission.md` records why that
+design failed and what replaced it.
 
 This document refines `language-spec.md` sections 17.1, 17.8, and
 17.9. It also refines Week 9 in `build-order.md`.
@@ -158,11 +161,11 @@ Admission therefore checks every required property again.
 
 Use this rule for every promotion:
 
-> **An `Image` becomes `SnapshotImage` only when its structure resolves
-> and every live declared type is accurate.**
+> **An `Image` becomes `SnapshotImage` only when its structure
+> resolves.**
 
-"Declared type" includes types inferred by the bytecode verifier at a
-saved program point. It never means only a type label from the image.
+Admission proves structure. It proves the type of no stored value.
+Section 5.2 states where type honesty comes from instead.
 
 Admission reads one exact verified module. It rejects an admission
 identity mismatch.
@@ -180,7 +183,9 @@ Structural resolution enforces these rules:
 - Every function, class, type, and operation identity resolves.
 - Every code identity matches verified code.
 - Every frame names a reachable instruction boundary.
-- Frame bases partition the local and operand arenas exactly.
+- Frame bases fill the local arena exactly.
+- The bottom frame starts the operand arena, and no later frame lowers
+  the operand base.
 - Every object has the required field or element count.
 - Every closure context names a compatible closure object.
 - Every literal entry names its exact program literal.
@@ -193,135 +198,59 @@ Structural resolution checks relationships that trusted runtime paths
 use without recovery. It does not require useful or reachable future
 behavior.
 
-### 5.2 Type accuracy
+### 5.2 Type honesty at run time
 
-Admission derives expected types from verified code and resolved
-layouts. An image type claim never serves as sole evidence.
+An earlier design made admission prove every declared type. That proof
+derived each expected type from the image, which the attacker controls.
+The derivation failed repeatedly, and two of its rules rejected legal
+programs. This section states what replaced it.
 
-Admission checks these typed positions:
+Two mechanisms carry type honesty. Neither one reads a type from the
+image.
 
-- It checks every initialized local.
-- It checks every operand owned by each stopped frame.
-- It checks every closure capture.
-- It checks every initialized instance field.
-- It checks every pending operation argument.
-- It checks every accepted mailbox value.
-- It checks every terminal result.
-- It checks every typed native value.
-- It checks every reachable collection element.
+**The interpreter tests each tag.** Every reader of a typed value tests
+the tag of that value, and raises a machine fault on a mismatch. A
+wrong-typed value in a restored machine therefore faults that machine.
+It reaches no host assertion. `crates/lm-vm/ASSERTIONS.md` records each
+assertion that remains, with the rule that carries it.
 
-Operand types come from verifier state at the saved instruction
-boundary. Pending argument types come from the state before the
-pending perform.
+**The world checks each VM boundary.** A value that crosses a VM
+boundary is checked against the type the receiving code expects. The
+expected type comes from the `reply_ty` field of the performing
+instruction, substituted through the type environment of the performing
+frame. The verifier proves that `reply_ty` agrees with the type it
+proves at that program point, so both inputs come from verified code.
 
-The terminal value matches the exact declared machine result type.
-`Unit` receives no exception from this rule.
+The boundaries are the terminal result read, the mailbox receive, the
+pending call reply, the spawn argument, the mock reply, and the restore
+that returns `Vm[T]` or `Snapshot[T]`.
+
+The check descends every element and every field. A native handle takes
+a shape test alone, because its arguments name another machine, another
+operation, or a function body. Each handle later produces a value that
+crosses a boundary of its own, and that read carries the check.
+
+The check has full force where the performing frame is live. Where the
+performing frame is itself restored, its type environment came from the
+image, so the expected type is one the attacker chose. The interpreter
+tag tests stay the guarantee inside a restored world.
+
+One state stays representable. An empty container reached under two
+different argument lists satisfies both, because it holds no value that
+contradicts either. A guest that reads an element of such a container
+takes a fault at the read.
 
 ### 5.3 Initialization state
 
-An uninitialized slot contains no typed value. Admission distinguishes
-that state from a real `Unit` value.
+The virtual machine writes an uninitialized marker into a local slot
+that holds no value. It writes the same marker into an instance field
+before the first assignment. The marker is a value with its own tag.
 
-An uninitialized marker is legal only where verifier state or layout
-state permits no initialized value. A live slot cannot use that marker
-as a type wildcard.
+Every reader faults on the marker. `LoadField` raises
+`UninitializedField`. A graph copy and a digest raise
+`BoundaryViolation`. A typed reader raises `TypeMismatch`.
 
-The representation can use a marker, a bitmap, or explicit slot state.
-The admission rule does not select one representation.
-
-### 5.4 Generic and shared graphs
-
-Admission applies every generic substitution before it checks a value.
-It never converts a missing substitution into an unchecked slot.
-
-The graph walk uses `(machine, object, resolved type)` as its visited
-key. One object can require checks under several resolved types.
-
-The walk is iterative and bounded. Cycles terminate without using the
-Rust call stack.
-
-Admission charges every visited pair and resolved type to one aggregate
-admission budget.
-
-#### Object type coherence
-
-One typed edge proves that edge alone. A shared object that satisfies
-two different types at two different edges still breaks the interpreter
-invariant.
-
-An edited image can point one `List[Int]` local and one `List[Str]`
-local at the same empty mutable list. Each edge passes, because the
-list holds no element. Verified code then appends an integer through
-the first local and reads a string through the second local. A generic
-instance with an empty `List[T]` field carries the same defect.
-
-Type accuracy must stay true after every verified mutation, so
-admission proves one exact type for each object:
-
-- Admission builds one map from `(machine, object)` to one exact closed
-  type. Objects never cross a machine boundary, so the machine ordinal
-  completes the key.
-- An instance edge normalizes through the concrete class of the object.
-  A closure edge normalizes through the declared type of its function.
-- Every other shape takes the type of the edge that reached it. An
-  empty list names no element type, so the object alone answers
-  nothing.
-- The map keeps the most specific type that any edge names. A later
-  edge that is a supertype of the stored type passes. A later edge that
-  is a subtype of the stored type replaces it.
-- Two edges with no subtype relation reject the image.
-
-Language specification section 6 makes class arguments invariant, so
-`List[Int]` and `List[Str]` have no subtype relation and the aliased
-empty list rejects. A `Dog` instance reached from an `Animal` edge
-admits, because the concrete class answers the same exact type at both
-edges.
-
-The map keeps the most specific type instead of the first type, so the
-order of the walk does not change the answer. Only `Tuple` and `Fn`
-carry a covariant argument, and both are born frozen, so no mutable
-object takes a supertype through this rule.
-
-The same reasoning governs the relational types of section 5.5. A
-`Vm[T]` reads the terminal value of its target, so a subtype result is
-sound. A `Handle[M,R]` sends and receives its message type, so the
-mailbox type must match exactly.
-
-Admission charges the map to the aggregate admission budget.
-
-### 5.5 Native relational types
-
-Some native types depend on another machine or another record. Their
-outer object tag does not establish type accuracy.
-
-Admission checks these relationships:
-
-- `Vm[T]` matches the target machine result type.
-- `Handle[M,R]` matches the target mailbox and result types.
-- `PendingCall[A,R]` matches its target operation and reply types.
-- `Snapshot[T]` matches the declared root result type of its nested
-  container.
-- `SnapshotImage` carries a nested snapshot container as an opaque
-  sealed value.
-
-Admission derives every in-world relational type from its target. It
-never reads a type identity from the image. A `Vm`, `Handle`, or
-`PendingCall` names a target inside the captured world, so its type
-resolves from that target.
-
-Admission resolves every machine result and mailbox type in one first
-pass. It then checks relational values against those resolved types.
-This order lets a handle name a target machine that admission has not
-walked yet.
-
-Admission keeps a nested snapshot opaque. It checks that the nested
-container is well formed. It checks that the declared root result type
-of the container matches the outer `Snapshot[T]`. It does not admit the
-nested body. The nested snapshot passes full admission at its own
-restore.
-
-Handle liveness and authority are not type properties. Runtime rules
-continue to enforce them.
+Admission proves nothing about where the marker appears.
 
 ### 5.6 Type environment witnesses
 
@@ -341,17 +270,20 @@ Three positions hold no such evidence:
 Signature unification cannot recover a type variable that appears in a
 capture list alone. The image therefore carries witnesses.
 
-#### A witness is data
+#### A witness is a runtime carrier
 
-A witness carries no trust. Admission validates every witness against
-verified code and against the values the image holds. A witness that
-disagrees with a derivation rejects the image.
+A witness gives a live frame the concrete types of its activation. The
+boundary check of section 5.2 reads it to substitute `reply_ty`, and a
+later `Type[T]` surface will read it for reflection.
 
-Admission uses a witness where the derivation is impossible. Admission
-checks the witness against the derivation everywhere else.
+Admission checks a witness structurally alone. Each ordinal lies in
+range, each entry holds no free type variable, the table is acyclic,
+and each arity matches its declaration.
 
-An editor can change a witness and its values together. Admission
-accepts the result when the witness, the code, and the values agree.
+Admission proves nothing about whether a witness is the one execution
+would have produced. A restored frame therefore carries a type
+environment that the attacker chose, and section 5.2 states why the
+interpreter tag tests stay the guarantee there.
 
 #### The witness sites
 
@@ -428,6 +360,10 @@ charges every resolved closed type node to the admission budget.
 
 Admission does not prove these properties:
 
+- It does not prove the type of any stored value. Section 5.2 states
+  the two mechanisms that carry type honesty instead.
+- It does not prove that a witness is the type environment execution
+  would have produced.
 - It does not prove termination or progress.
 - It does not prove useful values or useful control state.
 - It does not prove scheduler fairness or performance.
@@ -439,8 +375,9 @@ Admission does not prove these properties:
 - It does not admit a nested snapshot body. Nested admission runs at
   nested restore.
 
-A strange but structurally valid typed state remains legal. Runtime
-rules and restore limits govern the excluded properties.
+A strange but structurally valid state remains legal, and a
+wrong-typed one does as well. Runtime rules and restore limits govern
+the excluded properties.
 
 ## 7. Construction paths
 
@@ -497,7 +434,7 @@ key that state by container hash and exact admission identity.
 ## 8. Restore boundary
 
 Restore accepts `SnapshotImage`, never `Image`. It can trust structural
-resolution and type accuracy.
+resolution. It reads the type of no stored value.
 
 Restore still performs target-specific work:
 
@@ -570,7 +507,7 @@ The current implementation maps to this design as follows:
 | `Image` | Keep it as the editable decoded model. |
 | `codec::decode` | Keep container checks and return `Image`. |
 | `check_machine` | Move it into admission. |
-| `check_types` | Replace it with complete resolved-type admission. |
+| `check_types` | Delete it. Section 5.2 replaces it. |
 | `check_world` | Move structural relationships into admission. |
 | `SnapshotImage` | Keep the name and make it the only admitted wrapper. |
 | `codec::seal` | Restrict trusted promotion to capture code. |
@@ -595,8 +532,8 @@ mutable `Image` from acting as trusted state.
 ## 13. The rule this design delivers
 
 > **Images remain editable data. Only an immutable `SnapshotImage` can
-> restore, and admission proves only resolved structure and accurate
-> live types.**
+> restore. Admission proves resolved structure. The interpreter tests
+> each tag, and the world checks each VM boundary.**
 
 ## 14. Future use of the type environment
 

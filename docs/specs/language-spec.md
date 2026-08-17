@@ -1144,6 +1144,8 @@ Hosts may redact message and trace details while preserving the stable code.
 | `InvalidRequestToken` | stale, consumed, or cross-VM request token |
 | `BadOperationReply` | answer did not match declared reply type |
 | `BadCast` | failed `as T` |
+| `TypeMismatch` | a value crossing a VM boundary carried another type |
+| `MalformedState` | machine state reached a rule the verifier proves for live code |
 | `BoundaryViolation` | codec or descriptor rule violated |
 | `UnsendableValue` | holder-local or nonsendable value crossed a boundary; unfrozen graph reached `digest()` or `deep_equal` |
 | `MalformedArtifact` | invalid artifact/bytecode |

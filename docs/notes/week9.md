@@ -23,6 +23,11 @@ thirty-six of week 8 plus the two snapshot error families. The shape
 table holds sixteen shapes. The snapshot container format version is
 1.
 
+The work after week 9 moved several of these numbers.
+`docs/notes/post-week9-admission.md` records the current values: the
+bytecode format is 14, the compiler ABI is 8, the verifier is 7, the
+operation manifest ABI is 4, and the snapshot container format is 2.
+
 ## Landed
 
 ### The machine world
@@ -332,7 +337,9 @@ other machine control operation stays outside `as_call`.
   one. A restore builds into the same program, so the class and
   function manifests plus the recorded result-type digests name every
   type the image needs. A cross-program restore would need the table,
-  and it would need much more besides.
+  and it would need much more besides. The work after week 9 reversed
+  this: container format 2 carries a closed type table, and
+  `docs/notes/post-week9-admission.md` states why.
 - **`Vm.LoadSnapshot` has no guest form.** The operation takes a
   `Bytes` value, and version 0.2 declares no `Bytes` type. The
   verifier rejects the instruction with that reason. The host and the

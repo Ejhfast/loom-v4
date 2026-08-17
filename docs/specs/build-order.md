@@ -769,9 +769,13 @@ valid: state=asked machines=3 mailboxes=2
 - Policy tables and root grants never enter snapshot bytes.
 - A failed restore exposes no partial world.
 - A failed snapshot resumes the original world.
-- The loader checks machine references, mailbox types, limits, and
-  accepted values.
+- The loader checks machine references, limits, and lifecycle records.
+  `SnapshotImage` is the admitted host state, and `Image` is the
+  editable decoded state.
 - Whole-image structural verification occurs once on external load.
+  Admission proves structure. The interpreter tests each value tag, and
+  the world checks each VM boundary
+  (`docs/specs/snapshot-image-admission.md` section 5.2).
 - In-process trusted restore and external byte load remain separate
   APIs.
 - Snapshot size/load/write benchmarks are tracked by workload shape.
