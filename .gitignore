@@ -3,3 +3,10 @@ build/
 *.lma
 *.lms
 result
+
+# The checked container fixtures. A test reads each one, so a fresh
+# checkout must hold them. `docs/notes/week9.md` states when to
+# regenerate them: whenever the core image, the operation manifest, the
+# compiler ABI, the verifier, or the container format moves.
+!checkpoints/asked-tree.lms
+!tests/fuzz-regressions/*.lms
