@@ -2324,3 +2324,48 @@ fn a_restored_machine_takes_the_fuel_ceiling_of_its_target() {
         "the restored machine must run out of fuel"
     );
 }
+
+// ---------------------------------------------------------------
+// The boundary check follows the restore of a world.
+// ---------------------------------------------------------------
+
+/// A world that restored nothing runs no boundary check, and a restore
+/// turns the check on for the whole world.
+///
+/// Every value of a world that restored nothing came out of verified
+/// code, so the check would state a rule the verifier already proved.
+/// A restore states values the verifier never saw, so the check must
+/// cover every later crossing of that world.
+///
+/// The four type-confusion cases of this file prove the second half by
+/// construction: each one restores a forged image and then faults. This
+/// case states the flag itself, so a later change cannot leave the
+/// check off after a restore and still pass them by accident.
+#[test]
+fn a_restore_turns_the_boundary_check_on_for_its_world() {
+    let loaded = program(READ_LIST_SOURCE);
+    let images = boundaries(&loaded, &[], 60);
+    let image = pick(&images, "any captured world", |_| true);
+
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    assert!(
+        !world.restored_any(),
+        "a fresh world restored nothing, so it checks no boundary"
+    );
+
+    let bytes = codec::encode(&image, usize::MAX).expect("the image encodes");
+    let admitted = codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
+        .expect("the container admits");
+    let target = world.new_child(0).expect("a child budget");
+    world
+        .restore_image(0, target, &admitted)
+        .expect("the image restores");
+    assert!(
+        world.restored_any(),
+        "a committed restore turns the check on"
+    );
+}

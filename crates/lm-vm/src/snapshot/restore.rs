@@ -171,6 +171,11 @@ impl World<'_> {
     }
 
     /// Install one prepared restore without an allocation.
+    /// Commit one prepared restore.
+    ///
+    /// The commit marks the world. A restored machine holds values a
+    /// container stated, so every later VM boundary of this world
+    /// checks the type of the value that crosses it.
     pub(crate) fn commit_restore(&mut self, plan: RestorePlan) -> VmId {
         let RestorePlan {
             target,
@@ -182,6 +187,7 @@ impl World<'_> {
             gate_members,
         } = plan;
         self.envs.commit_import(types);
+        self.mark_restored();
         self.set_gate_marker(gate);
         self.machines[restorer as usize].children += child_charge;
         let mut machines = machines.into_iter();

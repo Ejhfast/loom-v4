@@ -211,6 +211,25 @@ pub struct World<'m> {
     /// first `run`, `step`, or `drive` of the restored root opens that
     /// gate for the whole restored world (specification 17.5).
     gate: u32,
+    /// True after one restore committed a machine into this world.
+    ///
+    /// The boundary check of `docs/specs/snapshot-image-admission.md`
+    /// section 5.2 proves that a value carries the type its receiving
+    /// code expects. Ordinary execution builds every value through
+    /// verified code, and the verifier already proved those types, so
+    /// the check answers a question that is already settled.
+    ///
+    /// A restore is the one path that states a value the verifier
+    /// never saw. Until a restore commits, therefore, no value of this
+    /// world can carry a type its code did not prove, and the check
+    /// costs work without adding a rule.
+    ///
+    /// The flag names the whole world rather than one machine. A
+    /// machine-level rule must follow the source of each value, and a
+    /// value reaches a boundary from a heap, a mailbox, or a host
+    /// reply, so the source needs its own record. The world flag needs
+    /// none, and it holds for every program that restores nothing.
+    restored_any: bool,
     /// The number of whole-image admissions this world ran.
     ///
     /// The count instruments the rule of specification 17.8: external
@@ -344,6 +363,7 @@ impl<'m> World<'m> {
             trace: None,
             cut: 0,
             gate: 0,
+            restored_any: false,
             checks: 0,
             trusted: Vec::new(),
             trusted_bytes: 0,
@@ -1296,6 +1316,13 @@ impl<'m> World<'m> {
     /// mailbox receive, the pending call reply, the spawn result, the
     /// mock reply, and the restore result together.
     fn check_reply(&mut self, vm: VmId, value: Value) -> Result<(), FaultCode> {
+        // Every value of a world that restored nothing came out of
+        // verified code, so the check states a rule the verifier
+        // already proved. The field doc of `restored_any` carries the
+        // argument.
+        if !self.restored_any {
+            return Ok(());
+        }
         let module = self.module;
         let machine = &self.machines[vm as usize];
         let frame = machine.vm.frames.last().ok_or(FaultCode::MalformedState)?;
@@ -1339,6 +1366,11 @@ impl<'m> World<'m> {
         env: lm_value::TypeEnvId,
         args: &[Value],
     ) -> Result<(), FaultCode> {
+        // The same rule as `check_reply`: a world that restored
+        // nothing holds no value the verifier failed to prove.
+        if !self.restored_any {
+            return Ok(());
+        }
         let module = self.module;
         let code = module
             .funcs
@@ -3999,6 +4031,19 @@ impl<'m> World<'m> {
     /// Commit one prepared world gate marker.
     pub(crate) fn set_gate_marker(&mut self, gate: u32) {
         self.gate = gate;
+    }
+
+    /// Record that one restore committed a machine into this world.
+    pub(crate) fn mark_restored(&mut self) {
+        self.restored_any = true;
+    }
+
+    /// True after one restore committed a machine into this world.
+    ///
+    /// A test reads it to state that a restore turns the boundary
+    /// check on.
+    pub fn restored_any(&self) -> bool {
+        self.restored_any
     }
 
     /// Reserve one restored gate record before restore commit.
