@@ -60,6 +60,11 @@ pub enum CutError {
     TooLarge,
 }
 
+/// Return one structured fault for a broken capture invariant.
+fn invalid_capture(detail: impl Into<String>) -> SnapshotFail {
+    SnapshotFail::Fault(FaultCode::MalformedState, detail.into())
+}
+
 impl World<'_> {
     /// Run one consistent cut from `root`.
     ///
@@ -371,7 +376,7 @@ impl World<'_> {
         }
         // Every class the closed type table names joins the manifest,
         // so admission resolves it and proves its definition hash.
-        let (types, envs) = self.build_type_tables(&mut machines);
+        let (types, envs) = self.build_type_tables(&mut machines)?;
         for node in &types {
             if let ClosedType::Class(class) | ClosedType::Inst(class, _) = node {
                 if !classes.contains(class) {
@@ -398,7 +403,7 @@ impl World<'_> {
         // tool reads it without walking the machine records. The
         // loader derives the same digest from the machine witness and
         // proves the two agree.
-        let result_type = self.machine_result_digest(root, &class_hashes);
+        let result_type = self.machine_result_digest(root, &class_hashes)?;
         Ok(Image {
             format: super::FORMAT_VERSION,
             abi_version: lm_abi::ABI_VERSION,
@@ -417,18 +422,25 @@ impl World<'_> {
     /// The canonical digest of the closed result type of one machine.
     ///
     /// A machine that never loaded a body function records zeros.
-    fn machine_result_digest(&mut self, vm: VmId, class_hashes: &[[u8; 32]]) -> [u8; 32] {
+    fn machine_result_digest(
+        &mut self,
+        vm: VmId,
+        class_hashes: &[[u8; 32]],
+    ) -> Result<[u8; 32], SnapshotFail> {
         let record = &self.machines[vm as usize];
         let Some(func) = record.body_func else {
-            return [0u8; 32];
+            return Ok([0u8; 32]);
         };
         let witness = record.witness;
         let ret = self.module.funcs[func as usize].ret;
         let module = self.module;
-        let Ok(closed) = self.envs.close(module, ret, witness) else {
-            return [0u8; 32];
-        };
-        self.envs.digest(module, class_hashes, closed)
+        let closed = self.envs.close(module, ret, witness).map_err(|_| {
+            SnapshotFail::Fault(
+                FaultCode::BoundaryLimit,
+                "the result type passed the closed type limit".to_string(),
+            )
+        })?;
+        Ok(self.envs.digest(module, class_hashes, closed))
     }
 
     /// Build the closed type table and the environment table of one
@@ -439,7 +451,10 @@ impl World<'_> {
     /// canonical walk: machine witness, frames, then objects, for each
     /// machine in ordinal order. A closed type takes its ordinal in
     /// post-order, so every child precedes its parent.
-    fn build_type_tables(&self, machines: &mut [ImageMachine]) -> (Vec<ClosedType>, Vec<TypeEnv>) {
+    fn build_type_tables(
+        &self,
+        machines: &mut [ImageMachine],
+    ) -> Result<(Vec<ClosedType>, Vec<TypeEnv>), SnapshotFail> {
         let mut env_map: HashMap<u32, u32> = HashMap::new();
         env_map.insert(0, 0);
         let mut world_envs: Vec<TypeEnvId> = vec![TypeEnvId::EMPTY];
@@ -466,43 +481,54 @@ impl World<'_> {
         let mut type_map: HashMap<u32, u32> = HashMap::new();
         let mut types: Vec<ClosedType> = Vec::new();
         for world in &world_envs {
-            let Some(entry) = self.envs.env(*world) else {
-                continue;
-            };
-            for ty in entry.types.clone() {
-                self.push_closed(ty, &mut type_map, &mut types);
+            let entry = self.envs.env(*world).ok_or_else(|| {
+                invalid_capture(format!("the capture names missing environment {}", world.0))
+            })?;
+            for ty in entry.types.iter().copied() {
+                self.push_closed(ty, &mut type_map, &mut types)?;
             }
         }
-        let envs: Vec<TypeEnv> = world_envs
-            .iter()
-            .map(|world| match self.envs.env(*world) {
-                Some(entry) => TypeEnv {
-                    types: entry
-                        .types
-                        .iter()
-                        .map(|ty| type_map.get(ty).copied().unwrap_or(0))
-                        .collect(),
-                    rows: entry.rows.clone(),
-                },
-                None => TypeEnv::default(),
+        let mut envs: Vec<TypeEnv> = Vec::with_capacity(world_envs.len());
+        for world in &world_envs {
+            let entry = self.envs.env(*world).ok_or_else(|| {
+                invalid_capture(format!("the capture names missing environment {}", world.0))
+            })?;
+            let mapped_types = entry
+                .types
+                .iter()
+                .map(|ty| {
+                    type_map.get(ty).copied().ok_or_else(|| {
+                        invalid_capture(format!("environment {} names unmapped type {ty}", world.0))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            envs.push(TypeEnv {
+                types: mapped_types,
+                rows: entry.rows.clone(),
+            });
+        }
+        let map_env = |world: u32| -> Result<u32, SnapshotFail> {
+            env_map.get(&world).copied().ok_or_else(|| {
+                invalid_capture(format!(
+                    "the capture has no image ordinal for environment {world}"
+                ))
             })
-            .collect();
-        let map_env = |world: u32| -> u32 { env_map.get(&world).copied().unwrap_or(0) };
+        };
         for machine in machines.iter_mut() {
-            machine.witness = map_env(machine.witness);
+            machine.witness = map_env(machine.witness)?;
             for frame in &mut machine.frames {
-                frame.env = map_env(frame.env);
+                frame.env = map_env(frame.env)?;
             }
             for entry in &mut machine.objects {
                 match &mut entry.object {
                     Object::Instance { env, .. } | Object::Closure { env, .. } => {
-                        *env = Witness(TypeEnvId(map_env(env.env().0)));
+                        *env = Witness(TypeEnvId(map_env(env.env().0)?));
                     }
                     _ => {}
                 }
             }
         }
-        (types, envs)
+        Ok((types, envs))
     }
 
     /// Give one closed type node and its whole subtree an image
@@ -511,18 +537,23 @@ impl World<'_> {
     /// The walk is iterative, so a deep type never grows the Rust
     /// stack. A child index of the world table is always smaller than
     /// its parent, so the walk terminates.
-    fn push_closed(&self, root: u32, map: &mut HashMap<u32, u32>, out: &mut Vec<ClosedType>) {
+    fn push_closed(
+        &self,
+        root: u32,
+        map: &mut HashMap<u32, u32>,
+        out: &mut Vec<ClosedType>,
+    ) -> Result<(), SnapshotFail> {
         if map.contains_key(&root) {
-            return;
+            return Ok(());
         }
         let mut stack: Vec<(u32, bool)> = vec![(root, false)];
         while let Some((id, expanded)) = stack.pop() {
             if map.contains_key(&id) {
                 continue;
             }
-            let Some(node) = self.envs.ty(id) else {
-                continue;
-            };
+            let node = self.envs.ty(id).ok_or_else(|| {
+                invalid_capture(format!("the capture names missing closed type {id}"))
+            })?;
             if !expanded {
                 stack.push((id, true));
                 for child in node.children().into_iter().rev() {
@@ -532,10 +563,18 @@ impl World<'_> {
                 }
                 continue;
             }
-            let mapped = node.remap(|child| map.get(&child).copied().unwrap_or(0));
+            for child in node.children() {
+                if !map.contains_key(&child) {
+                    return Err(invalid_capture(format!(
+                        "closed type {id} has unmapped child {child}"
+                    )));
+                }
+            }
+            let mapped = node.remap(|child| map[&child]);
             map.insert(id, out.len() as u32);
             out.push(mapped);
         }
+        Ok(())
     }
 
     /// Build one captured machine record.

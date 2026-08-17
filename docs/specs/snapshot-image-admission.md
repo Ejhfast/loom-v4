@@ -410,6 +410,10 @@ Trusted capture can construct `SnapshotImage` without a second full
 graph check. The stopped VM world already maintains the admission
 invariant.
 
+The trusted constructor checks closed-type and environment references
+before it creates `SnapshotImage`. This narrow check stays at the stage
+boundary.
+
 This path trusts the independent bytecode verifier, VM transitions,
 transfers, and native boundaries. Compiler provenance alone is not
 sufficient.
@@ -444,6 +448,9 @@ key that state by container hash and exact admission identity.
 
 Restore accepts `SnapshotImage`, never `Image`. It can trust structural
 resolution. It reads the type of no stored value.
+
+Restore maps admitted type and environment ordinals without a fallback.
+Only `SnapshotImage` construction checks those structural references.
 
 Restore still performs target-specific work:
 

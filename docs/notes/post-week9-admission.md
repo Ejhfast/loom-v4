@@ -31,6 +31,8 @@ edit. `SnapshotImage` is the admitted, immutable form.
 - `codec::from_trusted_capture` builds a `SnapshotImage` for
   `World::capture_snapshot`. It stays private to
   `crates/lm-vm/src/snapshot/`.
+- Trusted construction checks closed-type and environment references
+  once before it creates `SnapshotImage`.
 - `SnapshotImage::into_image` returns an editable copy. That copy needs
   `admit` again before a restore.
 

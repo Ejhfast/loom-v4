@@ -102,14 +102,13 @@ impl World<'_> {
         // place.
         self.machines[target as usize].config = clamp(&image.machines[0], ceiling);
         let gate = self.next_gate();
-        let outcome = self.fill_world(image, &ids, &env_map, restorer, gate);
-        if outcome.is_err() {
+        if let Err(error) = self.fill_world(image, &ids, &env_map, restorer, gate) {
             // Failure atomicity: drop every machine this call added,
             // return the reservations, and leave the target empty.
             self.machines.truncate(before);
             self.refund_children(restorer, charged);
             self.machines[target as usize] = Machine::empty_at(ceiling, Some(restorer), 0);
-            return Err(RestoreFail::LimitExceeded);
+            return Err(error);
         }
         Ok(target)
     }
@@ -121,12 +120,11 @@ impl World<'_> {
     /// map. The target cap governs, so an image can never grow the
     /// table of the target past its own limit.
     fn reintern_types(&mut self, image: &Image) -> Result<Vec<TypeEnvId>, RestoreFail> {
-        let module = self.module;
         let mut types: Vec<u32> = Vec::with_capacity(image.types.len());
         for node in &image.types {
             // Every child index names an earlier entry, which
-            // admission proved, so the map already holds it.
-            let mapped = node.remap(|child| types.get(child as usize).copied().unwrap_or(0));
+            // `SnapshotImage` construction proved, so the map holds it.
+            let mapped = node.remap(|child| types[child as usize]);
             let id = self
                 .envs
                 .intern(mapped)
@@ -136,16 +134,8 @@ impl World<'_> {
         let mut envs: Vec<TypeEnvId> = Vec::with_capacity(image.envs.len());
         for env in &image.envs {
             let entry = TypeEnv {
-                types: env
-                    .types
-                    .iter()
-                    .map(|ty| types.get(*ty as usize).copied().unwrap_or(0))
-                    .collect(),
-                rows: env
-                    .rows
-                    .iter()
-                    .map(|row| lm_bytecode::closed::canonical_row(module, row.clone()))
-                    .collect(),
+                types: env.types.iter().map(|ty| types[*ty as usize]).collect(),
+                rows: env.rows.clone(),
             };
             let id = self
                 .envs
@@ -179,7 +169,7 @@ impl World<'_> {
                 &refs,
                 restorer,
                 gate,
-            )?;
+            );
         }
         Ok(())
     }
@@ -204,7 +194,7 @@ impl World<'_> {
             .objects
             .iter()
             .map(|entry| relocate_env(&entry.object, env_map))
-            .collect::<Result<_, _>>()?;
+            .collect();
         let mut refs: Vec<ObjRef> = Vec::with_capacity(objects.len());
         for object in &objects {
             let initial = relocate_machines(object, ids);
@@ -249,36 +239,27 @@ impl World<'_> {
         refs: &[ObjRef],
         restorer: VmId,
         gate: u32,
-    ) -> Result<(), RestoreFail> {
+    ) {
         let value = |v: Value| -> Value {
             match v {
                 Value::Obj(r) => Value::Obj(refs[r.slot as usize]),
                 other => other,
             }
         };
-        let witness = env_map
-            .get(source.witness as usize)
-            .copied()
-            .ok_or(RestoreFail::InvalidImage)?;
+        let witness = env_map[source.witness as usize];
         let frames = source
             .frames
             .iter()
-            .map(|frame| {
-                let env = env_map
-                    .get(frame.env as usize)
-                    .copied()
-                    .ok_or(RestoreFail::InvalidImage)?;
-                Ok(Frame {
-                    func: frame.func,
-                    block: frame.block,
-                    ip: frame.ip,
-                    base_local: frame.base_local,
-                    base_operand: frame.base_operand,
-                    closure: frame.closure.map(|ordinal| refs[ordinal as usize]),
-                    env,
-                })
+            .map(|frame| Frame {
+                func: frame.func,
+                block: frame.block,
+                ip: frame.ip,
+                base_local: frame.base_local,
+                base_operand: frame.base_operand,
+                closure: frame.closure.map(|ordinal| refs[ordinal as usize]),
+                env: env_map[frame.env as usize],
             })
-            .collect::<Result<Vec<_>, RestoreFail>>()?;
+            .collect();
         let m = &mut self.machines[vm as usize];
         m.vm.parent = match source.parent {
             // An internal pass chain re-roots on the restored parent.
@@ -362,7 +343,6 @@ impl World<'_> {
                 generation: generations[target as usize],
             },
         });
-        Ok(())
     }
 
     /// Give back `count` child reservations of one machine.
@@ -401,19 +381,13 @@ fn clamp(source: &ImageMachine, ceiling: VmConfig) -> VmConfig {
 ///
 /// The image names an environment by its own ordinal, so the copy
 /// moves it to the index the target world interned.
-fn relocate_env(object: &Object, env_map: &[TypeEnvId]) -> Result<Object, RestoreFail> {
-    let moved = |env: &Witness| -> Result<Witness, RestoreFail> {
-        env_map
-            .get(env.env().0 as usize)
-            .copied()
-            .map(Witness)
-            .ok_or(RestoreFail::InvalidImage)
-    };
-    Ok(match object {
+fn relocate_env(object: &Object, env_map: &[TypeEnvId]) -> Object {
+    let moved = |env: &Witness| -> Witness { Witness(env_map[env.env().0 as usize]) };
+    match object {
         Object::Instance { class, fields, env } => Object::Instance {
             class: *class,
             fields: fields.clone(),
-            env: moved(env)?,
+            env: moved(env),
         },
         Object::Closure {
             func,
@@ -422,10 +396,10 @@ fn relocate_env(object: &Object, env_map: &[TypeEnvId]) -> Result<Object, Restor
         } => Object::Closure {
             func: *func,
             captures: captures.clone(),
-            env: moved(env)?,
+            env: moved(env),
         },
         other => other.clone(),
-    })
+    }
 }
 
 /// Rebuild one captured object with every machine ordinal relocated.

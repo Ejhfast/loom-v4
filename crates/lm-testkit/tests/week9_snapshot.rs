@@ -519,12 +519,12 @@ go()
 }
 
 // ---------------------------------------------------------------
-// Gate: whole-image structural verification occurs once on external
-// load, and the two paths stay separate.
+// Gate: whole-image admission occurs once on external load.
+// Trusted capture uses a separate path.
 // ---------------------------------------------------------------
 
 #[test]
-fn external_bytes_are_checked_once_and_the_trusted_path_checks_nothing() {
+fn external_bytes_run_admission_once_and_trusted_capture_skips_it() {
     let loaded = program(&asked_tree_source());
     let image = asked_tree_image(&loaded);
     let mut world = world_of(&loaded, &["Proc", "Vm", "Clock"]);
@@ -543,8 +543,7 @@ fn external_bytes_are_checked_once_and_the_trusted_path_checks_nothing() {
             .expect("the restore builds a world");
     }
     assert_eq!(world.snapshot_checks(), 1);
-    // The trusted in-process path is a different entry point, and it
-    // checks nothing.
+    // The trusted in-process path skips full admission.
     let mut fresh = world_of(&loaded, &["Proc", "Vm", "Clock"]);
     drive(&mut fresh);
     assert_eq!(fresh.snapshot_checks(), 0);

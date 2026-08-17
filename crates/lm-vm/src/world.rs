@@ -2081,15 +2081,6 @@ impl<'m> World<'m> {
                 );
                 return;
             }
-            Err(crate::snapshot::RestoreFail::InvalidImage) => {
-                self.fault_caller(
-                    vm,
-                    op,
-                    FaultCode::BoundaryViolation,
-                    "the admitted snapshot image is structurally invalid",
-                );
-                return;
-            }
         };
         self.reply_or_fault(vm, op, built);
     }
