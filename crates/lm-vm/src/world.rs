@@ -176,6 +176,11 @@ pub struct World<'m> {
     /// `lm snapshot save` writes it, so a program states in its own
     /// source which world a checkpoint holds.
     last_image: Option<crate::snapshot::SnapshotImage>,
+    /// The reusable buffers of the boundary type check.
+    ///
+    /// One world runs one check at a time, so one buffer set serves
+    /// every boundary. A scalar reply touches none of it.
+    check: crate::typecheck::BoundaryScratch,
 }
 
 /// The largest number of trusted images one world remembers.
@@ -264,6 +269,7 @@ impl<'m> World<'m> {
             checks: 0,
             trusted: Vec::new(),
             last_image: None,
+            check: crate::typecheck::BoundaryScratch::default(),
         }
     }
 
@@ -933,9 +939,96 @@ impl<'m> World<'m> {
         })
     }
 
+    /// The reply of one perform carries the type the instruction
+    /// states.
+    ///
+    /// The frame of the performing machine names the instruction, and
+    /// the instruction carries the reply type. The frame also names
+    /// the environment that closes it. Both inputs come from verified
+    /// code or from live execution, never from a snapshot container.
+    ///
+    /// This is the one funnel of every perform reply, so it covers the
+    /// terminal result of `run`, `step`, `drive`, and `done`, the
+    /// mailbox receive, the pending call reply, the spawn result, the
+    /// mock reply, and the restore result together.
+    fn check_reply(&mut self, vm: VmId, value: Value) -> Result<(), FaultCode> {
+        let module = self.module;
+        let machine = &self.machines[vm as usize];
+        let frame = machine.vm.frames.last().ok_or(FaultCode::MalformedState)?;
+        // The perform moved the counter past its own instruction, so
+        // the instruction before the counter is that perform.
+        let at = frame.ip.checked_sub(1).ok_or(FaultCode::MalformedState)?;
+        let instr = module
+            .funcs
+            .get(frame.func as usize)
+            .and_then(|code| code.blocks.get(frame.block as usize))
+            .and_then(|block| block.get(at as usize))
+            .ok_or(FaultCode::MalformedState)?;
+        let reply_ty = match instr {
+            lm_bytecode::Instr::Perform { reply_ty, .. }
+            | lm_bytecode::Instr::PerformValue { reply_ty, .. } => *reply_ty,
+            _ => return Err(FaultCode::MalformedState),
+        };
+        let env = frame.env;
+        crate::typecheck::check_boundary_value(
+            module,
+            &machine.vm.heap,
+            &self.envs,
+            &mut self.check,
+            value,
+            reply_ty,
+            env,
+        )
+    }
+
+    /// Every argument of one entry frame carries the parameter type
+    /// its function declares.
+    ///
+    /// A spawn and a `Vm.FromObject` both copy values into another
+    /// machine and load them as the first local slots of a frame. The
+    /// declared parameter types come from verified code, and the
+    /// closure states the environment its creator frame held.
+    fn check_frame_args(
+        &mut self,
+        vm: VmId,
+        func: u32,
+        env: lm_value::TypeEnvId,
+        args: &[Value],
+    ) -> Result<(), FaultCode> {
+        let module = self.module;
+        let code = module
+            .funcs
+            .get(func as usize)
+            .ok_or(FaultCode::MalformedState)?;
+        if code.params.len() != args.len() {
+            return Err(FaultCode::MalformedState);
+        }
+        let machine = &self.machines[vm as usize];
+        for (value, ty) in args.iter().zip(code.params.iter()) {
+            crate::typecheck::check_boundary_value(
+                module,
+                &machine.vm.heap,
+                &self.envs,
+                &mut self.check,
+                *value,
+                *ty,
+                env,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Install one reply value into a machine whose pending perform
     /// completes now.
     fn install_value_reply(&mut self, vm: VmId, value: Value) {
+        if let Err(code) = self.check_reply(vm, value) {
+            self.machines[vm as usize].set_fault(
+                code,
+                "the reply does not carry the type of its perform",
+                None,
+            );
+            return;
+        }
         let m = &mut self.machines[vm as usize];
         // A completed request closes the host attachment it opened.
         if let Some(pending) = &m.vm.pending {
@@ -1538,6 +1631,13 @@ impl<'m> World<'m> {
                         return;
                     }
                 };
+                // The arguments cross a machine boundary, so they meet
+                // the parameter types of the program before the frame
+                // loads them.
+                if let Err(code) = self.check_frame_args(target, func, env, &locals) {
+                    self.fault_caller(vm, op, code, "an argument does not carry its declared type");
+                    return;
+                }
                 self.machines[target as usize].load_frame(
                     self.module,
                     func,
@@ -2261,6 +2361,20 @@ impl<'m> World<'m> {
             m.start_body = Some(body);
             m.owner = Ownership::Scheduler;
             m.is_proc = true;
+        }
+        // The spawn arguments cross a machine boundary, so they meet
+        // the parameter types of the constructor before the frame
+        // loads them. A refusal rolls the whole call back.
+        if let Err(code) = self.check_frame_args(child, func, ctor_env, &ctor_args) {
+            self.machines.pop();
+            self.machines[vm as usize].children -= 1;
+            self.fault_caller(
+                vm,
+                op,
+                code,
+                "a spawn argument does not carry its declared type",
+            );
+            return;
         }
         self.machines[child as usize].load_frame(
             self.module,

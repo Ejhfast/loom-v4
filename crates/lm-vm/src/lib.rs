@@ -14,6 +14,7 @@ mod host;
 mod machine;
 mod resource;
 pub mod snapshot;
+mod typecheck;
 mod world;
 
 pub use host::{CoreCtor, Host, HostArg, HostStart, HostValue, NullHost, RecordingHost};
