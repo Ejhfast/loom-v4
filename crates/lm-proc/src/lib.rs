@@ -22,8 +22,10 @@ mod barrier;
 
 pub use barrier::{Barrier, BarrierError, BarrierReport};
 
-use lm_vm::{CompletionKey, Outcome, SliceExit, TaskKey, TaskStatus, WakeKey, World};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use lm_vm::{
+    CompletionKey, Outcome, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WakeKey, World,
+};
+use std::collections::{BTreeMap, VecDeque};
 
 /// The stack of one scheduler worker thread.
 ///
@@ -73,9 +75,10 @@ pub struct Scheduler {
     /// A ticket makes an old queue entry stay stale after requeue.
     /// One run has a `u64` fuel bound, so this counter cannot wrap.
     ready_ticket: u128,
-    tasks: BTreeMap<TaskKey, IndexedState>,
-    blocked: BTreeMap<WakeKey, BTreeSet<TaskKey>>,
+    tasks: TaskIndex,
+    blocked: WakeIndex,
     waiting: BTreeMap<CompletionKey, TaskKey>,
+    events: ScheduleEvents,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +87,167 @@ enum IndexedState {
     Running,
     Blocked(WakeKey),
     Waiting(CompletionKey),
+}
+
+/// Scheduler task states indexed by dense machine identifier.
+#[derive(Debug, Default)]
+struct TaskIndex {
+    slots: Vec<Option<IndexedTask>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IndexedTask {
+    key: TaskKey,
+    state: IndexedState,
+}
+
+/// Blocked tasks indexed by the dense target machine identifier.
+#[derive(Debug, Default)]
+struct WakeIndex {
+    slots: Vec<Vec<WakeBucket>>,
+}
+
+#[derive(Debug)]
+struct WakeBucket {
+    wake: WakeKey,
+    waiters: Waiters,
+}
+
+#[derive(Debug)]
+enum Waiters {
+    One(TaskKey),
+    Many(Vec<TaskKey>),
+}
+
+impl Waiters {
+    fn insert(&mut self, task: TaskKey) {
+        match self {
+            Waiters::One(held) if *held == task => {}
+            Waiters::One(held) => {
+                let mut tasks = vec![*held, task];
+                tasks.sort_unstable();
+                *self = Waiters::Many(tasks);
+            }
+            Waiters::Many(tasks) => {
+                if let Err(at) = tasks.binary_search(&task) {
+                    tasks.insert(at, task);
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, task: TaskKey) -> bool {
+        match self {
+            Waiters::One(held) => *held == task,
+            Waiters::Many(tasks) => {
+                let Ok(at) = tasks.binary_search(&task) else {
+                    return false;
+                };
+                tasks.remove(at);
+                if tasks.len() == 1 {
+                    *self = Waiters::One(tasks[0]);
+                }
+                false
+            }
+        }
+    }
+
+    fn for_each(self, mut visit: impl FnMut(TaskKey)) {
+        match self {
+            Waiters::One(task) => visit(task),
+            Waiters::Many(tasks) => tasks.into_iter().for_each(visit),
+        }
+    }
+}
+
+impl WakeIndex {
+    fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    fn insert(&mut self, wake: WakeKey, task: TaskKey) {
+        let slot = wake_task(wake).vm as usize;
+        if self.slots.len() <= slot {
+            self.slots.resize_with(slot + 1, Vec::new);
+        }
+        let buckets = &mut self.slots[slot];
+        match buckets.binary_search_by_key(&wake, |bucket| bucket.wake) {
+            Ok(at) => buckets[at].waiters.insert(task),
+            Err(at) => buckets.insert(
+                at,
+                WakeBucket {
+                    wake,
+                    waiters: Waiters::One(task),
+                },
+            ),
+        }
+    }
+
+    fn remove(&mut self, wake: WakeKey, task: TaskKey) {
+        let Some(buckets) = self.slots.get_mut(wake_task(wake).vm as usize) else {
+            return;
+        };
+        let Ok(at) = buckets.binary_search_by_key(&wake, |bucket| bucket.wake) else {
+            return;
+        };
+        if buckets[at].waiters.remove(task) {
+            buckets.remove(at);
+        }
+    }
+
+    fn take(&mut self, wake: WakeKey) -> Option<Waiters> {
+        let buckets = self.slots.get_mut(wake_task(wake).vm as usize)?;
+        let at = buckets
+            .binary_search_by_key(&wake, |bucket| bucket.wake)
+            .ok()?;
+        Some(buckets.remove(at).waiters)
+    }
+}
+
+fn wake_task(wake: WakeKey) -> TaskKey {
+    match wake {
+        WakeKey::Receive(task) | WakeKey::Send(task) | WakeKey::Done(task) => task,
+    }
+}
+
+impl TaskIndex {
+    fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    fn get(&self, key: &TaskKey) -> Option<&IndexedState> {
+        let task = self.slots.get(key.vm as usize)?.as_ref()?;
+        (task.key == *key).then_some(&task.state)
+    }
+
+    fn insert(&mut self, key: TaskKey, state: IndexedState) {
+        let slot = key.vm as usize;
+        if self.slots.len() <= slot {
+            self.slots.resize(slot + 1, None);
+        }
+        self.slots[slot] = Some(IndexedTask { key, state });
+    }
+
+    fn remove(&mut self, key: &TaskKey) {
+        let Some(slot) = self.slots.get_mut(key.vm as usize) else {
+            return;
+        };
+        if slot.as_ref().is_some_and(|task| task.key == *key) {
+            *slot = None;
+        }
+    }
+
+    fn values(&self) -> impl Iterator<Item = &IndexedState> {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.as_ref().map(|task| &task.state))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&TaskKey, &IndexedState)> {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.as_ref().map(|task| (&task.key, &task.state)))
+    }
 }
 
 impl Default for Scheduler {
@@ -107,9 +271,10 @@ impl Scheduler {
             stop: None,
             ready: VecDeque::new(),
             ready_ticket: 0,
-            tasks: BTreeMap::new(),
-            blocked: BTreeMap::new(),
+            tasks: TaskIndex::default(),
+            blocked: WakeIndex::default(),
             waiting: BTreeMap::new(),
+            events: ScheduleEvents::default(),
         }
     }
 
@@ -204,6 +369,7 @@ impl Scheduler {
         self.tasks.clear();
         self.blocked.clear();
         self.waiting.clear();
+        self.events.clear();
         for (task, status) in world.scheduler_seeds(include_root) {
             self.index_status(task, status);
         }
@@ -236,7 +402,7 @@ impl Scheduler {
         }
         self.remove_index(task);
         self.tasks.insert(task, IndexedState::Blocked(wake));
-        self.blocked.entry(wake).or_default().insert(task);
+        self.blocked.insert(wake, task);
     }
 
     fn wait(&mut self, task: TaskKey, completion: CompletionKey) {
@@ -251,13 +417,7 @@ impl Scheduler {
     fn remove_index(&mut self, task: TaskKey) {
         match self.tasks.get(&task).copied() {
             Some(IndexedState::Blocked(wake)) => {
-                let empty = self.blocked.get_mut(&wake).is_some_and(|tasks| {
-                    tasks.remove(&task);
-                    tasks.is_empty()
-                });
-                if empty {
-                    self.blocked.remove(&wake);
-                }
+                self.blocked.remove(wake, task);
             }
             Some(IndexedState::Waiting(completion)) => {
                 self.waiting.remove(&completion);
@@ -277,14 +437,17 @@ impl Scheduler {
 
     /// Apply changes produced by the last execution slice.
     fn consume_events(&mut self, world: &mut World<'_>) {
-        let events = world.take_schedule_events();
-        for task in events.removed {
+        if !world.swap_schedule_events(&mut self.events) {
+            return;
+        }
+        self.events.prepare_drain();
+        while let Some(task) = self.events.pop_removed() {
             self.drop_task(task);
         }
-        for wake in events.wakes {
+        while let Some(wake) = self.events.pop_wake() {
             self.wake(world, wake);
         }
-        for task in events.ready {
+        while let Some(task) = self.events.pop_ready() {
             if self.include_root || task.vm != world.root() {
                 self.refresh(world, task);
             }
@@ -293,18 +456,18 @@ impl Scheduler {
 
     /// Move indexed waiters whose wake condition changed.
     fn wake(&mut self, world: &World<'_>, wake: WakeKey) {
-        let Some(waiters) = self.blocked.remove(&wake) else {
+        let Some(waiters) = self.blocked.take(wake) else {
             return;
         };
-        for task in waiters {
+        waiters.for_each(|task| {
             if self.tasks.get(&task) != Some(&IndexedState::Blocked(wake)) {
-                continue;
+                return;
             }
             if world.task_status(task) == TaskStatus::Ready {
                 self.stats.unblocked = self.stats.unblocked.saturating_add(1);
             }
             self.refresh(world, task);
-        }
+        });
     }
 
     /// Poll every completion that is ready now.
@@ -478,6 +641,10 @@ pub fn drain_procs(world: &mut World<'_>) -> usize {
 mod tests {
     use super::*;
 
+    fn key(vm: u32, generation: u32) -> TaskKey {
+        TaskKey { vm, generation }
+    }
+
     #[test]
     fn a_requeue_invalidates_the_old_ready_entry() {
         let task = TaskKey {
@@ -492,5 +659,32 @@ mod tests {
         let new = scheduler.ready[1].1;
         assert_ne!(old, new);
         assert_eq!(scheduler.tasks.get(&task), Some(&IndexedState::Queued(new)));
+    }
+
+    #[test]
+    fn a_wake_keeps_waiters_in_task_order() {
+        let wake = WakeKey::Send(key(9, 2));
+        let mut index = WakeIndex::default();
+        index.insert(wake, key(3, 0));
+        index.insert(wake, key(1, 0));
+        index.insert(wake, key(2, 0));
+        index.insert(wake, key(2, 0));
+        let mut found = Vec::new();
+        index
+            .take(wake)
+            .expect("the wake has waiters")
+            .for_each(|task| found.push(task));
+        assert_eq!(found, vec![key(1, 0), key(2, 0), key(3, 0)]);
+    }
+
+    #[test]
+    fn wake_generations_share_one_dense_machine_slot() {
+        let old = WakeKey::Done(key(9, 2));
+        let new = WakeKey::Done(key(9, 3));
+        let mut index = WakeIndex::default();
+        index.insert(old, key(1, 0));
+        index.insert(new, key(2, 0));
+        assert!(index.take(old).is_some());
+        assert!(index.take(new).is_some());
     }
 }

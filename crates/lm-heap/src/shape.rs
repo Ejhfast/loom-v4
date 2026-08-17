@@ -15,25 +15,123 @@ use std::collections::TryReserveError;
 
 /// Logical byte cost of one object header.
 pub(crate) const HEADER_COST: usize = 32;
+/// The smallest logical byte cost of one heap object.
+pub const MIN_OBJECT_COST: usize = HEADER_COST;
 /// Logical byte cost of one stored value.
 pub(crate) const VALUE_COST: usize = 16;
 /// Logical byte cost of one map entry (key and value).
 pub(crate) const ENTRY_COST: usize = 2 * VALUE_COST;
 
-/// A derived lookup index for one map: key hash to entry indices.
+/// A derived open-addressed lookup index for one map.
 ///
 /// The index is a cache over the insertion-ordered entries: `built`
 /// counts the indexed prefix, and lookups extend it on demand.
 /// Iteration, display, equality, and digest semantics never read it.
 /// It holds no object references, so every graph mode skips it by
-/// design, and the logical entry cost covers it: the index grows by
-/// one bounded bucket entry per map entry.
+/// design. The logical entry cost covers one bounded slot per entry.
 #[derive(Debug, Clone, Default)]
 pub struct MapIndex {
     /// The number of entries the table already indexes.
     pub built: usize,
-    /// Key hash to the entry indices with that hash.
-    pub table: std::collections::HashMap<u64, Vec<u32>>,
+    slots: Vec<MapSlot>,
+}
+
+const EMPTY_MAP_ENTRY: u32 = u32::MAX;
+const MIN_MAP_SLOTS: usize = 8;
+
+#[derive(Debug, Clone, Copy)]
+struct MapSlot {
+    hash: u64,
+    entry: u32,
+}
+
+impl MapSlot {
+    const EMPTY: MapSlot = MapSlot {
+        hash: 0,
+        entry: EMPTY_MAP_ENTRY,
+    };
+}
+
+impl MapIndex {
+    /// Entry indices whose stored key has this hash.
+    pub fn candidates(&self, hash: u64) -> MapCandidates<'_> {
+        let remaining = self.slots.len();
+        let next = map_slot(hash, remaining);
+        MapCandidates {
+            slots: &self.slots,
+            hash,
+            next,
+            remaining,
+        }
+    }
+
+    /// Add one indexed entry.
+    pub fn insert(&mut self, hash: u64, entry: u32) {
+        debug_assert_eq!(entry as usize, self.built);
+        if self.slots.is_empty() || (self.built + 1) * 3 > self.slots.len() * 2 {
+            self.grow();
+        }
+        insert_map_slot(&mut self.slots, hash, entry);
+        self.built += 1;
+    }
+
+    fn grow(&mut self) {
+        let new_len = (self.slots.len() * 2).max(MIN_MAP_SLOTS);
+        let old = std::mem::replace(&mut self.slots, vec![MapSlot::EMPTY; new_len]);
+        for slot in old {
+            if slot.entry != EMPTY_MAP_ENTRY {
+                insert_map_slot(&mut self.slots, slot.hash, slot.entry);
+            }
+        }
+    }
+}
+
+/// Candidate entries from one open-addressed probe.
+pub struct MapCandidates<'a> {
+    slots: &'a [MapSlot],
+    hash: u64,
+    next: usize,
+    remaining: usize,
+}
+
+impl Iterator for MapCandidates<'_> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        while self.remaining > 0 {
+            let slot = self.slots[self.next];
+            self.next = (self.next + 1) & (self.slots.len() - 1);
+            self.remaining -= 1;
+            if slot.entry == EMPTY_MAP_ENTRY {
+                self.remaining = 0;
+                return None;
+            }
+            if slot.hash == self.hash {
+                return Some(slot.entry);
+            }
+        }
+        None
+    }
+}
+
+fn insert_map_slot(slots: &mut [MapSlot], hash: u64, entry: u32) {
+    let mut at = map_slot(hash, slots.len());
+    loop {
+        if slots[at].entry == EMPTY_MAP_ENTRY {
+            slots[at] = MapSlot { hash, entry };
+            return;
+        }
+        at = (at + 1) & (slots.len() - 1);
+    }
+}
+
+fn map_slot(hash: u64, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    debug_assert!(len.is_power_of_two());
+    let mixed = hash ^ hash.rotate_right(25) ^ hash.rotate_left(17);
+    mixed as usize & (len - 1)
 }
 
 impl PartialEq for MapIndex {
@@ -653,6 +751,31 @@ pub fn dump_shapes() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_map_index_keeps_all_equal_hash_candidates() {
+        let mut index = MapIndex::default();
+        index.insert(7, 0);
+        index.insert(7, 1);
+        index.insert(7, 2);
+        assert_eq!(index.candidates(7).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(index.candidates(8).next(), None);
+    }
+
+    #[test]
+    fn the_map_index_keeps_entries_across_growth() {
+        let mut index = MapIndex::default();
+        for entry in 0..100u32 {
+            index.insert(u64::from(entry) * 17, entry);
+        }
+        assert_eq!(index.built, 100);
+        for entry in 0..100u32 {
+            assert_eq!(
+                index.candidates(u64::from(entry) * 17).collect::<Vec<_>>(),
+                vec![entry]
+            );
+        }
+    }
 
     /// One sample object per shape, each container holding two
     /// distinct references so an order swap is visible.

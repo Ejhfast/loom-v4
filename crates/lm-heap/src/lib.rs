@@ -16,7 +16,9 @@ pub mod shape;
 use lm_value::ObjRef;
 #[cfg(test)]
 use lm_value::Value;
-pub use shape::{dump_shapes, BoundaryPolicy, MapIndex, Object, ShapeDesc, SHAPES};
+pub use shape::{
+    dump_shapes, BoundaryPolicy, MapIndex, Object, ShapeDesc, MIN_OBJECT_COST, SHAPES,
+};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -263,6 +265,22 @@ impl Heap {
         }
     }
 
+    /// Attach one shared ledger to an existing local heap.
+    ///
+    /// This operation charges all live storage once. It changes
+    /// nothing when the aggregate ledger cannot hold that storage.
+    pub fn attach_budget(&mut self, budget: HeapBudget) -> bool {
+        if self.budget.is_some() {
+            return true;
+        }
+        if budget.would_exceed(self.used_bytes, self.live) {
+            return false;
+        }
+        budget.charge(self.used_bytes, self.live);
+        self.budget = Some(budget);
+        true
+    }
+
     pub fn stats(&self) -> HeapStats {
         HeapStats {
             live: self.live,
@@ -328,6 +346,57 @@ impl Heap {
         &mut self.pages[slot as usize / PAGE_SLOTS][slot as usize % PAGE_SLOTS]
     }
 
+    /// Read two distinct entries through one mutable heap borrow.
+    fn two_entries_mut(&mut self, a: u32, b: u32) -> Option<(&mut Entry, &mut Entry)> {
+        if a == b {
+            return None;
+        }
+        let (a_page, a_slot) = (a as usize / PAGE_SLOTS, a as usize % PAGE_SLOTS);
+        let (b_page, b_slot) = (b as usize / PAGE_SLOTS, b as usize % PAGE_SLOTS);
+        if a_page == b_page {
+            let page = self.pages.get_mut(a_page)?;
+            if a_slot < b_slot {
+                let (left, right) = page.split_at_mut(b_slot);
+                return Some((left.get_mut(a_slot)?, right.first_mut()?));
+            }
+            let (left, right) = page.split_at_mut(a_slot);
+            return Some((right.first_mut()?, left.get_mut(b_slot)?));
+        }
+        if a_page < b_page {
+            let (left, right) = self.pages.split_at_mut(b_page);
+            return Some((
+                left.get_mut(a_page)?.get_mut(a_slot)?,
+                right.first_mut()?.get_mut(b_slot)?,
+            ));
+        }
+        let (left, right) = self.pages.split_at_mut(a_page);
+        Some((
+            right.first_mut()?.get_mut(a_slot)?,
+            left.get_mut(b_page)?.get_mut(b_slot)?,
+        ))
+    }
+
+    /// Append one string object to one distinct string builder.
+    /// The caller reserves growth and recharges the builder.
+    pub fn append_string(&mut self, builder: ObjRef, source: ObjRef) -> bool {
+        let Some((builder_entry, source_entry)) = self.two_entries_mut(builder.slot, source.slot)
+        else {
+            return false;
+        };
+        if builder_entry.generation != builder.generation
+            || source_entry.generation != source.generation
+        {
+            return false;
+        }
+        match (&mut builder_entry.live, &source_entry.live) {
+            (Some((_, Object::StrBuilder(builder))), Some((_, Object::Str(source)))) => {
+                builder.push_str(source);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Allocate one object. The caller must check the cap first with
     /// `would_exceed` and run a collection when needed.
     pub fn alloc(&mut self, object: Object) -> ObjRef {
@@ -341,35 +410,40 @@ impl Heap {
         if let Some(budget) = &self.budget {
             budget.charge(cost, 1);
         }
-        let slot = match self.free.pop() {
-            Some(slot) => slot,
-            None => {
-                let need_page = self
-                    .pages
-                    .last()
-                    .map(|p| p.len() == PAGE_SLOTS)
-                    .unwrap_or(true);
-                if need_page {
-                    self.pages.push(Vec::with_capacity(PAGE_SLOTS));
-                }
-                let page_idx = self.pages.len() - 1;
-                let page = &mut self.pages[page_idx];
-                let slot = page_idx * PAGE_SLOTS + page.len();
-                if self.generations.len() <= slot {
-                    self.generations.resize(slot + 1, 0);
-                }
-                page.push(Entry {
-                    generation: self.generations[slot],
-                    live: None,
-                });
-                slot as u32
-            }
+        if let Some(slot) = self.free.pop() {
+            let entry = self.entry_mut(slot);
+            debug_assert!(entry.live.is_none());
+            let generation = entry.generation;
+            entry.live = Some((header, object));
+            return ObjRef { slot, generation };
+        }
+
+        let need_page = self
+            .pages
+            .last()
+            .map(|page| page.len() == PAGE_SLOTS)
+            .unwrap_or(true);
+        if need_page {
+            self.pages.push(Vec::with_capacity(PAGE_SLOTS));
+        }
+        let page_idx = self.pages.len() - 1;
+        let page = &mut self.pages[page_idx];
+        let slot = page_idx * PAGE_SLOTS + page.len();
+        debug_assert!(slot <= self.generations.len());
+        let generation = if slot == self.generations.len() {
+            self.generations.push(0);
+            0
+        } else {
+            self.generations[slot]
         };
-        let entry = self.entry_mut(slot);
-        debug_assert!(entry.live.is_none());
-        let generation = entry.generation;
-        entry.live = Some((header, object));
-        ObjRef { slot, generation }
+        page.push(Entry {
+            generation,
+            live: Some((header, object)),
+        });
+        ObjRef {
+            slot: slot as u32,
+            generation,
+        }
     }
 
     /// Allocate one object with a fallible table reservation.
@@ -420,8 +494,13 @@ impl Heap {
 
     /// Read an object. The reference must be live and current.
     pub fn get(&self, r: ObjRef) -> &Object {
-        self.try_get(r)
-            .expect("object reference is live and generation-current")
+        let entry = self.entry(r.slot);
+        assert_eq!(entry.generation, r.generation, "stale object reference");
+        entry
+            .live
+            .as_ref()
+            .map(|(_, object)| object)
+            .expect("object reference is live")
     }
 
     /// Write access to an object. The caller must check the frozen bit
@@ -732,6 +811,18 @@ mod tests {
             }
         );
         assert_eq!(heap.live_count(), 2);
+    }
+
+    #[test]
+    fn a_builder_appends_a_string_without_changing_the_source() {
+        let mut heap = Heap::new(1 << 20);
+        let builder = heap.alloc(Object::StrBuilder("a".to_string()));
+        let source = heap.alloc(str_obj("bc"));
+
+        assert!(heap.append_string(builder, source));
+        heap.recharge(builder);
+        assert_eq!(heap.get(builder), &Object::StrBuilder("abc".to_string()));
+        assert_eq!(heap.get(source), &str_obj("bc"));
     }
 
     #[test]

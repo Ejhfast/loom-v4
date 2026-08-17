@@ -184,7 +184,7 @@ pub struct World<'m> {
     suspended: std::collections::BTreeMap<VmId, SuspendedStack>,
     /// Scheduler-owned procs that have not reached a terminal state.
     scheduler_procs: ActiveProcs,
-    /// Coalesced task and wake changes for `lm-proc`.
+    /// Batched task and wake changes for `lm-proc`.
     schedule_events: ScheduleEvents,
     /// Ready host replies that another task does not await.
     host_completions: std::collections::BTreeMap<CompletionKey, HostCompletion>,
@@ -201,6 +201,11 @@ pub struct World<'m> {
     config: VmConfig,
     /// Aggregate limits and current resource charges.
     budget: WorldBudget,
+    /// True when each machine heap charges the aggregate ledger.
+    ///
+    /// One machine needs only its local counters. The world attaches
+    /// the shared ledger before it creates another machine.
+    heap_shared: bool,
     /// The proc trace, when tracing is on.
     trace: Option<Vec<TraceEvent>>,
     /// The monotone mailbox cut marker of this world.
@@ -328,13 +333,19 @@ impl<'m> World<'m> {
     ) -> World<'m> {
         let module = loaded.module();
         let budget = WorldBudget::new(limits);
-        let mut root = Machine::empty_with_budgets(
-            config,
-            None,
-            0,
-            budget.heap.clone(),
-            budget.resources.clone(),
-        );
+        let local_heap_is_aggregate = config.heap_bytes <= budget.limits.max_heap_bytes
+            && config.heap_bytes / lm_heap::MIN_OBJECT_COST <= budget.limits.max_heap_objects;
+        let mut root = if local_heap_is_aggregate {
+            Machine::empty_with_resource_budget(config, None, 0, budget.resources.clone())
+        } else {
+            Machine::empty_with_budgets(
+                config,
+                None,
+                0,
+                budget.heap.clone(),
+                budget.resources.clone(),
+            )
+        };
         // The entry function of a program takes no type argument, so
         // the root frame carries the empty environment.
         root.load_frame(
@@ -360,6 +371,7 @@ impl<'m> World<'m> {
             host,
             config,
             budget,
+            heap_shared: !local_heap_is_aggregate,
             trace: None,
             cut: 0,
             gate: 0,
@@ -468,12 +480,26 @@ impl<'m> World<'m> {
 
     /// The live heap bytes of all machines.
     pub fn world_heap_bytes(&self) -> usize {
-        self.budget.heap.used_bytes()
+        if self.heap_shared {
+            self.budget.heap.used_bytes()
+        } else {
+            self.machines
+                .iter()
+                .map(|machine| machine.vm.heap.used_bytes())
+                .sum()
+        }
     }
 
     /// The live heap objects of all machines.
     pub fn world_heap_objects(&self) -> usize {
-        self.budget.heap.live_objects()
+        if self.heap_shared {
+            self.budget.heap.live_objects()
+        } else {
+            self.machines
+                .iter()
+                .map(|machine| machine.vm.heap.live_count())
+                .sum()
+        }
     }
 
     /// The live host resources of all machines.
@@ -881,33 +907,23 @@ impl<'m> World<'m> {
                     }
                     let module = self.module;
                     let dispatch = self.dispatch;
-                    let envs = &mut self.envs;
-                    let world_fuel = &mut self.budget.fuel;
-                    let machine = &mut self.machines[act.vm as usize];
-                    let (outcome, retired) = if let Some(remaining) = quantum {
-                        let limit = if act.mode == StopMode::OneStep {
-                            1
-                        } else {
-                            remaining
-                        };
-                        let (outcome, retired) =
-                            machine.exec_for_quantum(module, dispatch, envs, world_fuel, limit);
-                        (outcome, retired)
-                    } else if act.mode == StopMode::OneStep {
-                        (
-                            machine
-                                .exec_instr(module, dispatch, envs, world_fuel)
-                                .map(Some),
-                            1,
-                        )
-                    } else {
-                        (
-                            machine
-                                .exec_until_boundary(module, dispatch, envs, world_fuel)
-                                .map(Some),
-                            1,
-                        )
+                    if self.budget.fuel == 0 {
+                        self.machines[act.vm as usize].set_fault(FaultCode::OutOfFuel, "", None);
+                        continue;
+                    }
+                    let requested = match quantum {
+                        Some(_) if act.mode == StopMode::OneStep => 1,
+                        Some(remaining) => remaining,
+                        None if act.mode == StopMode::OneStep => 1,
+                        None => u32::MAX,
                     };
+                    let available = self.budget.fuel.min(u64::from(u32::MAX)) as u32;
+                    let limit = requested.min(available);
+                    let envs = &mut self.envs;
+                    let machine = &mut self.machines[act.vm as usize];
+                    let (outcome, retired) =
+                        machine.exec_for_quantum(module, dispatch, envs, limit);
+                    self.budget.fuel -= u64::from(retired);
                     if let Some(remaining) = &mut quantum {
                         *remaining = remaining.saturating_sub(retired);
                     }
@@ -1710,6 +1726,15 @@ impl<'m> World<'m> {
 
     /// Run one mock handler in an ephemeral machine on the same loop.
     fn start_mock(&mut self, stack: &mut Vec<Activation>, vm: VmId, owner: VmId, closure: ObjRef) {
+        if !self.share_heap_budget() {
+            let op = self.pending_op(vm);
+            self.machines[vm as usize].set_fault(
+                FaultCode::HeapLimit,
+                "the aggregate heap cannot hold the root machine",
+                op,
+            );
+            return;
+        }
         let mock_config = VmConfig {
             fuel: MOCK_FUEL,
             ..self.config
@@ -1845,6 +1870,9 @@ impl<'m> World<'m> {
     /// The local budget bounds tower depth per branch. `WorldBudget`
     /// bounds the total machine count and shared resources.
     pub(crate) fn reserve_child(&mut self, parent: VmId) -> Option<VmConfig> {
+        if !self.share_heap_budget() {
+            return None;
+        }
         if !self.has_machine_room(1) || self.machines.try_reserve(1).is_err() {
             return None;
         }
@@ -1869,6 +1897,25 @@ impl<'m> World<'m> {
             .is_some_and(|total| total <= self.budget.limits.max_machines as usize)
     }
 
+    /// Attach the aggregate heap ledger before a second machine exists.
+    fn share_heap_budget(&mut self) -> bool {
+        if self.heap_shared {
+            return true;
+        }
+        if self.machines.len() != 1 {
+            return false;
+        }
+        if !self.machines[0]
+            .vm
+            .heap
+            .attach_budget(self.budget.heap.clone())
+        {
+            return false;
+        }
+        self.heap_shared = true;
+        true
+    }
+
     /// Create one detached machine with the world ledgers.
     pub(crate) fn empty_machine(
         &self,
@@ -1876,6 +1923,7 @@ impl<'m> World<'m> {
         parent: Option<VmId>,
         generation: u32,
     ) -> Machine {
+        debug_assert!(self.heap_shared);
         Machine::empty_with_budgets(
             config,
             parent,
@@ -2791,6 +2839,9 @@ impl<'m> World<'m> {
         if src != dst {
             return self.transfer(src, dst, value);
         }
+        if let Some(result) = scalar_copy(value) {
+            return result;
+        }
         let limits = self.machines[dst as usize].config.graph;
         // The heap roots are read before the heap is borrowed: a
         // collection during the copy needs them.
@@ -3679,21 +3730,25 @@ impl<'m> World<'m> {
         out
     }
 
-    /// Take all coalesced changes since the last scheduler call.
-    pub fn take_schedule_events(&mut self) -> ScheduleEvents {
-        std::mem::take(&mut self.schedule_events)
+    /// Swap pending changes into a reusable scheduler buffer.
+    pub fn swap_schedule_events(&mut self, events: &mut ScheduleEvents) -> bool {
+        if self.schedule_events.is_empty() {
+            return false;
+        }
+        std::mem::swap(&mut self.schedule_events, events);
+        true
     }
 
     fn emit_ready(&mut self, key: TaskKey) {
-        self.schedule_events.ready.insert(key);
+        self.schedule_events.push_ready(key);
     }
 
     fn emit_removed(&mut self, key: TaskKey) {
-        self.schedule_events.removed.insert(key);
+        self.schedule_events.push_removed(key);
     }
 
     fn emit_wake(&mut self, wake: WakeKey) {
-        self.schedule_events.wakes.insert(wake);
+        self.schedule_events.push_wake(wake);
     }
 
     pub(crate) fn prepare_scheduler_procs(
@@ -3721,7 +3776,6 @@ impl<'m> World<'m> {
 
     fn deactivate_scheduler_proc(&mut self, key: TaskKey) {
         if self.scheduler_procs.remove(key) {
-            self.schedule_events.ready.remove(&key);
             self.emit_removed(key);
         }
     }
@@ -3990,7 +4044,6 @@ impl<'m> World<'m> {
             return;
         }
         if barrier.is_some() {
-            self.schedule_events.ready.remove(&key);
             self.emit_removed(key);
         } else {
             self.emit_ready(key);
@@ -4355,6 +4408,9 @@ impl<'m> World<'m> {
         dst: VmId,
         value: Value,
     ) -> Result<Value, FaultCode> {
+        if let Some(result) = scalar_copy(value) {
+            return result;
+        }
         // A restored world can name one machine on both sides of a
         // crossing. The rule is the same rule, so the call runs the
         // one-heap copy there and never splits one machine in two.
@@ -4375,6 +4431,16 @@ impl<'m> World<'m> {
             value,
             &limits,
         )
+    }
+}
+
+/// Copy one value that needs no heap traversal.
+#[inline]
+fn scalar_copy(value: Value) -> Option<Result<Value, FaultCode>> {
+    match value {
+        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Op(_) => Some(Ok(value)),
+        Value::Uninit => Some(Err(FaultCode::BoundaryViolation)),
+        Value::Obj(_) => None,
     }
 }
 
@@ -4865,6 +4931,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scalar_boundary_copies_need_no_heap_graph() {
+        assert_eq!(scalar_copy(Value::Int(7)), Some(Ok(Value::Int(7))));
+        assert_eq!(
+            scalar_copy(Value::Uninit),
+            Some(Err(FaultCode::BoundaryViolation))
+        );
+        assert_eq!(
+            scalar_copy(Value::Obj(ObjRef {
+                slot: 3,
+                generation: 1,
+            })),
+            None
+        );
+    }
+
     /// The self send applies the shape rule, so it accepts exactly
     /// what a cross-heap copy accepts.
     ///
@@ -4875,9 +4957,9 @@ mod tests {
     fn a_self_send_rejects_a_holder_local_value() {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
-        world
-            .machines
-            .push(Machine::empty(VmConfig::default(), None));
+        assert!(world.share_heap_budget());
+        let mock = world.empty_machine(VmConfig::default(), None, 0);
+        world.machines.push(mock);
         let handle = world.machines[0]
             .alloc(Object::NativeVm { vm: 1 })
             .expect("the handle allocates");
@@ -4958,9 +5040,9 @@ mod tests {
     fn a_retired_slot_takes_a_new_generation() {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
-        world
-            .machines
-            .push(Machine::empty(VmConfig::default(), None));
+        assert!(world.share_heap_budget());
+        let mock = world.empty_machine(VmConfig::default(), None, 0);
+        world.machines.push(mock);
         assert_eq!(world.generation_of(1), 0);
         world.retire_mock(1);
         assert_eq!(world.generation_of(1), 1);
@@ -5043,6 +5125,32 @@ mod tests {
             Err(FaultCode::HeapLimit)
         );
         assert_eq!(world.world_heap_objects(), 1);
+    }
+
+    #[test]
+    fn a_second_machine_attaches_the_aggregate_heap_ledger() {
+        let loaded = trivial_loaded();
+        let object = Object::Str("one".to_string());
+        let bytes = object.cost();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+
+        assert!(!world.heap_shared);
+        world.machines[0]
+            .alloc(object.clone())
+            .expect("the root allocation fits");
+        assert_eq!(world.world_heap_bytes(), bytes);
+        assert_eq!(world.world_heap_objects(), 1);
+
+        let child = world.new_child(0).expect("the child record fits");
+        assert!(world.heap_shared);
+        assert_eq!(world.world_heap_bytes(), bytes);
+        assert_eq!(world.world_heap_objects(), 1);
+
+        world.machines[child as usize]
+            .alloc(object)
+            .expect("the child allocation fits");
+        assert_eq!(world.world_heap_bytes(), bytes * 2);
+        assert_eq!(world.world_heap_objects(), 2);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 use crate::resource::{ResourceBudget, ResourceRegistry};
 use crate::{FaultCode, VmConfig};
 use lm_bytecode::closed::{TypeEnvFull, TypeEnvs};
-use lm_bytecode::{BcType, Instr, Module};
+use lm_bytecode::{Instr, Module};
 use lm_heap::{Heap, HeapBudget, MapIndex, Object};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 use std::hash::{Hash, Hasher};
@@ -209,47 +209,6 @@ impl PolicyTable {
     }
 }
 
-/// The type environment of one generic virtual call.
-///
-/// A method of a generic class binds the class arguments first and its
-/// own arguments after them. The receiver object carries its class
-/// arguments, and the declared type of the `self` parameter names the
-/// class that declared the method, so the walk needs no side table.
-fn method_env(
-    module: &Module,
-    envs: &mut TypeEnvs,
-    callee: u32,
-    class: u32,
-    class_env: TypeEnvId,
-    parent: TypeEnvId,
-    app: u32,
-) -> Result<TypeEnvId, TypeEnvFull> {
-    let own = envs.derive(module, parent, app)?;
-    let body = &module.funcs[callee as usize];
-    if body.type_params as usize == envs.env(own).map(|e| e.types.len()).unwrap_or(0) {
-        // The method owner takes no type argument, so the application
-        // of the call site is the whole environment.
-        return Ok(own);
-    }
-    let owner = match body.params.first().map(|p| &module.types[*p as usize]) {
-        Some(BcType::Class(c)) | Some(BcType::Inst(c, _)) => *c,
-        _ => return Ok(own),
-    };
-    let args: Vec<u32> = envs
-        .env(class_env)
-        .map(|e| e.types.clone())
-        .unwrap_or_default();
-    let mut types = envs
-        .ancestor_args(module, class, &args, owner)
-        .unwrap_or_default();
-    let (own_types, own_rows) = envs
-        .env(own)
-        .map(|e| (e.types.clone(), e.rows.clone()))
-        .unwrap_or_default();
-    types.extend(own_types);
-    envs.env_of(types, own_rows)
-}
-
 /// One explicit VM frame.
 pub struct Frame {
     pub func: u32,
@@ -420,6 +379,25 @@ impl Machine {
             parent,
             generation,
             Some(heap_budget),
+            Some(resource_budget),
+        )
+    }
+
+    /// Create an empty machine with local heap accounting.
+    ///
+    /// The resource ledger remains shared. The world attaches the
+    /// heap ledger before it creates a second machine.
+    pub(crate) fn empty_with_resource_budget(
+        config: VmConfig,
+        parent: Option<VmId>,
+        generation: u32,
+        resource_budget: ResourceBudget,
+    ) -> Machine {
+        Machine::empty_with_optional_budgets(
+            config,
+            parent,
+            generation,
+            None,
             Some(resource_budget),
         )
     }
@@ -797,27 +775,19 @@ impl Machine {
             }
             if let Object::Map { index, .. } = self.vm.heap.get_mut(r) {
                 for (offset, hash) in hashes.into_iter().enumerate() {
-                    index
-                        .table
-                        .entry(hash)
-                        .or_default()
-                        .push((built + offset) as u32);
+                    index.insert(hash, (built + offset) as u32);
                 }
-                index.built = len;
             }
         }
         let hash = self.key_hash(key);
-        let candidates: Vec<u32> = match self.vm.heap.get(r) {
-            Object::Map { index, .. } => index.table.get(&hash).cloned().unwrap_or_default(),
+        let (entries, candidates) = match self.vm.heap.get(r) {
+            Object::Map { entries, index } => (entries, index.candidates(hash)),
             _ => return Err(FaultCode::TypeMismatch),
         };
         for i in candidates {
-            let k = match self.vm.heap.get(r) {
-                Object::Map { entries, .. } => match entries.get(i as usize) {
-                    Some(entry) => entry.0,
-                    None => continue,
-                },
-                _ => return Err(FaultCode::TypeMismatch),
+            let k = match entries.get(i as usize) {
+                Some(entry) => entry.0,
+                None => continue,
             };
             if self.key_eq(k, key) {
                 return Ok(Some(i as usize));
@@ -887,8 +857,10 @@ impl Machine {
         };
         let target = method_of(dispatch, class, selector)?;
         let parent = self.frame_env();
-        let env =
-            method_env(module, envs, target, class, class_env, parent, app).map_err(env_fault)?;
+        let own = envs.derive(module, parent, app).map_err(env_fault)?;
+        let env = envs
+            .method_env(module, target, class, class_env, own)
+            .map_err(env_fault)?;
         self.push_frame(module, target, argc + 1, None, env)
     }
 
@@ -926,28 +898,21 @@ impl Machine {
     /// monomorphic instruction never reads it, so a monomorphic
     /// program performs no type work.
     #[inline(always)]
-    pub fn exec_instr(
+    fn exec_instr(
         &mut self,
         module: &Module,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
-        world_fuel: &mut u64,
     ) -> Result<ExecOutcome, FaultCode> {
-        if self.vm.fuel == 0 || *world_fuel == 0 {
+        if self.vm.fuel == 0 {
             return Err(FaultCode::OutOfFuel);
         }
         self.vm.fuel -= 1;
-        *world_fuel -= 1;
-        // The frame states the function, the block, and the program
-        // counter. A restored machine states all three, so the fetch
-        // tests each one instead of indexing.
+        // SnapshotImage construction proves that each saved code
+        // position resolves. Verified control flow preserves it.
         let frame = self.vm.frames.last().ok_or(BAD_STATE)?;
-        let instr = *module
-            .funcs
-            .get(frame.func as usize)
-            .and_then(|func| func.blocks.get(frame.block as usize))
-            .and_then(|block| block.get(frame.ip as usize))
-            .ok_or(BAD_STATE)?;
+        let instr =
+            module.funcs[frame.func as usize].blocks[frame.block as usize][frame.ip as usize];
         self.vm.frames.last_mut().ok_or(BAD_STATE)?.ip += 1;
         match instr {
             Instr::ConstUnit => self.push(Value::Unit)?,
@@ -964,7 +929,7 @@ impl Machine {
                 let value = match self.vm.literals[idx] {
                     Some(r) => Value::Obj(r),
                     None => {
-                        let text = module.strings.get(idx).ok_or(BAD_STATE)?.clone();
+                        let text = module.strings[idx].clone();
                         let value = self.alloc(Object::Str(text))?;
                         if let Value::Obj(r) = value {
                             self.vm.literals[idx] = Some(r);
@@ -991,22 +956,28 @@ impl Machine {
             Instr::Sub => self.int_binary(i64::checked_sub)?,
             Instr::Mul => self.int_binary(i64::checked_mul)?,
             Instr::Div => {
-                let b = self.pop_int()?;
-                let a = self.pop_int()?;
+                let (at, a, b) = self.int_pair()?;
                 if b == 0 {
+                    self.vm.operands.truncate(at);
                     return Err(FaultCode::DivideByZero);
                 }
-                let value = a.checked_div(b).ok_or(FaultCode::IntegerOverflow)?;
-                self.push(Value::Int(value))?;
+                let Some(value) = a.checked_div(b) else {
+                    self.vm.operands.truncate(at);
+                    return Err(FaultCode::IntegerOverflow);
+                };
+                self.replace_pair(at, Value::Int(value));
             }
             Instr::Rem => {
-                let b = self.pop_int()?;
-                let a = self.pop_int()?;
+                let (at, a, b) = self.int_pair()?;
                 if b == 0 {
+                    self.vm.operands.truncate(at);
                     return Err(FaultCode::DivideByZero);
                 }
-                let value = a.checked_rem(b).ok_or(FaultCode::IntegerOverflow)?;
-                self.push(Value::Int(value))?;
+                let Some(value) = a.checked_rem(b) else {
+                    self.vm.operands.truncate(at);
+                    return Err(FaultCode::IntegerOverflow);
+                };
+                self.replace_pair(at, Value::Int(value));
             }
             Instr::Neg => {
                 let a = self.pop_int()?;
@@ -1048,12 +1019,7 @@ impl Machine {
             // A direct call of a non-generic function copies the empty
             // environment, so it allocates nothing and reads no table.
             Instr::Call(callee) => {
-                let argc = module
-                    .funcs
-                    .get(callee as usize)
-                    .ok_or(BAD_STATE)?
-                    .params
-                    .len();
+                let argc = module.funcs[callee as usize].params.len();
                 self.push_frame(module, callee, argc, None, TypeEnvId::EMPTY)?;
             }
             // A generic call derives one environment from the caller
@@ -1137,12 +1103,7 @@ impl Machine {
             // A plain class takes no type argument, so the instance
             // records the empty environment and allocates nothing.
             Instr::New(class) => {
-                let field_count = module
-                    .classes
-                    .get(class as usize)
-                    .ok_or(BAD_STATE)?
-                    .fields
-                    .len();
+                let field_count = module.classes[class as usize].fields.len();
                 let value = self.alloc(Object::Instance {
                     class,
                     fields: vec![Value::Uninit; field_count],
@@ -1270,25 +1231,17 @@ impl Machine {
                 for pair in flat.chunks_exact(2) {
                     let (key, value) = (pair[0], pair[1]);
                     let hash = self.key_hash(key);
-                    let hit = index.table.get(&hash).and_then(|candidates| {
-                        candidates
-                            .iter()
-                            .copied()
-                            .find(|i| self.key_eq(entries[*i as usize].0, key))
-                    });
+                    let hit = index
+                        .candidates(hash)
+                        .find(|i| self.key_eq(entries[*i as usize].0, key));
                     match hit {
                         Some(pos) => entries[pos as usize].1 = value,
                         None => {
-                            index
-                                .table
-                                .entry(hash)
-                                .or_default()
-                                .push(entries.len() as u32);
+                            index.insert(hash, entries.len() as u32);
                             entries.push((key, value));
                         }
                     }
                 }
-                index.built = entries.len();
                 let value = self.alloc(Object::Map { entries, index })?;
                 self.push(value)?;
             }
@@ -1353,17 +1306,22 @@ impl Machine {
                 let s = self.pop_obj()?;
                 let sb = self.pop_obj()?;
                 self.frozen_guard(sb)?;
-                let text = match self.vm.heap.get(s) {
-                    Object::Str(text) => text.clone(),
+                let len = match self.vm.heap.get(s) {
+                    Object::Str(text) => text.len(),
                     _ => return Err(BAD_TYPE),
                 };
-                self.sb_append(sb, &text)?;
+                self.reserve(len, &[Value::Obj(sb), Value::Obj(s)])?;
+                if !self.vm.heap.append_string(sb, s) {
+                    return Err(BAD_TYPE);
+                }
+                self.vm.heap.recharge(sb);
+                self.push(Value::Obj(sb))?;
             }
             Instr::SbAppendInt => {
                 let v = self.pop_int()?;
                 let sb = self.pop_obj()?;
                 self.frozen_guard(sb)?;
-                self.sb_append(sb, &v.to_string())?;
+                self.sb_append_int(sb, v)?;
             }
             Instr::SbAppendBool => {
                 let v = self.pop_bool()?;
@@ -1531,22 +1489,6 @@ impl Machine {
         Ok(ExecOutcome::Continue)
     }
 
-    /// Execute until an instruction reaches the world boundary.
-    pub fn exec_until_boundary(
-        &mut self,
-        module: &Module,
-        dispatch: &[crate::DispatchRow],
-        envs: &mut TypeEnvs,
-        world_fuel: &mut u64,
-    ) -> Result<ExecOutcome, FaultCode> {
-        loop {
-            match self.exec_instr(module, dispatch, envs, world_fuel) {
-                Ok(ExecOutcome::Continue) => {}
-                outcome => return outcome,
-            }
-        }
-    }
-
     /// Execute until a boundary or an instruction count expires.
     ///
     /// `None` means the count expired after `retired` instructions.
@@ -1556,22 +1498,30 @@ impl Machine {
         module: &Module,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
-        world_fuel: &mut u64,
         limit: u32,
     ) -> (Result<Option<ExecOutcome>, FaultCode>, u32) {
         debug_assert!(limit > 0);
-        let mut retired = 0u32;
-        while retired < limit {
-            let before = *world_fuel;
-            let outcome = self.exec_instr(module, dispatch, envs, world_fuel);
-            retired += u32::from(*world_fuel < before);
-            match outcome {
+        let original_fuel = self.vm.fuel;
+        let batch_fuel = original_fuel.min(u64::from(limit));
+        let held_fuel = original_fuel - batch_fuel;
+        let count_expiry = u64::from(limit) <= original_fuel;
+        self.vm.fuel = batch_fuel;
+
+        let outcome = loop {
+            match self.exec_instr(module, dispatch, envs) {
                 Ok(ExecOutcome::Continue) => {}
-                Ok(outcome) => return (Ok(Some(outcome)), retired),
-                Err(code) => return (Err(code), retired),
+                outcome => break outcome,
             }
+        };
+        let retired = u32::try_from(batch_fuel - self.vm.fuel)
+            .expect("one execution batch retires at most its u32 limit");
+        self.vm.fuel += held_fuel;
+
+        match outcome {
+            Err(FaultCode::OutOfFuel) if count_expiry => (Ok(None), retired),
+            Ok(outcome) => (Ok(Some(outcome)), retired),
+            Err(code) => (Err(code), retired),
         }
-        (Ok(None), retired)
     }
 
     /// Return true when the instance class equals or extends the
@@ -1605,6 +1555,19 @@ impl Machine {
         self.reserve(text.len(), &[Value::Obj(sb)])?;
         match self.vm.heap.get_mut(sb) {
             Object::StrBuilder(buf) => buf.push_str(text),
+            _ => return Err(BAD_TYPE),
+        }
+        self.vm.heap.recharge(sb);
+        self.push(Value::Obj(sb))
+    }
+
+    /// Append one integer without a temporary string allocation.
+    fn sb_append_int(&mut self, sb: ObjRef, value: i64) -> Result<(), FaultCode> {
+        self.reserve(integer_text_len(value), &[Value::Obj(sb)])?;
+        match self.vm.heap.get_mut(sb) {
+            Object::StrBuilder(buf) => {
+                std::fmt::Write::write_fmt(buf, format_args!("{value}")).map_err(|_| BAD_STATE)?;
+            }
             _ => return Err(BAD_TYPE),
         }
         self.vm.heap.recharge(sb);
@@ -1731,17 +1694,58 @@ impl Machine {
         }
     }
 
+    /// Read two integer operands and preserve successful input.
+    ///
+    /// An error consumes the same operands as two ordered `pop_int`
+    /// calls. A successful caller replaces both operands in place.
+    #[inline]
+    fn int_pair(&mut self) -> Result<(usize, i64, i64), FaultCode> {
+        let len = self.vm.operands.len();
+        if len == 0 {
+            return Err(BAD_STATE);
+        }
+        let b = match self.vm.operands[len - 1] {
+            Value::Int(value) => value,
+            _ => {
+                self.vm.operands.truncate(len - 1);
+                return Err(BAD_TYPE);
+            }
+        };
+        if len == 1 {
+            self.vm.operands.clear();
+            return Err(BAD_STATE);
+        }
+        let at = len - 2;
+        let a = match self.vm.operands[at] {
+            Value::Int(value) => value,
+            _ => {
+                self.vm.operands.truncate(at);
+                return Err(BAD_TYPE);
+            }
+        };
+        Ok((at, a, b))
+    }
+
+    #[inline]
+    fn replace_pair(&mut self, at: usize, value: Value) {
+        self.vm.operands[at] = value;
+        self.vm.operands.truncate(at + 1);
+    }
+
     fn int_binary(&mut self, op: impl Fn(i64, i64) -> Option<i64>) -> Result<(), FaultCode> {
-        let b = self.pop_int()?;
-        let a = self.pop_int()?;
-        let value = op(a, b).ok_or(FaultCode::IntegerOverflow)?;
-        self.push(Value::Int(value))
+        let (at, a, b) = self.int_pair()?;
+        let Some(value) = op(a, b) else {
+            self.vm.operands.truncate(at);
+            return Err(FaultCode::IntegerOverflow);
+        };
+        self.replace_pair(at, Value::Int(value));
+        Ok(())
     }
 
     fn int_compare(&mut self, op: impl Fn(i64, i64) -> bool) -> Result<(), FaultCode> {
-        let b = self.pop_int()?;
-        let a = self.pop_int()?;
-        self.push(Value::Bool(op(a, b)))
+        let (at, a, b) = self.int_pair()?;
+        self.replace_pair(at, Value::Bool(op(a, b)));
+        Ok(())
     }
 
     fn str_compare(&mut self, want_equal: bool) -> Result<(), FaultCode> {
@@ -1753,6 +1757,16 @@ impl Machine {
         };
         self.push(Value::Bool(equal == want_equal))
     }
+}
+
+fn integer_text_len(value: i64) -> usize {
+    let mut magnitude = value.unsigned_abs();
+    let mut len = usize::from(value < 0) + 1;
+    while magnitude >= 10 {
+        magnitude /= 10;
+        len += 1;
+    }
+    len
 }
 
 #[cfg(test)]
@@ -1769,9 +1783,9 @@ mod tests {
     fn the_witness_costs_one_index_and_no_object_growth() {
         assert_eq!(std::mem::size_of::<Witness>(), 4);
         assert_eq!(std::mem::size_of::<Frame>(), 36);
-        // The map payload is the largest variant, so it fixes the
-        // object size and the two witnesses cost nothing there.
-        assert_eq!(std::mem::size_of::<Object>(), 80);
+        // The compact map index fixes the largest payload size. The
+        // two witness fields fit without increasing that size.
+        assert_eq!(std::mem::size_of::<Object>(), 56);
     }
 
     /// A fallible operand reader costs no register.
@@ -1789,6 +1803,33 @@ mod tests {
         assert_eq!(std::mem::size_of::<Result<bool, FaultCode>>(), 2);
         // An integer read pays one word, because `i64` has no niche.
         assert_eq!(std::mem::size_of::<Result<i64, FaultCode>>(), 16);
+    }
+
+    #[test]
+    fn an_integer_pair_replaces_two_operands_in_place() {
+        let mut machine = Machine::empty(VmConfig::default(), None);
+        machine.vm.operands = vec![Value::Int(7), Value::Int(5)];
+        machine
+            .int_binary(i64::checked_add)
+            .expect("the addition succeeds");
+        assert_eq!(machine.vm.operands, vec![Value::Int(12)]);
+
+        machine.vm.operands = vec![Value::Bool(false), Value::Int(5)];
+        assert_eq!(
+            machine.int_binary(i64::checked_add),
+            Err(FaultCode::TypeMismatch)
+        );
+        assert!(machine.vm.operands.is_empty());
+    }
+
+    #[test]
+    fn integer_text_lengths_cover_signed_bounds() {
+        assert_eq!(integer_text_len(0), 1);
+        assert_eq!(integer_text_len(9), 1);
+        assert_eq!(integer_text_len(10), 2);
+        assert_eq!(integer_text_len(-10), 3);
+        assert_eq!(integer_text_len(i64::MIN), i64::MIN.to_string().len());
+        assert_eq!(integer_text_len(i64::MAX), i64::MAX.to_string().len());
     }
 
     #[test]

@@ -20,6 +20,8 @@
 //! it with the CPython table from `benchmarks/ops.py`.
 
 use lm_vm::{Vm, VmConfig};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// Rounds per case. One warm-up plus this many measured rounds.
@@ -77,6 +79,29 @@ fn report(name: &str, iterations: u64, source: &str, base: Duration) {
         per,
         total.as_secs_f64() * 1e3
     );
+}
+
+/// Time one proc program. Compile and load stay outside the timed region.
+fn time_world(source: &str, grants: &[&str], config: VmConfig, expected: &str) -> Duration {
+    let bytes = lm_testkit::compile_to_bytes("bench.lm", source)
+        .unwrap_or_else(|e| panic!("the benchmark source must compile:\n{e}"));
+    let loaded = lm_vm::load_bytes(&bytes).expect("the benchmark artifact must load");
+    let mut runs: Vec<Duration> = Vec::with_capacity(ROUNDS);
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let host = Rc::new(RefCell::new(lm_vm::RecordingHost::new(1)));
+        let mut world = lm_vm::World::new(&loaded, config, Box::new(host));
+        for grant in grants {
+            world.allow(grant).expect("the benchmark grant must exist");
+        }
+        let outcome = lm_proc::run_world(&mut world);
+        let elapsed = start.elapsed();
+        assert_eq!(world.show_outcome(&outcome), expected);
+        if round > 0 {
+            runs.push(elapsed);
+        }
+    }
+    median(runs)
 }
 
 // ---------------------------------------------------------------
@@ -289,6 +314,39 @@ fn bench_language_operations() {
         500_000,
         "b = ByteBuffer()\ni = 0\nwhile i < 500000\n  b.append(65)\n  i = i + 1\nend\nb.len()\n",
         base,
+    );
+}
+
+#[test]
+#[ignore]
+fn bench_proc_operations() {
+    let source = "class Adder < Proc[Int]\n\
+                  \x20 total: Int = 0\n\
+                  \x20 def on_spawn(mut self): Int with Proc\n\
+                  \x20   loop do\n\
+                  \x20     case self.receive()\n\
+                  \x20     in Msg(n)\n\
+                  \x20       self.total = self.total + n\n\
+                  \x20     in Closed\n\
+                  \x20       return self.total\n\
+                  \x20     end\n\
+                  \x20   end\n\
+                  \x20   self.total\n\
+                  \x20 end\n\
+                  end\n\
+                  h = Adder.spawn()\n\
+                  i = 0\n\
+                  while i < 20000\n  h.send(1)\n  i = i + 1\nend\n\
+                  h.close()\n\
+                  case h.done()\n\
+                  in Done(v)  then v\n\
+                  in Fault(_) then 0 - 1\n\
+                  end\n";
+    let elapsed = time_world(source, &["Proc"], config(), "Done(20000)");
+    println!(
+        "LOOM\tproc_send_receive\t20000\t{:.1}\t{:.3}",
+        elapsed.as_nanos() as f64 / 20_000.0,
+        elapsed.as_secs_f64() * 1e3
     );
 }
 

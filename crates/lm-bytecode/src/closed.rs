@@ -175,6 +175,15 @@ pub struct TypeImportPlan {
     env_map: Vec<TypeEnvId>,
 }
 
+/// Runtime derivations rooted at one dense type environment.
+#[derive(Debug, Default)]
+struct TypeEnvCache {
+    /// Generic applications, sorted by module application index.
+    derived: Vec<(u32, TypeEnvId)>,
+    /// Method compositions, sorted by class, function, and own environment.
+    methods: Vec<((u32, u32, TypeEnvId), TypeEnvId)>,
+}
+
 impl TypeImportPlan {
     /// The destination identifier of each source environment.
     pub fn env_map(&self) -> &[TypeEnvId] {
@@ -210,8 +219,13 @@ pub struct TypeEnvs {
     type_index: HashMap<ClosedType, ClosedTypeId>,
     envs: Vec<TypeEnv>,
     env_index: HashMap<TypeEnv, TypeEnvId>,
-    /// One derived environment per `(parent environment, application)`.
-    derived: HashMap<(TypeEnvId, u32), TypeEnvId>,
+    /// Runtime derivations for each dense environment.
+    ///
+    /// Each cache vector stays sorted by integer indices. This layout
+    /// avoids hashing integer keys on every generic call.
+    env_cache: Vec<TypeEnvCache>,
+    /// The retained entries in all runtime environment caches.
+    cache_entries: u32,
     /// One closed type per `(module type, environment)`.
     closed: HashMap<(u32, TypeEnvId), ClosedTypeId>,
     /// The content digest of each closed type node, filled on demand.
@@ -242,7 +256,8 @@ impl TypeEnvs {
             type_index: HashMap::new(),
             envs: Vec::new(),
             env_index: HashMap::new(),
-            derived: HashMap::new(),
+            env_cache: Vec::new(),
+            cache_entries: 0,
             closed: HashMap::new(),
             digests: Vec::new(),
             depths: Vec::new(),
@@ -252,6 +267,7 @@ impl TypeEnvs {
         let empty = TypeEnv::default();
         table.envs.push(empty.clone());
         table.env_index.insert(empty, TypeEnvId::EMPTY);
+        table.env_cache.push(TypeEnvCache::default());
         table
     }
 
@@ -301,6 +317,9 @@ impl TypeEnvs {
             .try_reserve(types)
             .map_err(|_| TypeEnvFull { types: true })?;
         self.envs
+            .try_reserve_exact(envs)
+            .map_err(|_| TypeEnvFull { types: false })?;
+        self.env_cache
             .try_reserve_exact(envs)
             .map_err(|_| TypeEnvFull { types: false })?;
         self.env_index
@@ -441,6 +460,9 @@ impl TypeEnvs {
         self.envs
             .try_reserve_exact(new_envs.len())
             .map_err(|_| TypeEnvFull { types: false })?;
+        self.env_cache
+            .try_reserve_exact(new_envs.len())
+            .map_err(|_| TypeEnvFull { types: false })?;
         self.env_index
             .try_reserve(new_envs.len())
             .map_err(|_| TypeEnvFull { types: false })?;
@@ -466,6 +488,7 @@ impl TypeEnvs {
         }
         for env in plan.envs {
             self.envs.push(env);
+            self.env_cache.push(TypeEnvCache::default());
         }
         for (env, id) in plan.env_index {
             self.env_index.insert(env, id);
@@ -518,6 +541,7 @@ impl TypeEnvs {
         }
         let id = TypeEnvId(self.envs.len() as u32);
         self.envs.push(env.clone());
+        self.env_cache.push(TypeEnvCache::default());
         self.env_index.insert(env, id);
         Ok(id)
     }
@@ -672,8 +696,13 @@ impl TypeEnvs {
         parent: TypeEnvId,
         app: u32,
     ) -> Result<TypeEnvId, TypeEnvFull> {
-        if let Some(id) = self.derived.get(&(parent, app)) {
-            return Ok(*id);
+        if let Some(cache) = self.env_cache.get(parent.0 as usize) {
+            if let Ok(at) = cache
+                .derived
+                .binary_search_by_key(&app, |(entry, _)| *entry)
+            {
+                return Ok(cache.derived[at].1);
+            }
         }
         let entry = match module.apps.get(app as usize) {
             Some(entry) => entry.clone(),
@@ -689,8 +718,86 @@ impl TypeEnvs {
             .map(|row| self.close_row(module, row, parent))
             .collect();
         let id = self.intern_env(TypeEnv { types, rows })?;
-        self.derived.insert((parent, app), id);
+        if self.cache_entries < self.max_envs {
+            if let Some(cache) = self.env_cache.get_mut(parent.0 as usize) {
+                if cache.derived.try_reserve(1).is_ok() {
+                    let at = cache
+                        .derived
+                        .binary_search_by_key(&app, |(entry, _)| *entry)
+                        .unwrap_or_else(|at| at);
+                    cache.derived.insert(at, (app, id));
+                    self.cache_entries += 1;
+                }
+            }
+        }
         Ok(id)
+    }
+
+    /// Compose one generic method environment.
+    ///
+    /// The receiver supplies class arguments. `own` supplies method
+    /// arguments. One canonical composition serves every activation.
+    pub fn method_env(
+        &mut self,
+        module: &Module,
+        callee: u32,
+        class: u32,
+        class_env: TypeEnvId,
+        own: TypeEnvId,
+    ) -> Result<TypeEnvId, TypeEnvFull> {
+        let body = match module.funcs.get(callee as usize) {
+            Some(body) => body,
+            None => return Ok(own),
+        };
+        if body.type_params as usize == self.env(own).map(|env| env.types.len()).unwrap_or(0) {
+            return Ok(own);
+        }
+
+        let key = (class, callee, own);
+        if let Some(cache) = self.env_cache.get(class_env.0 as usize) {
+            if let Ok(at) = cache
+                .methods
+                .binary_search_by_key(&key, |(entry, _)| *entry)
+            {
+                return Ok(cache.methods[at].1);
+            }
+        }
+
+        let owner = match body
+            .params
+            .first()
+            .and_then(|param| module.types.get(*param as usize))
+        {
+            Some(BcType::Class(owner)) | Some(BcType::Inst(owner, _)) => *owner,
+            _ => return Ok(own),
+        };
+        let args = self
+            .env(class_env)
+            .map(|env| env.types.clone())
+            .unwrap_or_default();
+        let mut types = self
+            .ancestor_args(module, class, &args, owner)
+            .unwrap_or_default();
+        let (own_types, own_rows) = self
+            .env(own)
+            .map(|env| (env.types.clone(), env.rows.clone()))
+            .unwrap_or_default();
+        types.extend(own_types);
+        let composed = self.env_of(types, own_rows)?;
+
+        if self.cache_entries < self.max_envs {
+            if let Some(cache) = self.env_cache.get_mut(class_env.0 as usize) {
+                if cache.methods.try_reserve(1).is_ok() {
+                    let at = cache
+                        .methods
+                        .binary_search_by_key(&key, |(entry, _)| *entry)
+                        .unwrap_or_else(|at| at);
+                    cache.methods.insert(at, (key, composed));
+                    self.cache_entries += 1;
+                }
+            }
+        }
+        Ok(composed)
     }
 
     /// Build one environment from an explicit closed argument list.
@@ -1016,6 +1123,28 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, TypeEnvId::EMPTY);
         assert_eq!(table.env_count(), 2);
+    }
+
+    #[test]
+    fn the_environment_cache_stops_retaining_entries_at_its_cap() {
+        let mut m = module();
+        m.apps.extend_from_within(..);
+        m.apps.extend_from_within(..1);
+        let mut table = TypeEnvs::new(64, 2);
+
+        for app in 0..3 {
+            table
+                .derive(&m, TypeEnvId::EMPTY, app)
+                .expect("the application derives");
+        }
+        assert_eq!(table.env_count(), 2);
+        assert_eq!(table.cache_entries, 2);
+        assert_eq!(table.env_cache[0].derived.len(), 2);
+
+        table
+            .derive(&m, TypeEnvId::EMPTY, 2)
+            .expect("an uncached application still derives");
+        assert_eq!(table.cache_entries, 2);
     }
 
     #[test]

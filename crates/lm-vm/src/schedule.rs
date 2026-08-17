@@ -6,7 +6,6 @@
 
 use crate::machine::VmId;
 use crate::FaultCode;
-use std::collections::BTreeSet;
 
 /// One stable task identity inside an execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -59,12 +58,125 @@ pub enum TaskStatus {
     Dormant,
 }
 
-/// Coalesced changes produced during execution.
+/// Batched changes produced during execution.
 #[derive(Debug, Default)]
 pub struct ScheduleEvents {
-    pub ready: BTreeSet<TaskKey>,
-    pub removed: BTreeSet<TaskKey>,
-    pub wakes: BTreeSet<WakeKey>,
+    ready: Vec<TaskKey>,
+    removed: Vec<TaskKey>,
+    wakes: Vec<WakeKey>,
+    ready_marks: Vec<u64>,
+    removed_marks: Vec<u64>,
+    wake_marks: Vec<[u64; 3]>,
+}
+
+impl ScheduleEvents {
+    /// True when this batch holds no event.
+    pub fn is_empty(&self) -> bool {
+        self.ready.is_empty() && self.removed.is_empty() && self.wakes.is_empty()
+    }
+
+    /// Add one ready event unless this batch already holds it.
+    pub fn push_ready(&mut self, key: TaskKey) {
+        push_task(&mut self.ready, &mut self.ready_marks, key);
+    }
+
+    /// Add one removal event unless this batch already holds it.
+    pub fn push_removed(&mut self, key: TaskKey) {
+        push_task(&mut self.removed, &mut self.removed_marks, key);
+    }
+
+    /// Add one wake event unless this batch already holds it.
+    pub fn push_wake(&mut self, wake: WakeKey) {
+        let (key, lane) = wake_parts(wake);
+        let slot = key.vm as usize;
+        if self.wake_marks.len() <= slot {
+            self.wake_marks.resize(slot + 1, [0; 3]);
+        }
+        let mark = u64::from(key.generation) + 1;
+        if self.wake_marks[slot][lane] == mark {
+            return;
+        }
+        self.wake_marks[slot][lane] = mark;
+        self.wakes.push(wake);
+    }
+
+    /// Sort this batch for stable removal from each vector end.
+    pub fn prepare_drain(&mut self) {
+        self.release_marks();
+        order_for_pop(&mut self.removed);
+        order_for_pop(&mut self.wakes);
+        order_for_pop(&mut self.ready);
+    }
+
+    pub fn pop_ready(&mut self) -> Option<TaskKey> {
+        self.ready.pop()
+    }
+
+    pub fn pop_removed(&mut self) -> Option<TaskKey> {
+        self.removed.pop()
+    }
+
+    pub fn pop_wake(&mut self) -> Option<WakeKey> {
+        self.wakes.pop()
+    }
+
+    /// Remove all events and retain their storage.
+    pub fn clear(&mut self) {
+        self.release_marks();
+        self.ready.clear();
+        self.removed.clear();
+        self.wakes.clear();
+    }
+
+    fn release_marks(&mut self) {
+        for key in self.ready.iter().copied() {
+            clear_task_mark(&mut self.ready_marks, key);
+        }
+        for key in self.removed.iter().copied() {
+            clear_task_mark(&mut self.removed_marks, key);
+        }
+        for wake in self.wakes.iter().copied() {
+            let (key, lane) = wake_parts(wake);
+            if let Some(marks) = self.wake_marks.get_mut(key.vm as usize) {
+                if marks[lane] == u64::from(key.generation) + 1 {
+                    marks[lane] = 0;
+                }
+            }
+        }
+    }
+}
+
+fn push_task(values: &mut Vec<TaskKey>, marks: &mut Vec<u64>, key: TaskKey) {
+    let slot = key.vm as usize;
+    if marks.len() <= slot {
+        marks.resize(slot + 1, 0);
+    }
+    let mark = u64::from(key.generation) + 1;
+    if marks[slot] == mark {
+        return;
+    }
+    marks[slot] = mark;
+    values.push(key);
+}
+
+fn clear_task_mark(marks: &mut [u64], key: TaskKey) {
+    let mark = &mut marks[key.vm as usize];
+    if *mark == u64::from(key.generation) + 1 {
+        *mark = 0;
+    }
+}
+
+fn wake_parts(wake: WakeKey) -> (TaskKey, usize) {
+    match wake {
+        WakeKey::Receive(key) => (key, 0),
+        WakeKey::Send(key) => (key, 1),
+        WakeKey::Done(key) => (key, 2),
+    }
+}
+
+fn order_for_pop<T: Ord>(values: &mut Vec<T>) {
+    values.sort_unstable_by(|left, right| right.cmp(left));
+    values.dedup();
 }
 
 /// The active scheduler-owned proc keys.
@@ -180,5 +292,33 @@ mod tests {
         assert!(!active.contains(key(1, 0)));
         assert!(active.contains(key(1, 1)));
         assert_eq!(active.entries(), &[key(1, 1)]);
+    }
+
+    #[test]
+    fn one_event_batch_coalesces_equal_keys() {
+        let mut events = ScheduleEvents::default();
+        let task = key(3, 7);
+        events.push_ready(task);
+        events.push_ready(task);
+        events.push_wake(WakeKey::Receive(task));
+        events.push_wake(WakeKey::Receive(task));
+        events.prepare_drain();
+        assert_eq!(events.pop_ready(), Some(task));
+        assert_eq!(events.pop_ready(), None);
+        assert_eq!(events.pop_wake(), Some(WakeKey::Receive(task)));
+        assert_eq!(events.pop_wake(), None);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_drained_event_can_enter_the_next_batch() {
+        let mut events = ScheduleEvents::default();
+        let task = key(3, 7);
+        events.push_removed(task);
+        events.prepare_drain();
+        assert_eq!(events.pop_removed(), Some(task));
+        events.push_removed(task);
+        events.prepare_drain();
+        assert_eq!(events.pop_removed(), Some(task));
     }
 }
