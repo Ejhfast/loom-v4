@@ -59,6 +59,13 @@ fn err(func: u32, message: impl Into<String>) -> VerifyError {
     }
 }
 
+/// One join step: a finished type, or the element lists of two tuples
+/// whose elements the walk still joins.
+enum Flat {
+    Type(u32),
+    Tuple(Vec<u32>, Vec<u32>),
+}
+
 /// The abstract state at one program point. Types are indices into
 /// the extended type universe. `None` marks a local slot without a
 /// known value.
@@ -233,136 +240,222 @@ impl<'m> Ctx<'m> {
         out
     }
 
+    /// The child type indices of one type, in declaration order.
+    ///
+    /// Every child of a universe entry has a smaller index, because
+    /// `intern` appends and a caller builds a node from the bottom up.
+    /// Each walk below reads this one list, so the walks cannot drift.
+    fn type_children(&self, ty: u32, out: &mut Vec<u32>) {
+        match self.ty(ty) {
+            BcType::Inst(_, args) | BcType::Tuple(args) => out.extend(args),
+            BcType::List(e) | BcType::Vm(e) | BcType::Snapshot(e) | BcType::Op(_, e) => out.push(e),
+            BcType::Map(a, b) | BcType::PendingCall(a, b) | BcType::Handle(a, b) => {
+                out.push(a);
+                out.push(b);
+            }
+            BcType::Fn(params, _, ret, _) => {
+                out.extend(params);
+                out.push(ret);
+            }
+            _ => {}
+        }
+    }
+
     /// Substitute type variables and effect variables in one type.
+    ///
+    /// The walk is iterative. A crafted artifact can nest a type as
+    /// deeply as its type table allows, so a walk on the Rust stack
+    /// would abort the host.
     fn subst(&self, ty: u32, targs: &[u32], rows: &[Vec<BcRow>]) -> u32 {
         if targs.is_empty() && rows.is_empty() {
             return ty;
         }
-        match self.ty(ty) {
-            BcType::Var(i) => targs.get(i as usize).copied().unwrap_or(ty),
-            BcType::Inst(c, args) => {
-                let args: Vec<u32> = args.iter().map(|a| self.subst(*a, targs, rows)).collect();
-                self.intern(BcType::Inst(c, args))
+        let mut done: HashMap<u32, u32> = HashMap::new();
+        let mut children: Vec<u32> = Vec::new();
+        // Each entry pairs one type with the flag that says whether
+        // its children already sit on the stack.
+        let mut stack: Vec<(u32, bool)> = vec![(ty, false)];
+        while let Some((cur, expanded)) = stack.pop() {
+            if done.contains_key(&cur) {
+                continue;
             }
-            BcType::List(e) => {
-                let e = self.subst(e, targs, rows);
-                self.intern(BcType::List(e))
+            if !expanded {
+                stack.push((cur, true));
+                children.clear();
+                self.type_children(cur, &mut children);
+                for child in &children {
+                    stack.push((*child, false));
+                }
+                continue;
             }
-            BcType::Map(k, v) => {
-                let k = self.subst(k, targs, rows);
-                let v = self.subst(v, targs, rows);
-                self.intern(BcType::Map(k, v))
-            }
-            BcType::Tuple(elems) => {
-                let elems: Vec<u32> = elems.iter().map(|e| self.subst(*e, targs, rows)).collect();
-                self.intern(BcType::Tuple(elems))
-            }
-            BcType::Fn(params, muts, ret, row) => {
-                let params: Vec<u32> = params.iter().map(|p| self.subst(*p, targs, rows)).collect();
-                let ret = self.subst(ret, targs, rows);
-                let row = self.row_subst(&row, rows);
-                self.intern(BcType::Fn(params, muts, ret, row))
-            }
-            BcType::Vm(t) => {
-                let t = self.subst(t, targs, rows);
-                self.intern(BcType::Vm(t))
-            }
-            BcType::Snapshot(t) => {
-                let t = self.subst(t, targs, rows);
-                self.intern(BcType::Snapshot(t))
-            }
-            BcType::PendingCall(a, r) => {
-                let a = self.subst(a, targs, rows);
-                let r = self.subst(r, targs, rows);
-                self.intern(BcType::PendingCall(a, r))
-            }
-            BcType::Handle(m, r) => {
-                let m = self.subst(m, targs, rows);
-                let r = self.subst(r, targs, rows);
-                self.intern(BcType::Handle(m, r))
-            }
-            _ => ty,
+            let child = |c: u32| done.get(&c).copied().unwrap_or(c);
+            let built = match self.ty(cur) {
+                BcType::Var(i) => targs.get(i as usize).copied().unwrap_or(cur),
+                BcType::Inst(c, args) => {
+                    self.intern(BcType::Inst(c, args.iter().map(|a| child(*a)).collect()))
+                }
+                BcType::List(e) => self.intern(BcType::List(child(e))),
+                BcType::Map(k, v) => self.intern(BcType::Map(child(k), child(v))),
+                BcType::Tuple(elems) => {
+                    self.intern(BcType::Tuple(elems.iter().map(|e| child(*e)).collect()))
+                }
+                BcType::Fn(params, muts, ret, row) => self.intern(BcType::Fn(
+                    params.iter().map(|p| child(*p)).collect(),
+                    muts,
+                    child(ret),
+                    self.row_subst(&row, rows),
+                )),
+                BcType::Vm(t) => self.intern(BcType::Vm(child(t))),
+                BcType::Snapshot(t) => self.intern(BcType::Snapshot(child(t))),
+                BcType::PendingCall(a, r) => self.intern(BcType::PendingCall(child(a), child(r))),
+                BcType::Handle(m, r) => self.intern(BcType::Handle(child(m), child(r))),
+                _ => cur,
+            };
+            done.insert(cur, built);
         }
+        done.get(&ty).copied().unwrap_or(ty)
     }
 
     /// Return true when a value of type `found` is valid where the
     /// code expects type `expected`.
+    ///
+    /// The walk is iterative. A tuple type and a function type both
+    /// carry element types, and a crafted artifact can nest either as
+    /// deeply as its type table allows.
+    ///
+    /// The work list holds pairs that must all hold. A pair the rules
+    /// refuse answers false at once.
     fn is_subtype(&self, found: u32, expected: u32) -> bool {
-        if found == expected {
-            return true;
-        }
-        match (self.ty(found), self.ty(expected)) {
-            // A plain class position names no argument, so the walk to
-            // the ancestor must also reach it with no argument. A class
-            // that inherits an instantiated generic parent therefore
-            // fits no plain position of that parent.
-            (BcType::Class(a), BcType::Class(b)) => {
-                self.ancestor_args(a, &[], b) == Some(Vec::new())
+        // The empty list allocates nothing, so a pair of equal types
+        // or of two class types costs no allocation at all.
+        let mut work: Vec<(u32, u32)> = Vec::new();
+        let mut pair = (found, expected);
+        loop {
+            let (f, e) = pair;
+            if f != e {
+                let ok = match (self.ty(f), self.ty(e)) {
+                    // A plain class position names no argument, so the
+                    // walk to the ancestor must also reach it with no
+                    // argument. A class that inherits an instantiated
+                    // generic parent therefore fits no plain position
+                    // of that parent.
+                    (BcType::Class(a), BcType::Class(b)) => {
+                        self.ancestor_args(a, &[], b) == Some(Vec::new())
+                    }
+                    // A class may inherit an instantiated generic
+                    // parent, so a plain class instance can satisfy an
+                    // application type.
+                    (BcType::Class(a), BcType::Inst(b, ys)) => {
+                        self.ancestor_args(a, &[], b).as_ref() == Some(&ys)
+                    }
+                    (BcType::Inst(a, xs), BcType::Class(b)) => {
+                        self.ancestor_args(a, &xs, b) == Some(Vec::new())
+                    }
+                    (BcType::Inst(a, xs), BcType::Inst(b, ys)) => {
+                        self.ancestor_args(a, &xs, b).as_ref() == Some(&ys)
+                    }
+                    (BcType::Tuple(xs), BcType::Tuple(ys)) => {
+                        if xs.len() != ys.len() {
+                            return false;
+                        }
+                        work.extend(xs.iter().zip(ys.iter()).map(|(x, y)| (*x, *y)));
+                        true
+                    }
+                    (BcType::Fn(fp, fm, fr, frow), BcType::Fn(ep, em, er, erow)) => {
+                        // A function that needs a `mut` argument is
+                        // not valid where the expected type promises a
+                        // read-only call. A parameter compares in the
+                        // other direction.
+                        if fp.len() != ep.len()
+                            || !fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
+                            || !self.row_included(&frow, &erow)
+                        {
+                            return false;
+                        }
+                        work.extend(fp.iter().zip(ep.iter()).map(|(f, e)| (*e, *f)));
+                        work.push((fr, er));
+                        true
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    return false;
+                }
             }
-            // A class may inherit an instantiated generic parent, so a
-            // plain class instance can satisfy an application type.
-            (BcType::Class(a), BcType::Inst(b, ys)) => {
-                self.ancestor_args(a, &[], b).as_ref() == Some(&ys)
+            match work.pop() {
+                Some(next) => pair = next,
+                None => return true,
             }
-            (BcType::Inst(a, xs), BcType::Class(b)) => {
-                self.ancestor_args(a, &xs, b) == Some(Vec::new())
-            }
-            (BcType::Inst(a, xs), BcType::Inst(b, ys)) => {
-                self.ancestor_args(a, &xs, b).as_ref() == Some(&ys)
-            }
-            (BcType::Tuple(xs), BcType::Tuple(ys)) => {
-                xs.len() == ys.len()
-                    && xs
-                        .iter()
-                        .zip(ys.iter())
-                        .all(|(x, y)| self.is_subtype(*x, *y))
-            }
-            (BcType::Fn(fp, fm, fr, frow), BcType::Fn(ep, em, er, erow)) => {
-                // A function that needs a `mut` argument is not valid
-                // where the expected type promises a read-only call.
-                fp.len() == ep.len()
-                    && fp
-                        .iter()
-                        .zip(ep.iter())
-                        .all(|(f, e)| self.is_subtype(*e, *f))
-                    && fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
-                    && self.is_subtype(fr, er)
-                    && self.row_included(&frow, &erow)
-            }
-            _ => false,
         }
     }
 
     /// Join two types at a control-flow merge. Classes join at their
     /// nearest common ancestor. Unrelated types have no join.
+    ///
+    /// The walk is iterative. Only a tuple carries a nested join, so
+    /// the stack holds the tuple positions the answer still needs.
     fn join(&self, a: u32, b: u32) -> Option<u32> {
+        // A post-order stack over the pair tree. The flag marks a pair
+        // whose element pairs already sit above it on the stack.
+        let mut stack: Vec<(u32, u32, bool)> = vec![(a, b, false)];
+        // The answers, in the order the elements of each tuple close.
+        let mut done: Vec<u32> = Vec::new();
+        while let Some((x, y, expanded)) = stack.pop() {
+            if !expanded {
+                match self.join_flat(x, y)? {
+                    Flat::Type(id) => done.push(id),
+                    Flat::Tuple(xs, ys) => {
+                        stack.push((x, y, true));
+                        // The elements push in reverse, so they pop in
+                        // declaration order and their answers land in
+                        // that order.
+                        for (ex, ey) in xs.iter().zip(ys.iter()).rev() {
+                            stack.push((*ex, *ey, false));
+                        }
+                    }
+                }
+                continue;
+            }
+            let BcType::Tuple(xs) = self.ty(x) else {
+                return None;
+            };
+            if done.len() < xs.len() {
+                return None;
+            }
+            let elems = done.split_off(done.len() - xs.len());
+            done.push(self.intern(BcType::Tuple(elems)));
+        }
+        match done.len() {
+            1 => done.pop(),
+            _ => None,
+        }
+    }
+
+    /// One join step that needs no nested answer.
+    fn join_flat(&self, a: u32, b: u32) -> Option<Flat> {
         if self.is_subtype(a, b) {
-            return Some(b);
+            return Some(Flat::Type(b));
         }
         if self.is_subtype(b, a) {
-            return Some(a);
+            return Some(Flat::Type(a));
         }
         match (self.ty(a), self.ty(b)) {
             (BcType::Class(ca), BcType::Class(cb)) => {
                 let common = self.common_ancestor(ca, cb)?;
-                Some(self.intern(BcType::Class(common)))
+                Some(Flat::Type(self.intern(BcType::Class(common))))
             }
             (BcType::Inst(ca, xs), BcType::Inst(cb, ys)) => {
                 if xs != ys {
                     return None;
                 }
                 let common = self.common_ancestor(ca, cb)?;
-                Some(self.intern(BcType::Inst(common, xs)))
+                Some(Flat::Type(self.intern(BcType::Inst(common, xs))))
             }
             (BcType::Tuple(xs), BcType::Tuple(ys)) => {
                 if xs.len() != ys.len() {
                     return None;
                 }
-                let mut elems = Vec::with_capacity(xs.len());
-                for (x, y) in xs.iter().zip(ys.iter()) {
-                    elems.push(self.join(*x, *y)?);
-                }
-                Some(self.intern(BcType::Tuple(elems)))
+                Some(Flat::Tuple(xs, ys))
             }
             _ => None,
         }
@@ -433,27 +526,31 @@ impl<'m> Ctx<'m> {
 
     /// Check that every type variable inside `ty` is below `limit`
     /// and every row variable is below `elimit`.
+    ///
+    /// The walk is iterative, so a deeply nested type table costs heap
+    /// instead of Rust stack.
     fn vars_bounded(&self, ty: u32, limit: u32, elimit: u32) -> bool {
-        match self.ty(ty) {
-            BcType::Var(i) => i < limit,
-            BcType::Inst(_, args) => args.iter().all(|a| self.vars_bounded(*a, limit, elimit)),
-            BcType::List(e) => self.vars_bounded(e, limit, elimit),
-            BcType::Map(k, v) => {
-                self.vars_bounded(k, limit, elimit) && self.vars_bounded(v, limit, elimit)
+        let mut stack: Vec<u32> = vec![ty];
+        let mut children: Vec<u32> = Vec::new();
+        while let Some(cur) = stack.pop() {
+            match self.ty(cur) {
+                BcType::Var(i) => {
+                    if i >= limit {
+                        return false;
+                    }
+                }
+                BcType::Fn(_, _, _, row) => {
+                    if !self.row_vars_bounded(&row, elimit) {
+                        return false;
+                    }
+                }
+                _ => {}
             }
-            BcType::Tuple(elems) => elems.iter().all(|e| self.vars_bounded(*e, limit, elimit)),
-            BcType::Fn(params, _, ret, row) => {
-                params.iter().all(|p| self.vars_bounded(*p, limit, elimit))
-                    && self.vars_bounded(ret, limit, elimit)
-                    && self.row_vars_bounded(&row, elimit)
-            }
-            BcType::Vm(t) | BcType::Snapshot(t) => self.vars_bounded(t, limit, elimit),
-            BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
-                self.vars_bounded(a, limit, elimit) && self.vars_bounded(r, limit, elimit)
-            }
-            BcType::Op(_, f) => self.vars_bounded(f, limit, elimit),
-            _ => true,
+            children.clear();
+            self.type_children(cur, &mut children);
+            stack.extend(children.iter().copied());
         }
+        true
     }
 
     fn row_vars_bounded(&self, row: &[BcRow], elimit: u32) -> bool {
@@ -3749,5 +3846,86 @@ mod tests {
             bindings: vec![],
         };
         assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
+    }
+
+    /// A deeply nested type table never grows the Rust stack.
+    ///
+    /// An artifact states its own type table, and a hand-built one can
+    /// nest a type as deeply as the table holds entries. Every type
+    /// walk of the verifier is iterative, so the pass answers on a
+    /// small stack instead of aborting the host.
+    #[test]
+    fn a_deeply_nested_type_table_never_recurses() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                const DEPTH: u32 = 20_000;
+                // `join` tests the subtype relation at each level, so
+                // its cost grows with the square of the depth. That
+                // cost predates this work, and the smaller depth keeps
+                // the case quick while it still overruns a small Rust
+                // stack.
+                const JOIN_DEPTH: u32 = 4_000;
+                let class = |name: &str, parent: u32| BcClass {
+                    name: name.to_string(),
+                    key: name.to_string(),
+                    parent,
+                    parent_args: vec![],
+                    type_params: 0,
+                    kind: lm_bytecode::BcClassKind::Normal,
+                    fields: vec![],
+                    methods: vec![],
+                };
+                let mut types = base_types();
+                // `[[[ ... [T] ... ]]]`, nested `DEPTH` deep over the
+                // type variable of a generic function.
+                types.push(BcType::Var(0));
+                let mut deep = (types.len() - 1) as u32;
+                for _ in 0..DEPTH {
+                    types.push(BcType::List(deep));
+                    deep = (types.len() - 1) as u32;
+                }
+                // Two tuple chains of the same depth, one over each
+                // child class. Their join walks to the common parent
+                // at the innermost position.
+                types.push(BcType::Class(1));
+                let mut left = (types.len() - 1) as u32;
+                types.push(BcType::Class(2));
+                let mut right = (types.len() - 1) as u32;
+                for _ in 0..JOIN_DEPTH {
+                    types.push(BcType::Tuple(vec![left]));
+                    left = (types.len() - 1) as u32;
+                    types.push(BcType::Tuple(vec![right]));
+                    right = (types.len() - 1) as u32;
+                }
+                let mut callee = plain_func("deep", vec![deep], TY_INT, vec![]);
+                callee.type_params = 1;
+                callee.local_types = vec![deep];
+                callee.blocks = vec![vec![ConstInt(0), Return]];
+                let mut m = module_with(vec![vec![ConstInt(0), Return]]);
+                m.types = types;
+                m.classes = vec![class("P", NO_PARENT), class("A", 0), class("B", 0)];
+                m.apps = vec![TypeApp {
+                    types: vec![TY_INT],
+                    rows: vec![],
+                }];
+                m.funcs.push(callee);
+                // The whole pass runs first: the table rules read every
+                // entry, and `vars_bounded` walks the deep parameter.
+                verify_module(&m).expect("the module verifies");
+                // The three remaining walks run directly, because no
+                // small program reaches a type this deep.
+                let core = lm_bytecode::corepin::declared_layout(&m);
+                let ctx = verify_tables(&m, core).expect("the tables verify");
+                assert!(ctx.vars_bounded(deep, 1, 0));
+                let closed = ctx.subst(deep, &[TY_INT], &[]);
+                assert_ne!(closed, deep);
+                assert!(ctx.is_subtype(closed, closed));
+                assert!(!ctx.is_subtype(left, right));
+                assert!(ctx.join(left, right).is_some());
+            })
+            .expect("thread starts")
+            .join()
+            .expect("no Rust stack overflow");
     }
 }

@@ -278,6 +278,9 @@ impl TypeEnvs {
     /// variable, so the answer holds neither. A monomorphic type under
     /// the empty environment still interns, because the closed table is
     /// the one identity the witness records name.
+    /// The walk is iterative. A module type table can nest a type as
+    /// deeply as it holds entries, and a hand-built artifact chooses
+    /// that depth, so a walk on the Rust stack would abort the host.
     pub fn close(
         &mut self,
         module: &Module,
@@ -287,26 +290,50 @@ impl TypeEnvs {
         if let Some(id) = self.closed.get(&(ty, env)) {
             return Ok(*id);
         }
-        let node = match module.types.get(ty as usize) {
-            Some(node) => node.clone(),
+        // Each entry pairs one module type with the flag that says
+        // whether its children already sit on the stack.
+        let mut stack: Vec<(u32, bool)> = vec![(ty, false)];
+        let mut children: Vec<u32> = Vec::new();
+        while let Some((cur, expanded)) = stack.pop() {
+            if self.closed.contains_key(&(cur, env)) {
+                continue;
+            }
             // A module type index the caller cannot resolve closes to
-            // the unit type. Every caller inside this workspace reads a
-            // verified module, so the branch is unreachable there; a
+            // the unit type. Every caller inside this workspace reads
+            // a verified module, so the branch is unreachable there; a
             // hand-built module must not panic here.
-            None => BcType::Unit,
-        };
-        let closed = self.close_node(module, &node, env)?;
-        self.closed.insert((ty, env), closed);
-        Ok(closed)
+            let node = match module.types.get(cur as usize) {
+                Some(node) => node.clone(),
+                None => BcType::Unit,
+            };
+            if !expanded {
+                stack.push((cur, true));
+                children.clear();
+                bc_children(&node, &mut children);
+                for child in &children {
+                    stack.push((*child, false));
+                }
+                continue;
+            }
+            let closed = self.close_flat(module, &node, env)?;
+            self.closed.insert((cur, env), closed);
+        }
+        match self.closed.get(&(ty, env)) {
+            Some(id) => Ok(*id),
+            None => self.intern(ClosedType::Unit),
+        }
     }
 
-    /// Close one already-decoded module type node.
-    fn close_node(
+    /// Close one module type node whose children already closed.
+    fn close_flat(
         &mut self,
         module: &Module,
         node: &BcType,
         env: TypeEnvId,
     ) -> Result<ClosedTypeId, TypeEnvFull> {
+        let child = |table: &TypeEnvs, ty: u32| -> ClosedTypeId {
+            table.closed.get(&(ty, env)).copied().unwrap_or(0)
+        };
         let built = match node {
             BcType::Unit => ClosedType::Unit,
             BcType::Bool => ClosedType::Bool,
@@ -323,9 +350,10 @@ impl TypeEnvs {
             BcType::Class(c) => ClosedType::Class(*c),
             BcType::Var(i) => {
                 // A variable the environment does not bind has no
-                // closed form. The unit type stands in, and admission
-                // rejects the record that names it, because the
-                // derivation from the code names another type.
+                // closed form. The unit type stands in, and the
+                // boundary check rejects the value that names it,
+                // because the derivation from the code names another
+                // type.
                 let bound = self
                     .env(env)
                     .and_then(|e| e.types.get(*i as usize))
@@ -336,47 +364,24 @@ impl TypeEnvs {
                 };
             }
             BcType::Inst(c, args) => {
-                let mut out = Vec::with_capacity(args.len());
-                for arg in args {
-                    out.push(self.close(module, *arg, env)?);
-                }
-                ClosedType::Inst(*c, out)
+                ClosedType::Inst(*c, args.iter().map(|a| child(self, *a)).collect())
             }
-            BcType::List(e) => ClosedType::List(self.close(module, *e, env)?),
-            BcType::Map(k, v) => {
-                let k = self.close(module, *k, env)?;
-                let v = self.close(module, *v, env)?;
-                ClosedType::Map(k, v)
-            }
+            BcType::List(e) => ClosedType::List(child(self, *e)),
+            BcType::Map(k, v) => ClosedType::Map(child(self, *k), child(self, *v)),
             BcType::Tuple(elems) => {
-                let mut out = Vec::with_capacity(elems.len());
-                for elem in elems {
-                    out.push(self.close(module, *elem, env)?);
-                }
-                ClosedType::Tuple(out)
+                ClosedType::Tuple(elems.iter().map(|e| child(self, *e)).collect())
             }
-            BcType::Fn(params, muts, ret, row) => {
-                let mut out = Vec::with_capacity(params.len());
-                for param in params {
-                    out.push(self.close(module, *param, env)?);
-                }
-                let ret = self.close(module, *ret, env)?;
-                let row = self.close_row(module, row, env);
-                ClosedType::Fn(out, muts.clone(), ret, row)
-            }
-            BcType::Vm(t) => ClosedType::Vm(self.close(module, *t, env)?),
-            BcType::Snapshot(t) => ClosedType::Snapshot(self.close(module, *t, env)?),
-            BcType::PendingCall(a, r) => {
-                let a = self.close(module, *a, env)?;
-                let r = self.close(module, *r, env)?;
-                ClosedType::PendingCall(a, r)
-            }
-            BcType::Handle(m, r) => {
-                let m = self.close(module, *m, env)?;
-                let r = self.close(module, *r, env)?;
-                ClosedType::Handle(m, r)
-            }
-            BcType::Op(op, f) => ClosedType::Op(*op, self.close(module, *f, env)?),
+            BcType::Fn(params, muts, ret, row) => ClosedType::Fn(
+                params.iter().map(|p| child(self, *p)).collect(),
+                muts.clone(),
+                child(self, *ret),
+                self.close_row(module, row, env),
+            ),
+            BcType::Vm(t) => ClosedType::Vm(child(self, *t)),
+            BcType::Snapshot(t) => ClosedType::Snapshot(child(self, *t)),
+            BcType::PendingCall(a, r) => ClosedType::PendingCall(child(self, *a), child(self, *r)),
+            BcType::Handle(m, r) => ClosedType::Handle(child(self, *m), child(self, *r)),
+            BcType::Op(op, f) => ClosedType::Op(*op, child(self, *f)),
         };
         self.intern(built)
     }
@@ -520,6 +525,9 @@ impl TypeEnvs {
     /// text, so one closed type has one identity in every process. A
     /// child enters through its own digest, so the answer is a content
     /// address of the whole expression.
+    /// The walk is iterative. A closed type table can nest a type as
+    /// deeply as it holds entries, and polymorphic recursion is legal,
+    /// so a walk on the Rust stack would abort the host.
     pub fn digest(
         &mut self,
         module: &Module,
@@ -529,17 +537,56 @@ impl TypeEnvs {
         if let Some(Some(hit)) = self.digests.get(id as usize) {
             return *hit;
         }
-        let Some(node) = self.ty(id).cloned() else {
-            return [0u8; 32];
-        };
+        // Each entry pairs one node with the flag that says whether
+        // its children already sit on the stack. Every child names an
+        // earlier entry, so the walk terminates.
+        let mut stack: Vec<(ClosedTypeId, bool)> = vec![(id, false)];
+        while let Some((cur, expanded)) = stack.pop() {
+            if matches!(self.digests.get(cur as usize), Some(Some(_))) {
+                continue;
+            }
+            let Some(node) = self.ty(cur).cloned() else {
+                continue;
+            };
+            if !expanded {
+                stack.push((cur, true));
+                for child in node.children() {
+                    stack.push((child, false));
+                }
+                continue;
+            }
+            let digest = self.digest_flat(module, class_hashes, &node);
+            if let Some(slot) = self.digests.get_mut(cur as usize) {
+                *slot = Some(digest);
+            }
+        }
+        self.digests
+            .get(id as usize)
+            .copied()
+            .flatten()
+            .unwrap_or([0u8; 32])
+    }
+
+    /// The digest of one node whose children already answered.
+    fn digest_flat(
+        &self,
+        module: &Module,
+        class_hashes: &[[u8; 32]],
+        node: &ClosedType,
+    ) -> [u8; 32] {
         let mut out: Vec<u8> = Vec::with_capacity(64);
         out.extend_from_slice(DIGEST_DOMAIN);
-        out.push(tag_of(&node));
-        let child = |table: &mut TypeEnvs, out: &mut Vec<u8>, c: ClosedTypeId| {
-            let d = table.digest(module, class_hashes, c);
+        out.push(tag_of(node));
+        let child = |table: &TypeEnvs, out: &mut Vec<u8>, c: ClosedTypeId| {
+            let d = table
+                .digests
+                .get(c as usize)
+                .copied()
+                .flatten()
+                .unwrap_or([0u8; 32]);
             out.extend_from_slice(&d);
         };
-        match &node {
+        match node {
             ClosedType::Class(c) => {
                 out.extend_from_slice(&class_hash(class_hashes, *c));
             }
@@ -587,11 +634,24 @@ impl TypeEnvs {
             }
             _ => {}
         }
-        let digest = crate::hash::sha256(&out);
-        if let Some(slot) = self.digests.get_mut(id as usize) {
-            *slot = Some(digest);
+        crate::hash::sha256(&out)
+    }
+}
+
+/// The child type indices of one module type, in declaration order.
+fn bc_children(node: &BcType, out: &mut Vec<u32>) {
+    match node {
+        BcType::Inst(_, args) | BcType::Tuple(args) => out.extend(args),
+        BcType::List(e) | BcType::Vm(e) | BcType::Snapshot(e) | BcType::Op(_, e) => out.push(*e),
+        BcType::Map(a, b) | BcType::PendingCall(a, b) | BcType::Handle(a, b) => {
+            out.push(*a);
+            out.push(*b);
         }
-        digest
+        BcType::Fn(params, _, ret, _) => {
+            out.extend(params);
+            out.push(*ret);
+        }
+        _ => {}
     }
 }
 
@@ -777,6 +837,42 @@ mod tests {
         let mut third = TypeEnvs::default();
         let differs = third.intern(ClosedType::Class(0)).expect("interned");
         assert_ne!(third.digest(&m, &[[9u8; 32]], differs), one);
+    }
+
+    /// A deeply nested type never grows the Rust stack.
+    ///
+    /// A hand-built artifact states its module type table, and a
+    /// snapshot container states its closed type table, so both depths
+    /// are attacker data. `close` and `digest` are iterative, so they
+    /// answer on a small stack instead of aborting the host.
+    ///
+    /// `digest` is reachable from a legal program as well: polymorphic
+    /// recursion is legal, and capture digests the closed result type
+    /// of every machine.
+    #[test]
+    fn a_deeply_nested_closed_type_never_recurses() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                const DEPTH: u32 = 50_000;
+                let mut m = module();
+                // `[[[ ... [Int] ... ]]]`, nested `DEPTH` deep.
+                m.types = vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str];
+                let mut deep = 2u32;
+                for _ in 0..DEPTH {
+                    m.types.push(BcType::List(deep));
+                    deep = (m.types.len() - 1) as u32;
+                }
+                let mut table = TypeEnvs::new(u32::MAX, u32::MAX);
+                let closed = table.close(&m, deep, TypeEnvId::EMPTY).expect("closed");
+                let digest = table.digest(&m, &[], closed);
+                assert_ne!(digest, [0u8; 32]);
+                // The cached answer is the same answer.
+                assert_eq!(table.digest(&m, &[], closed), digest);
+            })
+            .expect("thread starts")
+            .join()
+            .expect("no Rust stack overflow");
     }
 
     #[test]
