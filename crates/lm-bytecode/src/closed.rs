@@ -361,7 +361,11 @@ impl TypeEnvs {
         env: TypeEnvId,
     ) -> Result<ClosedTypeId, TypeEnvFull> {
         let child = |table: &TypeEnvs, ty: u32| -> ClosedTypeId {
-            table.closed.get(&(ty, env)).copied().unwrap_or(0)
+            table
+                .closed
+                .get(&(ty, env))
+                .copied()
+                .expect("the type walk closes every child first")
         };
         let built = match node {
             BcType::Unit => ClosedType::Unit,

@@ -771,60 +771,6 @@ pub fn load_external(
     })
 }
 
-/// Check the type-table structure of one trusted capture.
-///
-/// External images pass admission. This narrow check gives trusted
-/// capture the same structural guarantee before `SnapshotImage` exists.
-fn validate_trusted_tables(image: &Image) -> Result<(), SnapshotFail> {
-    let invalid = |detail: String| SnapshotFail::Fault(FaultCode::MalformedState, detail);
-    for (at, node) in image.types.iter().enumerate() {
-        for child in node.children() {
-            if child as usize >= at {
-                return Err(invalid(format!(
-                    "trusted capture type {at} names child {child}, which is not earlier"
-                )));
-            }
-        }
-    }
-    match image.envs.first() {
-        Some(environment) if environment.is_empty() => {}
-        _ => {
-            return Err(invalid(
-                "trusted capture has no empty environment zero".to_string(),
-            ))
-        }
-    }
-    for (at, environment) in image.envs.iter().enumerate() {
-        for ty in &environment.types {
-            if *ty as usize >= image.types.len() {
-                return Err(invalid(format!(
-                    "trusted capture environment {at} names missing type {ty}"
-                )));
-            }
-        }
-    }
-    let check_env = |environment: u32, what: &str| -> Result<(), SnapshotFail> {
-        if environment as usize >= image.envs.len() {
-            return Err(invalid(format!(
-                "trusted capture {what} names missing environment {environment}"
-            )));
-        }
-        Ok(())
-    };
-    for machine in &image.machines {
-        check_env(machine.witness, "machine witness")?;
-        for frame in &machine.frames {
-            check_env(frame.env, "frame")?;
-        }
-        for entry in &machine.objects {
-            if let Object::Instance { env, .. } | Object::Closure { env, .. } = &entry.object {
-                check_env(env.env().0, "object")?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Seal one image one consistent cut produced.
 ///
 /// The cut copies a stopped verified world, so the admission invariant
@@ -837,7 +783,6 @@ pub(super) fn from_trusted_capture(
     identity: super::AdmissionIdentity,
     limit: usize,
 ) -> Result<SnapshotImage, SnapshotFail> {
-    validate_trusted_tables(&image)?;
     let bytes = encode(&image, limit)?;
     let hash = container_hash(&bytes[..bytes.len() - 32]);
     Ok(SnapshotImage {
@@ -1637,78 +1582,4 @@ fn decode_limits(cur: &mut Cursor<'_>) -> Read<ImageLimits> {
         max_resources: cur.u32()?,
         mailbox_limit: cur.u32()?,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn table_image(types: Vec<ClosedType>, envs: Vec<TypeEnv>) -> Image {
-        Image {
-            format: FORMAT_VERSION,
-            abi_version: lm_abi::ABI_VERSION,
-            compiler_abi: COMPILER_ABI_VERSION,
-            verifier_version: lm_verify::VERIFIER_VERSION,
-            module_semantic: [0; 32],
-            result_type: [0; 32],
-            funcs: Vec::new(),
-            classes: Vec::new(),
-            types,
-            envs,
-            machines: Vec::new(),
-        }
-    }
-
-    fn identity() -> super::super::AdmissionIdentity {
-        super::super::AdmissionIdentity {
-            module_semantic: [0; 32],
-            verification: [0; 32],
-            format: FORMAT_VERSION,
-            abi_version: lm_abi::ABI_VERSION,
-            compiler_abi: COMPILER_ABI_VERSION,
-            verifier_version: lm_verify::VERIFIER_VERSION,
-        }
-    }
-
-    #[test]
-    fn trusted_capture_accepts_resolved_type_tables() {
-        let image = table_image(
-            vec![ClosedType::Int, ClosedType::List(0)],
-            vec![
-                TypeEnv::default(),
-                TypeEnv {
-                    types: vec![1],
-                    rows: Vec::new(),
-                },
-            ],
-        );
-        assert_eq!(validate_trusted_tables(&image), Ok(()));
-    }
-
-    #[test]
-    fn trusted_capture_rejects_a_missing_type_child() {
-        let image = table_image(vec![ClosedType::List(0)], vec![TypeEnv::default()]);
-        assert!(matches!(
-            from_trusted_capture(image, identity(), usize::MAX),
-            Err(SnapshotFail::Fault(FaultCode::MalformedState, _))
-        ));
-    }
-
-    #[test]
-    fn trusted_capture_rejects_a_missing_environment_type() {
-        let image = table_image(
-            vec![ClosedType::Int],
-            vec![
-                TypeEnv::default(),
-                TypeEnv {
-                    types: vec![1],
-                    rows: Vec::new(),
-                },
-            ],
-        );
-        assert!(matches!(
-            from_trusted_capture(image, identity(), usize::MAX),
-            Err(SnapshotFail::Fault(FaultCode::MalformedState, _))
-        ));
-    }
 }
