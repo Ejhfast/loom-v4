@@ -63,6 +63,17 @@ fn reject(loaded: &LoadedModule, bytes: &[u8]) -> ImageReason {
         .reason
 }
 
+/// One container that decodes and admits.
+///
+/// Admission proves structure. A wrong-typed value is not a structural
+/// fact, so a container that carries one admits. The interpreter tests
+/// the tag at each accessor, and the world checks each VM boundary, so
+/// the wrong type stops one machine at its first read.
+fn admits(loaded: &LoadedModule, bytes: &[u8]) {
+    codec::load_external(bytes, loaded, LoadLimits::default())
+        .expect("the container admits, because admission proves structure alone");
+}
+
 /// The editable image of one container that decodes and admits.
 fn accept(loaded: &LoadedModule, bytes: &[u8]) -> lm_vm::snapshot::Image {
     codec::load_external(bytes, loaded, LoadLimits::default())
@@ -558,24 +569,30 @@ go()
 // The declared-type rules.
 // ---------------------------------------------------------------
 
-/// A local slot holds a value of its declared type. A forged image
-/// that put an integer where the code declares a handle would reach an
-/// interpreter path no verified program can reach.
+/// A local slot of another shape leaves its object unreachable.
+///
+/// The shape of a stored value is not a structural fact, so admission
+/// proves nothing about it. The edit still drops the object the slot
+/// named out of the reachable set, and the canonical order rule holds
+/// that. A wrong shape that keeps the heap canonical admits, and
+/// `admission.rs` states what the restored machine then does.
 #[test]
-fn a_local_of_the_wrong_shape_rejects() {
+fn a_local_that_drops_its_object_rejects_as_non_canonical() {
     let (loaded, bytes) = asked_tree();
     let image = accept(&loaded, &bytes);
     assert_eq!(image.machines[0].locals.len(), 1);
     let mut broken = image.clone();
     broken.machines[0].locals[0] = lm_value::Value::Int(1);
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    assert_eq!(reject(&loaded, &bad), ImageReason::Order);
 }
 
-/// An instance field holds a value of its declared type, whatever
-/// root reached the object.
+/// An instance field of another shape admits.
+///
+/// The interpreter tests the tag when the field reaches a typed
+/// reader.
 #[test]
-fn an_instance_field_of_the_wrong_shape_rejects() {
+fn an_instance_field_of_the_wrong_shape_admits() {
     let source = "\
 class Box
   label: String
@@ -635,14 +652,17 @@ go()
     }
     assert!(damaged, "the capture holds the boxed instance");
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    admits(&loaded, &bad);
 }
 
-/// An operand holds the type the verifier proved at that program
-/// point. The rule reads the same abstract interpretation the
-/// verifier runs, so the loader and the verifier cannot disagree.
+/// An operand of another shape or another count admits.
+///
+/// The exact operand count came from the verifier dataflow, and that
+/// dataflow left admission with the type proof. The interpreter reads
+/// its own arena instead: every typed reader tests the tag, and a pop
+/// from an empty arena raises `MalformedState`.
 #[test]
-fn an_operand_of_the_wrong_shape_or_count_rejects() {
+fn an_operand_of_the_wrong_shape_or_count_admits() {
     let source = "\
 def go(): Int with Vm
   vm = sys.vm.Vm().from_object(do ||: Int
@@ -678,23 +698,28 @@ go()
     let mut broken = image.clone();
     broken.machines[0].operands[0] = lm_value::Value::Bool(true);
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    admits(&loaded, &bad);
     // One operand too many.
     let mut broken = image.clone();
     broken.machines[0].operands.push(lm_value::Value::Int(1));
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    admits(&loaded, &bad);
     // One operand too few.
     let mut broken = image.clone();
     broken.machines[0].operands.pop();
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    admits(&loaded, &bad);
 }
 
-/// An accepted message names the mailbox type of its proc. The class
-/// table fixes that type, so the rule never reads it from the image.
+/// An accepted message of another shape leaves its object
+/// unreachable.
+///
+/// The receiving proc reads its mailbox through `Recv[M]`, and the
+/// boundary check of the world proves the message against that type at
+/// the receive. This edit also drops the message object out of the
+/// reachable set, so the canonical order rule holds it first.
 #[test]
-fn an_accepted_message_of_the_wrong_shape_rejects() {
+fn an_accepted_message_that_drops_its_object_rejects_as_non_canonical() {
     let (loaded, bytes) = asked_tree();
     let image = accept(&loaded, &bytes);
     // The worker mailbox holds the helper handle.
@@ -702,13 +727,18 @@ fn an_accepted_message_of_the_wrong_shape_rejects() {
     let mut broken = image.clone();
     broken.machines[1].mailbox.queue[0] = lm_value::Value::Int(1);
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    assert_eq!(reject(&loaded, &bad), ImageReason::Order);
 }
 
-/// A terminal machine keeps no frame, so the recorded result type is
-/// the only record of the type its stored result carries.
+/// A terminal machine states its body function, and the header states
+/// the closed result type that body derives.
+///
+/// The value itself is not a structural fact, so a terminal value of
+/// another shape admits. The holder reads it through `RunResult[T]` or
+/// `ProcResult[R]`, and the boundary check of the world proves it
+/// there. The two records around it stay structural rules.
 #[test]
-fn a_terminal_value_of_the_wrong_shape_rejects() {
+fn a_terminal_machine_states_a_body_and_a_header_result_type() {
     let source = "\
 def go(): Int with Vm
   vm = sys.vm.Vm().from_object(do ||: String
@@ -747,7 +777,7 @@ go()
         1,
     )));
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
+    admits(&loaded, &bad);
     // The header and the machine witness state one result type.
     let mut broken = image.clone();
     broken.result_type = [7u8; 32];
@@ -769,7 +799,7 @@ go()
 /// both: the header agreement passes, and the terminal rule fires
 /// alone.
 #[test]
-fn a_terminal_value_without_a_result_type_rejects() {
+fn a_terminal_machine_without_a_body_function_admits() {
     let source = "\
 def go(): Int with Vm
   vm = sys.vm.Vm().from_object(do ||: String
@@ -812,7 +842,7 @@ go()
     broken.machines[0].witness = 0;
     broken.result_type = [0u8; 32];
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::State);
+    admits(&loaded, &bad);
 }
 
 /// A machine that is not a proc carries no accepted message. A forged
@@ -844,7 +874,7 @@ fn a_non_proc_machine_with_a_queued_message_rejects() {
 /// operation this case captures. A wrong shape and a wrong count both
 /// reject.
 #[test]
-fn a_pending_argument_of_the_wrong_shape_or_count_rejects() {
+fn a_pending_argument_of_another_count_rejects() {
     // The held machine stops `asked` on `Rand.Int`, whose two integer
     // arguments the perform proved on the operand stack.
     let source = "\
@@ -892,13 +922,15 @@ go()
         })
         .expect("one machine is asked on Rand.Int");
     assert_eq!(image.machines[held].pending.as_ref().unwrap().args.len(), 2);
-    // A boolean where the point proves an integer.
+    // A boolean where the code proves an integer is not a structural
+    // fact. The host reads the arguments through `host_args`, which
+    // tests each shape and faults the machine.
     let mut broken = image.clone();
     broken.machines[held].pending.as_mut().unwrap().args[0] = lm_value::Value::Bool(true);
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
-    assert_eq!(reject(&loaded, &bad), ImageReason::Layout);
-    // One argument too many is a count mismatch against the proved
-    // program point.
+    admits(&loaded, &bad);
+    // One argument too many is a count mismatch against the perform
+    // the frame stopped inside.
     let mut broken = image.clone();
     broken.machines[held]
         .pending

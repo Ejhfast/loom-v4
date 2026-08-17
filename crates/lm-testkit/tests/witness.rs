@@ -229,13 +229,18 @@ fn a_closure_keeps_its_creator_environment_across_a_boundary() {
 // Admission uses and checks the witness.
 // ---------------------------------------------------------------
 
-/// A frame witness that disagrees with its call site rejects.
+/// A frame witness that disagrees with its call site admits.
 ///
-/// Only the bottom frame of a machine has no call site below it. Every
-/// other frame states an environment the call instruction derives, so
-/// an edit to one of them contradicts the code.
+/// A restored frame states its own environment. That is the design:
+/// admission derives no type from container data, so the boundary
+/// check of a restored perform compares against a type the container
+/// chose. The check has teeth where the performing frame is live,
+/// which is the machine that called restore.
+///
+/// The environment is still structural data, so its ordinal must name
+/// an entry of the table and its arity must match.
 #[test]
-fn a_frame_witness_that_disagrees_with_its_call_site_rejects() {
+fn a_frame_witness_that_disagrees_with_its_call_site_admits() {
     let loaded = program(CLOSURE_ACROSS_A_BOUNDARY);
     let images = boundaries(&loaded, &["Vm"], 80);
     let image = pick(&images, "a frame under a generic call site", |image| {
@@ -255,7 +260,15 @@ fn a_frame_witness_that_disagrees_with_its_call_site_rejects() {
         }
     }
     assert!(damaged, "the capture holds a generic call site");
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Type));
+    assert_eq!(admit(&loaded, &broken), None);
+    // An ordinal the table has not still rejects.
+    let mut broken = image.clone();
+    for machine in &mut broken.machines {
+        for frame in machine.frames.iter_mut() {
+            frame.env = u32::MAX;
+        }
+    }
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Reference));
 }
 
 /// A closure witness that disagrees with the frame that runs it
@@ -316,11 +329,11 @@ fn a_machine_witness_that_names_another_body_rejects() {
     });
     let mut broken = image.clone();
     broken.machines[1].body_func = Some(broken.machines[0].body_func.expect("the root has a body"));
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Type));
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
     // The environment half of the witness carries the same rule.
     let mut broken = image.clone();
     broken.machines[1].witness = 0;
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Type));
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
 }
 
 // ---------------------------------------------------------------
@@ -422,14 +435,16 @@ end
 go()
 ";
 
-/// An uninitialized instance field is legal only under construction.
+/// An uninitialized instance field outside construction admits.
 ///
 /// `New` allocates every field as the marker, and the construction
 /// function of the class holds the object until the initializer fills
-/// it. `self` cannot escape before that, so no other instance carries
-/// the marker.
+/// it. A container that puts the marker back past that point states no
+/// structural fact, so admission accepts it. `Instr::LoadField` raises
+/// `UninitializedField` when verified code reads the slot, so the
+/// marker stops one machine.
 #[test]
-fn an_uninitialized_field_outside_construction_rejects() {
+fn an_uninitialized_field_outside_construction_admits() {
     let loaded = program(UNDER_CONSTRUCTION);
     let images = boundaries(&loaded, &["Clock"], 120);
     // Every clean capture admits, including the ones that stop inside
@@ -464,7 +479,7 @@ fn an_uninitialized_field_outside_construction_rejects() {
         }
     }
     assert!(damaged, "the capture holds a complete instance");
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
+    assert_eq!(admit(&loaded, &broken), None);
 }
 
 // ---------------------------------------------------------------

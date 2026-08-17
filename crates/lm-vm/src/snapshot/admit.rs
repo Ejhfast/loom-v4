@@ -5,23 +5,28 @@
 //! immutable `SnapshotImage` that restore accepts. It proves one rule:
 //!
 //! > An `Image` becomes `SnapshotImage` only when its structure
-//! > resolves and every live declared type is accurate.
+//! > resolves.
 //!
-//! "Declared type" means the type the verifier proves at a saved
-//! program point, never a type label the image carries. Admission
-//! derives every type from the exact verified module:
+//! Structural resolution means that every ordinal names an entry that
+//! exists, every frame names a reachable instruction boundary, every
+//! lifecycle record agrees with its state, and every stored table is
+//! self-consistent. The restore path and the interpreter read all of
+//! those without recovery.
 //!
-//! - the slot types of a stopped frame come from the verifier
-//!   dataflow, with the substitution the call site applied;
-//! - the field types of an instance come from its class layout under
-//!   the type arguments of the position that names it;
-//! - the type of a machine handle, a proc handle, a call token, and a
-//!   nested snapshot comes from the target it names.
+//! Admission proves no type of a stored value. The interpreter tests
+//! the tag at each accessor, and the world checks a value against the
+//! type of verified code at each VM boundary
+//! (`crates/lm-vm/src/typecheck.rs`). A wrong type is therefore a
+//! contained machine fault, never a host panic, and no rule here
+//! derives an expected type from container data.
 //!
-//! The graph walk visits `(machine, object, resolved type)` triples,
-//! so one shared object is proved under every type that reaches it.
-//! The walk is iterative and bounded, and it charges one aggregate
-//! `AdmissionBudget`.
+//! The closed type table and the type environment table stay. They are
+//! a runtime carrier: they give a restored generic frame its concrete
+//! types, and they are the substrate a later `Type[T]` descriptor
+//! reads. Admission checks them structurally alone: an ordinal lies in
+//! range, an entry holds no free type variable, the table is acyclic,
+//! and an arity matches. It proves nothing about whether a witness is
+//! the one execution would have produced.
 
 use super::{
     codec, image_roots, AdmissionIdentity, Image, ImageBlock, ImageError, ImageMachine,
@@ -30,30 +35,22 @@ use super::{
 use crate::LoadedModule;
 use lm_bytecode::closed::{ClosedType, TypeEnv, TypeEnvs};
 use lm_bytecode::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
-use lm_bytecode::{BcRow, BcType, Instr};
+use lm_bytecode::{BcType, Instr};
 use lm_heap::Object;
 use lm_value::Value;
-use lm_verify::{FramePoint, FrameSlots, FrameWitness, ResolvedTypes};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// The work one admission may perform.
 ///
 /// The budget is one aggregate ledger for the whole image. It charges
 /// one unit for each of these, and for nothing else:
 ///
-/// - one resolved frame slot, operand, pending argument, or accepted
-///   message the rules read;
-/// - one triple the graph walk pushes. Every element of a list, a map,
-///   a tuple, a closure, and an instance goes through that push, so the
-///   work vector cannot grow past the ledger;
-/// - one triple the graph walk visits;
-/// - one object the coherence map records;
+/// - one entry of the closed type table or of the environment table;
+/// - one object the canonical order walk visits;
 /// - each 64 bytes of one nested container it decodes.
 ///
-/// The ledger therefore bounds the work vector, the visited set, and
-/// the coherence map together. A compact container can never expand
-/// into unbounded checking work.
+/// A compact container can never expand into unbounded checking work.
 ///
 /// The default limit is conservative. Worklist item 10 sizes it beside
 /// the decode budget and shares one ledger with nested containers.
@@ -66,8 +63,8 @@ pub struct AdmissionBudget {
 
 /// The default aggregate admission work limit, in units.
 ///
-/// One unit covers one checked value, one visited graph pair, or one
-/// resolved frame slot.
+/// One unit covers one table entry, one stored object, or one block of
+/// a nested container.
 pub const DEFAULT_ADMISSION_UNITS: u64 = 1 << 24;
 
 impl AdmissionBudget {
@@ -153,23 +150,12 @@ pub(super) fn prove(
     })?;
     let module = loaded.module();
     check_identity(image, identity)?;
-    let types = ResolvedTypes::new(module).map_err(|e| {
-        ImageError::admission(
-            ImageReason::Code,
-            format!("the program has no resolved type view: {e}"),
-        )
-    })?;
-    let tables = resolve_type_tables(image, module, &types, budget)?;
-    let mut admit = Admit {
+    let tables = resolve_type_tables(image, module, budget)?;
+    let admit = Admit {
         image,
         module,
         identity,
-        types,
         witness: tables,
-        result_of: Vec::new(),
-        mailbox_of: Vec::new(),
-        frames_of: Vec::new(),
-        allocators: RefCell::new(HashMap::new()),
     };
     admit.run(budget)?;
     Ok(AdmissionIdentity {
@@ -184,41 +170,6 @@ pub(super) fn prove(
 
 fn fail<T>(reason: ImageReason, detail: impl Into<String>) -> Result<T, ImageError> {
     Err(ImageError::admission(reason, detail))
-}
-
-/// Push one `(machine, object, resolved type)` triple onto the walk.
-///
-/// Every push charges the ledger, so the work vector can never grow
-/// past the budget. A container with N elements pushes N triples, and
-/// the ledger sees all N. Every element loop of `check_object` reaches
-/// the walk through this one call.
-fn push_work(
-    budget: &mut AdmissionBudget,
-    work: &mut Work,
-    entry: (u32, u32, u32),
-) -> Result<(), ImageError> {
-    budget.charge(1)?;
-    work.push(entry);
-    Ok(())
-}
-
-/// The class of the instance one frame holds in its first local slot.
-///
-/// A method call moves its receiver into that slot, so the slot names
-/// the class the runtime dispatched on. `None` marks a frame whose
-/// first slot holds no instance, and a virtual call site then has no
-/// receiver to resolve.
-///
-/// Every index the call reads is already proved: `check_references`
-/// proved that every local names an object of its machine.
-fn receiver_class(machine: &ImageMachine, base_local: u32) -> Option<u32> {
-    let Value::Obj(r) = machine.locals.get(base_local as usize)? else {
-        return None;
-    };
-    match machine.objects.get(r.slot as usize)?.object {
-        Object::Instance { class, .. } => Some(class),
-        _ => None,
-    }
 }
 
 /// Prove that the image names this exact verified program.
@@ -254,20 +205,15 @@ fn check_identity(image: &Image, identity: &ModuleIdentity) -> Result<(), ImageE
     Ok(())
 }
 
-/// The pending `(machine, object, resolved type)` triples of the graph
-/// walk.
-type Work = Vec<(u32, u32, u32)>;
-
 /// The witness tables of one image, resolved against the program.
 ///
 /// The image carries one closed type table and one environment table.
-/// The two maps below name the same entries in the two places
-/// admission needs them: the resolved type universe of the verifier,
-/// and one canonical table that answers content digests.
+/// Admission proves the structure of both, and it keeps one canonical
+/// copy for the content digests the header rule reads.
 struct WitnessTables {
-    /// The environment of every image environment ordinal, in the
-    /// resolved type universe.
-    envs: Vec<FrameWitness>,
+    /// The type arity and the row arity of every image environment
+    /// ordinal.
+    arity: Vec<(usize, usize)>,
     /// One canonical closed type table, for content digests.
     ///
     /// Its environment ordinals equal the image ordinals, because
@@ -280,21 +226,8 @@ struct Admit<'m> {
     image: &'m Image,
     module: &'m lm_bytecode::Module,
     identity: &'m ModuleIdentity,
-    types: ResolvedTypes<'m>,
     /// The witness tables the image carries.
     witness: WitnessTables,
-    /// The resolved result type of every captured machine.
-    result_of: Vec<Option<u32>>,
-    /// The resolved mailbox message type of every captured proc.
-    mailbox_of: Vec<Option<u32>>,
-    /// The resolved slot types of every frame of every machine.
-    frames_of: Vec<Vec<FrameSlots>>,
-    /// The classes each function allocates, filled on demand.
-    ///
-    /// `New` and `NewG` are the one allocation path of an instance, so
-    /// the set names the frames that may hold an object under
-    /// construction.
-    allocators: RefCell<HashMap<u32, HashSet<u32>>>,
 }
 
 /// Resolve the closed type table and the environment table of one
@@ -310,11 +243,9 @@ struct Admit<'m> {
 fn resolve_type_tables(
     image: &Image,
     module: &lm_bytecode::Module,
-    types: &ResolvedTypes<'_>,
     budget: &mut AdmissionBudget,
 ) -> Result<WitnessTables, ImageError> {
     let mut canonical = TypeEnvs::new(u32::MAX, u32::MAX);
-    let mut universe: Vec<u32> = Vec::with_capacity(image.types.len());
     let mut canonical_of: Vec<u32> = Vec::with_capacity(image.types.len());
     let mut seen: HashSet<ClosedType> = HashSet::new();
     let class_named = |slot: u32| {
@@ -349,6 +280,19 @@ fn resolve_type_tables(
                         ),
                     );
                 }
+                // A class states its own arity, so an application of
+                // another width names no type the program can build.
+                let arity = module.classes[*class as usize].type_params as usize;
+                let held = match node {
+                    ClosedType::Inst(_, args) => args.len(),
+                    _ => 0,
+                };
+                if held != arity {
+                    return fail(
+                        ImageReason::Layout,
+                        format!("closed type {at} applies class {class} with {held} arguments"),
+                    );
+                }
             }
             ClosedType::Op(op, _) => {
                 if *op >= lm_abi::OP_COUNT {
@@ -374,10 +318,9 @@ fn resolve_type_tables(
             ImageError::admission(ImageReason::Budget, "the closed type table passed its cap")
         })?;
         canonical_of.push(id);
-        universe.push(types.intern(to_bc_type(node, &universe)));
     }
     // The environment table. Ordinal zero is the empty environment.
-    let mut envs: Vec<FrameWitness> = Vec::with_capacity(image.envs.len());
+    let mut arity: Vec<(usize, usize)> = Vec::with_capacity(image.envs.len());
     let mut seen_envs: HashSet<TypeEnv> = HashSet::new();
     for (at, env) in image.envs.iter().enumerate() {
         budget.charge(1)?;
@@ -424,17 +367,10 @@ fn resolve_type_tables(
                 format!("environment {at} does not take its own ordinal"),
             );
         }
-        envs.push(FrameWitness {
-            types: env.types.iter().map(|ty| universe[*ty as usize]).collect(),
-            rows: env
-                .rows
-                .iter()
-                .map(|row| row.iter().map(|slot| BcRow::Op(*slot)).collect())
-                .collect(),
-        });
+        arity.push((env.types.len(), env.rows.len()));
     }
     Ok(WitnessTables {
-        envs,
+        arity,
         canonical: RefCell::new(canonical),
     })
 }
@@ -463,61 +399,8 @@ fn check_closed_row(
     Ok(())
 }
 
-/// One verifier effect row as a closed row.
-///
-/// A closed row holds no effect variable, so a row that still names
-/// one has no closed form.
-fn closed_row(module: &lm_bytecode::Module, row: &[BcRow]) -> Option<Vec<u32>> {
-    let mut out: Vec<u32> = Vec::with_capacity(row.len());
-    for elem in row {
-        match elem {
-            BcRow::Op(slot) => out.push(*slot),
-            BcRow::Var(_) => return None,
-        }
-    }
-    Some(lm_bytecode::closed::canonical_row(module, out))
-}
-
-/// One image closed type node, in the resolved type universe.
-///
-/// Every child already has a universe index, because a child names an
-/// earlier entry.
-fn to_bc_type(node: &ClosedType, universe: &[u32]) -> BcType {
-    let map = |id: &u32| universe[*id as usize];
-    match node {
-        ClosedType::Unit => BcType::Unit,
-        ClosedType::Bool => BcType::Bool,
-        ClosedType::Int => BcType::Int,
-        ClosedType::Str => BcType::Str,
-        ClosedType::StringBuilder => BcType::StringBuilder,
-        ClosedType::ByteBuffer => BcType::ByteBuffer,
-        ClosedType::Fault => BcType::Fault,
-        ClosedType::Request => BcType::Request,
-        ClosedType::PolicyTable => BcType::PolicyTable,
-        ClosedType::EmptyVm => BcType::EmptyVm,
-        ClosedType::Digest => BcType::Digest,
-        ClosedType::SnapshotImage => BcType::SnapshotImage,
-        ClosedType::Class(c) => BcType::Class(*c),
-        ClosedType::Inst(c, args) => BcType::Inst(*c, args.iter().map(map).collect()),
-        ClosedType::List(e) => BcType::List(map(e)),
-        ClosedType::Map(k, v) => BcType::Map(map(k), map(v)),
-        ClosedType::Tuple(elems) => BcType::Tuple(elems.iter().map(map).collect()),
-        ClosedType::Fn(params, muts, ret, row) => BcType::Fn(
-            params.iter().map(map).collect(),
-            muts.clone(),
-            map(ret),
-            row.iter().map(|slot| BcRow::Op(*slot)).collect(),
-        ),
-        ClosedType::Vm(t) => BcType::Vm(map(t)),
-        ClosedType::PendingCall(a, r) => BcType::PendingCall(map(a), map(r)),
-        ClosedType::Handle(m, r) => BcType::Handle(map(m), map(r)),
-        ClosedType::Op(op, f) => BcType::Op(*op, map(f)),
-        ClosedType::Snapshot(t) => BcType::Snapshot(map(t)),
-    }
-}
-
 impl Admit<'_> {
-    fn run(&mut self, budget: &mut AdmissionBudget) -> Result<(), ImageError> {
+    fn run(&self, budget: &mut AdmissionBudget) -> Result<(), ImageError> {
         if self.image.machines.is_empty() {
             return fail(ImageReason::State, "a snapshot world holds no machine");
         }
@@ -525,25 +408,20 @@ impl Admit<'_> {
         for vm in 0..self.image.machines.len() {
             self.check_references(vm as u32)?;
             self.check_state(vm as u32)?;
+            self.check_stop_points(vm as u32)?;
         }
         self.check_parent_forest()?;
         self.check_world()?;
-        self.resolve_frames()?;
-        self.resolve_relations();
         self.check_machine_witness()?;
         // The header repeats the root result type, and the witness of
         // the root machine derives it. The check runs after the
         // witness rules, so a damaged witness names its own rule.
         self.check_root_result_type()?;
-        let mut work: Work = Vec::new();
-        for vm in 0..self.image.machines.len() {
-            self.check_types(vm as u32, budget, &mut work)?;
-        }
-        self.walk(budget, &mut work)?;
         // The canonical order runs last. Every earlier rule states a
         // property of one position, so a diagnostic names that
         // position instead of the traversal an edit moved.
         for (vm, machine) in self.image.machines.iter().enumerate() {
+            budget.charge(machine.objects.len() as u64)?;
             self.check_order(machine, vm as u32)?;
         }
         Ok(())
@@ -551,13 +429,6 @@ impl Admit<'_> {
 
     fn machine(&self, vm: u32) -> &ImageMachine {
         &self.image.machines[vm as usize]
-    }
-
-    /// The resolved type entry of one universe index.
-    fn ty(&self, idx: u32) -> Result<BcType, ImageError> {
-        self.types.ty(idx).ok_or_else(|| {
-            ImageError::admission(ImageReason::Type, "a resolved type left the type universe")
-        })
     }
 
     // ----------------------------------------------------------
@@ -657,89 +528,6 @@ impl Admit<'_> {
         table.digest(self.module, &self.identity.class_hashes, closed)
     }
 
-    /// The canonical digest of one resolved universe type.
-    ///
-    /// The call rebuilds the type inside the canonical table, so the
-    /// answer is the identity a nested container states. `None` marks
-    /// a type that holds a variable, which no closed type can name.
-    fn universe_digest(&self, ty: u32) -> Option<[u8; 32]> {
-        let id = self.universe_closed(ty)?;
-        let mut table = self.witness.canonical.borrow_mut();
-        Some(table.digest(self.module, &self.identity.class_hashes, id))
-    }
-
-    /// One resolved universe type as a canonical closed type index.
-    ///
-    /// Every child index of a universe entry is smaller than the entry
-    /// itself, so the walk terminates.
-    fn universe_closed(&self, ty: u32) -> Option<u32> {
-        let node = self.types.ty(ty)?;
-        let built = match &node {
-            BcType::Unit => ClosedType::Unit,
-            BcType::Bool => ClosedType::Bool,
-            BcType::Int => ClosedType::Int,
-            BcType::Str => ClosedType::Str,
-            BcType::StringBuilder => ClosedType::StringBuilder,
-            BcType::ByteBuffer => ClosedType::ByteBuffer,
-            BcType::Fault => ClosedType::Fault,
-            BcType::Request => ClosedType::Request,
-            BcType::PolicyTable => ClosedType::PolicyTable,
-            BcType::EmptyVm => ClosedType::EmptyVm,
-            BcType::Digest => ClosedType::Digest,
-            BcType::SnapshotImage => ClosedType::SnapshotImage,
-            BcType::Class(c) => ClosedType::Class(*c),
-            BcType::Inst(c, args) => ClosedType::Inst(*c, self.universe_list(args)?),
-            BcType::List(e) => ClosedType::List(self.universe_closed(*e)?),
-            BcType::Map(k, v) => {
-                ClosedType::Map(self.universe_closed(*k)?, self.universe_closed(*v)?)
-            }
-            BcType::Tuple(elems) => ClosedType::Tuple(self.universe_list(elems)?),
-            BcType::Fn(params, muts, ret, row) => ClosedType::Fn(
-                self.universe_list(params)?,
-                muts.clone(),
-                self.universe_closed(*ret)?,
-                closed_row(self.module, row)?,
-            ),
-            BcType::Vm(t) => ClosedType::Vm(self.universe_closed(*t)?),
-            BcType::PendingCall(a, r) => {
-                ClosedType::PendingCall(self.universe_closed(*a)?, self.universe_closed(*r)?)
-            }
-            BcType::Handle(m, r) => {
-                ClosedType::Handle(self.universe_closed(*m)?, self.universe_closed(*r)?)
-            }
-            BcType::Op(op, f) => ClosedType::Op(*op, self.universe_closed(*f)?),
-            BcType::Snapshot(t) => ClosedType::Snapshot(self.universe_closed(*t)?),
-            BcType::Var(_) => return None,
-        };
-        self.witness.canonical.borrow_mut().intern(built).ok()
-    }
-
-    fn universe_list(&self, ids: &[u32]) -> Option<Vec<u32>> {
-        ids.iter()
-            .map(|id| self.universe_closed(*id))
-            .collect::<Option<Vec<u32>>>()
-    }
-
-    /// The witness one image environment ordinal names.
-    fn env_of(&self, env: u32) -> Result<&FrameWitness, ImageError> {
-        self.witness.envs.get(env as usize).ok_or_else(|| {
-            ImageError::admission(
-                ImageReason::Reference,
-                format!("a witness names environment {env}, which the image has not"),
-            )
-        })
-    }
-
-    /// One declared module type under one image environment.
-    fn subst_at(&self, ty: u32, env: u32) -> Result<u32, ImageError> {
-        let held = self.env_of(env)?;
-        Ok(self.types.substitute(ty, &held.types, &held.rows))
-    }
-
-    /// Every ordinal of one machine names an entry that exists.
-    ///
-    /// The decoder stores references as data, and an editor can write
-    /// any ordinal, so admission proves every one of them before any
     /// later rule follows a reference.
     fn check_references(&self, vm: u32) -> Result<(), ImageError> {
         let m = self.machine(vm);
@@ -906,7 +694,7 @@ impl Admit<'_> {
                     // `NewG` and records the empty witness there, so
                     // the empty environment is legal at every arity.
                     let arity = self.module.classes[*class as usize].type_params as usize;
-                    let held = self.env_of(env.env().0)?.types.len();
+                    let held = self.env_of(env.env().0)?.0;
                     if held != 0 && held != arity {
                         return fail(
                             ImageReason::Type,
@@ -944,8 +732,7 @@ impl Admit<'_> {
                     }
                     let body = &self.module.funcs[*func as usize];
                     let held = self.env_of(env.env().0)?;
-                    if held.types.len() != body.type_params as usize
-                        || held.rows.len() != body.effect_params as usize
+                    if held.0 != body.type_params as usize || held.1 != body.effect_params as usize
                     {
                         return fail(
                             ImageReason::Type,
@@ -1494,132 +1281,32 @@ impl Admit<'_> {
         Ok(())
     }
 
-    // ----------------------------------------------------------
-    // Resolved types.
-    // ----------------------------------------------------------
-
-    /// Resolve the slot types of every frame of every machine.
-    ///
-    /// The verifier proves a generic body once, with its type
-    /// variables opaque. The substitution of one activation comes from
-    /// the call site the frame below stopped inside, and the frame
-    /// witness must agree with it. The bottom frame has no call site
-    /// below it, so its witness answers alone.
-    fn resolve_frames(&mut self) -> Result<(), ImageError> {
-        let mut out: Vec<Vec<FrameSlots>> = Vec::with_capacity(self.image.machines.len());
-        for (vm, machine) in self.image.machines.iter().enumerate() {
-            // A faulted machine stopped inside an instruction that did
-            // not complete, so its arenas are not the state the
-            // verifier proves at any boundary. It never executes
-            // again, so no rule reads a type from its frames.
-            if machine.state == ImageState::Faulted {
-                out.push(Vec::new());
-                continue;
-            }
-            let points: Vec<FramePoint> = machine
-                .frames
-                .iter()
-                .enumerate()
-                .map(|(idx, frame)| FramePoint {
-                    func: frame.func,
-                    block: frame.block,
-                    ip: frame.ip,
-                    // The top frame of a machine with no pending
-                    // request stopped before the instruction its
-                    // counter names. Every other frame stopped inside
-                    // the instruction before it.
-                    before_counter: idx + 1 == machine.frames.len() && machine.pending.is_none(),
-                    // A method call moves its receiver into local slot
-                    // 0 of the callee frame, so the class of that
-                    // value is the class the runtime dispatched on.
-                    receiver_class: receiver_class(machine, frame.base_local),
-                })
-                .collect();
-            let mut held: Vec<FrameWitness> = Vec::with_capacity(machine.frames.len());
-            for frame in &machine.frames {
-                held.push(self.env_of(frame.env)?.clone());
-            }
-            let slots = self.types.resolve_chain(&points, &held).map_err(|e| {
-                ImageError::admission(ImageReason::Type, format!("machine {vm}: {e}"))
-            })?;
-            out.push(slots);
-        }
-        self.frames_of = out;
-        Ok(())
+    /// The type arity and the row arity of one image environment
+    /// ordinal.
+    fn env_of(&self, env: u32) -> Result<(usize, usize), ImageError> {
+        self.witness
+            .arity
+            .get(env as usize)
+            .copied()
+            .ok_or_else(|| {
+                ImageError::admission(
+                    ImageReason::Reference,
+                    format!("a witness names environment {env}, which the image has not"),
+                )
+            })
     }
 
-    /// Resolve the result type and the mailbox type of every machine.
+    /// Prove the structural rules of the machine witness.
     ///
-    /// A machine handle, a proc handle, and a call token take their
-    /// type from the target they name, and a target can sit anywhere in
-    /// the world. This pass therefore runs before the graph walk, so a
-    /// handle can name a machine the walk has not reached
-    /// (specification section 5.5).
-    fn resolve_relations(&mut self) {
-        let mut result_of: Vec<Option<u32>> = Vec::with_capacity(self.image.machines.len());
-        let mut mailbox_of: Vec<Option<u32>> = Vec::with_capacity(self.image.machines.len());
-        for vm in 0..self.image.machines.len() as u32 {
-            result_of.push(self.machine_result_type(vm));
-            mailbox_of.push(self.mailbox_type(vm));
-        }
-        self.result_of = result_of;
-        self.mailbox_of = mailbox_of;
-    }
-
-    /// The declared terminal result type of one captured machine.
-    ///
-    /// The machine witness states the body function and the
-    /// environment of its activation. A machine drops its body closure
-    /// and every frame, so the witness is the one lasting evidence.
-    /// `check_machine_witness` proves the witness against the body
-    /// closure and against the bottom frame wherever one exists.
-    fn machine_result_type(&self, vm: u32) -> Option<u32> {
-        let machine = self.machine(vm);
-        let ret = self.types.result_type(machine.body_func?)?;
-        let closed = self.subst_at(ret, machine.witness).ok()?;
-        self.types.is_resolved(closed).then_some(closed)
-    }
-
-    /// The mailbox message type of one captured machine.
-    ///
-    /// A machine that `Proc.Spawn` launched takes its type from its
-    /// proc class. The class fixes the type, and the first parameter of
-    /// the machine body names the proc instance. `None` means the type
-    /// does not follow from the image, and a proc that carries a
-    /// message then has no governing type.
-    ///
-    /// Every other machine accepts no message, so its type is `Never`.
-    /// `sys.proc.run` hands the caller exactly that handle: it moves a
-    /// loaded machine to the scheduler, and no proc class stands behind
-    /// it (`crates/lm-hir/src/checkfn.rs`, the `sys.proc.run` surface).
-    /// The lowering spells `Never` as `Unit`, and the verified type
-    /// table starts with `Unit`, so the type resolves for every module.
-    ///
-    /// The rule proves no message of such a machine. `check_state`
-    /// rejects a queued message on a machine that is not a proc, so no
-    /// value reaches the mailbox rule through this answer.
-    fn mailbox_type(&self, vm: u32) -> Option<u32> {
-        let machine = self.machine(vm);
-        if !machine.is_proc {
-            return Some(self.types.intern(BcType::Unit));
-        }
-        let instance = *self.types.params(machine.body_func?)?.first()?;
-        let closed = self.subst_at(instance, machine.witness).ok()?;
-        self.types.proc_mailbox(closed)
-    }
-
-    /// Prove the machine witness of every captured machine.
-    ///
-    /// The witness is data, so admission checks it wherever a
-    /// derivation exists. The stored proc body states the body
-    /// function and its environment directly. A machine with no proc
-    /// body runs its own body in its bottom frame, so that frame
-    /// states them instead. A terminal machine holds neither, and the
-    /// witness stands alone there.
+    /// The stored proc body states the body function and its
+    /// environment directly. A machine with no proc body runs its own
+    /// body in its bottom frame, so that frame states them instead. A
+    /// terminal machine holds neither, and the witness stands alone
+    /// there.
     ///
     /// A machine that claims the proc birth grant must name a proc
-    /// class through its witness. Without the rule an edited image
-    /// takes the whole `Proc` group at restore.
+    /// class through the first parameter of its body. The rule reads
+    /// the class table alone, so it derives no type from the image.
     fn check_machine_witness(&self) -> Result<(), ImageError> {
         for (vm, machine) in self.image.machines.iter().enumerate() {
             let at = |what: &str| format!("machine {vm}: {what}");
@@ -1631,6 +1318,7 @@ impl Admit<'_> {
                     );
                 }
             }
+            self.env_of(machine.witness)?;
             let derived: Option<(u32, u32)> = match machine.start_body {
                 Some(ordinal) => match machine.objects.get(ordinal as usize).map(|o| &o.object) {
                     Some(Object::Closure { func, env, .. }) => Some((*func, env.env().0)),
@@ -1645,18 +1333,18 @@ impl Admit<'_> {
             if let Some((func, env)) = derived {
                 if machine.body_func != Some(func) || machine.witness != env {
                     return fail(
-                        ImageReason::Type,
+                        ImageReason::State,
                         at("the machine witness does not match its body"),
                     );
                 }
             }
             if machine.body_func.is_none() && machine.witness != 0 {
                 return fail(
-                    ImageReason::Type,
+                    ImageReason::State,
                     at("a machine with no body function names an environment"),
                 );
             }
-            if machine.is_proc && self.mailbox_of[vm].is_none() {
+            if machine.is_proc && !self.body_takes_a_proc(machine) {
                 return fail(
                     ImageReason::Mailbox,
                     at("a machine that claims the proc grant names no proc class"),
@@ -1666,1036 +1354,151 @@ impl Admit<'_> {
         Ok(())
     }
 
-    // ----------------------------------------------------------
-    // Type accuracy.
-    // ----------------------------------------------------------
-
-    /// Seed the graph walk from every typed position of one machine.
-    fn check_types(
-        &self,
-        vm: u32,
-        budget: &mut AdmissionBudget,
-        work: &mut Work,
-    ) -> Result<(), ImageError> {
-        let machine = self.machine(vm);
-        let at = |what: &str| format!("machine {vm}: {what}");
-        // A faulted machine keeps its frames as diagnostic state, and
-        // no rule below reads a type from them. `check_state` and
-        // `check_references` already proved their structure.
-        if machine.state == ImageState::Faulted {
-            self.check_terminal(vm, budget, work)?;
-            self.check_mailbox(vm, budget, work)?;
-            self.check_proc_body(vm, budget, work)?;
-            return Ok(());
-        }
-        // Every local slot. A slot the verifier proves initialized
-        // holds a value of its proved type. A slot it proves
-        // uninitialized holds the uninitialized marker, or a value one
-        // path of a merge left behind; the declared slot type bounds
-        // that value, and no verified read reaches it.
-        for (idx, frame) in machine.frames.iter().enumerate() {
-            let slots = &self.frames_of[vm as usize][idx];
-            budget.charge(slots.locals.len() as u64)?;
-            for (slot, proved) in slots.locals.iter().enumerate() {
-                let position = frame.base_local as usize + slot;
-                let Some(value) = machine.locals.get(position) else {
-                    return fail(
-                        ImageReason::Layout,
-                        at("the local arena is shorter than the frame chain"),
-                    );
-                };
-                match proved {
-                    Some(ty) => {
-                        self.check_value(
-                            vm,
-                            *value,
-                            *ty,
-                            &at(&format!("local {slot}")),
-                            budget,
-                            work,
-                        )?;
-                    }
-                    None => {
-                        if *value != Value::Uninit {
-                            self.check_value(
-                                vm,
-                                *value,
-                                slots.declared[slot],
-                                &at(&format!("local {slot}")),
-                                budget,
-                                work,
-                            )?;
-                        }
-                    }
-                }
-            }
-        }
-        self.check_operands(vm, budget, work)?;
-        self.check_pending_args(vm, budget, work)?;
-        self.check_terminal(vm, budget, work)?;
-        self.check_mailbox(vm, budget, work)?;
-        // A capture context is the closure the frame runs, so the walk
-        // proves it at the function type of that frame.
-        for frame in &machine.frames {
-            let Some(closure) = frame.closure else {
-                continue;
-            };
-            let ty = self.types.fn_type(frame.func).ok_or_else(|| {
-                ImageError::admission(
-                    ImageReason::Type,
-                    at("a frame function has no function type"),
-                )
-            })?;
-            // The frame witness closes the declared function type, so
-            // a closure of a generic body joins the walk at the type
-            // its activation carries.
-            let ty = self.subst_at(ty, frame.env)?;
-            push_work(budget, work, (vm, closure, ty))?;
-        }
-        self.check_proc_body(vm, budget, work)?;
-        Ok(())
-    }
-
-    /// The proc body is a closure the runtime calls with the proc
-    /// instance. Its own function type proves its captures.
-    fn check_proc_body(
-        &self,
-        vm: u32,
-        budget: &mut AdmissionBudget,
-        work: &mut Work,
-    ) -> Result<(), ImageError> {
-        let machine = self.machine(vm);
-        let Some(body) = machine.start_body else {
-            return Ok(());
+    /// True when the body function of one machine takes a proc
+    /// instance as its first parameter.
+    ///
+    /// `Proc.Spawn` calls the body over the constructed instance, so a
+    /// machine with the proc birth grant has one. The rule reads the
+    /// class table of the program, never the image.
+    fn body_takes_a_proc(&self, machine: &ImageMachine) -> bool {
+        let Some(proc_class) = self.proc_class() else {
+            return false;
         };
-        if let Object::Closure { func, env, .. } = machine.objects[body as usize].object {
-            let ty = self.types.fn_type(func).ok_or_else(|| {
-                ImageError::admission(
-                    ImageReason::Type,
-                    format!("machine {vm}: the proc body has no function type"),
-                )
-            })?;
-            let ty = self.subst_at(ty, env.env().0)?;
-            push_work(budget, work, (vm, body, ty))?;
-        }
-        Ok(())
-    }
-
-    /// What the instruction one frame stopped inside took off the
-    /// operand stack.
-    ///
-    /// A frame stops at one of two points. The top frame of a machine
-    /// with no pending request stops before the instruction its program
-    /// counter names, so that instruction consumed nothing. Every other
-    /// frame, and the top frame of a machine with a pending request,
-    /// stopped inside the instruction before the counter.
-    ///
-    /// The first answer counts the operands that instruction popped.
-    /// The second counts the popped operands the pending record keeps.
-    /// The counts come from the instruction alone, so the image states
-    /// neither of them.
-    fn stop_effect(&self, vm: u32, idx: usize) -> Result<(usize, usize), ImageError> {
-        let machine = self.machine(vm);
-        let top = idx + 1 == machine.frames.len();
-        let pending = top.then_some(machine.pending.as_ref()).flatten();
-        if top && pending.is_none() {
-            return Ok((0, 0));
-        }
-        let at = |what: &str| format!("machine {vm}: frame {idx} {what}");
-        let frame = &machine.frames[idx];
-        // Every index below is proved: `check_references` proved the
-        // function, the block, and the program counter of every frame.
-        let block = &self.module.funcs[frame.func as usize].blocks[frame.block as usize];
-        let Some(before) = frame.ip.checked_sub(1) else {
-            return fail(
-                ImageReason::Layout,
-                at("stopped before the first instruction of its block"),
-            );
+        let Some(func) = machine.body_func else {
+            return false;
         };
-        let instr = block[before as usize];
-        // A call pushes the frame above. A perform records the pending
-        // request. No other instruction leaves a frame stopped, so an
-        // image that names one states a stop the runtime never reaches.
-        let counts = match (instr, pending) {
-            (Instr::Call(callee) | Instr::CallG { func: callee, .. }, None) => {
-                (self.module.funcs[callee as usize].params.len(), 0)
-            }
-            (Instr::CallVirtual { argc, .. } | Instr::CallVirtualG { argc, .. }, None) => {
-                // A virtual call consumes its receiver as well.
-                (argc as usize + 1, 0)
-            }
-            // A closure call consumes the closure value as well.
-            (Instr::CallValue { argc }, None) => (argc as usize + 1, 0),
-            (Instr::Perform { op, argc, .. }, Some(request)) => {
-                if request.op != op {
-                    return fail(
-                        ImageReason::State,
-                        at("stopped inside another operation than the pending request"),
-                    );
-                }
-                (argc as usize, argc as usize)
-            }
-            // A perform through an operation value consumes that value
-            // as well. The proved type of the value names the exact
-            // operation, so the pending record states no operation the
-            // program point does not prove.
-            (Instr::PerformValue { argc, .. }, Some(request)) => {
-                let types = &self.frames_of[vm as usize][idx].operands;
-                let at_op = types.len().checked_sub(argc as usize + 1);
-                let named = match at_op.and_then(|slot| types.get(slot)) {
-                    Some(ty) => matches!(self.ty(*ty)?, BcType::Op(op, _) if op == request.op),
-                    None => false,
-                };
-                if !named {
-                    return fail(
-                        ImageReason::State,
-                        at("stopped inside another operation than the pending request"),
-                    );
-                }
-                (argc as usize + 1, argc as usize)
-            }
-            _ => {
-                return fail(
-                    ImageReason::Layout,
-                    at("did not stop inside a call or a perform"),
-                )
-            }
+        let Some(body) = self.module.funcs.get(func as usize) else {
+            return false;
         };
-        Ok(counts)
-    }
-
-    /// Prove the operand types of every stopped frame.
-    ///
-    /// The operands a frame retains are the stack the verifier proved
-    /// before the instruction the frame stopped inside, less every
-    /// operand that instruction consumed. The rule is an equality at
-    /// every frame, not the top frame alone: a lower frame that keeps
-    /// one extra value hides that value under the call, and the value
-    /// survives the return with no proved type.
-    ///
-    /// A terminal machine holds no frame, so the rule reaches nothing
-    /// there.
-    fn check_operands(
-        &self,
-        vm: u32,
-        budget: &mut AdmissionBudget,
-        work: &mut Work,
-    ) -> Result<(), ImageError> {
-        let machine = self.machine(vm);
-        for (idx, frame) in machine.frames.iter().enumerate() {
-            // The operand region this frame retains.
-            let end = match machine.frames.get(idx + 1) {
-                Some(next) => next.base_operand as usize,
-                None => machine.operands.len(),
-            };
-            let start = frame.base_operand as usize;
-            if end < start || end > machine.operands.len() {
-                return fail(
-                    ImageReason::Layout,
-                    format!("machine {vm}: frame {idx} owns no operand region"),
-                );
-            }
-            let types = &self.frames_of[vm as usize][idx].operands;
-            let want = end - start;
-            let (consumed, _) = self.stop_effect(vm, idx)?;
-            let Some(retained) = types.len().checked_sub(consumed) else {
-                return fail(
-                    ImageReason::Layout,
-                    format!(
-                        "machine {vm}: frame {idx} stopped inside an instruction its program \
-                         point cannot supply"
-                    ),
-                );
-            };
-            if want != retained {
-                return fail(
-                    ImageReason::Layout,
-                    format!(
-                        "machine {vm}: frame {idx} holds {want} operands and the program point \
-                         proves {retained}"
-                    ),
-                );
-            }
-            budget.charge(want as u64)?;
-            for (offset, ty) in types.iter().take(want).enumerate() {
-                self.check_value(
-                    vm,
-                    machine.operands[start + offset],
-                    *ty,
-                    &format!("machine {vm}: frame {idx} operand {offset}"),
-                    budget,
-                    work,
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Prove the argument types of one pending perform.
-    ///
-    /// A perform pops its arguments off the operand stack into the
-    /// pending record, so the top frame stopped inside the perform. The
-    /// stack the verifier proved just before the perform is the
-    /// retained operands at the bottom, which `check_operands` already
-    /// proved, and the popped arguments at the top. This rule proves
-    /// the top.
-    ///
-    /// The count comes from the perform instruction, never from the
-    /// record: the image states the argument list, and a record that
-    /// holds another number of arguments does not agree with the
-    /// program point the frame names. The rule reads no manifest
-    /// parameter type, so it holds for a machine control operation as
-    /// well as a fixed one.
-    fn check_pending_args(
-        &self,
-        vm: u32,
-        budget: &mut AdmissionBudget,
-        work: &mut Work,
-    ) -> Result<(), ImageError> {
-        let machine = self.machine(vm);
-        let Some(pending) = &machine.pending else {
-            return Ok(());
+        let Some(first) = body.params.first() else {
+            return false;
         };
-        if machine.frames.is_empty() {
-            return fail(
-                ImageReason::State,
-                format!("machine {vm}: a pending request holds no frame"),
-            );
-        }
-        let idx = machine.frames.len() - 1;
-        let types = &self.frames_of[vm as usize][idx].operands;
-        let (_, argc) = self.stop_effect(vm, idx)?;
-        if pending.args.len() != argc {
-            return fail(
-                ImageReason::State,
-                format!(
-                    "machine {vm}: the pending request holds {} arguments and the perform takes \
-                     {argc}",
-                    pending.args.len()
-                ),
-            );
-        }
-        // The arguments are the top of the proved stack. A perform
-        // through an operation value keeps that value below them, and
-        // `stop_effect` proved which operation it names.
-        let Some(at) = types.len().checked_sub(argc) else {
-            return fail(
-                ImageReason::Layout,
-                format!("machine {vm}: the perform takes more arguments than the stack proves"),
-            );
+        let class = match self.module.types.get(*first as usize) {
+            Some(BcType::Class(c)) | Some(BcType::Inst(c, _)) => *c,
+            _ => return false,
         };
-        budget.charge(argc as u64)?;
-        for (offset, ty) in types.iter().skip(at).enumerate() {
-            self.check_value(
-                vm,
-                pending.args[offset],
-                *ty,
-                &format!("machine {vm}: pending argument {offset}"),
-                budget,
-                work,
-            )?;
-        }
-        Ok(())
+        self.class_extends(class, proc_class)
     }
 
-    /// A stored terminal value carries the exact declared result type
-    /// of its machine.
+    /// The core `Proc` class slot the artifact declares.
     ///
-    /// A terminal machine keeps no frame, so the recorded digest is the
-    /// only record of that type. The unit value takes no exception: a
-    /// consumer reads the stored value at the declared result type,
-    /// whatever that type is.
-    fn check_terminal(
-        &self,
-        vm: u32,
-        budget: &mut AdmissionBudget,
-        work: &mut Work,
-    ) -> Result<(), ImageError> {
-        let machine = self.machine(vm);
-        let Some(ImageTerminal::Done(value)) = &machine.terminal else {
-            return Ok(());
-        };
-        // A terminal machine keeps no frame, so the witness is the one
-        // record of the type its stored result carries.
-        let Some(ty) = self.result_of[vm as usize] else {
-            return fail(
-                ImageReason::State,
-                format!("machine {vm}: a terminal value carries no result type to prove"),
-            );
-        };
-        self.check_value(
-            vm,
-            *value,
-            ty,
-            &format!("machine {vm}: the terminal value"),
-            budget,
-            work,
-        )
+    /// The verifier proved the shape of every filled role slot, so the
+    /// answer names the core class and never a class of the image.
+    fn proc_class(&self) -> Option<u32> {
+        lm_bytecode::corepin::declared_layout(self.module).proc_class
     }
 
-    /// Every accepted message carries the mailbox type of its proc.
-    ///
-    /// The class table fixes that type, so the rule never reads it from
-    /// the image. A proc that carries a message and has no derivable
-    /// mailbox type holds values with no governing type, so admission
-    /// rejects it rather than schedule an unproven message.
-    fn check_mailbox(
-        &self,
-        vm: u32,
-        budget: &mut AdmissionBudget,
-        work: &mut Work,
-    ) -> Result<(), ImageError> {
-        let machine = self.machine(vm);
-        if machine.mailbox.queue.is_empty() {
-            return Ok(());
-        }
-        let Some(message) = self.mailbox_of[vm as usize] else {
-            return fail(
-                ImageReason::Mailbox,
-                format!(
-                    "machine {vm}: a proc whose mailbox type cannot be proven holds an accepted \
-                     message"
-                ),
-            );
-        };
-        budget.charge(machine.mailbox.queue.len() as u64)?;
-        for (idx, value) in machine.mailbox.queue.iter().enumerate() {
-            self.check_value(
-                vm,
-                *value,
-                message,
-                &format!("machine {vm}: accepted message {idx}"),
-                budget,
-                work,
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Check one value against one resolved type.
-    ///
-    /// A heap value joins the graph walk at that type, so one object is
-    /// proved under every type that reaches it.
-    fn check_value(
-        &self,
-        vm: u32,
-        value: Value,
-        ty: u32,
-        what: &str,
-        budget: &mut AdmissionBudget,
-        work: &mut Work,
-    ) -> Result<(), ImageError> {
-        let declared = self.ty(ty)?;
-        let wrong = |found: &str| -> Result<(), ImageError> {
-            fail(
-                ImageReason::Layout,
-                format!("{what} holds {found} where another type is declared"),
-            )
-        };
-        match value {
-            // The uninitialized marker is not a value. It is legal
-            // where the verifier or the layout proves that no value
-            // exists, and every one of those positions handles it
-            // before this call.
-            Value::Uninit => wrong("the uninitialized marker"),
-            Value::Unit => match declared {
-                BcType::Unit => Ok(()),
-                _ => wrong("the unit value"),
-            },
-            Value::Bool(_) => match declared {
-                BcType::Bool => Ok(()),
-                _ => wrong("a boolean"),
-            },
-            Value::Int(_) => match declared {
-                BcType::Int => Ok(()),
-                _ => wrong("an integer"),
-            },
-            Value::Op(slot) => match declared {
-                BcType::Op(op, _) if op == slot => Ok(()),
-                _ => wrong("an operation value"),
-            },
-            Value::Obj(r) => {
-                if r.slot as usize >= self.machine(vm).objects.len() {
-                    return fail(
-                        ImageReason::Reference,
-                        format!("{what} names no object of its machine"),
-                    );
-                }
-                push_work(budget, work, (vm, r.slot, ty))?;
-                Ok(())
-            }
-        }
-    }
-
-    /// Walk every `(machine, object, resolved type)` triple the typed
-    /// positions reach.
-    ///
-    /// The walk is iterative and bounded. One object can require a
-    /// proof under several types, so the visited key carries the type.
-    fn walk(&self, budget: &mut AdmissionBudget, work: &mut Work) -> Result<(), ImageError> {
-        let mut visited: HashSet<(u32, u32, u32)> = HashSet::new();
-        // Specification 5.4: one object carries one exact closed type.
-        let mut exact: HashMap<(u32, u32), u32> = HashMap::new();
-        while let Some((vm, object, ty)) = work.pop() {
-            if !visited.insert((vm, object, ty)) {
-                continue;
-            }
-            budget.charge(1)?;
-            // The coherence rule runs first. It states the general
-            // property of the object, and every later rule states a
-            // property of one edge, so a shared object that two edges
-            // type differently names that rule instead of the first
-            // edge rule the walk happens to reach.
-            self.check_coherence(vm, object, ty, &mut exact, budget)?;
-            self.check_object(vm, object, ty, budget, work)?;
-        }
-        self.check_instance_witness(&exact)
-    }
-
-    /// Prove the witness of every instance the walk reached.
-    ///
-    /// An instance witness is evidence for no admission rule, because
-    /// the edge that reaches the object already supplies
-    /// `Inst(class, args)`. Admission checks it because the image
-    /// carries it, and section 14 of the design states why the image
-    /// carries it: a reflection query has no edge to read.
-    ///
-    /// The check runs after the coherence map settles, so it reads the
-    /// one exact type of the object instead of the first edge the walk
-    /// happened to pop.
-    ///
-    /// The VM kernel builds a core enum instance outside `New` and
-    /// `NewG` and states no arguments there, so the empty witness
-    /// passes at every class.
-    fn check_instance_witness(&self, exact: &HashMap<(u32, u32), u32>) -> Result<(), ImageError> {
-        let mut entries: Vec<(&(u32, u32), &u32)> = exact.iter().collect();
-        entries.sort_unstable();
-        for ((vm, object), ty) in entries {
-            let Object::Instance { class, env, .. } =
-                &self.image.machines[*vm as usize].objects[*object as usize].object
-            else {
-                continue;
-            };
-            let held = &self.env_of(env.env().0)?.types;
-            if held.is_empty() {
-                continue;
-            }
-            let args = self
-                .types
-                .as_instance(*ty)
-                .map(|(_, args)| args)
-                .unwrap_or_default();
-            if *held != args {
-                return fail(
-                    ImageReason::Type,
-                    format!(
-                        "machine {vm} object {object} carries class arguments of class {class} \
-                         that the edge does not name"
-                    ),
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// The one exact closed type of one object.
-    ///
-    /// The type of an instance follows from the concrete class of the
-    /// object, so two positions that name one instance at two class
-    /// levels normalize to one type. The type of a closure follows from
-    /// its function in the same way.
-    ///
-    /// Every other shape takes the type of the edge that reached it. An
-    /// empty list names no element type, so the object alone answers
-    /// nothing.
-    fn exact_type(&self, vm: u32, object: u32, ty: u32) -> u32 {
-        match self.image.machines[vm as usize].objects[object as usize].object {
-            Object::Instance { class, .. } => self.types.instance_type(class, ty).unwrap_or(ty),
-            // The witness closes the declared function type, so two
-            // edges into one closure normalize to one type.
-            Object::Closure { func, env, .. } => match self.types.fn_type(func) {
-                Some(declared) => self.subst_at(declared, env.env().0).unwrap_or(ty),
-                None => ty,
-            },
-            _ => ty,
-        }
-    }
-
-    /// Prove that every edge into one object names one exact type.
-    ///
-    /// One typed edge proves that edge alone. Two locals typed
-    /// `List[Int]` and `List[Str]` can name one empty mutable list, and
-    /// each edge passes because the list holds no element. Verified
-    /// code then appends an integer through the first local and reads a
-    /// string through the second.
-    ///
-    /// Class arguments are invariant (`docs/specs/language-spec.md`
-    /// section 6), so `List[Int]` and `List[Str]` are unrelated types
-    /// and the aliased list rejects. A `Dog` instance reached from an
-    /// `Animal` edge still admits: nominal subclassing is real
-    /// subtyping, and the concrete class answers the same exact type at
-    /// both edges.
-    ///
-    /// The map keeps the most specific type any edge names, so the
-    /// order of the walk does not change the answer.
-    fn check_coherence(
-        &self,
-        vm: u32,
-        object: u32,
-        ty: u32,
-        exact: &mut HashMap<(u32, u32), u32>,
-        budget: &mut AdmissionBudget,
-    ) -> Result<(), ImageError> {
-        let found = self.exact_type(vm, object, ty);
-        let key = (vm, object);
-        let Some(held) = exact.get(&key).copied() else {
-            budget.charge(1)?;
-            exact.insert(key, found);
-            return Ok(());
-        };
-        if self.types.is_subtype(held, found) {
-            return Ok(());
-        }
-        if self.types.is_subtype(found, held) {
-            exact.insert(key, found);
-            return Ok(());
-        }
-        fail(
-            ImageReason::Layout,
-            format!(
-                "machine {vm} object {object} is reached at two types that no one value carries"
-            ),
-        )
-    }
-
-    /// Prove one object against one resolved type.
-    #[allow(clippy::too_many_lines)]
-    fn check_object(
-        &self,
-        vm: u32,
-        object: u32,
-        ty: u32,
-        budget: &mut AdmissionBudget,
-        work: &mut Work,
-    ) -> Result<(), ImageError> {
-        let declared = self.ty(ty)?;
-        let payload = &self.image.machines[vm as usize].objects[object as usize].object;
-        let at = format!("machine {vm} object {object}");
-        let wrong = |what: &str| -> Result<(), ImageError> {
-            fail(
-                ImageReason::Layout,
-                format!("{at} is a {what} where another type is declared"),
-            )
-        };
-        let plain = |ok: bool| -> Result<(), ImageError> {
-            if ok {
-                Ok(())
-            } else {
-                wrong(payload.shape().name)
-            }
-        };
-        match declared {
-            BcType::Str => plain(matches!(payload, Object::Str(_))),
-            BcType::StringBuilder => plain(matches!(payload, Object::StrBuilder(_))),
-            BcType::ByteBuffer => plain(matches!(payload, Object::ByteBuf(_))),
-            BcType::Fault => plain(matches!(payload, Object::NativeFault { .. })),
-            BcType::Request => plain(matches!(payload, Object::NativeRequest { .. })),
-            BcType::PolicyTable => plain(matches!(payload, Object::NativeTable { .. })),
-            BcType::Digest => plain(matches!(payload, Object::NativeDigest(_))),
-            // An empty machine handle names a machine with no loaded
-            // program. The lifecycle state is part of the type.
-            BcType::EmptyVm => match payload {
-                Object::NativeVm { vm: target } => {
-                    if self.image.machines[*target as usize].state == ImageState::Empty {
-                        Ok(())
-                    } else {
-                        fail(
-                            ImageReason::Layout,
-                            format!("{at} names machine {target}, which holds a loaded program"),
-                        )
-                    }
-                }
-                _ => wrong(payload.shape().name),
-            },
-            // A machine handle carries the result type of the machine
-            // it names. The type resolves from the target, never from
-            // the image.
-            BcType::Vm(want) => match payload {
-                Object::NativeVm { vm: target } => {
-                    let Some(found) = self.result_of[*target as usize] else {
-                        return fail(
-                            ImageReason::Type,
-                            format!("{at} names machine {target}, which records no result type"),
-                        );
-                    };
-                    if self.types.is_subtype(found, want) {
-                        Ok(())
-                    } else {
-                        fail(
-                            ImageReason::Layout,
-                            format!("{at} names machine {target}, which returns another type"),
-                        )
-                    }
-                }
-                _ => wrong(payload.shape().name),
-            },
-            // A proc handle carries the mailbox type and the result
-            // type of the proc it names.
-            BcType::Handle(message, result) => match payload {
-                Object::NativeHandle { proc, .. } => {
-                    let Some(found) = self.mailbox_of[*proc as usize] else {
-                        return fail(
-                            ImageReason::Type,
-                            format!(
-                                "{at} names machine {proc}, whose mailbox type is not provable"
-                            ),
-                        );
-                    };
-                    if found != message {
-                        return fail(
-                            ImageReason::Layout,
-                            format!("{at} names machine {proc}, which accepts another type"),
-                        );
-                    }
-                    let Some(returns) = self.result_of[*proc as usize] else {
-                        return fail(
-                            ImageReason::Type,
-                            format!("{at} names machine {proc}, which records no result type"),
-                        );
-                    };
-                    if self.types.is_subtype(returns, result) {
-                        Ok(())
-                    } else {
-                        fail(
-                            ImageReason::Layout,
-                            format!("{at} names machine {proc}, which returns another type"),
-                        )
-                    }
-                }
-                _ => wrong(payload.shape().name),
-            },
-            // A call token carries the argument view and the reply type
-            // of the exact operation it names.
-            BcType::PendingCall(view, reply) => match payload {
-                Object::NativeCall { op, .. } => {
-                    let Some((want_view, want_reply)) = self.types.pending_call_types(*op) else {
-                        return fail(
-                            ImageReason::Type,
-                            format!("{at} names an operation with no call type"),
-                        );
-                    };
-                    if want_view == view && want_reply == reply {
-                        Ok(())
-                    } else {
-                        fail(
-                            ImageReason::Layout,
-                            format!("{at} names an operation with another call type"),
-                        )
-                    }
-                }
-                _ => wrong(payload.shape().name),
-            },
-            // A nested snapshot stays opaque. Admission proves that its
-            // container is well formed and that its declared root
-            // result type matches. The nested body passes its own
-            // admission at its own restore.
-            BcType::SnapshotImage => match payload {
-                Object::NativeSnapshot(bytes) => {
-                    self.nested_result_type(bytes, budget, &at)?;
-                    Ok(())
-                }
-                _ => wrong(payload.shape().name),
-            },
-            BcType::Snapshot(want) => match payload {
-                Object::NativeSnapshot(bytes) => {
-                    let found = self.nested_result_type(bytes, budget, &at)?;
-                    // The closed type table gives the argument a
-                    // canonical identity, and the nested header states
-                    // the same identity for its root.
-                    let Some(digest) = self.universe_digest(want) else {
-                        return fail(
-                            ImageReason::Type,
-                            format!("{at} holds a snapshot type with no closed form"),
-                        );
-                    };
-                    if found == digest {
-                        Ok(())
-                    } else {
-                        fail(
-                            ImageReason::Layout,
-                            format!("{at} holds a nested world with another root result type"),
-                        )
-                    }
-                }
-                _ => wrong(payload.shape().name),
-            },
-            // A closure carries the captures its function declares. The
-            // witness closes the declared function type and every
-            // capture type, because a capture type can name a type
-            // variable the closure signature does not hold.
-            BcType::Fn(_, _, _, _) => match payload {
-                Object::Closure {
-                    func,
-                    captures,
-                    env,
-                } => {
-                    let declared_fn = self.types.fn_type(*func).ok_or_else(|| {
-                        ImageError::admission(
-                            ImageReason::Type,
-                            format!("{at} names a function with no function type"),
-                        )
-                    })?;
-                    let declared_fn = self.subst_at(declared_fn, env.env().0)?;
-                    if !self.types.is_subtype(declared_fn, ty) {
-                        return fail(
-                            ImageReason::Layout,
-                            format!("{at} is a closure of another function type"),
-                        );
-                    }
-                    let types = self.types.captures(*func).ok_or_else(|| {
-                        ImageError::admission(
-                            ImageReason::Type,
-                            format!("{at} names a function with no capture list"),
-                        )
-                    })?;
-                    for (idx, (value, capture)) in captures.iter().zip(types.iter()).enumerate() {
-                        let capture = self.subst_at(*capture, env.env().0)?;
-                        // A capture type that still holds a variable
-                        // after the witness has no decidable value
-                        // set, so admission rejects it instead of
-                        // leaving the capture unchecked.
-                        if !self.types.is_resolved(capture) {
-                            return fail(
-                                ImageReason::Type,
-                                format!("{at} capture {idx} has no resolved type"),
-                            );
-                        }
-                        self.check_value(
-                            vm,
-                            *value,
-                            capture,
-                            &format!("{at} capture {idx}"),
-                            budget,
-                            work,
-                        )?;
-                    }
-                    Ok(())
-                }
-                _ => wrong(payload.shape().name),
-            },
-            BcType::List(elem) => match payload {
-                Object::List { items } => {
-                    for (idx, value) in items.iter().enumerate() {
-                        self.check_value(
-                            vm,
-                            *value,
-                            elem,
-                            &format!("{at} item {idx}"),
-                            budget,
-                            work,
-                        )?;
-                    }
-                    Ok(())
-                }
-                _ => wrong(payload.shape().name),
-            },
-            BcType::Map(key, value) => match payload {
-                Object::Map { entries, .. } => {
-                    for (idx, (k, v)) in entries.iter().enumerate() {
-                        self.check_value(vm, *k, key, &format!("{at} key {idx}"), budget, work)?;
-                        self.check_value(
-                            vm,
-                            *v,
-                            value,
-                            &format!("{at} value {idx}"),
-                            budget,
-                            work,
-                        )?;
-                    }
-                    Ok(())
-                }
-                _ => wrong(payload.shape().name),
-            },
-            BcType::Tuple(elems) => match payload {
-                Object::Tuple { items } if items.len() == elems.len() => {
-                    for (idx, (value, elem)) in items.iter().zip(elems.iter()).enumerate() {
-                        self.check_value(
-                            vm,
-                            *value,
-                            *elem,
-                            &format!("{at} element {idx}"),
-                            budget,
-                            work,
-                        )?;
-                    }
-                    Ok(())
-                }
-                _ => wrong(payload.shape().name),
-            },
-            // An instance carries the fields its class layout declares,
-            // under the type arguments of the position that named it.
-            BcType::Class(_) | BcType::Inst(_, _) => match payload {
-                Object::Instance { class, fields, .. } => {
-                    let types = self.types.instance_field_types(*class, ty).ok_or_else(|| {
-                        ImageError::admission(
-                            ImageReason::Type,
-                            format!("{at} holds an instance whose field types do not follow"),
-                        )
-                    })?;
-                    if types.len() != fields.len() {
-                        return fail(
-                            ImageReason::Layout,
-                            format!("{at} holds another field count than its layout"),
-                        );
-                    }
-                    let under_construction = fields.contains(&Value::Uninit)
-                        && !self.is_under_construction(vm, object, *class);
-                    if under_construction {
-                        return fail(
-                            ImageReason::State,
-                            format!(
-                                "{at} holds an uninitialized field and is not the object under \
-                                 construction of its machine"
-                            ),
-                        );
-                    }
-                    for (idx, (value, field)) in fields.iter().zip(types.iter()).enumerate() {
-                        // A field before its first assignment holds the
-                        // uninitialized marker. The rule above proves
-                        // that the object is the one under
-                        // construction on its own frame stack, so no
-                        // other instance reaches this branch.
-                        if *value == Value::Uninit {
-                            continue;
-                        }
-                        if !self.types.is_resolved(*field) {
-                            return fail(
-                                ImageReason::Type,
-                                format!("{at} field {idx} has no resolved type"),
-                            );
-                        }
-                        self.check_value(
-                            vm,
-                            *value,
-                            *field,
-                            &format!("{at} field {idx}"),
-                            budget,
-                            work,
-                        )?;
-                    }
-                    Ok(())
-                }
-                _ => wrong(payload.shape().name),
-            },
-            // A scalar type never holds a heap object.
-            BcType::Unit | BcType::Bool | BcType::Int | BcType::Op(_, _) => {
-                wrong(payload.shape().name)
-            }
-            // Every resolved type carries its substitution, so a
-            // variable never reaches this walk.
-            BcType::Var(_) => fail(
-                ImageReason::Type,
-                format!("{at} sits at an unresolved type variable"),
-            ),
-        }
-    }
-
-    /// True when one instance is the object under construction on the
-    /// frame stack of its own machine.
-    ///
-    /// `New` and `NewG` are the one allocation path of an instance,
-    /// and the compiler emits them inside the construction function of
-    /// the class alone. That function stores the object in one local
-    /// slot, evaluates the field defaults, and calls the initializer
-    /// over it. `self` cannot escape before the initializer assigns
-    /// every required field (`E1029`), and a read before the first
-    /// assignment rejects at the checker (`E1028`). A partly built
-    /// instance therefore sits in a local slot or on the operand stack
-    /// of the frame that allocated it, and nowhere else.
-    ///
-    /// The rule is exactly that: some frame of the machine must name
-    /// the object directly, and the function of that frame must
-    /// allocate the class of the object.
-    fn is_under_construction(&self, vm: u32, object: u32, class: u32) -> bool {
-        let machine = self.machine(vm);
-        let names = |value: &Value| matches!(value, Value::Obj(r) if r.slot == object);
-        for (idx, frame) in machine.frames.iter().enumerate() {
-            if !self.allocates(frame.func, class) {
-                continue;
-            }
-            let local_end = match machine.frames.get(idx + 1) {
-                Some(next) => next.base_local as usize,
-                None => machine.locals.len(),
-            };
-            let operand_end = match machine.frames.get(idx + 1) {
-                Some(next) => next.base_operand as usize,
-                None => machine.operands.len(),
-            };
-            let locals = machine
-                .locals
-                .get(frame.base_local as usize..local_end.min(machine.locals.len()))
-                .unwrap_or(&[]);
-            let operands = machine
-                .operands
-                .get(frame.base_operand as usize..operand_end.min(machine.operands.len()))
-                .unwrap_or(&[]);
-            if locals.iter().any(names) || operands.iter().any(names) {
+    /// True when `child` equals `ancestor` or inherits it.
+    fn class_extends(&self, mut child: u32, ancestor: u32) -> bool {
+        for _ in 0..=self.module.classes.len() {
+            if child == ancestor {
                 return true;
+            }
+            match self
+                .module
+                .classes
+                .get(child as usize)
+                .and_then(|c| c.parent())
+            {
+                Some(parent) => child = parent,
+                None => return false,
             }
         }
         false
     }
 
-    /// True when one function allocates instances of one class.
+    /// Prove that every stopped frame stopped where the runtime stops.
     ///
-    /// The answer comes from the verified body: `New` and `NewG` name
-    /// the class they allocate. The set is filled on demand, so a
-    /// program pays for the functions its frames name alone.
-    fn allocates(&self, func: u32, class: u32) -> bool {
-        if let Some(known) = self.allocators.borrow().get(&func) {
-            return known.contains(&class);
+    /// A frame stops at one of two points. The top frame of a machine
+    /// with no pending request stops before the instruction its
+    /// program counter names. Every other frame, and the top frame of
+    /// a machine with a pending request, stopped inside the
+    /// instruction before the counter.
+    ///
+    /// A call pushes the frame above. A perform records the pending
+    /// request. No other instruction leaves a frame stopped, so an
+    /// image that names one states a stop the runtime never reaches.
+    ///
+    /// The rule reads the instruction alone. It derives no type, and
+    /// the boundary check of the world reads the reply type of the
+    /// same instruction at every restored perform.
+    fn check_stop_points(&self, vm: u32) -> Result<(), ImageError> {
+        let machine = self.machine(vm);
+        // A faulted machine stopped inside the instruction that
+        // faulted, so its frames record a position, never a boundary.
+        if machine.state == ImageState::Faulted {
+            return Ok(());
         }
-        let mut found: HashSet<u32> = HashSet::new();
-        if let Some(body) = self.module.funcs.get(func as usize) {
-            for block in &body.blocks {
-                for instr in block {
-                    match instr {
-                        Instr::New(c) | Instr::NewG { class: c, .. } => {
-                            found.insert(*c);
-                        }
-                        _ => {}
+        for (idx, frame) in machine.frames.iter().enumerate() {
+            let at = |what: &str| format!("machine {vm}: frame {idx} {what}");
+            let top = idx + 1 == machine.frames.len();
+            let pending = top.then_some(machine.pending.as_ref()).flatten();
+            if top && pending.is_none() {
+                continue;
+            }
+            // Every index below is proved: `check_references` proved
+            // the function, the block, and the program counter of
+            // every frame.
+            let block = &self.module.funcs[frame.func as usize].blocks[frame.block as usize];
+            let Some(before) = frame.ip.checked_sub(1) else {
+                return fail(
+                    ImageReason::Layout,
+                    at("stopped before the first instruction of its block"),
+                );
+            };
+            let instr = block[before as usize];
+            match (instr, pending) {
+                // A direct call names its callee, so the frame above
+                // must run exactly that function.
+                (Instr::Call(callee) | Instr::CallG { func: callee, .. }, None) => {
+                    if machine.frames[idx + 1].func != callee {
+                        return fail(
+                            ImageReason::Layout,
+                            at("does not sit below the callee of its call site"),
+                        );
                     }
+                }
+                // A virtual call and a closure call take their callee
+                // from a runtime value, so the call site names none.
+                (
+                    Instr::CallVirtual { .. }
+                    | Instr::CallVirtualG { .. }
+                    | Instr::CallValue { .. },
+                    None,
+                ) => {}
+                (Instr::Perform { op, argc, .. }, Some(request)) => {
+                    if request.op != op {
+                        return fail(
+                            ImageReason::State,
+                            at("stopped inside another operation than the pending request"),
+                        );
+                    }
+                    if request.args.len() != argc as usize {
+                        return fail(
+                            ImageReason::State,
+                            at("holds another argument count than its perform"),
+                        );
+                    }
+                }
+                // A perform through an operation value names its
+                // operation at run time, so the instruction states the
+                // argument count alone.
+                (Instr::PerformValue { argc, .. }, Some(request)) => {
+                    if request.args.len() != argc as usize {
+                        return fail(
+                            ImageReason::State,
+                            at("holds another argument count than its perform"),
+                        );
+                    }
+                }
+                _ => {
+                    return fail(
+                        ImageReason::Layout,
+                        at("did not stop inside a call or a perform"),
+                    )
                 }
             }
         }
-        let answer = found.contains(&class);
-        self.allocators.borrow_mut().insert(func, found);
-        answer
-    }
-
-    /// The declared root result type of one nested container.
-    ///
-    /// The nested image stays opaque: this call decodes its container
-    /// and reads the header alone. The nested body passes full
-    /// admission at its own restore.
-    fn nested_result_type(
-        &self,
-        bytes: &[u8],
-        budget: &mut AdmissionBudget,
-        at: &str,
-    ) -> Result<[u8; 32], ImageError> {
-        // The nested container costs decoding work, so the aggregate
-        // ledger carries it. One unit stands for one 64-byte block.
-        budget.charge(bytes.len() as u64 / 64 + 1)?;
-        let nested = codec::decode(bytes, LoadLimits::default()).map_err(|e| {
-            ImageError::admission(
-                e.reason,
-                format!(
-                    "{at} holds a nested container that does not decode: {}",
-                    e.detail
-                ),
-            )
-        })?;
-        Ok(nested.result_type)
+        Ok(())
     }
 }

@@ -1,20 +1,25 @@
 //! The snapshot admission suite of
 //! `docs/specs/snapshot-image-admission.md`.
 //!
-//! Every case builds one editable image, damages exactly one typed
-//! position, and states the rule the damage breaks. An image is
-//! editable data, so each damaged state is representable. Only
-//! admission decides whether it can restore.
+//! Every case builds one editable image, damages exactly one position,
+//! and states what the damage produces. An image is editable data, so
+//! each damaged state is representable.
+//!
+//! Admission proves structure. A structural edit rejects at admission.
+//! A wrong type admits, because no rule here derives a type from
+//! container data. The interpreter tests the tag at each accessor and
+//! the world checks each VM boundary, so a wrong type stops one
+//! machine and leaves the host running. Each type case therefore
+//! states containment instead of rejection.
 //!
 //! The cases keep the heap canonical after every edit, so the
-//! canonical-order rule never fires in place of the type rule under
-//! test.
+//! canonical-order rule never fires in place of the rule under test.
 
 use lm_heap::Object;
 use lm_testkit::compile_to_bytes;
 use lm_value::{ObjRef, Value};
 use lm_vm::snapshot::{codec, Image, ImageMachine, ImageObject, ImageReason, ImageTerminal};
-use lm_vm::{load_bytes, LoadedModule, RecordingHost, RootEvent, VmConfig, World};
+use lm_vm::{load_bytes, FaultCode, LoadedModule, RecordingHost, RootEvent, VmConfig, World};
 
 fn program(source: &str) -> LoadedModule {
     let bytes = compile_to_bytes("admission.lm", source).expect("the program compiles");
@@ -61,6 +66,98 @@ fn admit(loaded: &LoadedModule, image: &Image) -> Option<ImageReason> {
         Ok(_) => None,
         Err(error) => Some(error.reason),
     }
+}
+
+/// Restore one container into a fresh world and drive the restored
+/// root to a stop.
+///
+/// The call answers the fault the restored root took, or `None` when
+/// it reached a value. The host must survive either answer, so a
+/// return of any kind is the containment this suite states.
+fn restore_and_drive(loaded: &LoadedModule, image: &Image, allow: &[&str]) -> Option<FaultCode> {
+    let bytes = codec::encode(image, usize::MAX).expect("the image encodes");
+    let admitted = codec::load_external(&bytes, loaded, lm_vm::snapshot::LoadLimits::default())
+        .expect("the container admits");
+    let mut world = World::new(loaded, VmConfig::default(), Box::new(RecordingHost::new(1)));
+    // A restored machine starts default-deny and passes through the
+    // table of the machine that restored it, so the restorer holds the
+    // grants the capture ran under.
+    for grant in allow {
+        world.allow(grant).expect("the grant names a target");
+    }
+    let target = world.new_child(0).expect("a child budget");
+    let root = world
+        .restore_image(0, target, &admitted)
+        .expect("the image restores");
+    // Every restored machine starts default-deny, so the holder grants
+    // the restored root what the capture ran under. `lm snapshot run`
+    // does the same.
+    for vm in world.machine_ids() {
+        for grant in allow {
+            world.allow_on(vm, grant).expect("the grant names a target");
+        }
+    }
+    // A restored world may hold procs, so the loop drives the root and
+    // every runnable proc. The round bound keeps a restored world that
+    // makes no progress from spinning.
+    let mut fault: Option<FaultCode> = None;
+    let mut root_done = false;
+    for _ in 0..64 {
+        if !root_done {
+            match world.run_machine(root) {
+                RootEvent::Fault(rec) => {
+                    fault = Some(rec.code);
+                    break;
+                }
+                RootEvent::Done(_) => root_done = true,
+                _ => {}
+            }
+        }
+        world.poll_blocked();
+        let runnable = world.runnable_procs();
+        if runnable.is_empty() {
+            break;
+        }
+        for vm in runnable {
+            world.drive_proc(vm);
+        }
+    }
+    // A proc that faulted stops the world it belongs to, so the scan
+    // reports the first fault of any machine.
+    if fault.is_none() {
+        for vm in world.machine_ids() {
+            if let Some(rec) = world.fault_of(vm) {
+                fault = Some(rec.code);
+                break;
+            }
+        }
+    }
+    fault
+}
+
+/// A wrong-typed container admits, restores, and stops the machine it
+/// damaged instead of the host.
+fn contained(loaded: &LoadedModule, image: &Image) {
+    contained_with(loaded, image, &[]);
+}
+
+fn contained_with(loaded: &LoadedModule, image: &Image, allow: &[&str]) {
+    assert_eq!(
+        admit(loaded, image),
+        None,
+        "admission proves structure, so a wrong type admits"
+    );
+    restore_and_drive(loaded, image, allow);
+}
+
+/// A wrong-typed container admits, and the restored world faults.
+fn faults(loaded: &LoadedModule, image: &Image, allow: &[&str]) -> FaultCode {
+    assert_eq!(
+        admit(loaded, image),
+        None,
+        "admission proves structure, so a wrong type admits"
+    );
+    restore_and_drive(loaded, image, allow).expect("the restored world faults")
 }
 
 /// Rebuild the heap of one machine in canonical traversal order.
@@ -179,7 +276,7 @@ fn a_substituted_local_of_the_wrong_shape_rejects() {
         .position(|v| *v == Value::Int(1))
         .expect("the applied argument sits in a local");
     broken.machines[0].locals[at] = Value::Bool(true);
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 /// An operand of a generic frame carries the applied type as well.
@@ -201,7 +298,7 @@ fn a_substituted_operand_of_the_wrong_shape_rejects() {
         .position(|v| matches!(v, Value::Int(_)))
         .expect("the operand stack holds the applied value");
     broken.machines[0].operands[at] = Value::Bool(true);
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 // ---------------------------------------------------------------
@@ -234,7 +331,7 @@ fn a_unit_value_in_a_proved_local_rejects() {
         .position(|v| *v == Value::Int(41))
         .expect("the local holds the stored integer");
     broken.machines[0].locals[at] = Value::Unit;
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 /// The uninitialized marker is not a type wildcard either. It is legal
@@ -253,7 +350,7 @@ fn an_uninitialized_marker_in_a_proved_local_rejects() {
         .position(|v| *v == Value::Int(41))
         .expect("the local holds the stored integer");
     broken.machines[0].locals[at] = Value::Uninit;
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 // ---------------------------------------------------------------
@@ -318,7 +415,7 @@ fn a_shared_object_checked_under_a_second_type_rejects() {
         generation: 0,
     });
     recanonicalize(&mut broken.machines[0]);
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 // ---------------------------------------------------------------
@@ -374,6 +471,99 @@ fn alias_local(image: &Image, what: u32, to: u32) -> Image {
     broken
 }
 
+// ---------------------------------------------------------------
+// The type confusion cases that must stop one machine.
+// ---------------------------------------------------------------
+
+const READ_LIST_SOURCE: &str = "\
+def go(): Int
+  xs = [1, 2]
+  ys = [\"a\", \"b\"]
+  n = ys.len()
+  n = n + xs.at(0)
+  n
+end
+
+go()
+";
+
+/// A local typed `[Int]` that names a list of strings faults.
+///
+/// Admission proves structure, so the container admits. The restored
+/// machine then reads element zero and adds it to an integer. The
+/// integer reader of the interpreter tests the tag, so the machine
+/// stops and the host keeps running.
+#[test]
+fn a_list_local_that_names_a_list_of_strings_faults() {
+    let loaded = program(READ_LIST_SOURCE);
+    let images = boundaries(&loaded, &[], 60);
+    let ints = |image: &Image| -> Vec<u32> {
+        local_objects(image, |object| {
+            matches!(object, Object::List { items }
+                if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Int(_))))
+        })
+    };
+    let strings = |image: &Image| -> Vec<u32> {
+        local_objects(image, |object| {
+            matches!(object, Object::List { items }
+                if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Obj(_))))
+        })
+    };
+    // The first capture that holds both lists sits before the read.
+    let image = pick(&images, "both lists in locals", |image| {
+        !ints(image).is_empty() && !strings(image).is_empty()
+    });
+    let broken = alias_local(&image, ints(&image)[0], strings(&image)[0]);
+    assert_eq!(faults(&loaded, &broken, &[]), FaultCode::TypeMismatch);
+}
+
+const TWO_CLASSES_SOURCE: &str = "\
+class Counter
+  n: Int = 7
+end
+
+class Label
+  text: String = \"x\"
+end
+
+def go(): Int
+  a = Counter()
+  b = Label()
+  m = 1
+  m + a.n
+end
+
+go()
+";
+
+/// An instance of one class at a position of another class faults.
+///
+/// The local typed `Counter` names a `Label`, so the field read
+/// answers a string where the code proved an integer. The interpreter
+/// tests the tag at the addition.
+#[test]
+fn an_instance_at_a_position_of_another_class_faults() {
+    let loaded = program(TWO_CLASSES_SOURCE);
+    let images = boundaries(&loaded, &[], 60);
+    let counters = |image: &Image| -> Vec<u32> {
+        local_objects(image, |object| {
+            matches!(object, Object::Instance { fields, .. }
+                if fields.len() == 1 && matches!(fields[0], Value::Int(_)))
+        })
+    };
+    let labels = |image: &Image| -> Vec<u32> {
+        local_objects(image, |object| {
+            matches!(object, Object::Instance { fields, .. }
+                if fields.len() == 1 && matches!(fields[0], Value::Obj(_)))
+        })
+    };
+    let image = pick(&images, "both instances in locals", |image| {
+        !counters(image).is_empty() && !labels(image).is_empty()
+    });
+    let broken = alias_local(&image, counters(&image)[0], labels(&image)[0]);
+    assert_eq!(faults(&loaded, &broken, &[]), FaultCode::TypeMismatch);
+}
+
 /// One typed edge proves that edge alone. Two locals typed `[Int]` and
 /// `[String]` can name one empty mutable list, and each edge passes
 /// because the list holds no element. Verified code then appends an
@@ -394,7 +584,7 @@ fn one_empty_list_under_two_element_types_rejects() {
     });
     let found = empty(&image);
     let broken = alias_local(&image, found[1], found[0]);
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 const BAG_SOURCE: &str = "\
@@ -438,7 +628,7 @@ fn one_generic_instance_under_two_arguments_rejects() {
     });
     let found = bags(&image);
     let broken = alias_local(&image, found[1], found[0]);
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 const SUBCLASS_ALIAS_SOURCE: &str = "\
@@ -563,89 +753,22 @@ fn forge_inherited_parent(images: &[Image]) -> Vec<Image> {
     }
     out
 }
-
-/// An instance edge decides the class arguments, never the class name
-/// alone.
+/// An instance of an inherited generic parent at another argument
+/// admits, and the restored world stays contained.
 ///
 /// `IntBox` inherits `Box[Int]` and takes no type parameter of its
-/// own. A nominal test therefore accepts it in a `Box[String]`
-/// position, and the restored world reads an `Int` where the code
-/// proved a `String`. The rule compares the arguments the walk to
-/// `Box` reaches with the arguments the position names.
+/// own, so a nominal test accepts it in a `Box[String]` position.
+/// Admission proves structure alone, so the container admits. The
+/// restored world then reads an `Int` where the code proved a
+/// `String`, and the interpreter tests the tag at that read.
 #[test]
-fn an_instance_of_an_inherited_generic_parent_at_another_argument_rejects() {
+fn an_inherited_generic_parent_at_another_argument_stays_contained() {
     let loaded = program(INHERITED_PARENT_SOURCE);
     let images = boundaries(&loaded, &[], 200);
     let forged = forge_inherited_parent(&images);
     assert!(!forged.is_empty(), "no capture held both boxes");
     for broken in &forged {
-        assert!(
-            admit(&loaded, broken).is_some(),
-            "a `Box[String]` position accepted an `IntBox`"
-        );
-    }
-}
-
-/// The rule itself, without an image around it.
-///
-/// `instance_field_types` is the one call `check_object` makes for an
-/// instance, and `is_subtype` is the rule the verifier proves inside a
-/// function body. The two must answer one relation: an `IntBox` fits
-/// `Box[Int]` and fits no other application of `Box`.
-#[test]
-fn an_instance_edge_decides_the_same_relation_as_the_subtype_rule() {
-    use lm_bytecode::BcType;
-    let module =
-        lm_testkit::compile_text("admission.lm", INHERITED_PARENT_SOURCE).expect("it compiles");
-    let types = lm_verify::ResolvedTypes::new(&module).expect("the module resolves");
-    let slot_of = |name: &str| -> u32 {
-        module
-            .classes
-            .iter()
-            .position(|c| c.name == name)
-            .unwrap_or_else(|| panic!("the program declares `{name}`")) as u32
-    };
-    let boxed = slot_of("Box");
-    let int_box = slot_of("IntBox");
-    let int = types.intern(BcType::Int);
-    let text = types.intern(BcType::Str);
-    let plain = types.intern(BcType::Class(int_box));
-    let box_int = types.intern(BcType::Inst(boxed, vec![int]));
-    let box_str = types.intern(BcType::Inst(boxed, vec![text]));
-    assert!(types.is_subtype(plain, box_int));
-    assert!(!types.is_subtype(plain, box_str));
-    assert_eq!(
-        types.instance_field_types(int_box, box_int),
-        Some(vec![int]),
-        "an `IntBox` at a `Box[Int]` edge holds one `Int` field"
-    );
-    assert_eq!(
-        types.instance_field_types(int_box, box_str),
-        None,
-        "an `IntBox` at a `Box[String]` edge follows from nothing"
-    );
-}
-
-/// The same forgery never reaches restore.
-///
-/// A restored world runs verified code against the state the image
-/// states. An `Int` field where the code proved a `String` reaches the
-/// operand pop of the machine, which trusts the verifier. Admission is
-/// the one gate, so the test proves the gate holds before any restore.
-#[test]
-fn a_forged_inherited_parent_image_never_restores() {
-    let loaded = program(INHERITED_PARENT_SOURCE);
-    let images = boundaries(&loaded, &[], 200);
-    let forged = forge_inherited_parent(&images);
-    assert!(!forged.is_empty(), "no capture held both boxes");
-    for broken in &forged {
-        let bytes = codec::encode(broken, usize::MAX).expect("the image encodes");
-        let admitted =
-            codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default());
-        assert!(
-            admitted.is_err(),
-            "admission let a forged world through to restore"
-        );
+        contained(&loaded, broken);
     }
 }
 
@@ -762,7 +885,7 @@ fn a_generic_instance_field_of_the_wrong_shape_rejects() {
             }
         }
     }
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 // ---------------------------------------------------------------
@@ -790,7 +913,7 @@ go()
 /// The outer object tag proves nothing about that type, so admission
 /// reads the target machine.
 #[test]
-fn a_machine_handle_that_names_another_result_type_rejects() {
+fn a_machine_handle_that_names_another_result_type_faults() {
     let loaded = program(TWO_MACHINES_SOURCE);
     let images = boundaries(&loaded, &["Vm"], 60);
     // Two machine handles that name two loaded machines of two result
@@ -845,7 +968,7 @@ fn a_machine_handle_that_names_another_result_type_rejects() {
     broken.machines[0].objects[second_at].object = Object::NativeVm {
         vm: target(first_at),
     };
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    assert_eq!(faults(&loaded, &broken, &["Vm"]), FaultCode::TypeMismatch);
 }
 
 const EMPTY_VM_SOURCE: &str = "\
@@ -866,7 +989,7 @@ go()
 /// An empty machine handle names a machine with no loaded program.
 /// The type states the lifecycle state, so admission reads the target.
 #[test]
-fn an_empty_machine_handle_that_names_a_loaded_machine_rejects() {
+fn an_empty_machine_handle_that_names_a_loaded_machine_stays_contained() {
     let loaded = program(EMPTY_VM_SOURCE);
     let images = boundaries(&loaded, &["Vm"], 60);
     let image = pick(&images, "one empty and one loaded machine", |image| {
@@ -909,7 +1032,7 @@ fn an_empty_machine_handle_that_names_a_loaded_machine_rejects() {
             }
         }
     }
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained_with(&loaded, &broken, &["Vm"]);
 }
 
 // ---------------------------------------------------------------
@@ -954,7 +1077,7 @@ fn a_terminal_unit_at_another_result_type_rejects() {
     let mut broken = image.clone();
     broken.machines[at].terminal = Some(ImageTerminal::Done(Value::Unit));
     recanonicalize(&mut broken.machines[at]);
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 /// The uninitialized marker is not a terminal result either.
@@ -980,7 +1103,7 @@ fn a_terminal_uninitialized_marker_rejects() {
     let mut broken = image.clone();
     broken.machines[at].terminal = Some(ImageTerminal::Done(Value::Uninit));
     recanonicalize(&mut broken.machines[at]);
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 const PROC_SOURCE: &str = "\
@@ -1006,7 +1129,10 @@ def go(): Int with Proc
   inner = Inner.spawn()
   outer = Outer.spawn()
   outer.send(inner)
-  1
+  case inner.done()
+  in Done(v)  then v
+  in Fault(_) then 0
+  end
 end
 
 go()
@@ -1015,7 +1141,7 @@ go()
 /// A proc handle carries the mailbox type and the result type of the
 /// proc it names. The outer object tag proves neither.
 #[test]
-fn a_proc_handle_that_names_another_mailbox_rejects() {
+fn a_proc_handle_that_names_another_mailbox_faults() {
     let loaded = program(PROC_SOURCE);
     let images = boundaries(&loaded, &["Proc"], 80);
     let image = pick(&images, "two spawned procs", |image| {
@@ -1052,7 +1178,7 @@ fn a_proc_handle_that_names_another_mailbox_rejects() {
         proc: first,
         generation: image.machines[first as usize].generation,
     };
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    assert_eq!(faults(&loaded, &broken, &["Proc"]), FaultCode::TypeMismatch);
 }
 
 const CALL_TOKEN_SOURCE: &str = "\
@@ -1100,7 +1226,7 @@ fn a_call_token_of_another_operation_rejects() {
             op: lm_abi::OP_CLOCK_NOW,
         };
     }
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 // ---------------------------------------------------------------
@@ -1108,8 +1234,8 @@ fn a_call_token_of_another_operation_rejects() {
 // ---------------------------------------------------------------
 
 /// A frame names the callee of the call site the frame below stopped
-/// inside. The substitution of one activation comes from that call
-/// site, so a chain that does not agree resolves no type at all.
+/// inside. A chain that does not agree states a stop the runtime never
+/// reaches.
 #[test]
 fn a_frame_that_is_not_the_callee_of_its_call_site_rejects() {
     let loaded = program(GENERIC_SOURCE);
@@ -1128,7 +1254,7 @@ fn a_frame_that_is_not_the_callee_of_its_call_site_rejects() {
     broken.machines[0].frames[1].ip = 0;
     broken.machines[0].locals.resize(2 * locals, Value::Uninit);
     recanonicalize(&mut broken.machines[0]);
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Type));
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
 }
 
 // ---------------------------------------------------------------
@@ -1169,7 +1295,7 @@ fn an_operand_hidden_under_a_call_rejects() {
     let base = machine.frames[top].base_operand as usize;
     machine.operands.insert(base, Value::Int(0));
     machine.frames[top].base_operand += 1;
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 /// The operand arena starts at the base of the bottom frame. A value
@@ -1384,7 +1510,7 @@ fn a_nested_snapshot_of_another_root_type_rejects() {
     broken.machines[0].objects.swap(found[0], found[1]);
     // The swap moves two payloads of equal shape, so the canonical
     // order stays exact and only the nested root type rule fires.
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Layout));
+    contained(&loaded, &broken);
 }
 
 // ---------------------------------------------------------------
@@ -1467,49 +1593,31 @@ fn an_admission_budget_that_runs_out_rejects() {
     assert!(budget.used() > 0);
 }
 
-/// The element loop of one container grows with the container, so the
-/// ledger charges every element.
+/// The ledger charges every stored object and every table entry.
 ///
-/// The walk once pushed one triple per list item, map entry, tuple
-/// element, capture, and field with no charge at all. A compact
-/// container could then push an unbounded work vector while the ledger
-/// counted a handful of units.
-///
-/// The case stays small on purpose: the point is the charge, and the
-/// address-space cap of the build shell governs the size.
+/// Admission walks the canonical order of each machine heap and
+/// resolves both witness tables. A container with many objects
+/// therefore costs many units, and a ledger below that count stops
+/// the pass.
 #[test]
-fn the_budget_charges_every_element_of_a_wide_container() {
-    const WIDE: usize = 20_000;
+fn the_budget_charges_every_stored_object() {
     let loaded = program(SHARED_SOURCE);
     let images = boundaries(&loaded, &[], 40);
-    let image = pick(&images, "a list of strings", |image| {
-        image.machines[0].objects.iter().any(|entry| {
-            matches!(&entry.object, Object::List { items }
-                if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Obj(_))))
-        })
+    let image = pick(&images, "a heap with objects", |image| {
+        image.machines[0].objects.len() >= 4
     });
-    // One list of many references to one string. The container stays
-    // compact, because every element names the same object.
-    let mut wide = image.clone();
-    for entry in &mut wide.machines[0].objects {
-        if let Object::List { items } = &mut entry.object {
-            if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Obj(_))) {
-                let first = items[0];
-                *items = vec![first; WIDE];
-            }
-        }
-    }
+    let objects = image.machines[0].objects.len() as u64;
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();
-    lm_vm::snapshot::admit(wide.clone(), &loaded, &mut budget).expect("the wide image admits");
+    lm_vm::snapshot::admit(image.clone(), &loaded, &mut budget).expect("the image admits");
     assert!(
-        budget.used() >= WIDE as u64,
-        "the ledger charged {} units for {WIDE} elements",
+        budget.used() >= objects,
+        "the ledger charged {} units for {objects} objects",
         budget.used()
     );
-    // A ledger below the element count stops the walk.
-    let mut small = lm_vm::snapshot::AdmissionBudget::new(WIDE as u64 / 2);
+    // A ledger below the object count stops the pass.
+    let mut small = lm_vm::snapshot::AdmissionBudget::new(objects / 2);
     let error =
-        lm_vm::snapshot::admit(wide, &loaded, &mut small).expect_err("the small budget runs out");
+        lm_vm::snapshot::admit(image, &loaded, &mut small).expect_err("the small budget runs out");
     assert_eq!(error.reason, ImageReason::Budget);
 }
 
