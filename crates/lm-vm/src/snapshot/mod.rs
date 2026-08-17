@@ -1,6 +1,6 @@
 //! Machine-world snapshots: the image, the canonical codec, the
 //! writer, admission, and restore (specification 17 and
-//! `docs/specs/snapshot-image-admission.md`).
+//! `docs/specs/sidecar/snapshot-image-admission.md`).
 //!
 //! The module holds two host states, and the type system keeps them
 //! apart:

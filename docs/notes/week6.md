@@ -431,7 +431,7 @@ makes the developer loop fast.
   pins are interface-level.
 - A fully qualified reference without a `use` line
   (`mathlib.matrix.Matrix`) is not accepted. The `use` line comes
-  first. `docs/specs/packages.md` section 9 records it.
+  first. `docs/specs/sidecar/packages.md` section 9 records it.
 - An enum arm of a module-aliased enum has no qualified constructor
   form (`matrix.Shape.Dot(1)`). Bind the enum directly
   (`use mathlib.matrix.Shape`) and the unqualified arm names work.
@@ -708,7 +708,7 @@ next.
 ## The identity, linking, and build-store rework
 
 This section records the work that implements
-`docs/specs/identity-and-linking.md`. It replaces the identity
+`docs/specs/sidecar/identity-and-linking.md`. It replaces the identity
 decision above wherever the two disagree.
 
 Bytecode format version 8 carries the class qualified keys, the core
@@ -1139,7 +1139,7 @@ For a class, row 3 keeps two class slots, because two class keys need
 two runtime classes. For a function, row 3 keeps two bindings and one
 code object.
 
-`docs/specs/identity-and-linking.md` section 5 is now 5.0 (the three
+`docs/specs/sidecar/identity-and-linking.md` section 5 is now 5.0 (the three
 rules), 5.1 (class identity and class-slot merging), and 5.2 (function
 binding resolution and code sharing). Specification 3.6 carries both
 tables, and 3.7 states the three rules. The sentence at 3.6 that read

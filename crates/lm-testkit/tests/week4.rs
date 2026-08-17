@@ -756,6 +756,192 @@ answer_through_wrong_vm(a, c)
     );
 }
 
+/// The nested control edge carries `step` as well as `run`. The
+/// driver of the surface receives the descendant request either way.
+#[test]
+fn a_nested_step_surfaces_a_descendant_request() {
+    let source = r#"
+def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm
+  loop do
+    case vm.drive()
+    in Asked(q)
+      case q.as_call(Io.Print)
+      in Some(call)
+        args = call.args()
+        seen.push(args[0])
+        vm.answer(call, ())
+      in None then vm.dispatch(q)
+      end
+    in Done(value)
+      return seen.len() * 10 + value
+    in Fault(_)
+      return 0 - 1
+    end
+  end
+  0 - 2
+end
+
+def step_all(b: Vm[Int]): Int with Vm
+  loop do
+    case b.step()
+    in Ran     then ()
+    in Waiting then ()
+    in Done(value)
+      return value
+    in Fault(_)
+      return 0 - 3
+    end
+  end
+  0 - 4
+end
+
+inner = do ||: Int with Vm, Io.Print
+  sys.io.print("from A")
+  b = sys.vm.Vm().from_object(do ||: Int with Io.Print
+    sys.io.print("from B")
+    7
+  end, args: ())
+  b.table().pass(Io.Print)
+  step_all(b)
+end
+
+a = sys.vm.Vm().from_object(inner, args: ())
+a.table().pass(Vm)
+a.table().pass(Io.Print)
+seen: [String] = []
+drive_loop(a, seen)
+"#;
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+        .expect("the nested step program runs");
+    assert_eq!(out, "Done(27)");
+    assert!(host.borrow().printed.is_empty());
+}
+
+/// Two drivers stand above one machine. The policy walk stops at the
+/// first one, so the outer driver never sees the request.
+#[test]
+fn the_nearest_driver_receives_a_descendant_request() {
+    let source = r#"
+def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm
+  loop do
+    case vm.drive()
+    in Asked(q)
+      case q.as_call(Io.Print)
+      in Some(call)
+        args = call.args()
+        seen.push(args[0])
+        vm.answer(call, ())
+      in None then vm.dispatch(q)
+      end
+    in Done(value)
+      return seen.len() * 10 + value
+    in Fault(_)
+      return 0 - 1
+    end
+  end
+  0 - 2
+end
+
+def a_drives_b(b: Vm[Int]): Int with Vm
+  loop do
+    case b.drive()
+    in Asked(q)
+      case q.as_call(Io.Print)
+      in Some(call) then b.answer(call, ())
+      in None       then b.dispatch(q)
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return 0 - 3
+    end
+  end
+  0 - 4
+end
+
+inner = do ||: Int with Vm, Io.Print
+  sys.io.print("from A")
+  b = sys.vm.Vm().from_object(do ||: Int with Io.Print
+    sys.io.print("from B")
+    7
+  end, args: ())
+  b.table().pass(Io.Print)
+  a_drives_b(b)
+end
+
+a = sys.vm.Vm().from_object(inner, args: ())
+a.table().pass(Vm)
+a.table().pass(Io.Print)
+seen: [String] = []
+drive_loop(a, seen)
+"#;
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+        .expect("the two-driver program runs");
+    // The outer driver captured the print of A alone. The inner
+    // driver answered the print of B, so neither reached the host.
+    assert_eq!(out, "Done(17)");
+    assert!(host.borrow().printed.is_empty());
+}
+
+/// Routing is transitive. A driver receives a request that passed two
+/// machines below it.
+#[test]
+fn a_driver_receives_a_request_from_two_levels_below() {
+    let source = r#"
+def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm
+  loop do
+    case vm.drive()
+    in Asked(q)
+      case q.as_call(Io.Print)
+      in Some(call)
+        args = call.args()
+        seen.push(args[0])
+        vm.answer(call, ())
+      in None then vm.dispatch(q)
+      end
+    in Done(value)
+      return seen.len() * 10 + value
+    in Fault(_)
+      return 0 - 1
+    end
+  end
+  0 - 2
+end
+
+inner = do ||: Int with Vm, Io.Print
+  sys.io.print("from A")
+  b = sys.vm.Vm().from_object(do ||: Int with Vm, Io.Print
+    sys.io.print("from B")
+    c = sys.vm.Vm().from_object(do ||: Int with Io.Print
+      sys.io.print("from C")
+      7
+    end, args: ())
+    c.table().pass(Io.Print)
+    case c.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 3
+    end
+  end, args: ())
+  b.table().pass(Vm)
+  b.table().pass(Io.Print)
+  case b.run()
+  in Done(value) then value
+  in Fault(_) then 0 - 4
+  end
+end
+
+a = sys.vm.Vm().from_object(inner, args: ())
+a.table().pass(Vm)
+a.table().pass(Io.Print)
+seen: [String] = []
+drive_loop(a, seen)
+"#;
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+        .expect("the three-level program runs");
+    assert_eq!(out, "Done(37)");
+    assert!(host.borrow().printed.is_empty());
+}
+
 #[test]
 fn run_step_and_drive_agree_on_one_program() {
     let program = "do || with Clock.Now\n    \

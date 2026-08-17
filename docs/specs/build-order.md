@@ -428,7 +428,7 @@ and skips re-verification.
 
 ## Week 6 — Packages, modules, and the build loop
 
-The developer ergonomics of this week follow `docs/specs/packages.md`:
+The developer ergonomics of this week follow `docs/specs/sidecar/packages.md`:
 the package layout, the minimal TOML manifest with path dependencies,
 modules from files, and the `use` declaration over interfaces.
 
@@ -775,7 +775,7 @@ valid: state=asked machines=3 mailboxes=2
 - Whole-image structural verification occurs once on external load.
   Admission proves structure. The interpreter tests each value tag, and
   the world checks each VM boundary
-  (`docs/specs/snapshot-image-admission.md` section 5.2).
+  (`docs/specs/sidecar/snapshot-image-admission.md` section 5.2).
 - In-process trusted restore and external byte load remain separate
   APIs.
 - Snapshot size/load/write benchmarks are tracked by workload shape.

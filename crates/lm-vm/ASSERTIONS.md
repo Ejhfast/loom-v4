@@ -226,6 +226,29 @@ Capture reads one live machine world that this process built. No
 container reaches capture: `codec::decode` and `admit` are the one
 path from bytes into a host image.
 
+### `route_request` activation search and pop
+
+`crates/lm-vm/src/world.rs:1721`, `:1730`, `:1740`
+
+`route_request` routes one descendant request to the driver of an
+ancestor. It finds the driver position with `rposition` over the
+activation stack, indexes the stack there, and then pops the stack
+down to that position.
+
+`rposition` answers `Some` only for an index the stack holds. Between
+the search and the pop the function reads `self.machines` and returns
+early. It never mutates the stack. The index therefore stays valid,
+`stack[at]` holds, and `stack.len() > at` proves each `pop` answers
+`Some`.
+
+No container reaches the activation stack. A container states nested
+control edges, not activations. `resume_nested` builds one activation
+for each stored edge at the next control call, and it faults rather
+than asserts for a missing pending operation, a wrong operation, a
+self edge, a machine in use, and a scheduler-owned machine.
+`check_world` proves that each stored edge names a captured machine
+before that.
+
 ## Part 3: the decisions this inventory made
 
 ### The operand-stack depth rule left admission, so `pop` faults

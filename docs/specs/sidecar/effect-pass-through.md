@@ -219,6 +219,23 @@ A routed continuation performs fixed identity and state checks.
 A surfaced request still adds one guest round trip. That cost belongs
 to the explicit manual policy decision.
 
+The measurement below compares this commit against the commit before
+it, on one host, in one session. Each figure is the median of three
+runs of `bench_language_operations`, and each run reports the median
+of nine rounds. Nanoseconds per operation.
+
+| Case | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `int_loop` | 32.3 | 32.1 | none |
+| `class_init` | 177.1 | 177.2 | none |
+| `world_int_loop` | 33.5 | 34.0 | +0.5 |
+| `world_class_init` | 181.1 | 181.9 | +0.8 |
+
+The two bare-machine cases perform no operation, and they do not move.
+The two world cases stay inside the round-to-round spread of the
+allocating benchmarks, which reaches ten percent. Read the two small
+positive figures as a bound, not as a measured cost.
+
 ## 6. Scope
 
 `mock` stays. It is the advance answer, and it belongs beside the

@@ -59,6 +59,9 @@ in its own reviewed commit.
   (version 0.2).
 - `docs/specs/build-order.md` — the weekly vertical-slice implementation
   plan. Each week lands a complete source-to-execution increment.
+- `docs/specs/sidecar/` — sidecar specifications. Each one refines the
+  language specification for one topic. Keep `docs/specs/` itself to the
+  language specification and the build order.
 - `crates/` — the Rust workspace crates (`lm-source`, `lm-types`,
   `lm-bytecode`, `lm-verify`, `lm-vm`, `lm-cli`, ...).
 - `examples/` — runnable Loom programs (`.lm` files) with checked output.

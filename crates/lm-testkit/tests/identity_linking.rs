@@ -1,7 +1,7 @@
 //! Identity and linking: the four identities, the merge table, the
 //! order-invariant member labeling, and the symmetric members.
 //!
-//! The suite follows `docs/specs/identity-and-linking.md` sections 4
+//! The suite follows `docs/specs/sidecar/identity-and-linking.md` sections 4
 //! to 7 and specification 3.6 and 3.7.
 
 use lm_bytecode::identity::module_identity;

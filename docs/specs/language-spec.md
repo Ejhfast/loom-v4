@@ -184,7 +184,7 @@ end
 
 Top-level definitions are `class`, `enum`, and `def`. There are no mutable module variables, top-level assignment slots, effectful initializers, or runtime namespace installation. All definitions are exported by source name. The optional trailing expression becomes the module entry value.
 
-Inside a package, one module holds the program entry: `src/main.lm`. Every other module must end without a trailing expression. The file tree under `src/` is the module tree, and the module path across packages carries the package name of the manifest (`docs/specs/packages.md`).
+Inside a package, one module holds the program entry: `src/main.lm`. Every other module must end without a trailing expression. The file tree under `src/` is the module tree, and the module path across packages carries the package name of the manifest (`docs/specs/sidecar/packages.md`).
 
 ### 3.2 Predeclaration and recursion
 
@@ -204,7 +204,7 @@ The following require no ordinary import slot:
 
 The standard library is not ambient. A package or explicit compile environment supplies every `std/*` module it uses. Every other free name must be defined by the module or supplied in the explicit compile environment.
 
-The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name. A `use` of another module compiles to a named import slot, and the build tool fulfills it. `use` never grants authority and never changes an effect row. The package layout, the manifest, and the resolution roots are defined in `docs/specs/packages.md`.
+The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name. A `use` of another module compiles to a named import slot, and the build tool fulfills it. `use` never grants authority and never changes an effect row. The package layout, the manifest, and the resolution roots are defined in `docs/specs/sidecar/packages.md`.
 
 A `use` path starts at a root name. The root set is fixed per module: the dependency keys of the manifest, this package's own top-level modules, `std`, and `sys`. A collision inside the root set is a compile error, and the fix is a manifest rename; resolution never picks silently. A path that names a module binds that module, and every export of it resolves under the bound name. A path that names one export of a module binds that export.
 

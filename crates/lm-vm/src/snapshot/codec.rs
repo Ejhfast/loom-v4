@@ -11,7 +11,7 @@
 //!
 //! The decoder protects the host from the byte stream, and it does no
 //! more than that. It proves the container properties of
-//! `docs/specs/snapshot-image-admission.md` section 4: the frame, the
+//! `docs/specs/sidecar/snapshot-image-admission.md` section 4: the frame, the
 //! canonical integers, the section bounds, the container hash, and one
 //! `Image` representation for every wire tag. It reads no program, and
 //! it establishes no interpreter invariant. `admit` does that, because
