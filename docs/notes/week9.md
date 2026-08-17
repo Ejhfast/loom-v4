@@ -25,7 +25,7 @@ table holds sixteen shapes. The snapshot container format version is
 
 The work after week 9 moved several of these numbers.
 `docs/notes/post-week9-admission.md` records the current values: the
-bytecode format is 14, the compiler ABI is 8, the verifier is 7, the
+bytecode format is 14, the compiler ABI is 8, the verifier is 8, the
 operation manifest ABI is 4, and the snapshot container format is 2.
 
 ## Landed

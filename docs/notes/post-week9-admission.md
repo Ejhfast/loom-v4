@@ -47,6 +47,7 @@ Admission proves structure:
   operation identity resolves;
 - every code identity matches verified code;
 - every frame names a reachable instruction boundary;
+- every frame environment ordinal resolves;
 - frame bases fill the local arena exactly, the bottom frame starts the
   operand arena, and no later frame lowers the operand base;
 - every object holds its required field or element count;
@@ -82,10 +83,18 @@ pending call reply, the spawn argument, the mock reply, and the restore
 that returns `Vm[T]` or `Snapshot[T]`. The check runs in
 `World::install_value_reply` and `World::check_frame_args`.
 
-The check descends every element and every field. A native handle takes
-a shape test alone, because its arguments name another machine, another
-operation, or a function body. Each handle later produces a value that
+The check descends every element and every field. A closure also meets
+the verified closed signature of its function. The comparison includes
+parameters, mutation markers, the result, and the effect row.
+
+A native handle takes a shape test alone, because its arguments name
+another machine or operation. Each handle later produces a value that
 crosses a boundary of its own.
+
+The graph copy and the type check use separate bounded walks. A copy
+visits each object once. The type check visits each object and
+expected-type pair, because sharing can give one object several expected
+types.
 
 The check has full force where the performing frame is live. Where the
 performing frame is restored, its type environment came from the image,
@@ -148,7 +157,7 @@ the node cap.
 | bytecode format | 14 |
 | interface format | 5 |
 | compiler ABI | 8 |
-| verifier | 7 |
+| verifier | 8 |
 | operation manifest ABI | 4 |
 | snapshot container format | 2 |
 
@@ -159,6 +168,9 @@ and `verification_hash` covers `manifest_digest()`.
 `Perform` and `PerformValue` carry `reply_ty`, which moved the bytecode
 format.
 
+Verifier version 8 fixes generic parent subtype and join rules. It also
+makes shared type DAG walks visit each node or pair once.
+
 `core/pinned-core-defs.txt` follows `manifest_digest()`.
 `core/pinned-hash.txt` covers source content alone.
 
@@ -167,7 +179,7 @@ Both appear in the stable table of language specification 12.3.
 
 ### Tests
 
-`cargo test --workspace` runs 859 tests and exits 0.
+`cargo test --workspace` runs the full workspace suite and exits 0.
 
 `every_capture_of_every_shipped_program_admits`
 (`crates/lm-testkit/tests/admission.rs`) compiles each `.lm` file under

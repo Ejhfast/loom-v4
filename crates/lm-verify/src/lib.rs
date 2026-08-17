@@ -14,7 +14,7 @@
 use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, BcRow, BcType, Func, Instr, Module};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 /// The largest operand-stack depth the verifier accepts for one function.
@@ -30,10 +30,8 @@ const MAX_LOCAL_SLOTS: u32 = 65_536;
 /// The deepest a type may nest.
 ///
 /// A type child names an earlier table entry, so a table of N entries
-/// can nest N deep. Every walk over a type costs at least its depth,
-/// and `Ctx::join` costs the square of it, because the join tests the
-/// subtype relation at each level. A crafted artifact therefore turns
-/// a small type table into a denial of service.
+/// can nest N deep. Every walk over a type costs at least its depth. A
+/// crafted artifact must not make that work unbounded.
 ///
 /// The bound makes a deep type unrepresentable. It also keeps a
 /// recursive walk safe, so a later walk needs no iterative form to stay
@@ -128,19 +126,6 @@ impl<'m> Ctx<'m> {
 
     fn intern(&self, ty: BcType) -> u32 {
         self.uni.borrow_mut().intern(ty)
-    }
-
-    /// Return true when class `child` equals `ancestor` or inherits it.
-    fn class_extends(&self, mut child: u32, ancestor: u32) -> bool {
-        loop {
-            if child == ancestor {
-                return true;
-            }
-            match self.module.classes[child as usize].parent() {
-                Some(p) => child = p,
-                None => return false,
-            }
-        }
     }
 
     /// The type arguments of `ancestor` seen from an instance of
@@ -342,67 +327,62 @@ impl<'m> Ctx<'m> {
     /// The work list holds pairs that must all hold. A pair the rules
     /// refuse answers false at once.
     fn is_subtype(&self, found: u32, expected: u32) -> bool {
-        // The empty list allocates nothing, so a pair of equal types
-        // or of two class types costs no allocation at all.
-        let mut work: Vec<(u32, u32)> = Vec::new();
-        let mut pair = (found, expected);
-        loop {
-            let (f, e) = pair;
-            if f != e {
-                let ok = match (self.ty(f), self.ty(e)) {
-                    // A plain class position names no argument, so the
-                    // walk to the ancestor must also reach it with no
-                    // argument. A class that inherits an instantiated
-                    // generic parent therefore fits no plain position
-                    // of that parent.
-                    (BcType::Class(a), BcType::Class(b)) => {
-                        self.ancestor_args(a, &[], b) == Some(Vec::new())
-                    }
-                    // A class may inherit an instantiated generic
-                    // parent, so a plain class instance can satisfy an
-                    // application type.
-                    (BcType::Class(a), BcType::Inst(b, ys)) => {
-                        self.ancestor_args(a, &[], b).as_ref() == Some(&ys)
-                    }
-                    (BcType::Inst(a, xs), BcType::Class(b)) => {
-                        self.ancestor_args(a, &xs, b) == Some(Vec::new())
-                    }
-                    (BcType::Inst(a, xs), BcType::Inst(b, ys)) => {
-                        self.ancestor_args(a, &xs, b).as_ref() == Some(&ys)
-                    }
-                    (BcType::Tuple(xs), BcType::Tuple(ys)) => {
-                        if xs.len() != ys.len() {
-                            return false;
-                        }
-                        work.extend(xs.iter().zip(ys.iter()).map(|(x, y)| (*x, *y)));
-                        true
-                    }
-                    (BcType::Fn(fp, fm, fr, frow), BcType::Fn(ep, em, er, erow)) => {
-                        // A function that needs a `mut` argument is
-                        // not valid where the expected type promises a
-                        // read-only call. A parameter compares in the
-                        // other direction.
-                        if fp.len() != ep.len()
-                            || !fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
-                            || !self.row_included(&frow, &erow)
-                        {
-                            return false;
-                        }
-                        work.extend(fp.iter().zip(ep.iter()).map(|(f, e)| (*e, *f)));
-                        work.push((fr, er));
-                        true
-                    }
-                    _ => false,
-                };
-                if !ok {
-                    return false;
-                }
+        let mut work: Vec<(u32, u32)> = vec![(found, expected)];
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
+        while let Some((f, e)) = work.pop() {
+            if f == e || !seen.insert((f, e)) {
+                continue;
             }
-            match work.pop() {
-                Some(next) => pair = next,
-                None => return true,
+            let ok = match (self.ty(f), self.ty(e)) {
+                // A plain class position names no argument, so the
+                // walk to the ancestor must also reach it with no
+                // argument. A class that inherits an instantiated
+                // generic parent therefore fits no plain position
+                // of that parent.
+                (BcType::Class(a), BcType::Class(b)) => {
+                    self.ancestor_args(a, &[], b) == Some(Vec::new())
+                }
+                // A class may inherit an instantiated generic
+                // parent, so a plain class instance can satisfy an
+                // application type.
+                (BcType::Class(a), BcType::Inst(b, ys)) => {
+                    self.ancestor_args(a, &[], b).as_ref() == Some(&ys)
+                }
+                (BcType::Inst(a, xs), BcType::Class(b)) => {
+                    self.ancestor_args(a, &xs, b) == Some(Vec::new())
+                }
+                (BcType::Inst(a, xs), BcType::Inst(b, ys)) => {
+                    self.ancestor_args(a, &xs, b).as_ref() == Some(&ys)
+                }
+                (BcType::Tuple(xs), BcType::Tuple(ys)) => {
+                    if xs.len() != ys.len() {
+                        return false;
+                    }
+                    work.extend(xs.iter().zip(ys.iter()).map(|(x, y)| (*x, *y)));
+                    true
+                }
+                (BcType::Fn(fp, fm, fr, frow), BcType::Fn(ep, em, er, erow)) => {
+                    // A function that needs a `mut` argument is
+                    // not valid where the expected type promises a
+                    // read-only call. A parameter compares in the
+                    // other direction.
+                    if fp.len() != ep.len()
+                        || !fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
+                        || !self.row_included(&frow, &erow)
+                    {
+                        return false;
+                    }
+                    work.extend(fp.iter().zip(ep.iter()).map(|(f, e)| (*e, *f)));
+                    work.push((fr, er));
+                    true
+                }
+                _ => false,
+            };
+            if !ok {
+                return false;
             }
         }
+        true
     }
 
     /// Join two types at a control-flow merge. Classes join at their
@@ -411,79 +391,105 @@ impl<'m> Ctx<'m> {
     /// The walk is iterative. Only a tuple carries a nested join, so
     /// the stack holds the tuple positions the answer still needs.
     fn join(&self, a: u32, b: u32) -> Option<u32> {
-        // A post-order stack over the pair tree. The flag marks a pair
-        // whose element pairs already sit above it on the stack.
+        // A post-order walk over the pair DAG. The flag marks a pair
+        // whose element pairs already have answers.
         let mut stack: Vec<(u32, u32, bool)> = vec![(a, b, false)];
-        // The answers, in the order the elements of each tuple close.
-        let mut done: Vec<u32> = Vec::new();
+        let mut done: HashMap<(u32, u32), Option<u32>> = HashMap::new();
         while let Some((x, y, expanded)) = stack.pop() {
+            if done.contains_key(&(x, y)) {
+                continue;
+            }
             if !expanded {
                 match self.join_flat(x, y)? {
-                    Flat::Type(id) => done.push(id),
+                    Flat::Type(id) => {
+                        done.insert((x, y), Some(id));
+                    }
                     Flat::Tuple(xs, ys) => {
                         stack.push((x, y, true));
-                        // The elements push in reverse, so they pop in
-                        // declaration order and their answers land in
-                        // that order.
                         for (ex, ey) in xs.iter().zip(ys.iter()).rev() {
-                            stack.push((*ex, *ey, false));
+                            if !done.contains_key(&(*ex, *ey)) {
+                                stack.push((*ex, *ey, false));
+                            }
                         }
                     }
                 }
                 continue;
             }
-            let BcType::Tuple(xs) = self.ty(x) else {
+            let (BcType::Tuple(xs), BcType::Tuple(ys)) = (self.ty(x), self.ty(y)) else {
                 return None;
             };
-            if done.len() < xs.len() {
+            let mut elems = Vec::with_capacity(xs.len());
+            for pair in xs.iter().copied().zip(ys.iter().copied()) {
+                let Some(Some(joined)) = done.get(&pair) else {
+                    done.insert((x, y), None);
+                    elems.clear();
+                    break;
+                };
+                elems.push(*joined);
+            }
+            if elems.len() != xs.len() {
                 return None;
             }
-            let elems = done.split_off(done.len() - xs.len());
-            done.push(self.intern(BcType::Tuple(elems)));
+            let joined = self.intern(BcType::Tuple(elems));
+            done.insert((x, y), Some(joined));
         }
-        match done.len() {
-            1 => done.pop(),
-            _ => None,
-        }
+        done.remove(&(a, b)).flatten()
     }
 
     /// One join step that needs no nested answer.
     fn join_flat(&self, a: u32, b: u32) -> Option<Flat> {
+        if let (BcType::Tuple(xs), BcType::Tuple(ys)) = (self.ty(a), self.ty(b)) {
+            if xs.len() != ys.len() {
+                return None;
+            }
+            return Some(Flat::Tuple(xs, ys));
+        }
         if self.is_subtype(a, b) {
             return Some(Flat::Type(b));
         }
         if self.is_subtype(b, a) {
             return Some(Flat::Type(a));
         }
-        match (self.ty(a), self.ty(b)) {
-            (BcType::Class(ca), BcType::Class(cb)) => {
-                let common = self.common_ancestor(ca, cb)?;
-                Some(Flat::Type(self.intern(BcType::Class(common))))
-            }
-            (BcType::Inst(ca, xs), BcType::Inst(cb, ys)) => {
-                if xs != ys {
-                    return None;
-                }
-                let common = self.common_ancestor(ca, cb)?;
-                Some(Flat::Type(self.intern(BcType::Inst(common, xs))))
-            }
-            (BcType::Tuple(xs), BcType::Tuple(ys)) => {
-                if xs.len() != ys.len() {
-                    return None;
-                }
-                Some(Flat::Tuple(xs, ys))
-            }
-            _ => None,
-        }
+        let (ca, xs) = self.as_instance(a)?;
+        let (cb, ys) = self.as_instance(b)?;
+        let (common, args) = self.common_applied_ancestor(ca, &xs, cb, &ys)?;
+        let joined = if self.module.classes[common as usize].type_params == 0 {
+            BcType::Class(common)
+        } else {
+            BcType::Inst(common, args)
+        };
+        Some(Flat::Type(self.intern(joined)))
     }
 
-    fn common_ancestor(&self, a: u32, b: u32) -> Option<u32> {
-        let mut anc = Some(a);
-        while let Some(c) = anc {
-            if self.class_extends(b, c) {
-                return Some(c);
+    /// Find the nearest common ancestor with one equal application.
+    fn common_applied_ancestor(
+        &self,
+        a: u32,
+        a_args: &[u32],
+        b: u32,
+        b_args: &[u32],
+    ) -> Option<(u32, Vec<u32>)> {
+        let mut ancestor = Some(a);
+        while let Some(class) = ancestor {
+            let left = self.ancestor_args(a, a_args, class)?;
+            if let Some(right) = self.ancestor_args(b, b_args, class) {
+                if left == right {
+                    return Some((class, left));
+                }
             }
-            anc = self.module.classes[c as usize].parent();
+            ancestor = self.module.classes[class as usize].parent();
+        }
+        None
+    }
+
+    /// Find the nearest common nominal ancestor.
+    fn common_ancestor(&self, a: u32, b: u32) -> Option<u32> {
+        let mut ancestor = Some(a);
+        while let Some(class) = ancestor {
+            if self.ancestor_args(b, &[], class).is_some() {
+                return Some(class);
+            }
+            ancestor = self.module.classes[class as usize].parent();
         }
         None
     }
@@ -548,7 +554,11 @@ impl<'m> Ctx<'m> {
     fn vars_bounded(&self, ty: u32, limit: u32, elimit: u32) -> bool {
         let mut stack: Vec<u32> = vec![ty];
         let mut children: Vec<u32> = Vec::new();
+        let mut seen: HashSet<u32> = HashSet::new();
         while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
             match self.ty(cur) {
                 BcType::Var(i) => {
                     if i >= limit {
@@ -684,11 +694,10 @@ impl<'m> Ctx<'m> {
 /// The verifier version. It takes part in the verified-code cache
 /// key: a rule change invalidates every cached admission.
 ///
-/// Version 5 adds the class rules and the dispatch rules of a
-/// generic parent. Version 6 adds the two snapshot core families and
-/// the four snapshot operation rules. Version 7 adds the reply type
-/// rule of the two perform instructions.
-pub const VERIFIER_VERSION: u32 = 7;
+/// Version 5 adds generic parent dispatch rules. Version 6 adds the
+/// snapshot core rules. Version 7 adds perform reply types. Version 8
+/// fixes generic parent subtype and join rules.
+pub const VERIFIER_VERSION: u32 = 8;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -3921,6 +3930,86 @@ mod tests {
         let ctx = verify_tables(&m, core).expect("the tables verify");
         assert!(ctx.is_subtype(7, 5), "an IntBox fits Box[Int]");
         assert!(!ctx.is_subtype(7, 6), "an IntBox fits no Box[String]");
+    }
+
+    /// Sibling classes join through the full application of a generic
+    /// parent. A class slot alone would lose the parent's argument.
+    #[test]
+    fn sibling_classes_join_at_one_generic_parent_application() {
+        let class = |name: &str, parent: u32, args: Vec<u32>, params: u32| BcClass {
+            name: name.to_string(),
+            key: name.to_string(),
+            parent,
+            parent_args: args,
+            type_params: params,
+            kind: lm_bytecode::BcClassKind::Normal,
+            fields: vec![],
+            methods: vec![],
+        };
+        let mut m = module_with(vec![vec![ConstInt(0), Return]]);
+        m.types = base_types();
+        m.types.push(BcType::Class(1)); // 4 IntLeft
+        m.types.push(BcType::Class(2)); // 5 IntRight
+        m.types.push(BcType::Class(3)); // 6 StringChild
+        m.classes = vec![
+            class("Box", NO_PARENT, vec![], 1),
+            class("IntLeft", 0, vec![TY_INT], 0),
+            class("IntRight", 0, vec![TY_INT], 0),
+            class("StringChild", 0, vec![TY_STR], 0),
+        ];
+        let core = lm_bytecode::corepin::declared_layout(&m);
+        let ctx = verify_tables(&m, core).expect("the tables verify");
+
+        let joined = ctx.join(4, 5).expect("the siblings join");
+        assert_eq!(ctx.ty(joined), BcType::Inst(0, vec![TY_INT]));
+        assert_eq!(ctx.join(4, 6), None, "different applications do not join");
+    }
+
+    /// Shared type children form a DAG, not a tree. Each verifier walk
+    /// must visit one node or pair once.
+    #[test]
+    fn shared_type_dags_do_not_duplicate_verifier_work() {
+        const DEPTH: usize = 40;
+        let class = |name: &str, parent: u32| BcClass {
+            name: name.to_string(),
+            key: name.to_string(),
+            parent,
+            parent_args: vec![],
+            type_params: 0,
+            kind: lm_bytecode::BcClassKind::Normal,
+            fields: vec![],
+            methods: vec![],
+        };
+        let mut types = base_types();
+        types.push(BcType::Var(0));
+        let mut bounded = (types.len() - 1) as u32;
+        for _ in 0..DEPTH {
+            types.push(BcType::Tuple(vec![bounded, bounded]));
+            bounded = (types.len() - 1) as u32;
+        }
+        types.push(BcType::Class(1));
+        let mut left = (types.len() - 1) as u32;
+        types.push(BcType::Class(2));
+        let mut right = (types.len() - 1) as u32;
+        for _ in 0..DEPTH {
+            types.push(BcType::Tuple(vec![left, left]));
+            left = (types.len() - 1) as u32;
+            types.push(BcType::Tuple(vec![right, right]));
+            right = (types.len() - 1) as u32;
+        }
+        let mut m = module_with(vec![vec![ConstInt(0), Return]]);
+        m.types = types;
+        m.classes = vec![
+            class("Parent", NO_PARENT),
+            class("Left", 0),
+            class("Right", 0),
+        ];
+        let core = lm_bytecode::corepin::declared_layout(&m);
+        let ctx = verify_tables(&m, core).expect("the tables verify");
+
+        assert!(ctx.vars_bounded(bounded, 1, 0));
+        assert!(!ctx.is_subtype(left, right));
+        assert!(ctx.join(left, right).is_some());
     }
 
     /// A type table nests no deeper than `MAX_TYPE_DEPTH`.

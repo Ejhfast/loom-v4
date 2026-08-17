@@ -19,7 +19,9 @@ use lm_heap::Object;
 use lm_testkit::compile_to_bytes;
 use lm_value::{ObjRef, Value};
 use lm_vm::snapshot::{codec, Image, ImageMachine, ImageObject, ImageReason, ImageTerminal};
-use lm_vm::{load_bytes, FaultCode, LoadedModule, RecordingHost, RootEvent, VmConfig, World};
+use lm_vm::{
+    load_bytes, FaultCode, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, World,
+};
 
 fn program(source: &str) -> LoadedModule {
     let bytes = compile_to_bytes("admission.lm", source).expect("the program compiles");
@@ -1905,6 +1907,36 @@ fn every_captured_world_of_the_corpus_admits() {
         }
     }
 }
+
+/// An editable image reference uses generation zero.
+#[test]
+fn a_nonzero_image_reference_generation_rejects() {
+    let loaded = program(SHARED_SOURCE);
+    let images = boundaries(&loaded, &[], 60);
+    let mut broken = pick(&images, "an object-valued local", |image| {
+        image.machines.iter().any(|machine| {
+            machine
+                .locals
+                .iter()
+                .any(|value| matches!(value, Value::Obj(_)))
+        })
+    });
+    let reference = broken
+        .machines
+        .iter_mut()
+        .flat_map(|machine| machine.locals.iter_mut())
+        .find_map(|value| match value {
+            Value::Obj(reference) => Some(reference),
+            _ => None,
+        })
+        .expect("the capture holds an object-valued local");
+    reference.generation = 1;
+
+    let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+    let error = lm_vm::snapshot::admit(broken, &loaded, &mut budget)
+        .expect_err("the nonzero generation rejects");
+    assert_eq!(error.reason, ImageReason::Reference);
+}
 // ---------------------------------------------------------------
 // The gate: every capture of every shipped program admits.
 // ---------------------------------------------------------------
@@ -1946,6 +1978,19 @@ end
 
 go()
 ";
+
+/// A direct generic parameter uses the entry frame environment.
+#[test]
+fn a_generic_entry_parameter_crosses_the_vm_boundary() {
+    let loaded = program(GENERIC_ENTRY);
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the grant names a group");
+    assert_eq!(world.run_root(), Outcome::Done(Value::Int(41)));
+}
 
 /// A proc handle that outlives the constructor of its proc.
 const PROC_HANDLE: &str = "\

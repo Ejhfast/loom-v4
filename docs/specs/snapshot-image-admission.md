@@ -183,6 +183,7 @@ Structural resolution enforces these rules:
 - Every function, class, type, and operation identity resolves.
 - Every code identity matches verified code.
 - Every frame names a reachable instruction boundary.
+- Every frame environment ordinal resolves.
 - Frame bases fill the local arena exactly.
 - The bottom frame starts the operand arena, and no later frame lowers
   the operand base.
@@ -225,10 +226,18 @@ The boundaries are the terminal result read, the mailbox receive, the
 pending call reply, the spawn argument, the mock reply, and the restore
 that returns `Vm[T]` or `Snapshot[T]`.
 
-The check descends every element and every field. A native handle takes
-a shape test alone, because its arguments name another machine, another
-operation, or a function body. Each handle later produces a value that
+The check descends every element and every field. It compares a closure
+with the verified closed signature of its function. That comparison
+includes parameters, mutation markers, the result, and the effect row.
+
+A native handle takes a shape test alone, because its arguments name
+another machine or operation. Each handle later produces a value that
 crosses a boundary of its own, and that read carries the check.
+
+The graph copy and the type check use separate bounded walks. A copy
+visits each object identity once. The type check visits each object and
+expected-type pair. Sharing can give one object more than one expected
+type, so one object walk cannot replace the type walk.
 
 The check has full force where the performing frame is live. Where the
 performing frame is itself restored, its type environment came from the

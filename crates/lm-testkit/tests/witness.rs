@@ -229,6 +229,33 @@ fn a_closure_keeps_its_creator_environment_across_a_boundary() {
 // Admission uses and checks the witness.
 // ---------------------------------------------------------------
 
+/// Every frame environment ordinal resolves during admission.
+#[test]
+fn a_nonbottom_frame_environment_must_resolve() {
+    let loaded =
+        program("def inner(): Int\n  40 + 2\nend\n\ndef outer(): Int\n  inner()\nend\n\nouter()\n");
+    let images = boundaries(&loaded, &[], 20);
+    let mut broken = pick(&images, "a direct callee frame", |image| {
+        image.machines[0]
+            .frames
+            .iter()
+            .skip(1)
+            .any(|frame| frame.closure.is_none())
+    });
+    let frame = broken.machines[0]
+        .frames
+        .iter_mut()
+        .skip(1)
+        .find(|frame| frame.closure.is_none())
+        .expect("the capture holds a direct callee");
+    frame.env = u32::MAX;
+
+    let mut budget = lm_vm::snapshot::AdmissionBudget::default();
+    let error = lm_vm::snapshot::admit(broken, &loaded, &mut budget)
+        .expect_err("the missing environment rejects");
+    assert_eq!(error.reason, ImageReason::Reference);
+}
+
 /// A frame witness that disagrees with its call site admits.
 ///
 /// A restored frame states its own environment. That is the design:

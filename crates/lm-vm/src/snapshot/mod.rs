@@ -457,6 +457,11 @@ pub enum RestoreFail {
     /// belongs to the program that admitted it. A restore into another
     /// program would read those slots against the wrong tables.
     OtherProgram,
+    /// The admitted image broke an internal structural invariant.
+    ///
+    /// Public admission prevents this case. The variant keeps restore
+    /// total if an internal constructor breaks that contract.
+    InvalidImage,
 }
 
 /// The stage that rejected one container.

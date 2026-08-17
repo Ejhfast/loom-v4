@@ -1,104 +1,51 @@
-//! The boundary type check.
+//! Boundary type checks.
 //!
-//! A value crosses a VM boundary when it enters typed guest code: a
-//! terminal result read, a mailbox receive, a pending call reply, a
-//! spawn argument, a mock reply, and a restore that answers a handle.
-//! The receiving code expects one type there, and this module proves
-//! that the value carries it.
+//! A value crosses a VM boundary when it enters typed guest code. The
+//! receiving instruction supplies the expected module type. Its frame
+//! supplies the closed type environment.
 //!
-//! Two inputs decide the expected type, and neither comes from a
-//! snapshot container:
+//! The checker closes that type once. All later work uses canonical
+//! closed types. This rule resolves a root type variable and avoids a
+//! second argument-list interner inside the checker.
 //!
-//! - the instruction states a module type index. The verifier proves
-//!   that the index equals the type its dataflow pushes, so the index
-//!   comes from verified code;
-//! - the frame states a `TypeEnvId`. `call_generic` builds it from the
-//!   caller environment and the application of the call site, so a
-//!   live generic frame binds its variables to closed types that
-//!   execution built.
-//!
-//! A restored frame states its own environment, so the check there
-//! compares against a type the container chose. That is expected. The
-//! check has teeth where the performing frame is live, which is the
-//! machine that called restore and holds its own static type.
-//!
-//! The walk is iterative and bounded. It descends every element and
-//! every field, so a wrong type inside a container faults at the
-//! boundary instead of later.
-//!
-//! The walk reads no witness. An instance takes the arguments of the
-//! position that reached it, and the field types follow from the
-//! layout of its concrete class under those arguments. A wrong
-//! argument therefore shows as a wrong field value. An object that
-//! carries no value under the argument, for example an empty list,
-//! stays a question the interpreter answers: every read tests its own
-//! tag.
-//!
-//! The walk allocates nothing after its first call, and it performs no
-//! hashing in the common shapes.
+//! The walk is iterative and bounded. It descends collection elements
+//! and instance fields. It also checks a closure signature before the
+//! closure can execute in the receiving machine.
 
 use lm_abi::FaultCode;
-use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnvs};
+use lm_bytecode::closed::{ClosedRow, ClosedType, ClosedTypeId, TypeEnvFull, TypeEnvs};
 use lm_bytecode::{BcType, Module};
 use lm_heap::{Heap, Object};
 use lm_value::{TypeEnvId, Value};
 use std::collections::HashSet;
 
 /// The largest number of positions one boundary check may visit.
-///
-/// A graph past the bound takes `BoundaryLimit`, exactly as a copy
-/// past its graph limit does.
 const MAX_STEPS: u32 = 1 << 20;
 
 /// The number of visited positions the linear table holds.
-///
-/// A boundary value is usually one scalar or one small enum, so the
-/// linear scan answers without a hash. A wide graph spills into the
-/// set.
 const SEEN_LINEAR: usize = 32;
 
-/// One expected type of the walk.
-///
-/// `Open` names a module type under one argument list of the arena.
-/// `Closed` names an entry of the closed type table of the world. The
-/// walk starts open, and it turns closed where a type variable needs
-/// the substitution an environment holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Expect {
-    Open(u32, u32),
-    Closed(ClosedTypeId),
-}
-
-/// The reusable state of one boundary check.
-///
-/// The world owns one of these. Each check clears it, so a repeated
-/// check reuses the same buffers.
+/// Reusable state for one boundary check.
 #[derive(Debug, Default)]
 pub(crate) struct BoundaryScratch {
-    /// The argument lists the walk built. A list holds the expected
-    /// type of each parameter one position binds.
-    args: Vec<Vec<Expect>>,
-    /// The number of argument lists this check filled. The vectors
-    /// past that mark keep their storage for the next check.
-    args_len: usize,
-    /// One buffer for the argument list under construction.
-    tmp: Vec<Expect>,
-    work: Vec<(Value, Expect)>,
-    seen: Vec<(u32, Expect)>,
-    seen_set: HashSet<(u32, Expect)>,
+    work: Vec<(Value, ClosedTypeId)>,
+    seen: Vec<(u32, ClosedTypeId)>,
+    seen_set: HashSet<(u32, ClosedTypeId)>,
+    subtype_work: Vec<(ClosedTypeId, ClosedTypeId)>,
+    subtype_seen: HashSet<(ClosedTypeId, ClosedTypeId)>,
 }
 
 impl BoundaryScratch {
     fn reset(&mut self) {
-        self.args_len = 0;
         self.work.clear();
         self.seen.clear();
         self.seen_set.clear();
+        self.subtype_work.clear();
+        self.subtype_seen.clear();
     }
 
-    /// Record one visited position. The answer is true at the first
-    /// visit.
-    fn mark(&mut self, key: (u32, Expect)) -> bool {
+    /// Record one visited object and expected type.
+    fn mark(&mut self, key: (u32, ClosedTypeId)) -> bool {
         if self.seen_set.is_empty() {
             if self.seen.len() < SEEN_LINEAR {
                 if self.seen.contains(&key) {
@@ -111,76 +58,37 @@ impl BoundaryScratch {
         }
         self.seen_set.insert(key)
     }
-
-    /// Record one argument list and answer its arena index.
-    ///
-    /// The arena holds no duplicate, so one argument list has one
-    /// index inside one check and the visited key stays canonical.
-    fn args_of(&mut self, list: &[Expect]) -> u32 {
-        for (at, held) in self.args[..self.args_len].iter().enumerate() {
-            if held.as_slice() == list {
-                return at as u32;
-            }
-        }
-        if self.args_len == self.args.len() {
-            self.args.push(Vec::new());
-        }
-        let slot = &mut self.args[self.args_len];
-        slot.clear();
-        slot.extend_from_slice(list);
-        self.args_len += 1;
-        (self.args_len - 1) as u32
-    }
-
-    /// Record the closed argument list of one environment.
-    fn args_of_closed(&mut self, list: &[ClosedTypeId]) -> u32 {
-        let mut tmp = std::mem::take(&mut self.tmp);
-        tmp.clear();
-        tmp.extend(list.iter().map(|id| Expect::Closed(*id)));
-        let at = self.args_of(&tmp);
-        self.tmp = tmp;
-        at
-    }
-
-    fn args_at(&self, id: u32) -> &[Expect] {
-        match self.args.get(id as usize) {
-            Some(list) => list.as_slice(),
-            None => &[],
-        }
-    }
 }
 
-/// Prove that one value carries the type the receiving code expects.
-///
-/// `reply_ty` is the module type index the instruction states, and
-/// `env` is the type environment of the frame that runs it.
+fn env_fault(_: TypeEnvFull) -> FaultCode {
+    FaultCode::BoundaryLimit
+}
+
+/// Check one value against the closed type of its receiving position.
 pub(crate) fn check_boundary_value(
     module: &Module,
     heap: &Heap,
-    envs: &TypeEnvs,
+    envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     value: Value,
     reply_ty: u32,
     env: TypeEnvId,
 ) -> Result<(), FaultCode> {
-    // A scalar value at a scalar position needs no walk, and no
-    // substitution can turn a primitive into another type. The two
-    // most common replies, the unit of an `Io` operation and the
-    // integer of a clock read, take this answer.
-    match (value, module.types.get(reply_ty as usize)) {
-        (Value::Unit, Some(BcType::Unit))
-        | (Value::Int(_), Some(BcType::Int))
-        | (Value::Bool(_), Some(BcType::Bool)) => return Ok(()),
+    if module.types.get(reply_ty as usize).is_none() || envs.env(env).is_none() {
+        return Err(FaultCode::MalformedState);
+    }
+
+    // These common monomorphic replies need no closed-type node.
+    match (value, &module.types[reply_ty as usize]) {
+        (Value::Unit, BcType::Unit)
+        | (Value::Int(_), BcType::Int)
+        | (Value::Bool(_), BcType::Bool) => return Ok(()),
         _ => {}
     }
+
+    let root = envs.close(module, reply_ty, env).map_err(env_fault)?;
     scratch.reset();
-    // A monomorphic frame binds no variable, so the root argument list
-    // is empty.
-    let root = match envs.env(env) {
-        Some(entry) => scratch.args_of_closed(&entry.types),
-        None => scratch.args_of(&[]),
-    };
-    scratch.work.push((value, Expect::Open(reply_ty, root)));
+    scratch.work.push((value, root));
     let mut steps = 0u32;
     while let Some((value, expect)) = scratch.work.pop() {
         steps += 1;
@@ -192,7 +100,7 @@ pub(crate) fn check_boundary_value(
     Ok(())
 }
 
-/// The scalar kinds of the expected type.
+/// The scalar kinds of an expected type.
 #[derive(Clone, Copy)]
 enum Scalar {
     Unit,
@@ -201,7 +109,7 @@ enum Scalar {
     Op(u32),
 }
 
-/// The heap shapes an expected type names.
+/// The heap shapes of an expected type.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Str,
@@ -223,62 +131,48 @@ enum Kind {
     Instance,
 }
 
-/// The resolved shape of one expected type.
 enum Node {
     Scalar(Scalar),
     Heap(Kind),
 }
 
-/// Check one `(value, expected type)` pair and push its children.
+/// Check one value and expected type pair.
 fn check_one(
     module: &Module,
     heap: &Heap,
-    envs: &TypeEnvs,
+    envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     value: Value,
-    expect: Expect,
+    expect: ClosedTypeId,
 ) -> Result<(), FaultCode> {
-    match resolve(module, envs, expect)? {
+    match resolve(envs, expect)? {
         Node::Scalar(tag) => {
-            let ok = match (value, tag) {
+            let matches = match (value, tag) {
                 (Value::Unit, Scalar::Unit) => true,
                 (Value::Bool(_), Scalar::Bool) => true,
                 (Value::Int(_), Scalar::Int) => true,
                 (Value::Op(slot), Scalar::Op(op)) => slot == op,
                 _ => false,
             };
-            if ok {
-                Ok(())
-            } else {
-                Err(FaultCode::TypeMismatch)
-            }
+            matches.then_some(()).ok_or(FaultCode::TypeMismatch)
         }
         Node::Heap(kind) => {
-            let Value::Obj(r) = value else {
+            let Value::Obj(reference) = value else {
                 return Err(FaultCode::TypeMismatch);
             };
-            let object = heap.get(r);
+            let object = heap.get(reference);
             let found = kind_of(object);
-            // An `EmptyVm` position and a `Vm[T]` position both name a
-            // machine handle. The lifecycle rule of `EmptyVm` lives in
-            // the kernel.
             if found != kind && !(found == Kind::Vm && kind == Kind::EmptyVm) {
                 return Err(FaultCode::TypeMismatch);
             }
-            // Four shapes carry a rule past their tag. Every other
-            // shape ends the check here.
+
             let children = match object {
                 Object::List { items } | Object::Tuple { items } => items.len(),
                 Object::Map { entries, .. } => entries.len(),
                 Object::Instance { fields, .. } => fields.len(),
-                _ => return Ok(()),
+                _ => 0,
             };
-            // A graph may hold a cycle and may share one object at
-            // several positions. The visited key carries the type, so
-            // one object is proved under every type that reaches it,
-            // and the walk still terminates. An object with no child
-            // sits on no cycle, so it needs no entry.
-            if children > 0 && !scratch.mark((r.slot, expect)) {
+            if children > 0 && !scratch.mark((reference.slot, expect)) {
                 return Ok(());
             }
             check_object(module, envs, scratch, object, kind, expect)
@@ -286,72 +180,33 @@ fn check_one(
     }
 }
 
-/// Resolve one expected type to its shape.
-fn resolve(module: &Module, envs: &TypeEnvs, expect: Expect) -> Result<Node, FaultCode> {
-    match expect {
-        Expect::Open(ty, _) => {
-            let node = module
-                .types
-                .get(ty as usize)
-                .ok_or(FaultCode::MalformedState)?;
-            Ok(match node {
-                BcType::Unit => Node::Scalar(Scalar::Unit),
-                BcType::Bool => Node::Scalar(Scalar::Bool),
-                BcType::Int => Node::Scalar(Scalar::Int),
-                BcType::Op(op, _) => Node::Scalar(Scalar::Op(*op)),
-                BcType::Str => Node::Heap(Kind::Str),
-                BcType::StringBuilder => Node::Heap(Kind::StringBuilder),
-                BcType::ByteBuffer => Node::Heap(Kind::ByteBuffer),
-                BcType::Fault => Node::Heap(Kind::Fault),
-                BcType::Request => Node::Heap(Kind::Request),
-                BcType::PolicyTable => Node::Heap(Kind::PolicyTable),
-                BcType::EmptyVm => Node::Heap(Kind::EmptyVm),
-                BcType::Digest => Node::Heap(Kind::Digest),
-                BcType::SnapshotImage | BcType::Snapshot(_) => Node::Heap(Kind::Snapshot),
-                BcType::Vm(_) => Node::Heap(Kind::Vm),
-                BcType::PendingCall(_, _) => Node::Heap(Kind::PendingCall),
-                BcType::Handle(_, _) => Node::Heap(Kind::Handle),
-                BcType::Fn(_, _, _, _) => Node::Heap(Kind::Closure),
-                BcType::List(_) => Node::Heap(Kind::List),
-                BcType::Map(_, _) => Node::Heap(Kind::Map),
-                BcType::Tuple(_) => Node::Heap(Kind::Tuple),
-                BcType::Class(_) | BcType::Inst(_, _) => Node::Heap(Kind::Instance),
-                // `bind` resolves a variable before it reaches the
-                // work list, so a variable here names a position the
-                // argument list does not answer.
-                BcType::Var(_) => return Err(FaultCode::TypeMismatch),
-            })
-        }
-        Expect::Closed(id) => {
-            let node = envs.ty(id).ok_or(FaultCode::MalformedState)?;
-            Ok(match node {
-                ClosedType::Unit => Node::Scalar(Scalar::Unit),
-                ClosedType::Bool => Node::Scalar(Scalar::Bool),
-                ClosedType::Int => Node::Scalar(Scalar::Int),
-                ClosedType::Op(op, _) => Node::Scalar(Scalar::Op(*op)),
-                ClosedType::Str => Node::Heap(Kind::Str),
-                ClosedType::StringBuilder => Node::Heap(Kind::StringBuilder),
-                ClosedType::ByteBuffer => Node::Heap(Kind::ByteBuffer),
-                ClosedType::Fault => Node::Heap(Kind::Fault),
-                ClosedType::Request => Node::Heap(Kind::Request),
-                ClosedType::PolicyTable => Node::Heap(Kind::PolicyTable),
-                ClosedType::EmptyVm => Node::Heap(Kind::EmptyVm),
-                ClosedType::Digest => Node::Heap(Kind::Digest),
-                ClosedType::SnapshotImage | ClosedType::Snapshot(_) => Node::Heap(Kind::Snapshot),
-                ClosedType::Vm(_) => Node::Heap(Kind::Vm),
-                ClosedType::PendingCall(_, _) => Node::Heap(Kind::PendingCall),
-                ClosedType::Handle(_, _) => Node::Heap(Kind::Handle),
-                ClosedType::Fn(_, _, _, _) => Node::Heap(Kind::Closure),
-                ClosedType::List(_) => Node::Heap(Kind::List),
-                ClosedType::Map(_, _) => Node::Heap(Kind::Map),
-                ClosedType::Tuple(_) => Node::Heap(Kind::Tuple),
-                ClosedType::Class(_) | ClosedType::Inst(_, _) => Node::Heap(Kind::Instance),
-            })
-        }
-    }
+fn resolve(envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Node, FaultCode> {
+    let node = envs.ty(expect).ok_or(FaultCode::MalformedState)?;
+    Ok(match node {
+        ClosedType::Unit => Node::Scalar(Scalar::Unit),
+        ClosedType::Bool => Node::Scalar(Scalar::Bool),
+        ClosedType::Int => Node::Scalar(Scalar::Int),
+        ClosedType::Op(op, _) => Node::Scalar(Scalar::Op(*op)),
+        ClosedType::Str => Node::Heap(Kind::Str),
+        ClosedType::StringBuilder => Node::Heap(Kind::StringBuilder),
+        ClosedType::ByteBuffer => Node::Heap(Kind::ByteBuffer),
+        ClosedType::Fault => Node::Heap(Kind::Fault),
+        ClosedType::Request => Node::Heap(Kind::Request),
+        ClosedType::PolicyTable => Node::Heap(Kind::PolicyTable),
+        ClosedType::EmptyVm => Node::Heap(Kind::EmptyVm),
+        ClosedType::Digest => Node::Heap(Kind::Digest),
+        ClosedType::SnapshotImage | ClosedType::Snapshot(_) => Node::Heap(Kind::Snapshot),
+        ClosedType::Vm(_) => Node::Heap(Kind::Vm),
+        ClosedType::PendingCall(_, _) => Node::Heap(Kind::PendingCall),
+        ClosedType::Handle(_, _) => Node::Heap(Kind::Handle),
+        ClosedType::Fn(_, _, _, _) => Node::Heap(Kind::Closure),
+        ClosedType::List(_) => Node::Heap(Kind::List),
+        ClosedType::Map(_, _) => Node::Heap(Kind::Map),
+        ClosedType::Tuple(_) => Node::Heap(Kind::Tuple),
+        ClosedType::Class(_) | ClosedType::Inst(_, _) => Node::Heap(Kind::Instance),
+    })
 }
 
-/// The shape of one heap object.
 fn kind_of(object: &Object) -> Kind {
     match object {
         Object::Str(_) => Kind::Str,
@@ -373,46 +228,41 @@ fn kind_of(object: &Object) -> Kind {
     }
 }
 
-/// Prove one object against one expected type and push its children.
-///
-/// A machine handle, a proc handle, a call token, a snapshot, and a
-/// closure meet a shape test alone. Their type arguments name another
-/// machine, another operation, or a function body, and a container
-/// states all three. The value each one produces meets its own
-/// boundary check at its own read, and that check is the one with
-/// teeth.
+/// Check one object and add its typed children.
 fn check_object(
     module: &Module,
-    envs: &TypeEnvs,
+    envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     object: &Object,
     kind: Kind,
-    expect: Expect,
+    expect: ClosedTypeId,
 ) -> Result<(), FaultCode> {
     match (object, kind) {
         (Object::List { items }, Kind::List) => {
-            let elem = child(module, envs, scratch, expect, 0)?;
+            let elem = child(envs, expect, 0)?;
             for item in items {
                 scratch.work.push((*item, elem));
             }
             Ok(())
         }
         (Object::Map { entries, .. }, Kind::Map) => {
-            let key = child(module, envs, scratch, expect, 0)?;
-            let val = child(module, envs, scratch, expect, 1)?;
-            for (k, v) in entries {
-                scratch.work.push((*k, key));
-                scratch.work.push((*v, val));
+            let key = child(envs, expect, 0)?;
+            let value = child(envs, expect, 1)?;
+            for (entry_key, entry_value) in entries {
+                scratch.work.push((*entry_key, key));
+                scratch.work.push((*entry_value, value));
             }
             Ok(())
         }
         (Object::Tuple { items }, Kind::Tuple) => {
-            let arity = arity_of(module, envs, expect)?;
-            if items.len() != arity {
+            let elems = match envs.ty(expect) {
+                Some(ClosedType::Tuple(elems)) => elems.clone(),
+                _ => return Err(FaultCode::MalformedState),
+            };
+            if items.len() != elems.len() {
                 return Err(FaultCode::TypeMismatch);
             }
-            for (at, item) in items.iter().enumerate() {
-                let elem = child(module, envs, scratch, expect, at)?;
+            for (item, elem) in items.iter().zip(elems) {
                 scratch.work.push((*item, elem));
             }
             Ok(())
@@ -420,116 +270,158 @@ fn check_object(
         (Object::Instance { class, fields, .. }, Kind::Instance) => {
             check_instance(module, envs, scratch, *class, fields, expect)
         }
+        (Object::Closure { func, env, .. }, Kind::Closure) => {
+            check_closure(module, envs, scratch, *func, env.env(), expect)
+        }
         _ => Ok(()),
     }
 }
 
-/// The child expected type at one position of a container type.
-fn child(
+fn child(envs: &TypeEnvs, expect: ClosedTypeId, at: usize) -> Result<ClosedTypeId, FaultCode> {
+    match (envs.ty(expect), at) {
+        (Some(ClosedType::List(elem)), 0) => Ok(*elem),
+        (Some(ClosedType::Map(key, _)), 0) => Ok(*key),
+        (Some(ClosedType::Map(_, value)), 1) => Ok(*value),
+        (Some(ClosedType::Tuple(elems)), _) => {
+            elems.get(at).copied().ok_or(FaultCode::TypeMismatch)
+        }
+        _ => Err(FaultCode::MalformedState),
+    }
+}
+
+/// Check a closure's callable type before it can execute.
+fn check_closure(
     module: &Module,
-    envs: &TypeEnvs,
+    envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
-    expect: Expect,
-    at: usize,
-) -> Result<Expect, FaultCode> {
-    match expect {
-        Expect::Open(ty, args) => {
-            let node = module
-                .types
-                .get(ty as usize)
-                .ok_or(FaultCode::MalformedState)?;
-            let child = match (node, at) {
-                (BcType::List(e), 0) => *e,
-                (BcType::Map(k, _), 0) => *k,
-                (BcType::Map(_, v), 1) => *v,
-                (BcType::Tuple(elems), _) => *elems.get(at).ok_or(FaultCode::TypeMismatch)?,
-                _ => return Err(FaultCode::MalformedState),
+    func: u32,
+    env: TypeEnvId,
+    expect: ClosedTypeId,
+) -> Result<(), FaultCode> {
+    let code = module
+        .funcs
+        .get(func as usize)
+        .ok_or(FaultCode::TypeMismatch)?;
+    let held = envs.env(env).ok_or(FaultCode::MalformedState)?;
+    if held.types.len() != code.type_params as usize
+        || held.rows.len() != code.effect_params as usize
+    {
+        return Err(FaultCode::TypeMismatch);
+    }
+
+    let mut params = Vec::with_capacity(code.params.len());
+    for param in &code.params {
+        params.push(envs.close(module, *param, env).map_err(env_fault)?);
+    }
+    let result = envs.close(module, code.ret, env).map_err(env_fault)?;
+    let row = envs.close_row(module, &code.row, env);
+    let actual = envs
+        .intern(ClosedType::Fn(params, code.param_muts.clone(), result, row))
+        .map_err(env_fault)?;
+    if closed_is_subtype(module, envs, scratch, actual, expect)? {
+        Ok(())
+    } else {
+        Err(FaultCode::TypeMismatch)
+    }
+}
+
+/// Check the closed subtype relation used by callable values.
+fn closed_is_subtype(
+    module: &Module,
+    envs: &mut TypeEnvs,
+    scratch: &mut BoundaryScratch,
+    found: ClosedTypeId,
+    expected: ClosedTypeId,
+) -> Result<bool, FaultCode> {
+    scratch.subtype_work.clear();
+    scratch.subtype_seen.clear();
+    scratch.subtype_work.push((found, expected));
+    while let Some((found, expected)) = scratch.subtype_work.pop() {
+        if found == expected || !scratch.subtype_seen.insert((found, expected)) {
+            continue;
+        }
+        let found_node = envs.ty(found).cloned().ok_or(FaultCode::MalformedState)?;
+        let expected_node = envs
+            .ty(expected)
+            .cloned()
+            .ok_or(FaultCode::MalformedState)?;
+        match (found_node, expected_node) {
+            (ClosedType::Class(class), ClosedType::Class(parent)) => {
+                if envs.ancestor_args(module, class, &[], parent) != Some(Vec::new()) {
+                    return Ok(false);
+                }
+            }
+            (ClosedType::Class(class), ClosedType::Inst(parent, expected_args)) => {
+                if envs.ancestor_args(module, class, &[], parent) != Some(expected_args) {
+                    return Ok(false);
+                }
+            }
+            (ClosedType::Inst(class, args), ClosedType::Class(parent)) => {
+                if envs.ancestor_args(module, class, &args, parent) != Some(Vec::new()) {
+                    return Ok(false);
+                }
+            }
+            (ClosedType::Inst(class, args), ClosedType::Inst(parent, expected_args)) => {
+                if envs.ancestor_args(module, class, &args, parent) != Some(expected_args) {
+                    return Ok(false);
+                }
+            }
+            (ClosedType::Tuple(found), ClosedType::Tuple(expected)) => {
+                if found.len() != expected.len() {
+                    return Ok(false);
+                }
+                scratch.subtype_work.extend(found.into_iter().zip(expected));
+            }
+            (
+                ClosedType::Fn(found_params, found_muts, found_result, found_row),
+                ClosedType::Fn(expected_params, expected_muts, expected_result, expected_row),
+            ) => {
+                if found_params.len() != expected_params.len()
+                    || !found_muts
+                        .iter()
+                        .zip(expected_muts.iter())
+                        .all(|(found, expected)| !*found || *expected)
+                    || !row_included(module, &found_row, &expected_row)
+                {
+                    return Ok(false);
+                }
+                scratch
+                    .subtype_work
+                    .extend(expected_params.into_iter().zip(found_params));
+                scratch.subtype_work.push((found_result, expected_result));
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+fn row_included(module: &Module, sub: &ClosedRow, sup: &ClosedRow) -> bool {
+    sub.iter().all(|slot| {
+        let Some(name) = module.strings.get(*slot as usize) else {
+            return false;
+        };
+        sup.iter().any(|candidate| {
+            let Some(candidate_name) = module.strings.get(*candidate as usize) else {
+                return false;
             };
-            bind(module, scratch.args_at(args), child, args)
-        }
-        Expect::Closed(id) => {
-            let node = envs.ty(id).ok_or(FaultCode::MalformedState)?;
-            let child = match (node, at) {
-                (ClosedType::List(e), 0) => *e,
-                (ClosedType::Map(k, _), 0) => *k,
-                (ClosedType::Map(_, v), 1) => *v,
-                (ClosedType::Tuple(elems), _) => *elems.get(at).ok_or(FaultCode::TypeMismatch)?,
-                _ => return Err(FaultCode::MalformedState),
-            };
-            Ok(Expect::Closed(child))
-        }
-    }
+            candidate_name == name
+                || name
+                    .split_once('.')
+                    .map(|(group, _)| group == candidate_name)
+                    .unwrap_or(false)
+        })
+    })
 }
 
-/// One module type under one argument list.
-///
-/// A type variable resolves to the expected type the list binds, so no
-/// free variable ever reaches the work list. A variable the list does
-/// not answer keeps its open form, and `resolve` faults on it.
-fn bind(module: &Module, args: &[Expect], ty: u32, args_id: u32) -> Result<Expect, FaultCode> {
-    let node = module
-        .types
-        .get(ty as usize)
-        .ok_or(FaultCode::MalformedState)?;
-    match node {
-        BcType::Var(index) => args
-            .get(*index as usize)
-            .copied()
-            .ok_or(FaultCode::TypeMismatch),
-        _ => Ok(Expect::Open(ty, args_id)),
-    }
-}
-
-/// The element count of one tuple type.
-fn arity_of(module: &Module, envs: &TypeEnvs, expect: Expect) -> Result<usize, FaultCode> {
-    match expect {
-        Expect::Open(ty, _) => match module.types.get(ty as usize) {
-            Some(BcType::Tuple(elems)) => Ok(elems.len()),
-            _ => Err(FaultCode::MalformedState),
-        },
-        Expect::Closed(id) => match envs.ty(id) {
-            Some(ClosedType::Tuple(elems)) => Ok(elems.len()),
-            _ => Err(FaultCode::MalformedState),
-        },
-    }
-}
-
-/// True when `child` equals `ancestor` or inherits it.
-///
-/// The walk carries a step bound, so a hand-built class table cannot
-/// make it spin.
-fn class_extends(module: &Module, mut child: u32, ancestor: u32) -> bool {
-    for _ in 0..=module.classes.len() {
-        if child == ancestor {
-            return true;
-        }
-        match module.classes.get(child as usize).and_then(|c| c.parent()) {
-            Some(parent) => child = parent,
-            None => return false,
-        }
-    }
-    false
-}
-
-/// Prove one instance against one class position.
-///
-/// The concrete class of the object must equal or extend the class of
-/// the position. The field types then follow from the layout of that
-/// concrete class under the arguments of the position.
-///
-/// A class with type parameters declares no parent of its own, and an
-/// enum case passes the arguments of its family through, so the
-/// arguments of the position bind the parameters of the concrete class
-/// wherever the two arities agree. A layout that binds more parameters
-/// than the position answers keeps its fields unchecked, and every
-/// read of one meets the interpreter tag test.
+/// Check one instance against one closed class position.
 fn check_instance(
     module: &Module,
-    envs: &TypeEnvs,
+    envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     class: u32,
     fields: &[Value],
-    expect: Expect,
+    expect: ClosedTypeId,
 ) -> Result<(), FaultCode> {
     let layout = module
         .classes
@@ -538,70 +430,204 @@ fn check_instance(
     if fields.len() != layout.fields.len() {
         return Err(FaultCode::TypeMismatch);
     }
-    let mut want = std::mem::take(&mut scratch.tmp);
-    want.clear();
-    let found = position_class(module, envs, scratch, expect, &mut want);
-    let (want_class, arity_ok) = match found {
-        Ok(class_of_position) => {
-            let arity_ok = want.len() == layout.type_params as usize;
-            (class_of_position, arity_ok)
-        }
-        Err(code) => {
-            scratch.tmp = want;
-            return Err(code);
-        }
+    let (want_class, want_args) = envs.as_instance(expect).ok_or(FaultCode::MalformedState)?;
+
+    let actual_args = if class == want_class {
+        want_args.clone()
+    } else if layout.type_params == 0 {
+        Vec::new()
+    } else if layout.type_params as usize == want_args.len() {
+        // An enum case passes its family arguments through unchanged.
+        want_args.clone()
+    } else {
+        return Err(FaultCode::TypeMismatch);
     };
-    if !class_extends(module, class, want_class) {
-        scratch.tmp = want;
+    if actual_args.len() != layout.type_params as usize {
         return Err(FaultCode::TypeMismatch);
     }
-    if !arity_ok {
-        scratch.tmp = want;
-        return Ok(());
+    if envs.ancestor_args(module, class, &actual_args, want_class) != Some(want_args) {
+        return Err(FaultCode::TypeMismatch);
     }
-    let args = scratch.args_of(&want);
-    scratch.tmp = want;
-    for (at, value) in fields.iter().enumerate() {
-        // A field before its first assignment holds the uninitialized
-        // marker. The instruction that reads one faults, so the
-        // boundary leaves it alone.
+
+    let field_env = envs.env_of(actual_args, Vec::new()).map_err(env_fault)?;
+    for (value, (_, field_ty)) in fields.iter().zip(layout.fields.iter()) {
         if *value == Value::Uninit {
             continue;
         }
-        let expect = bind(module, scratch.args_at(args), layout.fields[at].1, args)?;
-        scratch.work.push((*value, expect));
+        let field = envs
+            .close(module, *field_ty, field_env)
+            .map_err(env_fault)?;
+        scratch.work.push((*value, field));
     }
     Ok(())
 }
 
-/// The class of one instance position, with its argument list written
-/// into `out`.
-fn position_class(
-    module: &Module,
-    envs: &TypeEnvs,
-    scratch: &BoundaryScratch,
-    expect: Expect,
-    out: &mut Vec<Expect>,
-) -> Result<u32, FaultCode> {
-    match expect {
-        Expect::Open(ty, args) => match module.types.get(ty as usize) {
-            Some(BcType::Class(class)) => Ok(*class),
-            Some(BcType::Inst(class, list)) => {
-                let bound = scratch.args_at(args);
-                for item in list {
-                    out.push(bind(module, bound, *item, args)?);
-                }
-                Ok(*class)
-            }
-            _ => Err(FaultCode::MalformedState),
-        },
-        Expect::Closed(id) => match envs.ty(id) {
-            Some(ClosedType::Class(class)) => Ok(*class),
-            Some(ClosedType::Inst(class, list)) => {
-                out.extend(list.iter().map(|arg| Expect::Closed(*arg)));
-                Ok(*class)
-            }
-            _ => Err(FaultCode::MalformedState),
-        },
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lm_bytecode::{BcClass, BcClassKind, BcRow, Func, NO_PARENT};
+    use lm_value::Witness;
+
+    const TY_INT: u32 = 2;
+    const TY_STR: u32 = 3;
+
+    fn module(types: Vec<BcType>, classes: Vec<BcClass>, funcs: Vec<Func>) -> Module {
+        Module {
+            strings: vec!["Io.Print".to_string()],
+            types,
+            selectors: Vec::new(),
+            apps: Vec::new(),
+            imports: Vec::new(),
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            classes,
+            funcs,
+            entry: 0,
+            exports: Vec::new(),
+            bindings: Vec::new(),
+        }
+    }
+
+    fn base_types() -> Vec<BcType> {
+        vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str]
+    }
+
+    fn function(row: Vec<BcRow>) -> Func {
+        Func {
+            name: "body".to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![TY_INT],
+            param_muts: vec![false],
+            ret: TY_INT,
+            row,
+            captures: Vec::new(),
+            local_types: vec![TY_INT],
+            blocks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_root_type_variable_uses_the_frame_environment() {
+        let mut types = base_types();
+        types.push(BcType::Var(0));
+        let module = module(types, Vec::new(), Vec::new());
+        let heap = Heap::new(1 << 20);
+        let mut envs = TypeEnvs::default();
+        let int = envs.intern(ClosedType::Int).expect("the type interns");
+        let env = envs
+            .env_of(vec![int], Vec::new())
+            .expect("the environment interns");
+        let mut scratch = BoundaryScratch::default();
+
+        assert_eq!(
+            check_boundary_value(
+                &module,
+                &heap,
+                &mut envs,
+                &mut scratch,
+                Value::Int(41),
+                4,
+                env,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_closure_with_another_parameter_type_does_not_fit() {
+        let mut types = base_types();
+        types.push(BcType::Fn(vec![TY_STR], vec![false], TY_INT, Vec::new()));
+        let module = module(types, Vec::new(), vec![function(Vec::new())]);
+        let mut heap = Heap::new(1 << 20);
+        let closure = heap.alloc(Object::Closure {
+            func: 0,
+            captures: Vec::new(),
+            env: Witness::EMPTY,
+        });
+        let mut envs = TypeEnvs::default();
+        let mut scratch = BoundaryScratch::default();
+
+        assert_eq!(
+            check_boundary_value(
+                &module,
+                &heap,
+                &mut envs,
+                &mut scratch,
+                Value::Obj(closure),
+                4,
+                TypeEnvId::EMPTY,
+            ),
+            Err(FaultCode::TypeMismatch)
+        );
+    }
+
+    #[test]
+    fn an_effectful_closure_does_not_fit_a_pure_function_type() {
+        let mut types = base_types();
+        types.push(BcType::Fn(vec![TY_INT], vec![false], TY_INT, Vec::new()));
+        let module = module(types, Vec::new(), vec![function(vec![BcRow::Op(0)])]);
+        let mut heap = Heap::new(1 << 20);
+        let closure = heap.alloc(Object::Closure {
+            func: 0,
+            captures: Vec::new(),
+            env: Witness::EMPTY,
+        });
+        let mut envs = TypeEnvs::default();
+        let mut scratch = BoundaryScratch::default();
+
+        assert_eq!(
+            check_boundary_value(
+                &module,
+                &heap,
+                &mut envs,
+                &mut scratch,
+                Value::Obj(closure),
+                4,
+                TypeEnvId::EMPTY,
+            ),
+            Err(FaultCode::TypeMismatch)
+        );
+    }
+
+    #[test]
+    fn a_child_of_another_generic_application_does_not_fit() {
+        let mut types = base_types();
+        types.push(BcType::Inst(0, vec![TY_INT]));
+        let class = |name: &str, parent: u32, parent_args: Vec<u32>, type_params: u32| BcClass {
+            name: name.to_string(),
+            key: name.to_string(),
+            parent,
+            parent_args,
+            type_params,
+            kind: BcClassKind::Normal,
+            fields: Vec::new(),
+            methods: Vec::new(),
+        };
+        let classes = vec![
+            class("Parent", NO_PARENT, Vec::new(), 1),
+            class("StringChild", 0, vec![TY_STR], 0),
+        ];
+        let module = module(types, classes, Vec::new());
+        let mut heap = Heap::new(1 << 20);
+        let instance = heap.alloc(Object::Instance {
+            class: 1,
+            fields: Vec::new(),
+            env: Witness::EMPTY,
+        });
+        let mut envs = TypeEnvs::default();
+        let mut scratch = BoundaryScratch::default();
+
+        assert_eq!(
+            check_boundary_value(
+                &module,
+                &heap,
+                &mut envs,
+                &mut scratch,
+                Value::Obj(instance),
+                4,
+                TypeEnvId::EMPTY,
+            ),
+            Err(FaultCode::TypeMismatch)
+        );
     }
 }

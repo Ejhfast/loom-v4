@@ -973,7 +973,7 @@ impl<'m> World<'m> {
         crate::typecheck::check_boundary_value(
             module,
             &machine.vm.heap,
-            &self.envs,
+            &mut self.envs,
             &mut self.check,
             value,
             reply_ty,
@@ -1008,7 +1008,7 @@ impl<'m> World<'m> {
             crate::typecheck::check_boundary_value(
                 module,
                 &machine.vm.heap,
-                &self.envs,
+                &mut self.envs,
                 &mut self.check,
                 *value,
                 *ty,
@@ -2078,6 +2078,15 @@ impl<'m> World<'m> {
                     op,
                     FaultCode::BoundaryViolation,
                     "the snapshot image was admitted against another program",
+                );
+                return;
+            }
+            Err(crate::snapshot::RestoreFail::InvalidImage) => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::BoundaryViolation,
+                    "the admitted snapshot image is structurally invalid",
                 );
                 return;
             }

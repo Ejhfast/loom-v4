@@ -536,6 +536,13 @@ impl Admit<'_> {
         let at = |what: &str| format!("machine {vm}: {what}");
         let object_ref = |value: &Value, what: &str| -> Result<(), ImageError> {
             match value {
+                Value::Obj(r) if r.generation != 0 => fail(
+                    ImageReason::Reference,
+                    at(&format!(
+                        "{what} holds generation {}, and an image reference requires zero",
+                        r.generation
+                    )),
+                ),
                 Value::Obj(r) if r.slot >= objects => fail(
                     ImageReason::Reference,
                     at(&format!(
@@ -558,6 +565,15 @@ impl Admit<'_> {
             let mut children = Vec::new();
             entry.object.children(&mut children);
             for child in &children {
+                if child.generation != 0 {
+                    return fail(
+                        ImageReason::Reference,
+                        at(&format!(
+                            "object {ordinal} holds generation {}, and an image reference requires zero",
+                            child.generation
+                        )),
+                    );
+                }
                 if child.slot >= objects {
                     return fail(
                         ImageReason::Reference,
@@ -757,6 +773,13 @@ impl Admit<'_> {
                 );
             }
             let code = &self.module.funcs[frame.func as usize];
+            self.env_of(frame.env).map_err(|mut error| {
+                error.detail = at(&format!(
+                    "frame {idx} names environment {}, which the image has not",
+                    frame.env
+                ));
+                error
+            })?;
             if frame.block as usize >= code.blocks.len() {
                 return fail(
                     ImageReason::Layout,
