@@ -292,7 +292,13 @@ impl<'m> Ctx<'m> {
             return true;
         }
         match (self.ty(found), self.ty(expected)) {
-            (BcType::Class(a), BcType::Class(b)) => self.class_extends(a, b),
+            // A plain class position names no argument, so the walk to
+            // the ancestor must also reach it with no argument. A class
+            // that inherits an instantiated generic parent therefore
+            // fits no plain position of that parent.
+            (BcType::Class(a), BcType::Class(b)) => {
+                self.ancestor_args(a, &[], b) == Some(Vec::new())
+            }
             // A class may inherit an instantiated generic parent, so a
             // plain class instance can satisfy an application type.
             (BcType::Class(a), BcType::Inst(b, ys)) => {
@@ -2136,6 +2142,13 @@ impl<'m> ResolvedTypes<'m> {
     /// resolved type of the position that names the object. `None`
     /// marks an object whose type arguments do not follow from that
     /// position.
+    ///
+    /// The answer decides the same relation `Ctx::is_subtype` decides
+    /// for an instance type. The candidate arguments come from the
+    /// shape of the class, and the walk to the declared class must
+    /// then reach exactly the arguments the position names. A class
+    /// that inherits `Box[Int]` therefore fits no `Box[String]`
+    /// position, even though it takes no type parameter of its own.
     fn instance_args(&self, class: u32, at: u32) -> Option<Vec<u32>> {
         let (declared, args) = self.ctx.as_instance(at)?;
         if !self.class_extends(class, declared) {
@@ -2147,15 +2160,20 @@ impl<'m> ResolvedTypes<'m> {
         // of the object class therefore follow from the position, or
         // the class takes none at all.
         let own: Vec<u32> = if class == declared {
-            args
+            args.clone()
         } else if entry.type_params == 0 {
             Vec::new()
         } else if self.passes_args_through(class, declared) {
-            args
+            args.clone()
         } else {
             return None;
         };
         if own.len() != entry.type_params as usize {
+            return None;
+        }
+        // The one test of an instance edge. Every branch above states a
+        // candidate, and this rule proves it against the position.
+        if self.ctx.ancestor_args(class, &own, declared).as_ref() != Some(&args) {
             return None;
         }
         Some(own)

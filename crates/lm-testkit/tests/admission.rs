@@ -497,6 +497,158 @@ fn one_instance_at_a_parent_and_a_child_edge_admits() {
     assert!(count > 0, "no capture aliased the instance from two locals");
 }
 
+const INHERITED_PARENT_SOURCE: &str = "\
+class Box[T]
+  v: T
+
+  def init(mut self, v: T)
+    self.v = v
+  end
+end
+
+class IntBox < Box[Int]
+  def init(mut self, v: Int)
+    super.init(v)
+  end
+end
+
+def go(): Int
+  s: Box[String] = Box(\"hello\")
+  i: IntBox = IntBox(7)
+  j = i.v
+  k = s.v
+  j
+end
+
+go()
+";
+
+/// Point the local that names the string box at the `IntBox`.
+///
+/// The image then states that a position the verifier proved
+/// `Box[String]` holds an instance of a class that inherits
+/// `Box[Int]`. The class test alone accepts it, because `IntBox`
+/// inherits `Box`. Only the argument test refuses it.
+fn forge_inherited_parent(images: &[Image]) -> Vec<Image> {
+    let mut out: Vec<Image> = Vec::new();
+    for image in images {
+        let machine = &image.machines[0];
+        let boxes: Vec<u32> = machine
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| match &entry.object {
+                Object::Instance { fields, .. } if fields.len() == 1 => Some(idx as u32),
+                _ => None,
+            })
+            .collect();
+        let int_box = boxes.iter().copied().find(|slot| {
+            matches!(machine.objects[*slot as usize].object,
+                Object::Instance { ref fields, .. } if fields[0] == Value::Int(7))
+        });
+        let str_box = boxes.iter().copied().find(|slot| {
+            matches!(&machine.objects[*slot as usize].object,
+                Object::Instance { fields, .. } if matches!(fields[0], Value::Obj(_)))
+        });
+        let (Some(int_box), Some(str_box)) = (int_box, str_box) else {
+            continue;
+        };
+        if !machine.locals.contains(&Value::Obj(ObjRef {
+            slot: str_box,
+            generation: 0,
+        })) {
+            continue;
+        }
+        out.push(alias_local(image, str_box, int_box));
+    }
+    out
+}
+
+/// An instance edge decides the class arguments, never the class name
+/// alone.
+///
+/// `IntBox` inherits `Box[Int]` and takes no type parameter of its
+/// own. A nominal test therefore accepts it in a `Box[String]`
+/// position, and the restored world reads an `Int` where the code
+/// proved a `String`. The rule compares the arguments the walk to
+/// `Box` reaches with the arguments the position names.
+#[test]
+fn an_instance_of_an_inherited_generic_parent_at_another_argument_rejects() {
+    let loaded = program(INHERITED_PARENT_SOURCE);
+    let images = boundaries(&loaded, &[], 200);
+    let forged = forge_inherited_parent(&images);
+    assert!(!forged.is_empty(), "no capture held both boxes");
+    for broken in &forged {
+        assert!(
+            admit(&loaded, broken).is_some(),
+            "a `Box[String]` position accepted an `IntBox`"
+        );
+    }
+}
+
+/// The rule itself, without an image around it.
+///
+/// `instance_field_types` is the one call `check_object` makes for an
+/// instance, and `is_subtype` is the rule the verifier proves inside a
+/// function body. The two must answer one relation: an `IntBox` fits
+/// `Box[Int]` and fits no other application of `Box`.
+#[test]
+fn an_instance_edge_decides_the_same_relation_as_the_subtype_rule() {
+    use lm_bytecode::BcType;
+    let module =
+        lm_testkit::compile_text("admission.lm", INHERITED_PARENT_SOURCE).expect("it compiles");
+    let types = lm_verify::ResolvedTypes::new(&module).expect("the module resolves");
+    let slot_of = |name: &str| -> u32 {
+        module
+            .classes
+            .iter()
+            .position(|c| c.name == name)
+            .unwrap_or_else(|| panic!("the program declares `{name}`")) as u32
+    };
+    let boxed = slot_of("Box");
+    let int_box = slot_of("IntBox");
+    let int = types.intern(BcType::Int);
+    let text = types.intern(BcType::Str);
+    let plain = types.intern(BcType::Class(int_box));
+    let box_int = types.intern(BcType::Inst(boxed, vec![int]));
+    let box_str = types.intern(BcType::Inst(boxed, vec![text]));
+    assert!(types.is_subtype(plain, box_int));
+    assert!(!types.is_subtype(plain, box_str));
+    assert_eq!(
+        types.instance_field_types(int_box, box_int),
+        Some(vec![int]),
+        "an `IntBox` at a `Box[Int]` edge holds one `Int` field"
+    );
+    assert_eq!(
+        types.instance_field_types(int_box, box_str),
+        None,
+        "an `IntBox` at a `Box[String]` edge follows from nothing"
+    );
+}
+
+/// The same forgery never reaches restore.
+///
+/// A restored world runs verified code against the state the image
+/// states. An `Int` field where the code proved a `String` reaches the
+/// operand pop of the machine, which trusts the verifier. Admission is
+/// the one gate, so the test proves the gate holds before any restore.
+#[test]
+fn a_forged_inherited_parent_image_never_restores() {
+    let loaded = program(INHERITED_PARENT_SOURCE);
+    let images = boundaries(&loaded, &[], 200);
+    let forged = forge_inherited_parent(&images);
+    assert!(!forged.is_empty(), "no capture held both boxes");
+    for broken in &forged {
+        let bytes = codec::encode(broken, usize::MAX).expect("the image encodes");
+        let admitted =
+            codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default());
+        assert!(
+            admitted.is_err(),
+            "admission let a forged world through to restore"
+        );
+    }
+}
+
 // ---------------------------------------------------------------
 // Dynamic dispatch.
 // ---------------------------------------------------------------
@@ -1823,6 +1975,7 @@ fn gate_corpus() -> Vec<(String, String)> {
         ("alias-source", ALIAS_SOURCE),
         ("bag-source", BAG_SOURCE),
         ("subclass-alias-source", SUBCLASS_ALIAS_SOURCE),
+        ("inherited-parent-source", INHERITED_PARENT_SOURCE),
         ("pick-source", PICK_SOURCE),
         ("faulted-source", FAULTED_SOURCE),
         ("asked-source", ASKED_SOURCE),
