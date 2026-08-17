@@ -507,6 +507,256 @@ fn dispatch_applies_the_controlled_table() {
 }
 
 #[test]
+fn drive_receives_a_passed_descendant_request() {
+    let source = "def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm\n  \
+        loop do\n    \
+        case vm.drive()\n    in Asked(q)\n      \
+        case q.as_call(Io.Print)\n      in Some(call)\n        \
+        args = call.args()\n        seen.push(args[0])\n        vm.answer(call, ())\n      \
+        in None\n        vm.dispatch(q)\n      end\n    \
+        in Done(value)\n      return seen.len() * 10 + value\n    \
+        in Fault(_)\n      return 0 - 1\n    end\n  end\n  0 - 2\nend\n\
+        inner = do ||: Int with Vm, Io.Print\n  \
+        sys.io.print(\"from A\")\n  \
+        b = sys.vm.Vm().from_object(do ||: Int with Io.Print\n    \
+        sys.io.print(\"from B\")\n    7\n  end, args: ())\n  \
+        b.table().pass(Io.Print)\n  \
+        case b.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\n\
+        a = sys.vm.Vm().from_object(inner, args: ())\n\
+        a.table().pass(Vm)\n\
+        a.table().pass(Io.Print)\n\
+        seen: [String] = []\n\
+        drive_loop(a, seen)\n";
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+        .expect("the routed request program runs");
+    assert_eq!(out, "Done(27)");
+    assert!(host.borrow().printed.is_empty());
+}
+
+#[test]
+fn routed_dispatch_continues_after_the_driver_table() {
+    let source = r#"
+def drive_all(vm: Vm[Int]): Int with Vm
+  loop do
+    case vm.drive()
+    in Asked(q) then vm.dispatch(q)
+    in Done(value)
+      return value
+    in Fault(_)
+      return 0 - 1
+    end
+  end
+  0 - 2
+end
+
+inner = do ||: Int with Vm, Io.Print
+  b = sys.vm.Vm().from_object(do ||: Int with Io.Print
+    sys.io.print("from B")
+    7
+  end, args: ())
+  b.table().pass(Io.Print)
+  case b.run()
+  in Done(value) then value
+  in Fault(_) then 0 - 3
+  end
+end
+
+a = sys.vm.Vm().from_object(inner, args: ())
+a.table().pass(Vm)
+a.table().pass(Io.Print)
+drive_all(a)
+"#;
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+        .expect("the routed dispatch program runs");
+    assert_eq!(out, "Done(7)");
+    assert_eq!(host.borrow().printed, vec!["from B"]);
+}
+
+#[test]
+fn routed_reject_faults_the_performing_descendant() {
+    let source = r#"
+def reject_print(vm: Vm[String], source_fault: Fault): String with Vm
+  loop do
+    case vm.drive()
+    in Asked(q)
+      case q.as_call(Io.Print)
+      in Some(_)
+        vm.reject(q, source_fault)
+      in None
+        vm.dispatch(q)
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return "outer fault"
+    end
+  end
+  "loop fault"
+end
+
+blocked = sys.vm.Vm().from_object(do || with Io.Print
+  sys.io.print("blocked")
+end, args: ())
+
+case blocked.run()
+in Done(_) then "no source fault"
+in Fault(source_fault)
+  inner = do ||: String with Vm, Io.Print
+    b = sys.vm.Vm().from_object(do ||: String with Io.Print
+      sys.io.print("from B")
+      "done"
+    end, args: ())
+    b.table().pass(Io.Print)
+    case b.run()
+    in Done(value) then value
+    in Fault(fault) then fault.code()
+    end
+  end
+
+  a = sys.vm.Vm().from_object(inner, args: ())
+  a.table().pass(Vm)
+  a.table().pass(Io.Print)
+  reject_print(a, source_fault)
+end
+"#;
+    let (out, host) = run_world("t.lm", source, &["Vm"], VmConfig::default())
+        .expect("the routed rejection program runs");
+    assert_eq!(out, "Done(\"PolicyDenied\")");
+    assert!(host.borrow().printed.is_empty());
+}
+
+#[test]
+fn every_ancestor_still_authorizes_a_routed_request() {
+    let source = r#"
+def drive_without_print(vm: Vm[Int]): Int with Vm
+  loop do
+    case vm.drive()
+    in Asked(q)
+      case q.as_call(Io.Print)
+      in Some(_)
+        return 0 - 2
+      in None then vm.dispatch(q)
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return 0 - 3
+    end
+  end
+  0 - 4
+end
+
+inner = do ||: Int with Vm, Io.Print
+  b = sys.vm.Vm().from_object(do ||: Int with Io.Print
+    sys.io.print("from B")
+    7
+  end, args: ())
+  b.table().pass(Io.Print)
+  case b.run()
+  in Done(value) then value
+  in Fault(_) then 0 - 1
+  end
+end
+
+a = sys.vm.Vm().from_object(inner, args: ())
+a.table().pass(Vm)
+drive_without_print(a)
+"#;
+    let (out, host) = run_world("t.lm", source, &["Vm", "Io.Print"], VmConfig::default())
+        .expect("the ancestor denial program runs");
+    assert_eq!(out, "Done(-1)");
+    assert!(host.borrow().printed.is_empty());
+}
+
+#[test]
+fn an_ancestor_mock_resolves_before_its_driver() {
+    let source = r#"
+def drive_without_clock(vm: Vm[Int]): Int with Vm
+  loop do
+    case vm.drive()
+    in Asked(q)
+      case q.as_call(Clock.Now)
+      in Some(_)
+        return 0 - 1
+      in None
+        vm.dispatch(q)
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return 0 - 2
+    end
+  end
+  0 - 3
+end
+
+inner = do ||: Int with Vm, Clock.Now
+  b = sys.vm.Vm().from_object(do ||: Int with Clock.Now
+    sys.clock.now()
+  end, args: ())
+  b.table().pass(Clock.Now)
+  case b.run()
+  in Done(value) then value
+  in Fault(_) then 0 - 4
+  end
+end
+
+a = sys.vm.Vm().from_object(inner, args: ())
+a.table().pass(Vm)
+a.table().mock(Clock.Now, do ||: Int 9 end)
+drive_without_clock(a)
+"#;
+    assert_eq!(allowed(source, &["Vm"]), "Done(9)");
+}
+
+#[test]
+fn a_routed_token_rejects_another_surface_machine() {
+    let source = r#"
+def answer_through_wrong_vm(vm: Vm[Int], wrong: Vm[Int]): Int with Vm
+  loop do
+    case vm.drive()
+    in Asked(q)
+      case q.as_call(Io.Print)
+      in Some(call)
+        wrong.answer(call, ())
+        return 1
+      in None
+        vm.dispatch(q)
+      end
+    in Done(_)
+      return 0 - 3
+    in Fault(_)
+      return 0 - 4
+    end
+  end
+  0 - 5
+end
+
+inner = do ||: Int with Vm, Io.Print
+  b = sys.vm.Vm().from_object(do ||: Int with Io.Print
+    sys.io.print("from B")
+    7
+  end, args: ())
+  b.table().pass(Io.Print)
+  case b.run()
+  in Done(value) then value
+  in Fault(_) then 0 - 1
+  end
+end
+
+a = sys.vm.Vm().from_object(inner, args: ())
+a.table().pass(Vm)
+a.table().pass(Io.Print)
+c = sys.vm.Vm().from_object(do ||: Int 0 end, args: ())
+answer_through_wrong_vm(a, c)
+"#;
+    assert_eq!(
+        allowed(source, &["Vm", "Io.Print"]),
+        "Fault(InvalidRequestToken)"
+    );
+}
+
+#[test]
 fn run_step_and_drive_agree_on_one_program() {
     let program = "do || with Clock.Now\n    \
         total = 0\n    i = 0\n    while i < 3\n      \

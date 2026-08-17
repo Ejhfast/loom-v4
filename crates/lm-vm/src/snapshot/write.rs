@@ -14,9 +14,10 @@
 
 use super::{
     codec, Image, ImageBlock, ImageFrame, ImageLimits, ImageMachine, ImageMailbox, ImageObject,
-    ImagePending, ImageState, ImageTerminal, SnapshotFail, SnapshotImage,
+    ImagePending, ImagePolicyCursor, ImageRoutedRequest, ImageState, ImageTerminal, SnapshotFail,
+    SnapshotImage,
 };
-use crate::machine::{Block, MachineState, Terminal, VmId};
+use crate::machine::{Block, MachineState, PolicyCursor, Terminal, VmId};
 use crate::world::World;
 use crate::FaultCode;
 use lm_bytecode::closed::{ClosedType, TypeEnv};
@@ -714,6 +715,24 @@ impl World<'_> {
             }),
         };
         let parent = m.parent.and_then(&ordinal_of);
+        let nested = m
+            .nested
+            .map(|target| self.require_ordinal(target, ordinal_of))
+            .transpose()?;
+        let routed = m
+            .routed
+            .map(|route| {
+                let target = self.require_ordinal(route.target, ordinal_of)?;
+                let cursor = match route.cursor {
+                    PolicyCursor::Table(table) => match ordinal_of(table) {
+                        Some(table) => ImagePolicyCursor::Table(table),
+                        None => ImagePolicyCursor::Binding,
+                    },
+                    PolicyCursor::Root => ImagePolicyCursor::Root,
+                };
+                Ok(ImageRoutedRequest { target, cursor })
+            })
+            .transpose()?;
         Ok(ImageMachine {
             parent,
             state,
@@ -766,6 +785,8 @@ impl World<'_> {
                 args: p.args.iter().map(|v| map_value(*v)).collect(),
                 ordinal: p.ordinal,
             }),
+            nested,
+            routed,
             terminal: match &m.terminal {
                 None => None,
                 Some(Terminal::Done(value)) => Some(ImageTerminal::Done(map_value(*value))),

@@ -159,6 +159,24 @@ pub struct Pending {
     pub ordinal: u64,
 }
 
+/// Where automatic policy resolution continues after a routed ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyCursor {
+    /// Read this machine's table next.
+    Table(VmId),
+    /// Dispatch the operation to the root host next.
+    Root,
+}
+
+/// One descendant request exposed through a driven ancestor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoutedRequest {
+    /// The machine that performed the operation.
+    pub target: VmId,
+    /// The next automatic policy decision after this driver.
+    pub cursor: PolicyCursor,
+}
+
 /// A stored machine fault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultRec {
@@ -270,6 +288,11 @@ pub struct VmState {
     pub fuel: u64,
     pub state: MachineState,
     pub pending: Option<Pending>,
+    /// The child that must finish this machine's pending VM control
+    /// operation before this machine can continue.
+    pub nested: Option<VmId>,
+    /// A descendant request that this machine's driver received.
+    pub routed: Option<RoutedRequest>,
     pub terminal: Option<Terminal>,
     pub parent: Option<VmId>,
     pub next_ordinal: u64,
@@ -297,6 +320,11 @@ pub struct Machine {
     /// to this machine on the driver stack. A machine with references
     /// rejects control methods.
     pub active: u32,
+    /// True when one active `drive` activation controls this machine.
+    ///
+    /// The activation stack owns this flag. A snapshot records the
+    /// routed request or nested control edge instead.
+    pub driven: bool,
     /// Active host work and scoped host resources.
     pub resources: ResourceRegistry,
     /// Resource control: the limits this machine runs under.
@@ -421,6 +449,8 @@ impl Machine {
                 fuel: config.fuel,
                 state: MachineState::Empty,
                 pending: None,
+                nested: None,
+                routed: None,
                 terminal: None,
                 parent,
                 next_ordinal: 1,
@@ -436,6 +466,7 @@ impl Machine {
             },
             table: PolicyTable::default(),
             active: 0,
+            driven: false,
             resources: match resource_budget {
                 Some(budget) => ResourceRegistry::with_budget(config.max_resources, budget),
                 None => ResourceRegistry::new(config.max_resources),
@@ -508,6 +539,8 @@ impl Machine {
         self.vm.terminal = Some(Terminal::Done(value));
         self.vm.state = MachineState::Done;
         self.vm.pending = None;
+        self.vm.nested = None;
+        self.vm.routed = None;
         self.close_resources();
         self.compact_terminal_proc();
     }
@@ -520,6 +553,8 @@ impl Machine {
         }));
         self.vm.state = MachineState::Faulted;
         self.vm.pending = None;
+        self.vm.nested = None;
+        self.vm.routed = None;
         self.close_resources();
         self.compact_terminal_proc();
     }
@@ -534,6 +569,8 @@ impl Machine {
         self.vm.operands = Vec::new();
         self.vm.literals = Vec::new();
         self.vm.pending = None;
+        self.vm.nested = None;
+        self.vm.routed = None;
         self.vm.block = None;
         self.vm.mailbox.queue = std::collections::VecDeque::new();
         self.start_body = None;

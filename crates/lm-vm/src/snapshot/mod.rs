@@ -57,7 +57,9 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 2 also carries the type environment witnesses of section
 /// 5.6: one closed type table, one environment table, and one
 /// environment index for each frame, closure, instance, and machine.
-pub const FORMAT_VERSION: u32 = 2;
+///
+/// Version 3 carries nested control edges and routed requests.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// The section kinds, in canonical order.
 ///
@@ -153,6 +155,26 @@ pub struct ImagePending {
     pub ordinal: u64,
 }
 
+/// The next policy location for one routed request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePolicyCursor {
+    /// Read this captured machine's policy table next.
+    Table(u32),
+    /// Read the restoring machine's policy table next.
+    Binding,
+    /// Dispatch the operation to the root host next.
+    Root,
+}
+
+/// One descendant request exposed through a driven machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageRoutedRequest {
+    /// The machine that performed the operation.
+    pub target: u32,
+    /// The next policy location after the driven machine.
+    pub cursor: ImagePolicyCursor,
+}
+
 /// One captured terminal result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageTerminal {
@@ -246,6 +268,10 @@ pub struct ImageMachine {
     pub literals: Vec<Option<u32>>,
     pub start_body: Option<u32>,
     pub pending: Option<ImagePending>,
+    /// The child that completes this machine's pending VM operation.
+    pub nested: Option<u32>,
+    /// A descendant request exposed through this machine.
+    pub routed: Option<ImageRoutedRequest>,
     pub terminal: Option<ImageTerminal>,
     pub mailbox: ImageMailbox,
     pub block: Option<ImageBlock>,

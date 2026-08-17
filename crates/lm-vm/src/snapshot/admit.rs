@@ -30,7 +30,8 @@
 
 use super::{
     codec, image_roots, AdmissionIdentity, Image, ImageBlock, ImageError, ImageMachine,
-    ImageReason, ImageState, ImageTerminal, LoadLimits, SnapshotImage, FORMAT_VERSION,
+    ImagePolicyCursor, ImageReason, ImageState, ImageTerminal, LoadLimits, SnapshotImage,
+    FORMAT_VERSION,
 };
 use crate::LoadedModule;
 use lm_bytecode::closed::{ClosedType, TypeEnv, TypeEnvs};
@@ -195,6 +196,9 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
         add(machine.mailbox.queue.len())?;
         if let Some(pending) = &machine.pending {
             add(pending.args.len())?;
+        }
+        if machine.routed.is_some() {
+            add(image.machines.len())?;
         }
         for entry in &machine.objects {
             let edges = object_edges(&entry.object);
@@ -646,6 +650,26 @@ impl Admit<'_> {
                 );
             }
         }
+        if m.nested.is_some_and(|target| target >= machines) {
+            return fail(
+                ImageReason::Reference,
+                at("the nested machine ordinal names no captured machine"),
+            );
+        }
+        if let Some(route) = m.routed {
+            if route.target >= machines {
+                return fail(
+                    ImageReason::Reference,
+                    at("the routed request target names no captured machine"),
+                );
+            }
+            if matches!(route.cursor, ImagePolicyCursor::Table(table) if table >= machines) {
+                return fail(
+                    ImageReason::Reference,
+                    at("the policy cursor names no captured machine"),
+                );
+            }
+        }
         let mut children = Vec::new();
         for (ordinal, entry) in m.objects.iter().enumerate() {
             children.clear();
@@ -1081,7 +1105,12 @@ impl Admit<'_> {
         // The state rules of specification 14.3 and 17.6.
         match m.state {
             ImageState::Empty => {
-                if !m.frames.is_empty() || m.pending.is_some() || m.terminal.is_some() {
+                if !m.frames.is_empty()
+                    || m.pending.is_some()
+                    || m.nested.is_some()
+                    || m.routed.is_some()
+                    || m.terminal.is_some()
+                {
                     return fail(
                         ImageReason::State,
                         at("an empty machine holds execution state"),
@@ -1092,10 +1121,10 @@ impl Admit<'_> {
                 if m.frames.is_empty() {
                     return fail(ImageReason::State, at("a ready machine holds no frame"));
                 }
-                if m.pending.is_some() {
+                if m.pending.is_some() != m.nested.is_some() {
                     return fail(
                         ImageReason::State,
-                        at("a ready machine holds a pending request"),
+                        at("a ready machine has an incomplete nested control edge"),
                     );
                 }
                 if m.terminal.is_some() {
@@ -1121,12 +1150,18 @@ impl Admit<'_> {
                         at("an asked or blocked machine holds a terminal result"),
                     );
                 }
-            }
-            ImageState::Done | ImageState::Faulted => {
-                if m.pending.is_some() {
+                if m.nested.is_some() || m.routed.is_some() {
                     return fail(
                         ImageReason::State,
-                        at("a terminal machine holds a pending request"),
+                        at("an asked or blocked machine holds nested control state"),
+                    );
+                }
+            }
+            ImageState::Done | ImageState::Faulted => {
+                if m.pending.is_some() || m.nested.is_some() || m.routed.is_some() {
+                    return fail(
+                        ImageReason::State,
+                        at("a terminal machine holds live control state"),
                     );
                 }
                 // A machine reaches `Done` only by returning its last
@@ -1160,6 +1195,101 @@ impl Admit<'_> {
                 )
             }
             _ => {}
+        }
+        if let Some(target) = m.nested {
+            if target == vm {
+                return fail(
+                    ImageReason::State,
+                    at("a nested control edge targets its own machine"),
+                );
+            }
+            let Some(pending) = m.pending.as_ref() else {
+                return fail(
+                    ImageReason::State,
+                    at("a nested control edge has no pending operation"),
+                );
+            };
+            if !matches!(
+                pending.op,
+                lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE
+            ) {
+                return fail(
+                    ImageReason::State,
+                    at("a nested control edge names another operation"),
+                );
+            }
+            let receiver_matches = match pending.args.first() {
+                Some(Value::Obj(reference)) => m.objects.get(reference.slot as usize).is_some_and(
+                    |entry| matches!(entry.object, Object::NativeVm { vm: held } if held == target),
+                ),
+                _ => false,
+            };
+            if !receiver_matches {
+                return fail(
+                    ImageReason::State,
+                    at("a nested control edge does not match its VM receiver"),
+                );
+            }
+            let child = self.machine(target);
+            if child.parent != Some(vm) {
+                return fail(
+                    ImageReason::State,
+                    at("a nested control edge does not name a direct child"),
+                );
+            }
+            if child.scheduler_owned {
+                return fail(
+                    ImageReason::State,
+                    at("a nested control edge names a scheduler-owned machine"),
+                );
+            }
+        }
+        if let Some(route) = m.routed {
+            if route.target == vm {
+                return fail(
+                    ImageReason::State,
+                    at("a routed request targets its surface machine"),
+                );
+            }
+            let target = self.machine(route.target);
+            if target.state != ImageState::Asked || target.pending.is_none() {
+                return fail(
+                    ImageReason::State,
+                    at("a routed request target holds no live request"),
+                );
+            }
+            let cursor_matches = match route.cursor {
+                ImagePolicyCursor::Table(table) => m.parent == Some(table),
+                ImagePolicyCursor::Binding | ImagePolicyCursor::Root => m.parent.is_none(),
+            };
+            if !cursor_matches {
+                return fail(
+                    ImageReason::State,
+                    at("a routed request has an invalid policy cursor"),
+                );
+            }
+            let mut next = m.nested;
+            let mut found = false;
+            for _ in 0..self.image.machines.len() {
+                let Some(current) = next else { break };
+                if current == route.target {
+                    found = true;
+                    break;
+                }
+                let Some(machine) = self.image.machines.get(current as usize) else {
+                    return fail(
+                        ImageReason::Reference,
+                        at("the routed request crosses an invalid nested edge"),
+                    );
+                };
+                next = machine.nested;
+            }
+            if !found {
+                return fail(
+                    ImageReason::State,
+                    at("a routed request target is not a nested descendant"),
+                );
+            }
         }
         // A block record exists exactly when the machine is blocked,
         // and its kind matches the pending proc operation.

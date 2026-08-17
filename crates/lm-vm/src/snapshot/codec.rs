@@ -25,9 +25,9 @@
 
 use super::{
     AdmissionBudget, Image, ImageBlock, ImageError, ImageFrame, ImageLimits, ImageMachine,
-    ImageMailbox, ImageObject, ImagePending, ImageReason, ImageState, ImageTerminal, LoadLimits,
-    Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER,
-    SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
+    ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor, ImageReason, ImageRoutedRequest,
+    ImageState, ImageTerminal, LoadLimits, Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION,
+    MAGIC, SECTION_CODE, SECTION_HEADER, SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
 };
 use crate::LoadedModule;
 use lm_abi::FaultCode;
@@ -549,6 +549,22 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
                 out.hash(&id);
                 out.values(&pending.args);
                 out.u64(pending.ordinal);
+            }
+        }
+        out.opt(machine.nested);
+        match machine.routed {
+            None => out.u8(0),
+            Some(route) => {
+                out.u8(1);
+                out.leb(route.target as u64);
+                match route.cursor {
+                    ImagePolicyCursor::Table(table) => {
+                        out.u8(0);
+                        out.leb(table as u64);
+                    }
+                    ImagePolicyCursor::Binding => out.u8(1),
+                    ImagePolicyCursor::Root => out.u8(2),
+                }
             }
         }
         match &machine.terminal {
@@ -1611,6 +1627,31 @@ fn decode_machine(
             )
         }
     };
+    let nested = cur.opt(ctx.machine_count as u64, "nested machine")?;
+    let routed = match cur.u8()? {
+        0 => None,
+        1 => {
+            let target = machine_ref(cur, ctx)?;
+            let cursor = match cur.u8()? {
+                0 => ImagePolicyCursor::Table(machine_ref(cur, ctx)?),
+                1 => ImagePolicyCursor::Binding,
+                2 => ImagePolicyCursor::Root,
+                other => {
+                    return err(
+                        ImageReason::State,
+                        format!("the policy cursor tag {other} is not a cursor kind"),
+                    )
+                }
+            };
+            Some(ImageRoutedRequest { target, cursor })
+        }
+        other => {
+            return err(
+                ImageReason::State,
+                format!("the routed request tag {other} is not 0 or 1"),
+            )
+        }
+    };
     let terminal = match cur.u8()? {
         0 => None,
         1 => Some(ImageTerminal::Done(decode_value(cur, count)?)),
@@ -1669,6 +1710,8 @@ fn decode_machine(
         literals,
         start_body,
         pending,
+        nested,
+        routed,
         terminal,
         mailbox: ImageMailbox {
             limit: mailbox_limit,

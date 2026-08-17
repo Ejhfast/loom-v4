@@ -5,8 +5,10 @@
 //! gate names the case that proves it in `docs/notes/week9.md`.
 
 use lm_heap::Object;
-use lm_testkit::{compile_to_bytes, repo_root, run_allowed};
-use lm_vm::snapshot::{codec, ImageState, LoadLimits, RestoreFail, SnapshotFail};
+use lm_testkit::{compile_to_bytes, repo_root, run_allowed, run_world};
+use lm_vm::snapshot::{
+    codec, ImagePolicyCursor, ImageReason, ImageState, LoadLimits, RestoreFail, SnapshotFail,
+};
 use lm_vm::{
     load_bytes, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, VmId, World, WorldLimits,
 };
@@ -664,6 +666,122 @@ fn an_asked_capture_restores_in_asked_and_drive_mints_a_fresh_token() {
         RootEvent::Asked(fresh) => assert_eq!(fresh, ordinal),
         other => panic!("expected an asked machine, got {other:?}"),
     }
+}
+
+/// A program that captures and restores one routed request.
+fn routed_snapshot_source() -> &'static str {
+    r#"
+def dispatch_to_end(vm: Vm[Int]): Int with Vm
+  loop do
+    case vm.drive()
+    in Asked(q) then vm.dispatch(q)
+    in Done(value)
+      return value
+    in Fault(_)
+      return 0 - 1
+    end
+  end
+  0 - 2
+end
+
+def go(): Int with Vm, Io.Print
+  inner = do ||: Int with Vm, Io.Print
+    b = sys.vm.Vm().from_object(do ||: Int with Io.Print
+      sys.io.print("from B")
+      7
+    end, args: ())
+    b.table().pass(Io.Print)
+    case b.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 3
+    end
+  end
+
+  a = sys.vm.Vm().from_object(inner, args: ())
+  a.table().pass(Vm)
+  a.table().pass(Io.Print)
+  loop do
+    case a.drive()
+    in Asked(q)
+      case q.as_call(Io.Print)
+      in Some(call)
+        case a.snapshot()
+        in Ok(snap)
+          a.answer(call, ())
+          original = case a.run()
+                     in Done(value) then value
+                     in Fault(_) then 0 - 4
+                     end
+          case sys.vm.Vm().restore(snap)
+          in Ok(restored)
+            return original + dispatch_to_end(restored)
+          in Err(_)
+            return 0 - 5
+          end
+        in Err(_)
+          return 0 - 6
+        end
+      in None
+        a.dispatch(q)
+      end
+    in Done(_)
+      return 0 - 7
+    in Fault(_)
+      return 0 - 8
+    end
+  end
+  0 - 9
+end
+
+go()
+"#
+}
+
+/// A routed request preserves its nested edge and policy cursor.
+#[test]
+fn a_routed_request_round_trips_with_its_policy_cursor() {
+    let (out, host) = run_world(
+        "routed-snapshot.lm",
+        routed_snapshot_source(),
+        &["Vm", "Io.Print"],
+        VmConfig::default(),
+    )
+    .expect("the routed snapshot program runs");
+    assert_eq!(out, "Done(14)");
+    assert_eq!(host.borrow().printed, vec!["from B"]);
+}
+
+/// Admission rejects damaged routed control records.
+#[test]
+fn malformed_routed_snapshot_state_rejects() {
+    let loaded = program(routed_snapshot_source());
+    let mut world = world_of(&loaded, &["Vm", "Io.Print"]);
+    let outcome = drive(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(14)");
+    let image = world
+        .last_snapshot()
+        .expect("the program captured a routed request");
+    let machine = &image.world().machines[0];
+    assert_eq!(machine.nested, Some(1));
+    assert!(machine.routed.is_some());
+
+    let mut broken = image.clone().into_image();
+    broken.machines[0].nested = None;
+    let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    let error = codec::load_external(&bytes, &loaded, LoadLimits::default())
+        .expect_err("the incomplete nested edge rejects");
+    assert_eq!(error.reason, ImageReason::State);
+
+    let mut broken = image.clone().into_image();
+    broken.machines[0]
+        .routed
+        .as_mut()
+        .expect("the route exists")
+        .cursor = ImagePolicyCursor::Table(1);
+    let bytes = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
+    let error = codec::load_external(&bytes, &loaded, LoadLimits::default())
+        .expect_err("the invalid policy cursor rejects");
+    assert_eq!(error.reason, ImageReason::State);
 }
 
 /// A terminal machine restores terminal, and its stored result

@@ -1,19 +1,18 @@
 # Effect Pass-Through and the Driver
 
-Status: problem record. The implementation does not follow it yet.
+Status: accepted and implemented.
 
-This document describes a defect in `language-spec.md` sections 13.4
-and 13.5, and in the implementation of both. It gives a demonstration
-program, the behavior today, and the behavior the language needs. It
-proposes a direction. It does not specify the fix.
+This document records the old defect and its solution. The normative
+rules are in `language-spec.md` sections 13.4, 13.5, and 14.7 through
+14.10.
 
 ## 1. Purpose
 
-A driver intercepts every operation of the machine it drives. A driver
-does not intercept an operation of a machine one level below that. The
-operation passes the driver and reaches the host.
+A driver intercepts direct requests from its machine. It also
+intercepts descendant requests that pass through that machine.
 
-This document records why that is wrong and what must replace it.
+The old implementation intercepted direct requests only. This
+document records the defect and the implemented replacement.
 
 ## 2. The four table actions
 
@@ -30,15 +29,12 @@ actions as the holder's decision, made in advance:
 `drive` is the same decision, made live. The two mechanisms then agree,
 and the model is one model.
 
-`pass` breaks the agreement. Specification 13.4 says a child `pass`
-"consults the live parent table". The implementation does the same:
-`resolve_policy` in `crates/lm-vm/src/world.rs` moves to `m.vm.parent`
-and reads that machine's table.
+The old `pass` implementation broke the agreement. It always moved to
+the parent table and ignored a live driver.
 
-> `pass` reads the holder's advance decision. It never asks the holder.
+> Apply the current table action first. A pass then asks the holder.
 
-A live driver is therefore invisible to every machine below its direct
-child.
+A live driver was therefore invisible below its direct child.
 
 ## 3. Demonstration
 
@@ -91,7 +87,7 @@ out = drive_loop(a, seen)
 sys.io.print("intercepted={out[0].len()} result={out[1]}\n")
 ```
 
-### 3.1 Behavior today
+### 3.1 Behavior before the fix
 
 ```text
 $ lm run --show-result nested-drive.lm --allow Vm,Io.Print
@@ -103,7 +99,7 @@ Done(())
 P captured the print of A. The print of B reached the host and wrote to
 standard output. P held a live drive loop and never saw the request.
 
-### 3.2 Behavior the language needs
+### 3.2 Behavior after the fix
 
 ```text
 $ lm run --show-result nested-drive.lm --allow Vm,Io.Print
@@ -139,45 +135,89 @@ service, not in authorization.
 | Question | Scope today |
 |---|---|
 | May B perform this operation? | every level decides |
-| Who answers B? | the nearest `mock`, or the host |
+| Who answers B? | the nearest live driver, `mock`, or host |
 
-## 5. Direction
+## 5. Solution
 
-The rule is one sentence:
+### 5.1 Policy routing
 
-> `pass` asks the holder. If the holder drives, the holder receives the
-> request. If no holder drives, the walk reads the table and climbs, as
-> it does today.
+Each `pass` computes the next policy location. This location is the
+parent table or the root host.
 
-The second branch is the behavior today. A world with no driver
-therefore keeps its exact behavior, and an unblocked operation still
-reaches the host. The change adds behavior only where a live driver
-exists.
+The policy walk tests the table owner for an active driver. It performs
+this test only after that table passes.
 
-The activation stack already holds the chain. When P drives A and A
-runs B, the stack records B, then A with its drive mode and its holder,
-then P. `deliver_asked` already parks one machine and installs an
-`Asked` event into another machine's heap. It builds a token that names
-its own target machine.
+A block or mock therefore wins before driver routing. A world without
+a live driver keeps its old behavior.
 
-A fix must answer four questions. This document does not answer them.
+### 5.2 Nested control edges
 
-1. `resolve_policy` reads no activation state. It needs the chain.
-2. `answer` and `reject` take a `Vm[T]` receiver. P holds no handle to
-   B. The token names B already, so answering through the token is one
-   option. The ownership check must then change from "B is my child" to
-   "this request came to me".
-3. `dispatch` returns `()` today, and it runs the child. In the program
-   above, B runs and finishes inside one `dispatch` call of P. A
-   surfaced request from B must reach P, so `dispatch` must return an
-   event, or the driving loop must change shape.
-4. Specification 14.10 covers reentrancy for a machine and its holder.
-   It must also cover a parked machine whose holder is suspended inside
-   its own call.
+Each nested `run`, `step`, or `drive` records one explicit control
+edge. The edge links the pending parent operation to its direct child.
 
-Two costs need measurement. A deep tower walks more levels for each
-operation. A surfaced request costs one round trip into guest code.
-`docs/notes/benchmarks.md` records the dispatch floor.
+When a descendant request reaches a driver, the loop parks the
+activation chain. It keeps the nested edges from the driven surface to
+the performing descendant.
+
+The current `drive` call has completed with `Asked`. The loop therefore
+clears the edge from the holder to the driven surface.
+
+The next control call rebuilds the activation chain from the stored
+edges. Guest or Rust call depth does not hold this state.
+
+### 5.3 Request routing and `ReplySink`
+
+The public request token names the performing machine. The continuation
+receiver names the driven surface.
+
+The runtime creates one internal `ReplySink` for a valid continuation.
+It checks these facts once:
+
+- the caller controls the surface;
+- the route connects the surface to the target;
+- the target holds the current asked request;
+- the ordinal matches the request;
+- a typed call also matches the operation.
+
+`answer` and `reject` then update the performing descendant. Direct
+requests use the same path with equal surface and target identifiers.
+
+`ReplySink` is a small Rust stack value. It allocates no heap object and
+adds no check to ordinary execution.
+
+### 5.4 Dispatch continuation
+
+A routed request stores the policy location after the surface pass.
+`dispatch` resumes at that location and never reapplies the surface
+table.
+
+Another active driver can receive the request during this resumed
+walk. A block, mock, or root host can also resolve it.
+
+Nested VM control needs one extra rule. `dispatch` records that control
+edge and returns to the driving loop.
+
+The next `drive` rebuilds the driven surface before it runs the child.
+This order keeps descendant requests visible to the driver.
+
+### 5.5 Snapshots
+
+Snapshot format 3 stores nested edges, routed targets, and saved policy
+cursors. Admission checks the receiver edge and the descendant chain.
+
+A cursor outside the captured world becomes the restoring holder
+binding. It restores no old policy table or grant.
+
+### 5.6 Cost
+
+An ordinary instruction takes no new branch. A passed table adds one
+Boolean driver test to the existing policy walk.
+
+A routed continuation performs fixed identity and state checks.
+`ReplySink` adds no allocation and no graph walk.
+
+A surfaced request still adds one guest round trip. That cost belongs
+to the explicit manual policy decision.
 
 ## 6. Scope
 
@@ -196,11 +236,11 @@ as `Fs.Open`. The driver then serves a child from its own file, or from
 a filesystem it holds in memory. The child receives a type-conforming
 handle and cannot tell the difference.
 
-That proposal is out of scope here, and it needs no rule of its own.
-It needs this fix. A driver can only mint for a request it receives,
-and today it receives nothing from below its direct child. A parent
-that wraps a child gains nothing as soon as the child creates a machine
-of its own.
+That proposal is out of scope here. This solution supplies its routing
+foundation.
 
-Fix `pass` first. The minting proposal then composes with no special
-case, which is the correct test of the fix.
+A driver now receives a passed request from every descendant depth.
+Minting can use that request without a nested-VM special case.
+
+Reply construction and minted-handle lifetime remain separate design
+questions. They do not change pass-through routing.

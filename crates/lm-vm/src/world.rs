@@ -9,7 +9,7 @@
 use crate::host::{CoreCtor, Host, HostArg, HostCompletion, HostStart, HostValue};
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, Machine, MachineState, Mailbox, Ownership, Pending,
-    Terminal, VmId,
+    PolicyCursor, RoutedRequest, Terminal, VmId,
 };
 use crate::schedule::{
     ActiveProcs, CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WakeKey,
@@ -88,6 +88,28 @@ enum ExitKind {
     Terminal,
     Ran,
     Waiting,
+}
+
+/// How one policy dispatch handles a nested VM execution operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchMode {
+    /// Continue nested execution in the current driver call.
+    Continue,
+    /// Record nested execution for the next control call.
+    DeferNested,
+}
+
+/// One validated destination for a single operation reply.
+///
+/// The value lives on the Rust stack. It grants no authority beyond
+/// the request and route that `reply_sink` already validated.
+#[derive(Debug, Clone, Copy)]
+struct ReplySink {
+    surface: VmId,
+    target: VmId,
+    ordinal: u64,
+    op: u32,
+    cursor: PolicyCursor,
 }
 
 /// One world-caller event.
@@ -607,6 +629,12 @@ impl<'m> World<'m> {
         // The first run, step, or drive of a restored root opens the
         // world gate, whatever the root state is.
         self.open_gate(vm);
+        if let Some(route) = self.machines[vm as usize].vm.routed {
+            return match self.machines[route.target as usize].vm.pending.as_ref() {
+                Some(pending) => RootEvent::Asked(pending.ordinal),
+                None => self.fault_event(vm, "the routed machine holds no request"),
+            };
+        }
         if self.suspended.contains_key(&vm) {
             return self.resume_stack(vm);
         }
@@ -746,6 +774,10 @@ impl<'m> World<'m> {
         // A restored world runs behind one gate until its root moves.
         self.open_gate(act.vm);
         self.machines[act.vm as usize].active += 1;
+        if act.mode == StopMode::DriveToAsk {
+            debug_assert!(!self.machines[act.vm as usize].driven);
+            self.machines[act.vm as usize].driven = true;
+        }
         if let Some(p) = act.reply_to {
             self.machines[p as usize].active += 1;
         }
@@ -756,6 +788,21 @@ impl<'m> World<'m> {
             m.vm.state = MachineState::Running;
         }
         stack.push(act);
+    }
+
+    /// Release the execution references of one removed activation.
+    fn release_activation(&mut self, act: Activation) {
+        self.machines[act.vm as usize].active -= 1;
+        if act.mode == StopMode::DriveToAsk {
+            self.machines[act.vm as usize].driven = false;
+        }
+        if let Some(parent) = act.reply_to {
+            self.machines[parent as usize].active -= 1;
+        }
+        let machine = &mut self.machines[act.vm as usize];
+        if machine.vm.state == MachineState::Running {
+            machine.vm.state = MachineState::Ready;
+        }
     }
 
     /// The one driver loop over the activation stack.
@@ -879,6 +926,10 @@ impl<'m> World<'m> {
                     self.machines[act.vm as usize].vm.state = MachineState::Running;
                 }
                 MachineState::Running => {
+                    if self.machines[act.vm as usize].vm.nested.is_some() {
+                        self.resume_nested(stack, act.vm);
+                        continue;
+                    }
                     if act.mode == StopMode::OneStep && act.retired {
                         if let Some(event) = self.finish(stack, ExitKind::Ran) {
                             return event;
@@ -968,6 +1019,65 @@ impl<'m> World<'m> {
                 }
             }
         }
+    }
+
+    /// Push the child of one reified nested VM control operation.
+    fn resume_nested(&mut self, stack: &mut Vec<Activation>, parent: VmId) {
+        let Some(target) = self.machines[parent as usize].vm.nested else {
+            return;
+        };
+        let Some(op) = self.machines[parent as usize]
+            .vm
+            .pending
+            .as_ref()
+            .map(|pending| pending.op)
+        else {
+            self.machines[parent as usize].set_fault(
+                FaultCode::MalformedState,
+                "the nested control edge has no pending operation",
+                None,
+            );
+            return;
+        };
+        let (mode, family) = match op {
+            lm_abi::OP_VM_RUN => (StopMode::RunToTerminal, Family::Run),
+            lm_abi::OP_VM_STEP => (StopMode::OneStep, Family::Step),
+            lm_abi::OP_VM_DRIVE => (StopMode::DriveToAsk, Family::Drive),
+            _ => {
+                self.machines[parent as usize].set_fault(
+                    FaultCode::MalformedState,
+                    "the nested control edge names another operation",
+                    Some(op),
+                );
+                return;
+            }
+        };
+        if target == parent || self.machines[target as usize].active > 0 {
+            self.machines[parent as usize].set_fault(
+                FaultCode::InvalidVmState,
+                "the nested machine is in use",
+                Some(op),
+            );
+            return;
+        }
+        if self.machines[target as usize].owner != Ownership::Holder {
+            self.machines[parent as usize].set_fault(
+                FaultCode::InvalidVmState,
+                "the nested machine belongs to the scheduler",
+                Some(op),
+            );
+            return;
+        }
+        self.push_activation(
+            stack,
+            Activation {
+                vm: target,
+                mode,
+                family,
+                reply_to: Some(parent),
+                retired: false,
+            },
+        );
     }
 
     /// The completion key of one waiting machine.
@@ -1116,17 +1226,7 @@ impl<'m> World<'m> {
         let Some(act) = stack.pop() else {
             return Some(RootEvent::Ran);
         };
-        self.machines[act.vm as usize].active -= 1;
-        if let Some(p) = act.reply_to {
-            self.machines[p as usize].active -= 1;
-        }
-        // A paused exit leaves the machine holder-controlled.
-        if matches!(kind, ExitKind::Ran) {
-            let m = &mut self.machines[act.vm as usize];
-            if m.vm.state == MachineState::Running {
-                m.vm.state = MachineState::Ready;
-            }
-        }
+        self.release_activation(act);
         match act.reply_to {
             None => Some(match kind {
                 ExitKind::Terminal => self.terminal_root_event(act.vm),
@@ -1146,6 +1246,15 @@ impl<'m> World<'m> {
             self.deliver_mock(act.vm, parent);
             return;
         }
+        if self.machines[parent as usize].vm.nested != Some(act.vm) {
+            self.machines[parent as usize].set_fault(
+                FaultCode::MalformedState,
+                "the nested result has no matching control edge",
+                None,
+            );
+            return;
+        }
+        self.machines[parent as usize].vm.nested = None;
         let value = match kind {
             ExitKind::Terminal => self.build_terminal_event(act.vm, parent, act.family),
             ExitKind::Ran => self.make_instance(parent, self.core.step_ran, vec![]),
@@ -1494,21 +1603,26 @@ impl<'m> World<'m> {
             let Some(act) = stack.pop() else {
                 return Some(self.fault_event(vm, "the performing machine left the driver stack"));
             };
-            self.machines[vm as usize].active -= 1;
-            if let Some(p) = act.reply_to {
-                self.machines[p as usize].active -= 1;
-            }
+            self.release_activation(act);
             self.machines[vm as usize].vm.state = MachineState::Asked;
             match act.reply_to {
                 None => return Some(RootEvent::Asked(ordinal)),
                 Some(parent) => {
+                    if self.machines[parent as usize].vm.nested != Some(vm) {
+                        self.machines[parent as usize].set_fault(
+                            FaultCode::MalformedState,
+                            "the asked result has no matching control edge",
+                            None,
+                        );
+                        return None;
+                    }
+                    self.machines[parent as usize].vm.nested = None;
                     self.deliver_asked(vm, parent, ordinal);
                     return None;
                 }
             }
         }
-        self.resolve_and_dispatch(stack, vm);
-        None
+        self.resolve_and_dispatch(stack, vm, PolicyCursor::Table(vm), DispatchMode::Continue)
     }
 
     /// Build and install `DriveEvent.Asked(request)` into `parent`.
@@ -1522,18 +1636,147 @@ impl<'m> World<'m> {
         }
     }
 
-    /// Resolve the pending perform of `vm` through its policy chain
-    /// and dispatch it.
-    fn resolve_and_dispatch(&mut self, stack: &mut Vec<Activation>, vm: VmId) {
+    /// Install a descendant request as the result of `surface.drive()`.
+    fn deliver_routed_asked(&mut self, target: VmId, parent: VmId, ordinal: u64) {
+        let built = self.machines[parent as usize]
+            .alloc(Object::NativeRequest {
+                vm: target,
+                ordinal,
+            })
+            .and_then(|request| self.make_instance(parent, self.core.drive_asked, vec![request]));
+        match built {
+            Ok(value) => self.install_value_reply(parent, value),
+            Err(code) => self.machines[parent as usize].set_fault(code, "", None),
+        }
+    }
+
+    /// Mint a fresh token for one parked descendant request.
+    fn recover_routed_asked(&mut self, surface: VmId, parent: VmId, control_op: u32) {
+        let Some(route) = self.machines[surface as usize].vm.routed else {
+            self.fault_caller(
+                parent,
+                control_op,
+                FaultCode::MalformedState,
+                "the machine holds no routed request",
+            );
+            return;
+        };
+        if self.machines[route.target as usize].vm.pending.is_none() {
+            self.fault_caller(
+                parent,
+                control_op,
+                FaultCode::MalformedState,
+                "the routed machine holds no pending request",
+            );
+            return;
+        }
+        let fresh = match self.machines[route.target as usize].take_request_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(code) => {
+                let pending_op = self.pending_op(route.target);
+                self.machines[route.target as usize].set_fault(
+                    code,
+                    "the request ordinal is exhausted",
+                    pending_op,
+                );
+                self.machines[surface as usize].vm.routed = None;
+                self.fault_caller(
+                    parent,
+                    control_op,
+                    code,
+                    "the routed request ordinal is exhausted",
+                );
+                return;
+            }
+        };
+        if let Some(pending) = self.machines[route.target as usize].vm.pending.as_mut() {
+            pending.ordinal = fresh;
+        }
+        self.deliver_routed_asked(route.target, parent, fresh);
+    }
+
+    /// Park a nested activation chain at its nearest active driver.
+    fn route_request(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        surface: VmId,
+        target: VmId,
+        cursor: PolicyCursor,
+    ) -> Option<RootEvent> {
+        let Some(ordinal) = self.machines[target as usize]
+            .vm
+            .pending
+            .as_ref()
+            .map(|pending| pending.ordinal)
+        else {
+            self.machines[target as usize].set_fault(
+                FaultCode::MalformedState,
+                "the routed request has no pending operation",
+                None,
+            );
+            return None;
+        };
+        let Some(at) = stack
+            .iter()
+            .rposition(|act| act.vm == surface && act.mode == StopMode::DriveToAsk)
+        else {
+            self.machines[target as usize].set_fault(
+                FaultCode::MalformedState,
+                "the policy walk found no matching driver activation",
+                None,
+            );
+            return None;
+        };
+        let holder = stack[at].reply_to;
+        if surface == target || self.machines[surface as usize].vm.routed.is_some() {
+            self.machines[target as usize].set_fault(
+                FaultCode::MalformedState,
+                "the driver already holds a routed request",
+                None,
+            );
+            return None;
+        }
+        while stack.len() > at {
+            let act = stack.pop().expect("the activation index is in the stack");
+            self.release_activation(act);
+        }
+        self.machines[target as usize].vm.state = MachineState::Asked;
+        self.machines[surface as usize].vm.routed = Some(RoutedRequest { target, cursor });
+        match holder {
+            Some(parent) => {
+                if self.machines[parent as usize].vm.nested != Some(surface) {
+                    self.machines[parent as usize].set_fault(
+                        FaultCode::MalformedState,
+                        "the routed ask has no matching control edge",
+                        None,
+                    );
+                    return None;
+                }
+                self.machines[parent as usize].vm.nested = None;
+                self.deliver_routed_asked(target, parent, ordinal);
+                None
+            }
+            None => Some(RootEvent::Asked(ordinal)),
+        }
+    }
+
+    /// Resolve one pending perform from a saved policy position.
+    fn resolve_and_dispatch(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        vm: VmId,
+        cursor: PolicyCursor,
+        dispatch_mode: DispatchMode,
+    ) -> Option<RootEvent> {
         let Some(op) = self.pending_op(vm) else {
             self.machines[vm as usize].set_fault(
                 FaultCode::MalformedState,
                 "policy resolution found no pending request",
                 None,
             );
-            return;
+            return None;
         };
-        match self.resolve_policy(vm, op) {
+        match self.resolve_policy(cursor, op) {
             Resolution::Denied => {
                 self.machines[vm as usize].set_fault(
                     FaultCode::PolicyDenied,
@@ -1555,9 +1798,12 @@ impl<'m> World<'m> {
                 );
             }
             Resolution::Mock { owner, closure } => self.start_mock(stack, vm, owner, closure),
+            Resolution::Driver { surface, cursor } => {
+                return self.route_request(stack, surface, vm, cursor);
+            }
             Resolution::Root => {
                 if lm_abi::op(op).kind == lm_abi::OpKind::VmControl {
-                    self.kernel_exec(stack, vm, op);
+                    self.kernel_exec(stack, vm, op, dispatch_mode);
                 } else {
                     let args = match self.host_args(vm) {
                         Ok(args) => args,
@@ -1568,7 +1814,7 @@ impl<'m> World<'m> {
                                 code,
                                 "an operation argument has another shape",
                             );
-                            return;
+                            return None;
                         }
                     };
                     if let Err(code) = self.machines[vm as usize].resources.prepare_register() {
@@ -1577,7 +1823,7 @@ impl<'m> World<'m> {
                             "the world has no host resource capacity",
                             Some(op),
                         );
-                        return;
+                        return None;
                     }
                     let Some(completion) = self.completion_key(vm) else {
                         self.machines[vm as usize].set_fault(
@@ -1585,7 +1831,7 @@ impl<'m> World<'m> {
                             "the host operation has no completion key",
                             Some(op),
                         );
-                        return;
+                        return None;
                     };
                     match self.host.start(completion, op, args) {
                         HostStart::Completed(reply) => self.install_host_reply(vm, reply),
@@ -1601,6 +1847,7 @@ impl<'m> World<'m> {
                 }
             }
         }
+        None
     }
 
     /// Record one suspended host operation.
@@ -1678,15 +1925,18 @@ impl<'m> World<'m> {
             .collect()
     }
 
-    /// Walk the policy chain of `vm` for one exact operation.
+    /// Walk one policy chain from a saved resolution position.
     ///
     /// The walk follows the parent chain. A cut world proves that chain
     /// acyclic, so the loop terminates. The step bound is a second
     /// defense: a chain longer than the machine table has a cycle,
     /// whatever built the state, so the walk fails closed rather than
     /// spins.
-    fn resolve_policy(&self, vm: VmId, op: u32) -> Resolution {
-        let mut cur = vm;
+    fn resolve_policy(&self, cursor: PolicyCursor, op: u32) -> Resolution {
+        let mut cur = match cursor {
+            PolicyCursor::Table(vm) => vm,
+            PolicyCursor::Root => return Resolution::Root,
+        };
         let mut steps = 0usize;
         loop {
             steps += 1;
@@ -1704,22 +1954,34 @@ impl<'m> World<'m> {
                         closure,
                     };
                 }
-                Some(Action::Pass) => match m.vm.parent {
-                    Some(parent) => {
-                        // A child table passes through the live parent
-                        // table. Parent death removes the pass
-                        // through, and a later request fails closed
-                        // (specification 18.6).
-                        if matches!(
-                            self.machines[parent as usize].vm.state,
-                            MachineState::Done | MachineState::Faulted
-                        ) {
-                            return Resolution::DeadParent;
-                        }
-                        cur = parent;
+                Some(Action::Pass) => {
+                    let next = match m.vm.parent {
+                        Some(parent) => PolicyCursor::Table(parent),
+                        None => PolicyCursor::Root,
+                    };
+                    if m.driven {
+                        return Resolution::Driver {
+                            surface: cur,
+                            cursor: next,
+                        };
                     }
-                    None => return Resolution::Root,
-                },
+                    match m.vm.parent {
+                        Some(parent) => {
+                            // A child table passes through the live parent
+                            // table. Parent death removes the pass
+                            // through, and a later request fails closed
+                            // (specification 18.6).
+                            if matches!(
+                                self.machines[parent as usize].vm.state,
+                                MachineState::Done | MachineState::Faulted
+                            ) {
+                                return Resolution::DeadParent;
+                            }
+                            cur = parent;
+                        }
+                        None => return Resolution::Root,
+                    }
+                }
             }
         }
     }
@@ -1987,7 +2249,13 @@ impl<'m> World<'m> {
     }
 
     /// Execute one VM control operation of the machine `vm`.
-    fn kernel_exec(&mut self, stack: &mut Vec<Activation>, vm: VmId, op: u32) {
+    fn kernel_exec(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        vm: VmId,
+        op: u32,
+        dispatch_mode: DispatchMode,
+    ) {
         let stored: Vec<Value> = match self.machines[vm as usize].vm.pending.as_ref() {
             Some(pending) => pending.args.clone(),
             None => {
@@ -2151,6 +2419,19 @@ impl<'m> World<'m> {
                 // The first run, step, or drive of a restored root
                 // opens the world gate (specification 17.5).
                 self.open_gate(target);
+                if self.machines[target as usize].vm.routed.is_some() {
+                    if op == lm_abi::OP_VM_DRIVE {
+                        self.recover_routed_asked(target, vm, op);
+                    } else {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "the machine holds a routed request; drive it",
+                        );
+                    }
+                    return;
+                }
                 match self.machines[target as usize].vm.state {
                     MachineState::Empty => {
                         self.fault_caller(
@@ -2214,17 +2495,30 @@ impl<'m> World<'m> {
                         }
                     }
                     MachineState::Ready | MachineState::Waiting => {
-                        self.machines[vm as usize].vm.pending = None;
-                        self.push_activation(
-                            stack,
-                            Activation {
-                                vm: target,
-                                mode,
-                                family,
-                                reply_to: Some(vm),
-                                retired: false,
-                            },
-                        );
+                        if self.machines[vm as usize].vm.nested.is_some() {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::InvalidVmState,
+                                "the machine already waits on nested control",
+                            );
+                            return;
+                        }
+                        self.machines[vm as usize].vm.nested = Some(target);
+                        if dispatch_mode == DispatchMode::DeferNested {
+                            self.machines[vm as usize].vm.state = MachineState::Ready;
+                        } else {
+                            self.push_activation(
+                                stack,
+                                Activation {
+                                    vm: target,
+                                    mode,
+                                    family,
+                                    reply_to: Some(vm),
+                                    retired: false,
+                                },
+                            );
+                        }
                     }
                     MachineState::Blocked => {
                         // A holder-owned machine blocks only inside a
@@ -2259,7 +2553,7 @@ impl<'m> World<'m> {
                 }
             }
             lm_abi::OP_VM_ANSWER => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
                     return;
                 };
                 let found = args[1].as_obj().and_then(|r| {
@@ -2277,36 +2571,23 @@ impl<'m> World<'m> {
                     );
                     return;
                 };
-                if !self.expect_asked(vm, op, target) {
+                let Some(sink) = self.reply_sink(vm, op, surface, token.0, token.1, Some(token.2))
+                else {
                     return;
-                }
-                let pending_ok = match self.machines[target as usize].vm.pending.as_ref() {
-                    Some(pending) => {
-                        token.0 == target && token.1 == pending.ordinal && token.2 == pending.op
-                    }
-                    None => false,
                 };
-                if !pending_ok {
-                    self.fault_caller(
-                        vm,
-                        op,
-                        FaultCode::InvalidRequestToken,
-                        "the call token is stale or foreign",
-                    );
-                    return;
-                }
-                let reply = match self.transfer(vm, target, args[2]) {
+                let reply = match self.transfer(vm, sink.target, args[2]) {
                     Ok(value) => value,
                     Err(code) => {
                         self.fault_caller(vm, op, code, "the reply is not sendable");
                         return;
                     }
                 };
-                self.install_value_reply(target, reply);
+                self.install_value_reply(sink.target, reply);
+                self.consume_reply_sink(sink);
                 self.install_value_reply(vm, Value::Unit);
             }
             lm_abi::OP_VM_REJECT | lm_abi::OP_VM_DISPATCH => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
                     return;
                 };
                 let found = args[1].as_obj().and_then(|r| {
@@ -2324,22 +2605,9 @@ impl<'m> World<'m> {
                     );
                     return;
                 };
-                if !self.expect_asked(vm, op, target) {
+                let Some(sink) = self.reply_sink(vm, op, surface, token.0, token.1, None) else {
                     return;
-                }
-                let pending_ok = match self.machines[target as usize].vm.pending.as_ref() {
-                    Some(pending) => token.0 == target && token.1 == pending.ordinal,
-                    None => false,
                 };
-                if !pending_ok {
-                    self.fault_caller(
-                        vm,
-                        op,
-                        FaultCode::InvalidRequestToken,
-                        "the request token is stale or foreign",
-                    );
-                    return;
-                }
                 if op == lm_abi::OP_VM_REJECT {
                     let built = args[2].as_obj().and_then(|r| {
                         match self.machines[vm as usize].vm.heap.get(r) {
@@ -2360,15 +2628,25 @@ impl<'m> World<'m> {
                         );
                         return;
                     };
-                    let pending_op = self.pending_op(target);
-                    self.machines[target as usize].set_fault(rec.code, rec.message, pending_op);
+                    let pending_op = self.pending_op(sink.target);
+                    self.machines[sink.target as usize].set_fault(
+                        rec.code,
+                        rec.message,
+                        pending_op,
+                    );
+                    self.consume_reply_sink(sink);
                     self.install_value_reply(vm, Value::Unit);
                 } else {
-                    // Dispatch applies the controlled machine's own
-                    // table. The caller's reply installs first; the
-                    // resolution may stack a mock run above it.
+                    // The caller's reply installs before policy can
+                    // stack a mock run above it.
+                    self.consume_reply_sink(sink);
                     self.install_value_reply(vm, Value::Unit);
-                    self.resolve_and_dispatch(stack, target);
+                    let _ = self.resolve_and_dispatch(
+                        stack,
+                        sink.target,
+                        sink.cursor,
+                        DispatchMode::DeferNested,
+                    );
                 }
             }
             lm_abi::OP_VM_SNAPSHOT_HELD => {
@@ -2721,27 +2999,104 @@ impl<'m> World<'m> {
         true
     }
 
-    /// Check that a controlled machine accepts a continuation method.
-    fn expect_asked(&mut self, vm: VmId, op: u32, target: VmId) -> bool {
-        if target == vm || self.machines[target as usize].active > 0 {
-            self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
-            return false;
-        }
-        if !self.expect_holder_owned(vm, op, target) {
-            return false;
-        }
-        if self.machines[target as usize].vm.state != MachineState::Asked {
-            // The machine has no pending request, so the caller's
-            // token is consumed or stale (specification 12.3).
+    /// Validate one direct or routed continuation token once.
+    fn reply_sink(
+        &mut self,
+        vm: VmId,
+        control_op: u32,
+        surface: VmId,
+        target: VmId,
+        ordinal: u64,
+        expected_op: Option<u32>,
+    ) -> Option<ReplySink> {
+        if surface == vm || self.machines[surface as usize].active > 0 {
             self.fault_caller(
                 vm,
-                op,
+                control_op,
+                FaultCode::InvalidVmState,
+                "the machine is in use",
+            );
+            return None;
+        }
+        if !self.expect_holder_owned(vm, control_op, surface) {
+            return None;
+        }
+        if self.machines.get(target as usize).is_none() || self.machines[target as usize].active > 0
+        {
+            self.fault_caller(
+                vm,
+                control_op,
+                FaultCode::InvalidRequestToken,
+                "the request token names no parked machine",
+            );
+            return None;
+        }
+        let cursor = if surface == target {
+            if self.machines[surface as usize].vm.state != MachineState::Asked {
+                self.fault_caller(
+                    vm,
+                    control_op,
+                    FaultCode::InvalidRequestToken,
+                    "the request token is consumed or stale",
+                );
+                return None;
+            }
+            PolicyCursor::Table(surface)
+        } else {
+            match self.machines[surface as usize].vm.routed {
+                Some(route) if route.target == target => route.cursor,
+                _ => {
+                    self.fault_caller(
+                        vm,
+                        control_op,
+                        FaultCode::InvalidRequestToken,
+                        "the request did not come through this machine",
+                    );
+                    return None;
+                }
+            }
+        };
+        let Some(pending) = self.machines[target as usize].vm.pending.as_ref() else {
+            self.fault_caller(
+                vm,
+                control_op,
                 FaultCode::InvalidRequestToken,
                 "the request token is consumed or stale",
             );
-            return false;
+            return None;
+        };
+        if self.machines[target as usize].vm.state != MachineState::Asked
+            || pending.ordinal != ordinal
+            || expected_op.is_some_and(|op| op != pending.op)
+        {
+            self.fault_caller(
+                vm,
+                control_op,
+                FaultCode::InvalidRequestToken,
+                "the request token is stale or foreign",
+            );
+            return None;
         }
-        true
+        Some(ReplySink {
+            surface,
+            target,
+            ordinal,
+            op: pending.op,
+            cursor,
+        })
+    }
+
+    /// Clear the route after one validated reply consumes its token.
+    fn consume_reply_sink(&mut self, sink: ReplySink) {
+        debug_assert!(sink.ordinal > 0);
+        debug_assert!((sink.op as usize) < lm_abi::OP_COUNT as usize);
+        if sink.surface != sink.target {
+            debug_assert!(self.machines[sink.surface as usize]
+                .vm
+                .routed
+                .is_some_and(|route| route.target == sink.target));
+            self.machines[sink.surface as usize].vm.routed = None;
+        }
     }
 
     /// Fault the calling machine without mutating the controlled one.
@@ -4237,10 +4592,11 @@ impl<'m> World<'m> {
 
     /// Every machine one machine names in its reachable state.
     ///
-    /// Five native shapes name a machine: a machine handle, a proc
-    /// handle, a policy-table handle, a request token, and a typed
-    /// call token. The walk reports all five, so the barrier set
-    /// closes over every machine reference a heap can hold.
+    /// Five native object shapes name a machine. The walk reports all
+    /// five shapes.
+    ///
+    /// A nested edge and a routed request also name machines. The walk
+    /// reports both records.
     ///
     /// The walk starts at the snapshot roots, which cover the frame
     /// closures, the locals, the operands, the pending arguments, the
@@ -4250,9 +4606,11 @@ impl<'m> World<'m> {
     /// machine that only a table-held mock closure names is therefore
     /// not part of the world.
     ///
-    /// The result is in canonical object order, first encounter first.
-    /// The machine ordinals of an image read that order, so they never
-    /// depend on a scheduler identifier.
+    /// Heap references use canonical object order. The nested edge and
+    /// routed target follow in that order.
+    ///
+    /// The image ordinals read this order. They never depend on a
+    /// scheduler identifier.
     pub fn machine_references(&mut self, vm: VmId) -> Result<Vec<VmId>, FaultCode> {
         let roots = self.machines[vm as usize].snapshot_roots();
         let limits = self.machines[vm as usize].config.graph;
@@ -4275,6 +4633,20 @@ impl<'m> World<'m> {
                 if !out.contains(&target) {
                     out.push(target);
                 }
+            }
+        }
+        for target in [
+            self.machines[vm as usize].vm.nested,
+            self.machines[vm as usize]
+                .vm
+                .routed
+                .map(|route| route.target),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !out.contains(&target) {
+                out.push(target);
             }
         }
         Ok(out)
@@ -4495,6 +4867,11 @@ enum Resolution {
     Mock {
         owner: VmId,
         closure: ObjRef,
+    },
+    /// The table owner has an active manual driver.
+    Driver {
+        surface: VmId,
+        cursor: PolicyCursor,
     },
     Root,
 }
@@ -4820,7 +5197,7 @@ mod tests {
         world.machines.push(child);
         arm_pending(&mut world, lm_abi::OP_VM_RUN, vec![], 1);
         let mut stack = Vec::new();
-        world.kernel_exec(&mut stack, 0, lm_abi::OP_VM_RUN);
+        world.kernel_exec(&mut stack, 0, lm_abi::OP_VM_RUN, DispatchMode::Continue);
         assert_eq!(world.machines[0].vm.state, MachineState::Faulted);
         match &world.machines[0].vm.terminal {
             Some(Terminal::Fault(rec)) => assert_eq!(rec.code, FaultCode::InvalidVmState),
@@ -4859,7 +5236,7 @@ mod tests {
             1,
         );
         let mut stack = Vec::new();
-        world.kernel_exec(&mut stack, 0, lm_abi::OP_VM_ANSWER);
+        world.kernel_exec(&mut stack, 0, lm_abi::OP_VM_ANSWER, DispatchMode::Continue);
         match &world.machines[0].vm.terminal {
             Some(Terminal::Fault(rec)) => {
                 assert_eq!(rec.code, FaultCode::InvalidRequestToken);
@@ -4896,7 +5273,12 @@ mod tests {
             .expect("the token allocates");
         arm_pending(&mut world, lm_abi::OP_VM_DISPATCH, vec![token], 1);
         let mut stack = Vec::new();
-        world.kernel_exec(&mut stack, 0, lm_abi::OP_VM_DISPATCH);
+        world.kernel_exec(
+            &mut stack,
+            0,
+            lm_abi::OP_VM_DISPATCH,
+            DispatchMode::Continue,
+        );
         match &world.machines[0].vm.terminal {
             Some(Terminal::Fault(rec)) => {
                 assert_eq!(rec.code, FaultCode::InvalidRequestToken);

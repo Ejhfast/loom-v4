@@ -241,6 +241,56 @@ fn drive_interception_smoke() {
 }
 
 #[test]
+fn descendant_drive_interception_smoke() {
+    let source = r#"
+def drive_all(vm: Vm[Int]): Int with Vm
+  loop do
+    case vm.drive()
+    in Asked(q)
+      case q.as_call(Clock.Now)
+      in Some(call) then vm.answer(call, 1)
+      in None then vm.dispatch(q)
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return 0 - 1
+    end
+  end
+  0 - 2
+end
+
+inner = do ||: Int with Vm, Clock.Now
+  b = sys.vm.Vm().from_object(do ||: Int with Clock.Now
+    i = 0
+    total = 0
+    while i < 1000
+      total = total + sys.clock.now()
+      i = i + 1
+    end
+    total
+  end, args: ())
+  b.table().pass(Clock.Now)
+  case b.run()
+  in Done(value) then value
+  in Fault(_) then 0 - 3
+  end
+end
+
+a = sys.vm.Vm().from_object(inner, args: ())
+a.table().pass(Vm)
+a.table().pass(Clock.Now)
+drive_all(a)
+"#;
+    timed_world(
+        "descendant_drive_interception_1k",
+        source,
+        &["Vm", "Clock.Now"],
+        "Done(1000)",
+    );
+}
+
+#[test]
 fn nested_vm_run_smoke() {
     let source = "def tower(n: Int): Int with Vm\n  if n <= 0\n    1\n  else\n    \
                   vm = sys.vm.Vm().from_object(do || with Vm\n      tower(n - 1)\n    end, args: ())\n    \

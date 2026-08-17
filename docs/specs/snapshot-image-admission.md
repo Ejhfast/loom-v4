@@ -195,6 +195,9 @@ Structural resolution enforces these rules:
 - Every request token ordinal is below its target counter.
 - Every lifecycle variant has its required records.
 - Pending, terminal, mailbox, block, pause, and gate records agree.
+- Each nested edge matches a pending VM receiver and a direct child.
+- Each routed target is an asked descendant of its driven surface.
+- Each routed policy cursor names the parent, binding, or root.
 
 Structural resolution checks relationships that trusted runtime paths
 use without recovery. It does not require useful or reachable future
@@ -457,6 +460,7 @@ Restore still performs target-specific work:
 - Allocate detached heaps and machine records.
 - Relocate machine and object references.
 - Create fresh default-deny policy tables.
+- Bind external routed cursors to the restoring holder.
 - Bind allowed external runtime services.
 - Commit the complete world atomically.
 

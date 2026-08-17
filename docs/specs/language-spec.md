@@ -1198,7 +1198,7 @@ t.mock(Clock.Now, do || 1_700_000_000 end)
 t.clear(Clock.Now)
 ```
 
-- `pass`: forward to parent table/root host;
+- `pass`: forward to a live holder, parent table, or root host;
 - `block`: fault the controlled guest with `PolicyDenied`;
 - `mock`: use a pure handler with the exact operation signature;
 - `clear`: remove the exact/group entry.
@@ -1213,13 +1213,23 @@ A mock handler has verified code, an empty row, and a sendable capture graph. In
 
 ### 13.4 Pass chains and revocation
 
-A child `pass` consults the live parent table associated at creation/launch, eventually reaching an embedding-host registry. Parent edits affect future child performs. If the parent/root binding is gone or the root implementation is ungranted, the operation fails closed with `PolicyDenied`.
+Each table applies its own action before a pass continues. A block denies the request, and a mock answers it.
+
+If a table passes while its machine has an active driver, the request goes to that driver. Otherwise, resolution continues at the parent table.
+
+Resolution can eventually reach an embedding-host registry. Each ancestor therefore keeps its authorization decision.
+
+Parent edits affect future child performs. A missing parent or root binding denies the request with `PolicyDenied`.
 
 Editing a table while a proc runs affects future lookups; it does not retroactively cancel a host operation already accepted unless that operation's own semantics expose cancellation.
 
 ### 13.5 Manual policy
 
-`drive()` stops before lookup. The holder may answer/reject directly or invoke `dispatch()` to apply this table. Tables remain the only automatic policy mechanism.
+`drive()` stops its direct machine before lookup. A descendant request also stops when a pass reaches the active driver.
+
+The holder can answer, reject, or dispatch the request. `dispatch()` applies the stopped table for a direct request.
+
+For a routed request, `dispatch()` continues after the pass that reached the driver. Tables remain the only automatic policy mechanism.
 
 ---
 
@@ -1269,6 +1279,12 @@ vm = empty.from_object(program, args: ("Ada",))
 
 There is at most one pending perform record.
 
+A ready machine can hold one nested control edge. The edge links a pending `run`, `step`, or `drive` operation to its direct child.
+
+A routed-request record links a driven surface to an asked descendant. It also stores the next policy location.
+
+These records are not public machine states.
+
 ### 14.4 Events
 
 ```lm
@@ -1291,7 +1307,9 @@ enum DriveEvent[T]
 end
 ```
 
-`WaitView` is inspection-only because automatic policy has already accepted and dispatched that operation. `Request` appears only on the manual path before policy lookup.
+`WaitView` is inspection-only because automatic policy has already accepted and dispatched that operation.
+
+`Request` appears only on the manual path before policy lookup. It can describe the driven machine or one routed descendant.
 
 An event holds no reference into the controlled machine. Its native parts, `WaitView`, `Request`, and `Fault`, are frozen views. Before terminal success is published, the value crosses transfer mode. A mutable result copies, and the holder receives a mutable copy. A holder-local or nonsendable result converts the controlled machine to `Fault(UnsendableValue)`.
 
@@ -1312,7 +1330,13 @@ If called while still waiting and no completion is ready, `step` returns the sam
 
 ### 14.7 `drive`
 
-`drive()` is valid from `ready`, `waiting`, and `asked`. From `asked` it returns the same semantic pending request with a freshly materialized holder token, without executing or consuming fuel; this is required after restoring an asked snapshot or losing a prior token. From `waiting`, an already dispatched wait completes before interception resumes. Otherwise it runs until the next `PERFORM` has recorded its operation, typed argument slots, reply type, destination, and continuation PC, then stops before table lookup:
+`drive()` is valid from `ready`, `waiting`, and `asked`. It is also valid when the machine holds a routed request.
+
+From `asked`, it returns the same request with a fresh holder token. It executes no instruction and consumes no fuel.
+
+The routed case returns the descendant request with a fresh token. From `waiting`, an accepted wait completes before interception resumes.
+
+Otherwise, it runs until one `PERFORM` records its operation, arguments, reply type, destination, and continuation PC. It then stops before table lookup:
 
 ```lm
 case vm.drive()
@@ -1327,9 +1351,13 @@ end
 
 The perform consumes normal fuel. No host-stack continuation and no copied guest stack are created.
 
+Nested VM execution uses the same rule. A descendant pass can return `Asked` through the machine that the holder drives.
+
 ### 14.8 Typed request matching
 
-`Request` is an opaque holder-local token for one pending perform. Its erased inspection surface contains no `Any`:
+`Request` is an opaque holder-local token for one pending perform. The token names the machine that performed the operation.
+
+That machine can be a descendant of the `Vm` receiver. Its erased inspection surface contains no `Any`:
 
 ```lm
 q.op(): Operation
@@ -1351,6 +1379,8 @@ in None
 end
 ```
 
+Call a continuation method on the same `Vm` receiver that produced the event. The route proves that the descendant request reached this receiver.
+
 `Request.as_call(op)` has a narrow compiler-known type rule. Its argument is an exact `Operation` descriptor known to the checker, such as `Io.Print`. If the manifest signature of that descriptor is `(A...) -> R`, the result is `Option[PendingCall[(A...), R]]`. The callable `sys` member is not used here: matching is descriptor work, and the compiler supplies the typed signature from the manifest. `PendingCall[A,R]` exposes:
 
 ```text
@@ -1363,7 +1393,7 @@ This is existential elimination at an operation-identity test, not general depen
 
 ### 14.9 Continuation methods
 
-While the controlled VM is `asked`:
+While the controlled VM is `asked` or holds a routed request:
 
 ```lm
 vm.answer(call, value)       # PendingCall[A,R], value: R
@@ -1371,15 +1401,29 @@ vm.reject(q, fault)          # Request, Fault
 vm.dispatch(q)               # Request
 ```
 
-`answer` checks that the token belongs to this VM, names the current ordinal, and remains pending; boundary-encodes the statically typed reply; validates its runtime `TypeId`; installs it; clears the request; and enters `ready`. A mismatch or stale/cross-VM token faults the controlled machine with `BadOperationReply` or the caller with `InvalidRequestToken` as appropriate, never corrupting a frame.
+The runtime builds one internal `ReplySink` after it validates the continuation. This check validates the receiver, route, target, ordinal, and any typed operation.
 
-`reject` installs the supplied frozen fault and enters `faulted`. `dispatch` applies the table and enters `ready`, `waiting`, or `faulted`. Tokens need not be linear in the source type system because the VM validates single use.
+`answer` boundary-encodes the typed reply and validates its runtime `TypeId`. It installs the reply in the performing machine.
 
-These methods are invalid in other states. Calling `step` or `run` while `asked`, or loading a nonempty VM, faults the caller with `InvalidVmState` without changing the controlled machine. Repeating `drive` while `asked` is the explicit token-recovery operation described above. Terminal execution calls return the stored terminal event idempotently.
+A bad reply faults the performing machine with `BadOperationReply`. A stale or foreign token faults the caller with `InvalidRequestToken`.
+
+`reject` installs the supplied frozen fault in the performing machine. `dispatch` continues policy resolution from the saved location.
+
+A nested VM control dispatch records an edge and returns. The next control call rebuilds the driver activation before the child runs.
+
+Tokens need not be linear in the source type system. The VM validates single use.
+
+These methods are invalid in other states. Calling `step` or `run` with a live request faults the caller with `InvalidVmState`.
+
+Loading a nonempty VM also faults the caller without changing the controlled machine. Repeating `drive` performs the token recovery described above.
+
+Terminal execution calls return the stored terminal event idempotently.
 
 ### 14.10 Reentrancy, inspection, and ownership
 
 A control method on a currently `running` VM, or from guest code executing inside that same VM, faults. Execution and inspection methods also fault while `proc_owned`. `table()` and edits through an already obtained table handle are the explicit synchronized exception, permitting live revocation.
+
+A routed request parks its descendant activation chain. Only the holder of the driven surface can consume that route.
 
 `stack()` is valid only while not running or proc-owned and returns deep-frozen `FrameView` values: function identity/name, PC, source location if present, locals as `ValueView`, and a bounded operand summary. No live guest reference escapes. The name of a frame is the set of names that bind its function value (3.7), because two equal bodies share one code object and keep both names.
 
@@ -1400,6 +1444,10 @@ execute(vm: &mut VmState, mode: StopMode) -> VmExit
 ```
 
 `StopMode` selects one instruction, terminal-only automatic execution, or stop-before-policy manual execution. The loop uses decoded numeric instruction records, dense code/class/type/selector slots, contiguous frame and operand vectors, and one preallocated pending-perform record. Public `Request`, `WaitView`, and event values are materialized only when execution exits to the holder.
+
+The driver stores nested VM control as explicit machine edges. It rebuilds activation records from those edges.
+
+A routed request stores its target and saved policy cursor. The driver needs no host-stack continuation for either record.
 
 The perform hot path is: write pending fields, load exact table action, fall back to group action, then block/pass/mock dispatch. `drive` takes the same path only until the pending fields are complete. No row lookup, string lookup, heap continuation, or public API transition occurs per guest instruction.
 
@@ -1510,7 +1558,13 @@ in Err(error)
 end
 ```
 
-A held snapshot names one paused `Vm[T]` as its root. A receiverless self snapshot names the performing machine as its root. The snapshot world is the root and every machine reachable from it. A machine is reachable through a proc handle or a held machine handle in a captured heap, frame, closure capture, mailbox, pending argument, or terminal result. Reachability is transitive. Running procs, paused procs, terminal procs, and held nested machines all ride along.
+A held snapshot names one paused `Vm[T]` as its root. A receiverless self snapshot names the performing machine as its root.
+
+The snapshot world contains the root and every reachable machine. Handles, nested control edges, and routed requests establish reachability.
+
+Heap, frame, closure, mailbox, pending, and terminal values can contain handles. Reachability is transitive.
+
+Running procs, paused procs, terminal procs, and held nested machines all ride along.
 
 The world is closed by construction. Reachability follows the handles, so every handle in the capture targets a captured machine. A reference that leaves the world is not representable. The design therefore needs no ownership records, no external references, and no restore-time resolution. What cannot exist needs no tracking.
 
@@ -1530,7 +1584,9 @@ Snapshot[T].to_bytes(self) -> Bytes
 
 ### 17.2 World contents
 
-A snapshot contains format and ABI versions, code and class manifests, type tables, every captured heap, roots, frames, locals, operands, current PCs, limits, fuel, machine states, pending requests, mailbox types, mailbox limits, accepted mailbox values, mailbox close state, blocked receive state, terminal proc results, machine references, and a container hash.
+A snapshot contains format and ABI versions, code manifests, type tables, heaps, frames, limits, fuel, and machine states.
+
+It also contains pending requests, nested control edges, routed requests, mailboxes, terminal results, machine references, and a container hash.
 
 It excludes policy tables, root grants, live host callbacks, host thread identity, executor tasks, mutex/channel storage, wake objects, and live OS handles.
 
@@ -1575,11 +1631,17 @@ SnapshotLimitExceeded
 
 Policy tables are never serialized. Each restored machine receives a fresh default-deny table. Internal pass chains refer to the new parent tables. Restore creates no authority.
 
+A routed cursor outside the captured world binds to the restoring holder. Dispatch then consults the restoring holder's table.
+
+The cursor restores no old table grant.
+
 The returned root VM is holder-controlled. Restored procs are scheduler-owned but stopped behind one world gate. The first root `run`, `step`, or `drive` opens that gate.
 
 ### 17.6 Paused, pending, and self snapshots
 
 A snapshot taken between instructions restores between those instructions. A snapshot in `asked` preserves operation, arguments, reply type, destination, continuation PC, and ordinal. The holder calls `drive()` once to obtain a fresh `Request` token. No guest instruction runs.
+
+A routed snapshot preserves the descendant target, nested control edges, and next policy location. The holder also calls `drive()` to obtain a fresh token.
 
 A machine in `waiting` holds a pending host operation, which is a live host attachment. It blocks the snapshot with `ResourceActive`. The caller retries after the operation completes.
 
@@ -2015,6 +2077,7 @@ Reference performance invariants:
 - one exact-action and at most one group-action load per perform;
 - no textual lookup after load;
 - request materialization only when `drive`/`step` exits;
+- no heap allocation for `ReplySink` validation;
 - snapshots and graph operations proportional to reachable encoded data, not heap capacity.
 
 The benchmark suite records dispatch, direct/virtual call, allocation, list traversal, map lookup, perform pass/block/mock, `drive` interception, nested-VM run, freeze, snapshot write/load, and proc send/receive. Regressions are compared against committed distributions, not a single machine-specific nanosecond threshold.
@@ -2036,6 +2099,10 @@ host_completion_token      # host-only; never serialized live
 ```
 
 While executing normally, arguments remain in verified operand slots. `drive` exits after the record is complete and before policy lookup. `Request.as_call` checks the exact operation slot and returns a holder token carrying VM identity, ordinal, argument tuple type, and reply type; `PendingCall.args()` boundary-encodes that tuple lazily. `answer` validates the token again before installing a reply.
+
+A routed request adds a surface, a performing target, and a saved policy cursor. Nested control adds one parent-to-child edge.
+
+`ReplySink` is a stack record. It centralizes one continuation check and allocates no guest or Rust heap object.
 
 The snapshot form serializes semantic fields, never a live completion token. A pending waiting operation is a live host attachment and blocks snapshot creation with `ResourceActive` (17.4, 17.6).
 

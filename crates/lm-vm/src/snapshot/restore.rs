@@ -3,10 +3,13 @@
 //! Preparation builds all restored state outside the live machine
 //! table. Commit installs that state without a fallible operation.
 
-use super::{ImageBlock, ImageMachine, ImageState, ImageTerminal, RestoreFail, SnapshotImage};
+use super::{
+    ImageBlock, ImageMachine, ImagePolicyCursor, ImageState, ImageTerminal, RestoreFail,
+    SnapshotImage,
+};
 use crate::machine::{
-    Action, Block, FaultRec, Frame, Machine, MachineState, Mailbox, Ownership, Pending, Terminal,
-    VmId,
+    Action, Block, FaultRec, Frame, Machine, MachineState, Mailbox, Ownership, Pending,
+    PolicyCursor, RoutedRequest, Terminal, VmId,
 };
 use crate::world::World;
 use crate::VmConfig;
@@ -401,6 +404,15 @@ fn restore_state(
     machine.vm.literals = literals;
     machine.start_body = source.start_body.map(|ordinal| refs[ordinal as usize]);
     machine.vm.pending = pending;
+    machine.vm.nested = source.nested.map(|ordinal| ids[ordinal as usize]);
+    machine.vm.routed = source.routed.map(|route| RoutedRequest {
+        target: ids[route.target as usize],
+        cursor: match route.cursor {
+            ImagePolicyCursor::Table(table) => PolicyCursor::Table(ids[table as usize]),
+            ImagePolicyCursor::Binding => PolicyCursor::Table(restorer),
+            ImagePolicyCursor::Root => PolicyCursor::Root,
+        },
+    });
     machine.vm.terminal = terminal;
     machine.vm.mailbox = Mailbox {
         limit: mailbox_limit,

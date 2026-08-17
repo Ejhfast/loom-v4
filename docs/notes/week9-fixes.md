@@ -449,6 +449,9 @@ nix-shell --run "cargo test -p lm-testkit --test fuzz regenerate_fuzz_corpus -- 
 container. That statement is wrong, and this note corrects it.
 
 `docs/notes/week9.md` states that the container omits a type table.
-Container format 2 carries one. Its format table there still lists four
-sections; format 2 holds five, and the heap and machine sections moved
-to kinds 4 and 5.
+Container formats 2 and 3 carry one.
+
+Its format table there still lists four sections. The current format
+holds five sections.
+
+Format 3 also stores nested control edges and routed requests.

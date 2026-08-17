@@ -6,7 +6,7 @@
 //! `lm inspect <file.lms>` prints it, and the deterministic snapshot
 //! diff of the test suite compares two dumps line by line.
 
-use super::{Image, ImageBlock, ImageTerminal, SnapshotImage};
+use super::{Image, ImageBlock, ImagePolicyCursor, ImageTerminal, SnapshotImage};
 use lm_heap::Object;
 use lm_value::Value;
 use std::fmt::Write as _;
@@ -102,6 +102,17 @@ pub fn dump_image(world: &Image) -> String {
                 pending.ordinal,
                 pending.args.len()
             );
+        }
+        if let Some(nested) = machine.nested {
+            let _ = writeln!(out, "  nested {nested}");
+        }
+        if let Some(route) = machine.routed {
+            let cursor = match route.cursor {
+                ImagePolicyCursor::Table(table) => format!("table {table}"),
+                ImagePolicyCursor::Binding => "binding".to_string(),
+                ImagePolicyCursor::Root => "root".to_string(),
+            };
+            let _ = writeln!(out, "  routed {} cursor {cursor}", route.target);
         }
         match &machine.terminal {
             None => {}
