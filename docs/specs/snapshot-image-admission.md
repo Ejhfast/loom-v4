@@ -192,6 +192,7 @@ Structural resolution enforces these rules:
 - Every literal entry names its exact program literal.
 - Every parent chain terminates inside the captured world.
 - Every machine reference stays inside the captured world.
+- Every request token ordinal is below its target counter.
 - Every lifecycle variant has its required records.
 - Pending, terminal, mailbox, block, pause, and gate records agree.
 
@@ -462,13 +463,25 @@ Restore still performs target-specific work:
 A restore failure exposes no partial world. It returns every temporary
 reservation and leaves the target machine unchanged.
 
+One `WorldBudget` covers the root VM and every proc it spawns. It
+limits machine records, heap storage, host resources, fuel, and traces.
+
+The image-cache byte limit controls retention only. It never rejects
+an admitted image. Eviction makes a later restore repeat admission.
+
+Each `VmConfig` remains a local ceiling. A child never receives a new
+aggregate balance.
+
+A terminal proc keeps its generation and reachable result. It releases
+dead execution state, resources, and heap objects.
+
 These checks do not weaken `SnapshotImage`. They answer questions that
 depend on the selected restore target.
 
 ## 9. Error stages
 
 Decode errors report malformed or excessive container data. Admission
-errors report unresolved structure or inaccurate types.
+errors report unresolved structure.
 
 Keep the two stages distinct in the host API. The guest loader can map
 both stages into `SnapshotError`.
@@ -484,8 +497,14 @@ boundary has this logical shape:
 ```rust
 pub fn decode(
     bytes: &[u8],
+    limits: LoadLimits,
+) -> Result<Image, ImageError>;
+
+pub fn decode_with_budget(
+    bytes: &[u8],
+    limits: LoadLimits,
     budget: &mut DecodeBudget,
-) -> Result<Image, DecodeError>;
+) -> Result<Image, ImageError>;
 
 pub fn admit(
     image: Image,
@@ -496,8 +515,8 @@ pub fn admit(
 pub fn load_external(
     bytes: &[u8],
     module: &LoadedModule,
-    budgets: LoadBudgets,
-) -> Result<SnapshotImage, SnapshotLoadError>;
+    limits: LoadLimits,
+) -> Result<SnapshotImage, ImageError>;
 
 pub(crate) fn from_trusted_capture(
     image: Image,

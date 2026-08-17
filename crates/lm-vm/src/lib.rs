@@ -98,6 +98,41 @@ impl Default for VmConfig {
     }
 }
 
+/// Aggregate resource limits for one machine world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldLimits {
+    /// The largest machine record table.
+    pub max_machines: u32,
+    /// The largest logical byte cost of all live heaps.
+    pub max_heap_bytes: usize,
+    /// The largest live object count of all heaps.
+    pub max_heap_objects: usize,
+    /// The largest live host resource count.
+    pub max_resources: usize,
+    /// The instruction budget shared by all machines.
+    pub fuel: u64,
+    /// The largest stored proc trace.
+    pub max_trace_events: usize,
+    /// The largest retained admitted-image cache, in bytes.
+    ///
+    /// This limit controls eviction. It never rejects an image.
+    pub max_cached_image_bytes: usize,
+}
+
+impl Default for WorldLimits {
+    fn default() -> WorldLimits {
+        WorldLimits {
+            max_machines: 4096,
+            max_heap_bytes: 1 << 30,
+            max_heap_objects: 1 << 24,
+            max_resources: 1 << 16,
+            fuel: 1_000_000_000,
+            max_trace_events: 1 << 20,
+            max_cached_image_bytes: 256 << 20,
+        }
+    }
+}
+
 /// A load failure: a structural decode error or a verifier rejection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
@@ -315,7 +350,7 @@ fn load_inner(
             let key = verified_key(&module);
             if !cache.verified.contains(&key) {
                 lm_verify::verify_module(&module)?;
-                cache.verifications += 1;
+                cache.verifications = cache.verifications.saturating_add(1);
                 cache.verified.insert(key);
             }
         }

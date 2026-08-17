@@ -1224,11 +1224,36 @@ fn a_call_token_of_another_operation_rejects() {
         // and the call type rule states the failure on its own.
         broken.machines[0].objects[at as usize].object = Object::NativeCall {
             vm,
-            ordinal: u64::MAX,
+            ordinal: 0,
             op: lm_abi::OP_CLOCK_NOW,
         };
     }
     contained(&loaded, &broken);
+}
+
+#[test]
+fn a_future_request_ordinal_rejects() {
+    let loaded = program(CALL_TOKEN_SOURCE);
+    let images = boundaries(&loaded, &["Vm", "Rand"], 120);
+    let image = pick(&images, "a call token", |image| {
+        image.machines[0]
+            .objects
+            .iter()
+            .any(|entry| matches!(entry.object, Object::NativeCall { .. }))
+    });
+    let at = find_object(&image.machines[0], "call token", |object| {
+        matches!(object, Object::NativeCall { .. })
+    });
+    let mut broken = image.clone();
+    if let Object::NativeCall { vm, op, .. } = broken.machines[0].objects[at as usize].object {
+        let future = broken.machines[vm as usize].next_ordinal;
+        broken.machines[0].objects[at as usize].object = Object::NativeCall {
+            vm,
+            ordinal: future,
+            op,
+        };
+    }
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
 }
 
 // ---------------------------------------------------------------

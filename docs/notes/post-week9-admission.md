@@ -137,6 +137,14 @@ live generic frame. A later `Type[T]` surface reads the same table.
 | closed type nodes per world | 65536 | `DEFAULT_MAX_CLOSED_TYPES` |
 | type environments per world | 65536 | `DEFAULT_MAX_TYPE_ENVS` |
 | admission work | 1 << 24 units | `AdmissionBudget` |
+| decoded allocation cost | 1 GiB | `DecodeBudget` |
+| machine records per proc tree | 4096 | `WorldLimits` |
+| live heap bytes per proc tree | 1 GiB | `WorldLimits` |
+| live heap objects per proc tree | 1 << 24 | `WorldLimits` |
+| live host resources per proc tree | 1 << 16 | `WorldLimits` |
+| instructions per proc tree | 1 billion | `WorldLimits` |
+| trace events per proc tree | 1 << 20 | `WorldLimits` |
+| admitted-image cache per proc tree | 256 MiB | `WorldLimits` |
 
 The depth limit is 128 for now. The cost of a type walk stays
 acceptable far above that, so a later change can raise it. The deepest
@@ -149,6 +157,38 @@ is a second line, not a replacement.
 Polymorphic recursion is legal, so a program can deepen a closed type
 as it runs. Such a program takes a local fault at the depth limit or at
 the node cap.
+
+### Group B containment
+
+Restore uses a detached `RestorePlan`. Preparation builds every heap,
+machine record, relocation table, and effective limit before commit.
+
+Commit installs prepared machines and type entries without an
+allocation. A failed plan leaves the target machine unchanged.
+
+Request tokens use one monotone ordinal. Admission rejects an ordinal
+at or above the target counter. Runtime checks still reject stale tokens.
+
+Ordinal exhaustion faults the requesting machine. Mailbox metrics
+saturate at their maximum values.
+
+The root VM and all spawned procs share one `WorldBudget`. Local
+`VmConfig` limits remain local ceilings and carry no aggregate balance.
+
+The admitted-image byte limit controls cache retention only. It does
+not reject an image. Eviction makes a later restore repeat admission.
+
+The heap and resource registries charge shared ledgers. Dropped plans,
+garbage collection, closed resources, and terminal proc compaction release charges.
+
+The decoder charges all decoded vectors and byte copies to one
+`DecodeBudget`. Admission charges all structural records and graph edges.
+
+Nested snapshot bytes stay opaque. Their own restore starts a new load
+and new budgets when the trusted cache has no admitted image.
+
+Container hashing streams the domain and prefix. The external loader
+uses the validated stored hash and does not hash the prefix again.
 
 ### Versions
 
@@ -224,10 +264,48 @@ Container sizes: a wide heap of 10000 list elements is 90425 bytes, a
 deep chain of 5000 instances is 125415 bytes, and a machine world of
 three machines is 843 bytes.
 
-This note carries no benchmark table. The figures it held came from two
-measurement sessions that disagreed with each other, so one run of
-`cargo test -p lm-testkit --test bench_smoke` in release, against
-`c87f9de` on an idle machine, must replace them.
+Benchmarks: `cargo test --release -p lm-testkit --test bench_smoke --
+--nocapture --test-threads=1`. Each figure is the median of seven
+passes. The spread column is the range of those seven passes, as a
+percentage of the median, so a reader can tell a real movement from
+measurement noise.
+
+| Entry | Median | Spread |
+| --- | --- | --- |
+| `alloc_gc_100k` | 8.64 ms | 11% |
+| `async_wait_50` | 0.60 ms | 42% |
+| `build_2_modules` | 1.45 ms | 14% |
+| `digest_graph_20k_plus_1k_cached` | 3.65 ms | 18% |
+| `drive_interception_5k` | 3.23 ms | 14% |
+| `freeze_chain_50k` | 6.23 ms | 18% |
+| `list_push_100k` | 4.75 ms | 20% |
+| `literal_loop_200k` | 5.72 ms | 4% |
+| `many_class_load_300` | 1.51 ms | 21% |
+| `map_insert_4000` | 0.85 ms | 52% |
+| `map_insert_32000` | 5.50 ms | 33% |
+| `map_put_300` | 0.31 ms | 51% |
+| `mark_sweep_100k_under_256k` | 9.84 ms | 12% |
+| `nested_vm_run_40` | 0.40 ms | 55% |
+| `perform_block_300` | 1.14 ms | 50% |
+| `perform_exact_pass_20k` | 1.59 ms | 12% |
+| `perform_group_pass_20k` | 1.56 ms | 23% |
+| `perform_mock_5k` | 2.32 ms | 7% |
+| `proc_pause_resume_5k` | 2.49 ms | 13% |
+| `proc_send_receive_20k` | 13.57 ms | 14% |
+| `proc_spawn_500` | 1.62 ms | 9% |
+| `proc_terminal_200x200` | 2.92 ms | 18% |
+| `transfer_graph_20k` | 5.58 ms | 3% |
+| `virtual_call_100k` | 7.95 ms | 14% |
+
+The spread of several entries passes 30 percent, so a single pass of
+this suite states little. Read a movement of one entry against its own
+spread.
+
+One entry moved past its spread when the shared heap ledger landed.
+`mark_sweep_100k_under_256k` rose about 7 percent, and its spread is
+12 percent, so the movement is near the edge of the measurement. The
+sweep releases each object into the ledger, which is the same shape as
+the charge on each allocation.
 
 ## Open questions
 
@@ -282,12 +360,8 @@ bounds it.
 
 ## Deferred work
 
-- Worklist items 7 to 12 belong to groups B and C.
-- `AdmissionBudget` carries a default limit and a container byte limit.
-  Worklist item 10 sizes it beside a `DecodeBudget`, shares one ledger
-  with nested containers, and adds the compact-input expansion tests.
-- `decode` uses `LoadLimits` and per-list caps. Worklist item 10
-  replaces them with one aggregate ledger and fallible reservations.
+- Worklist items 11 and 12 belong to group C.
+- Nested snapshots use lazy admission and independent load budgets.
 - Interfaces, conformance, dispatch, and a guest `Type[T]` stay outside
   group A. Specification section 14 records what `ClosedType` leaves in
   place for them.

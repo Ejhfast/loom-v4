@@ -4,24 +4,24 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   - Image may contain invalid structure or inaccurate types.
   - Decoding protects the host from malformed bytes.
-  - Admission proves resolved structure and accurate live types.
+  - Admission proves resolved structure only.
   - SnapshotImage records successful admission.
   - Restore accepts only SnapshotImage.
   - Trusted capture produces SnapshotImage by construction.
   - Arbitrary editing returns the state to Image.
-  - The interpreter can retain trusted unreachable! assertions.
+  - The interpreter converts wrong image values into machine faults.
+  - Each VM boundary checks the copied value against verified code.
   - No serialized proof data is required.
-  - No repeated dynamic type checking is required.
 
-  Strange but well-typed machine state remains valid.
+  Strange or inaccurate machine values remain valid until use.
 
   ## Revised issues
 
   ### 1. Critical: Admission is not an enforced API boundary
 
-  codec::decode performs semantic checks and returns mutable Image.
+  Before Group A, codec::decode performed semantic checks and returned mutable Image.
 
-  Image exposes public fields. crates/lm-vm/src/snapshot/restore.rs:36 accepts &Image.
+  Image exposed public fields. Restore accepted Image directly.
 
   Host code can construct or mutate an image after validation. It can then bypass the external loader.
 
@@ -40,41 +40,32 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   This work implements the docs/specs/snapshot-image-admission.md:40.
 
-  ### 2. Critical: Current type admission is incomplete
+  Status: implemented.
 
-  The current checker loses verifier-created substituted types. It represents them as None and skips their values.
+  ### 2. Critical: Wrong image values can reach trusted assertions
 
-  Unit and Uninit currently satisfy every declared type.
+  Image data cannot prove every value type without rejecting valid state.
 
-  The graph walk records only an object ordinal. It does not record the resolved type used for that visit.
+  A wrong value can reach an accessor after restore.
 
-  Generic fields and closure captures use unsubstituted layout types.
-
-  Native values validate only their outer object tags. Their generic protocol parameters remain unchecked.
-
-  Terminal Unit values can bypass their declared result type.
-
-  These holes can reach trusted interpreter assertions such as crates/lm-vm/src/machine.rs:1231.
+  An unchecked accessor can panic in the host.
 
   Resolution:
 
-  - Add a complete resolved-type representation.
-  - Preserve every verifier-created substitution.
-  - Derive operand types at each saved program point.
-  - Track initialization separately from Unit.
-  - Validate graph pairs as (machine, object, resolved type).
-  - Apply substitutions to fields and captures.
-  - Validate every terminal result type.
-  - Validate every mailbox message type.
-  - Validate pending arguments from pre-perform verifier state.
-  - Validate native types through their target relationships.
-  - Keep a nested snapshot opaque; match its declared root type only.
+  - Make each image-reachable accessor fallible.
+  - Convert each wrong tag into TypeMismatch.
+  - Convert each wrong structural position into MalformedState.
+  - Record each boundary type from verified code.
+  - Check the value during the boundary copy.
+  - Keep nested snapshot bytes opaque until restore.
 
   This work implements the docs/specs/snapshot-image-admission.md:156.
 
-  The interpreter can retain its trusted assertions after this work.
+  The expected boundary type never comes from image data.
 
-  ### 3. High: Request tokens can become valid later
+  Status: implemented.
+
+  ### 3. High: Future request tokens can become valid later
 
   A snapshot can contain a token with a future ordinal.
 
@@ -86,16 +77,16 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   Resolution:
 
-  - Add a fresh request epoch to each restored machine.
-  - Relocate only tokens matching a current pending request.
-  - Give relocated current tokens the fresh epoch.
-  - Leave every other restored token permanently stale.
-  - Mint future tokens with the fresh epoch.
+  - Reject each token whose ordinal is not below the target counter.
+  - Keep stale tokens legal.
+  - Keep exact runtime checks for live tokens.
   - Use checked ordinal allocation.
   - Convert exhaustion into a local machine fault.
-  - Use checked mailbox counter updates.
+  - Saturate mailbox metrics.
 
-  Admission does not prove token provenance. Runtime identity rules prevent token resurrection.
+  Trusted capture always satisfies the ordinal rule. Restore needs no request epoch.
+
+  Status: implemented.
 
   ### 4. High: Restore lacks one atomic preparation stage
 
@@ -127,6 +118,8 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   This work implements the docs/specs/snapshot-image-admission.md:335.
 
+  Status: implemented.
+
   ### 5. High: Proc creation multiplies resource ceilings
 
   Child creation copies almost the complete VmConfig.
@@ -140,8 +133,8 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   Resolution:
 
   - Keep VmLimits as local ceilings.
-  - Add one shared WorldBudget ledger.
-  - Charge live machines, heap bytes, objects, and resources globally.
+  - Add one `WorldBudget` for the root VM and every proc it spawns.
+  - Charge live machines, heap bytes, objects, and resources to that ledger.
   - Add a bounded aggregate execution budget.
   - Make child creation charge the shared ledger.
   - Never copy a consumable aggregate balance.
@@ -153,32 +146,32 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   This design preserves per-VM isolation without multiplying host resources.
 
+  Status: implemented.
+
   ### 6. High: Decoding and admission lack aggregate budgets
 
   LoadLimits applies several limits independently to each machine.
 
   A compact container can expand into allocations far beyond its byte size.
 
-  Nested snapshots can multiply decoding and verification work.
-
-  The type reader recomputes verifier dataflow for every saved frame.
+  A nested snapshot stays opaque until its own restore.
 
   Container hashing also copies and hashes the same bytes several times.
 
   Resolution:
 
   - Add one DecodeBudget for the complete container.
-  - Charge all vectors, strings, bytes, objects, and nested containers.
+  - Charge all vectors, strings, bytes, and objects.
   - Use checked size arithmetic before every reservation.
   - Use fallible collection reservation.
   - Add one AdmissionBudget.
-  - Charge every resolved type and graph pair.
-  - Compute verifier states once per function.
-  - Reuse those states for every saved frame.
+  - Charge every table entry, stored record, and graph edge.
   - Hash the container without copying its prefix.
   - Compute each required hash once.
 
-  The decoder remains narrow. Admission owns graph and type work.
+  The decoder remains narrow. Admission owns structural graph work.
+
+  Status: implemented.
 
   ### 7. Medium: Scheduler work grows quadratically
 
@@ -273,7 +266,7 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   ### 2. Split decoding from admission
 
   - Keep wire checks inside decode.
-  - Move check_machine, check_world, and type checks into admission.
+  - Move structural machine and world checks into admission.
   - Return editable Image from the low-level decoder.
   - Return SnapshotImage from load_external.
   - Give SnapshotImage private immutable fields.
@@ -283,35 +276,32 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   Preserve existing container diagnostics where their stage remains correct.
 
-  ### 3. Add complete resolved-type admission
+  ### 3. Harden restored-state access
 
-  - Add a resolved-type arena.
-  - Cache verifier state for each saved program point.
-  - Preserve substituted operand and local types.
-  - Track initialization independently.
-  - Validate every typed root.
-  - Traverse graph pairs by object and resolved type.
-  - Apply generic substitutions before field checks.
-  - Charge all work to AdmissionBudget.
+  - Preserve the uninitialized local marker.
+  - Make operand reads fallible.
+  - Make object tag reads fallible.
+  - Check each restored index before use.
+  - Convert a wrong tag into TypeMismatch.
+  - Convert malformed state into MalformedState.
 
-  This step closes the ordinary interpreter type holes.
+  This step contains wrong values inside one machine.
 
-  ### 4. Add native relational admission
+  ### 4. Check values at VM boundaries
 
-  - Derive Vm[T] from the target machine.
-  - Derive Handle[M,R] from the target proc.
-  - Derive PendingCall[A,R] from the pending operation.
-  - Check Snapshot[T] against the nested container declared root type.
-  - Keep a nested SnapshotImage opaque; admit it at its own restore.
-  - Reject missing relational type evidence.
+  - Record each expected boundary type during bytecode verification.
+  - Resolve generic types through the live frame environment.
+  - Check each value during its required copy.
+  - Fault the sender when the value does not match.
+  - Keep a nested SnapshotImage opaque until restore.
 
-  Choose explicit stored identities only when target derivation cannot supply them.
+  The expected type comes from verified code, not image data.
 
   ### 5. Fix identity and apply one reviewed format change
 
   - Hash every semantic OpDef field.
   - Include snapshot classification.
-  - Add required initialization or native type fields.
+  - Add required initialization and boundary type fields.
   - Bump affected versions once.
   - Regenerate pins and checked fixtures.
   - Test old container rejection.
@@ -326,7 +316,7 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   - Store admission identity beside canonical bytes.
   - Remove origin-based trust.
   - Audit every trusted interpreter assertion again.
-  - Keep assertions covered by admission and preservation.
+  - Keep assertions covered by structural admission and preservation.
   - Change uncovered paths into local faults.
 
   This completes the safety milestone.
@@ -345,22 +335,24 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   Test that a failure mid-build leaves the target unchanged.
 
-  ### 8. Add request epochs and checked counters
+  Status: implemented.
 
-  - Add request epochs to machines and tokens.
-  - Assign fresh epochs during restore.
-  - Relocate only currently valid tokens.
-  - Make every other restored token stale.
+  ### 8. Reject future request ordinals and check counters
+
+  - Reject a token at or above the target counter.
+  - Keep stale token behavior unchanged.
   - Use checked request ordinal allocation.
-  - Use checked mailbox counter updates.
+  - Saturate mailbox metrics.
   - Return local faults on exhaustion.
 
   Test future tokens, maximum counters, repeated restore, and multi-shot restore.
 
-  ### 9. Add aggregate world accounting
+  Status: implemented without request epochs.
+
+  ### 9. Add aggregate proc-tree accounting
 
   - Separate local limits from aggregate budgets.
-  - Add WorldBudget.
+  - Add one `WorldBudget` for the root VM and all spawned procs.
   - Charge child creation to the ledger.
   - Charge all live heap storage.
   - Charge live host resources.
@@ -370,16 +362,20 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   Test deep proc trees under the 4 GiB process cap.
 
+  Status: implemented.
+
   ### 10. Add aggregate decode and admission accounting
 
   - Add DecodeBudget.
   - Add AdmissionBudget.
   - Use fallible reservations.
-  - Share budgets with nested snapshots.
-  - Cache verifier dataflow results.
   - Remove repeated container hashing.
   - Add compact-input expansion tests.
   - Add deep and wide graph tests.
+
+  Nested images use lazy admission. Each nested restore starts its own budgets.
+
+  Status: implemented.
 
   ### 11. Replace scheduler scans
 
@@ -405,7 +401,7 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
 
   Group A contains worklist items 1 through 6. It establishes the new admission boundary.
 
-  Group B contains items 7 through 10. It establishes failure and resource containment.
+  Group B contains items 7 through 10. It establishes failure and resource containment. Group B is complete.
 
   Group C contains items 11 and 12. It removes known scaling defects.
 

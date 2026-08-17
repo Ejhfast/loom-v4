@@ -204,6 +204,33 @@ fn the_header_rules_reject_precisely() {
 }
 
 #[test]
+fn one_decode_budget_covers_all_container_allocations() {
+    let (loaded, bytes) = asked_tree();
+    let limits = LoadLimits::default();
+    let mut open = codec::DecodeBudget::new(usize::MAX);
+    codec::decode_with_budget(&bytes, limits, &mut open).expect("the open budget admits");
+    let decoded = open.used();
+    assert!(decoded > 1);
+
+    let mut small = codec::DecodeBudget::new(decoded - 1);
+    let error = codec::decode_with_budget(&bytes, limits, &mut small)
+        .expect_err("the aggregate decode budget runs out");
+    assert_eq!(error.reason, ImageReason::LimitExceeded);
+
+    let copy_limit = decoded
+        .checked_add(bytes.len())
+        .expect("the test size fits")
+        - 1;
+    let limits = LoadLimits {
+        max_alloc_bytes: copy_limit,
+        ..limits
+    };
+    let error = codec::load_external(&bytes, &loaded, limits)
+        .expect_err("the container copy also charges the budget");
+    assert_eq!(error.reason, ImageReason::LimitExceeded);
+}
+
+#[test]
 fn the_code_manifest_rules_reject_precisely() {
     let (loaded, bytes) = asked_tree();
     let code = section_offset(&bytes, 1);

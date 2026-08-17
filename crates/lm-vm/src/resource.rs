@@ -15,6 +15,49 @@
 use crate::machine::VmId;
 use crate::FaultCode;
 use lm_abi::SnapshotClass;
+use std::cell::Cell;
+use std::rc::Rc;
+
+/// One live-resource ledger for a root VM and its spawned procs.
+#[derive(Debug, Clone)]
+pub(crate) struct ResourceBudget {
+    used: Rc<Cell<usize>>,
+    limit: usize,
+}
+
+impl ResourceBudget {
+    pub(crate) fn new(limit: usize) -> ResourceBudget {
+        ResourceBudget {
+            used: Rc::new(Cell::new(0)),
+            limit,
+        }
+    }
+
+    fn take(&self) -> bool {
+        let used = self.used.get();
+        let Some(next) = used.checked_add(1) else {
+            return false;
+        };
+        if next > self.limit {
+            return false;
+        }
+        self.used.set(next);
+        true
+    }
+
+    fn has_room(&self) -> bool {
+        self.used.get() < self.limit
+    }
+
+    fn give(&self, count: usize) {
+        debug_assert!(self.used.get() >= count);
+        self.used.set(self.used.get().saturating_sub(count));
+    }
+
+    pub(crate) fn used(&self) -> usize {
+        self.used.get()
+    }
+}
 
 /// The kind of one registered resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,14 +112,26 @@ pub struct ResourceRegistry {
     cap: u32,
     /// The number of records cleanup closed, for the tests.
     closed: u64,
+    /// The aggregate ledger of the owning world.
+    budget: Option<ResourceBudget>,
 }
 
 impl ResourceRegistry {
     pub fn new(cap: u32) -> ResourceRegistry {
+        ResourceRegistry::with_optional_budget(cap, None)
+    }
+
+    /// Create a registry that charges one proc-tree ledger.
+    pub(crate) fn with_budget(cap: u32, budget: ResourceBudget) -> ResourceRegistry {
+        ResourceRegistry::with_optional_budget(cap, Some(budget))
+    }
+
+    fn with_optional_budget(cap: u32, budget: Option<ResourceBudget>) -> ResourceRegistry {
         ResourceRegistry {
             records: Vec::new(),
             cap,
             closed: 0,
+            budget,
         }
     }
 
@@ -101,18 +156,44 @@ impl ResourceRegistry {
             op,
             state: ResourceState::Live,
         };
-        if let Some(slot) = self
+        let reuse = self
             .records
-            .iter_mut()
-            .find(|r| r.state == ResourceState::Closed)
-        {
-            *slot = record;
-            return Ok(());
-        }
-        if self.records.len() as u32 >= self.cap {
+            .iter()
+            .position(|record| record.state == ResourceState::Closed);
+        if reuse.is_none() && self.records.len() as u32 >= self.cap {
             return Err(FaultCode::HostFault);
         }
-        self.records.push(record);
+        if self.budget.as_ref().is_some_and(|budget| !budget.take()) {
+            return Err(FaultCode::HostFault);
+        }
+        match reuse {
+            Some(slot) => self.records[slot] = record,
+            None => self.records.push(record),
+        }
+        Ok(())
+    }
+
+    /// Reserve registry storage before host work can start.
+    pub fn prepare_register(&mut self) -> Result<(), FaultCode> {
+        let reuses_closed = self
+            .records
+            .iter()
+            .any(|record| record.state == ResourceState::Closed);
+        if !reuses_closed && self.records.len() as u32 >= self.cap {
+            return Err(FaultCode::HostFault);
+        }
+        if self
+            .budget
+            .as_ref()
+            .is_some_and(|budget| !budget.has_room())
+        {
+            return Err(FaultCode::HostFault);
+        }
+        if !reuses_closed {
+            self.records
+                .try_reserve(1)
+                .map_err(|_| FaultCode::HostFault)?;
+        }
         Ok(())
     }
 
@@ -122,7 +203,10 @@ impl ResourceRegistry {
         for record in &mut self.records {
             if record.state == ResourceState::Live && record.scope == scope {
                 record.state = ResourceState::Closed;
-                self.closed += 1;
+                self.closed = self.closed.saturating_add(1);
+                if let Some(budget) = &self.budget {
+                    budget.give(1);
+                }
                 return true;
             }
         }
@@ -135,7 +219,10 @@ impl ResourceRegistry {
         for record in &mut self.records {
             if record.state == ResourceState::Live && record.ordinal == ordinal {
                 record.state = ResourceState::Closed;
-                self.closed += 1;
+                self.closed = self.closed.saturating_add(1);
+                if let Some(budget) = &self.budget {
+                    budget.give(1);
+                }
                 return true;
             }
         }
@@ -150,11 +237,20 @@ impl ResourceRegistry {
         for record in &mut self.records {
             if record.state == ResourceState::Live {
                 record.state = ResourceState::Closed;
-                self.closed += 1;
+                self.closed = self.closed.saturating_add(1);
                 count += 1;
             }
         }
+        if let Some(budget) = &self.budget {
+            budget.give(count);
+        }
         count
+    }
+
+    /// Release storage after all live resources close.
+    pub(crate) fn compact_closed(&mut self) {
+        debug_assert_eq!(self.live_count(), 0);
+        self.records = Vec::new();
     }
 
     /// The live record of one pending request ordinal.
@@ -186,6 +282,15 @@ impl ResourceRegistry {
     pub fn live_attachment(&self) -> Option<&ResourceRecord> {
         self.live()
             .find(|r| r.kind.snapshot() == SnapshotClass::HostAttachment)
+    }
+}
+
+impl Drop for ResourceRegistry {
+    fn drop(&mut self) {
+        let live = self.live_count();
+        if let Some(budget) = &self.budget {
+            budget.give(live);
+        }
     }
 }
 
@@ -241,5 +346,22 @@ mod tests {
         assert_eq!(reg.live_count(), 0);
         // A second cleanup closes nothing more.
         assert_eq!(reg.close_all(), 0);
+    }
+
+    #[test]
+    fn two_registries_charge_one_shared_budget() {
+        let budget = ResourceBudget::new(1);
+        let mut first = ResourceRegistry::with_budget(2, budget.clone());
+        let mut second = ResourceRegistry::with_budget(2, budget.clone());
+        first.prepare_register().expect("the first slot fits");
+        first
+            .register(ResourceKind::PendingOperation, 0, 1, 1, 0)
+            .expect("the first record registers");
+        assert_eq!(budget.used(), 1);
+        assert_eq!(second.prepare_register(), Err(FaultCode::HostFault));
+        assert!(first.close(1));
+        second
+            .prepare_register()
+            .expect("closing the first record releases the ledger");
     }
 }

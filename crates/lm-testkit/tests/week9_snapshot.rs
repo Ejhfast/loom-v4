@@ -7,7 +7,9 @@
 use lm_heap::Object;
 use lm_testkit::{compile_to_bytes, repo_root, run_allowed};
 use lm_vm::snapshot::{codec, ImageState, LoadLimits, RestoreFail, SnapshotFail};
-use lm_vm::{load_bytes, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, VmId, World};
+use lm_vm::{
+    load_bytes, LoadedModule, Outcome, RecordingHost, RootEvent, VmConfig, VmId, World, WorldLimits,
+};
 
 fn program(source: &str) -> LoadedModule {
     let bytes = compile_to_bytes("snapshot.lm", source).expect("the program compiles");
@@ -471,7 +473,11 @@ fn a_failed_restore_exposes_no_partial_world() {
         Box::new(RecordingHost::new(1)),
     );
     let target = world.new_child(0).expect("the budget holds one child");
+    world
+        .allow_on(target, "Io")
+        .expect("the target grant names a group");
     let before = world.machine_count();
+    let config = world.config_of(target);
     assert_eq!(
         world.restore_image(0, target, &image),
         Err(RestoreFail::LimitExceeded)
@@ -479,8 +485,63 @@ fn a_failed_restore_exposes_no_partial_world() {
     assert_eq!(world.machine_count(), before);
     assert_eq!(world.state_of(target), lm_vm::MachineState::Empty);
     assert_eq!(world.heap_of(target).live_count(), 0);
+    assert_eq!(world.table_entry_count(target), 1);
+    assert_eq!(world.config_of(target).max_children, config.max_children);
     // The reservation came back, so a later child still fits.
     assert_eq!(world.child_count(0), 1);
+}
+
+#[test]
+fn a_mid_build_heap_failure_releases_the_restore_plan() {
+    let loaded = program(&asked_tree_source());
+    let image = asked_tree_image(&loaded);
+    let first_heap: usize = image.world().machines[0]
+        .objects
+        .iter()
+        .map(|entry| entry.object.cost())
+        .sum();
+    assert!(first_heap > 0);
+    assert!(!image.world().machines[1].objects.is_empty());
+    let limits = WorldLimits {
+        max_heap_bytes: first_heap,
+        ..WorldLimits::default()
+    };
+    let mut world = World::new_with_limits(
+        &loaded,
+        VmConfig::default(),
+        limits,
+        Box::new(RecordingHost::new(1)),
+    );
+    let target = world.new_child(0).expect("the target record fits");
+    assert_eq!(
+        world.restore_image(0, target, &image),
+        Err(RestoreFail::LimitExceeded)
+    );
+    assert_eq!(world.state_of(target), lm_vm::MachineState::Empty);
+    assert_eq!(world.world_heap_bytes(), 0);
+    assert_eq!(world.machine_count(), 2);
+}
+
+#[test]
+fn restore_rejects_a_queue_past_the_effective_mailbox_limit() {
+    let loaded = program(&asked_tree_source());
+    let image = asked_tree_image(&loaded);
+    assert!(image
+        .world()
+        .machines
+        .iter()
+        .any(|machine| !machine.mailbox.queue.is_empty()));
+    let config = VmConfig {
+        mailbox_limit: 0,
+        ..VmConfig::default()
+    };
+    let mut world = World::new(&loaded, config, Box::new(RecordingHost::new(1)));
+    let target = world.new_child(0).expect("the target record fits");
+    assert_eq!(
+        world.restore_image(0, target, &image),
+        Err(RestoreFail::LimitExceeded)
+    );
+    assert_eq!(world.state_of(target), lm_vm::MachineState::Empty);
 }
 
 /// A live host attachment blocks the capture with the ordinary typed

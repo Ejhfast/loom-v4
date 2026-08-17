@@ -6,11 +6,11 @@
 //! that reaches outside the machine returns an `ExecOutcome` for the
 //! world driver.
 
-use crate::resource::ResourceRegistry;
+use crate::resource::{ResourceBudget, ResourceRegistry};
 use crate::{FaultCode, VmConfig};
 use lm_bytecode::closed::{TypeEnvFull, TypeEnvs};
 use lm_bytecode::{BcType, Instr, Module};
-use lm_heap::{Heap, MapIndex, Object};
+use lm_heap::{Heap, HeapBudget, MapIndex, Object};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 use std::hash::{Hash, Hasher};
 
@@ -130,6 +130,21 @@ impl Mailbox {
     /// True when the mailbox accepts one more message now.
     pub fn accepts(&self) -> bool {
         !self.closed && !self.frozen && (self.queue.len() as u32) < self.limit
+    }
+
+    /// Add one accepted message and update its metric.
+    pub(crate) fn push(&mut self, value: Value) {
+        self.queue.push_back(value);
+        self.accepted = self.accepted.saturating_add(1);
+    }
+
+    /// Remove one message and update its metric.
+    pub(crate) fn pop(&mut self) -> Option<Value> {
+        let value = self.queue.pop_front();
+        if value.is_some() {
+            self.delivered = self.delivered.saturating_add(1);
+        }
+        value
     }
 }
 
@@ -381,15 +396,47 @@ pub struct Machine {
 
 impl Machine {
     /// A machine without a loaded entry.
+    #[cfg(test)]
     pub fn empty(config: VmConfig, parent: Option<VmId>) -> Machine {
         Machine::empty_at(config, parent, 0)
     }
 
     /// A machine without a loaded entry, at one slot generation.
+    #[cfg(test)]
     pub fn empty_at(config: VmConfig, parent: Option<VmId>, generation: u32) -> Machine {
+        Machine::empty_with_optional_budgets(config, parent, generation, None, None)
+    }
+
+    /// Create an empty machine that charges the world ledgers.
+    pub(crate) fn empty_with_budgets(
+        config: VmConfig,
+        parent: Option<VmId>,
+        generation: u32,
+        heap_budget: HeapBudget,
+        resource_budget: ResourceBudget,
+    ) -> Machine {
+        Machine::empty_with_optional_budgets(
+            config,
+            parent,
+            generation,
+            Some(heap_budget),
+            Some(resource_budget),
+        )
+    }
+
+    fn empty_with_optional_budgets(
+        config: VmConfig,
+        parent: Option<VmId>,
+        generation: u32,
+        heap_budget: Option<HeapBudget>,
+        resource_budget: Option<ResourceBudget>,
+    ) -> Machine {
         Machine {
             vm: VmState {
-                heap: Heap::new(config.heap_bytes),
+                heap: match heap_budget {
+                    Some(budget) => Heap::with_budget(config.heap_bytes, budget),
+                    None => Heap::new(config.heap_bytes),
+                },
                 frames: Vec::new(),
                 locals: Vec::new(),
                 operands: Vec::new(),
@@ -411,7 +458,10 @@ impl Machine {
             },
             table: PolicyTable::default(),
             active: 0,
-            resources: ResourceRegistry::new(config.max_resources),
+            resources: match resource_budget {
+                Some(budget) => ResourceRegistry::with_budget(config.max_resources, budget),
+                None => ResourceRegistry::new(config.max_resources),
+            },
             config,
             children: 0,
             owner: Ownership::Holder,
@@ -481,6 +531,7 @@ impl Machine {
         self.vm.state = MachineState::Done;
         self.vm.pending = None;
         self.close_resources();
+        self.compact_terminal_proc();
     }
 
     pub fn set_fault(&mut self, code: FaultCode, message: impl Into<String>, op: Option<u32>) {
@@ -492,6 +543,52 @@ impl Machine {
         self.vm.state = MachineState::Faulted;
         self.vm.pending = None;
         self.close_resources();
+        self.compact_terminal_proc();
+    }
+
+    /// Remove state that a terminal proc cannot use again.
+    pub(crate) fn compact_terminal_proc(&mut self) {
+        if !self.is_proc {
+            return;
+        }
+        self.vm.frames = Vec::new();
+        self.vm.locals = Vec::new();
+        self.vm.operands = Vec::new();
+        self.vm.literals = Vec::new();
+        self.vm.pending = None;
+        self.vm.block = None;
+        self.vm.mailbox.queue = std::collections::VecDeque::new();
+        self.start_body = None;
+        self.table.exact.fill(None);
+        self.table.group.fill(None);
+        self.resources.compact_closed();
+        self.collect_garbage(&[]);
+        let root = match self.vm.terminal.as_ref() {
+            Some(Terminal::Done(Value::Obj(reference))) => Some(*reference),
+            _ => None,
+        };
+        match root {
+            Some(mut reference) => {
+                if self
+                    .vm
+                    .heap
+                    .compact_live(std::slice::from_mut(&mut reference))
+                    .is_ok()
+                {
+                    self.vm.terminal = Some(Terminal::Done(Value::Obj(reference)));
+                }
+            }
+            None => {
+                let _ = self.vm.heap.compact_live(&mut []);
+            }
+        }
+    }
+
+    /// Take the next request ordinal without wrapping it.
+    pub fn take_request_ordinal(&mut self) -> Result<u64, FaultCode> {
+        let ordinal = self.vm.next_ordinal;
+        self.vm.next_ordinal = ordinal.checked_add(1).ok_or(FaultCode::IntegerOverflow)?;
+        Ok(ordinal)
     }
 
     /// Close every scoped host resource this machine registered.
@@ -626,10 +723,10 @@ impl Machine {
     /// Make room for `delta` more bytes of growth on an existing
     /// object. `temps` holds values already popped from the arenas.
     fn reserve(&mut self, delta: usize, temps: &[Value]) -> Result<(), FaultCode> {
-        if self.vm.heap.would_exceed(delta) {
+        if self.vm.heap.would_exceed_growth(delta) {
             let extra: Vec<ObjRef> = temps.iter().filter_map(|v| v.as_obj()).collect();
             self.collect_garbage(&extra);
-            if self.vm.heap.would_exceed(delta) {
+            if self.vm.heap.would_exceed_growth(delta) {
                 return Err(FaultCode::HeapLimit);
             }
         }
@@ -834,11 +931,13 @@ impl Machine {
         module: &Module,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
+        world_fuel: &mut u64,
     ) -> Result<ExecOutcome, FaultCode> {
-        if self.vm.fuel == 0 {
+        if self.vm.fuel == 0 || *world_fuel == 0 {
             return Err(FaultCode::OutOfFuel);
         }
         self.vm.fuel -= 1;
+        *world_fuel -= 1;
         // The frame states the function, the block, and the program
         // counter. A restored machine states all three, so the fetch
         // tests each one instead of indexing.
@@ -1438,9 +1537,10 @@ impl Machine {
         module: &Module,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
+        world_fuel: &mut u64,
     ) -> Result<ExecOutcome, FaultCode> {
         loop {
-            match self.exec_instr(module, dispatch, envs) {
+            match self.exec_instr(module, dispatch, envs, world_fuel) {
                 Ok(ExecOutcome::Continue) => {}
                 outcome => return outcome,
             }
@@ -1662,5 +1762,55 @@ mod tests {
         assert_eq!(std::mem::size_of::<Result<bool, FaultCode>>(), 2);
         // An integer read pays one word, because `i64` has no niche.
         assert_eq!(std::mem::size_of::<Result<i64, FaultCode>>(), 16);
+    }
+
+    #[test]
+    fn request_ordinal_exhaustion_does_not_wrap() {
+        let mut machine = Machine::empty(VmConfig::default(), None);
+        machine.vm.next_ordinal = u64::MAX;
+        assert_eq!(
+            machine.take_request_ordinal(),
+            Err(FaultCode::IntegerOverflow)
+        );
+        assert_eq!(machine.vm.next_ordinal, u64::MAX);
+    }
+
+    #[test]
+    fn mailbox_metrics_saturate() {
+        let mut mailbox = Mailbox::new(1);
+        mailbox.accepted = u64::MAX;
+        mailbox.delivered = u64::MAX;
+        mailbox.push(Value::Int(1));
+        assert_eq!(mailbox.accepted, u64::MAX);
+        assert_eq!(mailbox.pop(), Some(Value::Int(1)));
+        assert_eq!(mailbox.delivered, u64::MAX);
+    }
+
+    #[test]
+    fn a_terminal_proc_keeps_only_its_dense_result_heap() {
+        let mut machine = Machine::empty(VmConfig::default(), None);
+        machine.is_proc = true;
+        machine.vm.locals = Vec::with_capacity(1024);
+        machine.vm.operands = Vec::with_capacity(1024);
+        for _ in 0..1500 {
+            machine
+                .alloc(Object::Str("dead".to_string()))
+                .expect("the dead object fits");
+        }
+        let result = machine
+            .alloc(Object::Str("live".to_string()))
+            .expect("the result fits");
+        machine.set_done(result);
+        let Some(Terminal::Done(Value::Obj(reference))) = machine.vm.terminal else {
+            panic!("the proc stores its result");
+        };
+        assert_eq!(reference.slot, 0);
+        assert_eq!(machine.vm.heap.slot_count(), 1);
+        assert_eq!(machine.vm.locals.capacity(), 0);
+        assert_eq!(machine.vm.operands.capacity(), 0);
+        assert_eq!(
+            machine.vm.heap.get(reference),
+            &Object::Str("live".to_string())
+        );
     }
 }

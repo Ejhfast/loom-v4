@@ -41,19 +41,7 @@ use lm_value::Value;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-/// The work one admission may perform.
-///
-/// The budget is one aggregate ledger for the whole image. It charges
-/// one unit for each of these, and for nothing else:
-///
-/// - one entry of the closed type table or of the environment table;
-/// - one object the canonical order walk visits;
-/// - each 64 bytes of one nested container it decodes.
-///
-/// A compact container can never expand into unbounded checking work.
-///
-/// The default limit is conservative. Worklist item 10 sizes it beside
-/// the decode budget and shares one ledger with nested containers.
+/// The aggregate work ledger of one admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmissionBudget {
     limit: u64,
@@ -63,8 +51,7 @@ pub struct AdmissionBudget {
 
 /// The default aggregate admission work limit, in units.
 ///
-/// One unit covers one table entry, one stored object, or one block of
-/// a nested container.
+/// One unit covers one table entry, stored record, or graph edge.
 pub const DEFAULT_ADMISSION_UNITS: u64 = 1 << 24;
 
 impl AdmissionBudget {
@@ -100,8 +87,10 @@ impl AdmissionBudget {
 
     /// Charge `units` of work. The call fails once the ledger runs out.
     fn charge(&mut self, units: u64) -> Result<(), ImageError> {
-        self.used = self.used.saturating_add(units);
-        if self.used > self.limit {
+        let next = self.used.checked_add(units).ok_or_else(|| {
+            ImageError::admission(ImageReason::Budget, "the admission work count overflowed")
+        })?;
+        if next > self.limit {
             return Err(ImageError::admission(
                 ImageReason::Budget,
                 format!(
@@ -110,6 +99,7 @@ impl AdmissionBudget {
                 ),
             ));
         }
+        self.used = next;
         Ok(())
     }
 }
@@ -145,19 +135,20 @@ pub(super) fn prove(
     loaded: &LoadedModule,
     budget: &mut AdmissionBudget,
 ) -> Result<AdmissionIdentity, ImageError> {
+    budget.charge(admission_cost(image)?)?;
     let identity = loaded.identity().map_err(|_| {
         ImageError::admission(ImageReason::Code, "the program has no verified identity")
     })?;
     let module = loaded.module();
     check_identity(image, identity)?;
-    let tables = resolve_type_tables(image, module, budget)?;
+    let tables = resolve_type_tables(image, module)?;
     let admit = Admit {
         image,
         module,
         identity,
         witness: tables,
     };
-    admit.run(budget)?;
+    admit.run()?;
     Ok(AdmissionIdentity {
         module_semantic: identity.semantic_hash,
         verification: lm_bytecode::identity::verification_hash(module),
@@ -170,6 +161,82 @@ pub(super) fn prove(
 
 fn fail<T>(reason: ImageReason, detail: impl Into<String>) -> Result<T, ImageError> {
     Err(ImageError::admission(reason, detail))
+}
+
+/// Calculate the complete structural work of one image.
+fn admission_cost(image: &Image) -> Result<u64, ImageError> {
+    let mut cost = 1u64;
+    let mut add = |units: usize| -> Result<(), ImageError> {
+        let units = u64::try_from(units).map_err(|_| {
+            ImageError::admission(ImageReason::Budget, "the admission work count overflowed")
+        })?;
+        cost = cost.checked_add(units).ok_or_else(|| {
+            ImageError::admission(ImageReason::Budget, "the admission work count overflowed")
+        })?;
+        Ok(())
+    };
+    add(image.funcs.len())?;
+    add(image.classes.len())?;
+    for node in &image.types {
+        add(1 + closed_type_parts(node))?;
+    }
+    for env in &image.envs {
+        add(1 + env.types.len() + env.rows.len())?;
+        for row in &env.rows {
+            add(row.len())?;
+        }
+    }
+    for machine in &image.machines {
+        add(1)?;
+        add(machine.frames.len())?;
+        add(machine.locals.len())?;
+        add(machine.operands.len())?;
+        add(machine.literals.len())?;
+        add(machine.mailbox.queue.len())?;
+        if let Some(pending) = &machine.pending {
+            add(pending.args.len())?;
+        }
+        for entry in &machine.objects {
+            let edges = object_edges(&entry.object);
+            add(2usize.saturating_add(edges.saturating_mul(2)))?;
+        }
+    }
+    Ok(cost)
+}
+
+fn closed_type_parts(node: &ClosedType) -> usize {
+    match node {
+        ClosedType::Inst(_, args) | ClosedType::Tuple(args) => args.len(),
+        ClosedType::Fn(params, markers, _, row) => params
+            .len()
+            .saturating_add(markers.len())
+            .saturating_add(row.len())
+            .saturating_add(1),
+        ClosedType::List(_)
+        | ClosedType::Vm(_)
+        | ClosedType::Op(_, _)
+        | ClosedType::Snapshot(_) => 1,
+        ClosedType::Map(_, _) | ClosedType::PendingCall(_, _) | ClosedType::Handle(_, _) => 2,
+        _ => 0,
+    }
+}
+
+fn object_edges(object: &Object) -> usize {
+    match object {
+        Object::Instance { fields, .. } => fields.len(),
+        Object::List { items } | Object::Tuple { items } => items.len(),
+        Object::Map { entries, .. } => entries.len().saturating_mul(2),
+        Object::Closure { captures, .. } => captures.len(),
+        _ => 0,
+    }
+}
+
+fn work_vec<T>(count: usize) -> Result<Vec<T>, ImageError> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(count).map_err(|_| {
+        ImageError::admission(ImageReason::Budget, "an admission work allocation failed")
+    })?;
+    Ok(values)
 }
 
 /// Prove that the image names this exact verified program.
@@ -243,11 +310,21 @@ struct Admit<'m> {
 fn resolve_type_tables(
     image: &Image,
     module: &lm_bytecode::Module,
-    budget: &mut AdmissionBudget,
 ) -> Result<WitnessTables, ImageError> {
     let mut canonical = TypeEnvs::new(u32::MAX, u32::MAX);
-    let mut canonical_of: Vec<u32> = Vec::with_capacity(image.types.len());
+    canonical
+        .reserve_capacity(image.types.len(), image.envs.len())
+        .map_err(|_| {
+            ImageError::admission(ImageReason::Budget, "the witness table allocation failed")
+        })?;
+    let mut canonical_of: Vec<u32> = work_vec(image.types.len())?;
     let mut seen: HashSet<ClosedType> = HashSet::new();
+    seen.try_reserve(image.types.len()).map_err(|_| {
+        ImageError::admission(
+            ImageReason::Budget,
+            "the closed type index allocation failed",
+        )
+    })?;
     let class_named = |slot: u32| {
         image
             .classes
@@ -255,7 +332,6 @@ fn resolve_type_tables(
             .is_ok()
     };
     for (at, node) in image.types.iter().enumerate() {
-        budget.charge(1)?;
         for child in node.children() {
             if child as usize >= at {
                 return fail(
@@ -320,10 +396,15 @@ fn resolve_type_tables(
         canonical_of.push(id);
     }
     // The environment table. Ordinal zero is the empty environment.
-    let mut arity: Vec<(usize, usize)> = Vec::with_capacity(image.envs.len());
+    let mut arity: Vec<(usize, usize)> = work_vec(image.envs.len())?;
     let mut seen_envs: HashSet<TypeEnv> = HashSet::new();
+    seen_envs.try_reserve(image.envs.len()).map_err(|_| {
+        ImageError::admission(
+            ImageReason::Budget,
+            "the environment index allocation failed",
+        )
+    })?;
     for (at, env) in image.envs.iter().enumerate() {
-        budget.charge(1)?;
         if at == 0 && !env.is_empty() {
             return fail(
                 ImageReason::Layout,
@@ -347,14 +428,15 @@ fn resolve_type_tables(
         for row in &env.rows {
             check_closed_row(module, row, at)?;
         }
-        let mapped = TypeEnv {
-            types: env
-                .types
-                .iter()
-                .map(|ty| canonical_of[*ty as usize])
-                .collect(),
-            rows: env.rows.clone(),
-        };
+        let mut types = work_vec(env.types.len())?;
+        types.extend(env.types.iter().map(|ty| canonical_of[*ty as usize]));
+        let mut rows = work_vec(env.rows.len())?;
+        for source in &env.rows {
+            let mut row = work_vec(source.len())?;
+            row.extend_from_slice(source);
+            rows.push(row);
+        }
+        let mapped = TypeEnv { types, rows };
         let id = canonical.intern_env(mapped).map_err(|_| {
             ImageError::admission(
                 ImageReason::Budget,
@@ -390,17 +472,21 @@ fn check_closed_row(
             );
         }
     }
-    if lm_bytecode::closed::canonical_row(module, row.to_vec()) != row {
-        return fail(
-            ImageReason::Layout,
-            format!("entry {at} holds an effect row that is not canonical"),
-        );
+    for pair in row.windows(2) {
+        let first = &module.strings[pair[0] as usize];
+        let second = &module.strings[pair[1] as usize];
+        if first >= second {
+            return fail(
+                ImageReason::Layout,
+                format!("entry {at} holds an effect row that is not canonical"),
+            );
+        }
     }
     Ok(())
 }
 
 impl Admit<'_> {
-    fn run(&self, budget: &mut AdmissionBudget) -> Result<(), ImageError> {
+    fn run(&self) -> Result<(), ImageError> {
         if self.image.machines.is_empty() {
             return fail(ImageReason::State, "a snapshot world holds no machine");
         }
@@ -421,7 +507,6 @@ impl Admit<'_> {
         // property of one position, so a diagnostic names that
         // position instead of the traversal an edit moved.
         for (vm, machine) in self.image.machines.iter().enumerate() {
-            budget.charge(machine.objects.len() as u64)?;
             self.check_order(machine, vm as u32)?;
         }
         Ok(())
@@ -561,8 +646,18 @@ impl Admit<'_> {
                 );
             }
         }
+        let mut children = Vec::new();
         for (ordinal, entry) in m.objects.iter().enumerate() {
-            let mut children = Vec::new();
+            children.clear();
+            let want = object_edges(&entry.object);
+            if want > children.capacity() {
+                children.try_reserve_exact(want).map_err(|_| {
+                    ImageError::admission(
+                        ImageReason::Budget,
+                        "the object child work allocation failed",
+                    )
+                })?;
+            }
             entry.object.children(&mut children);
             for child in &children {
                 if child.generation != 0 {
@@ -1162,18 +1257,19 @@ impl Admit<'_> {
     ///
     /// Every machine names at most one parent, so the parent pointers
     /// form a functional graph. A cycle in it makes the runtime policy
-    /// walk of `resolve_policy` loop forever, because that walk follows
-    /// the parent chain with no bound. The walk below is iterative, so
-    /// it never grows the Rust stack.
+    /// walk of `resolve_policy` fail closed. The walk below is
+    /// iterative, so it never grows the Rust stack.
     fn check_parent_forest(&self) -> Result<(), ImageError> {
         let n = self.image.machines.len();
         // 0 unvisited, 1 on the current path, 2 settled.
-        let mut colour = vec![0u8; n];
+        let mut colour = work_vec(n)?;
+        colour.resize(n, 0u8);
+        let mut path = work_vec(n)?;
         for start in 0..n {
             if colour[start] != 0 {
                 continue;
             }
-            let mut path: Vec<usize> = Vec::new();
+            path.clear();
             let mut cur = start;
             loop {
                 match colour[cur] {
@@ -1203,8 +1299,8 @@ impl Admit<'_> {
                     _ => break,
                 }
             }
-            for node in path {
-                colour[node] = 2;
+            for node in &path {
+                colour[*node] = 2;
             }
         }
         Ok(())
@@ -1237,6 +1333,16 @@ impl Admit<'_> {
                     _ => continue,
                 };
                 let target = &self.image.machines[target as usize];
+                // Allocation advances the counter before a token can
+                // enter a heap. A future ordinal cannot be valid data.
+                if request >= target.next_ordinal {
+                    return fail(
+                        ImageReason::State,
+                        format!(
+                            "machine {vm} object {ordinal} holds future request ordinal {request}"
+                        ),
+                    );
+                }
                 // A stale token is legal: the machine answered the
                 // request already. The rule is that a live token
                 // agrees.
@@ -1267,10 +1373,12 @@ impl Admit<'_> {
     /// reachable and that no object is missing.
     fn check_order(&self, machine: &ImageMachine, vm: u32) -> Result<(), ImageError> {
         let count = machine.objects.len();
-        let mut seen = vec![false; count];
+        let mut seen = work_vec(count)?;
+        seen.resize(count, false);
         let mut next = 0usize;
         let roots = image_roots(machine);
-        let mut stack: Vec<u32> = roots.iter().rev().copied().collect();
+        let mut stack = work_vec(roots.len())?;
+        stack.extend(roots.iter().rev().copied());
         let mut children: Vec<lm_value::ObjRef> = Vec::new();
         while let Some(r) = stack.pop() {
             let idx = r as usize;
@@ -1289,7 +1397,19 @@ impl Admit<'_> {
             seen[idx] = true;
             next += 1;
             children.clear();
+            let want = object_edges(&machine.objects[idx].object);
+            if want > children.capacity() {
+                children.try_reserve_exact(want).map_err(|_| {
+                    ImageError::admission(
+                        ImageReason::Budget,
+                        "the order child work allocation failed",
+                    )
+                })?;
+            }
             machine.objects[idx].object.children(&mut children);
+            stack.try_reserve(children.len()).map_err(|_| {
+                ImageError::admission(ImageReason::Budget, "the order stack allocation failed")
+            })?;
             stack.extend(children.iter().rev().map(|c| c.slot));
         }
         if next != count {

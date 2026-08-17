@@ -11,10 +11,10 @@ use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, Machine, MachineState, Mailbox, Ownership, Pending,
     Terminal, VmId,
 };
-use crate::{FaultCode, LoadedModule, Outcome, VmConfig};
+use crate::{FaultCode, LoadedModule, Outcome, VmConfig, WorldLimits};
 use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, Module};
-use lm_heap::{Heap, Object};
+use lm_heap::{Heap, HeapBudget, Object};
 use lm_value::{ObjRef, Value};
 
 /// The fuel budget of one mock handler run.
@@ -93,6 +93,33 @@ struct ModuleCodes<'m> {
     identity: &'m lm_bytecode::identity::ModuleIdentity,
 }
 
+/// The aggregate ledgers of one root VM and its spawned procs.
+struct WorldBudget {
+    limits: WorldLimits,
+    heap: HeapBudget,
+    resources: crate::resource::ResourceBudget,
+    fuel: u64,
+}
+
+/// One successful restore reply held before restore commit.
+struct PreparedRestoreReply {
+    value: Value,
+    handle: ObjRef,
+    reply: ObjRef,
+}
+
+impl WorldBudget {
+    fn new(mut limits: WorldLimits) -> WorldBudget {
+        limits.max_machines = limits.max_machines.max(1);
+        WorldBudget {
+            heap: HeapBudget::new(limits.max_heap_bytes, limits.max_heap_objects),
+            resources: crate::resource::ResourceBudget::new(limits.max_resources),
+            fuel: limits.fuel,
+            limits,
+        }
+    }
+}
+
 impl lm_graph::CodeIdentity for ModuleCodes<'_> {
     fn func_hash(&self, func: u32) -> Result<[u8; 32], FaultCode> {
         self.identity
@@ -144,6 +171,8 @@ pub struct World<'m> {
     pub(crate) envs: lm_bytecode::closed::TypeEnvs,
     host: Box<dyn Host>,
     config: VmConfig,
+    /// Aggregate limits and current resource charges.
+    budget: WorldBudget,
     /// The proc trace, when tracing is on.
     trace: Option<Vec<TraceEvent>>,
     /// The monotone mailbox cut marker of this world.
@@ -159,7 +188,7 @@ pub struct World<'m> {
     /// The count instruments the rule of specification 17.8: external
     /// bytes are admitted once, and a later restore repeats nothing.
     checks: u64,
-    /// The admitted images this world already holds, newest first.
+    /// The admitted images this execution already holds, newest first.
     ///
     /// A guest holds a snapshot as container bytes. A restore looks
     /// the bytes up by container hash: a hit is an image this process
@@ -167,10 +196,12 @@ pub struct World<'m> {
     /// state and repeats no check. A miss runs the external loader
     /// once. The table stores `SnapshotImage`, so the type system
     /// records the admission fact; a bare `Image` can never enter it.
-    /// The table is bounded, so a program that captures in a loop
-    /// never grows it; an evicted image is admitted again on its next
-    /// restore, which is safe and slower.
-    trusted: Vec<([u8; 32], crate::snapshot::SnapshotImage)>,
+    /// A byte budget bounds retained decoded graphs. It never rejects
+    /// an image. An evicted image runs admission again at its next
+    /// restore.
+    trusted: Vec<([u8; 32], crate::snapshot::SnapshotImage, usize)>,
+    /// The canonical byte size charged by the trusted image cache.
+    trusted_bytes: usize,
     /// The last image a guest capture produced in this world.
     ///
     /// `lm snapshot save` writes it, so a program states in its own
@@ -182,9 +213,6 @@ pub struct World<'m> {
     /// every boundary. A scalar reply touches none of it.
     check: crate::typecheck::BoundaryScratch,
 }
-
-/// The largest number of trusted images one world remembers.
-const TRUSTED_IMAGES: usize = 64;
 
 /// One recorded scheduler event. A trace record names machines by
 /// identifier and generation, never by a guest reference.
@@ -241,8 +269,25 @@ pub struct MailboxMetrics {
 impl<'m> World<'m> {
     /// Create a world with the entry loaded into the root machine.
     pub fn new(loaded: &'m LoadedModule, config: VmConfig, host: Box<dyn Host>) -> World<'m> {
+        World::new_with_limits(loaded, config, WorldLimits::default(), host)
+    }
+
+    /// Create a world with exact aggregate limits.
+    pub fn new_with_limits(
+        loaded: &'m LoadedModule,
+        config: VmConfig,
+        limits: WorldLimits,
+        host: Box<dyn Host>,
+    ) -> World<'m> {
         let module = loaded.module();
-        let mut root = Machine::empty(config, None);
+        let budget = WorldBudget::new(limits);
+        let mut root = Machine::empty_with_budgets(
+            config,
+            None,
+            0,
+            budget.heap.clone(),
+            budget.resources.clone(),
+        );
         // The entry function of a program takes no type argument, so
         // the root frame carries the empty environment.
         root.load_frame(
@@ -263,11 +308,13 @@ impl<'m> World<'m> {
             envs: lm_bytecode::closed::TypeEnvs::new(config.max_closed_types, config.max_type_envs),
             host,
             config,
+            budget,
             trace: None,
             cut: 0,
             gate: 0,
             checks: 0,
             trusted: Vec::new(),
+            trusted_bytes: 0,
             last_image: None,
             check: crate::typecheck::BoundaryScratch::default(),
         }
@@ -324,7 +371,9 @@ impl<'m> World<'m> {
 
     fn record(&mut self, event: TraceEvent) {
         if let Some(trace) = &mut self.trace {
-            trace.push(event);
+            if trace.len() < self.budget.limits.max_trace_events {
+                trace.push(event);
+            }
         }
     }
 
@@ -363,6 +412,31 @@ impl<'m> World<'m> {
     /// The number of machines, for tests.
     pub fn machine_count(&self) -> usize {
         self.machines.len()
+    }
+
+    /// The live heap bytes of all machines.
+    pub fn world_heap_bytes(&self) -> usize {
+        self.budget.heap.used_bytes()
+    }
+
+    /// The live heap objects of all machines.
+    pub fn world_heap_objects(&self) -> usize {
+        self.budget.heap.live_objects()
+    }
+
+    /// The live host resources of all machines.
+    pub fn world_resource_count(&self) -> usize {
+        self.budget.resources.used()
+    }
+
+    /// The instruction budget that remains for this world.
+    pub fn world_fuel(&self) -> u64 {
+        self.budget.fuel
+    }
+
+    /// The decoded image storage held by the trusted cache.
+    pub fn trusted_image_bytes(&self) -> usize {
+        self.trusted_bytes
     }
 
     /// Run the root machine to a terminal outcome.
@@ -466,7 +540,8 @@ impl<'m> World<'m> {
     pub fn new_child(&mut self, parent: VmId) -> Option<VmId> {
         let config = self.reserve_child(parent)?;
         let id = self.machines.len() as VmId;
-        self.machines.push(Machine::empty(config, Some(parent)));
+        let machine = self.empty_machine(config, Some(parent), 0);
+        self.machines.push(machine);
         Some(id)
     }
 
@@ -666,11 +741,12 @@ impl<'m> World<'m> {
                     let module = self.module;
                     let dispatch = self.dispatch;
                     let envs = &mut self.envs;
+                    let world_fuel = &mut self.budget.fuel;
                     let machine = &mut self.machines[act.vm as usize];
                     let outcome = if act.mode == StopMode::OneStep {
-                        machine.exec_instr(module, dispatch, envs)
+                        machine.exec_instr(module, dispatch, envs, world_fuel)
                     } else {
-                        machine.exec_until_boundary(module, dispatch, envs)
+                        machine.exec_until_boundary(module, dispatch, envs, world_fuel)
                     };
                     stack[top_idx].retired = true;
                     match outcome {
@@ -821,7 +897,7 @@ impl<'m> World<'m> {
         // The slot takes a new generation, so a reference minted for
         // the retired record names a dead machine, never the next one.
         let generation = self.machines[mock as usize].generation.wrapping_add(1);
-        self.machines[mock as usize] = Machine::empty_at(self.config, None, generation);
+        self.machines[mock as usize] = self.empty_machine(self.config, None, generation);
         self.mock_free.push(mock);
     }
 
@@ -1085,8 +1161,13 @@ impl<'m> World<'m> {
         args: Vec<Value>,
     ) -> Option<RootEvent> {
         let m = &mut self.machines[vm as usize];
-        let ordinal = m.vm.next_ordinal;
-        m.vm.next_ordinal += 1;
+        let ordinal = match m.take_request_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(code) => {
+                m.set_fault(code, "the request ordinal is exhausted", Some(op));
+                return None;
+            }
+        };
         m.vm.pending = Some(Pending { op, args, ordinal });
         let Some(top) = stack.last().copied() else {
             return Some(self.fault_event(vm, "the performing machine left the driver stack"));
@@ -1174,6 +1255,14 @@ impl<'m> World<'m> {
                             return;
                         }
                     };
+                    if let Err(code) = self.machines[vm as usize].resources.prepare_register() {
+                        self.machines[vm as usize].set_fault(
+                            code,
+                            "the world has no host resource capacity",
+                            Some(op),
+                        );
+                        return;
+                    }
                     match self.host.start(op, args) {
                         HostStart::Completed(reply) => self.install_host_reply(vm, reply),
                         HostStart::Waiting(token) => self.start_wait(vm, op, token),
@@ -1320,12 +1409,22 @@ impl<'m> World<'m> {
         // Reuse a retired mock slot before the table grows.
         let id = match self.mock_free.pop() {
             Some(id) => {
-                self.machines[id as usize] = Machine::empty(mock_config, None);
+                self.machines[id as usize] = self.empty_machine(mock_config, None, 0);
                 id
             }
             None => {
+                if !self.has_machine_room(1) || self.machines.try_reserve(1).is_err() {
+                    let op = self.pending_op(vm);
+                    self.machines[vm as usize].set_fault(
+                        FaultCode::BoundaryLimit,
+                        "the world machine limit stopped the mock",
+                        op,
+                    );
+                    return;
+                }
                 let id = self.machines.len() as VmId;
-                self.machines.push(Machine::empty(mock_config, None));
+                let machine = self.empty_machine(mock_config, None, 0);
+                self.machines.push(machine);
                 id
             }
         };
@@ -1435,10 +1534,12 @@ impl<'m> World<'m> {
     /// budget the root minted. The reservation happens before any
     /// machine record exists, so a refusal changes nothing.
     ///
-    /// The budget bounds tower depth per branch. It does not bound the
-    /// total machine count across branches; full transitive accounting
-    /// of fuel and heap bytes waits for the proc scheduler.
+    /// The local budget bounds tower depth per branch. `WorldBudget`
+    /// bounds the total machine count and shared resources.
     pub(crate) fn reserve_child(&mut self, parent: VmId) -> Option<VmConfig> {
+        if !self.has_machine_room(1) || self.machines.try_reserve(1).is_err() {
+            return None;
+        }
         let m = &mut self.machines[parent as usize];
         let budget = m.config.max_children;
         if m.children >= budget {
@@ -1450,6 +1551,30 @@ impl<'m> World<'m> {
             max_children: remaining,
             ..m.config
         })
+    }
+
+    /// True when the machine table can add `count` records.
+    pub(crate) fn has_machine_room(&self, count: usize) -> bool {
+        self.machines
+            .len()
+            .checked_add(count)
+            .is_some_and(|total| total <= self.budget.limits.max_machines as usize)
+    }
+
+    /// Create one detached machine with the world ledgers.
+    pub(crate) fn empty_machine(
+        &self,
+        config: VmConfig,
+        parent: Option<VmId>,
+        generation: u32,
+    ) -> Machine {
+        Machine::empty_with_budgets(
+            config,
+            parent,
+            generation,
+            self.budget.heap.clone(),
+            self.budget.resources.clone(),
+        )
     }
 
     /// Enter the proc body after the constructor frame returned.
@@ -1542,7 +1667,8 @@ impl<'m> World<'m> {
                     }
                 };
                 let child = self.machines.len() as VmId;
-                self.machines.push(Machine::empty(child_config, Some(vm)));
+                let machine = self.empty_machine(child_config, Some(vm), 0);
+                self.machines.push(machine);
                 match self.machines[vm as usize].alloc(Object::NativeVm { vm: child }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
                     Err(code) => {
@@ -1692,24 +1818,35 @@ impl<'m> World<'m> {
                         if op == lm_abi::OP_VM_DRIVE {
                             // Token recovery: the same semantic request
                             // with a fresh holder token.
-                            let fresh = {
-                                let m = &mut self.machines[target as usize];
-                                let fresh = m.vm.next_ordinal;
-                                m.vm.next_ordinal += 1;
-                                match m.vm.pending.as_mut() {
-                                    Some(pending) => pending.ordinal = fresh,
-                                    None => {
-                                        self.fault_caller(
-                                            vm,
-                                            op,
-                                            FaultCode::MalformedState,
-                                            "the asked machine holds no request",
-                                        );
-                                        return;
-                                    }
+                            if self.machines[target as usize].vm.pending.is_none() {
+                                self.fault_caller(
+                                    vm,
+                                    op,
+                                    FaultCode::MalformedState,
+                                    "the asked machine holds no request",
+                                );
+                                return;
+                            }
+                            let fresh = match self.machines[target as usize].take_request_ordinal()
+                            {
+                                Ok(ordinal) => ordinal,
+                                Err(code) => {
+                                    self.machines[target as usize].set_fault(
+                                        code,
+                                        "the request ordinal is exhausted",
+                                        Some(op),
+                                    );
+                                    let built =
+                                        self.build_terminal_event(target, vm, Family::Drive);
+                                    self.reply_or_fault(vm, op, built);
+                                    return;
                                 }
-                                fresh
                             };
+                            if let Some(pending) =
+                                self.machines[target as usize].vm.pending.as_mut()
+                            {
+                                pending.ordinal = fresh;
+                            }
                             self.deliver_asked(target, vm, fresh);
                         } else {
                             self.fault_caller(
@@ -2062,17 +2199,43 @@ impl<'m> World<'m> {
             );
             return;
         }
-        let built = match self.restore_image(vm, target, &image) {
-            Ok(root) => self.machines[vm as usize]
-                .alloc(Object::NativeVm { vm: root })
-                .and_then(|handle| self.make_instance(vm, self.core.result_ok, vec![handle])),
-            Err(crate::snapshot::RestoreFail::LimitExceeded) => self
-                .make_instance(vm, self.core.restore_limit_exceeded, vec![])
-                .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error])),
+        let reply = match self.prepare_restore_reply(vm, target) {
+            Ok(reply) => reply,
+            Err(code) => {
+                self.machines[vm as usize].set_fault(code, "", Some(op));
+                return;
+            }
+        };
+        if let Err(code) = self.check_reply(vm, reply.value) {
+            self.discard_restore_reply(vm, reply);
+            self.machines[vm as usize].set_fault(
+                code,
+                "the reply does not carry the type of its perform",
+                Some(op),
+            );
+            return;
+        }
+        if let Err(code) = self.reserve_restore_reply_slot(vm) {
+            self.discard_restore_reply(vm, reply);
+            self.machines[vm as usize].set_fault(code, "", Some(op));
+            return;
+        }
+        let built = match self.prepare_restore(vm, target, &image) {
+            Ok(plan) => {
+                self.commit_restore(plan);
+                self.install_prepared_restore_reply(vm, reply);
+                return;
+            }
+            Err(crate::snapshot::RestoreFail::LimitExceeded) => {
+                self.discard_restore_reply(vm, reply);
+                self.make_instance(vm, self.core.restore_limit_exceeded, vec![])
+                    .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]))
+            }
             // The check above already answered this case, so the guest
             // never reaches it. Restore states the rule again for
             // every caller, and a mismatch here is a boundary fault.
             Err(crate::snapshot::RestoreFail::OtherProgram) => {
+                self.discard_restore_reply(vm, reply);
                 self.fault_caller(
                     vm,
                     op,
@@ -2083,6 +2246,104 @@ impl<'m> World<'m> {
             }
         };
         self.reply_or_fault(vm, op, built);
+    }
+
+    /// Build the successful restore reply without partial allocation.
+    fn prepare_restore_reply(
+        &mut self,
+        vm: VmId,
+        target: VmId,
+    ) -> Result<PreparedRestoreReply, FaultCode> {
+        let class = self.core.result_ok.ok_or(FaultCode::MalformedState)?;
+        let handle = Object::NativeVm { vm: target };
+        let mut fields = Vec::new();
+        fields
+            .try_reserve_exact(1)
+            .map_err(|_| FaultCode::HeapLimit)?;
+        fields.push(Value::Unit);
+        let mut reply = Object::Instance {
+            class,
+            fields,
+            env: lm_value::Witness::EMPTY,
+        };
+        let bytes = handle
+            .cost()
+            .checked_add(reply.cost())
+            .ok_or(FaultCode::HeapLimit)?;
+        if self.machines[vm as usize]
+            .vm
+            .heap
+            .would_exceed_batch(bytes, 2)
+        {
+            self.machines[vm as usize].collect_garbage(&[]);
+            if self.machines[vm as usize]
+                .vm
+                .heap
+                .would_exceed_batch(bytes, 2)
+            {
+                return Err(FaultCode::HeapLimit);
+            }
+        }
+        let handle = self.machines[vm as usize]
+            .vm
+            .heap
+            .try_alloc(handle)
+            .map_err(|_| FaultCode::HeapLimit)?;
+        let Object::Instance { fields, .. } = &mut reply else {
+            return Err(FaultCode::MalformedState);
+        };
+        fields[0] = Value::Obj(handle);
+        match self.machines[vm as usize].vm.heap.try_alloc(reply) {
+            Ok(reply) => Ok(PreparedRestoreReply {
+                value: Value::Obj(reply),
+                handle,
+                reply,
+            }),
+            Err(_) => {
+                self.machines[vm as usize].vm.heap.free(handle);
+                Err(FaultCode::HeapLimit)
+            }
+        }
+    }
+
+    /// Remove one prepared reply after restore preparation fails.
+    fn discard_restore_reply(&mut self, vm: VmId, reply: PreparedRestoreReply) {
+        let heap = &mut self.machines[vm as usize].vm.heap;
+        heap.free(reply.reply);
+        heap.free(reply.handle);
+    }
+
+    /// Reserve the operand slot for one prepared restore reply.
+    fn reserve_restore_reply_slot(&mut self, vm: VmId) -> Result<(), FaultCode> {
+        let machine = &mut self.machines[vm as usize];
+        let stack = machine
+            .vm
+            .locals
+            .len()
+            .checked_add(machine.vm.operands.len())
+            .and_then(|used| used.checked_add(1))
+            .ok_or(FaultCode::StackLimit)?;
+        if stack > machine.config.max_stack_values as usize {
+            return Err(FaultCode::StackLimit);
+        }
+        machine
+            .vm
+            .operands
+            .try_reserve(1)
+            .map_err(|_| FaultCode::StackLimit)
+    }
+
+    /// Install a checked reply after restore commit.
+    fn install_prepared_restore_reply(&mut self, vm: VmId, reply: PreparedRestoreReply) {
+        let machine = &mut self.machines[vm as usize];
+        if let Some(pending) = &machine.vm.pending {
+            machine.resources.close_by_ordinal(pending.ordinal);
+        }
+        machine.vm.pending = None;
+        machine.vm.operands.push(reply.value);
+        if machine.vm.state != MachineState::Running {
+            machine.vm.state = MachineState::Ready;
+        }
     }
 
     /// Check that the holder still owns the execution of a machine.
@@ -2275,8 +2536,8 @@ impl<'m> World<'m> {
             }
         };
         let child = self.machines.len() as VmId;
-        self.machines
-            .push(Machine::empty_at(child_config, Some(vm), 0));
+        let machine = self.empty_machine(child_config, Some(vm), 0);
+        self.machines.push(machine);
         // The two closures and every argument cross the boundary. Each
         // result stays rooted while the next value crosses.
         let mut payload: Vec<Value> = vec![args[0], args[1]];
@@ -2396,12 +2657,21 @@ impl<'m> World<'m> {
             proc: child,
             generation,
         });
-        self.record(TraceEvent::Spawn {
-            parent: vm,
-            proc: child,
-            generation,
-        });
-        self.reply_or_fault(vm, op, built);
+        match built {
+            Ok(handle) => {
+                self.record(TraceEvent::Spawn {
+                    parent: vm,
+                    proc: child,
+                    generation,
+                });
+                self.install_value_reply(vm, handle);
+            }
+            Err(code) => {
+                self.machines.pop();
+                self.machines[vm as usize].children -= 1;
+                self.machines[vm as usize].set_fault(code, "", Some(op));
+            }
+        }
     }
 
     /// `sys.proc.run(vm)`: transfer one loaded machine to the
@@ -2427,18 +2697,23 @@ impl<'m> World<'m> {
             );
             return;
         }
-        self.machines[target as usize].owner = Ownership::Scheduler;
         let generation = self.machines[target as usize].generation;
         let built = self.machines[vm as usize].alloc(Object::NativeHandle {
             proc: target,
             generation,
         });
-        self.record(TraceEvent::Spawn {
-            parent: vm,
-            proc: target,
-            generation,
-        });
-        self.reply_or_fault(vm, op, built);
+        match built {
+            Ok(handle) => {
+                self.machines[target as usize].owner = Ownership::Scheduler;
+                self.record(TraceEvent::Spawn {
+                    parent: vm,
+                    proc: target,
+                    generation,
+                });
+                self.install_value_reply(vm, handle);
+            }
+            Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
+        }
     }
 
     /// `h.send(message)`.
@@ -2497,8 +2772,7 @@ impl<'m> World<'m> {
         };
         {
             let mailbox = &mut self.machines[proc as usize].vm.mailbox;
-            mailbox.queue.push_back(moved);
-            mailbox.accepted += 1;
+            mailbox.push(moved);
         }
         self.record(TraceEvent::Send {
             from: vm,
@@ -2548,10 +2822,9 @@ impl<'m> World<'m> {
             );
             return;
         }
-        let message = self.machines[vm as usize].vm.mailbox.queue.pop_front();
+        let message = self.machines[vm as usize].vm.mailbox.pop();
         match message {
             Some(value) => {
-                self.machines[vm as usize].vm.mailbox.delivered += 1;
                 self.record(TraceEvent::Receive {
                     proc: vm,
                     closed: false,
@@ -3116,6 +3389,16 @@ impl<'m> World<'m> {
         self.gate
     }
 
+    /// The latest world gate marker.
+    pub(crate) fn gate_marker(&self) -> u32 {
+        self.gate
+    }
+
+    /// Commit one prepared world gate marker.
+    pub(crate) fn set_gate_marker(&mut self, gate: u32) {
+        self.gate = gate;
+    }
+
     /// The world gate one machine sits behind, or zero.
     pub fn gate_of(&self, vm: VmId) -> u32 {
         self.machines[vm as usize].gate
@@ -3146,25 +3429,40 @@ impl<'m> World<'m> {
 
     /// Record one whole-image structural check.
     pub(crate) fn record_snapshot_check(&mut self) {
-        self.checks += 1;
+        self.checks = self.checks.saturating_add(1);
     }
 
     /// Remember one admitted image of this world.
     pub fn trust_image(&mut self, image: &crate::snapshot::SnapshotImage) {
         let hash = image.hash();
-        if self.trusted.iter().any(|(h, _)| *h == hash) {
+        if self.trusted.iter().any(|(held, _, _)| *held == hash) {
             return;
         }
-        self.trusted.insert(0, (hash, image.clone()));
-        self.trusted.truncate(TRUSTED_IMAGES);
+        let bytes = image.resident_bytes();
+        let limit = self.budget.limits.max_cached_image_bytes;
+        if bytes > limit {
+            return;
+        }
+        while self
+            .trusted_bytes
+            .checked_add(bytes)
+            .is_none_or(|total| total > limit)
+        {
+            let Some((_, _, removed)) = self.trusted.pop() else {
+                break;
+            };
+            self.trusted_bytes = self.trusted_bytes.saturating_sub(removed);
+        }
+        self.trusted.insert(0, (hash, image.clone(), bytes));
+        self.trusted_bytes += bytes;
     }
 
     /// The admitted image with this container hash.
     fn trusted_image(&self, hash: &[u8; 32]) -> Option<crate::snapshot::SnapshotImage> {
         self.trusted
             .iter()
-            .find(|(h, _)| h == hash)
-            .map(|(_, image)| image.clone())
+            .find(|(held, _, _)| held == hash)
+            .map(|(_, image, _)| image.clone())
     }
 
     /// Install one external snapshot container into this world.
@@ -3712,7 +4010,7 @@ mod tests {
     use super::*;
     use crate::host::NullHost;
     use crate::machine::Pending;
-    use crate::{load, VmConfig};
+    use crate::{load, VmConfig, WorldLimits};
     use lm_bytecode::{BcType, Func, Instr, Module};
 
     fn trivial_loaded() -> crate::LoadedModule {
@@ -4031,5 +4329,88 @@ mod tests {
             assert_eq!(world.mock_free.len(), 1, "start {ordinal}");
             assert!(stack.is_empty(), "start {ordinal}");
         }
+    }
+
+    #[test]
+    fn the_world_machine_limit_bounds_sibling_growth() {
+        let loaded = trivial_loaded();
+        let limits = WorldLimits {
+            max_machines: 2,
+            ..WorldLimits::default()
+        };
+        let mut world =
+            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
+        assert!(world.new_child(0).is_some());
+        assert!(world.new_child(0).is_none());
+        assert_eq!(world.machine_count(), 2);
+        assert_eq!(world.child_count(0), 1);
+    }
+
+    #[test]
+    fn two_machine_heaps_share_one_world_limit() {
+        let loaded = trivial_loaded();
+        let object = Object::Str("one".to_string());
+        let limits = WorldLimits {
+            max_heap_bytes: object.cost(),
+            max_heap_objects: 1,
+            ..WorldLimits::default()
+        };
+        let mut world =
+            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
+        world.machines[0]
+            .alloc(object.clone())
+            .expect("the first heap charge fits");
+        let child = world.new_child(0).expect("the child record fits");
+        assert_eq!(
+            world.machines[child as usize].alloc(object),
+            Err(FaultCode::HeapLimit)
+        );
+        assert_eq!(world.world_heap_objects(), 1);
+    }
+
+    #[test]
+    fn all_machines_share_one_instruction_budget() {
+        let loaded = trivial_loaded();
+        let limits = WorldLimits {
+            fuel: 1,
+            ..WorldLimits::default()
+        };
+        let mut world =
+            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
+        assert_eq!(world.run_root(), Outcome::Fault(FaultCode::OutOfFuel));
+        assert_eq!(world.world_fuel(), 0);
+    }
+
+    #[test]
+    fn the_proc_trace_stops_at_its_world_limit() {
+        let loaded = trivial_loaded();
+        let limits = WorldLimits {
+            max_trace_events: 1,
+            ..WorldLimits::default()
+        };
+        let mut world =
+            World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
+        world.trace_procs();
+        world.record(TraceEvent::Pause { proc: 0 });
+        world.record(TraceEvent::Resume { proc: 0 });
+        assert_eq!(world.trace(), &[TraceEvent::Pause { proc: 0 }]);
+    }
+
+    #[test]
+    fn a_failed_restore_reply_leaves_no_handle_object() {
+        let loaded = trivial_loaded();
+        let handle_bytes = Object::NativeVm { vm: 1 }.cost();
+        let config = VmConfig {
+            heap_bytes: handle_bytes,
+            ..VmConfig::default()
+        };
+        let mut world = World::new(&loaded, config, Box::new(NullHost));
+        world.core.result_ok = Some(0);
+        assert!(matches!(
+            world.prepare_restore_reply(0, 1),
+            Err(FaultCode::HeapLimit)
+        ));
+        assert_eq!(world.machines[0].vm.heap.live_count(), 0);
+        assert_eq!(world.world_heap_bytes(), 0);
     }
 }

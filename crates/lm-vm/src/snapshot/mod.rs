@@ -31,7 +31,7 @@ pub mod restore;
 pub mod write;
 
 pub use admit::{admit, AdmissionBudget};
-pub use codec::load_external;
+pub use codec::{load_external, DecodeBudget};
 pub use write::{CutError, CutReport};
 
 use crate::machine::VmId;
@@ -311,6 +311,54 @@ impl Image {
     pub fn root_state(&self) -> Option<ImageState> {
         self.machines.first().map(|m| m.state)
     }
+
+    /// Estimate the retained storage of this decoded image.
+    pub fn resident_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Image>();
+        bytes = bytes.saturating_add(self.funcs.len() * std::mem::size_of::<(u32, [u8; 32])>());
+        bytes = bytes.saturating_add(self.classes.len() * std::mem::size_of::<(u32, [u8; 32])>());
+        bytes = bytes.saturating_add(
+            self.types.len() * std::mem::size_of::<lm_bytecode::closed::ClosedType>(),
+        );
+        for ty in &self.types {
+            bytes = bytes.saturating_add(ty.child_count() * std::mem::size_of::<u32>());
+            if let lm_bytecode::closed::ClosedType::Fn(_, markers, _, row) = ty {
+                bytes = bytes.saturating_add(markers.len());
+                bytes = bytes.saturating_add(row.len() * std::mem::size_of::<u32>());
+            }
+        }
+        bytes = bytes
+            .saturating_add(self.envs.len() * std::mem::size_of::<lm_bytecode::closed::TypeEnv>());
+        for env in &self.envs {
+            bytes = bytes.saturating_add(env.types.len() * std::mem::size_of::<u32>());
+            for row in &env.rows {
+                bytes = bytes.saturating_add(std::mem::size_of::<Vec<u32>>());
+                bytes = bytes.saturating_add(row.len() * std::mem::size_of::<u32>());
+            }
+        }
+        bytes = bytes.saturating_add(self.machines.len() * std::mem::size_of::<ImageMachine>());
+        for machine in &self.machines {
+            bytes =
+                bytes.saturating_add(machine.objects.len() * std::mem::size_of::<ImageObject>());
+            for object in &machine.objects {
+                bytes = bytes.saturating_add(object.object.cost());
+            }
+            bytes = bytes.saturating_add(machine.frames.len() * std::mem::size_of::<ImageFrame>());
+            bytes = bytes.saturating_add(machine.locals.len() * std::mem::size_of::<Value>());
+            bytes = bytes.saturating_add(machine.operands.len() * std::mem::size_of::<Value>());
+            bytes =
+                bytes.saturating_add(machine.literals.len() * std::mem::size_of::<Option<u32>>());
+            if let Some(pending) = &machine.pending {
+                bytes = bytes.saturating_add(pending.args.len() * std::mem::size_of::<Value>());
+            }
+            if let Some(ImageTerminal::Fault(record)) = &machine.terminal {
+                bytes = bytes.saturating_add(record.message.len());
+            }
+            bytes =
+                bytes.saturating_add(machine.mailbox.queue.len() * std::mem::size_of::<Value>());
+        }
+        bytes
+    }
 }
 
 /// Where the bytes of one admitted image came from.
@@ -407,6 +455,11 @@ impl SnapshotImage {
         self.world.result_type
     }
 
+    /// The estimated storage retained by this admitted image.
+    pub fn resident_bytes(&self) -> usize {
+        self.bytes.len().saturating_add(self.world.resident_bytes())
+    }
+
     /// Check the result type of this image against an expected type
     /// digest (specification 17.1).
     ///
@@ -462,15 +515,14 @@ pub enum RestoreFail {
 /// The stage that rejected one container.
 ///
 /// Decoding protects the host from the byte stream. Admission proves
-/// resolved structure and accurate live types. The two stages report
+/// resolved structure. The two stages report
 /// separately, because an editor can produce an admission failure with
 /// no container behind it (specification section 9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageStage {
     /// The container bytes are malformed or excessive.
     Decode,
-    /// The image structure does not resolve, or a live type is not
-    /// accurate.
+    /// The image structure does not resolve.
     Admission,
 }
 
@@ -520,12 +572,7 @@ pub enum ImageReason {
     Order,
     /// Bytes remain after the last section.
     Trailing,
-    /// Admission cannot derive a type the image needs, or a derived
-    /// type does not match the target it names.
-    ///
-    /// `Layout` names a value that carries the wrong shape for a type
-    /// admission derived. This reason names the other half: the type
-    /// itself has no evidence.
+    /// Runtime type metadata has an invalid arity or relationship.
     Type,
     /// One aggregate admission budget ran out.
     Budget,
@@ -602,6 +649,8 @@ impl std::fmt::Display for ImageError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadLimits {
     pub max_bytes: usize,
+    /// The largest decoded allocation cost of one container.
+    pub max_alloc_bytes: usize,
     pub max_machines: u32,
     pub max_objects: u32,
     pub max_frames: u32,
@@ -622,6 +671,7 @@ impl Default for LoadLimits {
     fn default() -> LoadLimits {
         LoadLimits {
             max_bytes: 256 << 20,
+            max_alloc_bytes: 1 << 30,
             max_machines: 4096,
             max_objects: 1 << 22,
             max_frames: 1 << 20,

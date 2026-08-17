@@ -17,6 +17,8 @@ use lm_value::ObjRef;
 #[cfg(test)]
 use lm_value::Value;
 pub use shape::{dump_shapes, BoundaryPolicy, MapIndex, Object, ShapeDesc, SHAPES};
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// Object-table slots per page.
 const PAGE_SLOTS: usize = 1024;
@@ -110,11 +112,113 @@ impl GraphScratch {
     pub fn order(&self) -> &[ObjRef] {
         &self.order
     }
+
+    /// Release storage that no longer matches the heap table.
+    pub fn trim(&mut self, slots: usize) {
+        self.seen.truncate(slots);
+        self.ordinal.truncate(slots);
+        self.seen.shrink_to(slots);
+        self.ordinal.shrink_to(slots);
+        self.order.clear();
+        self.order.shrink_to(slots);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct HeapBudgetState {
+    bytes: usize,
+    objects: usize,
+}
+
+/// One shared heap ledger for all machines in a world.
+#[derive(Debug, Clone)]
+pub struct HeapBudget {
+    state: Rc<Cell<HeapBudgetState>>,
+    max_bytes: usize,
+    max_objects: usize,
+}
+
+impl HeapBudget {
+    /// Create one ledger with byte and object limits.
+    pub fn new(max_bytes: usize, max_objects: usize) -> HeapBudget {
+        HeapBudget {
+            state: Rc::new(Cell::new(HeapBudgetState::default())),
+            max_bytes,
+            max_objects,
+        }
+    }
+
+    /// The logical bytes charged to this ledger.
+    pub fn used_bytes(&self) -> usize {
+        self.state.get().bytes
+    }
+
+    /// The live objects charged to this ledger.
+    pub fn live_objects(&self) -> usize {
+        self.state.get().objects
+    }
+
+    fn would_exceed(&self, bytes: usize, objects: usize) -> bool {
+        let state = self.state.get();
+        state
+            .bytes
+            .checked_add(bytes)
+            .is_none_or(|total| total > self.max_bytes)
+            || state
+                .objects
+                .checked_add(objects)
+                .is_none_or(|total| total > self.max_objects)
+    }
+
+    /// Charge one allocation to the shared ledger.
+    ///
+    /// The caller tests `Heap::would_exceed`, `would_exceed_growth`, or
+    /// `would_exceed_batch` first, and each of those reads this ledger.
+    /// The rule is a debug assertion, because a release build runs this
+    /// call once for each allocated object, and a second test of the
+    /// same rule costs the allocation path a `Cell` read and two
+    /// checked additions.
+    ///
+    /// A caller that skips its test over-charges the ledger instead of
+    /// raising a fault. The debug build and the test suite catch that
+    /// mistake.
+    fn charge(&self, bytes: usize, objects: usize) {
+        debug_assert!(
+            !self.would_exceed(bytes, objects),
+            "a checked heap charge fits the world budget"
+        );
+        let state = self.state.get();
+        self.state.set(HeapBudgetState {
+            bytes: state.bytes + bytes,
+            objects: state.objects + objects,
+        });
+    }
+
+    fn release(&self, bytes: usize, objects: usize) {
+        let state = self.state.get();
+        debug_assert!(state.bytes >= bytes);
+        debug_assert!(state.objects >= objects);
+        self.state.set(HeapBudgetState {
+            bytes: state.bytes.saturating_sub(bytes),
+            objects: state.objects.saturating_sub(objects),
+        });
+    }
+}
+
+/// A terminal heap compaction failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactError {
+    /// A required host allocation failed.
+    Allocation,
+    /// A live value names no live object.
+    InvalidReference,
 }
 
 /// The VM heap.
 pub struct Heap {
     pages: Vec<Vec<Entry>>,
+    /// The latest generation of every slot ever allocated.
+    generations: Vec<u32>,
     free: Vec<u32>,
     live: usize,
     used_bytes: usize,
@@ -129,12 +233,24 @@ pub struct Heap {
     /// frozen object never changes, so an entry stays valid until the
     /// slot is freed.
     digests: std::collections::HashMap<u32, ([u8; 32], u32)>,
+    /// The aggregate ledger of the owning world.
+    budget: Option<HeapBudget>,
 }
 
 impl Heap {
     pub fn new(cap_bytes: usize) -> Heap {
+        Heap::with_optional_budget(cap_bytes, None)
+    }
+
+    /// Create a heap that charges one proc-tree ledger.
+    pub fn with_budget(cap_bytes: usize, budget: HeapBudget) -> Heap {
+        Heap::with_optional_budget(cap_bytes, Some(budget))
+    }
+
+    fn with_optional_budget(cap_bytes: usize, budget: Option<HeapBudget>) -> Heap {
         Heap {
             pages: Vec::new(),
+            generations: Vec::new(),
             free: Vec::new(),
             live: 0,
             used_bytes: 0,
@@ -143,6 +259,7 @@ impl Heap {
             host_roots: Vec::new(),
             scratch: GraphScratch::default(),
             digests: std::collections::HashMap::new(),
+            budget,
         }
     }
 
@@ -177,7 +294,30 @@ impl Heap {
 
     /// True when charging `cost` more bytes would exceed the cap.
     pub fn would_exceed(&self, cost: usize) -> bool {
-        self.used_bytes + cost > self.cap_bytes
+        self.would_exceed_batch(cost, 1)
+    }
+
+    /// True when object growth would exceed a byte limit.
+    pub fn would_exceed_growth(&self, cost: usize) -> bool {
+        self.used_bytes
+            .checked_add(cost)
+            .is_none_or(|total| total > self.cap_bytes)
+            || self
+                .budget
+                .as_ref()
+                .is_some_and(|budget| budget.would_exceed(cost, 0))
+    }
+
+    /// True when one batch would exceed a heap limit.
+    pub fn would_exceed_batch(&self, bytes: usize, objects: usize) -> bool {
+        self.used_bytes
+            .checked_add(bytes)
+            .is_none_or(|total| total > self.cap_bytes)
+            || self.live.checked_add(objects).is_none()
+            || self
+                .budget
+                .as_ref()
+                .is_some_and(|budget| budget.would_exceed(bytes, objects))
     }
 
     fn entry(&self, slot: u32) -> &Entry {
@@ -198,6 +338,9 @@ impl Heap {
         };
         self.used_bytes += cost;
         self.live += 1;
+        if let Some(budget) = &self.budget {
+            budget.charge(cost, 1);
+        }
         let slot = match self.free.pop() {
             Some(slot) => slot,
             None => {
@@ -211,11 +354,15 @@ impl Heap {
                 }
                 let page_idx = self.pages.len() - 1;
                 let page = &mut self.pages[page_idx];
+                let slot = page_idx * PAGE_SLOTS + page.len();
+                if self.generations.len() <= slot {
+                    self.generations.resize(slot + 1, 0);
+                }
                 page.push(Entry {
-                    generation: 0,
+                    generation: self.generations[slot],
                     live: None,
                 });
-                (page_idx * PAGE_SLOTS + page.len() - 1) as u32
+                slot as u32
             }
         };
         let entry = self.entry_mut(slot);
@@ -225,9 +372,46 @@ impl Heap {
         ObjRef { slot, generation }
     }
 
+    /// Allocate one object with a fallible table reservation.
+    pub fn try_alloc(&mut self, object: Object) -> Result<ObjRef, Object> {
+        if self.would_exceed(object.cost()) {
+            return Err(object);
+        }
+        if self.free.is_empty() {
+            let need_page = self
+                .pages
+                .last()
+                .map(|page| page.len() == PAGE_SLOTS)
+                .unwrap_or(true);
+            if need_page {
+                if self.pages.try_reserve(1).is_err() || self.generations.try_reserve(1).is_err() {
+                    return Err(object);
+                }
+                let mut page = Vec::new();
+                if page.try_reserve(1).is_err() {
+                    return Err(object);
+                }
+                self.pages.push(page);
+            } else if self
+                .pages
+                .last_mut()
+                .expect("the last page exists")
+                .try_reserve(1)
+                .is_err()
+                || self.generations.try_reserve(1).is_err()
+            {
+                return Err(object);
+            }
+        }
+        Ok(self.alloc(object))
+    }
+
     /// Read an object. Return `None` for a stale or dead reference.
     pub fn try_get(&self, r: ObjRef) -> Option<&Object> {
-        let entry = self.entry(r.slot);
+        let entry = self
+            .pages
+            .get(r.slot as usize / PAGE_SLOTS)?
+            .get(r.slot as usize % PAGE_SLOTS)?;
         if entry.generation != r.generation {
             return None;
         }
@@ -278,6 +462,13 @@ impl Heap {
         let old_cost = header.bytes;
         header.bytes = new_cost;
         self.used_bytes = self.used_bytes - old_cost + new_cost;
+        if let Some(budget) = &self.budget {
+            if new_cost >= old_cost {
+                budget.charge(new_cost - old_cost, 0);
+            } else {
+                budget.release(old_cost - new_cost, 0);
+            }
+        }
     }
 
     /// Free one live object now.
@@ -291,8 +482,12 @@ impl Heap {
         assert_eq!(entry.generation, r.generation, "stale object reference");
         let (header, _) = entry.live.take().expect("live object");
         entry.generation = entry.generation.wrapping_add(1);
+        self.generations[slot as usize] = entry.generation;
         self.used_bytes -= header.bytes;
         self.live -= 1;
+        if let Some(budget) = &self.budget {
+            budget.release(header.bytes, 1);
+        }
         self.free.push(slot);
         self.digests.remove(&slot);
     }
@@ -356,7 +551,7 @@ impl Heap {
     /// `lm-graph` marks the reachable set first and passes the test
     /// here. The heap never decides reachability.
     pub fn sweep(&mut self, keep: impl Fn(u32) -> bool) {
-        self.collections += 1;
+        self.collections = self.collections.saturating_add(1);
         let mut freed_bytes = 0usize;
         let mut freed = 0usize;
         // Most heaps hold no digest at all. The lookup per freed slot
@@ -372,6 +567,7 @@ impl Heap {
                 freed_bytes += header.bytes;
                 freed += 1;
                 entry.generation = entry.generation.wrapping_add(1);
+                self.generations[slot as usize] = entry.generation;
                 self.free.push(slot);
                 if has_digests {
                     self.digests.remove(&slot);
@@ -380,6 +576,113 @@ impl Heap {
         }
         self.used_bytes -= freed_bytes;
         self.live -= freed;
+        if let Some(budget) = &self.budget {
+            budget.release(freed_bytes, freed);
+        }
+    }
+
+    /// Release trailing empty pages and their work tables.
+    pub fn trim_free_pages(&mut self) {
+        while self
+            .pages
+            .last()
+            .is_some_and(|page| page.iter().all(|entry| entry.live.is_none()))
+        {
+            self.pages.pop();
+        }
+        let slots = self.slot_count();
+        self.free.retain(|slot| (*slot as usize) < slots);
+        self.free.shrink_to_fit();
+        self.scratch.trim(slots);
+    }
+
+    /// Rebuild all live objects into a dense table.
+    ///
+    /// The caller must collect unreachable objects first. `roots`
+    /// contains each live reference stored outside the heap.
+    /// Compaction also remaps registered host roots.
+    pub fn compact_live(&mut self, roots: &mut [ObjRef]) -> Result<(), CompactError> {
+        let mut order = Vec::new();
+        order
+            .try_reserve_exact(self.live)
+            .map_err(|_| CompactError::Allocation)?;
+        self.for_each_live(|reference, frozen, _| order.push((reference, frozen)));
+
+        let mut mapping = std::collections::HashMap::new();
+        mapping
+            .try_reserve(order.len())
+            .map_err(|_| CompactError::Allocation)?;
+        for (slot, (reference, _)) in order.iter().enumerate() {
+            let slot = u32::try_from(slot).map_err(|_| CompactError::Allocation)?;
+            let generation = self
+                .generations
+                .get(slot as usize)
+                .copied()
+                .map(|held| held.wrapping_add(1))
+                .unwrap_or(0);
+            mapping.insert(*reference, ObjRef { slot, generation });
+        }
+
+        let map_roots = |source: &[ObjRef]| -> Result<Vec<ObjRef>, CompactError> {
+            let mut mapped = Vec::new();
+            mapped
+                .try_reserve_exact(source.len())
+                .map_err(|_| CompactError::Allocation)?;
+            for reference in source {
+                mapped.push(
+                    mapping
+                        .get(reference)
+                        .copied()
+                        .ok_or(CompactError::InvalidReference)?,
+                );
+            }
+            Ok(mapped)
+        };
+        let mapped_roots = map_roots(roots)?;
+        let mapped_host_roots = map_roots(&self.host_roots)?;
+
+        let mut compacted = Heap::new(self.cap_bytes);
+        for (reference, frozen) in &order {
+            let mut missing = false;
+            let object = self
+                .get(*reference)
+                .try_clone_remapped(|child| match mapping.get(&child).copied() {
+                    Some(mapped) => mapped,
+                    None => {
+                        missing = true;
+                        child
+                    }
+                })
+                .map_err(|_| CompactError::Allocation)?;
+            if missing {
+                return Err(CompactError::InvalidReference);
+            }
+            let expected = mapping[reference];
+            let mapped = compacted
+                .try_alloc(object)
+                .map_err(|_| CompactError::Allocation)?;
+            if mapped.slot != expected.slot {
+                return Err(CompactError::InvalidReference);
+            }
+            let entry = compacted.entry_mut(mapped.slot);
+            entry.generation = expected.generation;
+            compacted.generations[mapped.slot as usize] = expected.generation;
+            if *frozen {
+                compacted.set_frozen(expected);
+            }
+        }
+        if compacted.live != self.live || compacted.used_bytes != self.used_bytes {
+            return Err(CompactError::InvalidReference);
+        }
+
+        self.pages = std::mem::take(&mut compacted.pages);
+        self.generations = std::mem::take(&mut compacted.generations);
+        self.free = std::mem::take(&mut compacted.free);
+        self.host_roots = mapped_host_roots;
+        self.scratch = std::mem::take(&mut compacted.scratch);
+        self.digests = std::mem::take(&mut compacted.digests);
+        roots.copy_from_slice(&mapped_roots);
+        Ok(())
     }
 
     /// Visit every live object in slot order.
@@ -394,6 +697,14 @@ impl Heap {
                     f(r, header.frozen, object);
                 }
             }
+        }
+    }
+}
+
+impl Drop for Heap {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.budget {
+            budget.release(self.used_bytes, self.live);
         }
     }
 }
@@ -494,5 +805,68 @@ mod tests {
         assert_eq!(fresh.slot, r.slot);
         assert_eq!(heap.cached_digest(fresh), None);
         assert_eq!(heap.digest_cache_len(), 0);
+    }
+
+    #[test]
+    fn two_heaps_charge_one_shared_budget() {
+        let cost = str_obj("one").cost();
+        let budget = HeapBudget::new(cost, 1);
+        let mut first = Heap::with_budget(1 << 20, budget.clone());
+        let second = Heap::with_budget(1 << 20, budget.clone());
+        assert!(!first.would_exceed(cost));
+        let value = first.alloc(str_obj("one"));
+        assert_eq!(budget.used_bytes(), cost);
+        assert!(second.would_exceed(cost));
+        first.free(value);
+        assert_eq!(budget.used_bytes(), 0);
+        assert!(!second.would_exceed(cost));
+    }
+
+    #[test]
+    fn trimmed_slots_keep_their_generation() {
+        let mut heap = Heap::new(1 << 20);
+        let stale = heap.alloc(str_obj("old"));
+        heap.sweep(|_| false);
+        heap.trim_free_pages();
+        assert_eq!(heap.slot_count(), 0);
+        assert_eq!(heap.try_get(stale), None);
+        let fresh = heap.alloc(str_obj("new"));
+        assert_eq!(fresh.slot, stale.slot);
+        assert_ne!(fresh.generation, stale.generation);
+        assert_eq!(heap.try_get(stale), None);
+    }
+
+    #[test]
+    fn terminal_compaction_removes_dead_slot_storage() {
+        let budget = HeapBudget::new(1 << 20, 2048);
+        let mut heap = Heap::with_budget(1 << 20, budget.clone());
+        for _ in 0..1500 {
+            heap.alloc(str_obj("dead"));
+        }
+        let mut root = heap.alloc(str_obj("live"));
+        heap.sweep(|slot| slot == root.slot);
+        assert_eq!(heap.live_count(), 1);
+        assert!(heap.slot_count() > 1);
+        let bytes = heap.used_bytes();
+        heap.compact_live(std::slice::from_mut(&mut root))
+            .expect("the live object compacts");
+        assert_eq!(root.slot, 0);
+        assert_eq!(heap.slot_count(), 1);
+        assert_eq!(heap.used_bytes(), bytes);
+        assert_eq!(budget.used_bytes(), bytes);
+        assert_eq!(heap.get(root), &str_obj("live"));
+    }
+
+    #[test]
+    fn terminal_compaction_does_not_revive_a_stale_reference() {
+        let mut heap = Heap::new(1 << 20);
+        let stale = heap.alloc(str_obj("old"));
+        heap.free(stale);
+        let mut root = heap.alloc(str_obj("live"));
+        heap.compact_live(std::slice::from_mut(&mut root))
+            .expect("the live object compacts");
+        assert_eq!(heap.try_get(stale), None);
+        assert_ne!(root.generation, stale.generation);
+        assert_eq!(heap.get(root), &str_obj("live"));
     }
 }

@@ -352,9 +352,8 @@ other machine control operation stays outside `as_call`.
   property of one boundary, and a factorial walks thousands of
   instructions, so the case walks the first forty boundaries of each
   pure example.
-- **The trusted-image table is bounded.** One world remembers
-  sixty-four images. An evicted image is checked again on its next
-  restore, which is safe and slower.
+- **The trusted-image table has a byte-bounded cache.** Eviction makes
+  the next restore repeat admission. The cache never rejects an image.
 - **A block record names its target by ordinal alone.** The generation
   comes from the restored target, so a restored block never reads as a
   dead peer. A proc slot is never reused today, so the two always

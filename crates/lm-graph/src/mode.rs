@@ -29,6 +29,7 @@ pub fn collect(heap: &mut Heap, roots: impl IntoIterator<Item = ObjRef>) {
         .expect("the mark mode has no limit and no rejecting visitor");
     heap.sweep(|slot| scratch.seen(slot));
     heap.put_scratch(scratch);
+    heap.trim_free_pages();
 }
 
 // ---------------------------------------------------------------
@@ -204,7 +205,17 @@ fn copy_value(
     // Pass 1: reach the graph in canonical order and check every
     // shape. Nothing in the destination changes yet.
     let discovered = walk(src, &mut scratch, &[root], limits, &mut CopyCheck);
-    let result = discovered.and_then(|_| copy_passes(src, dst, dst_roots, &scratch, root, mode));
+    let result = discovered.and_then(|cost| {
+        let bytes = usize::try_from(cost.bytes).map_err(|_| FaultCode::HeapLimit)?;
+        let objects = usize::try_from(cost.objects).map_err(|_| FaultCode::HeapLimit)?;
+        if dst.would_exceed_batch(bytes, objects) {
+            collect(dst, dst_roots.iter().copied());
+            if dst.would_exceed_batch(bytes, objects) {
+                return Err(FaultCode::HeapLimit);
+            }
+        }
+        copy_passes(src, dst, dst_roots, &scratch, root, mode)
+    });
     src.put_scratch(scratch);
     result
 }
@@ -238,9 +249,18 @@ pub fn copy_within(
     // Pass 1 is the shared visitor, so the one-heap answer and the
     // two-heap answer cannot drift.
     let discovered = walk(heap, &mut scratch, &[root], limits, &mut CopyCheck);
-    let result = discovered.and_then(|_| {
+    let result = discovered.and_then(|cost| {
+        let bytes = usize::try_from(cost.bytes).map_err(|_| FaultCode::HeapLimit)?;
+        let objects = usize::try_from(cost.objects).map_err(|_| FaultCode::HeapLimit)?;
         heap.push_host_root(root);
-        let out = copy_passes_within(heap, roots, &scratch, root);
+        if heap.would_exceed_batch(bytes, objects) {
+            collect(heap, roots.iter().copied());
+        }
+        let out = if heap.would_exceed_batch(bytes, objects) {
+            Err(FaultCode::HeapLimit)
+        } else {
+            copy_passes_within(heap, roots, &scratch, root)
+        };
         heap.pop_host_root(root);
         out
     });

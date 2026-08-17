@@ -56,6 +56,15 @@ pub fn hash(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
 
+/// Hash several byte slices without joining them first.
+pub fn hash_parts(parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    *hasher.finalize().as_bytes()
+}
+
 /// A visitor that rejects a graph the digest cannot encode.
 struct DigestCheck<'h> {
     heap: &'h Heap,

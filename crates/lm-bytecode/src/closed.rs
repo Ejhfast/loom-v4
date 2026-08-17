@@ -72,6 +72,20 @@ pub enum ClosedType {
 }
 
 impl ClosedType {
+    /// The number of child type indices in this node.
+    pub fn child_count(&self) -> usize {
+        match self {
+            ClosedType::Inst(_, args) | ClosedType::Tuple(args) => args.len(),
+            ClosedType::List(_)
+            | ClosedType::Vm(_)
+            | ClosedType::Snapshot(_)
+            | ClosedType::Op(_, _) => 1,
+            ClosedType::Map(_, _) | ClosedType::PendingCall(_, _) | ClosedType::Handle(_, _) => 2,
+            ClosedType::Fn(params, _, _, _) => params.len() + 1,
+            _ => 0,
+        }
+    }
+
     /// Every child index this node names, in canonical order.
     pub fn children(&self) -> Vec<ClosedTypeId> {
         match self {
@@ -145,6 +159,27 @@ pub struct TypeEnvFull {
     /// True when the closed type nodes reached their cap, false when
     /// the environment nodes did.
     pub types: bool,
+}
+
+/// One prepared import into a world type table.
+///
+/// Preparation resolves every source ordinal and reserves destination
+/// storage. Commit then appends the missing records without a limit
+/// check or an allocation.
+#[derive(Debug)]
+pub struct TypeImportPlan {
+    types: Vec<(ClosedType, u32)>,
+    type_index: HashMap<ClosedType, ClosedTypeId>,
+    envs: Vec<TypeEnv>,
+    env_index: HashMap<TypeEnv, TypeEnvId>,
+    env_map: Vec<TypeEnvId>,
+}
+
+impl TypeImportPlan {
+    /// The destination identifier of each source environment.
+    pub fn env_map(&self) -> &[TypeEnvId] {
+        &self.env_map
+    }
 }
 
 /// The default closed type node cap of one world.
@@ -249,6 +284,192 @@ impl TypeEnvs {
     /// One environment by index.
     pub fn env(&self, id: TypeEnvId) -> Option<&TypeEnv> {
         self.envs.get(id.0 as usize)
+    }
+
+    /// Reserve table storage without adding a record.
+    pub fn reserve_capacity(&mut self, types: usize, envs: usize) -> Result<(), TypeEnvFull> {
+        self.types
+            .try_reserve_exact(types)
+            .map_err(|_| TypeEnvFull { types: true })?;
+        self.digests
+            .try_reserve_exact(types)
+            .map_err(|_| TypeEnvFull { types: true })?;
+        self.depths
+            .try_reserve_exact(types)
+            .map_err(|_| TypeEnvFull { types: true })?;
+        self.type_index
+            .try_reserve(types)
+            .map_err(|_| TypeEnvFull { types: true })?;
+        self.envs
+            .try_reserve_exact(envs)
+            .map_err(|_| TypeEnvFull { types: false })?;
+        self.env_index
+            .try_reserve(envs)
+            .map_err(|_| TypeEnvFull { types: false })?;
+        Ok(())
+    }
+
+    /// Prepare one bottom-up import without changing table contents.
+    ///
+    /// Each source type child names an earlier source entry. Each
+    /// source environment names the source type table.
+    pub fn prepare_import(
+        &mut self,
+        source_types: &[ClosedType],
+        source_envs: &[TypeEnv],
+    ) -> Result<TypeImportPlan, TypeEnvFull> {
+        let mut type_map: Vec<ClosedTypeId> = Vec::new();
+        type_map
+            .try_reserve_exact(source_types.len())
+            .map_err(|_| TypeEnvFull { types: true })?;
+        let mut new_types: Vec<(ClosedType, u32)> = Vec::new();
+        let mut planned_types: HashMap<ClosedType, ClosedTypeId> = HashMap::new();
+        planned_types
+            .try_reserve(source_types.len())
+            .map_err(|_| TypeEnvFull { types: true })?;
+
+        for source in source_types {
+            let mapped = source.remap(|child| type_map[child as usize]);
+            if let Some(id) = self.type_index.get(&mapped) {
+                type_map.push(*id);
+                continue;
+            }
+            if let Some(id) = planned_types.get(&mapped) {
+                type_map.push(*id);
+                continue;
+            }
+            let next = self
+                .types
+                .len()
+                .checked_add(new_types.len())
+                .and_then(|len| u32::try_from(len).ok())
+                .ok_or(TypeEnvFull { types: true })?;
+            if next >= self.max_types {
+                return Err(TypeEnvFull { types: true });
+            }
+            let mut depth = 1u32;
+            for child in mapped.children() {
+                let child_depth = if (child as usize) < self.depths.len() {
+                    self.depths[child as usize]
+                } else {
+                    let at = child as usize - self.depths.len();
+                    new_types
+                        .get(at)
+                        .map(|entry| entry.1)
+                        .ok_or(TypeEnvFull { types: true })?
+                };
+                depth = depth.max(
+                    child_depth
+                        .checked_add(1)
+                        .ok_or(TypeEnvFull { types: true })?,
+                );
+            }
+            if depth > MAX_CLOSED_DEPTH {
+                return Err(TypeEnvFull { types: true });
+            }
+            planned_types.insert(mapped.clone(), next);
+            new_types.push((mapped, depth));
+            type_map.push(next);
+        }
+
+        let mut env_map: Vec<TypeEnvId> = Vec::new();
+        env_map
+            .try_reserve_exact(source_envs.len())
+            .map_err(|_| TypeEnvFull { types: false })?;
+        let mut new_envs: Vec<TypeEnv> = Vec::new();
+        let mut planned_envs: HashMap<TypeEnv, TypeEnvId> = HashMap::new();
+        planned_envs
+            .try_reserve(source_envs.len())
+            .map_err(|_| TypeEnvFull { types: false })?;
+
+        for source in source_envs {
+            let mut types = Vec::new();
+            types
+                .try_reserve_exact(source.types.len())
+                .map_err(|_| TypeEnvFull { types: false })?;
+            types.extend(source.types.iter().map(|ty| type_map[*ty as usize]));
+            let mut rows = Vec::new();
+            rows.try_reserve_exact(source.rows.len())
+                .map_err(|_| TypeEnvFull { types: false })?;
+            for source_row in &source.rows {
+                let mut row = Vec::new();
+                row.try_reserve_exact(source_row.len())
+                    .map_err(|_| TypeEnvFull { types: false })?;
+                row.extend_from_slice(source_row);
+                rows.push(row);
+            }
+            let env = TypeEnv { types, rows };
+            if env.is_empty() {
+                env_map.push(TypeEnvId::EMPTY);
+                continue;
+            }
+            if let Some(id) = self.env_index.get(&env) {
+                env_map.push(*id);
+                continue;
+            }
+            if let Some(id) = planned_envs.get(&env) {
+                env_map.push(*id);
+                continue;
+            }
+            let next = self
+                .envs
+                .len()
+                .checked_add(new_envs.len())
+                .and_then(|len| u32::try_from(len).ok())
+                .ok_or(TypeEnvFull { types: false })?;
+            if next >= self.max_envs {
+                return Err(TypeEnvFull { types: false });
+            }
+            let id = TypeEnvId(next);
+            planned_envs.insert(env.clone(), id);
+            new_envs.push(env);
+            env_map.push(id);
+        }
+
+        self.types
+            .try_reserve_exact(new_types.len())
+            .map_err(|_| TypeEnvFull { types: true })?;
+        self.digests
+            .try_reserve_exact(new_types.len())
+            .map_err(|_| TypeEnvFull { types: true })?;
+        self.depths
+            .try_reserve_exact(new_types.len())
+            .map_err(|_| TypeEnvFull { types: true })?;
+        self.type_index
+            .try_reserve(new_types.len())
+            .map_err(|_| TypeEnvFull { types: true })?;
+        self.envs
+            .try_reserve_exact(new_envs.len())
+            .map_err(|_| TypeEnvFull { types: false })?;
+        self.env_index
+            .try_reserve(new_envs.len())
+            .map_err(|_| TypeEnvFull { types: false })?;
+
+        Ok(TypeImportPlan {
+            types: new_types,
+            envs: new_envs,
+            type_index: planned_types,
+            env_index: planned_envs,
+            env_map,
+        })
+    }
+
+    /// Commit one prepared import.
+    pub fn commit_import(&mut self, plan: TypeImportPlan) {
+        for (node, depth) in plan.types {
+            self.types.push(node);
+            self.digests.push(None);
+            self.depths.push(depth);
+        }
+        for (node, id) in plan.type_index {
+            self.type_index.insert(node, id);
+        }
+        for env in plan.envs {
+            self.envs.push(env);
+        }
+        for (env, id) in plan.env_index {
+            self.env_index.insert(env, id);
+        }
     }
 
     /// Intern one closed type node.

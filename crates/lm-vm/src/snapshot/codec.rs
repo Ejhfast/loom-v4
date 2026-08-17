@@ -35,6 +35,49 @@ use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
 use lm_heap::{MapIndex, Object};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
+use std::cell::Cell;
+
+/// One aggregate allocation ledger for a decoded container.
+#[derive(Debug)]
+pub struct DecodeBudget {
+    limit: usize,
+    used: Cell<usize>,
+}
+
+impl DecodeBudget {
+    /// Create one allocation ledger with an exact limit.
+    pub fn new(limit: usize) -> DecodeBudget {
+        DecodeBudget {
+            limit,
+            used: Cell::new(0),
+        }
+    }
+
+    /// The logical allocation cost already charged.
+    pub fn used(&self) -> usize {
+        self.used.get()
+    }
+
+    /// The logical allocation cost that remains.
+    pub fn remaining(&self) -> usize {
+        self.limit.saturating_sub(self.used.get())
+    }
+
+    fn charge(&self, bytes: usize, what: &str) -> Result<(), ImageError> {
+        let next =
+            self.used.get().checked_add(bytes).ok_or_else(|| {
+                ImageError::new(ImageReason::LimitExceeded, "decode cost overflow")
+            })?;
+        if next > self.limit {
+            return Err(ImageError::new(
+                ImageReason::LimitExceeded,
+                format!("the decoded {what} passes the allocation budget"),
+            ));
+        }
+        self.used.set(next);
+        Ok(())
+    }
+}
 
 /// The domain separator of the container hash.
 const HASH_DOMAIN: &[u8] = b"lm-snapshot-container-v1\0";
@@ -49,10 +92,13 @@ const V_UNINIT: u8 = 5;
 
 /// The container hash of one byte prefix.
 pub fn container_hash(prefix: &[u8]) -> [u8; 32] {
-    let mut input = Vec::with_capacity(HASH_DOMAIN.len() + prefix.len());
-    input.extend_from_slice(HASH_DOMAIN);
-    input.extend_from_slice(prefix);
-    lm_graph::digest::hash(&input)
+    lm_graph::digest::hash_parts(&[HASH_DOMAIN, prefix])
+}
+
+fn stored_container_hash(bytes: &[u8]) -> [u8; 32] {
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&bytes[bytes.len() - 32..]);
+    hash
 }
 
 // ---------------------------------------------------------------
@@ -567,11 +613,12 @@ fn encode_limits(out: &mut Out, limits: &ImageLimits) {
 // The reader.
 // ---------------------------------------------------------------
 
-struct Cursor<'b> {
+struct Cursor<'b, 'd> {
     bytes: &'b [u8],
     at: usize,
     /// The end of the section the reader is inside.
     end: usize,
+    budget: &'d DecodeBudget,
 }
 
 type Read<T> = Result<T, ImageError>;
@@ -580,12 +627,13 @@ fn err<T>(reason: ImageReason, detail: impl Into<String>) -> Read<T> {
     Err(ImageError::new(reason, detail))
 }
 
-impl<'b> Cursor<'b> {
-    fn new(bytes: &'b [u8]) -> Cursor<'b> {
+impl<'b, 'd> Cursor<'b, 'd> {
+    fn new(bytes: &'b [u8], budget: &'d DecodeBudget) -> Cursor<'b, 'd> {
         Cursor {
             bytes,
             at: 0,
             end: bytes.len(),
+            budget,
         }
     }
 
@@ -704,8 +752,32 @@ impl<'b> Cursor<'b> {
     fn str(&mut self, cap: u32) -> Read<String> {
         let n = self.count(cap as u64, "string byte")?;
         let bytes = self.take(n)?;
-        String::from_utf8(bytes.to_vec())
+        let copy = self.copy_bytes(bytes, "string")?;
+        String::from_utf8(copy)
             .map_err(|_| ImageError::new(ImageReason::Layout, "a string is not valid UTF-8"))
+    }
+
+    /// Reserve one decoded vector before its first element.
+    fn vector<T>(&self, count: usize, what: &str) -> Read<Vec<T>> {
+        let bytes = std::mem::size_of::<T>()
+            .checked_mul(count)
+            .ok_or_else(|| ImageError::new(ImageReason::LimitExceeded, "decode cost overflow"))?;
+        self.budget.charge(bytes, what)?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(count).map_err(|_| {
+            ImageError::new(
+                ImageReason::LimitExceeded,
+                format!("the decoded {what} allocation failed"),
+            )
+        })?;
+        Ok(values)
+    }
+
+    /// Copy decoded bytes through a fallible reservation.
+    fn copy_bytes(&self, source: &[u8], what: &str) -> Read<Vec<u8>> {
+        let mut bytes = self.vector(source.len(), what)?;
+        bytes.extend_from_slice(source);
+        Ok(bytes)
     }
 
     /// One optional ordinal. `count` is the exclusive upper bound, so
@@ -756,14 +828,23 @@ pub fn load_external(
             ),
         );
     }
-    let image = decode(bytes, limits)?;
-    let mut budget = AdmissionBudget::default();
-    let identity = super::admit::prove(&image, loaded, &mut budget)?;
+    let decode_budget = DecodeBudget::new(limits.max_alloc_bytes);
+    let (image, hash) = decode_inner(bytes, limits, &decode_budget)?;
+    decode_budget.charge(bytes.len(), "container copy")?;
+    let mut admission_budget = AdmissionBudget::default();
+    let identity = super::admit::prove(&image, loaded, &mut admission_budget)?;
     // The decoder accepts one byte string for one image, so the bytes
     // it received are the canonical bytes of the admitted image.
-    let hash = container_hash(&bytes[..bytes.len() - 32]);
+    let mut owned = Vec::new();
+    owned.try_reserve_exact(bytes.len()).map_err(|_| {
+        ImageError::new(
+            ImageReason::LimitExceeded,
+            "the container copy allocation failed",
+        )
+    })?;
+    owned.extend_from_slice(bytes);
     Ok(SnapshotImage {
-        bytes: std::sync::Arc::new(bytes.to_vec()),
+        bytes: std::sync::Arc::new(owned),
         world: std::sync::Arc::new(image),
         hash,
         identity,
@@ -784,7 +865,7 @@ pub(super) fn from_trusted_capture(
     limit: usize,
 ) -> Result<SnapshotImage, SnapshotFail> {
     let bytes = encode(&image, limit)?;
-    let hash = container_hash(&bytes[..bytes.len() - 32]);
+    let hash = stored_container_hash(&bytes);
     Ok(SnapshotImage {
         bytes: std::sync::Arc::new(bytes),
         world: std::sync::Arc::new(image),
@@ -818,7 +899,7 @@ pub(super) fn seal_admitted(
             format!("the admitted image holds a live {kind} attachment"),
         ),
     })?;
-    let hash = container_hash(&bytes[..bytes.len() - 32]);
+    let hash = stored_container_hash(&bytes);
     Ok(SnapshotImage {
         bytes: std::sync::Arc::new(bytes),
         world: std::sync::Arc::new(image),
@@ -834,6 +915,24 @@ pub(super) fn seal_admitted(
 /// it establishes no interpreter invariant, so its result is ordinary
 /// `Image` data that `admit` must still prove.
 pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
+    let mut budget = DecodeBudget::new(limits.max_alloc_bytes);
+    decode_with_budget(bytes, limits, &mut budget)
+}
+
+/// Decode one container with a caller-owned allocation ledger.
+pub fn decode_with_budget(
+    bytes: &[u8],
+    limits: LoadLimits,
+    budget: &mut DecodeBudget,
+) -> Result<Image, ImageError> {
+    decode_inner(bytes, limits, budget).map(|(image, _)| image)
+}
+
+fn decode_inner(
+    bytes: &[u8],
+    limits: LoadLimits,
+    budget: &DecodeBudget,
+) -> Result<(Image, [u8; 32]), ImageError> {
     if bytes.len() > limits.max_bytes {
         return err(
             ImageReason::LimitExceeded,
@@ -850,7 +949,8 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
             "the container is shorter than its frame",
         );
     }
-    let mut cur = Cursor::new(bytes);
+    budget.charge(std::mem::size_of::<Image>(), "image record")?;
+    let mut cur = Cursor::new(bytes, budget);
     let magic = cur.take(MAGIC.len())?;
     if magic != MAGIC {
         return err(ImageReason::Magic, "the container magic is not `LMSNAP`");
@@ -907,7 +1007,7 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
             ),
         );
     }
-    let mut table: Vec<(u32, u64, u64)> = Vec::with_capacity(count);
+    let mut table: Vec<(u32, u64, u64)> = cur.vector(count, "section table")?;
     for _ in 0..count {
         let kind = cur.u32()?;
         let offset = cur.u32()? as u64;
@@ -943,12 +1043,13 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
             "bytes remain between the last section and the container hash",
         );
     }
-    let section = |idx: usize| -> Cursor<'_> {
+    let section = |idx: usize| -> Cursor<'_, '_> {
         let (_, offset, length) = table[idx];
         Cursor {
             bytes,
             at: offset as usize,
             end: (offset + length) as usize,
+            budget,
         }
     };
     // Section 1: the header. The machine count is checked against the
@@ -977,7 +1078,7 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
     // that every slot exists and carries its definition hash.
     let mut code = section(1);
     let func_count = code.count(limits.max_code_slots as u64, "function")?;
-    let mut funcs: Vec<(u32, [u8; 32])> = Vec::new();
+    let mut funcs: Vec<(u32, [u8; 32])> = code.vector(func_count, "function manifest")?;
     let mut last: Option<u32> = None;
     for _ in 0..func_count {
         let slot = code.leb()?;
@@ -991,7 +1092,7 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
         funcs.push((slot, hash));
     }
     let class_count = code.count(limits.max_code_slots as u64, "class")?;
-    let mut classes: Vec<(u32, [u8; 32])> = Vec::new();
+    let mut classes: Vec<(u32, [u8; 32])> = code.vector(class_count, "class manifest")?;
     let mut last: Option<u32> = None;
     for _ in 0..class_count {
         let slot = code.leb()?;
@@ -1022,10 +1123,11 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
     };
     // Section 4: the heaps, one per machine, in ordinal order.
     let mut heaps = section(3);
-    let mut all_objects: Vec<Vec<ImageObject>> = Vec::new();
+    let mut all_objects: Vec<Vec<ImageObject>> =
+        heaps.vector(machine_count, "machine heap table")?;
     for _ in 0..machine_count {
         let count = heaps.count(ctx.limits.max_objects as u64, "object")?;
-        let mut objects: Vec<ImageObject> = Vec::new();
+        let mut objects: Vec<ImageObject> = heaps.vector(count, "heap object table")?;
         for _ in 0..count {
             let frozen = heaps.flag()?;
             let object = decode_object(&mut heaps, &ctx, count as u32)?;
@@ -1038,7 +1140,7 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
     }
     // Section 5: the machine records.
     let mut records = section(4);
-    let mut machines: Vec<ImageMachine> = Vec::new();
+    let mut machines: Vec<ImageMachine> = records.vector(machine_count, "machine table")?;
     for objects in all_objects {
         let machine = decode_machine(&mut records, &ctx, objects)?;
         machines.push(machine);
@@ -1049,19 +1151,22 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
             "the machine section holds extra bytes",
         );
     }
-    Ok(Image {
-        format,
-        abi_version,
-        compiler_abi,
-        verifier_version,
-        module_semantic,
-        result_type,
-        funcs,
-        classes,
-        types,
-        envs,
-        machines,
-    })
+    Ok((
+        Image {
+            format,
+            abi_version,
+            compiler_abi,
+            verifier_version,
+            module_semantic,
+            result_type,
+            funcs,
+            classes,
+            types,
+            envs,
+            machines,
+        },
+        stored,
+    ))
 }
 
 /// Decode the closed type table and the type environment table.
@@ -1071,25 +1176,29 @@ pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
 /// name an earlier entry, so the table stays a directed acyclic graph
 /// and a walk over one node terminates.
 fn decode_types(
-    cur: &mut Cursor<'_>,
+    cur: &mut Cursor<'_, '_>,
     limits: &LoadLimits,
 ) -> Read<(Vec<ClosedType>, Vec<TypeEnv>)> {
     let count = cur.count(limits.max_closed_types as u64, "closed type")?;
-    let mut types: Vec<ClosedType> = Vec::new();
+    let mut types: Vec<ClosedType> = cur.vector(count, "closed type table")?;
     for idx in 0..count {
         let node = decode_closed_type(cur, limits, idx as u32)?;
         types.push(node);
     }
     let env_count = cur.count(limits.max_type_envs as u64, "type environment")?;
-    let mut envs: Vec<TypeEnv> = vec![TypeEnv::default()];
+    let env_total = env_count
+        .checked_add(1)
+        .ok_or_else(|| ImageError::new(ImageReason::LimitExceeded, "environment count overflow"))?;
+    let mut envs: Vec<TypeEnv> = cur.vector(env_total, "type environment table")?;
+    envs.push(TypeEnv::default());
     for _ in 0..env_count {
         let arity = cur.count(limits.max_closed_types as u64, "environment argument")?;
-        let mut list: Vec<u32> = Vec::new();
+        let mut list: Vec<u32> = cur.vector(arity, "environment arguments")?;
         for _ in 0..arity {
             list.push(closed_ref(cur, count as u32)?);
         }
         let rows_len = cur.count(limits.max_closed_types as u64, "environment row")?;
-        let mut rows: Vec<ClosedRow> = Vec::new();
+        let mut rows: Vec<ClosedRow> = cur.vector(rows_len, "environment rows")?;
         for _ in 0..rows_len {
             rows.push(decode_row(cur, limits)?);
         }
@@ -1099,7 +1208,7 @@ fn decode_types(
 }
 
 /// One closed type ordinal below `count`.
-fn closed_ref(cur: &mut Cursor<'_>, count: u32) -> Read<u32> {
+fn closed_ref(cur: &mut Cursor<'_, '_>, count: u32) -> Read<u32> {
     let id = cur.leb()?;
     if id >= count as u64 {
         return err(
@@ -1110,9 +1219,9 @@ fn closed_ref(cur: &mut Cursor<'_>, count: u32) -> Read<u32> {
     Ok(id as u32)
 }
 
-fn decode_row(cur: &mut Cursor<'_>, limits: &LoadLimits) -> Read<ClosedRow> {
+fn decode_row(cur: &mut Cursor<'_, '_>, limits: &LoadLimits) -> Read<ClosedRow> {
     let len = cur.count(limits.max_code_slots as u64, "effect row element")?;
-    let mut row: ClosedRow = Vec::new();
+    let mut row: ClosedRow = cur.vector(len, "effect row")?;
     for _ in 0..len {
         let slot = u32::try_from(cur.leb()?)
             .map_err(|_| ImageError::new(ImageReason::Code, "an effect name slot is too large"))?;
@@ -1123,11 +1232,11 @@ fn decode_row(cur: &mut Cursor<'_>, limits: &LoadLimits) -> Read<ClosedRow> {
 
 /// Decode one closed type node. `at` is the ordinal of the node, and
 /// every child must name an earlier ordinal.
-fn decode_closed_type(cur: &mut Cursor<'_>, limits: &LoadLimits, at: u32) -> Read<ClosedType> {
+fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) -> Read<ClosedType> {
     let tag = cur.u8()?;
-    let list = |cur: &mut Cursor<'_>| -> Read<Vec<u32>> {
+    let list = |cur: &mut Cursor<'_, '_>| -> Read<Vec<u32>> {
         let len = cur.count(limits.max_closed_types as u64, "closed type argument")?;
-        let mut out = Vec::new();
+        let mut out = cur.vector(len, "closed type arguments")?;
         for _ in 0..len {
             out.push(closed_ref(cur, at)?);
         }
@@ -1160,8 +1269,8 @@ fn decode_closed_type(cur: &mut Cursor<'_>, limits: &LoadLimits, at: u32) -> Rea
         16 => ClosedType::Tuple(list(cur)?),
         17 => {
             let len = cur.count(limits.max_closed_types as u64, "closed parameter")?;
-            let mut params = Vec::new();
-            let mut muts = Vec::new();
+            let mut params = cur.vector(len, "closed parameters")?;
+            let mut muts = cur.vector(len, "parameter markers")?;
             for _ in 0..len {
                 muts.push(cur.flag()?);
                 params.push(closed_ref(cur, at)?);
@@ -1195,12 +1304,12 @@ fn decode_closed_type(cur: &mut Cursor<'_>, limits: &LoadLimits, at: u32) -> Rea
     })
 }
 
-fn class_slot(cur: &mut Cursor<'_>) -> Read<u32> {
+fn class_slot(cur: &mut Cursor<'_, '_>) -> Read<u32> {
     u32::try_from(cur.leb()?)
         .map_err(|_| ImageError::new(ImageReason::Code, "a class slot is too large"))
 }
 
-fn decode_value(cur: &mut Cursor<'_>, objects: u32) -> Read<Value> {
+fn decode_value(cur: &mut Cursor<'_, '_>, objects: u32) -> Read<Value> {
     let tag = cur.u8()?;
     Ok(match tag {
         V_UNIT => Value::Unit,
@@ -1242,16 +1351,16 @@ fn decode_value(cur: &mut Cursor<'_>, objects: u32) -> Read<Value> {
     })
 }
 
-fn decode_values(cur: &mut Cursor<'_>, objects: u32, cap: u64, what: &str) -> Read<Vec<Value>> {
+fn decode_values(cur: &mut Cursor<'_, '_>, objects: u32, cap: u64, what: &str) -> Read<Vec<Value>> {
     let count = cur.count(cap, what)?;
-    let mut out: Vec<Value> = Vec::new();
+    let mut out: Vec<Value> = cur.vector(count, what)?;
     for _ in 0..count {
         out.push(decode_value(cur, objects)?);
     }
     Ok(out)
 }
 
-fn decode_op(cur: &mut Cursor<'_>) -> Read<u32> {
+fn decode_op(cur: &mut Cursor<'_, '_>) -> Read<u32> {
     let id = cur.hash()?;
     match (0..lm_abi::OP_COUNT).find(|slot| lm_abi::op_identity(*slot) == id) {
         Some(slot) => Ok(slot),
@@ -1262,7 +1371,7 @@ fn decode_op(cur: &mut Cursor<'_>) -> Read<u32> {
     }
 }
 
-fn decode_fault(cur: &mut Cursor<'_>, limits: &LoadLimits) -> Read<crate::FaultRec> {
+fn decode_fault(cur: &mut Cursor<'_, '_>, limits: &LoadLimits) -> Read<crate::FaultRec> {
     let name = cur.str(limits.max_string_bytes)?;
     let Some(code) = FaultCode::from_name(&name) else {
         return err(
@@ -1284,7 +1393,7 @@ fn decode_fault(cur: &mut Cursor<'_>, limits: &LoadLimits) -> Read<crate::FaultR
     Ok(crate::FaultRec { code, message, op })
 }
 
-fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx, objects: u32) -> Read<Object> {
+fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Object> {
     let tag = cur.u8()?;
     let limits = &ctx.limits;
     Ok(match tag {
@@ -1300,7 +1409,7 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx, objects: u32) -> Read<Object> 
         },
         3 => {
             let count = cur.count(limits.max_stack_values as u64, "map entry")?;
-            let mut entries: Vec<(Value, Value)> = Vec::new();
+            let mut entries: Vec<(Value, Value)> = cur.vector(count, "map entries")?;
             for _ in 0..count {
                 let key = decode_value(cur, objects)?;
                 let value = decode_value(cur, objects)?;
@@ -1329,7 +1438,8 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx, objects: u32) -> Read<Object> 
         6 => Object::StrBuilder(cur.str(limits.max_string_bytes)?),
         7 => {
             let count = cur.count(limits.max_string_bytes as u64, "buffer byte")?;
-            Object::ByteBuf(cur.take(count)?.to_vec())
+            let source = cur.take(count)?;
+            Object::ByteBuf(cur.copy_bytes(source, "buffer bytes")?)
         }
         8 => Object::NativeVm {
             vm: machine_ref(cur, ctx)?,
@@ -1368,7 +1478,10 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx, objects: u32) -> Read<Object> 
             // restore path runs the loader over it before it becomes a
             // world, and the restored object records that.
             let count = cur.count(limits.max_bytes as u64, "nested image byte")?;
-            Object::NativeSnapshot(std::sync::Arc::new(cur.take(count)?.to_vec()))
+            let source = cur.take(count)?;
+            Object::NativeSnapshot(std::sync::Arc::new(
+                cur.copy_bytes(source, "nested image bytes")?,
+            ))
         }
         other => {
             return err(
@@ -1380,12 +1493,12 @@ fn decode_object(cur: &mut Cursor<'_>, ctx: &Ctx, objects: u32) -> Read<Object> 
 }
 
 /// One type environment ordinal of this image, as a witness.
-fn env_ref(cur: &mut Cursor<'_>, ctx: &Ctx) -> Read<Witness> {
+fn env_ref(cur: &mut Cursor<'_, '_>, ctx: &Ctx) -> Read<Witness> {
     Ok(Witness(TypeEnvId(env_ordinal(cur, ctx)?)))
 }
 
 /// One type environment ordinal of this image.
-fn env_ordinal(cur: &mut Cursor<'_>, ctx: &Ctx) -> Read<u32> {
+fn env_ordinal(cur: &mut Cursor<'_, '_>, ctx: &Ctx) -> Read<u32> {
     let env = cur.leb()?;
     if env >= ctx.env_count as u64 {
         return err(
@@ -1399,7 +1512,7 @@ fn env_ordinal(cur: &mut Cursor<'_>, ctx: &Ctx) -> Read<u32> {
     Ok(env as u32)
 }
 
-fn machine_ref(cur: &mut Cursor<'_>, ctx: &Ctx) -> Read<u32> {
+fn machine_ref(cur: &mut Cursor<'_, '_>, ctx: &Ctx) -> Read<u32> {
     let vm = cur.leb()?;
     if vm >= ctx.machine_count as u64 {
         return err(
@@ -1415,7 +1528,7 @@ fn machine_ref(cur: &mut Cursor<'_>, ctx: &Ctx) -> Read<u32> {
 
 #[allow(clippy::too_many_lines)]
 fn decode_machine(
-    cur: &mut Cursor<'_>,
+    cur: &mut Cursor<'_, '_>,
     ctx: &Ctx,
     objects: Vec<ImageObject>,
 ) -> Read<ImageMachine> {
@@ -1444,7 +1557,7 @@ fn decode_machine(
     let children = cur.u32()?;
     let machine_limits = decode_limits(cur)?;
     let frame_count = cur.count(limits.max_frames as u64, "frame")?;
-    let mut frames: Vec<ImageFrame> = Vec::new();
+    let mut frames: Vec<ImageFrame> = cur.vector(frame_count, "frame table")?;
     for _ in 0..frame_count {
         let func = cur.leb()?;
         let func = u32::try_from(func).map_err(|_| {
@@ -1478,7 +1591,7 @@ fn decode_machine(
     let locals = decode_values(cur, count, limits.max_stack_values as u64, "local")?;
     let operands = decode_values(cur, count, limits.max_stack_values as u64, "operand")?;
     let literal_count = cur.count(limits.max_code_slots as u64, "literal")?;
-    let mut literals: Vec<Option<u32>> = Vec::new();
+    let mut literals: Vec<Option<u32>> = cur.vector(literal_count, "literal table")?;
     for _ in 0..literal_count {
         literals.push(cur.opt(count as u64, "literal")?);
     }
@@ -1568,7 +1681,7 @@ fn decode_machine(
     })
 }
 
-fn decode_limits(cur: &mut Cursor<'_>) -> Read<ImageLimits> {
+fn decode_limits(cur: &mut Cursor<'_, '_>) -> Read<ImageLimits> {
     Ok(ImageLimits {
         fuel: cur.u64()?,
         max_frames: cur.u32()?,

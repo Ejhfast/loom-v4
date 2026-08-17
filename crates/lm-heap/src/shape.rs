@@ -11,6 +11,7 @@
 
 use lm_abi::{FaultCode, SnapshotClass};
 use lm_value::{ObjRef, Value, Witness};
+use std::collections::TryReserveError;
 
 /// Logical byte cost of one object header.
 pub(crate) const HEADER_COST: usize = 32;
@@ -328,6 +329,108 @@ pub const SHAPES: [&ShapeDesc; 16] = [
 ];
 
 impl Object {
+    /// Clone this object and remap its object references.
+    ///
+    /// Every owned buffer uses a fallible exact reservation. The map
+    /// index is derived data, so the clone starts with an empty index.
+    pub fn try_clone_remapped(
+        &self,
+        mut map: impl FnMut(ObjRef) -> ObjRef,
+    ) -> Result<Object, TryReserveError> {
+        fn copy_string(source: &str) -> Result<String, TryReserveError> {
+            let mut target = String::new();
+            target.try_reserve_exact(source.len())?;
+            target.push_str(source);
+            Ok(target)
+        }
+        fn copy_values(
+            source: &[Value],
+            map: &mut impl FnMut(ObjRef) -> ObjRef,
+        ) -> Result<Vec<Value>, TryReserveError> {
+            let mut target = Vec::new();
+            target.try_reserve_exact(source.len())?;
+            for value in source {
+                target.push(match value {
+                    Value::Obj(reference) => Value::Obj(map(*reference)),
+                    other => *other,
+                });
+            }
+            Ok(target)
+        }
+
+        Ok(match self {
+            Object::Str(text) => Object::Str(copy_string(text)?),
+            Object::Instance { class, fields, env } => Object::Instance {
+                class: *class,
+                fields: copy_values(fields, &mut map)?,
+                env: *env,
+            },
+            Object::List { items } => Object::List {
+                items: copy_values(items, &mut map)?,
+            },
+            Object::Map { entries, .. } => {
+                let mut copied = Vec::new();
+                copied.try_reserve_exact(entries.len())?;
+                for (key, value) in entries {
+                    let key = match key {
+                        Value::Obj(reference) => Value::Obj(map(*reference)),
+                        other => *other,
+                    };
+                    let value = match value {
+                        Value::Obj(reference) => Value::Obj(map(*reference)),
+                        other => *other,
+                    };
+                    copied.push((key, value));
+                }
+                Object::Map {
+                    entries: copied,
+                    index: MapIndex::default(),
+                }
+            }
+            Object::Tuple { items } => Object::Tuple {
+                items: copy_values(items, &mut map)?,
+            },
+            Object::Closure {
+                func,
+                captures,
+                env,
+            } => Object::Closure {
+                func: *func,
+                captures: copy_values(captures, &mut map)?,
+                env: *env,
+            },
+            Object::StrBuilder(text) => Object::StrBuilder(copy_string(text)?),
+            Object::ByteBuf(bytes) => {
+                let mut copied = Vec::new();
+                copied.try_reserve_exact(bytes.len())?;
+                copied.extend_from_slice(bytes);
+                Object::ByteBuf(copied)
+            }
+            Object::NativeVm { vm } => Object::NativeVm { vm: *vm },
+            Object::NativeTable { vm } => Object::NativeTable { vm: *vm },
+            Object::NativeRequest { vm, ordinal } => Object::NativeRequest {
+                vm: *vm,
+                ordinal: *ordinal,
+            },
+            Object::NativeCall { vm, ordinal, op } => Object::NativeCall {
+                vm: *vm,
+                ordinal: *ordinal,
+                op: *op,
+            },
+            Object::NativeFault { code, message, op } => Object::NativeFault {
+                code: *code,
+                message: copy_string(message)?,
+                op: *op,
+            },
+            Object::NativeDigest(bytes) => Object::NativeDigest(*bytes),
+            Object::NativeHandle { proc, generation } => Object::NativeHandle {
+                proc: *proc,
+                generation: *generation,
+            },
+            Object::NativeSnapshot(image) => Object::NativeSnapshot(image.clone()),
+        })
+    }
+
     /// The shape tag of this object: its index in `SHAPES`. The
     /// canonical digest encoding uses the tag, so the order is part
     /// of the digest contract.
@@ -608,13 +711,11 @@ mod tests {
         ]
     }
 
-    /// The three shape walks must stay in step.
+    /// The four shape walks must stay in step.
     ///
-    /// `children` reports the canonical order, `remap` rebuilds in
-    /// that order, and `shell` keeps the payload sizes. A new shape or
-    /// a reordered field breaks this test before it reaches a graph
-    /// mode, because a copy would otherwise attach a child to the
-    /// wrong position.
+    /// `children`, `remap`, and the fallible clone use one order.
+    /// `shell` keeps each payload size. A new shape or reordered field
+    /// breaks this test before a graph mode can attach a wrong child.
     #[test]
     fn the_three_shape_walks_agree() {
         for object in sample_objects() {
@@ -634,6 +735,15 @@ mod tests {
                 // reference, or a copy would drop one.
                 None => assert!(listed.is_empty(), "{name}: unmapped children"),
             }
+            let mut cloned = Vec::new();
+            let rebuilt = object
+                .try_clone_remapped(|reference| {
+                    cloned.push(reference);
+                    reference
+                })
+                .expect("the sample clone fits");
+            assert_eq!(listed, cloned, "{name}: fallible clone order");
+            assert_eq!(rebuilt, object, "{name}: a fallible identity clone");
             match object.shell() {
                 Some(shell) => {
                     assert_eq!(shell.cost(), object.cost(), "{name}: shell cost");
