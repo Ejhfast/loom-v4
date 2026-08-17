@@ -874,6 +874,7 @@ fn a_receive_on_a_foreign_receiver_is_rejected() {
                         *instr = lm_bytecode::Instr::Perform {
                             op: lm_abi::OP_PROC_DONE,
                             argc: 1,
+                            reply_ty: 0,
                         };
                         patched = true;
                         break 'outer;

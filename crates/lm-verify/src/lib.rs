@@ -573,8 +573,9 @@ impl<'m> Ctx<'m> {
 ///
 /// Version 5 adds the class rules and the dispatch rules of a
 /// generic parent. Version 6 adds the two snapshot core families and
-/// the four snapshot operation rules.
-pub const VERIFIER_VERSION: u32 = 6;
+/// the four snapshot operation rules. Version 7 adds the reply type
+/// rule of the two perform instructions.
+pub const VERIFIER_VERSION: u32 = 7;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -1769,13 +1770,21 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         return Err(err(fidx, at("jump target is not a block")));
                     }
                 }
-                Instr::Perform { op, argc } => {
+                Instr::Perform { op, argc, reply_ty } => {
                     if *op >= lm_abi::OP_COUNT {
                         return Err(err(fidx, at("perform operation slot out of range")));
                     }
                     let want = perform_argc(*op);
                     if *argc != want {
                         return Err(err(fidx, at("perform argument count mismatch")));
+                    }
+                    if *reply_ty as usize >= module.types.len() {
+                        return Err(err(fidx, at("perform reply type index out of range")));
+                    }
+                }
+                Instr::PerformValue { reply_ty, .. } => {
+                    if *reply_ty as usize >= module.types.len() {
+                        return Err(err(fidx, at("perform reply type index out of range")));
                     }
                 }
                 Instr::OpConst(op) => {
@@ -2538,6 +2547,42 @@ impl<'m> ResolvedTypes<'m> {
 
 /// Merge an edge state into a target block. Queue the block again when
 /// its entry state changes.
+/// Prove that a perform instruction states the reply type its program
+/// point proves.
+///
+/// The world reads `reply_ty` at run time and checks the reply value
+/// against it at every boundary crossing. The check is worth nothing
+/// unless the stated index is the type the dataflow pushes, so this
+/// rule ties the two together. The rule reads the module type table
+/// and the dataflow state alone, so no snapshot container takes part.
+///
+/// The test is equality, never subtyping. The consumer of the reply
+/// reads it at exactly the type the dataflow pushed, so a wider stated
+/// type would weaken the run-time check.
+fn check_reply_ty(
+    ctx: &Ctx<'_>,
+    state: &State,
+    reply_ty: u32,
+    fail: &dyn Fn(String) -> VerifyError,
+) -> Result<(), VerifyError> {
+    let Some(pushed) = state.stack.last().copied() else {
+        return Err(fail("a perform pushed no reply".to_string()));
+    };
+    if reply_ty as usize >= ctx.module.types.len() {
+        return Err(fail(format!(
+            "the perform states reply type {reply_ty}, which the module has not"
+        )));
+    }
+    // The universe starts with the module type table and interns by
+    // content, so equal types take one index.
+    if pushed != reply_ty {
+        return Err(fail(format!(
+            "the perform states reply type {reply_ty} and the program point proves {pushed}"
+        )));
+    }
+    Ok(())
+}
+
 fn merge(
     ctx: &Ctx<'_>,
     fidx: u32,
@@ -3138,7 +3183,8 @@ fn step(
         Instr::Return => {
             pop_expect(state, func.ret)?;
         }
-        Instr::Perform { op, .. } => {
+        Instr::Perform { op, reply_ty, .. } => {
+            let reply_ty = *reply_ty;
             let op = *op;
             let name = lm_abi::op_name(op);
             if !ctx.row_has_name(&func.row, &name) {
@@ -3432,8 +3478,10 @@ fn step(
                     }
                 }
             }
+            check_reply_ty(ctx, state, reply_ty, &fail)?;
         }
-        Instr::PerformValue { argc } => {
+        Instr::PerformValue { argc, reply_ty } => {
+            let reply_ty = *reply_ty;
             let argc = *argc as usize;
             if state.stack.len() < argc + 1 {
                 return Err(fail("perform through a value on a short stack".to_string()));
@@ -3459,6 +3507,7 @@ fn step(
             pop_args(state, &params)?;
             pop(state)?;
             push(state, ret)?;
+            check_reply_ty(ctx, state, reply_ty, &fail)?;
         }
         Instr::OpConst(op) => {
             let sig = ctx.fixed_sig_type(*op).map_err(&fail)?;

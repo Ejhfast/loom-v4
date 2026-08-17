@@ -1826,7 +1826,7 @@ impl Admit<'_> {
             }
             // A closure call consumes the closure value as well.
             (Instr::CallValue { argc }, None) => (argc as usize + 1, 0),
-            (Instr::Perform { op, argc }, Some(request)) => {
+            (Instr::Perform { op, argc, .. }, Some(request)) => {
                 if request.op != op {
                     return fail(
                         ImageReason::State,
@@ -1839,7 +1839,7 @@ impl Admit<'_> {
             // as well. The proved type of the value names the exact
             // operation, so the pending record states no operation the
             // program point does not prove.
-            (Instr::PerformValue { argc }, Some(request)) => {
+            (Instr::PerformValue { argc, .. }, Some(request)) => {
                 let types = &self.frames_of[vm as usize][idx].operands;
                 let at_op = types.len().checked_sub(argc as usize + 1);
                 let named = match at_op.and_then(|slot| types.get(slot)) {

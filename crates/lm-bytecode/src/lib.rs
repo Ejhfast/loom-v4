@@ -332,14 +332,25 @@ pub enum Instr {
     Return,
     /// Perform the exact manifest operation `op` over `argc` popped
     /// arguments and push the reply.
+    ///
+    /// `reply_ty` is the module type index of the reply. It may name a
+    /// type variable of the performing function, and `Frame.env`
+    /// closes it at run time. The verifier proves that it equals the
+    /// type the dataflow pushes, so the value comes from verified code
+    /// and never from a snapshot container. The world checks the reply
+    /// value against it at every boundary crossing.
     Perform {
         op: u32,
         argc: u32,
+        reply_ty: u32,
     },
     /// Perform through a first-class operation value: pop `argc`
     /// arguments over the operation value and push the reply.
+    ///
+    /// `reply_ty` carries the same rule as the field of `Perform`.
     PerformValue {
         argc: u32,
+        reply_ty: u32,
     },
     /// Push the first-class value of the exact manifest operation.
     OpConst(u32),
@@ -639,9 +650,10 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// Version 11 adds the `Digest` type and the three digest
 /// instructions. Version 13 adds the `SnapshotImage` and `Snapshot`
-/// types. Every earlier tag keeps its byte, so each change adds
+/// types. Version 14 adds the reply type index of the two perform
+/// instructions. Every earlier tag keeps its byte, so each change adds
 /// encodings and moves none.
-pub const VERSION: u16 = 13;
+pub const VERSION: u16 = 14;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1194,14 +1206,16 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             write_u32(out, *block);
         }
         Instr::Return => out.push(OP_RETURN),
-        Instr::Perform { op, argc } => {
+        Instr::Perform { op, argc, reply_ty } => {
             out.push(OP_PERFORM);
             write_u32(out, *op);
             write_u32(out, *argc);
+            write_u32(out, *reply_ty);
         }
-        Instr::PerformValue { argc } => {
+        Instr::PerformValue { argc, reply_ty } => {
             out.push(OP_PERFORM_VALUE);
             write_u32(out, *argc);
+            write_u32(out, *reply_ty);
         }
         Instr::OpConst(op) => {
             out.push(OP_OP_CONST);
@@ -1872,8 +1886,12 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_PERFORM => Instr::Perform {
             op: cur.u32()?,
             argc: cur.u32()?,
+            reply_ty: cur.u32()?,
         },
-        OP_PERFORM_VALUE => Instr::PerformValue { argc: cur.u32()? },
+        OP_PERFORM_VALUE => Instr::PerformValue {
+            argc: cur.u32()?,
+            reply_ty: cur.u32()?,
+        },
         OP_OP_CONST => Instr::OpConst(cur.u32()?),
         OP_TABLE_EDIT => Instr::TableEdit {
             action: cur.u32()?,

@@ -1051,6 +1051,17 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
             func: reloc.funcs[*func as usize],
             captures: *captures,
         },
+        // The reply type index names a module type, so it moves with
+        // the type table.
+        Instr::Perform { op, argc, reply_ty } => Instr::Perform {
+            op: *op,
+            argc: *argc,
+            reply_ty: reloc.types[*reply_ty as usize],
+        },
+        Instr::PerformValue { argc, reply_ty } => Instr::PerformValue {
+            argc: *argc,
+            reply_ty: reloc.types[*reply_ty as usize],
+        },
         Instr::New(c) => Instr::New(reloc.classes[*c as usize]),
         Instr::NewG { class, app } => Instr::NewG {
             class: reloc.classes[*class as usize],
@@ -1125,8 +1136,6 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::JumpIfFalse(_)
         | Instr::JumpIfTrue(_)
         | Instr::Return
-        | Instr::Perform { .. }
-        | Instr::PerformValue { .. }
         | Instr::OpConst(_)
         | Instr::TableEdit { .. }
         | Instr::AsCall(_)

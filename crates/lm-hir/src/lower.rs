@@ -649,9 +649,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.lower_expr(arg);
                 }
                 if is_op {
-                    self.m.bc_ty(expr.ty);
+                    // The instruction carries the reply type, so the
+                    // world can check the reply value at a boundary.
+                    let reply_ty = self.m.bc_ty(expr.ty);
                     self.emit(Instr::PerformValue {
                         argc: args.len() as u32,
+                        reply_ty,
                     });
                 } else {
                     self.emit(Instr::CallValue {
@@ -699,9 +702,13 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                         count: args.len() as u32,
                     });
                 }
+                // The spawn sugar expands into one perform, so the
+                // instruction states the handle type it pushes.
+                let reply_ty = self.m.bc_ty(expr.ty);
                 self.emit(Instr::Perform {
                     op: lm_abi::OP_PROC_SPAWN,
                     argc: 3,
+                    reply_ty,
                 });
             }
             HExprKind::TupleLit(items) => {
@@ -846,10 +853,13 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 }
                 // The verifier reconstructs the perform result type
                 // through the module type table, so the entry exists.
-                self.m.bc_ty(expr.ty);
+                // The instruction states the same index, and the world
+                // checks the reply value against it at a boundary.
+                let reply_ty = self.m.bc_ty(expr.ty);
                 self.emit(Instr::Perform {
                     op: *op,
                     argc: args.len() as u32,
+                    reply_ty,
                 });
             }
             HExprKind::OpConst(op) => {
@@ -1541,7 +1551,7 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_) => (1, 0),
         Instr::Return => (1, 0),
         Instr::Perform { argc, .. } => (*argc as usize, 1),
-        Instr::PerformValue { argc } => (*argc as usize + 1, 1),
+        Instr::PerformValue { argc, .. } => (*argc as usize + 1, 1),
         Instr::OpConst(_) => (0, 1),
         Instr::TableEdit { action, .. } => {
             // A mock edit also pops the handler closure.
@@ -1645,10 +1655,10 @@ fn instr_text(instr: &Instr) -> String {
         Instr::JumpIfFalse(b) => format!("JumpIfFalse -> b{b}"),
         Instr::JumpIfTrue(b) => format!("JumpIfTrue -> b{b}"),
         Instr::Return => "Return".to_string(),
-        Instr::Perform { op, argc } => {
+        Instr::Perform { op, argc, .. } => {
             format!("Perform {} argc {argc}", op_text(*op))
         }
-        Instr::PerformValue { argc } => format!("PerformValue argc {argc}"),
+        Instr::PerformValue { argc, .. } => format!("PerformValue argc {argc}"),
         Instr::OpConst(op) => format!("OpConst {}", op_text(*op)),
         Instr::TableEdit { action, kind, slot } => {
             let action_text = match action {

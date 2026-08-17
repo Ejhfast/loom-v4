@@ -68,8 +68,10 @@ use std::collections::HashMap;
 ///
 /// Version 6 adds the parent type arguments of a generic parent to
 /// the canonical class identity encoding. Version 7 adds the
-/// `SnapshotImage` and `Snapshot` type tags.
-pub const COMPILER_ABI_VERSION: u32 = 7;
+/// `SnapshotImage` and `Snapshot` type tags. Version 8 adds the reply
+/// type of the two perform instructions to the instruction encoding
+/// and to the canonical identity encoding.
+pub const COMPILER_ABI_VERSION: u32 = 8;
 
 /// The refinement work budget of one component.
 ///
@@ -562,11 +564,15 @@ fn preflight_instr(
             }
             Ok(())
         }
-        Instr::Perform { op: _, argc: _ }
-        | Instr::PerformValue { argc: _ }
-        | Instr::OpConst(_)
-        | Instr::TableEdit { .. }
-        | Instr::AsCall(_) => Ok(()),
+        // The reply type index names a module type, exactly as a
+        // collection literal names one.
+        Instr::Perform { reply_ty: ty, .. } | Instr::PerformValue { reply_ty: ty, .. } => {
+            if *ty as usize >= s.types {
+                return Err(bad("type index"));
+            }
+            Ok(())
+        }
+        Instr::OpConst(_) | Instr::TableEdit { .. } | Instr::AsCall(_) => Ok(()),
     }
 }
 
@@ -673,7 +679,9 @@ impl Graph {
                         | Instr::ListNew { ty, .. }
                         | Instr::MapNew { ty, .. }
                         | Instr::IsType(ty)
-                        | Instr::CastType(ty) => list.push(s.type_node(*ty)),
+                        | Instr::CastType(ty)
+                        | Instr::Perform { reply_ty: ty, .. }
+                        | Instr::PerformValue { reply_ty: ty, .. } => list.push(s.type_node(*ty)),
                         _ => {}
                     }
                 }
@@ -1365,14 +1373,16 @@ impl<'a> Resolver<'a> {
                 u(out, *b);
             }
             Instr::Return => out.push(0x34),
-            Instr::Perform { op, argc } => {
+            Instr::Perform { op, argc, reply_ty } => {
                 out.push(0x70);
                 u(out, *op);
                 u(out, *argc);
+                out.extend_from_slice(&self.type_digest(*reply_ty));
             }
-            Instr::PerformValue { argc } => {
+            Instr::PerformValue { argc, reply_ty } => {
                 out.push(0x71);
                 u(out, *argc);
+                out.extend_from_slice(&self.type_digest(*reply_ty));
             }
             Instr::OpConst(op) => {
                 out.push(0x72);
