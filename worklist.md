@@ -387,6 +387,8 @@ The docs/specs/snapshot-image-admission.md:1 defines this boundary.
   - Preserve deterministic interleaving tests.
   - Confirm no full-machine scan remains.
 
+  Status: implemented.
+
   ### 12. Consolidate snapshot capture work
 
   - Add CapturePlan.

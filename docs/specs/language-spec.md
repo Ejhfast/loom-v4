@@ -2069,7 +2069,9 @@ The default block action requires no allocation. Live edits replace one action u
 
 ### 22.12 Procs, snapshot barriers, and asynchronous host work
 
-A proc owns one `VmState` on one scheduler task. The baseline scheduler uses Rust threads for isolation clarity, with a bounded mailbox and a completion channel for host operations. An implementation may multiplex many proc tasks, but one VM is never executed concurrently.
+A proc owns one `VmState` on one scheduler task. The baseline scheduler uses one deterministic FIFO ready queue. It runs each ready task for one fixed instruction quantum. Wake indexes name mailbox changes, terminal states, and host completions. A state change wakes only tasks in its matching index. The scheduler waits on the host only when no task is ready. One VM never executes concurrently.
+
+Task keys and wake keys contain plain identifiers and counters. A future worker or process scheduler can use the same records.
 
 Each proc has a stable opaque reference with a generation for dead-proc detection. Handle transfer preserves the reference.
 

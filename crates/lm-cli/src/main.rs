@@ -303,18 +303,11 @@ fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
                 return Ok(ExitCode::SUCCESS);
             }
             lm_vm::RootEvent::Blocked => {
-                if world.poll_blocked() > 0 {
+                if lm_proc::drain_procs(&mut world) > 0 {
                     continue;
                 }
-                match world.runnable_procs().first().copied() {
-                    Some(proc) => {
-                        world.drive_proc(proc);
-                    }
-                    None => {
-                        println!("Fault(HostFault)");
-                        return Ok(ExitCode::from(1));
-                    }
-                }
+                println!("Fault(HostFault)");
+                return Ok(ExitCode::from(1));
             }
             lm_vm::RootEvent::Ran | lm_vm::RootEvent::Waiting => {
                 println!("Fault(HostFault)");

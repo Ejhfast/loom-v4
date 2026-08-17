@@ -22,6 +22,7 @@ pub(crate) struct RestorePlan {
     types: TypeImportPlan,
     child_charge: u32,
     gate: u32,
+    gate_members: Vec<VmId>,
 }
 
 impl World<'_> {
@@ -83,6 +84,19 @@ impl World<'_> {
             .gate_marker()
             .checked_add(1)
             .ok_or(RestoreFail::LimitExceeded)?;
+        let active_added = image
+            .machines
+            .iter()
+            .filter(|machine| {
+                machine.scheduler_owned
+                    && !machine.paused
+                    && !matches!(machine.state, ImageState::Done | ImageState::Faulted)
+            })
+            .count();
+        self.prepare_scheduler_procs(self.machines.len() + added, active_added)
+            .map_err(|_| RestoreFail::LimitExceeded)?;
+        self.prepare_gate_group()
+            .map_err(|_| RestoreFail::LimitExceeded)?;
 
         let types = self
             .envs
@@ -152,6 +166,7 @@ impl World<'_> {
             types,
             child_charge,
             gate,
+            gate_members: ids,
         })
     }
 
@@ -164,6 +179,7 @@ impl World<'_> {
             types,
             child_charge,
             gate,
+            gate_members,
         } = plan;
         self.envs.commit_import(types);
         self.set_gate_marker(gate);
@@ -173,6 +189,16 @@ impl World<'_> {
             .next()
             .expect("a prepared restore holds its root machine");
         self.machines.extend(machines);
+        for vm in gate_members.iter().copied() {
+            let machine = &self.machines[vm as usize];
+            if machine.owner == Ownership::Scheduler
+                && !machine.paused
+                && !matches!(machine.vm.state, MachineState::Done | MachineState::Faulted)
+            {
+                self.activate_scheduler_proc_prepared(vm);
+            }
+        }
+        self.install_gate_group(gate, gate_members);
         target
     }
 }

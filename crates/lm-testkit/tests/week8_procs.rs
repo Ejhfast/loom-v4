@@ -349,6 +349,41 @@ fn a_paused_proc_leaves_the_scheduler_run_set() {
     assert!(world.runnable_procs().is_empty());
 }
 
+/// A quantum boundary lets the holder pause a task that has run.
+#[test]
+fn a_quantum_boundary_accepts_a_pause() {
+    let source = "vm = sys.vm.Vm().from_object(do ||: Int\n\
+                  \x20 i = 0\n\
+                  \x20 while i < 10000\n\
+                  \x20   i = i + 1\n\
+                  \x20 end\n\
+                  \x20 i\n\
+                  end, args: ())\n\
+                  h = sys.proc.run(vm)\n\
+                  i = 0\n\
+                  while i < 20\n\
+                  \x20 i = i + 1\n\
+                  end\n\
+                  case h.pause()\n\
+                  in Ok(_)  then 1\n\
+                  in Err(_) then 0 - 1\n\
+                  end\n";
+    let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Proc").expect("the grant names a group");
+    world.allow("Vm").expect("the grant names a group");
+    let mut scheduler = Scheduler::new_with_quantum(SchedulerMode::Deterministic, 4);
+    let outcome = scheduler.run(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(1)");
+    assert_eq!(world.owner_of(1), Ownership::Holder);
+    assert_eq!(world.active_of(1), 0);
+}
+
 // ---------------------------------------------------------------
 // Parent lifetime and revocation.
 // ---------------------------------------------------------------
@@ -458,6 +493,143 @@ fn the_deterministic_scheduler_repeats_its_interleaving() {
     assert_eq!(first.0, second.0);
     assert_eq!(first.1, second.1);
     assert_eq!(first.2, second.2);
+}
+
+/// A bounded quantum lets a short later proc finish before a long
+/// earlier proc.
+#[test]
+fn bounded_slices_let_a_later_short_proc_finish_first() {
+    let source = "class Spin < Proc\n\
+                  \x20 limit: Int\n\
+                  \x20 def init(mut self, limit: Int)\n\
+                  \x20   self.limit = limit\n\
+                  \x20 end\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   i = 0\n\
+                  \x20   while i < self.limit\n\
+                  \x20     i = i + 1\n\
+                  \x20   end\n\
+                  \x20   i\n\
+                  \x20 end\n\
+                  end\n\
+                  slow = Spin.spawn(200)\n\
+                  fast = Spin.spawn(1)\n\
+                  (slow.done(), fast.done())\n";
+    let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.trace_procs();
+    world.allow("Proc").expect("the grant names a group");
+    let mut scheduler = Scheduler::new_with_quantum(SchedulerMode::Deterministic, 8);
+    let outcome = scheduler.run(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done((Done(200), Done(1)))");
+    let terminal: Vec<u32> = world
+        .trace()
+        .iter()
+        .filter_map(|event| match event {
+            TraceEvent::Terminal { proc, .. } => Some(*proc),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(terminal, vec![2, 1]);
+    assert!(scheduler.stats().proc_slices > 2);
+}
+
+/// A waiting host operation does not stop a task that is ready.
+#[test]
+fn a_host_wait_does_not_stop_a_ready_task() {
+    let source = "nap = sys.vm.Vm().from_object(do ||: Int with Clock.Sleep\n\
+                  \x20 sys.clock.sleep(5)\n\
+                  \x20 1\n\
+                  end, args: ())\n\
+                  nap.table().pass(Clock)\n\
+                  quick = sys.vm.Vm().from_object(do ||: Int 2 end, args: ())\n\
+                  slow = sys.proc.run(nap)\n\
+                  fast = sys.proc.run(quick)\n\
+                  (slow.done(), fast.done())\n";
+    let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.trace_procs();
+    for grant in ["Proc", "Vm", "Clock"] {
+        world.allow(grant).expect("the grant names a group");
+    }
+    let outcome = Scheduler::default().run(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done((Done(1), Done(2)))");
+    let terminal: Vec<u32> = world
+        .trace()
+        .iter()
+        .filter_map(|event| match event {
+            TraceEvent::Terminal { proc, .. } => Some(*proc),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(terminal, vec![2, 1]);
+}
+
+/// A scheduler run does not install a reply for a holder-controlled
+/// machine.
+#[test]
+fn host_completion_waits_for_its_controlling_task() {
+    let source = "inner = sys.vm.Vm().from_object(do ||: Int with Clock.Sleep\n\
+                  \x20 sys.clock.sleep(5)\n\
+                  \x20 9\n\
+                  end, args: ())\n\
+                  inner.table().pass(Clock)\n\
+                  inner.step()\n\
+                  inner.step()\n\
+                  inner.step()\n\
+                  nap = sys.vm.Vm().from_object(do ||: Int with Clock.Sleep\n\
+                  \x20 sys.clock.sleep(5)\n\
+                  \x20 7\n\
+                  end, args: ())\n\
+                  nap.table().pass(Clock)\n\
+                  sys.proc.run(nap).done()\n";
+    let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    for grant in ["Proc", "Vm", "Clock"] {
+        world.allow(grant).expect("the grant names a group");
+    }
+    let outcome = Scheduler::default().run(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(Done(7))");
+    assert_eq!(world.state_of(1), MachineState::Waiting);
+    assert_eq!(world.resource_count(1), 1);
+    assert_eq!(world.world_resource_count(), 1);
+}
+
+/// Statistics describe one requested run only.
+#[test]
+fn scheduler_statistics_reset_at_each_run() {
+    let source = "i = 0\nwhile i < 20\n  i = i + 1\nend\ni\n";
+    let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let mut scheduler = Scheduler::new_with_quantum(SchedulerMode::Deterministic, 4);
+    let first = scheduler.run(&mut world);
+    assert_eq!(world.show_outcome(&first), "Done(20)");
+    assert!(scheduler.stats().root_slices > 1);
+    let second = scheduler.run(&mut world);
+    assert_eq!(world.show_outcome(&second), "Done(20)");
+    assert_eq!(scheduler.stats().root_slices, 0);
+    assert_eq!(scheduler.stats().proc_slices, 0);
+    assert_eq!(scheduler.stats().unblocked, 0);
 }
 
 /// A world with no runnable machine and a blocked root is a deadlock.

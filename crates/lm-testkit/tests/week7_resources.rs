@@ -55,16 +55,21 @@ fn a_host_that_suspends_a_machine_state_operation_faults() {
     struct BadHost;
 
     impl lm_vm::Host for BadHost {
-        fn start(&mut self, _op: u32, _args: Vec<lm_vm::HostArg>) -> lm_vm::HostStart {
+        fn start(
+            &mut self,
+            _key: lm_vm::CompletionKey,
+            _op: u32,
+            _args: Vec<lm_vm::HostArg>,
+        ) -> lm_vm::HostStart {
             lm_vm::HostStart::Waiting(1)
         }
 
-        fn poll(&mut self, _token: u64) -> Option<lm_vm::HostValue> {
-            Some(lm_vm::HostValue::Int(1))
+        fn poll(&mut self) -> Option<lm_vm::HostCompletion> {
+            None
         }
 
-        fn wait(&mut self, _token: u64) -> lm_vm::HostValue {
-            lm_vm::HostValue::Int(1)
+        fn wait(&mut self) -> Option<lm_vm::HostCompletion> {
+            None
         }
     }
 

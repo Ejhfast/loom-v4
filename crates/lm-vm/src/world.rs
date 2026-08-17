@@ -6,10 +6,13 @@
 //! guest call depth or with nested VM depth. `run`, `step`, and
 //! `drive` are stop modes of this one loop.
 
-use crate::host::{CoreCtor, Host, HostArg, HostStart, HostValue};
+use crate::host::{CoreCtor, Host, HostArg, HostCompletion, HostStart, HostValue};
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, Machine, MachineState, Mailbox, Ownership, Pending,
     Terminal, VmId,
+};
+use crate::schedule::{
+    ActiveProcs, CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WakeKey,
 };
 use crate::{FaultCode, LoadedModule, Outcome, VmConfig, WorldLimits};
 use lm_bytecode::corepin::CoreLayout;
@@ -51,6 +54,34 @@ struct Activation {
     retired: bool,
 }
 
+/// Why one scheduler task saved its activation stack.
+#[derive(Debug, Clone, Copy)]
+enum SuspendReason {
+    Yielded,
+    Blocked {
+        machine: VmId,
+        wake: WakeKey,
+    },
+    Waiting {
+        machine: VmId,
+        completion: CompletionKey,
+    },
+}
+
+/// One saved activation stack and its scheduler condition.
+#[derive(Debug)]
+struct SuspendedStack {
+    activations: Vec<Activation>,
+    reason: SuspendReason,
+}
+
+/// The machines held behind one restored execution gate.
+#[derive(Debug)]
+pub(crate) struct GateGroup {
+    id: u32,
+    members: Vec<VmId>,
+}
+
 /// Why one activation exits.
 #[derive(Debug, Clone, Copy)]
 enum ExitKind {
@@ -70,17 +101,6 @@ pub enum RootEvent {
     Blocked,
     Done(Value),
     Fault(FaultRec),
-}
-
-/// The stop of one scheduler-driven proc slice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcStop {
-    /// The proc blocked on another machine of this world.
-    Blocked,
-    /// The proc reached a terminal result.
-    Terminal,
-    /// The proc waits for a host completion.
-    Waiting,
 }
 
 /// The verified semantic identity of the loaded code, for the
@@ -161,7 +181,15 @@ pub struct World<'m> {
     /// and resumes the stored stack when the block clears. The record
     /// holds machine identifiers and stop modes only, never a guest
     /// heap reference.
-    suspended: std::collections::BTreeMap<VmId, Vec<Activation>>,
+    suspended: std::collections::BTreeMap<VmId, SuspendedStack>,
+    /// Scheduler-owned procs that have not reached a terminal state.
+    scheduler_procs: ActiveProcs,
+    /// Coalesced task and wake changes for `lm-proc`.
+    schedule_events: ScheduleEvents,
+    /// Ready host replies that another task does not await.
+    host_completions: std::collections::BTreeMap<CompletionKey, HostCompletion>,
+    /// Active restored execution gates and their exact members.
+    gate_groups: Vec<GateGroup>,
     /// The closed type table and the type environment table of this
     /// world (`docs/specs/snapshot-image-admission.md` section 5.6).
     ///
@@ -305,6 +333,10 @@ impl<'m> World<'m> {
             machines: vec![root],
             mock_free: Vec::new(),
             suspended: std::collections::BTreeMap::new(),
+            scheduler_procs: ActiveProcs::new(1),
+            schedule_events: ScheduleEvents::default(),
+            host_completions: std::collections::BTreeMap::new(),
+            gate_groups: Vec::new(),
             envs: lm_bytecode::closed::TypeEnvs::new(config.max_closed_types, config.max_type_envs),
             host,
             config,
@@ -451,7 +483,11 @@ impl<'m> World<'m> {
             RootEvent::Blocked => {
                 // No scheduler drives this world, so the block can
                 // never clear. The root faults instead of hanging.
-                self.fail_blocked(0, "no scheduler drives this world");
+                let key = TaskKey {
+                    vm: 0,
+                    generation: self.machines[0].generation,
+                };
+                self.fail_blocked_task(key, "no scheduler drives this world");
                 match self.terminal_root_event(0) {
                     RootEvent::Fault(rec) => Outcome::Fault(rec.code),
                     _ => Outcome::Fault(FaultCode::HostFault),
@@ -485,13 +521,19 @@ impl<'m> World<'m> {
 
     /// Resume one suspended activation stack.
     fn resume_stack(&mut self, vm: VmId) -> RootEvent {
-        let Some(mut stack) = self.suspended.remove(&vm) else {
+        self.resume_stack_with_quantum(vm, None)
+    }
+
+    /// Resume one saved stack under an optional scheduler quantum.
+    fn resume_stack_with_quantum(&mut self, vm: VmId, quantum: Option<u32>) -> RootEvent {
+        let Some(saved) = self.suspended.remove(&vm) else {
             return self.fault_event(vm, "the machine holds no suspended stack");
         };
+        let mut stack = saved.activations;
         if stack.is_empty() {
             return self.fault_event(vm, "the suspended stack holds no activation");
         }
-        self.drive_stack(&mut stack)
+        self.drive_stack(&mut stack, quantum)
     }
 
     /// Fault one machine and answer its terminal event.
@@ -633,7 +675,7 @@ impl<'m> World<'m> {
                 retired: false,
             },
         );
-        self.drive_stack(&mut stack)
+        self.drive_stack(&mut stack, None)
     }
 
     /// The stored terminal event of one machine.
@@ -671,7 +713,7 @@ impl<'m> World<'m> {
     }
 
     /// The one driver loop over the activation stack.
-    fn drive_stack(&mut self, stack: &mut Vec<Activation>) -> RootEvent {
+    fn drive_stack(&mut self, stack: &mut Vec<Activation>, mut quantum: Option<u32>) -> RootEvent {
         loop {
             let Some(top_idx) = stack.len().checked_sub(1) else {
                 return RootEvent::Ran;
@@ -680,11 +722,32 @@ impl<'m> World<'m> {
             let state = self.machines[act.vm as usize].vm.state;
             match state {
                 MachineState::Blocked => {
+                    if self.block_ready(act.vm) {
+                        self.complete_blocked_machine(act.vm);
+                        continue;
+                    }
+                    let Some(wake) = self.block_wake_key(act.vm) else {
+                        self.machines[act.vm as usize].set_fault(
+                            FaultCode::MalformedState,
+                            "the blocked machine has no wake condition",
+                            None,
+                        );
+                        continue;
+                    };
                     // The whole stack stops. Every activation keeps
                     // its execution reference, so no control call can
                     // reach a machine of the stopped stack.
                     let base = stack[0].vm;
-                    self.suspended.insert(base, std::mem::take(stack));
+                    self.suspended.insert(
+                        base,
+                        SuspendedStack {
+                            activations: std::mem::take(stack),
+                            reason: SuspendReason::Blocked {
+                                machine: act.vm,
+                                wake,
+                            },
+                        },
+                    );
                     return RootEvent::Blocked;
                 }
                 MachineState::Done | MachineState::Faulted => {
@@ -700,19 +763,57 @@ impl<'m> World<'m> {
                             }
                             continue;
                         }
-                        let token = self.wait_token(act.vm);
-                        match self.host.poll(token) {
-                            Some(reply) => self.install_host_reply(act.vm, reply),
-                            None => {
-                                if let Some(event) = self.finish(stack, ExitKind::Waiting) {
-                                    return event;
-                                }
+                        let Some(completion) = self.completion_key(act.vm) else {
+                            self.machines[act.vm as usize].set_fault(
+                                FaultCode::MalformedState,
+                                "the waiting machine has no completion key",
+                                None,
+                            );
+                            continue;
+                        };
+                        let _ = self.poll_host_completion(|key| key == completion);
+                        if self.machines[act.vm as usize].vm.state == MachineState::Waiting {
+                            if let Some(event) = self.finish(stack, ExitKind::Waiting) {
+                                return event;
                             }
                         }
+                    } else if quantum.is_some() {
+                        let Some(completion) = self.completion_key(act.vm) else {
+                            self.machines[act.vm as usize].set_fault(
+                                FaultCode::MalformedState,
+                                "the waiting machine has no completion key",
+                                None,
+                            );
+                            continue;
+                        };
+                        let base = stack[0].vm;
+                        self.suspended.insert(
+                            base,
+                            SuspendedStack {
+                                activations: std::mem::take(stack),
+                                reason: SuspendReason::Waiting {
+                                    machine: act.vm,
+                                    completion,
+                                },
+                            },
+                        );
+                        return RootEvent::Waiting;
                     } else {
-                        let token = self.wait_token(act.vm);
-                        let reply = self.host.wait(token);
-                        self.install_host_reply(act.vm, reply);
+                        let Some(completion) = self.completion_key(act.vm) else {
+                            self.machines[act.vm as usize].set_fault(
+                                FaultCode::MalformedState,
+                                "the waiting machine has no completion key",
+                                None,
+                            );
+                            continue;
+                        };
+                        if self.wait_host_completion(|key| key == completion).is_none() {
+                            self.machines[act.vm as usize].set_fault(
+                                FaultCode::HostFault,
+                                "the host returned no pending completion",
+                                None,
+                            );
+                        }
                     }
                 }
                 // A machine on the driver stack holds an execution
@@ -738,23 +839,65 @@ impl<'m> World<'m> {
                         }
                         continue;
                     }
+                    if matches!(quantum, Some(0)) {
+                        // A base activation keeps its continuation in
+                        // machine state. Release its driver record at
+                        // this scheduler safepoint.
+                        if stack.len() == 1 {
+                            if let Some(event) = self.finish(stack, ExitKind::Ran) {
+                                return event;
+                            }
+                            continue;
+                        }
+                        let base = stack[0].vm;
+                        self.suspended.insert(
+                            base,
+                            SuspendedStack {
+                                activations: std::mem::take(stack),
+                                reason: SuspendReason::Yielded,
+                            },
+                        );
+                        return RootEvent::Ran;
+                    }
                     let module = self.module;
                     let dispatch = self.dispatch;
                     let envs = &mut self.envs;
                     let world_fuel = &mut self.budget.fuel;
                     let machine = &mut self.machines[act.vm as usize];
-                    let outcome = if act.mode == StopMode::OneStep {
-                        machine.exec_instr(module, dispatch, envs, world_fuel)
+                    let (outcome, retired) = if let Some(remaining) = quantum {
+                        let limit = if act.mode == StopMode::OneStep {
+                            1
+                        } else {
+                            remaining
+                        };
+                        let (outcome, retired) =
+                            machine.exec_for_quantum(module, dispatch, envs, world_fuel, limit);
+                        (outcome, retired)
+                    } else if act.mode == StopMode::OneStep {
+                        (
+                            machine
+                                .exec_instr(module, dispatch, envs, world_fuel)
+                                .map(Some),
+                            1,
+                        )
                     } else {
-                        machine.exec_until_boundary(module, dispatch, envs, world_fuel)
+                        (
+                            machine
+                                .exec_until_boundary(module, dispatch, envs, world_fuel)
+                                .map(Some),
+                            1,
+                        )
                     };
-                    stack[top_idx].retired = true;
+                    if let Some(remaining) = &mut quantum {
+                        *remaining = remaining.saturating_sub(retired);
+                    }
+                    stack[top_idx].retired |= retired > 0;
                     match outcome {
                         Err(code) => {
                             self.machines[act.vm as usize].set_fault(code, "", None);
                         }
-                        Ok(ExecOutcome::Continue) => {}
-                        Ok(ExecOutcome::Terminal(value)) => {
+                        Ok(None) | Ok(Some(ExecOutcome::Continue)) => {}
+                        Ok(Some(ExecOutcome::Terminal(value))) => {
                             // A launched proc runs two frames: the
                             // constructor, then the proc body over the
                             // constructed instance.
@@ -764,46 +907,171 @@ impl<'m> World<'m> {
                                 self.machines[act.vm as usize].set_done(value);
                             }
                         }
-                        Ok(ExecOutcome::Perform { op, args }) => {
+                        Ok(Some(ExecOutcome::Perform { op, args })) => {
                             if let Some(event) = self.handle_perform(stack, act.vm, op, args) {
                                 return event;
                             }
                         }
-                        Ok(ExecOutcome::TableEdit {
+                        Ok(Some(ExecOutcome::TableEdit {
                             table,
                             action,
                             kind,
                             slot,
                             mock,
-                        }) => self.handle_table_edit(act.vm, table, action, kind, slot, mock),
-                        Ok(ExecOutcome::AsCall { request, op }) => {
+                        })) => self.handle_table_edit(act.vm, table, action, kind, slot, mock),
+                        Ok(Some(ExecOutcome::AsCall { request, op })) => {
                             self.handle_as_call(act.vm, request, op)
                         }
-                        Ok(ExecOutcome::CallArgs { call }) => self.handle_call_args(act.vm, call),
-                        Ok(ExecOutcome::Digest { value }) => self.handle_digest(act.vm, value),
+                        Ok(Some(ExecOutcome::CallArgs { call })) => {
+                            self.handle_call_args(act.vm, call)
+                        }
+                        Ok(Some(ExecOutcome::Digest { value })) => {
+                            self.handle_digest(act.vm, value)
+                        }
                     }
                 }
             }
         }
     }
 
-    /// The host completion token of a waiting machine.
-    ///
-    /// The token is host work, so it lives in the resource registry
-    /// beside the machine, never in the serializable `VmState`. The
-    /// pending request ordinal links the two. `start_wait` is the one
-    /// path into `Waiting`, and it registers the record first, so a
-    /// waiting machine always holds one. A machine without one takes
-    /// the reserved token, and the host answers it with a failure.
-    fn wait_token(&self, vm: VmId) -> u64 {
-        let m = &self.machines[vm as usize];
-        let Some(pending) = m.vm.pending.as_ref() else {
-            return u64::MAX;
-        };
-        match m.resources.pending(pending.ordinal) {
-            Some(record) => record.scope,
-            None => u64::MAX,
+    /// The completion key of one waiting machine.
+    fn completion_key(&self, vm: VmId) -> Option<CompletionKey> {
+        let machine = self.machines.get(vm as usize)?;
+        let pending = machine.vm.pending.as_ref()?;
+        Some(CompletionKey {
+            machine: TaskKey {
+                vm,
+                generation: machine.generation,
+            },
+            ordinal: pending.ordinal,
+        })
+    }
+
+    /// Poll and install one accepted host completion.
+    pub fn poll_host_completion(
+        &mut self,
+        mut accepts: impl FnMut(CompletionKey) -> bool,
+    ) -> Option<CompletionKey> {
+        self.prune_host_completions();
+        loop {
+            if let Some(completion) = self.take_host_completion(&mut accepts) {
+                if let Some(key) = self.install_host_completion(completion) {
+                    return Some(key);
+                }
+                continue;
+            }
+            let completion = self.host.poll()?;
+            if !self.completion_is_current(completion.key) {
+                continue;
+            }
+            if accepts(completion.key) {
+                if let Some(key) = self.install_host_completion(completion) {
+                    return Some(key);
+                }
+            } else {
+                self.host_completions
+                    .entry(completion.key)
+                    .or_insert(completion);
+            }
         }
+    }
+
+    /// Wait for and install one accepted host completion.
+    pub fn wait_host_completion(
+        &mut self,
+        mut accepts: impl FnMut(CompletionKey) -> bool,
+    ) -> Option<CompletionKey> {
+        self.prune_host_completions();
+        loop {
+            if let Some(completion) = self.take_host_completion(&mut accepts) {
+                if let Some(key) = self.install_host_completion(completion) {
+                    return Some(key);
+                }
+                continue;
+            }
+            let completion = self.host.wait()?;
+            if !self.completion_is_current(completion.key) {
+                continue;
+            }
+            if accepts(completion.key) {
+                if let Some(key) = self.install_host_completion(completion) {
+                    return Some(key);
+                }
+            } else {
+                self.host_completions
+                    .entry(completion.key)
+                    .or_insert(completion);
+            }
+        }
+    }
+
+    /// Take one buffered completion accepted by the caller.
+    fn take_host_completion(
+        &mut self,
+        accepts: &mut impl FnMut(CompletionKey) -> bool,
+    ) -> Option<HostCompletion> {
+        let key = self
+            .host_completions
+            .keys()
+            .copied()
+            .find(|key| accepts(*key))?;
+        self.host_completions.remove(&key)
+    }
+
+    /// Remove replies for requests that no longer wait.
+    fn prune_host_completions(&mut self) {
+        let machines = &self.machines;
+        self.host_completions.retain(|key, _| {
+            machines
+                .get(key.machine.vm as usize)
+                .is_some_and(|machine| {
+                    machine.generation == key.machine.generation
+                        && machine.vm.state == MachineState::Waiting
+                        && machine
+                            .vm
+                            .pending
+                            .as_ref()
+                            .is_some_and(|pending| pending.ordinal == key.ordinal)
+                })
+        });
+    }
+
+    /// True when one completion still names its waiting request.
+    fn completion_is_current(&self, key: CompletionKey) -> bool {
+        self.machines
+            .get(key.machine.vm as usize)
+            .is_some_and(|machine| {
+                machine.generation == key.machine.generation
+                    && machine.vm.state == MachineState::Waiting
+                    && machine
+                        .vm
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.ordinal == key.ordinal)
+            })
+    }
+
+    /// Install one host completion when its machine still waits.
+    fn install_host_completion(&mut self, completion: HostCompletion) -> Option<CompletionKey> {
+        let key = completion.key;
+        if !self.completion_is_current(key) {
+            return None;
+        }
+        let machine = &self.machines[key.machine.vm as usize];
+        let scope_matches = machine
+            .resources
+            .pending(key.ordinal)
+            .is_some_and(|record| record.scope == completion.token);
+        if !scope_matches {
+            self.machines[key.machine.vm as usize].set_fault(
+                FaultCode::HostFault,
+                "the host completion has another scope",
+                None,
+            );
+            return Some(key);
+        }
+        self.install_host_reply(key.machine.vm, completion.value);
+        Some(key)
     }
 
     /// Pop the top activation and deliver its exit event. Return the
@@ -1263,7 +1531,15 @@ impl<'m> World<'m> {
                         );
                         return;
                     }
-                    match self.host.start(op, args) {
+                    let Some(completion) = self.completion_key(vm) else {
+                        self.machines[vm as usize].set_fault(
+                            FaultCode::MalformedState,
+                            "the host operation has no completion key",
+                            Some(op),
+                        );
+                        return;
+                    };
+                    match self.host.start(completion, op, args) {
                         HostStart::Completed(reply) => self.install_host_reply(vm, reply),
                         HostStart::Waiting(token) => self.start_wait(vm, op, token),
                         HostStart::Failed(message) => {
@@ -2536,6 +2812,11 @@ impl<'m> World<'m> {
             }
         };
         let child = self.machines.len() as VmId;
+        if let Err(code) = self.prepare_scheduler_proc(child) {
+            self.machines[vm as usize].children -= 1;
+            self.fault_caller(vm, op, code, "the scheduler has no task capacity");
+            return;
+        }
         let machine = self.empty_machine(child_config, Some(vm), 0);
         self.machines.push(machine);
         // The two closures and every argument cross the boundary. Each
@@ -2659,6 +2940,7 @@ impl<'m> World<'m> {
         });
         match built {
             Ok(handle) => {
+                self.activate_scheduler_proc_prepared(child);
                 self.record(TraceEvent::Spawn {
                     parent: vm,
                     proc: child,
@@ -2698,6 +2980,10 @@ impl<'m> World<'m> {
             return;
         }
         let generation = self.machines[target as usize].generation;
+        if let Err(code) = self.prepare_scheduler_proc(target) {
+            self.fault_caller(vm, op, code, "the scheduler has no task capacity");
+            return;
+        }
         let built = self.machines[vm as usize].alloc(Object::NativeHandle {
             proc: target,
             generation,
@@ -2705,6 +2991,7 @@ impl<'m> World<'m> {
         match built {
             Ok(handle) => {
                 self.machines[target as usize].owner = Ownership::Scheduler;
+                self.activate_scheduler_proc_prepared(target);
                 self.record(TraceEvent::Spawn {
                     parent: vm,
                     proc: target,
@@ -2774,6 +3061,11 @@ impl<'m> World<'m> {
             let mailbox = &mut self.machines[proc as usize].vm.mailbox;
             mailbox.push(moved);
         }
+        let target = TaskKey {
+            vm: proc,
+            generation,
+        };
+        self.emit_wake(WakeKey::Receive(target));
         self.record(TraceEvent::Send {
             from: vm,
             to: proc,
@@ -2798,6 +3090,12 @@ impl<'m> World<'m> {
         }
         let first = !self.machines[proc as usize].vm.mailbox.closed;
         self.machines[proc as usize].vm.mailbox.closed = true;
+        let target = TaskKey {
+            vm: proc,
+            generation,
+        };
+        self.emit_wake(WakeKey::Receive(target));
+        self.emit_wake(WakeKey::Send(target));
         self.record(TraceEvent::Close { proc, first });
         let arm = if first {
             self.core.send_sent
@@ -2825,6 +3123,9 @@ impl<'m> World<'m> {
         let message = self.machines[vm as usize].vm.mailbox.pop();
         match message {
             Some(value) => {
+                if let Some(target) = self.task_key(vm) {
+                    self.emit_wake(WakeKey::Send(target));
+                }
                 self.record(TraceEvent::Receive {
                     proc: vm,
                     closed: false,
@@ -2915,8 +3216,13 @@ impl<'m> World<'m> {
         } else if self.machines[proc as usize].active > 0 {
             self.core.proc_error_in_use
         } else {
+            let key = TaskKey {
+                vm: proc,
+                generation,
+            };
             self.machines[proc as usize].owner = Ownership::Holder;
             self.machines[proc as usize].paused = true;
+            self.deactivate_scheduler_proc(key);
             self.record(TraceEvent::Pause { proc });
             let built = self.machines[vm as usize]
                 .alloc(Object::NativeVm { vm: proc })
@@ -2942,8 +3248,13 @@ impl<'m> World<'m> {
         } else if self.machines[proc as usize].active > 0 {
             self.core.proc_error_in_use
         } else {
+            if let Err(code) = self.prepare_scheduler_proc(proc) {
+                self.fault_caller(vm, op, code, "the scheduler has no task capacity");
+                return;
+            }
             self.machines[proc as usize].owner = Ownership::Scheduler;
             self.machines[proc as usize].paused = false;
+            self.activate_scheduler_proc_prepared(proc);
             self.record(TraceEvent::Resume { proc });
             let built = self.make_instance(vm, self.core.result_ok, vec![Value::Unit]);
             self.reply_or_fault(vm, op, built);
@@ -3194,68 +3505,193 @@ impl<'m> World<'m> {
         }
     }
 
-    /// Complete every block that can complete now, in machine order.
-    /// Return the number of machines the call released.
-    pub fn poll_blocked(&mut self) -> usize {
-        let ready: Vec<VmId> = (0..self.machines.len() as VmId)
-            .filter(|vm| {
-                // A machine behind a world gate makes no move at all,
-                // not even a completed block. The first run, step, or
-                // drive of the restored root opens the gate
-                // (specification 17.5).
-                self.machines[*vm as usize].gate == 0
-                    && self.machines[*vm as usize].vm.state == MachineState::Blocked
-                    && self.block_ready(*vm)
-            })
-            .collect();
-        for vm in &ready {
-            // A machine reaches `Blocked` inside a proc operation, so
-            // it holds that request. A restored machine without one
-            // faults instead of running a proc rule with no operation.
-            let found = self.machines[*vm as usize]
-                .vm
-                .pending
-                .as_ref()
-                .map(|pending| (pending.op, pending.args.clone()));
-            let Some((op, args)) = found else {
-                self.fail_blocked(*vm, "the blocked machine holds no request");
-                continue;
-            };
-            self.machines[*vm as usize].vm.block = None;
-            self.machines[*vm as usize].vm.state = MachineState::Ready;
-            self.record(TraceEvent::Unblock { vm: *vm });
-            self.proc_exec(*vm, op, args);
+    /// The wake condition stored by one blocked machine.
+    fn block_wake_key(&self, vm: VmId) -> Option<WakeKey> {
+        let machine = self.machines.get(vm as usize)?;
+        let own = TaskKey {
+            vm,
+            generation: machine.generation,
+        };
+        match machine.vm.block? {
+            Block::Receive => Some(WakeKey::Receive(own)),
+            Block::Send { target, generation } => Some(WakeKey::Send(TaskKey {
+                vm: target,
+                generation,
+            })),
+            Block::Done { target, generation } => Some(WakeKey::Done(TaskKey {
+                vm: target,
+                generation,
+            })),
         }
-        ready.len()
     }
 
-    /// The scheduler-owned machines that can retire an instruction
-    /// now, in ascending identifier order.
-    pub fn runnable_procs(&self) -> Vec<VmId> {
-        (0..self.machines.len() as VmId)
-            .filter(|vm| {
-                let m = &self.machines[*vm as usize];
-                // A machine with a suspended stack holds the execution
-                // references of that stack, so its own base activation
-                // is the one that resumes it. Every other machine of
-                // the stack stays out of the run set.
-                let resumable = self.suspended.contains_key(vm);
-                // A running machine is one that a suspended stack
-                // left mid flight. Only its own base activation may
-                // pick it up again.
-                let state_ok = match m.vm.state {
-                    MachineState::Ready | MachineState::Waiting => true,
-                    MachineState::Running => resumable,
-                    _ => false,
-                };
-                m.owner == Ownership::Scheduler
-                    && (m.active == 0 || resumable)
-                    && !m.paused
-                    && m.barrier.is_none()
-                    && m.gate == 0
-                    && state_ok
-            })
-            .collect()
+    /// Complete one ready proc block.
+    fn complete_blocked_machine(&mut self, vm: VmId) {
+        let found = self.machines[vm as usize]
+            .vm
+            .pending
+            .as_ref()
+            .map(|pending| (pending.op, pending.args.clone()));
+        let Some((op, args)) = found else {
+            let pending_op = self.pending_op(vm);
+            self.machines[vm as usize].vm.block = None;
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the blocked machine holds no request",
+                pending_op,
+            );
+            return;
+        };
+        self.machines[vm as usize].vm.block = None;
+        self.machines[vm as usize].vm.state = MachineState::Ready;
+        self.record(TraceEvent::Unblock { vm });
+        self.proc_exec(vm, op, args);
+    }
+
+    /// The stable identity of one current machine record.
+    pub fn task_key(&self, vm: VmId) -> Option<TaskKey> {
+        self.machines.get(vm as usize).map(|machine| TaskKey {
+            vm,
+            generation: machine.generation,
+        })
+    }
+
+    /// The scheduler view of one task without a machine-table scan.
+    pub fn task_status(&self, key: TaskKey) -> TaskStatus {
+        let Some(machine) = self.machines.get(key.vm as usize) else {
+            return TaskStatus::Dormant;
+        };
+        if machine.generation != key.generation {
+            return TaskStatus::Dormant;
+        }
+        if matches!(machine.vm.state, MachineState::Done | MachineState::Faulted) {
+            return TaskStatus::Terminal;
+        }
+        let root = key.vm == 0;
+        if !root
+            && (!self.scheduler_procs.contains(key)
+                || machine.owner != Ownership::Scheduler
+                || machine.paused)
+        {
+            return TaskStatus::Dormant;
+        }
+        if machine.barrier.is_some() || machine.gate != 0 {
+            return TaskStatus::Dormant;
+        }
+        if let Some(saved) = self.suspended.get(&key.vm) {
+            return match saved.reason {
+                SuspendReason::Yielded => TaskStatus::Ready,
+                SuspendReason::Blocked {
+                    machine: blocked,
+                    wake,
+                } => {
+                    if self
+                        .machines
+                        .get(blocked as usize)
+                        .is_some_and(|machine| machine.vm.state == MachineState::Blocked)
+                        && !self.block_ready(blocked)
+                    {
+                        TaskStatus::Blocked(wake)
+                    } else {
+                        TaskStatus::Ready
+                    }
+                }
+                SuspendReason::Waiting {
+                    machine: waiting,
+                    completion,
+                } => {
+                    if self
+                        .machines
+                        .get(waiting as usize)
+                        .is_some_and(|machine| machine.vm.state == MachineState::Waiting)
+                    {
+                        TaskStatus::Waiting(completion)
+                    } else {
+                        TaskStatus::Ready
+                    }
+                }
+            };
+        }
+        if machine.active > 0 {
+            return TaskStatus::Dormant;
+        }
+        match machine.vm.state {
+            MachineState::Ready => TaskStatus::Ready,
+            MachineState::Blocked if self.block_ready(key.vm) => TaskStatus::Ready,
+            MachineState::Blocked => self
+                .block_wake_key(key.vm)
+                .map(TaskStatus::Blocked)
+                .unwrap_or(TaskStatus::Ready),
+            MachineState::Waiting => self
+                .completion_key(key.vm)
+                .map(TaskStatus::Waiting)
+                .unwrap_or(TaskStatus::Ready),
+            MachineState::Empty | MachineState::Asked | MachineState::Running => TaskStatus::Ready,
+            MachineState::Done | MachineState::Faulted => TaskStatus::Terminal,
+        }
+    }
+
+    /// The root and active proc states for a new scheduler run.
+    pub fn scheduler_seeds(&self, include_root: bool) -> Vec<(TaskKey, TaskStatus)> {
+        let mut keys = self.scheduler_procs.entries().to_vec();
+        keys.sort_unstable();
+        let mut out = Vec::with_capacity(keys.len() + usize::from(include_root));
+        if include_root {
+            let root = TaskKey {
+                vm: 0,
+                generation: self.machines[0].generation,
+            };
+            out.push((root, self.task_status(root)));
+        }
+        out.extend(keys.into_iter().map(|key| (key, self.task_status(key))));
+        out
+    }
+
+    /// Take all coalesced changes since the last scheduler call.
+    pub fn take_schedule_events(&mut self) -> ScheduleEvents {
+        std::mem::take(&mut self.schedule_events)
+    }
+
+    fn emit_ready(&mut self, key: TaskKey) {
+        self.schedule_events.ready.insert(key);
+    }
+
+    fn emit_removed(&mut self, key: TaskKey) {
+        self.schedule_events.removed.insert(key);
+    }
+
+    fn emit_wake(&mut self, wake: WakeKey) {
+        self.schedule_events.wakes.insert(wake);
+    }
+
+    pub(crate) fn prepare_scheduler_procs(
+        &mut self,
+        machine_slots: usize,
+        added: usize,
+    ) -> Result<(), FaultCode> {
+        self.scheduler_procs.prepare_batch(machine_slots, added)
+    }
+
+    fn prepare_scheduler_proc(&mut self, vm: VmId) -> Result<(), FaultCode> {
+        self.scheduler_procs.prepare(vm)
+    }
+
+    pub(crate) fn activate_scheduler_proc_prepared(&mut self, vm: VmId) {
+        let key = TaskKey {
+            vm,
+            generation: self.machines[vm as usize].generation,
+        };
+        self.scheduler_procs.insert_prepared(key);
+        if self.task_status(key) == TaskStatus::Ready {
+            self.emit_ready(key);
+        }
+    }
+
+    fn deactivate_scheduler_proc(&mut self, key: TaskKey) {
+        if self.scheduler_procs.remove(key) {
+            self.schedule_events.ready.remove(&key);
+            self.emit_removed(key);
+        }
     }
 
     /// True when one machine still holds a suspended activation stack.
@@ -3269,7 +3705,10 @@ impl<'m> World<'m> {
     /// that blocked on its own base activation, and the scheduler
     /// rebuilds that activation when the block clears.
     pub fn suspended_len(&self, vm: VmId) -> usize {
-        self.suspended.get(&vm).map(Vec::len).unwrap_or(0)
+        self.suspended
+            .get(&vm)
+            .map(|saved| saved.activations.len())
+            .unwrap_or(0)
     }
 
     /// Drop the suspended activation stack of one machine.
@@ -3281,56 +3720,202 @@ impl<'m> World<'m> {
         self.suspended.remove(&vm);
     }
 
-    /// Drive one scheduler-owned proc until it blocks, waits, or
-    /// reaches a terminal result.
-    pub fn drive_proc(&mut self, vm: VmId) -> ProcStop {
-        debug_assert_eq!(self.machines[vm as usize].owner, Ownership::Scheduler);
-        let event = if self.suspended.contains_key(&vm) {
-            self.resume_stack(vm)
+    /// Drive one task for at most `quantum` guest instructions.
+    pub fn drive_slice(&mut self, key: TaskKey, quantum: u32) -> Option<SliceExit> {
+        match self.task_status(key) {
+            TaskStatus::Dormant => return None,
+            TaskStatus::Terminal => return Some(SliceExit::Terminal),
+            TaskStatus::Blocked(wake) => return Some(SliceExit::Blocked(wake)),
+            TaskStatus::Waiting(completion) => return Some(SliceExit::Waiting(completion)),
+            TaskStatus::Ready => {}
+        }
+        if self.machines[key.vm as usize].vm.state == MachineState::Blocked
+            && !self.suspended.contains_key(&key.vm)
+        {
+            self.complete_blocked_machine(key.vm);
+        }
+        let event = if self.suspended.contains_key(&key.vm) {
+            self.resume_stack_with_quantum(key.vm, Some(quantum.max(1)))
+        } else if self.machines[key.vm as usize].vm.state == MachineState::Ready {
+            let mut stack = Vec::new();
+            self.push_activation(
+                &mut stack,
+                Activation {
+                    vm: key.vm,
+                    mode: StopMode::RunToTerminal,
+                    family: Family::Run,
+                    reply_to: None,
+                    retired: false,
+                },
+            );
+            self.drive_stack(&mut stack, Some(quantum.max(1)))
         } else {
-            self.control(vm, StopMode::RunToTerminal, Family::Run)
+            self.fault_event(key.vm, "the scheduler task is not ready to run")
         };
         match event {
-            RootEvent::Blocked => ProcStop::Blocked,
-            RootEvent::Waiting => ProcStop::Waiting,
+            RootEvent::Blocked => self.suspended.get(&key.vm).and_then(|saved| {
+                if let SuspendReason::Blocked { wake, .. } = saved.reason {
+                    Some(SliceExit::Blocked(wake))
+                } else {
+                    None
+                }
+            }),
+            RootEvent::Waiting => self.suspended.get(&key.vm).and_then(|saved| {
+                if let SuspendReason::Waiting { completion, .. } = saved.reason {
+                    Some(SliceExit::Waiting(completion))
+                } else {
+                    None
+                }
+            }),
+            RootEvent::Ran => Some(SliceExit::Yielded),
             RootEvent::Done(_) | RootEvent::Fault(_) => {
-                let faulted = self.machines[vm as usize].vm.state == MachineState::Faulted;
-                self.record(TraceEvent::Terminal { proc: vm, faulted });
-                ProcStop::Terminal
+                if key.vm != 0 && self.scheduler_procs.contains(key) {
+                    let faulted = self.machines[key.vm as usize].vm.state == MachineState::Faulted;
+                    self.record(TraceEvent::Terminal {
+                        proc: key.vm,
+                        faulted,
+                    });
+                }
+                Some(SliceExit::Terminal)
             }
-            // A slice runs to a terminal, a block, or a wait. Any
-            // other exit stops the proc as a fault, so the scheduler
-            // retires it instead of spinning on it.
             _ => {
-                self.machines[vm as usize].set_fault(
+                self.machines[key.vm as usize].set_fault(
                     FaultCode::MalformedState,
-                    "the proc slice stopped outside its stop set",
+                    "the scheduler slice stopped outside its stop set",
                     None,
                 );
-                self.record(TraceEvent::Terminal {
-                    proc: vm,
-                    faulted: true,
-                });
-                ProcStop::Terminal
+                Some(SliceExit::Terminal)
             }
         }
     }
 
-    /// Fault one blocked machine, for a scheduler that cannot make
-    /// the block complete.
-    pub fn fail_blocked(&mut self, vm: VmId, message: &str) {
+    /// Remove one terminal proc from the active scheduler index.
+    pub fn retire_scheduler_task(&mut self, key: TaskKey) {
+        if key.vm != 0 {
+            self.deactivate_scheduler_proc(key);
+        }
+    }
+
+    /// The stored outcome of one terminal task.
+    pub fn task_outcome(&self, key: TaskKey) -> Outcome {
+        match self.terminal_root_event(key.vm) {
+            RootEvent::Done(value) => Outcome::Done(value),
+            RootEvent::Fault(record) => Outcome::Fault(record.code),
+            _ => Outcome::Fault(FaultCode::MalformedState),
+        }
+    }
+
+    /// Fault the machine that blocks one saved scheduler task.
+    pub fn fail_blocked_task(&mut self, key: TaskKey, message: &str) {
+        let blocked = self
+            .suspended
+            .get(&key.vm)
+            .and_then(|saved| match saved.reason {
+                SuspendReason::Blocked { machine, .. } => Some(machine),
+                _ => None,
+            });
+        let vm = blocked.unwrap_or(key.vm);
         let op = self.pending_op(vm);
         self.machines[vm as usize].vm.block = None;
         self.machines[vm as usize].set_fault(FaultCode::HostFault, message, op);
-        self.suspended.remove(&vm);
+        if let Some(saved) = self.suspended.get_mut(&key.vm) {
+            saved.reason = SuspendReason::Yielded;
+        }
     }
 
-    /// Every machine that is blocked on another machine, in ascending
-    /// identifier order.
+    /// Fault the machine that waits inside one saved scheduler task.
+    pub fn fail_waiting_task(&mut self, key: TaskKey, message: &str) {
+        let waiting = self
+            .suspended
+            .get(&key.vm)
+            .and_then(|saved| match saved.reason {
+                SuspendReason::Waiting { machine, .. } => Some(machine),
+                _ => None,
+            });
+        let vm = waiting.unwrap_or(key.vm);
+        let op = self.pending_op(vm);
+        self.machines[vm as usize].set_fault(FaultCode::HostFault, message, op);
+        if let Some(saved) = self.suspended.get_mut(&key.vm) {
+            saved.reason = SuspendReason::Yielded;
+        }
+    }
+
+    /// The ready proc keys for tools and transition tests.
+    ///
+    /// The call reads the active index. It never scans terminal
+    /// machine records.
+    pub fn runnable_procs(&self) -> Vec<VmId> {
+        let mut ready: Vec<VmId> = self
+            .scheduler_procs
+            .entries()
+            .iter()
+            .copied()
+            .filter(|key| self.task_status(*key) == TaskStatus::Ready)
+            .map(|key| key.vm)
+            .collect();
+        ready.sort_unstable();
+        ready
+    }
+
+    /// Complete indexed blocks that became ready.
+    ///
+    /// Scheduler production uses wake keys. This entry supports tools
+    /// that drive proc transitions directly.
+    pub fn poll_blocked(&mut self) -> usize {
+        let mut keys: Vec<TaskKey> = self.scheduler_procs.entries().to_vec();
+        if let Some(root) = self.task_key(0) {
+            keys.push(root);
+        }
+        keys.sort_unstable();
+        let mut released = 0;
+        for key in keys {
+            let blocked = self
+                .suspended
+                .get(&key.vm)
+                .and_then(|saved| match saved.reason {
+                    SuspendReason::Blocked { machine, .. } => Some(machine),
+                    _ => None,
+                });
+            let vm = blocked.unwrap_or(key.vm);
+            if self
+                .machines
+                .get(vm as usize)
+                .is_some_and(|machine| machine.vm.state == MachineState::Blocked)
+                && self.block_ready(vm)
+            {
+                self.complete_blocked_machine(vm);
+                if let Some(saved) = self.suspended.get_mut(&key.vm) {
+                    saved.reason = SuspendReason::Yielded;
+                }
+                released += 1;
+            }
+        }
+        released
+    }
+
+    /// Drive one proc with the compatibility quantum.
+    pub fn drive_proc(&mut self, vm: VmId) -> SliceExit {
+        let Some(key) = self.task_key(vm) else {
+            return SliceExit::Terminal;
+        };
+        let exit = self
+            .drive_slice(key, u32::MAX)
+            .unwrap_or(SliceExit::Terminal);
+        if exit == SliceExit::Terminal {
+            self.retire_scheduler_task(key);
+        }
+        exit
+    }
+
+    /// The blocked indexed task bases in stable order.
     pub fn blocked_machines(&self) -> Vec<VmId> {
-        (0..self.machines.len() as VmId)
-            .filter(|vm| self.machines[*vm as usize].vm.state == MachineState::Blocked)
-            .collect()
+        let mut blocked: Vec<VmId> = self
+            .scheduler_seeds(true)
+            .into_iter()
+            .filter_map(|(key, status)| matches!(status, TaskStatus::Blocked(_)).then_some(key.vm))
+            .collect();
+        blocked.sort_unstable();
+        blocked
     }
 
     /// The mailbox counters of one machine.
@@ -3366,6 +3951,18 @@ impl<'m> World<'m> {
     /// machine stays at the instruction boundary the barrier found.
     pub fn set_barrier(&mut self, vm: VmId, barrier: Option<u32>) {
         self.machines[vm as usize].barrier = barrier;
+        let Some(key) = self.task_key(vm) else {
+            return;
+        };
+        if !self.scheduler_procs.contains(key) && vm != 0 {
+            return;
+        }
+        if barrier.is_some() {
+            self.schedule_events.ready.remove(&key);
+            self.emit_removed(key);
+        } else {
+            self.emit_ready(key);
+        }
     }
 
     /// Freeze or thaw mailbox acceptance of one machine.
@@ -3375,6 +3972,11 @@ impl<'m> World<'m> {
     /// what a snapshot would copy.
     pub fn freeze_mailbox(&mut self, vm: VmId, frozen: bool) {
         self.machines[vm as usize].vm.mailbox.frozen = frozen;
+        if !frozen {
+            if let Some(key) = self.task_key(vm) {
+                self.emit_wake(WakeKey::Send(key));
+            }
+        }
     }
 
     /// The next mailbox cut marker of this world.
@@ -3399,6 +4001,18 @@ impl<'m> World<'m> {
         self.gate = gate;
     }
 
+    /// Reserve one restored gate record before restore commit.
+    pub(crate) fn prepare_gate_group(&mut self) -> Result<(), FaultCode> {
+        self.gate_groups
+            .try_reserve(1)
+            .map_err(|_| FaultCode::HostFault)
+    }
+
+    /// Install one prepared restored gate record.
+    pub(crate) fn install_gate_group(&mut self, id: u32, members: Vec<VmId>) {
+        self.gate_groups.push(GateGroup { id, members });
+    }
+
     /// The world gate one machine sits behind, or zero.
     pub fn gate_of(&self, vm: VmId) -> u32 {
         self.machines[vm as usize].gate
@@ -3415,9 +4029,27 @@ impl<'m> World<'m> {
         if gate == 0 {
             return;
         }
-        for machine in &mut self.machines {
-            if machine.gate == gate {
-                machine.gate = 0;
+        let Some(at) = self.gate_groups.iter().position(|group| group.id == gate) else {
+            self.machines[vm as usize].gate = 0;
+            if let Some(key) = self.task_key(vm) {
+                self.emit_ready(key);
+            }
+            return;
+        };
+        let group = self.gate_groups.swap_remove(at);
+        for member in group.members {
+            if self
+                .machines
+                .get(member as usize)
+                .is_none_or(|machine| machine.gate != gate)
+            {
+                continue;
+            }
+            self.machines[member as usize].gate = 0;
+            if let Some(key) = self.task_key(member) {
+                if member == 0 || self.scheduler_procs.contains(key) {
+                    self.emit_ready(key);
+                }
             }
         }
     }

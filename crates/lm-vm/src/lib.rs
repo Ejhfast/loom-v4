@@ -13,14 +13,18 @@
 mod host;
 mod machine;
 mod resource;
+mod schedule;
 pub mod snapshot;
 mod typecheck;
 mod world;
 
-pub use host::{CoreCtor, Host, HostArg, HostStart, HostValue, NullHost, RecordingHost};
+pub use host::{
+    CoreCtor, Host, HostArg, HostCompletion, HostStart, HostValue, NullHost, RecordingHost,
+};
 pub use machine::{Block, FaultRec, MachineState, Mailbox, Ownership, VmId, VmState};
 pub use resource::{ResourceKind, ResourceRecord, ResourceRegistry, ResourceState};
-pub use world::{MailboxMetrics, ProcStop, RootEvent, StopMode, TraceEvent, World};
+pub use schedule::{CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WakeKey};
+pub use world::{MailboxMetrics, RootEvent, StopMode, TraceEvent, World};
 
 /// The fault codes are manifest content, and the heap and the graph
 /// engine name them too. They live in `lm-abi`.

@@ -1547,6 +1547,33 @@ impl Machine {
         }
     }
 
+    /// Execute until a boundary or an instruction count expires.
+    ///
+    /// `None` means the count expired after `retired` instructions.
+    /// A boundary result includes the instruction that produced it.
+    pub fn exec_for_quantum(
+        &mut self,
+        module: &Module,
+        dispatch: &[crate::DispatchRow],
+        envs: &mut TypeEnvs,
+        world_fuel: &mut u64,
+        limit: u32,
+    ) -> (Result<Option<ExecOutcome>, FaultCode>, u32) {
+        debug_assert!(limit > 0);
+        let mut retired = 0u32;
+        while retired < limit {
+            let before = *world_fuel;
+            let outcome = self.exec_instr(module, dispatch, envs, world_fuel);
+            retired += u32::from(*world_fuel < before);
+            match outcome {
+                Ok(ExecOutcome::Continue) => {}
+                Ok(outcome) => return (Ok(Some(outcome)), retired),
+                Err(code) => return (Err(code), retired),
+            }
+        }
+        (Ok(None), retired)
+    }
+
     /// Return true when the instance class equals or extends the
     /// class named by the target type index.
     fn instance_matches(&self, module: &Module, r: ObjRef, ty: u32) -> Result<bool, FaultCode> {

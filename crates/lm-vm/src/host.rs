@@ -5,7 +5,8 @@
 //! completes with a plain-data reply, now or later. No Rust reference
 //! into guest memory crosses this boundary in either direction.
 
-use std::collections::HashMap;
+use crate::CompletionKey;
+use std::collections::BTreeMap;
 
 /// One plain-data operation argument.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,34 +47,45 @@ pub enum HostStart {
     Failed(String),
 }
 
+/// One completed asynchronous host operation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostCompletion {
+    /// The machine request that started the operation.
+    pub key: CompletionKey,
+    /// The host scope returned by `HostStart::Waiting`.
+    pub token: u64,
+    /// The plain-data reply.
+    pub value: HostValue,
+}
+
 /// The root host registry. The VM calls it only for operations that
 /// the policy chain passed to the root.
 pub trait Host {
     /// Start one operation.
-    fn start(&mut self, op: u32, args: Vec<HostArg>) -> HostStart;
-    /// Poll one pending completion without blocking.
-    fn poll(&mut self, token: u64) -> Option<HostValue>;
-    /// Wait for one pending completion.
-    fn wait(&mut self, token: u64) -> HostValue;
+    fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart;
+    /// Poll the completion source without blocking.
+    fn poll(&mut self) -> Option<HostCompletion>;
+    /// Wait for the next completion.
+    fn wait(&mut self) -> Option<HostCompletion>;
 }
 
 /// A host without any implementation. Every started operation fails.
 pub struct NullHost;
 
 impl Host for NullHost {
-    fn start(&mut self, op: u32, _args: Vec<HostArg>) -> HostStart {
+    fn start(&mut self, _key: CompletionKey, op: u32, _args: Vec<HostArg>) -> HostStart {
         HostStart::Failed(format!(
             "no host implementation for {}",
             lm_abi::op_name(op)
         ))
     }
 
-    fn poll(&mut self, _token: u64) -> Option<HostValue> {
+    fn poll(&mut self) -> Option<HostCompletion> {
         None
     }
 
-    fn wait(&mut self, _token: u64) -> HostValue {
-        HostValue::Unit
+    fn wait(&mut self) -> Option<HostCompletion> {
+        None
     }
 }
 
@@ -88,7 +100,7 @@ pub struct RecordingHost {
     now: i64,
     monotonic: i64,
     rand_state: u64,
-    sleeps: HashMap<u64, u32>,
+    sleeps: BTreeMap<u64, (CompletionKey, u32)>,
     next_token: u64,
 }
 
@@ -107,7 +119,7 @@ impl RecordingHost {
             now: 1_000,
             monotonic: 0,
             rand_state: seed.max(1),
-            sleeps: HashMap::new(),
+            sleeps: BTreeMap::new(),
             next_token: 1,
         }
     }
@@ -124,7 +136,7 @@ impl RecordingHost {
 }
 
 impl Host for RecordingHost {
-    fn start(&mut self, op: u32, args: Vec<HostArg>) -> HostStart {
+    fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
         match op {
             lm_abi::OP_IO_PRINT => {
                 if let Some(HostArg::Str(text)) = args.first() {
@@ -161,7 +173,7 @@ impl Host for RecordingHost {
             lm_abi::OP_CLOCK_SLEEP => {
                 let token = self.next_token;
                 self.next_token += 1;
-                self.sleeps.insert(token, 1);
+                self.sleeps.insert(token, (key, 1));
                 HostStart::Waiting(token)
             }
             lm_abi::OP_RAND_INT => {
@@ -183,38 +195,52 @@ impl Host for RecordingHost {
         }
     }
 
-    fn poll(&mut self, token: u64) -> Option<HostValue> {
-        match self.sleeps.get_mut(&token) {
-            Some(remaining) if *remaining > 0 => {
-                *remaining -= 1;
+    fn poll(&mut self) -> Option<HostCompletion> {
+        let ready = self
+            .sleeps
+            .iter()
+            .find_map(|(token, (_, remaining))| (*remaining == 0).then_some(*token));
+        match ready {
+            Some(token) => {
+                let (key, _) = self.sleeps.remove(&token)?;
+                Some(HostCompletion {
+                    key,
+                    token,
+                    value: HostValue::Unit,
+                })
+            }
+            None => {
+                for (_, remaining) in self.sleeps.values_mut() {
+                    *remaining = remaining.saturating_sub(1);
+                }
                 None
             }
-            Some(_) => {
-                self.sleeps.remove(&token);
-                Some(HostValue::Unit)
-            }
-            None => None,
         }
     }
 
-    fn wait(&mut self, token: u64) -> HostValue {
-        self.sleeps.remove(&token);
-        HostValue::Unit
+    fn wait(&mut self) -> Option<HostCompletion> {
+        let token = self.sleeps.keys().next().copied()?;
+        let (key, _) = self.sleeps.remove(&token)?;
+        Some(HostCompletion {
+            key,
+            token,
+            value: HostValue::Unit,
+        })
     }
 }
 
 /// A shared recording host, so a test keeps access to the buffers
 /// after the world takes the host box.
 impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
-    fn start(&mut self, op: u32, args: Vec<HostArg>) -> HostStart {
-        self.borrow_mut().start(op, args)
+    fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+        self.borrow_mut().start(key, op, args)
     }
 
-    fn poll(&mut self, token: u64) -> Option<HostValue> {
-        self.borrow_mut().poll(token)
+    fn poll(&mut self) -> Option<HostCompletion> {
+        self.borrow_mut().poll()
     }
 
-    fn wait(&mut self, token: u64) -> HostValue {
-        self.borrow_mut().wait(token)
+    fn wait(&mut self) -> Option<HostCompletion> {
+        self.borrow_mut().wait()
     }
 }

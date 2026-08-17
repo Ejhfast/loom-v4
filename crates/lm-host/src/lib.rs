@@ -10,7 +10,7 @@
 //! the deadline passed; `wait` blocks until it passes. Week 9 makes
 //! the channel truly asynchronous; the shape is already in place.
 
-use lm_vm::{CoreCtor, Host, HostArg, HostStart, HostValue};
+use lm_vm::{CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostStart, HostValue};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub struct CliHost {
     started: Instant,
     rand_state: u64,
-    sleeps: HashMap<u64, Instant>,
+    sleeps: HashMap<u64, (CompletionKey, Instant)>,
     next_token: u64,
 }
 
@@ -56,7 +56,7 @@ fn io_error(message: String) -> HostValue {
 }
 
 impl Host for CliHost {
-    fn start(&mut self, op: u32, args: Vec<HostArg>) -> HostStart {
+    fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
         match op {
             lm_abi::OP_IO_PRINT => {
                 let Some(HostArg::Str(text)) = args.first() else {
@@ -118,7 +118,7 @@ impl Host for CliHost {
                 let token = self.next_token;
                 self.next_token += 1;
                 self.sleeps
-                    .insert(token, Instant::now() + Duration::from_nanos(nanos));
+                    .insert(token, (key, Instant::now() + Duration::from_nanos(nanos)));
                 HostStart::Waiting(token)
             }
             lm_abi::OP_RAND_INT => {
@@ -140,30 +140,54 @@ impl Host for CliHost {
         }
     }
 
-    fn poll(&mut self, token: u64) -> Option<HostValue> {
-        match self.sleeps.get(&token) {
-            Some(deadline) if Instant::now() >= *deadline => {
-                self.sleeps.remove(&token);
-                Some(HostValue::Unit)
-            }
-            _ => None,
-        }
+    fn poll(&mut self) -> Option<HostCompletion> {
+        let now = Instant::now();
+        let token = self
+            .sleeps
+            .iter()
+            .filter(|(_, (_, deadline))| now >= *deadline)
+            .min_by_key(|(token, (_, deadline))| (*deadline, **token))
+            .map(|(token, _)| *token)?;
+        let (key, _) = self.sleeps.remove(&token)?;
+        Some(HostCompletion {
+            key,
+            token,
+            value: HostValue::Unit,
+        })
     }
 
-    fn wait(&mut self, token: u64) -> HostValue {
-        if let Some(deadline) = self.sleeps.remove(&token) {
-            let now = Instant::now();
-            if deadline > now {
-                std::thread::sleep(deadline - now);
-            }
+    fn wait(&mut self) -> Option<HostCompletion> {
+        let token = self
+            .sleeps
+            .iter()
+            .min_by_key(|(token, (_, deadline))| (*deadline, **token))
+            .map(|(token, _)| *token)?;
+        let (key, deadline) = self.sleeps.remove(&token)?;
+        let now = Instant::now();
+        if deadline > now {
+            std::thread::sleep(deadline - now);
         }
-        HostValue::Unit
+        Some(HostCompletion {
+            key,
+            token,
+            value: HostValue::Unit,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn completion() -> CompletionKey {
+        CompletionKey {
+            machine: lm_vm::TaskKey {
+                vm: 0,
+                generation: 0,
+            },
+            ordinal: 1,
+        }
+    }
 
     #[test]
     fn rand_is_deterministic_per_seed() {
@@ -172,6 +196,7 @@ mod tests {
             (0..4)
                 .map(|_| {
                     match host.start(
+                        completion(),
                         lm_abi::OP_RAND_INT,
                         vec![HostArg::Int(0), HostArg::Int(100)],
                     ) {
@@ -188,18 +213,22 @@ mod tests {
     #[test]
     fn rand_rejects_an_empty_range() {
         let mut host = CliHost::new(1);
-        let out = host.start(lm_abi::OP_RAND_INT, vec![HostArg::Int(5), HostArg::Int(5)]);
+        let out = host.start(
+            completion(),
+            lm_abi::OP_RAND_INT,
+            vec![HostArg::Int(5), HostArg::Int(5)],
+        );
         assert!(matches!(out, HostStart::Failed(_)));
     }
 
     #[test]
     fn sleep_uses_the_completion_channel() {
         let mut host = CliHost::new(1);
-        let token = match host.start(lm_abi::OP_CLOCK_SLEEP, vec![HostArg::Int(1)]) {
+        let token = match host.start(completion(), lm_abi::OP_CLOCK_SLEEP, vec![HostArg::Int(1)]) {
             HostStart::Waiting(token) => token,
             other => panic!("unexpected start result: {other:?}"),
         };
-        assert_eq!(host.wait(token), HostValue::Unit);
-        assert_eq!(host.poll(token), None);
+        assert_eq!(host.wait().map(|completion| completion.token), Some(token));
+        assert_eq!(host.poll(), None);
     }
 }
