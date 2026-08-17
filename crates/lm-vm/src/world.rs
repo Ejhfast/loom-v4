@@ -374,11 +374,13 @@ impl<'m> World<'m> {
                 self.fail_blocked(0, "no scheduler drives this world");
                 match self.terminal_root_event(0) {
                     RootEvent::Fault(rec) => Outcome::Fault(rec.code),
-                    _ => unreachable!("a failed block stores a fault"),
+                    _ => Outcome::Fault(FaultCode::HostFault),
                 }
             }
-            // `run` waits out completions inside the loop.
-            _ => unreachable!("run mode exits at a terminal only"),
+            // `run` waits out completions inside the loop, so it
+            // exits at a terminal alone. Any other exit is a state
+            // this build does not run, and it reads as a fault.
+            _ => Outcome::Fault(FaultCode::MalformedState),
         }
     }
 
@@ -403,11 +405,22 @@ impl<'m> World<'m> {
 
     /// Resume one suspended activation stack.
     fn resume_stack(&mut self, vm: VmId) -> RootEvent {
-        let mut stack = self
-            .suspended
-            .remove(&vm)
-            .expect("the caller proved a suspended stack");
+        let Some(mut stack) = self.suspended.remove(&vm) else {
+            return self.fault_event(vm, "the machine holds no suspended stack");
+        };
+        if stack.is_empty() {
+            return self.fault_event(vm, "the suspended stack holds no activation");
+        }
         self.drive_stack(&mut stack)
+    }
+
+    /// Fault one machine and answer its terminal event.
+    ///
+    /// The call answers a driver entry that reached a state this build
+    /// does not run. It stops the machine and leaves the world alive.
+    fn fault_event(&mut self, vm: VmId, message: &str) -> RootEvent {
+        self.machines[vm as usize].set_fault(FaultCode::MalformedState, message, None);
+        self.terminal_root_event(vm)
     }
 
     /// Retire one root instruction with automatic policy.
@@ -431,15 +444,10 @@ impl<'m> World<'m> {
         }
         match self.machines[vm as usize].vm.state {
             MachineState::Blocked => RootEvent::Blocked,
-            MachineState::Asked => {
-                let ordinal = self.machines[vm as usize]
-                    .vm
-                    .pending
-                    .as_ref()
-                    .expect("an asked machine holds its request")
-                    .ordinal;
-                RootEvent::Asked(ordinal)
-            }
+            MachineState::Asked => match self.machines[vm as usize].vm.pending.as_ref() {
+                Some(pending) => RootEvent::Asked(pending.ordinal),
+                None => self.fault_event(vm, "the asked machine holds no request"),
+            },
             MachineState::Empty => RootEvent::Ran,
             _ => self.control(vm, StopMode::RunToTerminal, Family::Run),
         }
@@ -525,7 +533,12 @@ impl<'m> World<'m> {
                     return self.terminal_root_event(vm);
                 }
                 MachineState::Ready | MachineState::Waiting => {}
-                _ => unreachable!("the world caller controls a paused machine"),
+                // The callers above answer `Empty`, `Asked`, and
+                // `Blocked` before this call, and a machine that is
+                // `Running` holds an execution reference. A state that
+                // reaches here belongs to no driver entry, so the
+                // machine stops instead of running under a wrong mode.
+                _ => return self.fault_event(vm, "the machine is not ready to run"),
             }
         }
         let mut stack: Vec<Activation> = Vec::new();
@@ -542,11 +555,21 @@ impl<'m> World<'m> {
         self.drive_stack(&mut stack)
     }
 
+    /// The stored terminal event of one machine.
+    ///
+    /// A terminal machine stores its result: `set_done` and
+    /// `set_fault` are the one path into either state, and admission
+    /// keeps the rule for a restored machine. A machine that reaches
+    /// this call without one stops as a fault instead of a panic.
     fn terminal_root_event(&self, vm: VmId) -> RootEvent {
         match &self.machines[vm as usize].vm.terminal {
             Some(Terminal::Done(value)) => RootEvent::Done(*value),
             Some(Terminal::Fault(rec)) => RootEvent::Fault(rec.clone()),
-            None => unreachable!("a terminal machine stores its result"),
+            None => RootEvent::Fault(FaultRec {
+                code: FaultCode::MalformedState,
+                message: "the terminal machine stores no result".to_string(),
+                op: None,
+            }),
         }
     }
 
@@ -569,7 +592,9 @@ impl<'m> World<'m> {
     /// The one driver loop over the activation stack.
     fn drive_stack(&mut self, stack: &mut Vec<Activation>) -> RootEvent {
         loop {
-            let top_idx = stack.len() - 1;
+            let Some(top_idx) = stack.len().checked_sub(1) else {
+                return RootEvent::Ran;
+            };
             let act = stack[top_idx];
             let state = self.machines[act.vm as usize].vm.state;
             match state {
@@ -608,6 +633,19 @@ impl<'m> World<'m> {
                         let reply = self.host.wait(token);
                         self.install_host_reply(act.vm, reply);
                     }
+                }
+                // A machine on the driver stack holds an execution
+                // reference, and `push_activation` takes one from a
+                // machine that is ready or waiting alone. Neither
+                // state below can reach the loop, so a machine that
+                // holds one stops instead of running under a mode its
+                // state does not accept.
+                MachineState::Empty | MachineState::Asked => {
+                    self.machines[act.vm as usize].set_fault(
+                        FaultCode::MalformedState,
+                        "the machine left the driver stack state set",
+                        None,
+                    );
                 }
                 MachineState::Ready => {
                     self.machines[act.vm as usize].vm.state = MachineState::Running;
@@ -663,9 +701,6 @@ impl<'m> World<'m> {
                         Ok(ExecOutcome::Digest { value }) => self.handle_digest(act.vm, value),
                     }
                 }
-                MachineState::Empty | MachineState::Asked => {
-                    unreachable!("an empty or asked machine is not on the driver stack")
-                }
             }
         }
     }
@@ -674,24 +709,27 @@ impl<'m> World<'m> {
     ///
     /// The token is host work, so it lives in the resource registry
     /// beside the machine, never in the serializable `VmState`. The
-    /// pending request ordinal links the two.
+    /// pending request ordinal links the two. `start_wait` is the one
+    /// path into `Waiting`, and it registers the record first, so a
+    /// waiting machine always holds one. A machine without one takes
+    /// the reserved token, and the host answers it with a failure.
     fn wait_token(&self, vm: VmId) -> u64 {
         let m = &self.machines[vm as usize];
-        let ordinal =
-            m.vm.pending
-                .as_ref()
-                .expect("a waiting machine has a pending perform")
-                .ordinal;
-        m.resources
-            .pending(ordinal)
-            .expect("a waiting machine holds its pending-operation resource")
-            .scope
+        let Some(pending) = m.vm.pending.as_ref() else {
+            return u64::MAX;
+        };
+        match m.resources.pending(pending.ordinal) {
+            Some(record) => record.scope,
+            None => u64::MAX,
+        }
     }
 
     /// Pop the top activation and deliver its exit event. Return the
     /// event when the consumer is the world caller.
     fn finish(&mut self, stack: &mut Vec<Activation>, kind: ExitKind) -> Option<RootEvent> {
-        let act = stack.pop().expect("an activation exists");
+        let Some(act) = stack.pop() else {
+            return Some(RootEvent::Ran);
+        };
         self.machines[act.vm as usize].active -= 1;
         if let Some(p) = act.reply_to {
             self.machines[p as usize].active -= 1;
@@ -741,8 +779,7 @@ impl<'m> World<'m> {
         }
         let exit = match &self.machines[mock as usize].vm.terminal {
             Some(Terminal::Done(value)) => MockExit::Done(*value),
-            Some(Terminal::Fault(_)) => MockExit::Fault,
-            None => unreachable!("a finished mock stores its result"),
+            _ => MockExit::Fault,
         };
         match exit {
             MockExit::Done(value) => match self.transfer(mock, target, value) {
@@ -800,7 +837,11 @@ impl<'m> World<'m> {
         let t = match &self.machines[child as usize].vm.terminal {
             Some(Terminal::Done(value)) => T::Done(*value),
             Some(Terminal::Fault(rec)) => T::Fault(rec.clone()),
-            None => unreachable!("a terminal machine stores its result"),
+            None => T::Fault(FaultRec {
+                code: FaultCode::MalformedState,
+                message: "the terminal machine stores no result".to_string(),
+                op: None,
+            }),
         };
         match t {
             T::Done(value) => match self.transfer(child, parent, value) {
@@ -828,12 +869,17 @@ impl<'m> World<'m> {
         }
     }
 
+    /// The `Done` arm of one event family.
+    ///
+    /// `deliver_event` answers a mock exit before it reads an arm, so
+    /// the mock family reaches neither call. `None` here becomes a
+    /// machine fault at `make_instance`.
     fn done_arm(&self, family: Family) -> Option<u32> {
         match family {
             Family::Run => self.core.run_done,
             Family::Step => self.core.step_done,
             Family::Drive => self.core.drive_done,
-            Family::Mock => unreachable!("mock exits carry no event"),
+            Family::Mock => None,
         }
     }
 
@@ -842,7 +888,7 @@ impl<'m> World<'m> {
             Family::Run => self.core.run_fault,
             Family::Step => self.core.step_fault,
             Family::Drive => self.core.drive_fault,
-            Family::Mock => unreachable!("mock exits carry no event"),
+            Family::Mock => None,
         }
     }
 
@@ -865,14 +911,15 @@ impl<'m> World<'m> {
     ///
     /// The verifier proves the parent slot wherever an instruction
     /// needs the family, and it rejects a family that resolves
-    /// without every arm. The arm slot is therefore present.
+    /// without every arm. The arm slot is therefore present. A module
+    /// that reaches this call without one faults the machine.
     fn make_instance(
         &mut self,
         vm: VmId,
         class: Option<u32>,
         fields: Vec<Value>,
     ) -> Result<Value, FaultCode> {
-        let class = class.expect("the verifier requires the whole core family");
+        let class = class.ok_or(FaultCode::MalformedState)?;
         // The kernel builds a core enum instance outside `New` and
         // `NewG`, and it holds no closed form of the class arguments:
         // those follow from the operation manifest, which `lm-vm` does
@@ -948,13 +995,15 @@ impl<'m> World<'m> {
         let ordinal = m.vm.next_ordinal;
         m.vm.next_ordinal += 1;
         m.vm.pending = Some(Pending { op, args, ordinal });
-        let top = *stack
-            .last()
-            .expect("the performing machine is on the stack");
+        let Some(top) = stack.last().copied() else {
+            return Some(self.fault_event(vm, "the performing machine left the driver stack"));
+        };
         debug_assert_eq!(top.vm, vm);
         if top.mode == StopMode::DriveToAsk {
             // Stop before policy lookup.
-            let act = stack.pop().expect("an activation exists");
+            let Some(act) = stack.pop() else {
+                return Some(self.fault_event(vm, "the performing machine left the driver stack"));
+            };
             self.machines[vm as usize].active -= 1;
             if let Some(p) = act.reply_to {
                 self.machines[p as usize].active -= 1;
@@ -986,9 +1035,14 @@ impl<'m> World<'m> {
     /// Resolve the pending perform of `vm` through its policy chain
     /// and dispatch it.
     fn resolve_and_dispatch(&mut self, stack: &mut Vec<Activation>, vm: VmId) {
-        let op = self
-            .pending_op(vm)
-            .expect("policy resolution needs a pending perform");
+        let Some(op) = self.pending_op(vm) else {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "policy resolution found no pending request",
+                None,
+            );
+            return;
+        };
         match self.resolve_policy(vm, op) {
             Resolution::Denied => {
                 self.machines[vm as usize].set_fault(
@@ -1015,7 +1069,18 @@ impl<'m> World<'m> {
                 if lm_abi::op(op).kind == lm_abi::OpKind::VmControl {
                     self.kernel_exec(stack, vm, op);
                 } else {
-                    let args = self.host_args(vm);
+                    let args = match self.host_args(vm) {
+                        Ok(args) => args,
+                        Err(code) => {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                code,
+                                "an operation argument has another shape",
+                            );
+                            return;
+                        }
+                    };
                     match self.host.start(op, args) {
                         HostStart::Completed(reply) => self.install_host_reply(vm, reply),
                         HostStart::Waiting(token) => self.start_wait(vm, op, token),
@@ -1054,12 +1119,19 @@ impl<'m> World<'m> {
             );
             return;
         }
-        let ordinal = self.machines[vm as usize]
+        let Some(ordinal) = self.machines[vm as usize]
             .vm
             .pending
             .as_ref()
-            .expect("the pending perform waits")
-            .ordinal;
+            .map(|p| p.ordinal)
+        else {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the host suspended a machine with no pending request",
+                Some(op),
+            );
+            return;
+        };
         let m = &mut self.machines[vm as usize];
         if let Err(code) = m.resources.register(
             crate::ResourceKind::PendingOperation,
@@ -1079,19 +1151,23 @@ impl<'m> World<'m> {
     }
 
     /// Extract plain-data host arguments from the pending perform.
-    fn host_args(&self, vm: VmId) -> Vec<HostArg> {
+    ///
+    /// A host operation takes integers and strings alone. A restored
+    /// machine states its own pending arguments, so a value of another
+    /// shape stops the machine instead of the host.
+    fn host_args(&self, vm: VmId) -> Result<Vec<HostArg>, FaultCode> {
         let m = &self.machines[vm as usize];
-        let pending = m.vm.pending.as_ref().expect("a pending perform exists");
+        let pending = m.vm.pending.as_ref().ok_or(FaultCode::MalformedState)?;
         pending
             .args
             .iter()
             .map(|value| match value {
-                Value::Int(v) => HostArg::Int(*v),
+                Value::Int(v) => Ok(HostArg::Int(*v)),
                 Value::Obj(r) => match m.vm.heap.get(*r) {
-                    Object::Str(text) => HostArg::Str(text.clone()),
-                    _ => unreachable!("verified operation argument shape"),
+                    Object::Str(text) => Ok(HostArg::Str(text.clone())),
+                    _ => Err(FaultCode::TypeMismatch),
                 },
-                _ => unreachable!("verified operation argument shape"),
+                _ => Err(FaultCode::TypeMismatch),
             })
             .collect()
     }
@@ -1176,16 +1252,30 @@ impl<'m> World<'m> {
                 return;
             }
         };
-        let args: Vec<Value> = self.machines[vm as usize]
-            .vm
-            .pending
-            .as_ref()
-            .expect("the mocked perform is pending")
-            .args
-            .clone();
+        let args: Vec<Value> = match self.machines[vm as usize].vm.pending.as_ref() {
+            Some(pending) => pending.args.clone(),
+            None => {
+                self.retire_mock(id);
+                self.machines[vm as usize].set_fault(
+                    FaultCode::MalformedState,
+                    "the mocked perform holds no request",
+                    None,
+                );
+                return;
+            }
+        };
         // The handler is not reachable from the mock machine yet, so
         // it stays rooted while the arguments cross.
-        let closure_ref = closure_value.as_obj().expect("a closure is a heap object");
+        let Some(closure_ref) = closure_value.as_obj() else {
+            self.retire_mock(id);
+            let op = self.pending_op(vm);
+            self.machines[vm as usize].set_fault(
+                FaultCode::TypeMismatch,
+                "the mock handler is not a closure",
+                op,
+            );
+            return;
+        };
         self.machines[id as usize]
             .vm
             .heap
@@ -1214,7 +1304,16 @@ impl<'m> World<'m> {
         // environment.
         let (func, env) = match self.machines[id as usize].vm.heap.get(closure_ref) {
             Object::Closure { func, env, .. } => (*func, env.env()),
-            _ => unreachable!("a mock handler is a closure"),
+            _ => {
+                self.retire_mock(id);
+                let op = self.pending_op(vm);
+                self.machines[vm as usize].set_fault(
+                    FaultCode::TypeMismatch,
+                    "the mock handler is not a closure",
+                    op,
+                );
+                return;
+            }
         };
         self.machines[id as usize].load_frame(
             self.module,
@@ -1262,35 +1361,76 @@ impl<'m> World<'m> {
 
     /// Enter the proc body after the constructor frame returned.
     fn enter_proc_body(&mut self, vm: VmId, instance: Value) {
-        let body = self.machines[vm as usize]
-            .start_body
-            .take()
-            .expect("the caller proved a stored proc body");
+        let Some(body) = self.machines[vm as usize].start_body.take() else {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the machine stores no proc body",
+                None,
+            );
+            return;
+        };
         let (func, env) = match self.machines[vm as usize].vm.heap.get(body) {
             Object::Closure { func, env, .. } => (*func, env.env()),
-            _ => unreachable!("a proc body is a closure"),
+            _ => {
+                self.machines[vm as usize].set_fault(
+                    FaultCode::TypeMismatch,
+                    "the proc body is not a closure",
+                    None,
+                );
+                return;
+            }
         };
         self.machines[vm as usize].load_frame(self.module, func, vec![instance], Some(body), env);
     }
 
     /// Read one machine handle out of a holder value.
-    fn handle_vm(&self, holder: VmId, value: Value) -> VmId {
-        let r = value.as_obj().expect("verified handle value");
+    ///
+    /// The argument comes from the pending record of the machine, and
+    /// a restored machine states that record, so the read tests the
+    /// shape. `None` faults the caller at its use site.
+    fn handle_vm(&self, holder: VmId, value: Value) -> Option<VmId> {
+        let r = value.as_obj()?;
         match self.machines[holder as usize].vm.heap.get(r) {
-            Object::NativeVm { vm } => *vm,
-            _ => unreachable!("verified handle shape"),
+            Object::NativeVm { vm } => Some(*vm),
+            _ => None,
+        }
+    }
+
+    /// The machine one argument names, or a fault on the caller.
+    fn vm_arg(&mut self, vm: VmId, op: u32, value: Value) -> Option<VmId> {
+        match self.handle_vm(vm, value) {
+            Some(target) => Some(target),
+            None => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the receiver is not a machine handle",
+                );
+                None
+            }
         }
     }
 
     /// Execute one VM control operation of the machine `vm`.
     fn kernel_exec(&mut self, stack: &mut Vec<Activation>, vm: VmId, op: u32) {
-        let args: Vec<Value> = self.machines[vm as usize]
-            .vm
-            .pending
-            .as_ref()
-            .expect("a pending perform exists")
-            .args
-            .clone();
+        let stored: Vec<Value> = match self.machines[vm as usize].vm.pending.as_ref() {
+            Some(pending) => pending.args.clone(),
+            None => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::MalformedState,
+                    "the kernel found no pending request",
+                );
+                return;
+            }
+        };
+        // A restored machine states its own argument list. `arg` reads
+        // a missing position as the uninitialized marker, and every
+        // shape test below rejects that marker, so a short list faults
+        // the caller instead of indexing past the list.
+        let args = Args(&stored);
         match op {
             lm_abi::OP_VM_NEW => {
                 // The parent reserves the child from its own budget
@@ -1323,7 +1463,9 @@ impl<'m> World<'m> {
                 }
             }
             lm_abi::OP_VM_FROM_OBJECT => {
-                let target = self.handle_vm(vm, args[0]);
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
                 if self.machines[target as usize].vm.state != MachineState::Empty {
                     self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is loaded");
                     return;
@@ -1337,12 +1479,28 @@ impl<'m> World<'m> {
                 };
                 // The argument view: unit, or a tuple whose elements
                 /* become the initial parameter locals. */
-                let closure_ref = program.as_obj().expect("a program value is a closure");
+                let Some(closure_ref) = program.as_obj() else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the program value is not a closure",
+                    );
+                    return;
+                };
                 let mut locals = Vec::new();
                 if let Value::Obj(r) = args[2] {
                     let items = match self.machines[vm as usize].vm.heap.get(r) {
                         Object::Tuple { items } => items.clone(),
-                        _ => unreachable!("verified argument view shape"),
+                        _ => {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::TypeMismatch,
+                                "the argument view is not a tuple",
+                            );
+                            return;
+                        }
                     };
                     // The program is not reachable from the target
                     // machine yet, so it stays rooted while the
@@ -1370,7 +1528,15 @@ impl<'m> World<'m> {
                 // applied.
                 let (func, env) = match self.machines[target as usize].vm.heap.get(closure_ref) {
                     Object::Closure { func, env, .. } => (*func, env.env()),
-                    _ => unreachable!("a program value is a closure"),
+                    _ => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::TypeMismatch,
+                            "the program value is not a closure",
+                        );
+                        return;
+                    }
                 };
                 self.machines[target as usize].load_frame(
                     self.module,
@@ -1385,7 +1551,9 @@ impl<'m> World<'m> {
                 }
             }
             lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE => {
-                let target = self.handle_vm(vm, args[0]);
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
                 let (mode, family) = match op {
                     lm_abi::OP_VM_RUN => (StopMode::RunToTerminal, Family::Run),
                     lm_abi::OP_VM_STEP => (StopMode::OneStep, Family::Step),
@@ -1428,10 +1596,18 @@ impl<'m> World<'m> {
                                 let m = &mut self.machines[target as usize];
                                 let fresh = m.vm.next_ordinal;
                                 m.vm.next_ordinal += 1;
-                                m.vm.pending
-                                    .as_mut()
-                                    .expect("an asked machine has a pending perform")
-                                    .ordinal = fresh;
+                                match m.vm.pending.as_mut() {
+                                    Some(pending) => pending.ordinal = fresh,
+                                    None => {
+                                        self.fault_caller(
+                                            vm,
+                                            op,
+                                            FaultCode::MalformedState,
+                                            "the asked machine holds no request",
+                                        );
+                                        return;
+                                    }
+                                }
                                 fresh
                             };
                             self.deliver_asked(target, vm, fresh);
@@ -1468,37 +1644,54 @@ impl<'m> World<'m> {
                             "the machine is blocked on another machine",
                         );
                     }
+                    // A running machine holds an execution reference,
+                    // and the guard above already refused one.
                     MachineState::Running => {
-                        unreachable!("a running machine holds an active reference")
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "the machine is in use",
+                        );
                     }
                 }
             }
             lm_abi::OP_VM_TABLE => {
-                let target = self.handle_vm(vm, args[0]);
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
                 match self.machines[vm as usize].alloc(Object::NativeTable { vm: target }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
                     Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
                 }
             }
             lm_abi::OP_VM_ANSWER => {
-                let target = self.handle_vm(vm, args[0]);
-                let token = {
-                    let r = args[1].as_obj().expect("verified call token");
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|r| {
                     match self.machines[vm as usize].vm.heap.get(r) {
-                        Object::NativeCall { vm, ordinal, op } => (*vm, *ordinal, *op),
-                        _ => unreachable!("verified call token shape"),
+                        Object::NativeCall { vm, ordinal, op } => Some((*vm, *ordinal, *op)),
+                        _ => None,
                     }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
                 };
                 if !self.expect_asked(vm, op, target) {
                     return;
                 }
-                let pending_ok = {
-                    let pending = self.machines[target as usize]
-                        .vm
-                        .pending
-                        .as_ref()
-                        .expect("an asked machine has a pending perform");
-                    token.0 == target && token.1 == pending.ordinal && token.2 == pending.op
+                let pending_ok = match self.machines[target as usize].vm.pending.as_ref() {
+                    Some(pending) => {
+                        token.0 == target && token.1 == pending.ordinal && token.2 == pending.op
+                    }
+                    None => false,
                 };
                 if !pending_ok {
                     self.fault_caller(
@@ -1520,24 +1713,30 @@ impl<'m> World<'m> {
                 self.install_value_reply(vm, Value::Unit);
             }
             lm_abi::OP_VM_REJECT | lm_abi::OP_VM_DISPATCH => {
-                let target = self.handle_vm(vm, args[0]);
-                let token = {
-                    let r = args[1].as_obj().expect("verified request token");
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|r| {
                     match self.machines[vm as usize].vm.heap.get(r) {
-                        Object::NativeRequest { vm, ordinal } => (*vm, *ordinal),
-                        _ => unreachable!("verified request token shape"),
+                        Object::NativeRequest { vm, ordinal } => Some((*vm, *ordinal)),
+                        _ => None,
                     }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a request token",
+                    );
+                    return;
                 };
                 if !self.expect_asked(vm, op, target) {
                     return;
                 }
-                let pending_ok = {
-                    let pending = self.machines[target as usize]
-                        .vm
-                        .pending
-                        .as_ref()
-                        .expect("an asked machine has a pending perform");
-                    token.0 == target && token.1 == pending.ordinal
+                let pending_ok = match self.machines[target as usize].vm.pending.as_ref() {
+                    Some(pending) => token.0 == target && token.1 == pending.ordinal,
+                    None => false,
                 };
                 if !pending_ok {
                     self.fault_caller(
@@ -1549,16 +1748,24 @@ impl<'m> World<'m> {
                     return;
                 }
                 if op == lm_abi::OP_VM_REJECT {
-                    let rec = {
-                        let r = args[2].as_obj().expect("verified fault value");
+                    let built = args[2].as_obj().and_then(|r| {
                         match self.machines[vm as usize].vm.heap.get(r) {
-                            Object::NativeFault { code, message, op } => FaultRec {
+                            Object::NativeFault { code, message, op } => Some(FaultRec {
                                 code: *code,
                                 message: message.clone(),
                                 op: *op,
-                            },
-                            _ => unreachable!("verified fault value shape"),
+                            }),
+                            _ => None,
                         }
+                    });
+                    let Some(rec) = built else {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::TypeMismatch,
+                            "the argument is not a fault value",
+                        );
+                        return;
                     };
                     let pending_op = self.pending_op(target);
                     self.machines[target as usize].set_fault(rec.code, rec.message, pending_op);
@@ -1572,7 +1779,9 @@ impl<'m> World<'m> {
                 }
             }
             lm_abi::OP_VM_SNAPSHOT_HELD => {
-                let target = self.handle_vm(vm, args[0]);
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
                 if target == vm || self.machines[target as usize].active > 0 {
                     self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
                     return;
@@ -1601,7 +1810,7 @@ impl<'m> World<'m> {
                     "Vm.LoadSnapshot has no guest form without a Bytes value",
                 );
             }
-            lm_abi::OP_VM_RESTORE => self.restore_snapshot(vm, op, &args),
+            lm_abi::OP_VM_RESTORE => self.restore_snapshot(vm, op, args),
             lm_abi::OP_PROC_RUN
             | lm_abi::OP_PROC_SPAWN
             | lm_abi::OP_PROC_SEND
@@ -1609,8 +1818,16 @@ impl<'m> World<'m> {
             | lm_abi::OP_PROC_RECV
             | lm_abi::OP_PROC_DONE
             | lm_abi::OP_PROC_PAUSE
-            | lm_abi::OP_PROC_RESUME => self.proc_exec(vm, op, args),
-            _ => unreachable!("every VmControl slot has a kernel rule"),
+            | lm_abi::OP_PROC_RESUME => self.proc_exec(vm, op, stored),
+            // Every `VmControl` slot of the manifest has an arm above.
+            // A slot without one names a manifest this build does not
+            // hold, so the caller faults.
+            _ => self.fault_caller(
+                vm,
+                op,
+                FaultCode::MalformedState,
+                "the operation has no kernel rule",
+            ),
         }
     }
 
@@ -1659,7 +1876,7 @@ impl<'m> World<'m> {
                 let list = self.machines[vm as usize].alloc(Object::List { items })?;
                 // The list holds no root yet, so it stays host-rooted
                 // while the kind string allocates.
-                let list_ref = list.as_obj().expect("a list is a heap object");
+                let list_ref = list.as_obj().ok_or(FaultCode::MalformedState)?;
                 self.machines[vm as usize].vm.heap.push_host_root(list_ref);
                 let text = self.machines[vm as usize].alloc(Object::Str(kind.clone()));
                 self.machines[vm as usize].vm.heap.pop_host_root(list_ref);
@@ -1679,8 +1896,10 @@ impl<'m> World<'m> {
     /// already wrote or already checked restore through the trusted
     /// path; any other bytes run the external loader once first, so no
     /// unchecked image ever builds a world.
-    fn restore_snapshot(&mut self, vm: VmId, op: u32, args: &[Value]) {
-        let target = self.handle_vm(vm, args[0]);
+    fn restore_snapshot(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let Some(target) = self.vm_arg(vm, op, args[0]) else {
+            return;
+        };
         if target == vm || self.machines[target as usize].active > 0 {
             self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
             return;
@@ -1689,12 +1908,21 @@ impl<'m> World<'m> {
             self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is loaded");
             return;
         }
-        let bytes = {
-            let r = args[1].as_obj().expect("verified snapshot value");
-            match self.machines[vm as usize].vm.heap.get(r) {
-                Object::NativeSnapshot(image) => image.clone(),
-                _ => unreachable!("verified snapshot shape"),
-            }
+        let found =
+            args[1]
+                .as_obj()
+                .and_then(|r| match self.machines[vm as usize].vm.heap.get(r) {
+                    Object::NativeSnapshot(image) => Some(image.clone()),
+                    _ => None,
+                });
+        let Some(bytes) = found else {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::TypeMismatch,
+                "the argument is not a snapshot value",
+            );
+            return;
         };
         if bytes.len() < 32 {
             self.fault_caller(
@@ -1809,11 +2037,30 @@ impl<'m> World<'m> {
     // ------------------------------------------------------------
 
     /// Read one proc reference out of a handle value.
-    fn handle_proc(&self, holder: VmId, value: Value) -> (VmId, u32) {
-        let r = value.as_obj().expect("verified handle value");
+    ///
+    /// The argument comes from the pending record, so the read tests
+    /// the shape and the caller faults on `None`.
+    fn handle_proc(&self, holder: VmId, value: Value) -> Option<(VmId, u32)> {
+        let r = value.as_obj()?;
         match self.machines[holder as usize].vm.heap.get(r) {
-            Object::NativeHandle { proc, generation } => (*proc, *generation),
-            _ => unreachable!("verified handle shape"),
+            Object::NativeHandle { proc, generation } => Some((*proc, *generation)),
+            _ => None,
+        }
+    }
+
+    /// The proc one argument names, or a fault on the caller.
+    fn proc_arg(&mut self, vm: VmId, op: u32, value: Value) -> Option<(VmId, u32)> {
+        match self.handle_proc(vm, value) {
+            Some(found) => Some(found),
+            None => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the receiver is not a proc handle",
+                );
+                None
+            }
         }
     }
 
@@ -1884,17 +2131,27 @@ impl<'m> World<'m> {
     }
 
     /// Execute one proc operation of the machine `vm`.
-    fn proc_exec(&mut self, vm: VmId, op: u32, args: Vec<Value>) {
+    fn proc_exec(&mut self, vm: VmId, op: u32, stored: Vec<Value>) {
+        // A restored machine states its own argument list, so a short
+        // list reads as the uninitialized marker and every shape test
+        // below rejects it.
+        let args = Args(&stored);
         match op {
-            lm_abi::OP_PROC_SPAWN => self.proc_spawn(vm, op, &args),
-            lm_abi::OP_PROC_RUN => self.proc_run(vm, op, &args),
-            lm_abi::OP_PROC_SEND => self.proc_send(vm, op, &args),
-            lm_abi::OP_PROC_CLOSE => self.proc_close(vm, op, &args),
+            lm_abi::OP_PROC_SPAWN => self.proc_spawn(vm, op, args),
+            lm_abi::OP_PROC_RUN => self.proc_run(vm, op, args),
+            lm_abi::OP_PROC_SEND => self.proc_send(vm, op, args),
+            lm_abi::OP_PROC_CLOSE => self.proc_close(vm, op, args),
             lm_abi::OP_PROC_RECV => self.proc_recv(vm, op),
-            lm_abi::OP_PROC_DONE => self.proc_done(vm, op, &args),
-            lm_abi::OP_PROC_PAUSE => self.proc_pause(vm, op, &args),
-            lm_abi::OP_PROC_RESUME => self.proc_resume(vm, op, &args),
-            _ => unreachable!("every proc slot has a kernel rule"),
+            lm_abi::OP_PROC_DONE => self.proc_done(vm, op, args),
+            lm_abi::OP_PROC_PAUSE => self.proc_pause(vm, op, args),
+            lm_abi::OP_PROC_RESUME => self.proc_resume(vm, op, args),
+            // Every proc slot of the manifest has an arm above.
+            _ => self.fault_caller(
+                vm,
+                op,
+                FaultCode::MalformedState,
+                "the operation has no proc rule",
+            ),
         }
     }
 
@@ -1904,7 +2161,7 @@ impl<'m> World<'m> {
     /// The arguments are the constructor closure, the proc body
     /// closure, and the argument tuple. The proc instance is
     /// constructed inside its own machine (specification 18.1).
-    fn proc_spawn(&mut self, vm: VmId, op: u32, args: &[Value]) {
+    fn proc_spawn(&mut self, vm: VmId, op: u32, args: Args<'_>) {
         let child_config = match self.reserve_child(vm) {
             Some(config) => config,
             None => {
@@ -1926,7 +2183,17 @@ impl<'m> World<'m> {
         if let Value::Obj(r) = args[2] {
             let items = match self.machines[vm as usize].vm.heap.get(r) {
                 Object::Tuple { items } => items.clone(),
-                _ => unreachable!("verified argument view shape"),
+                _ => {
+                    self.machines.pop();
+                    self.machines[vm as usize].children -= 1;
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument view is not a tuple",
+                    );
+                    return;
+                }
             };
             payload.extend(items);
         }
@@ -1942,25 +2209,50 @@ impl<'m> World<'m> {
                 return;
             }
         };
-        let ctor = moved[0].as_obj().expect("a constructor is a closure");
-        let body = moved[1].as_obj().expect("a proc body is a closure");
-        let ctor_args: Vec<Value> = moved[2..].to_vec();
-        let (func, ctor_env) = match self.machines[child as usize].vm.heap.get(ctor) {
-            Object::Closure { func, env, .. } => (*func, env.env()),
-            _ => unreachable!("a constructor is a closure"),
-        };
+        // The two closures come from the pending record, so a
+        // restored machine can state another shape at either slot.
+        let pair = moved[0].as_obj().zip(moved[1].as_obj()).and_then(|(c, b)| {
+            let heap = &self.machines[child as usize].vm.heap;
+            let ctor = match heap.get(c) {
+                Object::Closure { func, env, .. } => (*func, env.env()),
+                _ => return None,
+            };
+            let body = match heap.get(b) {
+                Object::Closure { func, env, .. } => (*func, env.env()),
+                _ => return None,
+            };
+            Some((c, b, ctor, body))
+        });
         // The machine witness names the proc body, never the
         // constructor: the terminal result of a proc is the result of
         // its body, and the first parameter of the body is the proc
         // instance the mailbox type follows from.
-        let (body_func, body_env) = match self.machines[child as usize].vm.heap.get(body) {
-            Object::Closure { func, env, .. } => (*func, env.env()),
-            _ => unreachable!("a proc body is a closure"),
+        let Some((ctor, body, (func, ctor_env), (body_func, body_env))) = pair else {
+            self.machines.pop();
+            self.machines[vm as usize].children -= 1;
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::TypeMismatch,
+                "a spawn program is not a closure",
+            );
+            return;
         };
+        let ctor_args: Vec<Value> = moved[2..].to_vec();
         // The birth grant of specification 18.3. A mailbox-bearing
         // proc needs the `Proc` group to receive, and the spawner
         // already carries `Proc.Spawn`, so it may pass the group.
-        let group = lm_abi::group_by_name("Proc").expect("the manifest declares the Proc group");
+        let Some(group) = lm_abi::group_by_name("Proc") else {
+            self.machines.pop();
+            self.machines[vm as usize].children -= 1;
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::MalformedState,
+                "the manifest declares no Proc group",
+            );
+            return;
+        };
         let limit = self.machines[child as usize].config.mailbox_limit;
         {
             let m = &mut self.machines[child as usize];
@@ -2001,8 +2293,10 @@ impl<'m> World<'m> {
     /// `sys.proc.run(vm)`: transfer one loaded machine to the
     /// scheduler. The launch carries no mailbox, so the handle takes
     /// the bottom message type.
-    fn proc_run(&mut self, vm: VmId, op: u32, args: &[Value]) {
-        let target = self.handle_vm(vm, args[0]);
+    fn proc_run(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let Some(target) = self.vm_arg(vm, op, args[0]) else {
+            return;
+        };
         if target == vm || self.machines[target as usize].active > 0 {
             self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
             return;
@@ -2037,8 +2331,10 @@ impl<'m> World<'m> {
     ///
     /// The mailbox limit is checked before the copy, so a refused
     /// message never enters the target heap.
-    fn proc_send(&mut self, vm: VmId, op: u32, args: &[Value]) {
-        let (proc, generation) = self.handle_proc(vm, args[0]);
+    fn proc_send(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let Some((proc, generation)) = self.proc_arg(vm, op, args[0]) else {
+            return;
+        };
         if !self.proc_running(proc, generation) {
             let built = self
                 .make_fault(vm, FaultCode::DeadProc, "the target proc is dead")
@@ -2101,8 +2397,10 @@ impl<'m> World<'m> {
 
     /// `h.close()`. A successful close returns `Sent`; a repeat
     /// returns `Closed` (specification 18.4).
-    fn proc_close(&mut self, vm: VmId, op: u32, args: &[Value]) {
-        let (proc, generation) = self.handle_proc(vm, args[0]);
+    fn proc_close(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let Some((proc, generation)) = self.proc_arg(vm, op, args[0]) else {
+            return;
+        };
         if !self.proc_running(proc, generation) {
             let built = self
                 .make_fault(vm, FaultCode::DeadProc, "the target proc is dead")
@@ -2162,8 +2460,10 @@ impl<'m> World<'m> {
     }
 
     /// `h.done()`. The holder blocks until the proc is terminal.
-    fn proc_done(&mut self, vm: VmId, op: u32, args: &[Value]) {
-        let (proc, generation) = self.handle_proc(vm, args[0]);
+    fn proc_done(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let Some((proc, generation)) = self.proc_arg(vm, op, args[0]) else {
+            return;
+        };
         if !self.proc_alive(proc, generation) {
             let built = self
                 .make_fault(vm, FaultCode::DeadProc, "the proc reference is stale")
@@ -2192,7 +2492,11 @@ impl<'m> World<'m> {
         let t = match &self.machines[proc as usize].vm.terminal {
             Some(Terminal::Done(value)) => T::Done(*value),
             Some(Terminal::Fault(rec)) => T::Fault(rec.clone()),
-            None => unreachable!("a terminal machine stores its result"),
+            None => T::Fault(FaultRec {
+                code: FaultCode::MalformedState,
+                message: "the terminal proc stores no result".to_string(),
+                op: None,
+            }),
         };
         let built = match t {
             T::Done(value) => match self.transfer(proc, vm, value) {
@@ -2213,8 +2517,10 @@ impl<'m> World<'m> {
     }
 
     /// `h.pause()`: take execution ownership back from the scheduler.
-    fn proc_pause(&mut self, vm: VmId, op: u32, args: &[Value]) {
-        let (proc, generation) = self.handle_proc(vm, args[0]);
+    fn proc_pause(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let Some((proc, generation)) = self.proc_arg(vm, op, args[0]) else {
+            return;
+        };
         let arm = if !self.proc_running(proc, generation) {
             self.core.proc_error_dead
         } else if self.machines[proc as usize].paused {
@@ -2238,8 +2544,10 @@ impl<'m> World<'m> {
     }
 
     /// `h.resume()`: give execution ownership back to the scheduler.
-    fn proc_resume(&mut self, vm: VmId, op: u32, args: &[Value]) {
-        let (proc, generation) = self.handle_proc(vm, args[0]);
+    fn proc_resume(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let Some((proc, generation)) = self.proc_arg(vm, op, args[0]) else {
+            return;
+        };
         let arm = if !self.proc_running(proc, generation) {
             self.core.proc_error_dead
         } else if !self.machines[proc as usize].paused {
@@ -2272,13 +2580,27 @@ impl<'m> World<'m> {
     ) {
         let target = match self.machines[vm as usize].vm.heap.get(table) {
             Object::NativeTable { vm } => *vm,
-            _ => unreachable!("verified table handle shape"),
+            _ => {
+                self.machines[vm as usize].set_fault(
+                    FaultCode::TypeMismatch,
+                    "the receiver is not a policy table handle",
+                    None,
+                );
+                return;
+            }
         };
         let entry = match action {
             0 => Some(Action::Pass),
             1 => Some(Action::Block),
             2 => {
-                let closure = mock.expect("a mock edit carries its handler");
+                let Some(closure) = mock else {
+                    self.machines[vm as usize].set_fault(
+                        FaultCode::MalformedState,
+                        "the mock edit carries no handler",
+                        None,
+                    );
+                    return;
+                };
                 // Installation boundary-copies the handler into
                 // table-owned storage (specification 13.3). The
                 // one-heap path runs the same copy, so a same-heap
@@ -2290,9 +2612,17 @@ impl<'m> World<'m> {
                 // `docs/notes/week7.md` records it.
                 debug_assert_ne!(target, vm, "a machine cannot hold a table handle to itself");
                 match self.boundary_copy(vm, target, closure) {
-                    Ok(value) => Some(Action::Mock(
-                        value.as_obj().expect("a mock handler is a closure"),
-                    )),
+                    Ok(value) => match value.as_obj() {
+                        Some(r) => Some(Action::Mock(r)),
+                        None => {
+                            self.machines[vm as usize].set_fault(
+                                FaultCode::TypeMismatch,
+                                "the mock handler is not a closure",
+                                None,
+                            );
+                            return;
+                        }
+                    },
                     Err(code) => {
                         self.machines[vm as usize].set_fault(
                             code,
@@ -2306,10 +2636,24 @@ impl<'m> World<'m> {
             _ => None,
         };
         let t = &mut self.machines[target as usize].table;
-        if kind == 0 {
-            t.exact[slot as usize] = entry;
+        // The verifier bounds every table-edit slot, so the store
+        // reaches a live entry. A slot outside the table drops the
+        // edit instead of indexing past it.
+        let cell = if kind == 0 {
+            t.exact.get_mut(slot as usize)
         } else {
-            t.group[slot as usize] = entry;
+            t.group.get_mut(slot as usize)
+        };
+        match cell {
+            Some(cell) => *cell = entry,
+            None => {
+                self.machines[vm as usize].set_fault(
+                    FaultCode::MalformedState,
+                    "the table edit names no policy slot",
+                    None,
+                );
+                return;
+            }
         }
         // A table edit is an ordinary instruction: push the unit
         // result directly.
@@ -2322,7 +2666,14 @@ impl<'m> World<'m> {
     fn handle_as_call(&mut self, vm: VmId, request: ObjRef, op: u32) {
         let (rv, ordinal) = match self.machines[vm as usize].vm.heap.get(request) {
             Object::NativeRequest { vm, ordinal } => (*vm, *ordinal),
-            _ => unreachable!("verified request shape"),
+            _ => {
+                self.machines[vm as usize].set_fault(
+                    FaultCode::TypeMismatch,
+                    "the receiver is not a request token",
+                    None,
+                );
+                return;
+            }
         };
         let matches = {
             let m = &self.machines[rv as usize];
@@ -2379,7 +2730,14 @@ impl<'m> World<'m> {
     fn handle_call_args(&mut self, vm: VmId, call: ObjRef) {
         let (cv, ordinal, op) = match self.machines[vm as usize].vm.heap.get(call) {
             Object::NativeCall { vm, ordinal, op } => (*vm, *ordinal, *op),
-            _ => unreachable!("verified call shape"),
+            _ => {
+                self.machines[vm as usize].set_fault(
+                    FaultCode::TypeMismatch,
+                    "the receiver is not a call token",
+                    None,
+                );
+                return;
+            }
         };
         let matches = {
             let m = &self.machines[cv as usize];
@@ -2398,13 +2756,10 @@ impl<'m> World<'m> {
             );
             return;
         }
-        let source_args: Vec<Value> = self.machines[cv as usize]
-            .vm
-            .pending
-            .as_ref()
-            .expect("an asked machine has a pending perform")
-            .args
-            .clone();
+        let source_args: Vec<Value> = match self.machines[cv as usize].vm.pending.as_ref() {
+            Some(pending) => pending.args.clone(),
+            None => Vec::new(),
+        };
         let built = if source_args.is_empty() {
             Ok(Value::Unit)
         } else {
@@ -2467,19 +2822,21 @@ impl<'m> World<'m> {
             })
             .collect();
         for vm in &ready {
-            let op = self
-                .pending_op(*vm)
-                .expect("a blocked machine holds its pending perform");
-            self.machines[*vm as usize].vm.block = None;
-            self.machines[*vm as usize].vm.state = MachineState::Ready;
-            self.record(TraceEvent::Unblock { vm: *vm });
-            let args: Vec<Value> = self.machines[*vm as usize]
+            // A machine reaches `Blocked` inside a proc operation, so
+            // it holds that request. A restored machine without one
+            // faults instead of running a proc rule with no operation.
+            let found = self.machines[*vm as usize]
                 .vm
                 .pending
                 .as_ref()
-                .expect("a blocked machine holds its pending perform")
-                .args
-                .clone();
+                .map(|pending| (pending.op, pending.args.clone()));
+            let Some((op, args)) = found else {
+                self.fail_blocked(*vm, "the blocked machine holds no request");
+                continue;
+            };
+            self.machines[*vm as usize].vm.block = None;
+            self.machines[*vm as usize].vm.state = MachineState::Ready;
+            self.record(TraceEvent::Unblock { vm: *vm });
             self.proc_exec(*vm, op, args);
         }
         ready.len()
@@ -2554,7 +2911,21 @@ impl<'m> World<'m> {
                 self.record(TraceEvent::Terminal { proc: vm, faulted });
                 ProcStop::Terminal
             }
-            _ => unreachable!("a proc slice runs to a terminal, a block, or a wait"),
+            // A slice runs to a terminal, a block, or a wait. Any
+            // other exit stops the proc as a fault, so the scheduler
+            // retires it instead of spinning on it.
+            _ => {
+                self.machines[vm as usize].set_fault(
+                    FaultCode::MalformedState,
+                    "the proc slice stopped outside its stop set",
+                    None,
+                );
+                self.record(TraceEvent::Terminal {
+                    proc: vm,
+                    faulted: true,
+                });
+                ProcStop::Terminal
+            }
         }
     }
 
@@ -2762,8 +3133,11 @@ impl<'m> World<'m> {
     }
 
     /// Split access to two distinct machines.
+    ///
+    /// `transfer` routes an equal pair to the one-heap copy, so this
+    /// call always receives two machines.
     fn two(&mut self, a: VmId, b: VmId) -> (&mut Machine, &mut Machine) {
-        assert_ne!(a, b, "a boundary transfer needs two machines");
+        debug_assert_ne!(a, b, "a boundary transfer needs two machines");
         let (a, b) = (a as usize, b as usize);
         if a < b {
             let (left, right) = self.machines.split_at_mut(b);
@@ -2892,6 +3266,12 @@ impl<'m> World<'m> {
         dst: VmId,
         value: Value,
     ) -> Result<Value, FaultCode> {
+        // A restored world can name one machine on both sides of a
+        // crossing. The rule is the same rule, so the call runs the
+        // one-heap copy there and never splits one machine in two.
+        if src == dst {
+            return self.boundary_copy(src, dst, value);
+        }
         // The copy allocates in the destination, so the destination
         // limits govern the walk.
         let limits = self.machines[dst as usize].config.graph;
@@ -2920,6 +3300,23 @@ fn copy_failure(code: FaultCode, what: &str) -> String {
         FaultCode::HeapLimit => format!("the {what} copy exceeded the heap limit"),
         FaultCode::BoundaryLimit => format!("the {what} copy exceeded the boundary limit"),
         _ => format!("the {what} is not sendable"),
+    }
+}
+
+/// The stored argument list of one pending request.
+///
+/// A restored machine states its own list, so a kernel rule must read
+/// a position the list may not hold. The index answers the
+/// uninitialized marker there, and every shape test of a kernel rule
+/// rejects that marker.
+#[derive(Clone, Copy)]
+struct Args<'a>(&'a [Value]);
+
+impl std::ops::Index<usize> for Args<'_> {
+    type Output = Value;
+
+    fn index(&self, at: usize) -> &Value {
+        self.0.get(at).unwrap_or(&Value::Uninit)
     }
 }
 

@@ -44,6 +44,20 @@ pub enum FaultCode {
     /// exhaustive `case` executed. Checked source programs cannot
     /// reach this fault.
     UnreachableCode,
+    /// A value did not carry the type the program point expects.
+    ///
+    /// Verified code never reaches this fault. A restored machine can:
+    /// a container states the values of a machine, and admission
+    /// proves the structure of those values alone. The interpreter
+    /// tests the tag at each accessor and raises this code, so a wrong
+    /// type stops the machine instead of the host.
+    TypeMismatch,
+    /// The stored state of a machine does not match the code it runs.
+    ///
+    /// An empty operand stack under a pop, a frame that names no
+    /// instruction, and a pending record without its perform all raise
+    /// it. Verified code never reaches this fault.
+    MalformedState,
 }
 
 /// Every stable fault code, in declaration order.
@@ -52,7 +66,7 @@ pub enum FaultCode {
 /// so a loader must map a name back to a code. This table is the one
 /// place that lists the codes, so a new code joins both directions at
 /// once.
-pub const FAULT_CODES: [FaultCode; 19] = [
+pub const FAULT_CODES: [FaultCode; 21] = [
     FaultCode::IntegerOverflow,
     FaultCode::DivideByZero,
     FaultCode::OutOfFuel,
@@ -72,6 +86,8 @@ pub const FAULT_CODES: [FaultCode; 19] = [
     FaultCode::DeadProc,
     FaultCode::UninitializedField,
     FaultCode::UnreachableCode,
+    FaultCode::TypeMismatch,
+    FaultCode::MalformedState,
 ];
 
 impl FaultCode {
@@ -106,6 +122,8 @@ impl fmt::Display for FaultCode {
             FaultCode::DeadProc => "DeadProc",
             FaultCode::UninitializedField => "UninitializedField",
             FaultCode::UnreachableCode => "UnreachableCode",
+            FaultCode::TypeMismatch => "TypeMismatch",
+            FaultCode::MalformedState => "MalformedState",
         };
         f.write_str(name)
     }

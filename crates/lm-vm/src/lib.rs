@@ -132,24 +132,22 @@ pub struct DispatchRow {
 }
 
 impl DispatchRow {
-    /// The method for one selector. Verified calls always resolve.
+    /// The method for one selector, or `None` when the row does not
+    /// answer it.
     ///
-    /// The index is unchecked on purpose: this is the hot dispatch
-    /// path, and the verifier proves every virtual call resolves on
-    /// the receiver class. The debug assertion turns a future verifier
-    /// gap into a test failure instead of a release panic.
+    /// The verifier proves that every virtual call of verified code
+    /// resolves on the static receiver class. The runtime receiver is
+    /// a heap object, and a restored machine states its own objects,
+    /// so the class can be one the row does not answer. The lookup
+    /// therefore tests the range and the empty slot, and the caller
+    /// turns `None` into a machine fault.
     #[inline]
-    pub(crate) fn method(&self, selector: u32) -> u32 {
-        debug_assert!(
-            selector >= self.base && ((selector - self.base) as usize) < self.table.len(),
-            "the verifier admitted a virtual call the dispatch row cannot answer"
-        );
-        debug_assert_ne!(
-            self.table[(selector - self.base) as usize],
-            NO_METHOD,
-            "the verifier admitted a virtual call on an empty dispatch slot"
-        );
-        self.table[(selector - self.base) as usize]
+    pub(crate) fn method(&self, selector: u32) -> Option<u32> {
+        let offset = selector.checked_sub(self.base)? as usize;
+        match self.table.get(offset).copied() {
+            Some(NO_METHOD) | None => None,
+            Some(func) => Some(func),
+        }
     }
 }
 

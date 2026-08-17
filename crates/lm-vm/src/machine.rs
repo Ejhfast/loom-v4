@@ -24,6 +24,33 @@ fn env_fault(_: TypeEnvFull) -> FaultCode {
     FaultCode::BoundaryLimit
 }
 
+/// A value did not carry the type this program point expects.
+///
+/// Verified code never reaches it. A restored machine can: the
+/// container states the values, and admission proves their structure
+/// alone. Every accessor below tests the tag and raises this code, so
+/// the machine stops and the host keeps running.
+const BAD_TYPE: FaultCode = FaultCode::TypeMismatch;
+
+/// The stored state of this machine does not match the code it runs.
+///
+/// A short operand stack, a frame that names no instruction, and a
+/// local slot outside the arena all raise it.
+const BAD_STATE: FaultCode = FaultCode::MalformedState;
+
+/// The method one class answers for one selector.
+///
+/// The receiver class comes from a heap object, so a restored machine
+/// can name a class whose dispatch row does not answer the selector.
+/// The lookup therefore tests the row instead of indexing it.
+#[inline]
+fn method_of(dispatch: &[crate::DispatchRow], class: u32, selector: u32) -> Result<u32, FaultCode> {
+    dispatch
+        .get(class as usize)
+        .and_then(|row| row.method(selector))
+        .ok_or(BAD_TYPE)
+}
+
 /// A dense machine identifier inside one world.
 pub type VmId = u32;
 
@@ -413,7 +440,13 @@ impl Machine {
         closure: Option<ObjRef>,
         env: TypeEnvId,
     ) {
-        let local_count = module.funcs[func as usize].local_count() as usize;
+        let local_count = match module.funcs.get(func as usize) {
+            Some(code) => code.local_count() as usize,
+            None => {
+                self.set_fault(BAD_STATE, "the frame names no function", None);
+                return;
+            }
+        };
         if local_count > self.config.max_stack_values as usize {
             self.set_fault(
                 FaultCode::StackLimit,
@@ -651,17 +684,17 @@ impl Machine {
     /// Find the entry position of a key in the map object `r` through
     /// the hash index. The index is a cache: the call first indexes
     /// the entries appended since the last lookup.
-    fn map_lookup(&mut self, r: ObjRef, key: Value) -> Option<usize> {
+    fn map_lookup(&mut self, r: ObjRef, key: Value) -> Result<Option<usize>, FaultCode> {
         let (built, len) = match self.vm.heap.get(r) {
             Object::Map { entries, index } => (index.built, entries.len()),
-            _ => unreachable!("verified map shape"),
+            _ => return Err(FaultCode::TypeMismatch),
         };
         if built < len {
             let mut hashes = Vec::with_capacity(len - built);
             for i in built..len {
                 let k = match self.vm.heap.get(r) {
                     Object::Map { entries, .. } => entries[i].0,
-                    _ => unreachable!("verified map shape"),
+                    _ => return Err(FaultCode::TypeMismatch),
                 };
                 hashes.push(self.key_hash(k));
             }
@@ -679,18 +712,21 @@ impl Machine {
         let hash = self.key_hash(key);
         let candidates: Vec<u32> = match self.vm.heap.get(r) {
             Object::Map { index, .. } => index.table.get(&hash).cloned().unwrap_or_default(),
-            _ => unreachable!("verified map shape"),
+            _ => return Err(FaultCode::TypeMismatch),
         };
         for i in candidates {
             let k = match self.vm.heap.get(r) {
-                Object::Map { entries, .. } => entries[i as usize].0,
-                _ => unreachable!("verified map shape"),
+                Object::Map { entries, .. } => match entries.get(i as usize) {
+                    Some(entry) => entry.0,
+                    None => continue,
+                },
+                _ => return Err(FaultCode::TypeMismatch),
             };
             if self.key_eq(k, key) {
-                return Some(i as usize);
+                return Ok(Some(i as usize));
             }
         }
-        None
+        Ok(None)
     }
 
     fn frozen_guard(&self, r: ObjRef) -> Result<(), FaultCode> {
@@ -720,7 +756,12 @@ impl Machine {
         callee: u32,
         app: u32,
     ) -> Result<(), FaultCode> {
-        let argc = module.funcs[callee as usize].params.len();
+        let argc = module
+            .funcs
+            .get(callee as usize)
+            .ok_or(BAD_STATE)?
+            .params
+            .len();
         let parent = self.frame_env();
         let env = envs.derive(module, parent, app).map_err(env_fault)?;
         self.push_frame(module, callee, argc, None, env)
@@ -742,12 +783,12 @@ impl Machine {
         app: u32,
     ) -> Result<(), FaultCode> {
         let argc = argc as usize;
-        let recv = self.vm.operands[self.vm.operands.len() - 1 - argc];
-        let (class, class_env) = match self.vm.heap.get(recv.as_obj().expect("verified receiver")) {
+        let recv = self.peek(argc)?;
+        let (class, class_env) = match self.vm.heap.get(recv.as_obj().ok_or(BAD_TYPE)?) {
             Object::Instance { class, env, .. } => (*class, env.env()),
-            _ => unreachable!("verified receiver shape"),
+            _ => return Err(BAD_TYPE),
         };
-        let target = dispatch[class as usize].method(selector);
+        let target = method_of(dispatch, class, selector)?;
         let parent = self.frame_env();
         let env =
             method_env(module, envs, target, class, class_env, parent, app).map_err(env_fault)?;
@@ -767,7 +808,12 @@ impl Machine {
         class: u32,
         app: u32,
     ) -> Result<Value, FaultCode> {
-        let field_count = module.classes[class as usize].fields.len();
+        let field_count = module
+            .classes
+            .get(class as usize)
+            .ok_or(BAD_STATE)?
+            .fields
+            .len();
         let parent = self.frame_env();
         let env = envs.derive(module, parent, app).map_err(env_fault)?;
         self.alloc(Object::Instance {
@@ -793,14 +839,17 @@ impl Machine {
             return Err(FaultCode::OutOfFuel);
         }
         self.vm.fuel -= 1;
-        let frame = self.vm.frames.last().expect("an active frame exists");
-        let func = &module.funcs[frame.func as usize];
-        let instr = func.blocks[frame.block as usize][frame.ip as usize];
-        self.vm
-            .frames
-            .last_mut()
-            .expect("an active frame exists")
-            .ip += 1;
+        // The frame states the function, the block, and the program
+        // counter. A restored machine states all three, so the fetch
+        // tests each one instead of indexing.
+        let frame = self.vm.frames.last().ok_or(BAD_STATE)?;
+        let instr = *module
+            .funcs
+            .get(frame.func as usize)
+            .and_then(|func| func.blocks.get(frame.block as usize))
+            .and_then(|block| block.get(frame.ip as usize))
+            .ok_or(BAD_STATE)?;
+        self.vm.frames.last_mut().ok_or(BAD_STATE)?.ip += 1;
         match instr {
             Instr::ConstUnit => self.push(Value::Unit)?,
             Instr::ConstBool(v) => self.push(Value::Bool(v))?,
@@ -816,7 +865,7 @@ impl Machine {
                 let value = match self.vm.literals[idx] {
                     Some(r) => Value::Obj(r),
                     None => {
-                        let text = module.strings[idx].clone();
+                        let text = module.strings.get(idx).ok_or(BAD_STATE)?.clone();
                         let value = self.alloc(Object::Str(text))?;
                         if let Value::Obj(r) = value {
                             self.vm.literals[idx] = Some(r);
@@ -827,24 +876,24 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::LoadLocal(slot) => {
-                let base = self.vm.frames.last().expect("frame").base_local;
-                let value = self.vm.locals[(base + slot) as usize];
+                let at = self.local_at(slot)?;
+                let value = *self.vm.locals.get(at).ok_or(BAD_STATE)?;
                 self.push(value)?;
             }
             Instr::StoreLocal(slot) => {
-                let value = self.pop();
-                let base = self.vm.frames.last().expect("frame").base_local;
-                self.vm.locals[(base + slot) as usize] = value;
+                let value = self.pop()?;
+                let at = self.local_at(slot)?;
+                *self.vm.locals.get_mut(at).ok_or(BAD_STATE)? = value;
             }
             Instr::Pop => {
-                self.pop();
+                self.pop()?;
             }
             Instr::Add => self.int_binary(i64::checked_add)?,
             Instr::Sub => self.int_binary(i64::checked_sub)?,
             Instr::Mul => self.int_binary(i64::checked_mul)?,
             Instr::Div => {
-                let b = self.pop_int();
-                let a = self.pop_int();
+                let b = self.pop_int()?;
+                let a = self.pop_int()?;
                 if b == 0 {
                     return Err(FaultCode::DivideByZero);
                 }
@@ -852,8 +901,8 @@ impl Machine {
                 self.push(Value::Int(value))?;
             }
             Instr::Rem => {
-                let b = self.pop_int();
-                let a = self.pop_int();
+                let b = self.pop_int()?;
+                let a = self.pop_int()?;
                 if b == 0 {
                     return Err(FaultCode::DivideByZero);
                 }
@@ -861,12 +910,12 @@ impl Machine {
                 self.push(Value::Int(value))?;
             }
             Instr::Neg => {
-                let a = self.pop_int();
+                let a = self.pop_int()?;
                 let value = a.checked_neg().ok_or(FaultCode::IntegerOverflow)?;
                 self.push(Value::Int(value))?;
             }
             Instr::Not => {
-                let a = self.pop_bool();
+                let a = self.pop_bool()?;
                 self.push(Value::Bool(!a))?;
             }
             Instr::LtInt => self.int_compare(|a, b| a < b)?,
@@ -876,31 +925,36 @@ impl Machine {
             Instr::EqInt => self.int_compare(|a, b| a == b)?,
             Instr::NeInt => self.int_compare(|a, b| a != b)?,
             Instr::EqBool => {
-                let b = self.pop_bool();
-                let a = self.pop_bool();
+                let b = self.pop_bool()?;
+                let a = self.pop_bool()?;
                 self.push(Value::Bool(a == b))?;
             }
             Instr::NeBool => {
-                let b = self.pop_bool();
-                let a = self.pop_bool();
+                let b = self.pop_bool()?;
+                let a = self.pop_bool()?;
                 self.push(Value::Bool(a != b))?;
             }
             Instr::EqStr => self.str_compare(true)?,
             Instr::NeStr => self.str_compare(false)?,
             Instr::EqRef => {
-                let b = self.pop_obj();
-                let a = self.pop_obj();
+                let b = self.pop_obj()?;
+                let a = self.pop_obj()?;
                 self.push(Value::Bool(a == b))?;
             }
             Instr::NeRef => {
-                let b = self.pop_obj();
-                let a = self.pop_obj();
+                let b = self.pop_obj()?;
+                let a = self.pop_obj()?;
                 self.push(Value::Bool(a != b))?;
             }
             // A direct call of a non-generic function copies the empty
             // environment, so it allocates nothing and reads no table.
             Instr::Call(callee) => {
-                let argc = module.funcs[callee as usize].params.len();
+                let argc = module
+                    .funcs
+                    .get(callee as usize)
+                    .ok_or(BAD_STATE)?
+                    .params
+                    .len();
                 self.push_frame(module, callee, argc, None, TypeEnvId::EMPTY)?;
             }
             // A generic call derives one environment from the caller
@@ -912,12 +966,12 @@ impl Machine {
             }
             Instr::CallVirtual { selector, argc } => {
                 let argc = argc as usize;
-                let recv = self.vm.operands[self.vm.operands.len() - 1 - argc];
-                let class = match self.vm.heap.get(recv.as_obj().expect("verified receiver")) {
+                let recv = self.peek(argc)?;
+                let class = match self.vm.heap.get(recv.as_obj().ok_or(BAD_TYPE)?) {
                     Object::Instance { class, .. } => *class,
-                    _ => unreachable!("verified receiver shape"),
+                    _ => return Err(BAD_TYPE),
                 };
-                let target = dispatch[class as usize].method(selector);
+                let target = method_of(dispatch, class, selector)?;
                 self.push_frame(module, target, argc + 1, None, TypeEnvId::EMPTY)?;
             }
             // A generic virtual call binds the receiver class
@@ -937,12 +991,17 @@ impl Machine {
             // the closure value is the only evidence.
             Instr::CallValue { argc } => {
                 let argc = argc as usize;
-                let callee_pos = self.vm.operands.len() - 1 - argc;
+                let callee_pos = self
+                    .vm
+                    .operands
+                    .len()
+                    .checked_sub(argc + 1)
+                    .ok_or(BAD_STATE)?;
                 let callee = self.vm.operands.remove(callee_pos);
-                let r = callee.as_obj().expect("verified closure value");
+                let r = callee.as_obj().ok_or(BAD_TYPE)?;
                 let (target, env) = match self.vm.heap.get(r) {
                     Object::Closure { func, env, .. } => (*func, env.env()),
-                    _ => unreachable!("verified closure shape"),
+                    _ => return Err(BAD_TYPE),
                 };
                 self.push_frame(module, target, argc, Some(r), env)?;
             }
@@ -950,7 +1009,12 @@ impl Machine {
             // built it. Capture cannot rebuild it later, because the
             // closure outlives that frame.
             Instr::MakeClosure { func, captures } => {
-                let split = self.vm.operands.len() - captures as usize;
+                let split = self
+                    .vm
+                    .operands
+                    .len()
+                    .checked_sub(captures as usize)
+                    .ok_or(BAD_STATE)?;
                 let captured: Vec<Value> = self.vm.operands.split_off(split);
                 let env = Witness(self.frame_env());
                 let value = self.alloc(Object::Closure {
@@ -961,18 +1025,25 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::LoadCapture(idx) => {
-                let frame = self.vm.frames.last().expect("frame");
-                let closure = frame.closure.expect("verified capture context");
+                let frame = self.vm.frames.last().ok_or(BAD_STATE)?;
+                let closure = frame.closure.ok_or(BAD_STATE)?;
                 let value = match self.vm.heap.get(closure) {
-                    Object::Closure { captures, .. } => captures[idx as usize],
-                    _ => unreachable!("verified closure shape"),
+                    Object::Closure { captures, .. } => {
+                        *captures.get(idx as usize).ok_or(BAD_TYPE)?
+                    }
+                    _ => return Err(BAD_TYPE),
                 };
                 self.push(value)?;
             }
             // A plain class takes no type argument, so the instance
             // records the empty environment and allocates nothing.
             Instr::New(class) => {
-                let field_count = module.classes[class as usize].fields.len();
+                let field_count = module
+                    .classes
+                    .get(class as usize)
+                    .ok_or(BAD_STATE)?
+                    .fields
+                    .len();
                 let value = self.alloc(Object::Instance {
                     class,
                     fields: vec![Value::Uninit; field_count],
@@ -988,36 +1059,43 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::TupleNew { count, .. } => {
-                let split = self.vm.operands.len() - count as usize;
+                let split = self
+                    .vm
+                    .operands
+                    .len()
+                    .checked_sub(count as usize)
+                    .ok_or(BAD_STATE)?;
                 let items: Vec<Value> = self.vm.operands.split_off(split);
                 let value = self.alloc(Object::Tuple { items })?;
                 self.push(value)?;
             }
             Instr::TupleGet(index) => {
-                let r = self.pop_obj();
+                let r = self.pop_obj()?;
                 let value = match self.vm.heap.get(r) {
-                    Object::Tuple { items } => items[index as usize],
-                    _ => unreachable!("verified tuple shape"),
+                    Object::Tuple { items } => *items.get(index as usize).ok_or(BAD_TYPE)?,
+                    _ => return Err(BAD_TYPE),
                 };
                 self.push(value)?;
             }
             Instr::IsType(ty) => {
-                let r = self.pop_obj();
-                let matches = self.instance_matches(module, r, ty);
+                let r = self.pop_obj()?;
+                let matches = self.instance_matches(module, r, ty)?;
                 self.push(Value::Bool(matches))?;
             }
             Instr::CastType(ty) => {
-                let r = self.pop_obj();
-                if !self.instance_matches(module, r, ty) {
+                let r = self.pop_obj()?;
+                if !self.instance_matches(module, r, ty)? {
                     return Err(FaultCode::BadCast);
                 }
                 self.push(Value::Obj(r))?;
             }
             Instr::LoadField(field) => {
-                let r = self.pop_obj();
+                let r = self.pop_obj()?;
                 let value = match self.vm.heap.get(r) {
-                    Object::Instance { fields, .. } => fields[field as usize],
-                    _ => unreachable!("verified instance shape"),
+                    Object::Instance { fields, .. } => {
+                        *fields.get(field as usize).ok_or(BAD_TYPE)?
+                    }
+                    _ => return Err(BAD_TYPE),
                 };
                 if value == Value::Uninit {
                     return Err(FaultCode::UninitializedField);
@@ -1025,31 +1103,38 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::StoreField(field) => {
-                let value = self.pop();
-                let r = self.pop_obj();
+                let value = self.pop()?;
+                let r = self.pop_obj()?;
                 self.frozen_guard(r)?;
                 match self.vm.heap.get_mut(r) {
-                    Object::Instance { fields, .. } => fields[field as usize] = value,
-                    _ => unreachable!("verified instance shape"),
+                    Object::Instance { fields, .. } => {
+                        *fields.get_mut(field as usize).ok_or(BAD_TYPE)? = value;
+                    }
+                    _ => return Err(BAD_TYPE),
                 }
             }
             Instr::ListNew { count, .. } => {
-                let split = self.vm.operands.len() - count as usize;
+                let split = self
+                    .vm
+                    .operands
+                    .len()
+                    .checked_sub(count as usize)
+                    .ok_or(BAD_STATE)?;
                 let items: Vec<Value> = self.vm.operands.split_off(split);
                 let value = self.alloc(Object::List { items })?;
                 self.push(value)?;
             }
             Instr::ListLen => {
-                let r = self.pop_obj();
+                let r = self.pop_obj()?;
                 let len = match self.vm.heap.get(r) {
                     Object::List { items } => items.len(),
-                    _ => unreachable!("verified list shape"),
+                    _ => return Err(BAD_TYPE),
                 };
                 self.push(Value::Int(len as i64))?;
             }
             Instr::ListAt => {
-                let idx = self.pop_int();
-                let r = self.pop_obj();
+                let idx = self.pop_int()?;
+                let r = self.pop_obj()?;
                 let value = match self.vm.heap.get(r) {
                     Object::List { items } => {
                         if idx < 0 || idx as usize >= items.len() {
@@ -1057,28 +1142,33 @@ impl Machine {
                         }
                         items[idx as usize]
                     }
-                    _ => unreachable!("verified list shape"),
+                    _ => return Err(BAD_TYPE),
                 };
                 self.push(value)?;
             }
             Instr::ListPush => {
-                let value = self.pop();
-                let r = self.pop_obj();
+                let value = self.pop()?;
+                let r = self.pop_obj()?;
                 self.frozen_guard(r)?;
                 self.reserve(16, &[Value::Obj(r), value])?;
                 match self.vm.heap.get_mut(r) {
                     Object::List { items } => items.push(value),
-                    _ => unreachable!("verified list shape"),
+                    _ => return Err(BAD_TYPE),
                 }
                 self.vm.heap.recharge(r);
                 self.push(Value::Unit)?;
             }
             Instr::MapNew { count, .. } => {
-                let split = self.vm.operands.len() - 2 * count as usize;
+                let split = self
+                    .vm
+                    .operands
+                    .len()
+                    .checked_sub(2 * count as usize)
+                    .ok_or(BAD_STATE)?;
                 let flat: Vec<Value> = self.vm.operands.split_off(split);
                 let mut entries: Vec<(Value, Value)> = Vec::new();
                 let mut index = MapIndex::default();
-                for pair in flat.chunks(2) {
+                for pair in flat.chunks_exact(2) {
                     let (key, value) = (pair[0], pair[1]);
                     let hash = self.key_hash(key);
                     let hit = index.table.get(&hash).and_then(|candidates| {
@@ -1104,42 +1194,44 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::MapLen => {
-                let r = self.pop_obj();
+                let r = self.pop_obj()?;
                 let len = match self.vm.heap.get(r) {
                     Object::Map { entries, .. } => entries.len(),
-                    _ => unreachable!("verified map shape"),
+                    _ => return Err(BAD_TYPE),
                 };
                 self.push(Value::Int(len as i64))?;
             }
             Instr::MapHas => {
-                let key = self.pop();
-                let r = self.pop_obj();
-                let found = self.map_lookup(r, key).is_some();
+                let key = self.pop()?;
+                let r = self.pop_obj()?;
+                let found = self.map_lookup(r, key)?.is_some();
                 self.push(Value::Bool(found))?;
             }
             Instr::MapAt => {
-                let key = self.pop();
-                let r = self.pop_obj();
-                let pos = match self.map_lookup(r, key) {
+                let key = self.pop()?;
+                let r = self.pop_obj()?;
+                let pos = match self.map_lookup(r, key)? {
                     Some(pos) => pos,
                     None => return Err(FaultCode::MissingKey),
                 };
                 let value = match self.vm.heap.get(r) {
-                    Object::Map { entries, .. } => entries[pos].1,
-                    _ => unreachable!("verified map shape"),
+                    Object::Map { entries, .. } => entries.get(pos).ok_or(BAD_STATE)?.1,
+                    _ => return Err(BAD_TYPE),
                 };
                 self.push(value)?;
             }
             Instr::MapPut => {
-                let value = self.pop();
-                let key = self.pop();
-                let r = self.pop_obj();
+                let value = self.pop()?;
+                let key = self.pop()?;
+                let r = self.pop_obj()?;
                 self.frozen_guard(r)?;
-                let pos = self.map_lookup(r, key);
+                let pos = self.map_lookup(r, key)?;
                 match pos {
                     Some(pos) => match self.vm.heap.get_mut(r) {
-                        Object::Map { entries, .. } => entries[pos].1 = value,
-                        _ => unreachable!(),
+                        Object::Map { entries, .. } => {
+                            entries.get_mut(pos).ok_or(BAD_STATE)?.1 = value;
+                        }
+                        _ => return Err(BAD_TYPE),
                     },
                     None => {
                         // The appended entry joins the index on the
@@ -1147,7 +1239,7 @@ impl Machine {
                         self.reserve(32, &[Value::Obj(r), key, value])?;
                         match self.vm.heap.get_mut(r) {
                             Object::Map { entries, .. } => entries.push((key, value)),
-                            _ => unreachable!(),
+                            _ => return Err(BAD_TYPE),
                         }
                         self.vm.heap.recharge(r);
                     }
@@ -1159,33 +1251,33 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::SbAppendStr => {
-                let s = self.pop_obj();
-                let sb = self.pop_obj();
+                let s = self.pop_obj()?;
+                let sb = self.pop_obj()?;
                 self.frozen_guard(sb)?;
                 let text = match self.vm.heap.get(s) {
                     Object::Str(text) => text.clone(),
-                    _ => unreachable!("verified string shape"),
+                    _ => return Err(BAD_TYPE),
                 };
                 self.sb_append(sb, &text)?;
             }
             Instr::SbAppendInt => {
-                let v = self.pop_int();
-                let sb = self.pop_obj();
+                let v = self.pop_int()?;
+                let sb = self.pop_obj()?;
                 self.frozen_guard(sb)?;
                 self.sb_append(sb, &v.to_string())?;
             }
             Instr::SbAppendBool => {
-                let v = self.pop_bool();
-                let sb = self.pop_obj();
+                let v = self.pop_bool()?;
+                let sb = self.pop_obj()?;
                 self.frozen_guard(sb)?;
                 let text = if v { "true" } else { "false" };
                 self.sb_append(sb, text)?;
             }
             Instr::SbBuild => {
-                let sb = self.pop_obj();
+                let sb = self.pop_obj()?;
                 let text = match self.vm.heap.get(sb) {
                     Object::StrBuilder(text) => text.clone(),
-                    _ => unreachable!("verified builder shape"),
+                    _ => return Err(BAD_TYPE),
                 };
                 let value = self.alloc(Object::Str(text))?;
                 self.push(value)?;
@@ -1195,38 +1287,38 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::BbAppend => {
-                let v = self.pop_int();
-                let bb = self.pop_obj();
+                let v = self.pop_int()?;
+                let bb = self.pop_obj()?;
                 self.frozen_guard(bb)?;
                 let byte = u8::try_from(v).map_err(|_| FaultCode::IntegerOverflow)?;
                 self.reserve(1, &[Value::Obj(bb)])?;
                 match self.vm.heap.get_mut(bb) {
                     Object::ByteBuf(bytes) => bytes.push(byte),
-                    _ => unreachable!("verified buffer shape"),
+                    _ => return Err(BAD_TYPE),
                 }
                 self.vm.heap.recharge(bb);
                 self.push(Value::Obj(bb))?;
             }
             Instr::BbLen => {
-                let bb = self.pop_obj();
+                let bb = self.pop_obj()?;
                 let len = match self.vm.heap.get(bb) {
                     Object::ByteBuf(bytes) => bytes.len(),
-                    _ => unreachable!("verified buffer shape"),
+                    _ => return Err(BAD_TYPE),
                 };
                 self.push(Value::Int(len as i64))?;
             }
             Instr::BbBuild => {
-                let bb = self.pop_obj();
+                let bb = self.pop_obj()?;
                 let bytes = match self.vm.heap.get(bb) {
                     Object::ByteBuf(bytes) => bytes.clone(),
-                    _ => unreachable!("verified buffer shape"),
+                    _ => return Err(BAD_TYPE),
                 };
                 let text = String::from_utf8(bytes).map_err(|_| FaultCode::BadCast)?;
                 let value = self.alloc(Object::Str(text))?;
                 self.push(value)?;
             }
             Instr::Freeze => {
-                let r = self.pop_obj();
+                let r = self.pop_obj()?;
                 // The freeze mode validates the whole reachable graph
                 // against its limits before any bit goes on, so a
                 // rejected freeze changes nothing.
@@ -1234,42 +1326,42 @@ impl Machine {
                 self.push(Value::Obj(r))?;
             }
             Instr::Digest => {
-                let r = self.pop_obj();
+                let r = self.pop_obj()?;
                 return Ok(ExecOutcome::Digest { value: r });
             }
             Instr::EqDigest | Instr::NeDigest => {
-                let b = self.pop_obj();
-                let a = self.pop_obj();
+                let b = self.pop_obj()?;
+                let a = self.pop_obj()?;
                 // A digest compares by value, never by reference
                 // (specification 6.4).
                 let equal = match (self.vm.heap.get(a), self.vm.heap.get(b)) {
                     (Object::NativeDigest(x), Object::NativeDigest(y)) => x == y,
-                    _ => unreachable!("verified digest operand"),
+                    _ => return Err(BAD_TYPE),
                 };
                 self.push(Value::Bool(equal == matches!(instr, Instr::EqDigest)))?;
             }
             Instr::Jump(target) => {
-                let frame = self.vm.frames.last_mut().expect("frame");
+                let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
                 frame.block = target;
                 frame.ip = 0;
             }
             Instr::JumpIfFalse(target) => {
-                if !self.pop_bool() {
-                    let frame = self.vm.frames.last_mut().expect("frame");
+                if !self.pop_bool()? {
+                    let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
                     frame.block = target;
                     frame.ip = 0;
                 }
             }
             Instr::JumpIfTrue(target) => {
-                if self.pop_bool() {
-                    let frame = self.vm.frames.last_mut().expect("frame");
+                if self.pop_bool()? {
+                    let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
                     frame.block = target;
                     frame.ip = 0;
                 }
             }
             Instr::Return => {
-                let value = self.pop();
-                let frame = self.vm.frames.pop().expect("frame");
+                let value = self.pop()?;
+                let frame = self.vm.frames.pop().ok_or(BAD_STATE)?;
                 self.vm.operands.truncate(frame.base_operand as usize);
                 self.vm.locals.truncate(frame.base_local as usize);
                 if self.vm.frames.is_empty() {
@@ -1280,18 +1372,28 @@ impl Machine {
             Instr::Unreachable => {
                 return Err(FaultCode::UnreachableCode);
             }
-            Instr::Perform { op, argc } => {
-                let split = self.vm.operands.len() - argc as usize;
+            Instr::Perform { op, argc, .. } => {
+                let split = self
+                    .vm
+                    .operands
+                    .len()
+                    .checked_sub(argc as usize)
+                    .ok_or(BAD_STATE)?;
                 let args = self.vm.operands.split_off(split);
                 return Ok(ExecOutcome::Perform { op, args });
             }
-            Instr::PerformValue { argc } => {
-                let split = self.vm.operands.len() - argc as usize;
+            Instr::PerformValue { argc, .. } => {
+                let split = self
+                    .vm
+                    .operands
+                    .len()
+                    .checked_sub(argc as usize)
+                    .ok_or(BAD_STATE)?;
                 let args = self.vm.operands.split_off(split);
-                let callee = self.pop();
+                let callee = self.pop()?;
                 let op = match callee {
                     Value::Op(op) => op,
-                    _ => unreachable!("verified operation value"),
+                    _ => return Err(BAD_TYPE),
                 };
                 return Ok(ExecOutcome::Perform { op, args });
             }
@@ -1299,8 +1401,8 @@ impl Machine {
                 self.push(Value::Op(op))?;
             }
             Instr::TableEdit { action, kind, slot } => {
-                let mock = if action == 2 { Some(self.pop()) } else { None };
-                let table = self.pop_obj();
+                let mock = if action == 2 { Some(self.pop()?) } else { None };
+                let table = self.pop_obj()?;
                 return Ok(ExecOutcome::TableEdit {
                     table,
                     action,
@@ -1310,18 +1412,18 @@ impl Machine {
                 });
             }
             Instr::AsCall(op) => {
-                let request = self.pop_obj();
+                let request = self.pop_obj()?;
                 return Ok(ExecOutcome::AsCall { request, op });
             }
             Instr::CallArgs => {
-                let call = self.pop_obj();
+                let call = self.pop_obj()?;
                 return Ok(ExecOutcome::CallArgs { call });
             }
             Instr::FaultCode => {
-                let r = self.pop_obj();
+                let r = self.pop_obj()?;
                 let code = match self.vm.heap.get(r) {
                     Object::NativeFault { code, .. } => *code,
-                    _ => unreachable!("verified fault shape"),
+                    _ => return Err(BAD_TYPE),
                 };
                 let value = self.alloc(Object::Str(code.to_string()))?;
                 self.push(value)?;
@@ -1347,24 +1449,28 @@ impl Machine {
 
     /// Return true when the instance class equals or extends the
     /// class named by the target type index.
-    fn instance_matches(&self, module: &Module, r: ObjRef, ty: u32) -> bool {
-        let target = match &module.types[ty as usize] {
+    fn instance_matches(&self, module: &Module, r: ObjRef, ty: u32) -> Result<bool, FaultCode> {
+        let target = match module.types.get(ty as usize).ok_or(BAD_STATE)? {
             lm_bytecode::BcType::Class(c) | lm_bytecode::BcType::Inst(c, _) => *c,
-            _ => unreachable!("verified type-test target"),
+            _ => return Err(BAD_STATE),
         };
         let mut class = match self.vm.heap.get(r) {
             Object::Instance { class, .. } => *class,
-            _ => unreachable!("verified type-test operand"),
+            _ => return Err(BAD_TYPE),
         };
-        loop {
+        // The class chain of a verified module is acyclic, and the
+        // step bound holds whatever built the state, so the walk never
+        // spins on a hand-built table.
+        for _ in 0..=module.classes.len() {
             if class == target {
-                return true;
+                return Ok(true);
             }
-            match module.classes[class as usize].parent() {
+            match module.classes.get(class as usize).and_then(|c| c.parent()) {
                 Some(p) => class = p,
-                None => return false,
+                None => return Ok(false),
             }
         }
+        Err(BAD_STATE)
     }
 
     /// Append text to a string builder with a growth reservation.
@@ -1372,7 +1478,7 @@ impl Machine {
         self.reserve(text.len(), &[Value::Obj(sb)])?;
         match self.vm.heap.get_mut(sb) {
             Object::StrBuilder(buf) => buf.push_str(text),
-            _ => unreachable!("verified builder shape"),
+            _ => return Err(BAD_TYPE),
         }
         self.vm.heap.recharge(sb);
         self.push(Value::Obj(sb))
@@ -1392,9 +1498,14 @@ impl Machine {
         if self.vm.frames.len() as u32 >= self.config.max_frames {
             return Err(FaultCode::StackLimit);
         }
-        let func = &module.funcs[callee as usize];
+        let func = module.funcs.get(callee as usize).ok_or(BAD_STATE)?;
         let base_local = self.vm.locals.len() as u32;
-        let arg_start = self.vm.operands.len() - consume;
+        let arg_start = self
+            .vm
+            .operands
+            .len()
+            .checked_sub(consume)
+            .ok_or(BAD_STATE)?;
         let new_locals = self.vm.locals.len() + func.local_count() as usize;
         if new_locals + self.vm.operands.len() > self.config.max_stack_values as usize {
             return Err(FaultCode::StackLimit);
@@ -1428,65 +1539,90 @@ impl Machine {
         Ok(())
     }
 
+    /// The arena position of one local slot of the running frame.
+    ///
+    /// The frame states its own local base, so a restored machine can
+    /// state one the arena does not hold. The caller reads the arena
+    /// through `get`, so the one bounds test of the slice answers the
+    /// position as well.
+    #[inline]
+    fn local_at(&self, slot: u32) -> Result<usize, FaultCode> {
+        let base = self.vm.frames.last().ok_or(BAD_STATE)?.base_local;
+        Ok(base as usize + slot as usize)
+    }
+
+    /// The operand `back` places below the top of the stack.
+    #[inline]
+    fn peek(&self, back: usize) -> Result<Value, FaultCode> {
+        let at = self
+            .vm
+            .operands
+            .len()
+            .checked_sub(back + 1)
+            .ok_or(BAD_STATE)?;
+        Ok(self.vm.operands[at])
+    }
+
     /// Take the top operand.
     ///
-    /// The readers below assert the operand type instead of testing it.
-    /// Two facts carry that assertion, and both hold for a restored
-    /// machine as well as a live one:
+    /// The independent verifier proves the operand type at every
+    /// program point of every executed function, so verified code
+    /// never reaches the error arm of this call or of the readers
+    /// below.
     ///
-    /// - the independent verifier proves the operand type at every
-    ///   program point of every executed function;
-    /// - snapshot admission proves that every operand of a stopped
-    ///   frame carries the type the verifier proved at that point, and
-    ///   restore preserves values without retyping them.
-    ///
-    /// An `Image` never reaches this code: only an admitted
-    /// `SnapshotImage` restores. A path that neither fact covers takes
-    /// a local machine fault instead of an assertion.
-    fn pop(&mut self) -> Value {
-        self.vm.operands.pop().expect("verified stack shape")
+    /// A restored machine states its own operand arena. Admission
+    /// proves the structure of that arena and no type of it, so the
+    /// readers test the tag and raise `TypeMismatch`. A short stack
+    /// raises `MalformedState`. Both stop the machine and leave the
+    /// host running.
+    #[inline]
+    fn pop(&mut self) -> Result<Value, FaultCode> {
+        self.vm.operands.pop().ok_or(BAD_STATE)
     }
 
-    fn pop_int(&mut self) -> i64 {
-        match self.pop() {
-            Value::Int(v) => v,
-            _ => unreachable!("verified operand type"),
+    #[inline]
+    fn pop_int(&mut self) -> Result<i64, FaultCode> {
+        match self.pop()? {
+            Value::Int(v) => Ok(v),
+            _ => Err(BAD_TYPE),
         }
     }
 
-    fn pop_bool(&mut self) -> bool {
-        match self.pop() {
-            Value::Bool(v) => v,
-            _ => unreachable!("verified operand type"),
+    #[inline]
+    fn pop_bool(&mut self) -> Result<bool, FaultCode> {
+        match self.pop()? {
+            Value::Bool(v) => Ok(v),
+            _ => Err(BAD_TYPE),
         }
     }
 
-    fn pop_obj(&mut self) -> ObjRef {
-        match self.pop() {
-            Value::Obj(r) => r,
-            _ => unreachable!("verified operand type"),
+    #[inline]
+    fn pop_obj(&mut self) -> Result<ObjRef, FaultCode> {
+        match self.pop()? {
+            Value::Obj(r) => Ok(r),
+            _ => Err(BAD_TYPE),
         }
     }
 
     fn int_binary(&mut self, op: impl Fn(i64, i64) -> Option<i64>) -> Result<(), FaultCode> {
-        let b = self.pop_int();
-        let a = self.pop_int();
+        let b = self.pop_int()?;
+        let a = self.pop_int()?;
         let value = op(a, b).ok_or(FaultCode::IntegerOverflow)?;
         self.push(Value::Int(value))
     }
 
     fn int_compare(&mut self, op: impl Fn(i64, i64) -> bool) -> Result<(), FaultCode> {
-        let b = self.pop_int();
-        let a = self.pop_int();
+        let b = self.pop_int()?;
+        let a = self.pop_int()?;
         self.push(Value::Bool(op(a, b)))
     }
 
     fn str_compare(&mut self, want_equal: bool) -> Result<(), FaultCode> {
-        let b = self.pop_obj();
-        let a = self.pop_obj();
+        let b = self.pop_obj()?;
+        let a = self.pop_obj()?;
         let equal = match (self.vm.heap.get(a), self.vm.heap.get(b)) {
             (Object::Str(s1), Object::Str(s2)) => s1 == s2,
-            _ => unreachable!("verified operand type"),
+            _ => return Err(BAD_TYPE),
         };
         self.push(Value::Bool(equal == want_equal))
     }

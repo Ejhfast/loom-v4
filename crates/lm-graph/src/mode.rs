@@ -264,10 +264,14 @@ fn copy_passes_within(
     let mut new_refs: Vec<ObjRef> = Vec::with_capacity(order.len());
     let mut result = Ok(());
     for r in order {
-        let shell = heap
-            .get(*r)
-            .shell()
-            .expect("pass 1 admitted sendable shapes only");
+        // `shell` answers for a sendable shape alone, and pass 1
+        // admitted sendable shapes alone, so the test never fires.
+        // The test states the rule instead of asserting it, so a
+        // future shape without a shell faults the machine.
+        let Some(shell) = heap.get(*r).shell() else {
+            result = Err(FaultCode::UnsendableValue);
+            break;
+        };
         let cost = shell.cost();
         if heap.would_exceed(cost) {
             collect(heap, roots.iter().copied());
@@ -326,10 +330,12 @@ fn copy_passes(
     let mut new_refs: Vec<ObjRef> = Vec::with_capacity(order.len());
     let mut result = Ok(());
     for r in order {
-        let shell = src
-            .get(*r)
-            .shell()
-            .expect("pass 1 admitted sendable shapes only");
+        // See `copy_passes_within`: pass 1 admitted sendable shapes
+        // alone, and every sendable shape has a shell.
+        let Some(shell) = src.get(*r).shell() else {
+            result = Err(FaultCode::UnsendableValue);
+            break;
+        };
         let cost = shell.cost();
         if dst.would_exceed(cost) {
             // The shells are host-rooted already, so a collection

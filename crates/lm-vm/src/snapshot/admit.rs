@@ -1260,11 +1260,15 @@ impl Admit<'_> {
         // and its kind matches the pending proc operation.
         match (m.state, m.block) {
             (ImageState::Blocked, Some(block)) => {
-                let op = m
-                    .pending
-                    .as_ref()
-                    .expect("a blocked machine has a request")
-                    .op;
+                // The state rule above already refused a blocked
+                // machine with no request. The read states that fact
+                // again instead of asserting it.
+                let Some(op) = m.pending.as_ref().map(|p| p.op) else {
+                    return fail(
+                        ImageReason::State,
+                        at("a blocked machine holds no pending request"),
+                    );
+                };
                 let ok = match block {
                     ImageBlock::Receive => op == lm_abi::OP_PROC_RECV,
                     ImageBlock::Send { .. } => op == lm_abi::OP_PROC_SEND,
@@ -1426,11 +1430,10 @@ impl Admit<'_> {
                 // A stale token is legal: the machine answered the
                 // request already. The rule is that a live token
                 // agrees.
-                if target.state == ImageState::Asked {
-                    let pending = target
-                        .pending
-                        .as_ref()
-                        .expect("an asked machine holds its request");
+                // `check_state` already refused an asked machine with
+                // no request, so this read never answers `None`.
+                if let (ImageState::Asked, Some(pending)) = (target.state, target.pending.as_ref())
+                {
                     if pending.ordinal == request && op.is_some_and(|op| op != pending.op) {
                         return fail(
                             ImageReason::Reference,

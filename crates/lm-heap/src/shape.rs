@@ -769,6 +769,24 @@ mod tests {
         }
     }
 
+    /// Exactly the sendable shapes have a shell.
+    ///
+    /// The copy runs its shape check first and builds a shell after
+    /// it, so the two sets must agree. A sendable shape without a
+    /// shell would pass the check and then fail the copy.
+    #[test]
+    fn a_shape_has_a_shell_exactly_when_it_is_sendable() {
+        for object in sample_objects() {
+            let sendable = object.shape().boundary == BoundaryPolicy::Sendable;
+            assert_eq!(
+                object.shell().is_some(),
+                sendable,
+                "{}",
+                object.shape().name
+            );
+        }
+    }
+
     /// A holder-local shape is never digestible: a digest that named
     /// it could not be reproduced in another heap.
     #[test]
