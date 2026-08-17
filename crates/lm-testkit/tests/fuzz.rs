@@ -284,6 +284,386 @@ fn mutated_snapshot_containers_never_panic_the_loader() {
     });
 }
 
+// ---------------------------------------------------------------
+// The structural snapshot fuzzer.
+// ---------------------------------------------------------------
+
+/// The largest time one restored mutant may take.
+///
+/// The slice bound and the fuel cap already bound the work. The clock
+/// states the same rule again, so a future path that loops without
+/// spending fuel fails the case instead of hanging the suite.
+const MAX_CASE_TIME: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Rebuild the heap of one machine in canonical traversal order.
+///
+/// A structural edit can move an object out of the reachable set or
+/// change the traversal order. The canonical order rule would then
+/// answer for every mutant, and the run-time rules would never see
+/// one. The pass keeps the heap canonical, so a mutant reaches the
+/// interpreter.
+fn recanonicalize(machine: &mut lm_vm::snapshot::ImageMachine) {
+    use lm_value::{ObjRef, Value};
+    let roots = lm_vm::snapshot::image_roots(machine);
+    let mut order: Vec<u32> = Vec::new();
+    let mut seen = vec![false; machine.objects.len()];
+    let mut stack: Vec<u32> = roots.iter().rev().copied().collect();
+    let mut children: Vec<ObjRef> = Vec::new();
+    while let Some(r) = stack.pop() {
+        if r as usize >= seen.len() || seen[r as usize] {
+            continue;
+        }
+        seen[r as usize] = true;
+        order.push(r);
+        children.clear();
+        machine.objects[r as usize].object.children(&mut children);
+        stack.extend(children.iter().rev().map(|c| c.slot));
+    }
+    let mut moved = vec![u32::MAX; machine.objects.len()];
+    for (idx, r) in order.iter().enumerate() {
+        moved[*r as usize] = idx as u32;
+    }
+    let map = |r: ObjRef| ObjRef {
+        slot: moved.get(r.slot as usize).copied().unwrap_or(0),
+        generation: 0,
+    };
+    let objects: Vec<lm_vm::snapshot::ImageObject> = order
+        .iter()
+        .map(|r| {
+            let entry = &machine.objects[*r as usize];
+            lm_vm::snapshot::ImageObject {
+                frozen: entry.frozen,
+                object: entry
+                    .object
+                    .remap(map)
+                    .unwrap_or_else(|| entry.object.clone()),
+            }
+        })
+        .collect();
+    let value = |v: &mut Value| {
+        if let Value::Obj(r) = v {
+            *v = Value::Obj(map(*r));
+        }
+    };
+    for frame in &mut machine.frames {
+        frame.closure = frame.closure.and_then(|o| moved.get(o as usize).copied());
+    }
+    for v in machine.locals.iter_mut().chain(machine.operands.iter_mut()) {
+        value(v);
+    }
+    if let Some(pending) = &mut machine.pending {
+        for v in &mut pending.args {
+            value(v);
+        }
+    }
+    if let Some(lm_vm::snapshot::ImageTerminal::Done(v)) = &mut machine.terminal {
+        value(v);
+    }
+    for v in machine.mailbox.queue.iter_mut() {
+        value(v);
+    }
+    machine.start_body = machine
+        .start_body
+        .and_then(|o| moved.get(o as usize).copied());
+    for slot in machine.literals.iter_mut() {
+        *slot = slot.and_then(|o| moved.get(o as usize).copied());
+    }
+    machine.objects = objects;
+}
+
+/// Apply one seeded structural mutation to a decoded image.
+///
+/// A byte mutation almost always fails the decoder. A structural
+/// mutation states a world the decoder accepts, so admission and the
+/// interpreter answer for it instead.
+fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
+    use lm_value::{ObjRef, Value};
+    if image.machines.is_empty() {
+        return;
+    }
+    let vm = prng.below(image.machines.len());
+    let machines = image.machines.len() as u32;
+    let objects = image.machines[vm].objects.len() as u32;
+    // The value pool of this machine: the scalars a program can hold
+    // and every object ordinal of its heap.
+    let pick_value = |prng: &mut Prng| -> Value {
+        match prng.below(6) {
+            0 => Value::Unit,
+            1 => Value::Int(prng.next() as i64),
+            2 => Value::Bool(prng.next() & 1 == 0),
+            3 => Value::Uninit,
+            4 => Value::Op((prng.next() % 64) as u32),
+            _ if objects > 0 => Value::Obj(ObjRef {
+                slot: prng.below(objects as usize) as u32,
+                generation: 0,
+            }),
+            _ => Value::Unit,
+        }
+    };
+    match prng.below(12) {
+        0 => {
+            let m = &mut image.machines[vm];
+            if !m.locals.is_empty() {
+                let at = prng.below(m.locals.len());
+                m.locals[at] = pick_value(prng);
+            }
+        }
+        1 => {
+            let m = &mut image.machines[vm];
+            if !m.operands.is_empty() {
+                let at = prng.below(m.operands.len());
+                m.operands[at] = pick_value(prng);
+            }
+        }
+        2 => {
+            let value = pick_value(prng);
+            let m = &mut image.machines[vm];
+            if !m.objects.is_empty() {
+                let at = prng.below(m.objects.len());
+                if let lm_heap::Object::Instance { fields, .. } = &mut m.objects[at].object {
+                    if !fields.is_empty() {
+                        let slot = prng.below(fields.len());
+                        fields[slot] = value;
+                    }
+                }
+            }
+        }
+        3 => {
+            let value = pick_value(prng);
+            let m = &mut image.machines[vm];
+            if !m.objects.is_empty() {
+                let at = prng.below(m.objects.len());
+                if let lm_heap::Object::List { items } = &mut m.objects[at].object {
+                    if !items.is_empty() {
+                        let slot = prng.below(items.len());
+                        items[slot] = value;
+                    }
+                }
+            }
+        }
+        4 => {
+            let value = pick_value(prng);
+            let m = &mut image.machines[vm];
+            if !m.mailbox.queue.is_empty() {
+                let at = prng.below(m.mailbox.queue.len());
+                m.mailbox.queue[at] = value;
+            }
+        }
+        5 => {
+            // A native handle names another machine of the world.
+            let target = prng.below(machines as usize) as u32;
+            let m = &mut image.machines[vm];
+            if !m.objects.is_empty() {
+                let at = prng.below(m.objects.len());
+                match &mut m.objects[at].object {
+                    lm_heap::Object::NativeVm { vm } | lm_heap::Object::NativeTable { vm } => {
+                        *vm = target;
+                    }
+                    lm_heap::Object::NativeHandle { proc, .. } => *proc = target,
+                    lm_heap::Object::NativeRequest { vm, .. }
+                    | lm_heap::Object::NativeCall { vm, .. } => *vm = target,
+                    _ => {}
+                }
+            }
+        }
+        6 => {
+            let env = prng.below(image.envs.len().max(1)) as u32;
+            let m = &mut image.machines[vm];
+            if !m.frames.is_empty() {
+                let at = prng.below(m.frames.len());
+                m.frames[at].env = env;
+            }
+        }
+        7 => {
+            let env = prng.below(image.envs.len().max(1)) as u32;
+            image.machines[vm].witness = env;
+        }
+        8 => {
+            let m = &mut image.machines[vm];
+            m.is_proc = !m.is_proc;
+        }
+        9 => {
+            let m = &mut image.machines[vm];
+            if !m.frames.is_empty() {
+                let at = prng.below(m.frames.len());
+                m.frames[at].ip = prng.next() as u32 % 8;
+            }
+        }
+        10 => {
+            let value = pick_value(prng);
+            if let Some(lm_vm::snapshot::ImageTerminal::Done(v)) = &mut image.machines[vm].terminal
+            {
+                *v = value;
+            }
+        }
+        _ => {
+            let env = prng.below(image.envs.len().max(1)) as u32;
+            let m = &mut image.machines[vm];
+            if !m.objects.is_empty() {
+                let at = prng.below(m.objects.len());
+                match &mut m.objects[at].object {
+                    lm_heap::Object::Instance { env: w, .. }
+                    | lm_heap::Object::Closure { env: w, .. } => {
+                        *w = lm_value::Witness(lm_value::TypeEnvId(env));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for machine in &mut image.machines {
+        recanonicalize(machine);
+    }
+}
+
+/// A second seed: one world captured mid execution.
+///
+/// The checkpoint world stops `asked`, so a restored root answers its
+/// event and executes no instruction. This seed stops `ready` between
+/// two instructions, so a restored mutant runs the interpreter over a
+/// heap that holds a class instance, two lists, and live locals.
+fn ready_snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
+    use lm_vm::{RecordingHost, RootEvent, World};
+    let source = "\
+class Counter
+  n: Int = 7
+end
+
+def go(): Int
+  a = Counter()
+  xs = [1, 2]
+  ys = [\"a\", \"b\"]
+  m = ys.len()
+  m = m + xs.at(0)
+  m + a.n
+end
+
+go()
+";
+    let bytes = compile_to_bytes("ready.lm", source).expect("the seed compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the seed loads");
+    let container = {
+        let mut world = World::new(
+            &loaded,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+        );
+        // Step to the boundary that holds every object of the body.
+        let mut best: Option<Vec<u8>> = None;
+        for _ in 0..200 {
+            let gate = world.next_gate();
+            if let Ok(image) = world.capture_snapshot(gate, 0, false) {
+                if image.world().machines[0].objects.len() >= 4 {
+                    best = Some(image.bytes().to_vec());
+                    break;
+                }
+            }
+            match world.step_root() {
+                RootEvent::Ran => {}
+                _ => break,
+            }
+        }
+        best.expect("one boundary holds the whole heap")
+    };
+    (loaded, container)
+}
+
+/// Every structural mutant decodes, admits or rejects, restores, and
+/// drives without a panic and without a hang.
+///
+/// Admission proves structure alone, so most of these mutants admit.
+/// The interpreter then meets a world that verified code never built,
+/// and the rule is that one machine stops instead of the host.
+#[test]
+fn mutated_snapshot_images_never_panic_the_runtime() {
+    on_supported_stack(|| {
+        let mut prng = Prng(SEED ^ 0x1_5eed_1a6e);
+        let limits = lm_vm::snapshot::LoadLimits::default();
+        let mut admitted_count = 0usize;
+        let mut restored_count = 0usize;
+        let mut ran_count = 0usize;
+        for (loaded, base, grants) in [
+            {
+                let (loaded, base) = snapshot_seed();
+                (loaded, base, &["Proc", "Vm", "Clock"][..])
+            },
+            {
+                let (loaded, base) = ready_snapshot_seed();
+                (loaded, base, &[][..])
+            },
+        ] {
+            let seed_image = lm_vm::snapshot::codec::load_external(&base, &loaded, limits)
+                .expect("the seed admits")
+                .into_image();
+            for _round in 0..ROUNDS * 4 {
+                let started = std::time::Instant::now();
+                let mut image = seed_image.clone();
+                for _ in 0..=prng.below(3) {
+                    mutate_image(&mut image, &mut prng);
+                }
+                let Ok(bytes) = lm_vm::snapshot::codec::encode(&image, usize::MAX) else {
+                    continue;
+                };
+                assert!(bytes.len() <= MAX_CASE_BYTES, "a mutation grew the input");
+                let Ok(admitted) = lm_vm::snapshot::codec::load_external(&bytes, &loaded, limits)
+                else {
+                    continue;
+                };
+                admitted_count += 1;
+                // A tight heap and fuel cap bound the run. The restored
+                // world takes the grants the capture ran under, so the
+                // mutant reaches the kernel instead of stopping at the
+                // policy table.
+                let mut world = lm_vm::World::new(
+                    &loaded,
+                    VmConfig {
+                        fuel: 20_000,
+                        heap_bytes: 1 << 20,
+                        max_children: 4_096,
+                        ..VmConfig::default()
+                    },
+                    Box::new(lm_vm::RecordingHost::new(1)),
+                );
+                for grant in grants {
+                    world.allow(grant).expect("the grant names a target");
+                }
+                if let Some(target) = world.new_child(0) {
+                    if let Ok(root) = world.restore_image(0, target, &admitted) {
+                        restored_count += 1;
+                        for vm in world.machine_ids() {
+                            for grant in grants {
+                                world.allow_on(vm, grant).expect("the grant names a target");
+                            }
+                        }
+                        if world.state_of(root) == lm_vm::MachineState::Ready {
+                            ran_count += 1;
+                        }
+                        drive_restored(&mut world, root);
+                    }
+                }
+                assert!(
+                    started.elapsed() < MAX_CASE_TIME,
+                    "one mutant ran past its time bound"
+                );
+            }
+        }
+        // The counters state that the path is not empty. The rule is
+        // the absence of a panic and of a hang.
+        assert!(
+            admitted_count > ROUNDS * 2,
+            "too few structural mutants admitted: {admitted_count}"
+        );
+        assert!(
+            restored_count > ROUNDS * 2,
+            "too few structural mutants restored: {restored_count}"
+        );
+        assert!(
+            ran_count > ROUNDS,
+            "too few restored mutants executed an instruction: {ran_count}"
+        );
+    });
+}
+
 #[test]
 fn mutated_sources_never_panic_the_scanner_checker_or_lowering() {
     on_supported_stack(|| {
