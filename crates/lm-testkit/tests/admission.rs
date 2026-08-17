@@ -2237,3 +2237,65 @@ fn every_capture_of_every_shipped_program_admits() {
         fails.join("\n")
     );
 }
+
+// ---------------------------------------------------------------
+// Restore applies the effective ceiling to live state.
+// ---------------------------------------------------------------
+
+/// A program that loops until its own budget runs out.
+const SPIN_SOURCE: &str = "\
+def spin(n: Int): Int
+  total = 0
+  i = 0
+  while i < n
+    total = total + i
+    i = i + 1
+  end
+  total
+end
+
+spin(1000000)
+";
+
+/// A container states the fuel its machine holds, so restore must
+/// clamp that fuel by the ceiling of the target world.
+///
+/// `clamp` bounds the configured budget. The interpreter reads
+/// `vm.fuel` instead, so an unclamped copy let an image state any
+/// budget. A restored machine then ran a loop of the victim program
+/// without end, and the host never returned.
+#[test]
+fn a_restored_machine_takes_the_fuel_ceiling_of_its_target() {
+    let loaded = program(SPIN_SOURCE);
+    let images = boundaries(&loaded, &[], 40);
+    let mut broken = pick(&images, "a running loop", |image| {
+        !image.machines[0].frames.is_empty()
+    });
+    // The image claims every budget it can state.
+    broken.machines[0].fuel = u64::MAX;
+    broken.machines[0].limits.fuel = u64::MAX;
+    assert_eq!(
+        admit(&loaded, &broken),
+        None,
+        "admission proves structure, so a large budget admits"
+    );
+
+    let bytes = codec::encode(&broken, usize::MAX).expect("the image encodes");
+    let admitted = codec::load_external(&bytes, &loaded, lm_vm::snapshot::LoadLimits::default())
+        .expect("the container admits");
+    let ceiling = VmConfig {
+        fuel: 2000,
+        ..VmConfig::default()
+    };
+    let mut world = World::new(&loaded, ceiling, Box::new(RecordingHost::new(1)));
+    let target = world.new_child(0).expect("a child budget");
+    let root = world
+        .restore_image(0, target, &admitted)
+        .expect("the image restores");
+    // The loop needs far more than the ceiling, so the restored
+    // machine stops instead of running without end.
+    assert!(
+        matches!(world.run_machine(root), RootEvent::Fault(rec) if rec.code == FaultCode::OutOfFuel),
+        "the restored machine must run out of fuel"
+    );
+}

@@ -302,7 +302,12 @@ impl World<'_> {
         m.body_func = source.body_func;
         m.witness = witness;
         m.gate = gate;
-        m.vm.fuel = source.fuel;
+        // The remaining fuel is live state, so the effective ceiling
+        // governs it. `clamp` bounds the configured budget, and the
+        // interpreter reads this field instead. Without the bound an
+        // image states any budget, and a restored machine runs a loop
+        // of the victim program without end.
+        m.vm.fuel = source.fuel.min(m.config.fuel);
         m.vm.next_ordinal = source.next_ordinal;
         m.vm.frames = frames;
         m.vm.locals = source.locals.iter().map(|v| value(*v)).collect();
