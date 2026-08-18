@@ -799,6 +799,34 @@ impl<'m> World<'m> {
         Some(id)
     }
 
+    /// The table grants that the declared row of one function names.
+    ///
+    /// A row entry is text: either one exact operation name or one
+    /// group name. The launch paths pass exactly this row to a new
+    /// machine, and each caller charges the same row, so a launch
+    /// creates no authority.
+    fn declared_grants(&self, func: u32) -> (Vec<u32>, Vec<u32>) {
+        let mut ops: Vec<u32> = Vec::new();
+        let mut groups: Vec<u32> = Vec::new();
+        let Some(entry) = self.module.funcs.get(func as usize) else {
+            return (ops, groups);
+        };
+        for elem in &entry.row {
+            let lm_bytecode::BcRow::Op(idx) = elem else {
+                continue;
+            };
+            let Some(text) = self.module.strings.get(*idx as usize) else {
+                continue;
+            };
+            if let Some(op) = lm_abi::op_by_name(text) {
+                ops.push(op);
+            } else if let Some(group) = lm_abi::group_by_name(text) {
+                groups.push(group);
+            }
+        }
+        (ops, groups)
+    }
+
     /// Grant one root policy target to one machine, for tools.
     pub fn allow_on(&mut self, vm: VmId, name: &str) -> Result<(), String> {
         let table = &mut self.machines[vm as usize].table;
@@ -4803,26 +4831,7 @@ impl<'m> World<'m> {
             );
             return;
         };
-        // The declared row of the proc body names exact operations and
-        // groups by text. Resolve them once, before the child record
-        // borrows the machine table.
-        let mut birth_ops: Vec<u32> = Vec::new();
-        let mut birth_groups: Vec<u32> = Vec::new();
-        if let Some(func) = self.module.funcs.get(body_func as usize) {
-            for entry in &func.row {
-                let lm_bytecode::BcRow::Op(idx) = entry else {
-                    continue;
-                };
-                let Some(text) = self.module.strings.get(*idx as usize) else {
-                    continue;
-                };
-                if let Some(op) = lm_abi::op_by_name(text) {
-                    birth_ops.push(op);
-                } else if let Some(group) = lm_abi::group_by_name(text) {
-                    birth_groups.push(group);
-                }
-            }
-        }
+        let (birth_ops, birth_groups) = self.declared_grants(body_func);
         let limit = self.machines[child as usize].config.mailbox_limit;
         {
             let m = &mut self.machines[child as usize];
