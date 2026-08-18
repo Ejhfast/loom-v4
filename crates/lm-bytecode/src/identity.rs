@@ -72,7 +72,7 @@ use std::collections::HashMap;
 /// type of the two perform instructions to the instruction encoding
 /// and to the canonical identity encoding. Version 9 adds the three
 /// resource types. Version 10 adds the three byte instructions.
-pub const COMPILER_ABI_VERSION: u32 = 11;
+pub const COMPILER_ABI_VERSION: u32 = 12;
 
 /// The refinement work budget of one component.
 ///
@@ -1123,6 +1123,7 @@ impl<'a> Resolver<'a> {
             BcClassKind::Abstract => 1,
             BcClassKind::Case => 2,
         });
+        out.push(u8::from(class.is_final));
         out.extend_from_slice(&class.type_params.to_le_bytes());
         match class.parent() {
             None => out.push(0xff),

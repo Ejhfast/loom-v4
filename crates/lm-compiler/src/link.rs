@@ -413,6 +413,7 @@ fn relocate(
                 merged.classes.push(BcClass {
                     name: source.name.clone(),
                     key: source.key.clone(),
+                    is_final: source.is_final,
                     parent: NO_PARENT,
                     parent_args: Vec::new(),
                     type_params: source.type_params,
@@ -523,6 +524,7 @@ fn relocate(
         let filled = BcClass {
             name: source.name.clone(),
             key: source.key.clone(),
+            is_final: source.is_final,
             parent: match source.parent() {
                 None => NO_PARENT,
                 Some(p) => reloc.classes[p as usize],

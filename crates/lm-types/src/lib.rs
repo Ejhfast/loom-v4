@@ -146,6 +146,8 @@ pub enum Type {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassMeta {
     pub name: String,
+    /// True when the class cannot have a subclass.
+    pub is_final: bool,
     pub parent: Option<ClassId>,
     /// The type arguments of a generic parent, for example the `Work`
     /// of `class Worker < Proc[Work]`. Empty for a plain parent.
@@ -308,12 +310,18 @@ impl TypeStore {
         let id = ClassId(self.classes.len() as u32);
         self.classes.push(ClassMeta {
             name: name.into(),
+            is_final: false,
             parent: None,
             parent_args: Vec::new(),
             type_params,
             kind,
         });
         id
+    }
+
+    /// Mark one registered class as final.
+    pub fn set_class_final(&mut self, class: ClassId) {
+        self.classes[class.0 as usize].is_final = true;
     }
 
     pub fn set_class_parent(&mut self, class: ClassId, parent: ClassId) {

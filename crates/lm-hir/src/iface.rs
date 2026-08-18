@@ -177,6 +177,7 @@ impl Naming<'_> {
             .collect();
         IfaceClass {
             kind,
+            is_final: info.is_final,
             type_params,
             parent: info.parent.map(|p| self.qual(p)),
             fields,

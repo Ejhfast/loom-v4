@@ -214,6 +214,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
         .map(|class| BcClass {
             name: class.name.clone(),
             key: class.key.clone(),
+            is_final: class.is_final,
             parent: class.parent.unwrap_or(NO_PARENT),
             parent_args: class.parent_args.iter().map(|t| m.bc_ty(*t)).collect(),
             type_params: class.type_params,
@@ -1970,6 +1971,7 @@ pub fn dump_cfg(module: &Module) -> String {
             BcClassKind::Abstract => " abstract",
             BcClassKind::Case => " case",
         };
+        let final_mark = if class.is_final { " final" } else { "" };
         let generics = if class.type_params > 0 {
             format!(" params {}", class.type_params)
         } else {
@@ -1977,7 +1979,7 @@ pub fn dump_cfg(module: &Module) -> String {
         };
         let _ = writeln!(
             out,
-            "class class{cidx} {}{kind}{generics}{parent}",
+            "class class{cidx} {}{final_mark}{kind}{generics}{parent}",
             class.name
         );
         for (fidx, (name, ty)) in class.fields.iter().enumerate() {

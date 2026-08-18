@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 6;
+const VERSION: u16 = 7;
 
 /// The domain tag of the interface hash.
 const TAG_IFACE: &[u8] = b"lm-iface-v1\0";
@@ -174,6 +174,8 @@ impl IfaceClassKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfaceClass {
     pub kind: IfaceClassKind,
+    /// True when the class cannot have a subclass.
+    pub is_final: bool,
     pub type_params: u32,
     pub parent: Option<QualName>,
     /// The full field layout: inherited fields first.
@@ -441,6 +443,7 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
         IfaceItem::Class(class) => {
             out.push(1);
             out.push(class.kind.tag());
+            out.push(u8::from(class.is_final));
             write_u32(out, class.type_params);
             match &class.parent {
                 None => out.push(0),
@@ -663,6 +666,7 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 2 => IfaceClassKind::EnumCase,
                 other => return Err(DecodeError::BadClassKind(other)),
             };
+            let is_final = cur.flag()?;
             let type_params = cur.u32()?;
             let parent = match cur.u8()? {
                 0 => None,
@@ -715,6 +719,7 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
             };
             Ok(IfaceItem::Class(IfaceClass {
                 kind,
+                is_final,
                 type_params,
                 parent,
                 fields,
@@ -918,6 +923,9 @@ pub fn item_text(item: &IfaceItem) -> String {
         IfaceItem::Func(sig) => fn_text(sig),
         IfaceItem::Class(class) => {
             let mut out = String::new();
+            if class.is_final {
+                out.push_str("final ");
+            }
             if class.type_params > 0 {
                 let parts: Vec<String> = (0..class.type_params).map(|i| format!("${i}")).collect();
                 out.push('[');

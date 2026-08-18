@@ -862,6 +862,15 @@ end
 
 At `end`, the definition is sealed. Fields, layout, superclass, generic parameters, methods, selectors, signatures, and bodies can never change. A class cannot be reopened.
 
+The optional `final` modifier prevents subclass declarations:
+
+```lm
+final class Token
+end
+```
+
+Classes remain open for inheritance when they omit `final`. Enum cases remain final without this modifier.
+
 ### 8.2 Fields
 
 A field has a mandatory type and optional default:
@@ -927,7 +936,9 @@ class Child < Parent
 end
 ```
 
-Ordinary sealed definitions may be subclassed. A subclass inherits fields and methods and may add both. An override must keep parameter types and `mut` markers, may narrow the result, and may narrow but not widen the row.
+Ordinary non-final definitions may be subclassed. A subclass inherits fields and methods and may add both. A final definition rejects every subclass.
+
+An override must keep parameter types and `mut` markers. It may narrow the result and row.
 
 Constructor signatures are not inherited. A subclass initializer handles inherited required fields and may call `super.init(...)` exactly once before reading fields initialized by it.
 
@@ -938,8 +949,8 @@ A call selector is fixed at compile time; the runtime class selects the sealed i
 A class value is frozen. Four identities answer four questions about one class. Each consumer names the one it needs.
 
 - **QualifiedKey** — the nominal identity. The value is the fully qualified declaration path, for example `mathlib.geometry.Point`. Two classes are the same nominal class when their QualifiedKey values are equal. The linker uses this value. The type checker never compares it, because it works on class indices inside one module.
-- **StructuralHash** — the name-free content identity. It covers the kind, the generic arity, the parent identity, the normalized field layout, the selector set, the method signatures, the implementing function identities, and the native intrinsic identifier where applicable. It never covers the class's own name. It covers no construction function: a constructor is a function value with its own StructuralHash, and the binding `<class key>.<new>` ties it to the class (3.6). A field default and an `init` body therefore reach the constructor identity and no class identity. Section 3.7 states how a reference to another class enters it.
-- **InterfaceHash** — the named public API identity of one export. It covers the export name, the kind, the full structural signature with class references by qualified name, the field defaults, the arm names, and the initializer signature. An import slot pins it. A rename moves it.
+- **StructuralHash** — This name-free identity covers kind, final flag, generic arity, parent, fields, selectors, methods, and intrinsics. It excludes the class name and construction function. A constructor has its own StructuralHash. The `<class key>.<new>` binding ties it to the class. Section 3.7 defines reference hashing.
+- **InterfaceHash** — This named public identity covers the export name, kind, final flag, signature, defaults, arms, and initializer. An import slot pins it. A rename changes it.
 - **VerificationHash** — the exact resolved input of the verifier. It answers whether the verifier approved this exact representation.
 
 The linker merges two classes on QualifiedKey and StructuralHash together (3.6). Instance headers point to a VM-local class slot that the linker resolved. Class equality at run time stays an index comparison inside one linked program, and no run-time path compares a hash.
@@ -2865,7 +2876,7 @@ module          = opt_separators, { definition, separators },
 
 definition      = class_decl | enum_decl | function_decl ;
 
-class_decl      = "class", IDENT, [ type_params ], [ "<", type ], separators,
+class_decl      = [ "final" ], "class", IDENT, [ type_params ], [ "<", type ], separators,
                   { ( field_decl | method_decl ), separators },
                   "end" ;
 

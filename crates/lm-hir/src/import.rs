@@ -171,6 +171,9 @@ impl<'a> Materializer<'a> {
             .store
             .register_class(name.to_string(), class.type_params, kind)
             .0;
+        if class.is_final {
+            ctx.store.set_class_final(ClassId(id));
+        }
         self.classes.insert(key, id);
         self.pending.push(PendingClass {
             id,
@@ -475,6 +478,7 @@ impl<'a> Materializer<'a> {
         }
         Ok(ClassInfo {
             imported: true,
+            is_final: class.is_final,
             name: item.name.clone(),
             parent,
             type_params,

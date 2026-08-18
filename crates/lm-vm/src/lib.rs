@@ -637,6 +637,7 @@ mod tests {
             classes: vec![lm_bytecode::BcClass {
                 name: "Point".to_string(),
                 key: "Point".to_string(),
+                is_final: false,
                 parent: lm_bytecode::NO_PARENT,
                 parent_args: Vec::new(),
                 type_params: 0,

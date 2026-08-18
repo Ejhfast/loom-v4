@@ -608,6 +608,7 @@ mod tests {
         let class = |name: &str, parent: u32, parent_args: Vec<u32>, type_params: u32| BcClass {
             name: name.to_string(),
             key: name.to_string(),
+            is_final: false,
             parent,
             parent_args,
             type_params,

@@ -1102,6 +1102,7 @@ mod tests {
             classes: vec![BcClass {
                 name: "C".to_string(),
                 key: "C".to_string(),
+                is_final: false,
                 parent: NO_PARENT,
                 parent_args: vec![],
                 type_params: 0,

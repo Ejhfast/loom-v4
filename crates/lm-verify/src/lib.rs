@@ -726,7 +726,7 @@ impl<'m> Ctx<'m> {
 /// key: a rule change invalidates every cached admission.
 ///
 /// Version 9 adds byte types, resource types, and their operations.
-pub const VERIFIER_VERSION: u32 = 9;
+pub const VERIFIER_VERSION: u32 = 10;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -1439,11 +1439,17 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         }
         match class.kind {
             BcClassKind::Abstract => {
+                if class.is_final {
+                    return Err(cerr("an abstract enum parent cannot be final".to_string()));
+                }
                 if class.parent().is_some() {
                     return Err(cerr("an abstract enum parent cannot inherit".to_string()));
                 }
             }
             BcClassKind::Case => {
+                if class.is_final {
+                    return Err(cerr("a case class cannot use the final flag".to_string()));
+                }
                 let Some(p) = class.parent() else {
                     return Err(cerr("a case class needs its enum parent".to_string()));
                 };
@@ -1468,6 +1474,9 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                 return Err(cerr(format!("parent {p} is not an earlier class entry")));
             }
             let parent = &module.classes[p as usize];
+            if parent.is_final {
+                return Err(cerr("a class cannot inherit a final class".to_string()));
+            }
             if class.kind != BcClassKind::Case {
                 if parent.kind != BcClassKind::Normal {
                     return Err(cerr(
@@ -3389,6 +3398,7 @@ mod tests {
                 name: "Counter".to_string(),
                 parent_args: Vec::new(),
                 key: "Counter".to_string(),
+                is_final: false,
                 parent: NO_PARENT,
                 type_params: 0,
                 kind: BcClassKind::Normal,
@@ -3437,6 +3447,7 @@ mod tests {
                 name: "Box".to_string(),
                 parent_args: Vec::new(),
                 key: "Box".to_string(),
+                is_final: false,
                 parent: NO_PARENT,
                 type_params: 1,
                 kind: BcClassKind::Normal,
@@ -3659,6 +3670,7 @@ mod tests {
             name: "Opt".to_string(),
             parent_args: Vec::new(),
             key: "Opt".to_string(),
+            is_final: false,
             parent: NO_PARENT,
             type_params: 0,
             kind: BcClassKind::Abstract,
@@ -3676,6 +3688,7 @@ mod tests {
             name: "Opt".to_string(),
             parent_args: Vec::new(),
             key: "Opt".to_string(),
+            is_final: false,
             parent: NO_PARENT,
             type_params: 0,
             kind: BcClassKind::Abstract,
@@ -3686,6 +3699,7 @@ mod tests {
             name: "Opt.None".to_string(),
             parent_args: Vec::new(),
             key: "Opt.None".to_string(),
+            is_final: false,
             parent: 1,
             type_params: 0,
             kind: BcClassKind::Case,
@@ -3696,6 +3710,7 @@ mod tests {
             name: "Bad".to_string(),
             parent_args: Vec::new(),
             key: "Bad".to_string(),
+            is_final: false,
             parent: 2,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -3714,6 +3729,7 @@ mod tests {
             name: "Other".to_string(),
             parent_args: Vec::new(),
             key: "Other".to_string(),
+            is_final: false,
             parent: NO_PARENT,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -3850,6 +3866,7 @@ mod tests {
             name: "Fast".to_string(),
             parent_args: Vec::new(),
             key: "Fast".to_string(),
+            is_final: false,
             parent: 0,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -3875,6 +3892,7 @@ mod tests {
             name: "Loud".to_string(),
             parent_args: Vec::new(),
             key: "Loud".to_string(),
+            is_final: false,
             parent: 0,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -3905,6 +3923,7 @@ mod tests {
             name: "Bad".to_string(),
             parent_args: Vec::new(),
             key: "Bad".to_string(),
+            is_final: false,
             parent: 0,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -4133,6 +4152,7 @@ mod tests {
             name: name.to_string(),
             parent_args: Vec::new(),
             key: name.to_string(),
+            is_final: false,
             parent,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -4183,6 +4203,7 @@ mod tests {
         let class = |name: &str, parent: u32, args: Vec<u32>, params: u32| BcClass {
             name: name.to_string(),
             key: name.to_string(),
+            is_final: false,
             parent,
             parent_args: args,
             type_params: params,
@@ -4213,6 +4234,7 @@ mod tests {
         let class = |name: &str, parent: u32, args: Vec<u32>, params: u32| BcClass {
             name: name.to_string(),
             key: name.to_string(),
+            is_final: false,
             parent,
             parent_args: args,
             type_params: params,
@@ -4247,6 +4269,7 @@ mod tests {
         let class = |name: &str, parent: u32| BcClass {
             name: name.to_string(),
             key: name.to_string(),
+            is_final: false,
             parent,
             parent_args: vec![],
             type_params: 0,
@@ -4326,6 +4349,7 @@ mod tests {
                 let class = |name: &str, parent: u32| BcClass {
                     name: name.to_string(),
                     key: name.to_string(),
+                    is_final: false,
                     parent,
                     parent_args: vec![],
                     type_params: 0,

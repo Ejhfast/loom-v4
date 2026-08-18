@@ -154,6 +154,7 @@ pub(crate) struct MethodSig {
 pub(crate) struct ClassInfo {
     /// True for an imported declaration: a shape with no body.
     pub(crate) imported: bool,
+    pub(crate) is_final: bool,
     pub(crate) name: String,
     pub(crate) parent: Option<u32>,
     pub(crate) type_params: Vec<String>,
@@ -183,6 +184,7 @@ impl ClassInfo {
     pub(crate) fn placeholder(_idx: u32) -> ClassInfo {
         ClassInfo {
             imported: false,
+            is_final: false,
             name: String::new(),
             parent: None,
             type_params: Vec::new(),
@@ -1388,6 +1390,7 @@ fn assemble(
             .unwrap_or_default();
         hir_classes.push(HirClass {
             imported: info.imported,
+            is_final: info.is_final,
             name: info.name.clone(),
             key: keys[idx].clone(),
             parent: info.parent,
@@ -1491,7 +1494,8 @@ fn register_type_names(
                    name: &str,
                    span: Span,
                    type_params: u32,
-                   kind: ClassKind|
+                   kind: ClassKind,
+                   is_final: bool|
      -> Result<u32, Diagnostic> {
         let map = if is_core {
             &mut ctx.core_types
@@ -1506,6 +1510,9 @@ fn register_type_names(
             ));
         }
         let id = ctx.store.register_class(name, type_params, kind);
+        if is_final {
+            ctx.store.set_class_final(id);
+        }
         if kind != ClassKind::EnumCase {
             let map = if is_core {
                 &mut ctx.core_types
@@ -1531,6 +1538,7 @@ fn register_type_names(
             class.name_span,
             type_names.len() as u32,
             ClassKind::Normal,
+            class.is_final,
         )?;
     }
     for enum_def in &module.enums {
@@ -1548,6 +1556,7 @@ fn register_type_names(
             enum_def.name_span,
             type_names.len() as u32,
             ClassKind::EnumParent,
+            false,
         )?;
         let mut seen: Vec<&str> = Vec::new();
         for arm in &enum_def.arms {
@@ -1566,6 +1575,7 @@ fn register_type_names(
                 arm.name_span,
                 type_names.len() as u32,
                 ClassKind::EnumCase,
+                false,
             )?;
             ctx.store.set_class_parent(ClassId(arm_id), ClassId(parent));
         }
@@ -1607,6 +1617,13 @@ fn link_class_parents(
                 Diagnostic::new("E1038", format!("unknown parent class `{pname}`"), *pspan)
             })?;
             let parent_meta = ctx.store.class_meta(ClassId(parent)).clone();
+            if parent_meta.is_final {
+                return Err(Diagnostic::new(
+                    "E1040",
+                    format!("`{pname}` is final and cannot be a parent"),
+                    *pspan,
+                ));
+            }
             match parent_meta.kind {
                 ClassKind::EnumParent | ClassKind::EnumCase => {
                     return Err(Diagnostic::new(
@@ -1988,6 +2005,7 @@ fn resolve_class(
     }
     Ok(ClassInfo {
         imported: false,
+        is_final: class.is_final,
         name: class.name.clone(),
         parent,
         type_params: type_names,
@@ -2078,6 +2096,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
     let arms: Vec<u32> = arm_infos.iter().map(|(idx, _, _, _)| *idx).collect();
     ctx.classes[parent_idx as usize] = ClassInfo {
         imported: false,
+        is_final: false,
         name: enum_def.name.clone(),
         parent: None,
         type_params: type_names.clone(),
@@ -2105,6 +2124,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         let count = field_tys.len();
         ctx.classes[arm_class as usize] = ClassInfo {
             imported: false,
+            is_final: false,
             name: format!("{}.{}", enum_def.name, short),
             parent: Some(parent_idx),
             type_params: type_names.clone(),

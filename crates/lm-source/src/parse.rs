@@ -133,7 +133,7 @@ impl Parser<'_> {
             self.skip_newlines();
             match self.peek() {
                 Tok::Eof => break,
-                Tok::KwClass => classes.push(self.class_def()?),
+                Tok::KwClass | Tok::KwFinal => classes.push(self.class_def()?),
                 Tok::KwEnum => enums.push(self.enum_def()?),
                 Tok::KwDef => funcs.push(self.func_def()?),
                 Tok::KwUse => {
@@ -282,6 +282,11 @@ impl Parser<'_> {
     }
 
     fn class_def(&mut self) -> Result<ClassDef, Diagnostic> {
+        let final_tok = if matches!(self.peek(), Tok::KwFinal) {
+            Some(self.next())
+        } else {
+            None
+        };
         let class_tok = self.expect(Tok::KwClass, "`class`")?;
         let (name, name_span) = self.ident("a class name")?;
         let generics = self.generic_params()?;
@@ -340,13 +345,18 @@ impl Parser<'_> {
         let end_tok = self.expect(Tok::KwEnd, "`end`")?;
         self.expect_terminator()?;
         Ok(ClassDef {
+            is_final: final_tok.is_some(),
             name,
             name_span,
             generics,
             parent,
             fields,
             methods,
-            span: class_tok.span.to(end_tok.span),
+            span: final_tok
+                .as_ref()
+                .map(|token| token.span)
+                .unwrap_or(class_tok.span)
+                .to(end_tok.span),
         })
     }
 
@@ -757,7 +767,7 @@ impl Parser<'_> {
                 "E1002",
                 "a `def` function is only valid at the top level of a module or in a class",
             )),
-            Tok::KwClass => Err(self.error(
+            Tok::KwClass | Tok::KwFinal => Err(self.error(
                 "E1002",
                 "a `class` is only valid at the top level of a module",
             )),

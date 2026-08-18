@@ -151,6 +151,8 @@ pub struct BcClass {
     /// structural hash. It never enters the class's own structural
     /// hash.
     pub key: String,
+    /// True when the class cannot have a subclass.
+    pub is_final: bool,
     /// Parent class index, or `NO_PARENT`.
     pub parent: u32,
     /// Type arguments of a generic parent, as type indices. Empty
@@ -668,7 +670,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// instructions. Version 15 adds bytes, file handles, resource
 /// controls, and three byte instructions. Every earlier tag keeps its
 /// byte, so each change adds encodings and moves none.
-pub const VERSION: u16 = 15;
+pub const VERSION: u16 = 16;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -881,6 +883,7 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
             BcClassKind::Abstract => KIND_ABSTRACT,
             BcClassKind::Case => KIND_CASE,
         });
+        out.push(u8::from(class.is_final));
         write_u32(&mut out, class.fields.len() as u32);
         for (name, ty) in &class.fields {
             write_bytes(&mut out, name.as_bytes());
@@ -1624,6 +1627,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             KIND_CASE => BcClassKind::Case,
             other => return Err(DecodeError::BadClassKind(other)),
         };
+        let is_final = cur.flag()?;
         let field_count = cur.len()?;
         let mut fields = Vec::with_capacity(field_count);
         for _ in 0..field_count {
@@ -1641,6 +1645,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         classes.push(BcClass {
             name: String::new(),
             key: String::new(),
+            is_final,
             parent,
             parent_args,
             type_params,
@@ -1992,6 +1997,7 @@ mod tests {
                     name: "Counter".to_string(),
                     parent_args: Vec::new(),
                     key: "Counter".to_string(),
+                    is_final: false,
                     parent: NO_PARENT,
                     type_params: 0,
                     kind: BcClassKind::Normal,
@@ -2002,6 +2008,7 @@ mod tests {
                     name: "Box".to_string(),
                     parent_args: Vec::new(),
                     key: "Box".to_string(),
+                    is_final: false,
                     parent: NO_PARENT,
                     type_params: 1,
                     kind: BcClassKind::Normal,
