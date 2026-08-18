@@ -4830,6 +4830,31 @@ impl<'o> FnChecker<'o> {
     ) -> Result<HPattern, Diagnostic> {
         match &pat.kind {
             PatternKind::Wildcard => Ok(HPattern::Wildcard),
+            PatternKind::Tuple(elems) => {
+                let Type::Tuple(elem_tys) = ctx.store.get(scrut_ty).clone() else {
+                    return Err(self.pattern_mismatch(ctx, "a tuple", scrut_ty, pat.span));
+                };
+                if elem_tys.len() != elems.len() {
+                    return Err(Diagnostic::new(
+                        "E1041",
+                        format!(
+                            "this tuple pattern has {} element(s), but {} has {}",
+                            elems.len(),
+                            ctx.store.display(scrut_ty),
+                            elem_tys.len()
+                        ),
+                        pat.span,
+                    ));
+                }
+                let mut out = Vec::with_capacity(elems.len());
+                for (sub, ty) in elems.iter().zip(elem_tys.iter()) {
+                    out.push(self.check_pattern(ctx, sub, *ty, scrut_mut, binds)?);
+                }
+                Ok(HPattern::Tuple {
+                    elems: out,
+                    elem_tys,
+                })
+            }
             PatternKind::Int(v) => {
                 if scrut_ty != INT {
                     return Err(self.pattern_mismatch(
@@ -5351,6 +5376,7 @@ fn arrange_args<'a>(
 fn hpat_to_apat(pat: &HPattern) -> APat {
     match pat {
         HPattern::Wildcard | HPattern::Bind(_) => APat::Wild,
+        HPattern::Tuple { elems, .. } => APat::Tuple(elems.iter().map(hpat_to_apat).collect()),
         HPattern::Int(v) => APat::Int(*v),
         HPattern::Bool(v) => APat::Bool(*v),
         HPattern::Str(v) => APat::Str(v.clone()),

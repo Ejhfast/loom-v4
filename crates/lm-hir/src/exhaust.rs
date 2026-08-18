@@ -16,6 +16,10 @@ pub enum APat {
     Str(String),
     /// A final case class with sub-patterns for its fields.
     Ctor(u32, Vec<APat>),
+    /// A tuple with one sub-pattern for each element. A tuple type has
+    /// one constructor, so a tuple head is always a complete
+    /// signature.
+    Tuple(Vec<APat>),
 }
 
 /// Class metadata for the analysis.
@@ -54,6 +58,13 @@ pub fn useful(
             sv.extend_from_slice(&v[1..]);
             useful(meta, &spec, &sv, budget)
         }
+        APat::Tuple(args) => {
+            let arity = args.len();
+            let spec = specialize_matrix(matrix, &Head::Tuple(arity), arity);
+            let mut sv: Vec<APat> = args.clone();
+            sv.extend_from_slice(&v[1..]);
+            useful(meta, &spec, &sv, budget)
+        }
         APat::Int(value) => {
             let spec = specialize_matrix(matrix, &Head::Int(*value), 0);
             useful(meta, &spec, &v[1..], budget)
@@ -72,6 +83,7 @@ pub fn useful(
                 for head in &heads {
                     let arity = match head {
                         Head::Class(c) => meta.arm_arity(*c),
+                        Head::Tuple(n) => *n,
                         _ => 0,
                     };
                     let spec = specialize_matrix(matrix, head, arity);
@@ -97,6 +109,7 @@ pub fn useful(
 #[derive(Debug, Clone, PartialEq)]
 enum Head {
     Class(u32),
+    Tuple(usize),
     Int(i64),
     Bool(bool),
     Str(String),
@@ -109,6 +122,7 @@ fn pattern_head(pat: &APat) -> Option<Head> {
         APat::Bool(v) => Some(Head::Bool(*v)),
         APat::Str(v) => Some(Head::Str(v.clone())),
         APat::Ctor(c, _) => Some(Head::Class(*c)),
+        APat::Tuple(args) => Some(Head::Tuple(args.len())),
     }
 }
 
@@ -137,6 +151,9 @@ fn complete_signature(meta: &impl PatMeta, heads: &[Head]) -> bool {
             let arms = meta.family_arms(*c);
             arms.iter().all(|arm| heads.contains(&Head::Class(*arm)))
         }
+        // A tuple type has one constructor, so one tuple head
+        // covers it.
+        Head::Tuple(_) => true,
         Head::Int(_) | Head::Str(_) => false,
     }
 }
@@ -146,6 +163,7 @@ fn specialize_row(row: &[APat], head: &Head, arity: usize) -> Option<Vec<APat>> 
     let expanded: Option<Vec<APat>> = match (first, head) {
         (APat::Wild, _) => Some(vec![APat::Wild; arity]),
         (APat::Ctor(c, args), Head::Class(h)) if c == h => Some(args.clone()),
+        (APat::Tuple(args), Head::Tuple(n)) if args.len() == *n => Some(args.clone()),
         (APat::Int(v), Head::Int(h)) if v == h => Some(Vec::new()),
         (APat::Bool(v), Head::Bool(h)) if v == h => Some(Vec::new()),
         (APat::Str(v), Head::Str(h)) if v == h => Some(Vec::new()),

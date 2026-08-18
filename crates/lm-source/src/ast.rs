@@ -287,6 +287,9 @@ pub enum PatternKind {
         args: Vec<Pattern>,
         has_parens: bool,
     },
+    /// A tuple pattern: `(a, b)`. One element needs a trailing
+    /// comma, as a one-tuple expression does.
+    Tuple(Vec<Pattern>),
     /// Supported literal patterns.
     Int(i64),
     Bool(bool),
@@ -580,6 +583,14 @@ fn dump_type(ty: &TypeExpr) -> String {
 fn dump_pattern(pattern: &Pattern) -> String {
     match &pattern.kind {
         PatternKind::Wildcard => "_".to_string(),
+        PatternKind::Tuple(elems) => {
+            let parts: Vec<String> = elems.iter().map(dump_pattern).collect();
+            if parts.len() == 1 {
+                format!("({},)", parts[0])
+            } else {
+                format!("({})", parts.join(", "))
+            }
+        }
         PatternKind::Name(name) => name.clone(),
         PatternKind::Ctor {
             qualifier,

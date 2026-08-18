@@ -1715,6 +1715,40 @@ impl Parser<'_> {
     fn pattern_inner(&mut self) -> Result<Pattern, Diagnostic> {
         self.reject_reserved()?;
         match self.peek() {
+            Tok::LParen => {
+                let open = self.expect(Tok::LParen, "`(`")?;
+                let mut elems = Vec::new();
+                let mut tuple = false;
+                loop {
+                    if matches!(self.peek(), Tok::RParen) {
+                        break;
+                    }
+                    elems.push(self.pattern()?);
+                    if matches!(self.peek(), Tok::Comma) {
+                        self.next();
+                        // A trailing comma makes a one-element tuple.
+                        tuple = true;
+                        continue;
+                    }
+                    break;
+                }
+                let close = self.expect(Tok::RParen, "`)`")?;
+                let span = open.span.to(close.span);
+                if elems.is_empty() {
+                    return Err(self.error(
+                        "E1041",
+                        "a tuple pattern needs one element or more".to_string(),
+                    ));
+                }
+                // Without a comma the parentheses only group.
+                if elems.len() == 1 && !tuple {
+                    return Ok(elems.remove(0));
+                }
+                Ok(Pattern {
+                    kind: PatternKind::Tuple(elems),
+                    span,
+                })
+            }
             Tok::Int(_) => {
                 let token = self.next();
                 match token.tok {

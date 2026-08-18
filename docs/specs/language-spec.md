@@ -1399,8 +1399,10 @@ To read arguments or answer, the holder matches the request against an exact typ
 ```lm
 case q.as_call(Io.Print)
 in Some(call)
-  (text,) = call.args()       # (String,)
-  captured.push(text)
+  case call.args()            # (String,)
+  in (text,)
+    captured.push(text)
+  end
   vm.answer(call, ())         # reply is statically ()
 in None
   # not Io.Print
@@ -2984,7 +2986,9 @@ case_arm        = "in", pattern,
 pattern         = "_"
                 | IDENT
                 | literal
+                | tuple_pattern
                 | qualified_name, "(", [ pattern, { ",", pattern } ], ")" ;
+tuple_pattern   = "(", pattern, ( ",", [ pattern, { ",", pattern } ] | { ",", pattern } ), ")" ;
 
 return_expr     = "return", [ expression ] ;
 

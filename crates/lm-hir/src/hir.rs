@@ -253,6 +253,11 @@ pub enum HPattern {
     Int(i64),
     Bool(bool),
     Str(String),
+    /// Destructures one tuple. `elem_tys` types the scratch slots.
+    Tuple {
+        elems: Vec<HPattern>,
+        elem_tys: Vec<TypeId>,
+    },
     /// Tests the final case class and destructures its fields. `ty`
     /// is the instantiated case type used by the test and the cast.
     /// `field_tys` holds the instantiated field types, aligned with
