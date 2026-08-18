@@ -299,7 +299,7 @@ Negative UI examples show non-exhaustive enums, escaping uninitialized `self`, i
 - Canonical operation/group manifest; generated `sys` object; identity-indexed `Op`; `PERFORM`; row checking against direct/callee/higher-order effects; independent verifier row reconstruction.
 - Dense exact/group policy arrays with default block, transitive `pass`, pure `mock`, and live table editing.
 - Public native `EmptyVm`/`Vm[T]`, typed load/restore transitions, `step`, terminal `run`, `drive`, states, wait completions, stack views, fuel/limits, reentrancy checks, and one internal stop-mode interpreter loop.
-- Typed `Request.as_call(op) -> PendingCall[Args,Reply]`; typed `answer`; token-checked `reject`/`dispatch`; no `Answer(Any)` path.
+- The typed request pattern `Call(op, call, args)`; typed `answer`; token-checked `reject`/`dispatch`; no `Answer(Any)` path.
 - Initial host operations: `Io.Print`, `Io.Error`, `Io.ReadLine`, `Clock.Now`, `Clock.Monotonic`, `Clock.Sleep`, and deterministic `Rand.Bytes`/`Rand.Int` adapters.
 - Async completion channel with no Rust reference into guest memory.
 
@@ -328,16 +328,14 @@ captured: [String] = []
 loop do
   case vm.drive()
   in Asked(q)
-    case q.as_call(Io.Print)
-    in Some(call)
-      (text,) = call.args()
+    case q
+    in Call(Io.Print, call, (text,))
       captured.push(text)
       vm.answer(call, ())
-    in None
-      case q.as_call(Clock.Now)
-      in Some(call) then vm.answer(call, 123)
-      in None       then vm.dispatch(q)
-      end
+    in Call(Clock.Now, call, ())
+      vm.answer(call, 123)
+    in _
+      vm.dispatch(q)
     end
   in Done(value) then return (captured.freeze(), value)
   in Fault(_)    then return (captured.freeze(), -1)
@@ -375,7 +373,7 @@ pipeline. Packages and the multi-file build loop follow in week 6.
   `sys` members move to snake_case (`sys.io.print`, `sys.clock.now`;
   `sys.vm.Vm()` stays the one capitalized constructor), `use` becomes
   a keyword with the fixed-binding alias form (`use sys.vm`), and
-  `Request.as_call` takes an exact `Operation` descriptor.
+  A `Call` pattern names an exact `Operation` descriptor.
 - The sectioned artifact container: a semantic region (code,
   constants, signatures, rows, types), an export section, and a debug
   section, with atomic writes. The container hash covers exact bytes;

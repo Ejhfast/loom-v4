@@ -1190,9 +1190,9 @@ def go(): Int with Vm, Rand
   end, args: ())
   case held.drive()
   in Asked(q)
-    case q.as_call(Rand.Int)
-    in Some(call) then call.args()[0]
-    in None       then 0
+    case q
+    in Call(Rand.Int, _, (low, _)) then low
+    in _                           then 0
     end
   in Done(_)  then 0
   in Fault(_) then 0

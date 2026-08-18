@@ -68,14 +68,14 @@ in Ok(backing)
   child = sys.vm.Vm().from_fn(read_twice, args: ())
   case child.drive()
   in Asked(request)
-    case request.as_call(Fs.Open)
-    in Some(call)
+    case request
+    in Call(Fs.Open, call, (_, _))
       mine = child.mint_file(call)
       sizes: [Int] = []
       text = tee(child, mine, backing, sizes)
       backing.close()
       "the child read {sizes.len()} times and saw {text}"
-    in None then "the child asked for something else first"
+    in _ then "the child asked for something else first"
     end
   in Done(_)  then "the child finished before it opened a file"
   in Fault(_) then "the child faulted before it opened a file"

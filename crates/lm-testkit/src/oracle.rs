@@ -449,7 +449,6 @@ impl<'m> Oracle<'m> {
             | HExprKind::Spawn { .. }
             | HExprKind::OpConst(_)
             | HExprKind::TableEdit { .. }
-            | HExprKind::AsCall { .. }
             | HExprKind::CallArgs { .. }
             | HExprKind::FaultCodeGet { .. } => Err(Stop::Limit(
                 "the oracle models the pure subset only; programs with performs \

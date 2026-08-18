@@ -1734,12 +1734,6 @@ impl Parser<'_> {
                 }
                 let close = self.expect(Tok::RParen, "`)`")?;
                 let span = open.span.to(close.span);
-                if elems.is_empty() {
-                    return Err(self.error(
-                        "E1041",
-                        "a tuple pattern needs one element or more".to_string(),
-                    ));
-                }
                 // Without a comma the parentheses only group.
                 if elems.len() == 1 && !tuple {
                     return Ok(elems.remove(0));

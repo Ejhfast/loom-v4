@@ -53,11 +53,11 @@ def supervise(vm: Vm[Int], mut seen: [String]): Int with Vm
   loop do
     case vm.drive()
     in Asked(request)
-      case request.as_call(Io.Print)
-      in Some(call)
-        seen.push(call.args()[0])
+      case request
+      in Call(Io.Print, call, (text,))
+        seen.push(text)
         vm.answer(call, ())
-      in None
+      in _
         vm.dispatch(request)
       end
     in Done(value)
@@ -288,11 +288,11 @@ def audit(vm: Vm[Int], mut seen: [String]): Int with Vm
   loop do
     case vm.drive()
     in Asked(request)
-      case request.as_call(Io.Print)
-      in Some(call)
-        seen.push(call.args()[0])
+      case request
+      in Call(Io.Print, call, (text,))
+        seen.push(text)
         vm.answer(call, ())
-      in None
+      in _
         vm.dispatch(request)
       end
     in Done(value)

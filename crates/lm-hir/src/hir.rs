@@ -246,7 +246,8 @@ pub enum TargetKind {
 /// One native projection a pattern may read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Projection {
-    /// `Request.as_call(op)`: answers `Option[PendingCall[A, R]]`.
+    /// The operation identity test of a request. It answers
+    /// `Option[PendingCall[A, R]]`.
     AsCall(u32),
     /// `PendingCall.args()`: answers the argument tuple.
     CallArgs,
@@ -435,11 +436,6 @@ pub enum HExprKind {
         table: Box<HExpr>,
         /// The handler closure of a `mock` edit.
         mock: Option<Box<HExpr>>,
-    },
-    /// `request.as_call(op)` with a compile-time operation identity.
-    AsCall {
-        request: Box<HExpr>,
-        op: u32,
     },
     /// `call.args()` on a typed pending call.
     CallArgs {

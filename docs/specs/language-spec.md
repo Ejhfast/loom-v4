@@ -467,7 +467,7 @@ enum Result[T, E]
 end
 ```
 
-An artifact carries a **core role table**: one class slot per stable core role, for example `Option`, `Option.Some`, and `Option.None`. The compiler fills the table, the linker relocates it, and the verifier proves the kind, the generic arity, the parent slot, and the exact field layout of every filled slot. A rule that needs a core family, such as the return type of `Request.as_call`, reads a slot. It reads no name and no hash, so a rename changes nothing the verifier reads, and an artifact with no source resolves its core from its own bytes. A family whose parent slot is filled must fill every arm slot.
+An artifact carries a **core role table**: one class slot per stable core role, for example `Option`, `Option.Some`, and `Option.None`. The compiler fills the table, the linker relocates it, and the verifier proves the kind, the generic arity, the parent slot, and the exact field layout of every filled slot. A rule that needs a core family, such as the pending-call type of a `Call` pattern, reads a slot. It reads no name and no hash, so a rename changes nothing the verifier reads, and an artifact with no source resolves its core from its own bytes. A family whose parent slot is filled must fill every arm slot.
 
 Pattern matching and exhaustiveness use the same enum machinery as user enums. The host ABI reads the same slots, so `Io.ReadLine` and user code cannot silently disagree about what `Result` means.
 
@@ -1397,25 +1397,10 @@ q.reply_type(): TypeView
 To read arguments or answer, the holder matches the request against an exact typed operation object:
 
 ```lm
-case q.as_call(Io.Print)
-in Some(call)
-  case call.args()            # (String,)
-  in (text,)
-    captured.push(text)
-  end
-  vm.answer(call, ())         # reply is statically ()
-in None
-  # not Io.Print
-end
-```
-
-A `case` over the request itself states the same test as a pattern. One `case` therefore serves several operations without one nested `as_call` for each:
-
-```lm
 case q
-in Call(Io.Print, call, (text,))
+in Call(Io.Print, call, (text,))   # the tuple is (String,)
   captured.push(text)
-  vm.answer(call, ())
+  vm.answer(call, ())              # reply is statically ()
 in Call(Clock.Now, call, ())
   vm.answer(call, 123)
 in _
@@ -1427,7 +1412,7 @@ end
 
 Call a continuation method on the same `Vm` receiver that produced the event. The route proves that the descendant request reached this receiver.
 
-`Request.as_call(op)` has a narrow compiler-known type rule. Its argument is an exact `Operation` descriptor known to the checker, such as `Io.Print`. If the manifest signature of that descriptor is `(A...) -> R`, the result is `Option[PendingCall[(A...), R]]`. The callable `sys` member is not used here: matching is descriptor work, and the compiler supplies the typed signature from the manifest. `PendingCall[A,R]` exposes:
+The `Call` pattern has a narrow compiler-known type rule. Its first position is an exact `Operation` descriptor known to the checker, such as `Io.Print`. If the manifest signature of that descriptor is `(A...) -> R`, the arm binds a `PendingCall[(A...), R]` and matches its third position against `(A...)`. The callable `sys` member is not used here: matching is descriptor work, and the compiler supplies the typed signature from the manifest. `PendingCall[A,R]` exposes:
 
 ```text
 args(self) -> A
@@ -2150,7 +2135,7 @@ state: none | asked | waiting
 host_completion_token      # host-only; never serialized live
 ```
 
-While executing normally, arguments remain in verified operand slots. `drive` exits after the record is complete and before policy lookup. `Request.as_call` checks the exact operation slot and returns a holder token carrying VM identity, ordinal, argument tuple type, and reply type; `PendingCall.args()` boundary-encodes that tuple lazily. `answer` validates the token again before installing a reply.
+While executing normally, arguments remain in verified operand slots. `drive` exits after the record is complete and before policy lookup. A `Call` pattern checks the exact operation slot and binds a holder token carrying VM identity, ordinal, argument tuple type, and reply type; `PendingCall.args()` boundary-encodes that tuple lazily. `answer` validates the token again before installing a reply.
 
 A routed request adds a surface, a performing target, and a saved policy cursor. Nested control adds one parent-to-child edge.
 
@@ -2658,19 +2643,18 @@ def answer_print[T](
   request: Request,
   mut captured: [String]
 ): Bool with Vm.Answer
-  case request.as_call(Io.Print)
-  in Some(call)
-    (text,) = call.args()
+  case request
+  in Call(Io.Print, call, (text,))
     captured.push(text)
     vm.answer(call, ())
     true
-  in None
+  in _
     false
   end
 end
 ```
 
-A policy can define one such function per operation whose behavior it owns. This remains fully type-checked by the ordinary `Request.as_call` rule and does not add variadic generics, tuple spreading, or a third dependent native rule. `std/vm` instead provides fuel/limit builders, terminal-result mapping, snapshot-image file helpers, and bounded request logging through `ValueView`.
+A policy can define one such function per operation whose behavior it owns. This remains fully type-checked by the ordinary `Call` pattern rule and does not add variadic generics, tuple spreading, or a third dependent native rule. `std/vm` instead provides fuel/limit builders, terminal-result mapping, snapshot-image file helpers, and bounded request logging through `ValueView`.
 
 ### 24.13 Procs
 
@@ -3058,18 +3042,14 @@ def supervise(
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(call)
-        (text,) = call.args()
+      case q
+      in Call(Io.Print, call, (text,))
         captured.push(text)
         vm.answer(call, ())
-      in None
-        case q.as_call(Clock.Now)
-        in Some(call)
-          vm.answer(call, 1_700_000_000)
-        in None
-          vm.reject(q, policy_denied_fault(q.op()))
-        end
+      in Call(Clock.Now, call, ())
+        vm.answer(call, 1_700_000_000)
+      in _
+        vm.reject(q, policy_denied_fault(q.op()))
       end
     in Done(value)
       sys.io.print("captured {captured.len()} writes\n")

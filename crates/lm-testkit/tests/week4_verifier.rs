@@ -179,7 +179,7 @@ fn table_edit_forgeries_are_rejected() {
 #[test]
 fn as_call_of_a_vm_control_slot_is_rejected() {
     let source = "def f(vm: Vm[Int]): Int with Vm\n  case vm.drive()\n  in Asked(q)\n    \
-        case q.as_call(Clock.Now)\n    in Some(call) then 1\n    in None then 2\n    end\n  \
+        case q\n    in Call(Clock.Now, call, ()) then 1\n    in _ then 2\n    end\n  \
         in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\n1\n";
     let mut module = compile(source);
     let f = func_index(&module, "f");

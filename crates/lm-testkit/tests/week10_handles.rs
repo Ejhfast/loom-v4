@@ -203,11 +203,11 @@ child = sys.vm.Vm().from_fn(do ||: Int with Fs.Open
 end, args: ())
 case child.drive()
 in Asked(request)
-  case request.as_call(Fs.Open)
-  in Some(call)
+  case request
+  in Call(Fs.Open, call, (_, _))
     control = child.mint_file(call)
     control.is_open()
-  in None then false
+  in _ then false
   end
 in Done(_)  then false
 in Fault(_) then false

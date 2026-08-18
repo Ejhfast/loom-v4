@@ -3375,61 +3375,6 @@ impl<'o> FnChecker<'o> {
         })
     }
 
-    /// Resolve the `as_call` argument: an exact `Operation` descriptor
-    /// such as `Io.Print`. The compiler supplies the typed signature
-    /// from the manifest. The old callable-argument form gets a
-    /// precise migration diagnostic.
-    fn as_call_descriptor(&mut self, ctx: &mut Ctx, expr: &ast::Expr) -> Result<u32, Diagnostic> {
-        match self.resolve_descriptor_for(expr, "the `as_call` argument") {
-            Ok((TargetKind::Exact, slot, name)) => {
-                // A typed call token names a fixed host operation, or
-                // the receiverless self snapshot. A restored self
-                // snapshot holds that request pending, and the
-                // restorer answers it through the ordinary typed call
-                // path (specification 17.6).
-                let answerable = lm_abi::op(slot).kind == lm_abi::OpKind::Fixed
-                    || slot == lm_abi::OP_VM_SNAPSHOT_SELF;
-                if !answerable {
-                    return Err(Diagnostic::new(
-                        "E1004",
-                        format!(
-                            "`as_call` needs a fixed host operation; `{name}` is a \
-                             machine control operation"
-                        ),
-                        expr.span,
-                    ));
-                }
-                Ok(slot)
-            }
-            Ok((TargetKind::Group, _, name)) => Err(Diagnostic::new(
-                "E1004",
-                format!(
-                    "`as_call` needs an exact operation descriptor such as \
-                     `{name}.<Operation>`; `{name}` is a group"
-                ),
-                expr.span,
-            )),
-            Err(descriptor_err) => {
-                // The argument is not a descriptor. When it is the old
-                // callable form, name the exact rewrite.
-                if let Ok(value) = self.synth_expr(ctx, expr) {
-                    if let Type::Op(op, _) = ctx.store.get(value.ty) {
-                        return Err(Diagnostic::new(
-                            "E1004",
-                            format!(
-                                "`as_call` takes the operation descriptor, not the \
-                                 callable; write `as_call({})`",
-                                lm_abi::op_name(*op)
-                            ),
-                            expr.span,
-                        ));
-                    }
-                }
-                Err(descriptor_err)
-            }
-        }
-    }
-
     /// Resolve a policy-target descriptor expression: a group name
     /// such as `Io`, or an exact name such as `Clock.Now`.
     fn resolve_descriptor(
@@ -3920,29 +3865,6 @@ impl<'o> FnChecker<'o> {
                 return self
                     .check_table_edit(ctx, recv_h, name, name_span, args, span)
                     .map(Some);
-            }
-            (Type::Request, "as_call") => {
-                if args.len() != 1 {
-                    return Err(Diagnostic::new(
-                        "E1006",
-                        format!("`as_call` expects 1 argument(s), found {}", args.len()),
-                        span,
-                    ));
-                }
-                let op = self.as_call_descriptor(ctx, &args[0])?;
-                let args_ty = Self::op_args_type(ctx, op);
-                let def = lm_abi::op(op);
-                let reply_ty = Self::abi_type_id(ctx, def.reply);
-                let call_ty = ctx.store.intern(Type::PendingCall(args_ty, reply_ty));
-                let ty = Self::core_inst(ctx, "Option", vec![call_ty]);
-                HExpr {
-                    ty,
-                    mutable: true,
-                    kind: HExprKind::AsCall {
-                        request: Box::new(recv_h),
-                        op,
-                    },
-                }
             }
             (Type::PendingCall(a, _), "args") => {
                 if !args.is_empty() {
@@ -4887,6 +4809,14 @@ impl<'o> FnChecker<'o> {
                         field_tys: vec![call_ty],
                     }),
                 })
+            }
+            // `()` is the unit pattern. Unit holds one value, so the
+            // pattern binds nothing and always matches.
+            PatternKind::Tuple(elems) if elems.is_empty() => {
+                if scrut_ty != UNIT {
+                    return Err(self.pattern_mismatch(ctx, "a unit", scrut_ty, pat.span));
+                }
+                Ok(HPattern::Wildcard)
             }
             PatternKind::Tuple(elems) => {
                 let Type::Tuple(elem_tys) = ctx.store.get(scrut_ty).clone() else {

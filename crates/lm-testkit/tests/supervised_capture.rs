@@ -53,14 +53,14 @@ def supervise(vm: Vm[Int]): Int with Vm
   loop do
     case vm.drive()
     in Asked(request)
-      case request.as_call(Io.Print)
-      in Some(call)
+      case request
+      in Call(Io.Print, call, (_,))
         took = vm.snapshot().is_ok()
         vm.answer(call, ())
         if not took
           return 0 - 7
         end
-      in None
+      in _
         vm.dispatch(request)
       end
     in Done(value)
@@ -116,13 +116,13 @@ def supervise(vm: Vm[Int], mut misses: [Int]): Int with Vm
   loop do
     case vm.drive()
     in Asked(request)
-      case request.as_call(Io.Print)
-      in Some(call)
+      case request
+      in Call(Io.Print, call, (_,))
         if not vm.snapshot().is_ok()
           misses.push(1)
         end
         vm.answer(call, ())
-      in None
+      in _
         vm.dispatch(request)
       end
     in Done(value)

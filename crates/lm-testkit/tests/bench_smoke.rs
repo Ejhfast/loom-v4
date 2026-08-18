@@ -235,7 +235,7 @@ fn drive_interception_smoke() {
                   i = 0\n    total = 0\n    while i < 5000\n      total = total + sys.clock.now()\n      i = i + 1\n    end\n    total\n  end, args: ())\n  \
                   guard = 0\n  while guard < 100000\n    guard = guard + 1\n    \
                   case vm.drive()\n    in Asked(q)\n      \
-                  case q.as_call(Clock.Now)\n      in Some(call) then vm.answer(call, 1)\n      in None then vm.dispatch(q)\n      end\n    \
+                  case q\n      in Call(Clock.Now, call, ()) then vm.answer(call, 1)\n      in _ then vm.dispatch(q)\n      end\n    \
                   in Done(v)\n      return v\n    in Fault(_)\n      return 0 - 1\n    end\n  end\n  0 - 2\nend\ngo()\n";
     timed_world("drive_interception_5k", source, &["Vm"], "Done(5000)");
 }
@@ -247,9 +247,9 @@ def drive_all(vm: Vm[Int]): Int with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Clock.Now)
-      in Some(call) then vm.answer(call, 1)
-      in None then vm.dispatch(q)
+      case q
+      in Call(Clock.Now, call, ()) then vm.answer(call, 1)
+      in _ then vm.dispatch(q)
       end
     in Done(value)
       return value

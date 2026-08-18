@@ -234,39 +234,17 @@ fn use_alias_example_has_checked_output() {
 // ---------------------------------------------------------------
 
 #[test]
-fn as_call_takes_an_exact_descriptor() {
+fn a_request_pattern_answers_through_its_call() {
     assert_eq!(
         allowed(
             "def go(): Int with Vm\n  \
              m = sys.vm.Vm().from_fn(do || with Clock.Now\n    sys.clock.now()\n  \
              end, args: ())\n  case m.drive()\n  in Asked(q)\n    \
-             case q.as_call(Clock.Now)\n    in Some(call)\n      m.answer(call, 99)\n      \
+             case q\n    in Call(Clock.Now, call, ())\n      m.answer(call, 99)\n      \
              case m.run()\n      in Done(v) then v\n      in Fault(_) then 0\n      end\n    \
-             in None then 0\n    end\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
+             in _ then 0\n    end\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),
         "Done(99)"
     );
-}
-
-#[test]
-fn as_call_rejects_groups_and_the_old_callable_form() {
-    // A group is not an exact descriptor.
-    assert_eq!(
-        code_of(
-            "def f(vm: Vm[Int]) with Vm\n  case vm.drive()\n  in Asked(q)\n    \
-             q.as_call(Io)\n    ()\n  in Done(_) then ()\n  in Fault(_) then ()\n  end\nend\n1\n"
-        ),
-        "E1004"
-    );
-    // The old callable form names the rewrite.
-    let rendered = compile_text(
-        "t.lm",
-        "def f(vm: Vm[Int]) with Vm\n  case vm.drive()\n  in Asked(q)\n    \
-         q.as_call(sys.clock.now)\n    ()\n  in Done(_) then ()\n  in Fault(_) then ()\n  \
-         end\nend\n1\n",
-    )
-    .unwrap_err();
-    assert!(rendered.starts_with("error[E1004]"), "{rendered}");
-    assert!(rendered.contains("as_call(Clock.Now)"), "{rendered}");
 }

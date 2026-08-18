@@ -77,10 +77,10 @@ The child cannot observe the service location. It uses normal `Fs`
 operations on the received handle.
 
 ```lm
-case request.as_call(Fs.Open)
-in Some(call)
+case request
+in Call(Fs.Open, call, (_, _))
   vm.answer(call, Ok(parent_file))
-in None
+in _
   vm.dispatch(request)
 end
 ```
@@ -89,11 +89,11 @@ A driver can also mint a new file resource for an `Fs.Open` request.
 The runtime binds that resource to the driver.
 
 ```lm
-case request.as_call(Fs.Open)
-in Some(call)
+case request
+in Call(Fs.Open, call, (_, _))
   control = vm.mint_file(call)
   files.push(MemoryFile(control, Bytes(""), 0))
-in None
+in _
   vm.dispatch(request)
 end
 ```

@@ -35,24 +35,21 @@ def serve(child: Vm[String], mine: ResourceHandle, contents: Bytes): String with
   loop do
     case child.drive()
     in Asked(request)
-      case request.as_call(Fs.Read)
-      in Some(call)
-        if child.resource(call.args()[0]).same_resource(mine)
+      case request
+      in Call(Fs.Read, call, (file, _))
+        if child.resource(file).same_resource(mine)
           child.answer(call, Ok(contents))
         else
           child.dispatch(request)
         end
-      in None
-        case request.as_call(Fs.Close)
-        in Some(call)
-          if child.resource(call.args()[0]).same_resource(mine)
-            child.answer(call, Ok(()))
-          else
-            child.dispatch(request)
-          end
-        in None
+      in Call(Fs.Close, call, (file,))
+        if child.resource(file).same_resource(mine)
+          child.answer(call, Ok(()))
+        else
           child.dispatch(request)
         end
+      in _
+        child.dispatch(request)
       end
     in Done(value)
       return value
@@ -66,8 +63,8 @@ end
 child = sys.vm.Vm().from_fn(read_settings, args: ())
 case child.drive()
 in Asked(request)
-  case request.as_call(Fs.Open)
-  in Some(call)
+  case request
+  in Call(Fs.Open, call, (_, _))
     mine = child.mint_file(call)
     served = ServedRequest(mine, serve(child, mine, Bytes("cached settings")))
 
@@ -80,7 +77,7 @@ in Asked(request)
     else
       served.text
     end
-  in None then "the child asked for something else first"
+  in _ then "the child asked for something else first"
   end
 in Done(_)  then "the child finished before it opened a file"
 in Fault(_) then "the child faulted before it opened a file"

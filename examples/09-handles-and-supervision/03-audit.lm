@@ -22,10 +22,10 @@ def audit(child: Vm[String], mut opened: [String]): String with Vm
     # reads the request first.
     case child.drive()
     in Asked(request)
-      case request.as_call(Fs.Open)
-      in Some(call)
-        opened.push(call.args()[0])
-      in None then ()
+      case request
+      in Call(Fs.Open, _, (path, _))
+        opened.push(path)
+      in _ then ()
       end
       # `dispatch` returns the request to the normal policy.
       child.dispatch(request)

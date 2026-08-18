@@ -1,2 +1,2 @@
 error[E1004]: expected (), found Int
-  --> tests/ui/answer-type-mismatch.lm:5:40
+  --> tests/ui/answer-type-mismatch.lm:5:56

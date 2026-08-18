@@ -179,26 +179,8 @@ fn typed_answer_mismatch_is_static() {
     assert_eq!(
         code_of(
             "def bad(vm: Vm[Int]) with Vm\n  case vm.drive()\n  in Asked(q)\n    \
-             case q.as_call(Io.Print)\n    in Some(call) then vm.answer(call, 5)\n    \
-             in None then ()\n    end\n  in Done(_) then ()\n  in Fault(_) then ()\n  end\nend\n1\n"
-        ),
-        "E1004"
-    );
-    // `as_call` needs an exact operation descriptor; a function value
-    // is rejected.
-    assert_eq!(
-        code_of(
-            "def bad(vm: Vm[Int], g: (String) -> ()) with Vm\n  case vm.drive()\n  in Asked(q)\n    \
-             q.as_call(g)\n    ()\n  in Done(_) then ()\n  in Fault(_) then ()\n  end\nend\n1\n"
-        ),
-        "E1051"
-    );
-    // The old callable-argument form names the exact rewrite.
-    assert_eq!(
-        code_of(
-            "def bad(vm: Vm[Int]) with Vm\n  case vm.drive()\n  in Asked(q)\n    \
-             q.as_call(sys.io.print)\n    ()\n  in Done(_) then ()\n  in Fault(_) then ()\n  \
-             end\nend\n1\n"
+             case q\n    in Call(Io.Print, call, (_,)) then vm.answer(call, 5)\n    \
+             in _ then ()\n    end\n  in Done(_) then ()\n  in Fault(_) then ()\n  end\nend\n1\n"
         ),
         "E1004"
     );
@@ -419,10 +401,10 @@ fn asked_rejects_run_and_step_and_recovers_tokens_through_drive() {
     let source = "def go(): Int with Vm\n  \
         vm = sys.vm.Vm().from_fn(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q1)\n    \
-        case q1.as_call(Clock.Now)\n    in Some(stale)\n      \
+        case q1\n    in Call(Clock.Now, stale, ())\n      \
         case vm.drive()\n      in Asked(q2)\n        vm.answer(stale, 9)\n        1\n      \
         in Done(_) then 2\n      in Fault(_) then 3\n      end\n    \
-        in None then 4\n    end\n  \
+        in _ then 4\n    end\n  \
         in Done(_) then 5\n  in Fault(_) then 6\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidRequestToken)");
     // The fresh token answers.
@@ -430,10 +412,10 @@ fn asked_rejects_run_and_step_and_recovers_tokens_through_drive() {
         vm = sys.vm.Vm().from_fn(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q1)\n    \
         case vm.drive()\n    in Asked(q2)\n      \
-        case q2.as_call(Clock.Now)\n      in Some(call)\n        \
+        case q2\n      in Call(Clock.Now, call, ())\n        \
         vm.answer(call, 40)\n        \
         case vm.run()\n        in Done(v) then v + 2\n        in Fault(_) then 0 - 1\n        end\n      \
-        in None then 0 - 2\n      end\n    \
+        in _ then 0 - 2\n      end\n    \
         in Done(_) then 0 - 3\n    in Fault(_) then 0 - 4\n    end\n  \
         in Done(_) then 0 - 5\n  in Fault(_) then 0 - 6\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(42)");
@@ -447,9 +429,9 @@ fn continuation_methods_need_an_asked_machine() {
     let source = "def go(): Int with Vm\n  \
         vm = sys.vm.Vm().from_fn(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q)\n    \
-        case q.as_call(Clock.Now)\n    in Some(call)\n      \
+        case q\n    in Call(Clock.Now, call, ())\n      \
         vm.answer(call, 7)\n      vm.dispatch(q)\n      1\n    \
-        in None then 2\n    end\n  \
+        in _ then 2\n    end\n  \
         in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidRequestToken)");
 }
@@ -462,9 +444,9 @@ fn cross_vm_tokens_fault_safely() {
         a = spawn_now()\n  b = spawn_now()\n  \
         case a.drive()\n  in Asked(qa)\n    \
         case b.drive()\n    in Asked(qb)\n      \
-        case qa.as_call(Clock.Now)\n      in Some(call_a)\n        \
+        case qa\n      in Call(Clock.Now, call_a, ())\n        \
         b.answer(call_a, 1)\n        1\n      \
-        in None then 2\n      end\n    \
+        in _ then 2\n      end\n    \
         in Done(_) then 3\n    in Fault(_) then 4\n    end\n  \
         in Done(_) then 5\n  in Fault(_) then 6\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidRequestToken)");
@@ -511,9 +493,9 @@ fn drive_receives_a_passed_descendant_request() {
     let source = "def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm\n  \
         loop do\n    \
         case vm.drive()\n    in Asked(q)\n      \
-        case q.as_call(Io.Print)\n      in Some(call)\n        \
-        args = call.args()\n        seen.push(args[0])\n        vm.answer(call, ())\n      \
-        in None\n        vm.dispatch(q)\n      end\n    \
+        case q\n      in Call(Io.Print, call, (text,))\n        \
+        seen.push(text)\n        vm.answer(call, ())\n      \
+        in _\n        vm.dispatch(q)\n      end\n    \
         in Done(value)\n      return seen.len() * 10 + value\n    \
         in Fault(_)\n      return 0 - 1\n    end\n  end\n  0 - 2\nend\n\
         inner = do ||: Int with Vm, Io.Print\n  \
@@ -579,10 +561,10 @@ def reject_print(vm: Vm[String], source_fault: Fault): String with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(_)
+      case q
+      in Call(Io.Print, _, (_,))
         vm.reject(q, source_fault)
-      in None
+      in _
         vm.dispatch(q)
       end
     in Done(value)
@@ -632,10 +614,10 @@ def drive_without_print(vm: Vm[Int]): Int with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(_)
+      case q
+      in Call(Io.Print, _, (_,))
         return 0 - 2
-      in None then vm.dispatch(q)
+      in _ then vm.dispatch(q)
       end
     in Done(value)
       return value
@@ -675,10 +657,10 @@ def drive_without_clock(vm: Vm[Int]): Int with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Clock.Now)
-      in Some(_)
+      case q
+      in Call(Clock.Now, _, ())
         return 0 - 1
-      in None
+      in _
         vm.dispatch(q)
       end
     in Done(value)
@@ -716,11 +698,11 @@ def answer_through_wrong_vm(vm: Vm[Int], wrong: Vm[Int]): Int with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(call)
+      case q
+      in Call(Io.Print, call, (_,))
         wrong.answer(call, ())
         return 1
-      in None
+      in _
         vm.dispatch(q)
       end
     in Done(_)
@@ -765,12 +747,11 @@ def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(call)
-        args = call.args()
-        seen.push(args[0])
+      case q
+      in Call(Io.Print, call, (text,))
+        seen.push(text)
         vm.answer(call, ())
-      in None then vm.dispatch(q)
+      in _ then vm.dispatch(q)
       end
     in Done(value)
       return seen.len() * 10 + value
@@ -826,12 +807,11 @@ def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(call)
-        args = call.args()
-        seen.push(args[0])
+      case q
+      in Call(Io.Print, call, (text,))
+        seen.push(text)
         vm.answer(call, ())
-      in None then vm.dispatch(q)
+      in _ then vm.dispatch(q)
       end
     in Done(value)
       return seen.len() * 10 + value
@@ -846,9 +826,9 @@ def a_drives_b(b: Vm[Int]): Int with Vm
   loop do
     case b.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(call) then b.answer(call, ())
-      in None       then b.dispatch(q)
+      case q
+      in Call(Io.Print, call, (_,)) then b.answer(call, ())
+      in _                          then b.dispatch(q)
       end
     in Done(value)
       return value
@@ -892,12 +872,11 @@ def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(call)
-        args = call.args()
-        seen.push(args[0])
+      case q
+      in Call(Io.Print, call, (text,))
+        seen.push(text)
         vm.answer(call, ())
-      in None then vm.dispatch(q)
+      in _ then vm.dispatch(q)
       end
     in Done(value)
       return seen.len() * 10 + value
@@ -969,8 +948,8 @@ fn run_step_and_drive_agree_on_one_program() {
          guard = 0\n  \
          while guard < 100000\n    guard = guard + 1\n    \
          case vm.drive()\n    in Asked(q)\n      \
-         case q.as_call(Clock.Now)\n      in Some(call) then vm.answer(call, 5)\n      \
-         in None then vm.dispatch(q)\n      end\n    \
+         case q\n      in Call(Clock.Now, call, ()) then vm.answer(call, 5)\n      \
+         in _ then vm.dispatch(q)\n      end\n    \
          in Done(v)\n      return v\n    in Fault(_)\n      return 0 - 1\n    end\n  end\n  \
          0 - 2\nend\ngo()\n"
     );

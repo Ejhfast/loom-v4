@@ -48,12 +48,11 @@ def drive_loop(vm: Vm[Int], mut seen: [String]): ([String], Int) with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(call)
-        args = call.args()
-        seen.push(args[0])
+      case q
+      in Call(Io.Print, call, (text,))
+        seen.push(text)
         vm.answer(call, ())
-      in None
+      in _
         vm.dispatch(q)
       end
     in Done(value)

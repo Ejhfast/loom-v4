@@ -5,16 +5,14 @@ def drive_loop(vm: Vm[Int], mut captured: [String]): ([String], Int) with Vm
   loop do
     case vm.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(call)
-        args = call.args()
-        captured.push(args[0])
+      case q
+      in Call(Io.Print, call, (text,))
+        captured.push(text)
         vm.answer(call, ())
-      in None
-        case q.as_call(Clock.Now)
-        in Some(call) then vm.answer(call, 123)
-        in None       then vm.dispatch(q)
-        end
+      in Call(Clock.Now, call, ())
+        vm.answer(call, 123)
+      in _
+        vm.dispatch(q)
       end
     in Done(value)
       return (captured.freeze(), value)

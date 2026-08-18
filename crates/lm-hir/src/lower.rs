@@ -906,11 +906,6 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     slot: *slot,
                 });
             }
-            HExprKind::AsCall { request, op } => {
-                self.lower_expr(request);
-                self.m.bc_ty(expr.ty);
-                self.emit(Instr::AsCall(*op));
-            }
             HExprKind::CallArgs { call } => {
                 self.lower_expr(call);
                 self.m.bc_ty(expr.ty);
@@ -1272,7 +1267,6 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
                 shift_expr_in_place(mock, base, max);
             }
         }
-        HExprKind::AsCall { request, .. } => shift_expr_in_place(request, base, max),
         HExprKind::CallArgs { call } => shift_expr_in_place(call, base, max),
         HExprKind::FaultCodeGet { fault } => shift_expr_in_place(fault, base, max),
     }

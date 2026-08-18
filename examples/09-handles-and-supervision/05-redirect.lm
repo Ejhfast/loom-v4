@@ -24,10 +24,10 @@ def redirect(child: Vm[String], approved: FileHandle): String with Vm
   loop do
     case child.drive()
     in Asked(request)
-      case request.as_call(Fs.Open)
-      in Some(call)
+      case request
+      in Call(Fs.Open, call, (_, _))
         child.answer(call, Ok(approved))
-      in None
+      in _
         child.dispatch(request)
       end
     in Done(value)

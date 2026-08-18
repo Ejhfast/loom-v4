@@ -703,8 +703,8 @@ def go(): Int with Vm, Io.Print
   loop do
     case a.drive()
     in Asked(q)
-      case q.as_call(Io.Print)
-      in Some(call)
+      case q
+      in Call(Io.Print, call, (_,))
         case a.snapshot()
         in Ok(snap)
           a.answer(call, ())
@@ -721,7 +721,7 @@ def go(): Int with Vm, Io.Print
         in Err(_)
           return 0 - 6
         end
-      in None
+      in _
         a.dispatch(q)
       end
     in Done(_)

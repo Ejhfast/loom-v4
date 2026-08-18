@@ -16,14 +16,14 @@ def allow_only(child: Vm[String], permitted: String): String with Vm
   loop do
     case child.drive()
     in Asked(request)
-      case request.as_call(Fs.Open)
-      in Some(call)
-        if call.args()[0] == permitted
+      case request
+      in Call(Fs.Open, call, (path, _))
+        if path == permitted
           child.dispatch(request)
         else
-          child.answer(call, Err(Failed("{call.args()[0]} is not permitted")))
+          child.answer(call, Err(Failed("{path} is not permitted")))
         end
-      in None
+      in _
         child.dispatch(request)
       end
     in Done(value)
