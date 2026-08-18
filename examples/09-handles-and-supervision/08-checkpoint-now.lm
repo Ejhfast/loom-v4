@@ -59,16 +59,28 @@ def resume(image: Snapshot[String]): String with Vm, Fs
 end
 
 def checkpoint_now(child: Vm[String]): String with Vm, Fs
-  # Run the child to its first request, so it holds a live file.
+  # Let the open through. The host serves it asynchronously, so the
+  # file appears only when the child reaches its next request.
   case child.drive()
-  in Asked(request)
-    child.dispatch(request)
-    live = child.snapshot().is_ok()
-    closed = close_every_handle(child)
-    case child.snapshot()
-    in Ok(image)
-      "live capture={live}, closed {closed}, restored: {resume(image)}"
-    in Err(_) then "the closed handle still blocked the capture"
+  in Asked(open_request)
+    child.dispatch(open_request)
+    case child.drive()
+    in Asked(read_request)
+      # The child holds a live file here, so a capture must refuse.
+      live = child.snapshot().is_ok()
+      closed = close_every_handle(child)
+      # Answer the read before the capture. A machine that holds a
+      # request needs its driver, and a restored world has none.
+      child.dispatch(read_request)
+      case child.snapshot()
+      in Ok(image)
+        "live capture={live}, closed {closed}, restored: {resume(image)}"
+      in Err(_) then "the closed handle still blocked the capture"
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return "the child faulted"
     end
   in Done(value)
     return value
