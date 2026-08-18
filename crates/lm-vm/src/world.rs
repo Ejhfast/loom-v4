@@ -1412,7 +1412,14 @@ impl<'m> World<'m> {
             );
             return Some(key);
         }
-        self.install_host_reply(key.machine.vm, completion.value);
+        match completion.result {
+            Ok(value) => self.install_host_reply(key.machine.vm, value),
+            Err(message) => {
+                let op = self.pending_op(key.machine.vm);
+                self.machines[key.machine.vm as usize].set_fault(FaultCode::HostFault, message, op);
+                self.close_files_for_machine(key.machine.vm);
+            }
+        }
         Some(key)
     }
 

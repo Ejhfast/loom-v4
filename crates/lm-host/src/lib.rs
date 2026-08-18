@@ -5,17 +5,15 @@
 //! seeded deterministic PRNG. `lm-vm` never depends on this crate.
 //! `lm-cli` wires it in.
 //!
-//! `Clock.Sleep` uses the asynchronous completion channel: `start`
-//! records a deadline and returns `Waiting`; `poll` completes when
-//! the deadline passed; `wait` blocks until it passes. Week 9 makes
-//! the channel truly asynchronous; the shape is already in place.
+//! Potentially blocking file and stream work runs in a fixed I/O
+//! service. `start` submits work and returns `Waiting`.
 
-use lm_vm::{
-    CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostOpenOptions, HostSeekFrom,
-    HostStart, HostValue,
-};
+mod io_service;
+
+use io_service::{FileRequest, IoService, StreamRequest};
+use lm_vm::{CompletionKey, Host, HostArg, HostCompletion, HostStart, HostValue};
 use std::collections::HashMap;
-use std::io::{BufRead, Read, Seek, Write};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The command-line root host.
@@ -24,8 +22,8 @@ pub struct CliHost {
     rand_state: u64,
     sleeps: HashMap<u64, (CompletionKey, Instant)>,
     next_token: u64,
-    files: HashMap<u64, std::fs::File>,
     next_file: u64,
+    io: IoService,
 }
 
 impl CliHost {
@@ -36,8 +34,8 @@ impl CliHost {
             rand_state: rand_seed.max(1),
             sleeps: HashMap::new(),
             next_token: 1,
-            files: HashMap::new(),
             next_file: 1,
+            io: IoService::new(),
         }
     }
 
@@ -50,27 +48,41 @@ impl CliHost {
         self.rand_state = x;
         x.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
-}
 
-fn io_error(message: String) -> HostValue {
-    HostValue::Ctor(
-        CoreCtor::Err,
-        vec![HostValue::Ctor(
-            CoreCtor::IoErrorFailed,
-            vec![HostValue::Str(message)],
-        )],
-    )
-}
+    fn start_file(&mut self, key: CompletionKey, request: FileRequest) -> HostStart {
+        let Some(token) = self.take_token() else {
+            return HostStart::Failed("the completion token space is exhausted".to_string());
+        };
+        if self.io.submit_file(key, token, request) {
+            HostStart::Waiting(token)
+        } else {
+            HostStart::Completed(fs_error("the I/O queue is full".to_string()))
+        }
+    }
 
-fn fs_ok(value: HostValue) -> HostValue {
-    HostValue::Ctor(CoreCtor::Ok, vec![value])
+    fn start_stream(&mut self, key: CompletionKey, request: StreamRequest) -> HostStart {
+        let Some(token) = self.take_token() else {
+            return HostStart::Failed("the completion token space is exhausted".to_string());
+        };
+        if self.io.submit_stream(key, token, request) {
+            HostStart::Waiting(token)
+        } else {
+            HostStart::Failed("the I/O queue is full".to_string())
+        }
+    }
+
+    fn take_token(&mut self) -> Option<u64> {
+        let token = self.next_token;
+        self.next_token = token.checked_add(1)?;
+        Some(token)
+    }
 }
 
 fn fs_error(message: String) -> HostValue {
     HostValue::Ctor(
-        CoreCtor::Err,
+        lm_vm::CoreCtor::Err,
         vec![HostValue::Ctor(
-            CoreCtor::FsErrorFailed,
+            lm_vm::CoreCtor::FsErrorFailed,
             vec![HostValue::Str(message)],
         )],
     )
@@ -85,44 +97,15 @@ impl Host for CliHost {
                 let Some(HostArg::Str(text)) = args.first() else {
                     return HostStart::Failed("Io.Print needs one string".to_string());
                 };
-                let mut out = std::io::stdout();
-                match out.write_all(text.as_bytes()).and_then(|_| out.flush()) {
-                    Ok(()) => HostStart::Completed(HostValue::Unit),
-                    Err(e) => HostStart::Failed(format!("stdout write failed: {e}")),
-                }
+                self.start_stream(key, StreamRequest::Print(text.clone()))
             }
             lm_abi::OP_IO_ERROR => {
                 let Some(HostArg::Str(text)) = args.first() else {
                     return HostStart::Failed("Io.Error needs one string".to_string());
                 };
-                let mut out = std::io::stderr();
-                match out.write_all(text.as_bytes()).and_then(|_| out.flush()) {
-                    Ok(()) => HostStart::Completed(HostValue::Unit),
-                    Err(e) => HostStart::Failed(format!("stderr write failed: {e}")),
-                }
+                self.start_stream(key, StreamRequest::Error(text.clone()))
             }
-            lm_abi::OP_IO_READ_LINE => {
-                let mut line = String::new();
-                let reply = match std::io::stdin().lock().read_line(&mut line) {
-                    Ok(0) => {
-                        HostValue::Ctor(CoreCtor::Ok, vec![HostValue::Ctor(CoreCtor::None, vec![])])
-                    }
-                    Ok(_) => {
-                        if line.ends_with('\n') {
-                            line.pop();
-                            if line.ends_with('\r') {
-                                line.pop();
-                            }
-                        }
-                        HostValue::Ctor(
-                            CoreCtor::Ok,
-                            vec![HostValue::Ctor(CoreCtor::Some, vec![HostValue::Str(line)])],
-                        )
-                    }
-                    Err(e) => io_error(format!("stdin read failed: {e}")),
-                };
-                HostStart::Completed(reply)
-            }
+            lm_abi::OP_IO_READ_LINE => self.start_stream(key, StreamRequest::ReadLine),
             lm_abi::OP_CLOCK_NOW => {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -138,8 +121,11 @@ impl Host for CliHost {
                     return HostStart::Failed("Clock.Sleep needs one integer".to_string());
                 };
                 let nanos = (*nanos).max(0) as u64;
-                let token = self.next_token;
-                self.next_token += 1;
+                let Some(token) = self.take_token() else {
+                    return HostStart::Failed(
+                        "the completion token space is exhausted".to_string(),
+                    );
+                };
                 self.sleeps
                     .insert(token, (key, Instant::now() + Duration::from_nanos(nanos)));
                 HostStart::Waiting(token)
@@ -162,43 +148,19 @@ impl Host for CliHost {
                 else {
                     return HostStart::Failed("Fs.Open needs a path and options".to_string());
                 };
-                let mut open = std::fs::OpenOptions::new();
-                match options {
-                    HostOpenOptions::ReadOnly => {
-                        open.read(true);
-                    }
-                    HostOpenOptions::WriteOnly => {
-                        open.write(true);
-                    }
-                    HostOpenOptions::ReadWrite => {
-                        open.read(true).write(true);
-                    }
-                    HostOpenOptions::Create => {
-                        open.read(true).write(true).create(true);
-                    }
-                    HostOpenOptions::CreateTruncate => {
-                        open.read(true).write(true).create(true).truncate(true);
-                    }
-                    HostOpenOptions::Append => {
-                        open.write(true).create(true).append(true);
-                    }
-                }
-                match open.open(path) {
-                    Ok(file) => {
-                        let token = self.next_file;
-                        let Some(next) = token.checked_add(1) else {
-                            return HostStart::Failed(
-                                "the file token space is exhausted".to_string(),
-                            );
-                        };
-                        self.next_file = next;
-                        self.files.insert(token, file);
-                        HostStart::Completed(fs_ok(HostValue::File(token)))
-                    }
-                    Err(error) => {
-                        HostStart::Completed(fs_error(format!("file open failed: {error}")))
-                    }
-                }
+                let file = self.next_file;
+                let Some(next) = file.checked_add(1) else {
+                    return HostStart::Failed("the file token space is exhausted".to_string());
+                };
+                self.next_file = next;
+                self.start_file(
+                    key,
+                    FileRequest::Open {
+                        file,
+                        path: path.clone(),
+                        options: *options,
+                    },
+                )
             }
             lm_abi::OP_FS_READ => {
                 let (Some(HostArg::File(token)), Some(HostArg::Int(count))) =
@@ -216,21 +178,13 @@ impl Host for CliHost {
                         "the read count is too large".to_string(),
                     ));
                 }
-                let Some(file) = self.files.get_mut(token) else {
-                    return HostStart::Completed(fs_error(
-                        "the file token is not open".to_string(),
-                    ));
-                };
-                let mut bytes = vec![0; count];
-                match file.read(&mut bytes) {
-                    Ok(read) => {
-                        bytes.truncate(read);
-                        HostStart::Completed(fs_ok(HostValue::Bytes(bytes)))
-                    }
-                    Err(error) => {
-                        HostStart::Completed(fs_error(format!("file read failed: {error}")))
-                    }
-                }
+                self.start_file(
+                    key,
+                    FileRequest::Read {
+                        file: *token,
+                        count,
+                    },
+                )
             }
             lm_abi::OP_FS_WRITE => {
                 let (Some(HostArg::File(token)), Some(HostArg::Bytes(bytes))) =
@@ -238,17 +192,13 @@ impl Host for CliHost {
                 else {
                     return HostStart::Failed("Fs.Write needs a file and bytes".to_string());
                 };
-                let Some(file) = self.files.get_mut(token) else {
-                    return HostStart::Completed(fs_error(
-                        "the file token is not open".to_string(),
-                    ));
-                };
-                match file.write(bytes) {
-                    Ok(written) => HostStart::Completed(fs_ok(HostValue::Int(written as i64))),
-                    Err(error) => {
-                        HostStart::Completed(fs_error(format!("file write failed: {error}")))
-                    }
-                }
+                self.start_file(
+                    key,
+                    FileRequest::Write {
+                        file: *token,
+                        bytes: bytes.clone(),
+                    },
+                )
             }
             lm_abi::OP_FS_SEEK => {
                 let (Some(HostArg::File(token)), Some(HostArg::SeekFrom(from))) =
@@ -256,61 +206,25 @@ impl Host for CliHost {
                 else {
                     return HostStart::Failed("Fs.Seek needs a file and origin".to_string());
                 };
-                let Some(file) = self.files.get_mut(token) else {
-                    return HostStart::Completed(fs_error(
-                        "the file token is not open".to_string(),
-                    ));
-                };
-                let from = match from {
-                    HostSeekFrom::Start(offset) => match u64::try_from(*offset) {
-                        Ok(offset) => std::io::SeekFrom::Start(offset),
-                        Err(_) => {
-                            return HostStart::Completed(fs_error(
-                                "the seek position is invalid".to_string(),
-                            ))
-                        }
+                self.start_file(
+                    key,
+                    FileRequest::Seek {
+                        file: *token,
+                        from: *from,
                     },
-                    HostSeekFrom::Current(offset) => std::io::SeekFrom::Current(*offset),
-                    HostSeekFrom::End(offset) => std::io::SeekFrom::End(*offset),
-                };
-                match file.seek(from) {
-                    Ok(position) => match i64::try_from(position) {
-                        Ok(position) => HostStart::Completed(fs_ok(HostValue::Int(position))),
-                        Err(_) => HostStart::Completed(fs_error(
-                            "the seek position is too large".to_string(),
-                        )),
-                    },
-                    Err(error) => {
-                        HostStart::Completed(fs_error(format!("file seek failed: {error}")))
-                    }
-                }
+                )
             }
             lm_abi::OP_FS_FLUSH => {
                 let Some(HostArg::File(token)) = args.first() else {
                     return HostStart::Failed("Fs.Flush needs a file".to_string());
                 };
-                let Some(file) = self.files.get_mut(token) else {
-                    return HostStart::Completed(fs_error(
-                        "the file token is not open".to_string(),
-                    ));
-                };
-                match file.flush() {
-                    Ok(()) => HostStart::Completed(fs_ok(HostValue::Unit)),
-                    Err(error) => {
-                        HostStart::Completed(fs_error(format!("file flush failed: {error}")))
-                    }
-                }
+                self.start_file(key, FileRequest::Flush { file: *token })
             }
             lm_abi::OP_FS_CLOSE => {
                 let Some(HostArg::File(token)) = args.first() else {
                     return HostStart::Failed("Fs.Close needs a file".to_string());
                 };
-                if self.files.remove(token).is_none() {
-                    return HostStart::Completed(fs_error(
-                        "the file token is not open".to_string(),
-                    ));
-                }
-                HostStart::Completed(fs_ok(HostValue::Unit))
+                self.start_file(key, FileRequest::Close { file: *token })
             }
             _ => HostStart::Failed(format!(
                 "the command-line host does not implement {}",
@@ -320,6 +234,9 @@ impl Host for CliHost {
     }
 
     fn poll(&mut self) -> Option<HostCompletion> {
+        if let Some(completion) = self.io.poll() {
+            return Some(completion);
+        }
         let now = Instant::now();
         let token = self
             .sleeps
@@ -331,36 +248,46 @@ impl Host for CliHost {
         Some(HostCompletion {
             key,
             token,
-            value: HostValue::Unit,
+            result: Ok(HostValue::Unit),
         })
     }
 
     fn wait(&mut self) -> Option<HostCompletion> {
+        if let Some(completion) = self.poll() {
+            return Some(completion);
+        }
         let token = self
             .sleeps
             .iter()
             .min_by_key(|(token, (_, deadline))| (*deadline, **token))
-            .map(|(token, _)| *token)?;
-        let (key, deadline) = self.sleeps.remove(&token)?;
-        let now = Instant::now();
-        if deadline > now {
-            std::thread::sleep(deadline - now);
+            .map(|(token, (_, deadline))| (*token, *deadline));
+        let Some((sleep_token, deadline)) = token else {
+            return self.io.wait();
+        };
+        let duration = deadline.saturating_duration_since(Instant::now());
+        match self.io.wait_timeout(duration) {
+            Ok(completion) => Some(completion),
+            Err(RecvTimeoutError::Timeout) => {
+                let (key, _) = self.sleeps.remove(&sleep_token)?;
+                Some(HostCompletion {
+                    key,
+                    token: sleep_token,
+                    result: Ok(HostValue::Unit),
+                })
+            }
+            Err(RecvTimeoutError::Disconnected) => None,
         }
-        Some(HostCompletion {
-            key,
-            token,
-            value: HostValue::Unit,
-        })
     }
 
     fn close_file(&mut self, token: u64) -> bool {
-        self.files.remove(&token).is_some()
+        self.io.force_close(token)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lm_vm::{CoreCtor, HostOpenOptions, HostSeekFrom};
 
     struct TempFile(std::path::PathBuf);
 
@@ -380,11 +307,20 @@ mod tests {
         }
     }
 
-    fn fs_ok_value(start: HostStart) -> HostValue {
-        match start {
-            HostStart::Completed(HostValue::Ctor(CoreCtor::Ok, mut values))
-                if values.len() == 1 =>
-            {
+    fn run_host(host: &mut CliHost, op: u32, args: Vec<HostArg>) -> HostValue {
+        let token = match host.start(completion(), op, args) {
+            HostStart::Completed(value) => return value,
+            HostStart::Waiting(token) => token,
+            HostStart::Failed(message) => panic!("the host start failed: {message}"),
+        };
+        let completion = host.wait().expect("the host operation completes");
+        assert_eq!(completion.token, token);
+        completion.result.expect("the host operation succeeds")
+    }
+
+    fn fs_ok_value(value: HostValue) -> HostValue {
+        match value {
+            HostValue::Ctor(CoreCtor::Ok, mut values) if values.len() == 1 => {
                 values.pop().expect("the success value exists")
             }
             other => panic!("expected one filesystem success, found {other:?}"),
@@ -446,8 +382,8 @@ mod tests {
         let path_text = path.0.to_string_lossy().into_owned();
         let mut host = CliHost::new(1);
 
-        let token = match fs_ok_value(host.start(
-            completion(),
+        let token = match fs_ok_value(run_host(
+            &mut host,
             lm_abi::OP_FS_OPEN,
             vec![
                 HostArg::Str(path_text),
@@ -458,24 +394,24 @@ mod tests {
             other => panic!("expected a file token, found {other:?}"),
         };
         assert_eq!(
-            fs_ok_value(host.start(
-                completion(),
+            fs_ok_value(run_host(
+                &mut host,
                 lm_abi::OP_FS_WRITE,
                 vec![HostArg::File(token), HostArg::Bytes(b"hello".to_vec())],
             )),
             HostValue::Int(5)
         );
         assert_eq!(
-            fs_ok_value(host.start(
-                completion(),
+            fs_ok_value(run_host(
+                &mut host,
                 lm_abi::OP_FS_FLUSH,
                 vec![HostArg::File(token)],
             )),
             HostValue::Unit
         );
         assert_eq!(
-            fs_ok_value(host.start(
-                completion(),
+            fs_ok_value(run_host(
+                &mut host,
                 lm_abi::OP_FS_SEEK,
                 vec![
                     HostArg::File(token),
@@ -485,16 +421,16 @@ mod tests {
             HostValue::Int(0)
         );
         assert_eq!(
-            fs_ok_value(host.start(
-                completion(),
+            fs_ok_value(run_host(
+                &mut host,
                 lm_abi::OP_FS_READ,
                 vec![HostArg::File(token), HostArg::Int(5)],
             )),
             HostValue::Bytes(b"hello".to_vec())
         );
         assert_eq!(
-            fs_ok_value(host.start(
-                completion(),
+            fs_ok_value(run_host(
+                &mut host,
                 lm_abi::OP_FS_CLOSE,
                 vec![HostArg::File(token)],
             )),

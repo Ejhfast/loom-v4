@@ -81,8 +81,8 @@ pub struct HostCompletion {
     pub key: CompletionKey,
     /// The host scope returned by `HostStart::Waiting`.
     pub token: u64,
-    /// The plain-data reply.
-    pub value: HostValue,
+    /// The plain-data reply or an asynchronous host failure.
+    pub result: Result<HostValue, String>,
 }
 
 /// The root host registry. The VM calls it only for operations that
@@ -421,7 +421,7 @@ impl Host for RecordingHost {
                 Some(HostCompletion {
                     key,
                     token,
-                    value: HostValue::Unit,
+                    result: Ok(HostValue::Unit),
                 })
             }
             None => {
@@ -439,7 +439,7 @@ impl Host for RecordingHost {
         Some(HostCompletion {
             key,
             token,
-            value: HostValue::Unit,
+            result: Ok(HostValue::Unit),
         })
     }
 
