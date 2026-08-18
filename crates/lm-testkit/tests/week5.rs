@@ -1,5 +1,5 @@
 //! Week-5 surface suites: the `sys` casing rule, the `use` keyword
-//! with fixed-binding aliases, and the `as_call` descriptor form.
+//! with fixed-binding aliases, and the request pattern.
 
 use lm_testkit::{compile_text, run_allowed, run_text, run_world};
 use lm_vm::VmConfig;
@@ -230,7 +230,7 @@ fn use_alias_example_has_checked_output() {
 }
 
 // ---------------------------------------------------------------
-// The `as_call` descriptor form.
+// The request pattern.
 // ---------------------------------------------------------------
 
 #[test]

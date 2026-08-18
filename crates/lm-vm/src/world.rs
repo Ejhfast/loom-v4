@@ -5406,7 +5406,7 @@ impl<'m> World<'m> {
         }
     }
 
-    /// `request.as_call(op)` executed by `vm`.
+    /// The operation identity test of a `Call` pattern, run by `vm`.
     fn handle_as_call(&mut self, vm: VmId, request: ObjRef, op: u32) {
         let (rv, ordinal) = match self.machines[vm as usize].vm.heap.get(request) {
             Object::NativeRequest { vm, ordinal } => (*vm, *ordinal),

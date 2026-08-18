@@ -291,7 +291,7 @@ pub enum ExecOutcome {
         slot: u32,
         mock: Option<Value>,
     },
-    /// `request.as_call(op)`.
+    /// The operation identity test of a `Call` pattern.
     AsCall { request: ObjRef, op: u32 },
     /// `call.args()`.
     CallArgs { call: ObjRef },

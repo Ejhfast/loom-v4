@@ -24,8 +24,8 @@ fn a_one_tuple_pattern_needs_its_comma() {
     // Without the comma the parentheses only group, so this binds the
     // whole tuple to `n`.
     assert_eq!(
-        run("case (3,)\nin (n) then 1\nend\n"),
-        "Done(1)",
+        run("case (3,)\nin (n) then n\nend\n"),
+        "Done((3,))",
         "a parenthesized name is a binding, not a one-tuple"
     );
 }
@@ -59,8 +59,9 @@ fn a_tuple_pattern_checks_its_arity() {
 fn a_tuple_pattern_needs_a_tuple_scrutinee() {
     let error =
         run_allowed("tuple.lm", "case 1\nin (a, b) then a\nend\n", &[]).expect_err("not a tuple");
+    assert!(error.contains("E1041"), "{error}");
     assert!(
-        error.contains("E1041") || error.contains("E1004"),
+        error.contains("a tuple pattern cannot match a scrutinee of type Int"),
         "{error}"
     );
 }

@@ -175,8 +175,11 @@ never reopens a path or contacts a previous driver.
 A holder can force closure before an immediate snapshot:
 
 ```lm
-for control in vm.handles() do
-  control.close()
+controls = vm.handles()
+i = 0
+while i < controls.len()
+  controls.at(i).close()
+  i = i + 1
 end
 snapshot = vm.snapshot()
 ```
@@ -212,7 +215,7 @@ Host waits consume no fuel. Host waits can extend elapsed time.
 A later timer wait can give callers an elapsed-time limit through
 `select`.
 
-`docs/specs/waits.md` defines the scheduler wait and selection model.
+`docs/specs/sidecar/waits.md` defines the scheduler wait and selection model.
 
 ## 9. Cleanup
 

@@ -2,8 +2,7 @@
 //!
 //! `Call(Op, call, args)` tests one operation identity, binds the
 //! pending call, and destructures its arguments. One `case` therefore
-//! serves several operations without nesting one `as_call` per
-//! operation.
+//! serves several operations without one nested `case` per operation.
 
 use lm_testkit::run_allowed;
 

@@ -2331,7 +2331,7 @@ Wait.Cancel[T]        (Wait[T]) -> Bool
 
 Wait tokens are holder-local and one-shot. Section 7.4 defines select syntax.
 
-`docs/specs/waits.md` defines readiness, drive leases, and scheduler indexes.
+`docs/specs/sidecar/waits.md` defines readiness, drive leases, and scheduler indexes.
 
 ### 23.8 Compiler and reflection
 

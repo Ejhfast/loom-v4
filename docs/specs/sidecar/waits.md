@@ -1,6 +1,6 @@
 # Typed Waits and Selection
 
-Status: accepted design for the selectable-waits branch.
+Status: accepted design. Week 10 implements the typed waits and `select`.
 
 ## 1. Purpose
 

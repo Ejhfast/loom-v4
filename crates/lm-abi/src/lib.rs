@@ -90,7 +90,7 @@ impl AbiType {
 pub enum OpKind {
     /// A host operation with a fixed first-order signature. It is
     /// callable through `sys`, first-class as an `Op` value, and a
-    /// valid `mock` and `as_call` target.
+    /// valid `mock` and `Call` pattern target.
     Fixed,
     /// A VM control operation. Its signature is generic and the
     /// verifier applies a built-in rule per slot. It is not

@@ -785,7 +785,7 @@ valid: state=asked machines=3 mailboxes=2
 ## Week 10 — Scoped files, selectable waits, time, random, and TCP
 
 Week 10 starts with the handle foundation in
-`docs/specs/handles.md`. Later slices add scoped leases, broader host
+`docs/specs/sidecar/handles.md`. Later slices add scoped leases, broader host
 operations, and TCP.
 
 ### Land
