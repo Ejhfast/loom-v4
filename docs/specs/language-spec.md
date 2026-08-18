@@ -2626,7 +2626,7 @@ freeze(self) -> Map[K,V]
 
 ### 24.6 Strings, bytes, builders, and formatting
 
-Tier A is the implemented core String surface. It keeps all offsets in bytes.
+The core String surface keeps all offsets in bytes.
 
 ```text
 byte_len() -> Int
@@ -2636,33 +2636,36 @@ concat(other: String) -> String
 starts_with(prefix: String) -> Bool
 ends_with(suffix: String) -> Bool
 contains(needle: String) -> Bool
-find(needle: String) -> Option[Int]          # byte offset
-__add__(other: String) -> String
-__eq__(other: String) -> Bool
-__ne__(other: String) -> Bool
-```
-
-`+`, `==`, and `!=` use the three String hook methods. Each hook has paired underscores.
-
-Tier B reserves the following fallible and conversion surface.
-
-```text
-slice_bytes(start,length) -> Result[String,Utf8Error]
-slice_chars(start,length) -> Result[String,IndexError]
+find(needle: String) -> Option[Int]              # byte offset
+slice_bytes(start: Int, length: Int) -> Result[String,Utf8Error]
 bytes() -> Bytes
 split(separator: String) -> List[String]
 lines() -> List[String]
-trim / trim_start / trim_end
-replace(needle,replacement) -> String
-to_lower_ascii / to_upper_ascii
+trim() -> String
+trim_start() -> String
+trim_end() -> String
+replace(needle: String, replacement: String) -> String
+to_lower_ascii() -> String
+to_upper_ascii() -> String
 parse_int(radix: Int) -> Result[Int,ParseIntError]
+__add__(other: String) -> String
+__eq__(other: String) -> Bool
+__ne__(other: String) -> Bool
+__lt__(other: String) -> Bool
+__le__(other: String) -> Bool
+__gt__(other: String) -> Bool
+__ge__(other: String) -> Bool
 ```
 
-Core defines `Utf8Error`, `IndexError`, and `ParseIntError`. Tier B can use these types without changing its error contract.
+`+`, `==`, `!=`, and the four ordering operators use the String hook methods. Each hook has paired underscores. The ordering hooks carry the lexicographic rule of section 6.4.
 
-Methods that return `Char` remain deferred. Float parsing remains deferred until core defines `Float`.
+`find` gives a byte offset, and `slice_bytes` takes one, so a search and an extraction compose. `slice_bytes` reports `Utf8Error` for a boundary that splits a character.
 
-Tier A includes the following Bytes surface.
+Core defines `Utf8Error`, `IndexError`, and `ParseIntError`.
+
+Methods that return `Char` are not defined here, and neither is float parsing. Both wait on a core type: `Char` and `Float`.
+
+The core Bytes surface follows.
 
 ```text
 len() -> Int
@@ -2679,6 +2682,10 @@ text() -> String
 __add__(other: Bytes) -> Bytes
 __eq__(other: Bytes) -> Bool
 __ne__(other: Bytes) -> Bool
+__lt__(other: Bytes) -> Bool
+__le__(other: Bytes) -> Bool
+__gt__(other: Bytes) -> Bool
+__ge__(other: Bytes) -> Bool
 ```
 
 `at` faults with `IndexOutOfBounds` for an invalid index. `get` returns `None` for an invalid index.
@@ -2689,7 +2696,7 @@ __ne__(other: Bytes) -> Bool
 
 `utf8` reports invalid encoding through its result. `text` is a compatibility conversion that faults with `BadCast`.
 
-`+`, `==`, and `!=` use the paired-underscore Bytes hook methods.
+`+`, `==`, `!=`, and the four ordering operators use the paired-underscore Bytes hook methods. The ordering hooks carry the unsigned byte rule of section 6.4.
 
 The final nominal builders have the following surface.
 

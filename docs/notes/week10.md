@@ -109,10 +109,14 @@ access of any kind.
 Specification 6.4 states that strings compare lexicographically by
 Unicode scalar value. `String` declares `__eq__` and `__ne__` and no
 ordering hook, so `"a" < "b"` reports "expected Int, found String". No
-program can sort strings. Specification 24.6 lists the method in
-neither of its two tiers, so this was missed rather than deferred.
-`Bytes` has the same hole: 6.4 promises byte ordering and `Bytes`
-declares no ordering hook either.
+program can sort strings. `Bytes` has the same hole: 6.4 promises byte
+ordering and `Bytes` declares no ordering hook either.
+
+Specification 24.6 described these two surfaces in an implemented tier
+and a reserved tier. That framing let an unfinished type read as a
+plan, and it still left the ordering hooks out of both lists. The
+section now states one surface for each type. The implementation is
+behind it, and this note is where that belongs.
 
 The result reaches the filesystem work directly. A program reads a
 file, decodes `Bytes` to `String`, and then has to go back down to
