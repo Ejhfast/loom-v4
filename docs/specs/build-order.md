@@ -840,14 +840,14 @@ end
 ```
 
 ```text
-$ lm run examples/09-host/cat.lm \
+$ lm run examples/09-handles-and-supervision/cat.lm \
     --allow Fs.Open,Fs.Read,Fs.Close -- data.txt
 first line
 second line
 ```
 
 ```text
-$ lm run examples/09-host/word-count.lm \
+$ lm run examples/09-handles-and-supervision/word-count.lm \
     --allow Fs.Open,Fs.Read,Fs.Close -- book.txt
 lines=1240 words=18302 bytes=100771
 ```

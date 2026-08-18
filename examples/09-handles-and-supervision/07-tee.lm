@@ -1,0 +1,85 @@
+# Tee: mint the child's file, back it with a real file, and record the
+# size of every read.
+#
+# This joins the two previous ideas. The child reads real data. The
+# supervisor sees each operation and can change the answer.
+
+def read_twice(): String with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("input.txt", ReadOnly)
+  in Ok(file)
+    first = case file.read(6)
+    in Ok(bytes)  then bytes.text()
+    in Err(error) then error.message()
+    end
+    second = case file.read(6)
+    in Ok(bytes)  then bytes.text()
+    in Err(error) then error.message()
+    end
+    file.close()
+    "{first}+{second}"
+  in Err(error) then error.message()
+  end
+end
+
+def tee(
+  child: Vm[String],
+  mine: ResourceHandle,
+  backing: FileHandle,
+  mut sizes: [Int]
+): String with Vm, Fs.Read
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request.as_call(Fs.Read)
+      in Some(call)
+        if child.resource(call.args()[0]).same_resource(mine)
+          case backing.read(call.args()[1])
+          in Ok(bytes)
+            sizes.push(bytes.len())
+            child.answer(call, Ok(bytes))
+          in Err(error)
+            child.answer(call, Err(error))
+          end
+        else
+          child.dispatch(request)
+        end
+      in None
+        case request.as_call(Fs.Close)
+        in Some(call)
+          if child.resource(call.args()[0]).same_resource(mine)
+            child.answer(call, Ok(()))
+          else
+            child.dispatch(request)
+          end
+        in None
+          child.dispatch(request)
+        end
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return "the child faulted"
+    end
+  end
+  "the supervisor stopped"
+end
+
+case sys.fs.open("message.txt", ReadOnly)
+in Ok(backing)
+  child = sys.vm.Vm().from_object(read_twice, args: ())
+  case child.drive()
+  in Asked(request)
+    case request.as_call(Fs.Open)
+    in Some(call)
+      mine = child.mint_file(call)
+      sizes: [Int] = []
+      text = tee(child, mine, backing, sizes)
+      backing.close()
+      "the child read {sizes.len()} times and saw {text}"
+    in None then "the child asked for something else first"
+    end
+  in Done(_)  then "the child finished before it opened a file"
+  in Fault(_) then "the child faulted before it opened a file"
+  end
+in Err(error) then error.message()
+end

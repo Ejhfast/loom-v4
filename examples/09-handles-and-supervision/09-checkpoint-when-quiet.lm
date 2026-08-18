@@ -1,0 +1,60 @@
+# Checkpoint when quiet: let the child finish its file work, then
+# capture it without taking the file away.
+#
+# `08-checkpoint-now.lm` closes the child's handles and makes the child
+# recover. This supervisor waits instead. It steps the child and retries
+# the capture after each step. The first capture that succeeds is the
+# first moment at which the child holds no live resource.
+#
+# Use this shape when the controlled machine holds the resource itself.
+# Use `10-checkpoint-background-work.lm` when a background proc holds it.
+
+def read_message(): String with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("message.txt", ReadOnly)
+  in Ok(file)
+    case file.read(1024)
+    in Ok(bytes)
+      file.close()
+      "the child read {bytes.len()} bytes"
+    in Err(error) then error.message()
+    end
+  in Err(error) then error.message()
+  end
+end
+
+def capture_when_quiet(child: Vm[String], budget: Int): String with Vm
+  steps = 0
+  while steps < budget
+    steps = steps + 1
+    case child.step()
+    in Done(_)
+      return "the child finished before it released its file"
+    in Fault(_)
+      return "the child faulted"
+    in Ran     then ()
+    in Waiting then ()
+    end
+    if child.snapshot().is_ok()
+      return "captured after {steps} steps"
+    end
+  end
+  "no quiet point within {budget} steps"
+end
+
+def supervise(child: Vm[String]): String with Vm
+  # Let the open through, so the child truly holds a file.
+  case child.drive()
+  in Asked(request)
+    child.dispatch(request)
+    live = child.snapshot().is_ok()
+    "live capture={live}, then {capture_when_quiet(child, 5000)}"
+  in Done(value)
+    return value
+  in Fault(_)
+    return "the child faulted"
+  end
+end
+
+child = sys.vm.Vm().from_object(read_message, args: ())
+child.table().pass(Fs)
+supervise(child)

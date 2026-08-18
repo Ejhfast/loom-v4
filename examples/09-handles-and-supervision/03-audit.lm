@@ -1,0 +1,46 @@
+# Audit: record every file the child opens, then let the open proceed.
+#
+# This is the smallest useful supervisor. It changes no behavior. It
+# only watches.
+
+def read_message(): String with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("message.txt", ReadOnly)
+  in Ok(file)
+    text = case file.read(1024)
+    in Ok(bytes)  then bytes.text()
+    in Err(error) then error.message()
+    end
+    file.close()
+    text
+  in Err(error) then error.message()
+  end
+end
+
+def audit(child: Vm[String], mut opened: [String]): String with Vm
+  loop do
+    # `drive` stops the child before its policy runs. The supervisor
+    # reads the request first.
+    case child.drive()
+    in Asked(request)
+      case request.as_call(Fs.Open)
+      in Some(call)
+        opened.push(call.args()[0])
+      in None then ()
+      end
+      # `dispatch` returns the request to the normal policy.
+      child.dispatch(request)
+    in Done(value)
+      return value
+    in Fault(_)
+      return "the child faulted"
+    end
+  end
+  "the supervisor stopped"
+end
+
+child = sys.vm.Vm().from_object(read_message, args: ())
+child.table().pass(Fs)
+
+opened: [String] = []
+text = audit(child, opened)
+"{opened.len()} open(s), first={opened[0]}, text={text}"

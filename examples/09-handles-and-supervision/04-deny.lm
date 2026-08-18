@@ -1,0 +1,40 @@
+# Deny: permit one path and refuse every other path.
+#
+# The child receives an ordinary `FsError`, not a fault. It handles the
+# refusal like any other file error.
+
+def read_secret(): String with Fs.Open, Fs.Close
+  case sys.fs.open("secret.txt", ReadOnly)
+  in Ok(file)
+    file.close()
+    "the child opened the secret"
+  in Err(error) then "the child was refused: {error.message()}"
+  end
+end
+
+def allow_only(child: Vm[String], permitted: String): String with Vm
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request.as_call(Fs.Open)
+      in Some(call)
+        if call.args()[0] == permitted
+          child.dispatch(request)
+        else
+          child.answer(call, Err(Failed("{call.args()[0]} is not permitted")))
+        end
+      in None
+        child.dispatch(request)
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return "the child faulted"
+    end
+  end
+  "the supervisor stopped"
+end
+
+child = sys.vm.Vm().from_object(read_secret, args: ())
+child.table().pass(Fs)
+allow_only(child, "message.txt")

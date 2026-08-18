@@ -1,0 +1,79 @@
+# Checkpoint background work: wait for a proc to release its file.
+#
+# The application hands a file to a background indexer proc, then logs
+# its progress. The supervisor wants a checkpoint at that log point, but
+# the indexer still owns a live file.
+#
+# `snapshot_wait(fuel)` advances the ready procs of the controlled
+# machine world and retries the capture. It does not run the controlled
+# machine itself, so the fuel counts proc instructions only.
+
+def index_file(file: FileHandle): Int with Fs.Read, Fs.Close
+  size = case file.read(1024)
+  in Ok(bytes) then bytes.len()
+  in Err(_)
+    return 0 - 1
+  end
+  # The indexer owns this file until its work ends.
+  case file.close()
+  in Ok(_)  then size
+  in Err(_) then 0 - 1
+  end
+end
+
+def run_with_indexer(): String with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Io.Print
+  case sys.fs.open("message.txt", ReadOnly)
+  in Ok(file)
+    worker = sys.vm.Vm().from_object(index_file, args: (file,))
+    worker.table().pass(Fs.Read)
+    worker.table().pass(Fs.Close)
+    job = sys.proc.run(worker)
+
+    # The supervisor uses this log as its checkpoint point.
+    sys.io.print("the index is running")
+
+    case job.done()
+    in Done(size) then "indexed {size} bytes"
+    in Fault(_)   then "the index failed"
+    end
+  in Err(error) then error.message()
+  end
+end
+
+def supervise(child: Vm[String]): String with Vm
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request.as_call(Io.Print)
+      in Some(_)
+        # The indexer holds a live file here, so an immediate capture
+        # fails. A bounded wait lets the indexer finish and close it.
+        waited = case child.snapshot_wait(1000)
+        in Ok(_)  then "captured after the indexer closed its file"
+        in Err(_) then "the indexer still holds its file"
+        end
+        child.dispatch(request)
+        case child.run()
+        in Done(value)
+          return "{waited}; {value}"
+        in Fault(_)
+          return "the child faulted"
+        end
+      in None
+        child.dispatch(request)
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return "the child faulted"
+    end
+  end
+  "the supervisor stopped"
+end
+
+child = sys.vm.Vm().from_object(run_with_indexer, args: ())
+child.table().pass(Fs)
+child.table().pass(Vm)
+child.table().pass(Proc)
+child.table().pass(Io.Print)
+supervise(child)

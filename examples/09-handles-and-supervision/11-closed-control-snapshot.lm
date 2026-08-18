@@ -1,0 +1,87 @@
+# A closed control is ordinary state.
+#
+# The supervisor mints a file for the child, serves it from memory, and
+# closes it. The supervisor keeps the control afterwards, inside a plain
+# object field.
+#
+# A live resource blocks a capture. This control is closed, so it does
+# not. The snapshot stores a closed marker with no host authority, and a
+# restored marker stays closed.
+
+class ServedRequest
+  control: ResourceHandle
+  text: String
+
+  def init(mut self, control: ResourceHandle, text: String)
+    self.control = control
+    self.text = text
+  end
+end
+
+def read_settings(): String with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("settings.txt", ReadOnly)
+  in Ok(file)
+    text = case file.read(1024)
+    in Ok(bytes)  then bytes.text()
+    in Err(error) then error.message()
+    end
+    file.close()
+    text
+  in Err(error) then error.message()
+  end
+end
+
+def serve(child: Vm[String], mine: ResourceHandle, contents: Bytes): String with Vm
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request.as_call(Fs.Read)
+      in Some(call)
+        if child.resource(call.args()[0]).same_resource(mine)
+          child.answer(call, Ok(contents))
+        else
+          child.dispatch(request)
+        end
+      in None
+        case request.as_call(Fs.Close)
+        in Some(call)
+          if child.resource(call.args()[0]).same_resource(mine)
+            child.answer(call, Ok(()))
+          else
+            child.dispatch(request)
+          end
+        in None
+          child.dispatch(request)
+        end
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return "the child faulted"
+    end
+  end
+  "the supervisor stopped"
+end
+
+child = sys.vm.Vm().from_object(read_settings, args: ())
+case child.drive()
+in Asked(request)
+  case request.as_call(Fs.Open)
+  in Some(call)
+    mine = child.mint_file(call)
+    served = ServedRequest(mine, serve(child, mine, Bytes("cached settings")))
+
+    # The child closed the entry, so the retained control is closed.
+    # `snapshot_self` therefore succeeds and keeps the closed marker.
+    if served.control.is_open()
+      "the served request still owns a live file"
+    elsif sys.vm.snapshot_self().is_err()
+      "the closed control blocked the capture"
+    else
+      served.text
+    end
+  in None then "the child asked for something else first"
+  end
+in Done(_)  then "the child finished before it opened a file"
+in Fault(_) then "the child faulted before it opened a file"
+end

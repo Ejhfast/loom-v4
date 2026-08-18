@@ -11,7 +11,7 @@ fn source(path: &str) -> String {
 
 #[test]
 fn a_recording_host_services_file_handles() {
-    let text = source("examples/09-host/read-file.lm");
+    let text = source("examples/09-handles-and-supervision/01-read-file.lm");
     let bytes = compile_to_bytes("read-file.lm", &text).expect("the example compiles");
     let loaded = load_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
@@ -28,7 +28,7 @@ fn a_recording_host_services_file_handles() {
 
 #[test]
 fn all_six_file_effects_complete_a_round_trip() {
-    let text = source("examples/09-host/round-trip-file.lm");
+    let text = source("examples/09-handles-and-supervision/02-round-trip-file.lm");
     let bytes = compile_to_bytes("round-trip-file.lm", &text).expect("the example compiles");
     let loaded = load_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
@@ -47,8 +47,8 @@ fn all_six_file_effects_complete_a_round_trip() {
 
 #[test]
 fn a_holder_closes_live_handles_before_a_snapshot() {
-    let text = source("examples/09-host/managed-snapshot.lm");
-    let bytes = compile_to_bytes("managed-snapshot.lm", &text).expect("the example compiles");
+    let text = source("examples/09-handles-and-supervision/08-checkpoint-now.lm");
+    let bytes = compile_to_bytes("checkpoint-now.lm", &text).expect("the example compiles");
     let loaded = load_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
@@ -62,7 +62,7 @@ fn a_holder_closes_live_handles_before_a_snapshot() {
 
     assert_eq!(
         world.show_outcome(&outcome),
-        "Done(\"reopened snapshot data\")",
+        "Done(\"live capture=false, closed 1, restored: recovered snapshot data\")",
         "child fault: {:?}",
         world.fault_of(1)
     );
@@ -89,11 +89,47 @@ fn run_example(path: &str, allow: &[&str], file: Option<(&str, &[u8])>) -> Strin
 fn a_driver_can_share_an_existing_file_handle() {
     assert_eq!(
         run_example(
-            "examples/09-host/wrapped-handle.lm",
+            "examples/09-handles-and-supervision/05-redirect.lm",
             &["Vm", "Fs"],
             Some(("message.txt", b"shared file")),
         ),
-        "Done(\"shared file\")"
+        "Done(\"shared file (the shared entry is closed)\")"
+    );
+}
+
+#[test]
+fn a_supervisor_records_every_open() {
+    assert_eq!(
+        run_example(
+            "examples/09-handles-and-supervision/03-audit.lm",
+            &["Vm", "Fs"],
+            Some(("message.txt", b"audited bytes")),
+        ),
+        "Done(\"1 open(s), first=message.txt, text=audited bytes\")"
+    );
+}
+
+#[test]
+fn a_supervisor_refuses_a_path_outside_its_allowlist() {
+    assert_eq!(
+        run_example(
+            "examples/09-handles-and-supervision/04-deny.lm",
+            &["Vm", "Fs"],
+            None,
+        ),
+        "Done(\"the child was refused: secret.txt is not permitted\")"
+    );
+}
+
+#[test]
+fn a_driver_observes_every_read_of_a_minted_file() {
+    assert_eq!(
+        run_example(
+            "examples/09-handles-and-supervision/07-tee.lm",
+            &["Vm", "Fs"],
+            Some(("message.txt", b"hello from memory")),
+        ),
+        "Done(\"the child read 2 times and saw hello +from m\")"
     );
 }
 
@@ -133,8 +169,26 @@ end
 #[test]
 fn a_driver_can_mint_a_file_handle() {
     assert_eq!(
-        run_example("examples/09-host/minted-handle.lm", &["Vm"], None),
-        "Done(\"parent memory\")"
+        run_example(
+            "examples/09-handles-and-supervision/06-serve-memory.lm",
+            &["Vm"],
+            None,
+        ),
+        "Done(\"settings from the supervisor\")"
+    );
+}
+
+#[test]
+fn a_supervisor_steps_the_child_to_a_quiet_capture_point() {
+    let out = run_example(
+        "examples/09-handles-and-supervision/09-checkpoint-when-quiet.lm",
+        &["Vm", "Fs"],
+        Some(("message.txt", b"quiet point data")),
+    );
+    // The step count depends on the lowering, so this reads the prefix.
+    assert!(
+        out.starts_with("Done(\"live capture=false, then captured after "),
+        "unexpected outcome: {out}"
     );
 }
 
@@ -178,8 +232,9 @@ end
 
 #[test]
 fn snapshot_wait_advances_reachable_background_work() {
-    let text = source("examples/09-host/wait-snapshot.lm");
-    let bytes = compile_to_bytes("wait-snapshot.lm", &text).expect("the example compiles");
+    let text = source("examples/09-handles-and-supervision/10-checkpoint-background-work.lm");
+    let bytes =
+        compile_to_bytes("checkpoint-background-work.lm", &text).expect("the example compiles");
     let loaded = load_bytes(&bytes).expect("the example loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
@@ -193,7 +248,7 @@ fn snapshot_wait_advances_reachable_background_work() {
 
     assert_eq!(
         world.show_outcome(&outcome),
-        "Done(\"indexed 9 bytes\")",
+        "Done(\"captured after the indexer closed its file; indexed 9 bytes\")",
         "root fault: {:?}; child fault: {:?}; worker fault: {:?}",
         world.fault_of(0),
         world.fault_of(1),
@@ -204,7 +259,7 @@ fn snapshot_wait_advances_reachable_background_work() {
 
 #[test]
 fn a_closed_resource_control_survives_restore() {
-    let text = source("examples/09-host/closed-control-snapshot.lm");
+    let text = source("examples/09-handles-and-supervision/11-closed-control-snapshot.lm");
     let bytes =
         compile_to_bytes("closed-control-snapshot.lm", &text).expect("the example compiles");
     let loaded = load_bytes(&bytes).expect("the example loads");
