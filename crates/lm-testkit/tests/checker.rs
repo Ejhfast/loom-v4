@@ -55,7 +55,7 @@ fn negative_cases_have_stable_codes() {
     );
     assert_eq!(code_of("return\n"), "E1016");
     assert_eq!(code_of("def f()\nend\nf() == f()\n"), "E1017");
-    assert_eq!(code_of("def f(): Int\n  1\nend\nf\n"), "E1018");
+    assert_eq!(code_of("class A\nend\nA\n"), "E1018");
     assert_eq!(code_of("def f(): Int\n  1\nend\nf = 3\n"), "E1019");
     assert_eq!(code_of("x = 1\nx: Int = 2\n"), "E1020");
     assert_eq!(code_of("while true\n  break\n  x = 1\nend\n1\n"), "E1021");

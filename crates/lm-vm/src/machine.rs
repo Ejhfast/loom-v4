@@ -1062,12 +1062,12 @@ impl Machine {
             Instr::EqRef => {
                 let b = self.pop_obj()?;
                 let a = self.pop_obj()?;
-                self.push(Value::Bool(a == b))?;
+                self.push(Value::Bool(self.references_equal(module, a, b)))?;
             }
             Instr::NeRef => {
                 let b = self.pop_obj()?;
                 let a = self.pop_obj()?;
-                self.push(Value::Bool(a != b))?;
+                self.push(Value::Bool(!self.references_equal(module, a, b)))?;
             }
             // A direct call of a non-generic function copies the empty
             // environment, so it allocates nothing and reads no table.
@@ -1826,6 +1826,37 @@ impl Machine {
         let (at, a, b) = self.int_pair()?;
         self.replace_pair(at, Value::Bool(op(a, b)));
         Ok(())
+    }
+
+    /// Compare references under the function identity rule.
+    fn references_equal(&self, module: &Module, a: ObjRef, b: ObjRef) -> bool {
+        if a == b {
+            return true;
+        }
+        let (
+            Object::Closure {
+                func: a_func,
+                captures: a_captures,
+                env: a_env,
+            },
+            Object::Closure {
+                func: b_func,
+                captures: b_captures,
+                env: b_env,
+            },
+        ) = (self.vm.heap.get(a), self.vm.heap.get(b))
+        else {
+            return false;
+        };
+        a_func == b_func
+            && a_captures.is_empty()
+            && b_captures.is_empty()
+            && a_env.env() == TypeEnvId::EMPTY
+            && b_env.env() == TypeEnvId::EMPTY
+            && module
+                .bindings
+                .iter()
+                .any(|binding| binding.func == *a_func)
     }
 
     fn str_compare(&mut self, want_equal: bool) -> Result<(), FaultCode> {

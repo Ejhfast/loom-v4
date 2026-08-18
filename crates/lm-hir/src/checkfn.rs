@@ -1035,12 +1035,26 @@ impl<'o> FnChecker<'o> {
                     }
                     None => {}
                 }
-                if ctx.func_index.contains_key(name) {
-                    return Err(Diagnostic::new(
-                        "E1018",
-                        format!("the function `{name}` is not a value in this language slice"),
-                        expr.span,
-                    ));
+                if let Some(func) = ctx.func_index.get(name).copied() {
+                    let sig = ctx.sigs[func as usize].clone();
+                    if !sig.type_params.is_empty() || !sig.effect_params.is_empty() {
+                        return Err(Diagnostic::new(
+                            "E1024",
+                            format!("the generic function `{name}` needs a direct call"),
+                            expr.span,
+                        ));
+                    }
+                    let ty = ctx
+                        .store
+                        .intern_fn(sig.params, sig.param_muts, sig.ret, sig.row);
+                    return Ok(HExpr {
+                        ty,
+                        mutable: true,
+                        kind: HExprKind::MakeClosure {
+                            func,
+                            captures: vec![],
+                        },
+                    });
                 }
                 if let Some(class) = ctx.lookup_type(name, &self.env) {
                     let what = if ctx.classes[class as usize].kind == ClassKind::EnumParent {

@@ -735,6 +735,9 @@ thunk = { || 42 }
 
 Both forms lower to the same typed HIR node and bytecode form. They have identical capture, result, row, and evaluation rules. A closure is a sealed function object containing code identity and captures. Omitting `with` means empty row.
 
+A monomorphic top-level function name produces a zero-capture function value.
+A generic function name needs a direct call in this version.
+
 ### 6.3 Fields, `self`, and `super`
 
 `receiver.field` is statically resolved. `self` exists only in methods. A mutating method declares `mut self`. `super.method(args)` calls the immediate superclass implementation with the same receiver and a compile-time selector.

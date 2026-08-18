@@ -42,6 +42,49 @@ increment(41)
     assert_eq!(a, b, "the two spellings must encode identically");
 }
 
+#[test]
+fn a_named_function_is_a_zero_capture_value() {
+    let source = "\
+def increment(value: Int): Int
+  value + 1
+end
+
+def apply(f: (Int) -> Int, value: Int): Int
+  f(value)
+end
+
+apply(increment, 41)
+";
+    assert_eq!(runs(source), "Done(42)");
+}
+
+#[test]
+fn a_named_function_value_uses_code_identity() {
+    let source = "\
+def first(value: Int): Int
+  value + 1
+end
+
+a = do |value: Int|: Int value + 1 end
+b = do |value: Int|: Int value + 1 end
+(first == first, a == a, a == b)
+";
+    assert_eq!(runs(source), "Done((true, true, false))");
+}
+
+#[test]
+fn a_generic_function_value_needs_a_direct_call() {
+    let source = "\
+def identity[T](value: T): T
+  value
+end
+
+function = identity
+function
+";
+    assert_eq!(code_of(source), "E1024");
+}
+
 /// A trailing closure is the final call argument in either spelling,
 /// and the two forms encode identically.
 #[test]
