@@ -4803,10 +4803,44 @@ impl<'m> World<'m> {
             );
             return;
         };
+        // The declared row of the proc body names exact operations and
+        // groups by text. Resolve them once, before the child record
+        // borrows the machine table.
+        let mut birth_ops: Vec<u32> = Vec::new();
+        let mut birth_groups: Vec<u32> = Vec::new();
+        if let Some(func) = self.module.funcs.get(body_func as usize) {
+            for entry in &func.row {
+                let lm_bytecode::BcRow::Op(idx) = entry else {
+                    continue;
+                };
+                let Some(text) = self.module.strings.get(*idx as usize) else {
+                    continue;
+                };
+                if let Some(op) = lm_abi::op_by_name(text) {
+                    birth_ops.push(op);
+                } else if let Some(group) = lm_abi::group_by_name(text) {
+                    birth_groups.push(group);
+                }
+            }
+        }
         let limit = self.machines[child as usize].config.mailbox_limit;
         {
             let m = &mut self.machines[child as usize];
             m.table.group[group as usize] = Some(Action::Pass);
+            // The birth grant also passes the declared row of the proc
+            // body. The spawner charges the same row, so this creates
+            // no authority. A proc that drives therefore needs no
+            // pause and no table edit before it runs.
+            for op in &birth_ops {
+                if let Some(action) = m.table.exact.get_mut(*op as usize) {
+                    *action = Some(Action::Pass);
+                }
+            }
+            for group in &birth_groups {
+                if let Some(action) = m.table.group.get_mut(*group as usize) {
+                    *action = Some(Action::Pass);
+                }
+            }
             m.vm.mailbox = Mailbox::new(limit);
             m.start_body = Some(body);
             m.owner = Ownership::Scheduler;

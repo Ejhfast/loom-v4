@@ -58,18 +58,10 @@ class Controller < Proc
   end
 end
 
+# The birth grant carries the declared row of `on_spawn`, so the
+# supervisor starts with `Proc`, `Vm`, and `Wait` already passed. This
+# spawner charges that same row, so it passes nothing it does not hold.
 supervisor = Supervisor.spawn()
-
-# A new proc starts with a default-deny policy table. Pause the proc
-# before adding the two capabilities that its supervisor loop needs.
-case supervisor.pause()
-in Ok(vm)
-  vm.table().pass(Vm)
-  vm.table().pass(Wait)
-  supervisor.resume()
-  ()
-in Err(_) then ()
-end
 
 # The controller represents an independent parent command source.
 Controller.spawn(supervisor)

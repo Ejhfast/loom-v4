@@ -775,7 +775,7 @@ fn the_spawn_arguments_check_against_init() {
 /// proc body run inside the child, so their rows resolve through the
 /// child table and the birth grant.
 #[test]
-fn the_spawner_charges_the_spawn_operation_only() {
+fn the_spawner_charges_the_declared_row_of_the_body() {
     let source = "class Worker < Proc[Int]\n\
                   \x20 def on_spawn(self): Int with Proc\n\
                   \x20   case self.receive()\n\
@@ -786,7 +786,7 @@ fn the_spawner_charges_the_spawn_operation_only() {
                   \x20   end\n\
                   \x20 end\n\
                   end\n\
-                  def launch(): Handle[Int, Int] with Proc.Spawn\n\
+                  def launch(): Handle[Int, Int] with Proc\n\
                   \x20 Worker.spawn()\n\
                   end\n\
                   h = launch()\n\
@@ -921,10 +921,11 @@ fn a_proc_fault_publishes_as_a_terminal_value() {
     assert_eq!(run(source), "Done(\"DivideByZero\")");
 }
 
-/// The birth grant carries the `Proc` group and nothing else.
-/// Additional grants use the explicit machine path (18.3).
+/// The birth grant carries the declared row of `on_spawn`. The
+/// spawner charges the same row, so a spawn passes only authority the
+/// spawner holds (18.3).
 #[test]
-fn the_birth_grant_carries_the_proc_group_only() {
+fn the_birth_grant_carries_the_declared_row() {
     let spawned = "class Talker < Proc\n\
                    \x20 def on_spawn(self): Int with Proc, Io.Print\n\
                    \x20   sys.io.print(\"x\")\n\
@@ -937,8 +938,26 @@ fn the_birth_grant_carries_the_proc_group_only() {
                    end\n";
     assert_eq!(
         run_allowed("proc.lm", spawned, &["Proc", "Io"]).expect("the program compiles"),
-        "Done(\"PolicyDenied\")"
+        "Done(\"1\")"
     );
+    // A spawner that does not hold the row cannot pass it. The checker
+    // refuses the spawn, so no grant reaches the child.
+    let under = "class Talker < Proc\n\
+                 \x20 def on_spawn(self): Int with Proc, Io.Print\n\
+                 \x20   sys.io.print(\"x\")\n\
+                 \x20   1\n\
+                 \x20 end\n\
+                 end\n\
+                 def launch(): Int with Proc\n\
+                 \x20 case Talker.spawn().done()\n\
+                 \x20 in Done(v)  then v\n\
+                 \x20 in Fault(_) then 0 - 1\n\
+                 \x20 end\n\
+                 end\n\
+                 launch()\n";
+    let refused = run_allowed("proc.lm", under, &["Proc", "Io"])
+        .expect_err("the spawner may not pass a row it lacks");
+    assert!(refused.contains("E1046"), "{refused}");
     // The explicit path grants what the launch needs.
     let explicit = "vm = sys.vm.Vm().from_object(do ||: Int with Io.Print\n\
                     \x20 sys.io.print(\"x\")\n\
@@ -1100,7 +1119,7 @@ fn spawn_works_inside_a_generic_function() {
                   \x20   1\n\
                   \x20 end\n\
                   end\n\
-                  def launch[T](x: T): Handle[Never, Int] with Proc.Spawn\n\
+                  def launch[T](x: T): Handle[Never, Int] with Proc\n\
                   \x20 W.spawn()\n\
                   end\n\
                   case launch(1).done()\n\

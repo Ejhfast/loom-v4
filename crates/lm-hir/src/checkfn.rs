@@ -2508,6 +2508,7 @@ impl<'o> FnChecker<'o> {
                 name_span,
             ));
         }
+        let declared_row = body.row.clone();
         // The constructor signature of the proc class.
         let info = &ctx.classes[class as usize];
         let (params, muts, names) = match &info.init {
@@ -2519,10 +2520,11 @@ impl<'o> FnChecker<'o> {
             None => (Vec::new(), Vec::new(), Vec::new()),
         };
         let checked = self.check_args_simple(ctx, args, &params, &muts, &names, "spawn", span)?;
-        // The spawner charges `Proc.Spawn` only. The constructor and
-        // the proc body run inside the child machine, so their rows
-        // resolve through the child table and the birth grant.
+        // The spawner charges `Proc.Spawn` and the declared row of
+        // `on_spawn`. The birth grant gives the child that same row, so
+        // the spawner passes only authority it already holds.
         self.charge_op(ctx, lm_abi::OP_PROC_SPAWN, span)?;
+        self.charge_row(ctx, &declared_row, span)?;
         if !checked.is_empty() {
             // Lowering reads the interned tuple type of the arguments.
             let elems: Vec<TypeId> = checked.iter().map(|a| a.ty).collect();
