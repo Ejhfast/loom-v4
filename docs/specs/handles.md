@@ -186,17 +186,22 @@ recover if continued execution matters.
 
 ## 8. Bounded waiting
 
-`snapshot_wait(fuel)` runs the controlled world at safe boundaries. It
-captures the first state without a live resource.
+`snapshot_wait(fuel)` first tries an immediate capture.
 
-The fuel limit counts retired guest instructions. It does not measure
-host time.
+When a resource blocks capture, the call advances reachable
+scheduler-owned procs. It never runs the controlled root.
+
+The call visits ready procs in stable round-robin order. It retries
+capture after each retired proc instruction.
+
+The fuel limit counts these proc instructions. It does not measure host
+time.
 
 The call returns the current `ResourceActive` error when the fuel ends.
 It leaves the controlled world valid.
 
-The call also returns when no machine can make progress. It does not
-spin while an external completion remains unavailable.
+The call also returns when no reachable proc can make progress. It does
+not spin while an external completion remains unavailable.
 
 A host application can apply a time limit around repeated fuel-limited
 calls. The VM does not depend on a clock.

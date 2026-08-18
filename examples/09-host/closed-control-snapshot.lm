@@ -1,30 +1,43 @@
-# Store a closed resource control in a snapshot.
+# Checkpoint a service after it completes an in-memory settings read.
 
-def request_memory_file(): Int with Fs.Open
-  case sys.fs.open("memory.txt", ReadOnly)
-  in Ok(_)  then 1
-  in Err(_) then 0
+class CompletedRead
+  control: ResourceHandle
+  text: String
+
+  def init(mut self, control: ResourceHandle, text: String)
+    self.control = control
+    self.text = text
   end
 end
 
-def capture_closed_control(): Bool with Vm
-  program = do ||: Int with Fs.Open
-    request_memory_file()
+def load_cached_settings(): String with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("settings.txt", ReadOnly)
+  in Ok(file)
+    text = case file.read(1024)
+    in Ok(bytes) then bytes.text()
+    in Err(error)
+      return error.message()
+    end
+    case file.close()
+    in Ok(_)      then text
+    in Err(error) then error.message()
+    end
+  in Err(error) then error.message()
   end
-  child = sys.vm.Vm().from_object(program, args: ())
+end
+
+def answer_cached_read(child: Vm[String], control: ResourceHandle): Bool with Vm
   case child.drive()
   in Asked(request)
-    case request.as_call(Fs.Open)
+    case request.as_call(Fs.Read)
     in Some(call)
-      control = child.mint_file(call)
-      if not control.close()
+      args = call.args()
+      requested = child.resource(args[0])
+      if not requested.same_resource(control)
         return false
       end
-      saved = sys.vm.snapshot_self().is_ok()
-      saved and
-        not control.is_open() and
-        not control.same_resource(control) and
-        control.kind() == "file"
+      child.answer(call, Ok(Bytes("cached settings")))
+      true
     in None then false
     end
   in Done(_)  then false
@@ -32,4 +45,72 @@ def capture_closed_control(): Bool with Vm
   end
 end
 
-capture_closed_control()
+def answer_cached_close(child: Vm[String], control: ResourceHandle): Bool with Vm
+  case child.drive()
+  in Asked(request)
+    case request.as_call(Fs.Close)
+    in Some(call)
+      args = call.args()
+      requested = child.resource(args[0])
+      if not requested.same_resource(control)
+        return false
+      end
+      child.answer(call, Ok(()))
+      true
+    in None then false
+    end
+  in Done(_)  then false
+  in Fault(_) then false
+  end
+end
+
+def checkpoint_completed_read(child: Vm[String], control: ResourceHandle): String with Vm
+  if not answer_cached_read(child, control)
+    return "the driver did not answer the settings read"
+  end
+  if not answer_cached_close(child, control)
+    return "the driver did not answer the settings close"
+  end
+
+  text = case child.run()
+  in Done(value) then value
+  in Fault(_)
+    return "the application faulted"
+  end
+  completed = CompletedRead(control, text)
+
+  # The service keeps this completed request for accounting.
+  if completed.control.is_open()
+    return "the completed request still owns a live file"
+  end
+
+  # The snapshot stores the closed control without host authority.
+  if sys.vm.snapshot_self().is_err()
+    return "the completed request blocked the snapshot"
+  end
+  if completed.control.kind() != "file"
+    return "the restored marker lost its resource kind"
+  end
+  completed.text
+end
+
+def capture_completed_read(): String with Vm
+  child = sys.vm.Vm().from_object(load_cached_settings, args: ())
+
+  # The first request opens the driver's in-memory file.
+  case child.drive()
+  in Asked(request)
+    case request.as_call(Fs.Open)
+    in Some(call)
+      # `mint_file` answers the open and creates driver control.
+      control = child.mint_file(call)
+      checkpoint_completed_read(child, control)
+    in None
+      "the application did not request its settings file"
+    end
+  in Done(_)  then "the application completed before opening its file"
+  in Fault(_) then "the application faulted before opening its file"
+  end
+end
+
+capture_completed_read()

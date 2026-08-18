@@ -1,94 +1,89 @@
-# Close a child file before a snapshot, then restore the child.
+# Force-close an application's transient file before a snapshot.
 
-def observe_forced_close(): String with Fs.Open, Fs.Close, Io.Print
+def read_and_close(file: FileHandle): String with Fs.Read, Fs.Close
+  text = case file.read(1024)
+  in Ok(bytes) then bytes.text()
+  in Err(error)
+    return error.message()
+  end
+  case file.close()
+  in Ok(_)      then text
+  in Err(error) then error.message()
+  end
+end
+
+def checkpointable_reader(): String with Fs.Open, Fs.Read, Fs.Close
   case sys.fs.open("message.txt", ReadOnly)
   in Ok(file)
-    sys.io.print("the file is open")
-    case file.close()
-    in Err(Closed) then "the restored child observed a closed file"
-    in Err(error)  then error.message()
-    in Ok(_)       then "the file remained open"
+    case file.read(1024)
+    in Ok(bytes)
+      file.close()
+      bytes.text()
+    in Err(Closed)
+      # The restored application recovers from forced closure.
+      case sys.fs.open("message.txt", ReadOnly)
+      in Ok(reopened) then "reopened {read_and_close(reopened)}"
+      in Err(error)   then error.message()
+      end
+    in Err(error) then error.message()
     end
   in Err(error) then error.message()
   end
 end
 
-def dispatch_open(vm: Vm[String]): Bool with Vm
-  case vm.drive()
+def start_reader(child: Vm[String]): Bool with Vm
+  # `drive` exposes the open request before policy dispatch.
+  case child.drive()
   in Asked(request)
     case request.as_call(Fs.Open)
     in Some(_)
-      vm.dispatch(request)
+      # `dispatch` applies the filesystem policy and completes the open.
+      child.dispatch(request)
       true
-    in None
-      vm.dispatch(request)
-      false
+    in None then false
     end
   in Done(_)  then false
   in Fault(_) then false
   end
 end
 
-def stop_at_print(vm: Vm[String]): Bool with Vm
-  case vm.drive()
-  in Asked(request) then request.as_call(Io.Print).is_some()
-  in Done(_)        then false
-  in Fault(_)       then false
-  end
-end
-
-def resume_snapshot(snapshot: Snapshot[String]): String with Vm, Fs.Close
+def resume_reader(snapshot: Snapshot[String]): String with Vm, Fs
   case sys.vm.Vm().restore(snapshot)
   in Ok(restored)
-    restored.table().pass(Fs.Close)
-    case restored.drive()
-    in Asked(request)
-      case request.as_call(Io.Print)
-      in Some(call) then restored.answer(call, ())
-      in None
-        restored.dispatch(request)
-        return "the restored child requested an unexpected effect"
-      end
-    in Done(_)
-      return "the restored child completed too early"
-    in Fault(_)
-      return "the restored child faulted"
-    end
+    # Restore creates a new default-deny policy table.
+    restored.table().pass(Fs)
     case restored.run()
     in Done(message) then message
-    in Fault(_)      then "the restored child faulted"
+    in Fault(_)      then "the restored application faulted"
     end
   in Err(_) then "the snapshot did not restore"
   end
 end
 
-def demonstrate_managed_snapshot(): String with Vm, Fs.Open, Fs.Close
-  program = do ||: String with Fs.Open, Fs.Close, Io.Print
-    observe_forced_close()
-  end
-  child = sys.vm.Vm().from_object(program, args: ())
-  child.table().pass(Fs.Open)
+def demonstrate_managed_snapshot(): String with Vm, Fs
+  child = sys.vm.Vm().from_object(checkpointable_reader, args: ())
 
-  if not dispatch_open(child)
-    return "the child did not request a file"
-  end
-  if not stop_at_print(child)
-    return "the child did not reach its pause point"
+  # The supervisor permits normal filesystem requests.
+  child.table().pass(Fs)
+  if not start_reader(child)
+    return "the application did not open its input file"
   end
   if child.snapshot().is_ok()
-    return "a live file entered a snapshot"
+    return "a live file entered the snapshot"
   end
 
+  # `handles` returns controls for all live child resources.
   controls = child.handles()
   if controls.len() != 1
-    return "the holder did not find one live file"
+    return "the supervisor did not find one live file"
   end
   if not controls.at(0).close()
-    return "the holder did not close the file"
+    return "the supervisor did not close the file"
   end
 
+  # The closed handle stays as ordinary child state.
   case child.snapshot()
-  in Ok(snapshot) then resume_snapshot(snapshot)
+  in Ok(snapshot) then resume_reader(snapshot)
   in Err(_)       then "the closed file blocked the snapshot"
   end
 end

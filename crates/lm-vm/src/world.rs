@@ -638,15 +638,16 @@ impl<'m> World<'m> {
         self.control(0, StopMode::OneStep, Family::Step)
     }
 
-    /// Run a controlled machine until one snapshot can exclude live resources.
+    /// Wait for reachable procs to release live snapshot resources.
     ///
-    /// `fuel` counts retired guest instructions. The call never waits
-    /// for an unavailable external completion.
+    /// `fuel` counts proc instructions. This call never runs the held
+    /// root. It never waits for an unavailable host completion.
     pub fn snapshot_wait(
         &mut self,
         root: VmId,
         mut fuel: u64,
     ) -> Result<crate::snapshot::SnapshotImage, crate::snapshot::SnapshotFail> {
+        let mut last_task = None;
         loop {
             let barrier = self.next_gate();
             let active = match self.capture_snapshot(barrier, root, false) {
@@ -657,17 +658,43 @@ impl<'m> World<'m> {
             if fuel == 0 {
                 return Err(active);
             }
-            if !matches!(
-                self.machines[root as usize].vm.state,
-                MachineState::Ready | MachineState::Waiting
-            ) {
+            let machines = self.controlled_machines(root).map_err(|code| {
+                crate::snapshot::SnapshotFail::Fault(
+                    code,
+                    "the snapshot wait could not inspect the machine world".to_string(),
+                )
+            })?;
+
+            let completed = self.poll_host_completion(|key| machines.contains(&key.machine.vm));
+            if completed.is_some() {
+                continue;
+            }
+
+            let ready: Vec<TaskKey> = self
+                .scheduler_seeds(false)
+                .into_iter()
+                .filter_map(|(key, status)| {
+                    (machines.contains(&key.vm) && status == TaskStatus::Ready).then_some(key)
+                })
+                .collect();
+            if ready.is_empty() {
                 return Err(active);
             }
+            let next = last_task
+                .and_then(|last| ready.iter().position(|key| *key > last))
+                .unwrap_or(0);
+            let key = ready[next];
+            last_task = Some(key);
+
             let before = self.budget.fuel;
-            let _ = self.control(root, StopMode::OneStep, Family::Step);
+            let exit = self.drive_slice(key, 1);
+            if exit == Some(SliceExit::Terminal) {
+                self.retire_scheduler_task(key);
+            }
             let retired = before.saturating_sub(self.budget.fuel);
             if retired == 0 {
-                return Err(active);
+                let barrier = self.next_gate();
+                return self.capture_snapshot(barrier, root, false);
             }
             fuel = fuel.saturating_sub(retired);
         }
@@ -1011,8 +1038,6 @@ impl<'m> World<'m> {
                         );
                         return RootEvent::Ran;
                     }
-                    let module = self.module;
-                    let dispatch = self.dispatch;
                     if self.budget.fuel == 0 {
                         self.machines[act.vm as usize].set_fault(FaultCode::OutOfFuel, "", None);
                         continue;
@@ -1025,6 +1050,8 @@ impl<'m> World<'m> {
                     };
                     let available = self.budget.fuel.min(u64::from(u32::MAX)) as u32;
                     let limit = requested.min(available);
+                    let module = self.module;
+                    let dispatch = self.dispatch;
                     let envs = &mut self.envs;
                     let machine = &mut self.machines[act.vm as usize];
                     let (outcome, retired) =
@@ -1768,8 +1795,8 @@ impl<'m> World<'m> {
         self.machines[holder as usize].alloc(Object::NativeResourceHandle { surface, resource })
     }
 
-    /// Find every live file resource in one controlled machine world.
-    fn controlled_file_resources(&mut self, root: VmId) -> Result<Vec<u64>, FaultCode> {
+    /// Find every machine in one controlled machine world.
+    fn controlled_machines(&mut self, root: VmId) -> Result<Vec<VmId>, FaultCode> {
         let mut machines = Vec::new();
         let mut queue = std::collections::VecDeque::from([root]);
         while let Some(machine) = queue.pop_front() {
@@ -1783,6 +1810,12 @@ impl<'m> World<'m> {
                 }
             }
         }
+        Ok(machines)
+    }
+
+    /// Find every live file resource in one controlled machine world.
+    fn controlled_file_resources(&mut self, root: VmId) -> Result<Vec<u64>, FaultCode> {
+        let machines = self.controlled_machines(root)?;
         let mut resources = std::collections::BTreeSet::new();
         for (resource, file) in &self.files {
             if machines.contains(&file.owner) {

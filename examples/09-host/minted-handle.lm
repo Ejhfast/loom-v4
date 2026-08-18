@@ -1,20 +1,10 @@
-# Back a child file with bytes that the parent owns.
-
-class MemoryFile
-  control: ResourceHandle
-  contents: Bytes
-
-  def init(mut self, control: ResourceHandle, contents: Bytes)
-    self.control = control
-    self.contents = contents
-  end
-end
+# Back a child's ordinary file operations with parent-owned bytes.
 
 def read_memory_file(): String with Fs.Open, Fs.Read, Fs.Close
   case sys.fs.open("memory.txt", ReadOnly)
   in Ok(file)
     text = case file.read(1024)
-    in Ok(bytes)  then bytes.text()
+    in Ok(bytes) then bytes.text()
     in Err(error)
       return error.message()
     end
@@ -26,44 +16,35 @@ def read_memory_file(): String with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def mint_memory_file(vm: Vm[String]): Result[MemoryFile, String] with Vm
-  case vm.drive()
-  in Asked(request)
-    case request.as_call(Fs.Open)
-    in Some(call)
-      control = vm.mint_file(call)
-      Ok(MemoryFile(control, Bytes("parent memory")))
-    in None
-      vm.dispatch(request)
-      Err("the child did not request a file")
-    end
-  in Done(_)  then Err("the child completed before opening a file")
-  in Fault(_) then Err("the child faulted before opening a file")
-  end
-end
-
-def serve_file_request(vm: Vm[String], request: Request, file: MemoryFile): Bool with Vm
+def serve_memory_request(
+  child: Vm[String],
+  request: Request,
+  control: ResourceHandle,
+  contents: Bytes
+): Bool with Vm
   case request.as_call(Fs.Read)
   in Some(call)
     args = call.args()
-    requested = vm.resource(args[0])
-    if not requested.same_resource(file.control)
-      vm.answer(call, Err(Failed("the file does not belong to this driver")))
-    elsif args[1] < file.contents.len()
-      vm.answer(call, Err(Failed("the read limit is too small")))
+
+    # `resource` gives the parent control for this child handle.
+    requested = child.resource(args[0])
+    if not requested.same_resource(control)
+      child.answer(call, Err(Failed("the file does not belong to this driver")))
+    elsif args[1] < contents.len()
+      child.answer(call, Err(Failed("the read limit is too small")))
     else
-      vm.answer(call, Ok(file.contents))
+      child.answer(call, Ok(contents))
     end
     true
   in None
     case request.as_call(Fs.Close)
     in Some(call)
       args = call.args()
-      requested = vm.resource(args[0])
-      if requested.same_resource(file.control)
-        vm.answer(call, Ok(()))
+      requested = child.resource(args[0])
+      if requested.same_resource(control)
+        child.answer(call, Ok(()))
       else
-        vm.answer(call, Err(Failed("the file does not belong to this driver")))
+        child.answer(call, Err(Failed("the file does not belong to this driver")))
       end
       true
     in None then false
@@ -71,12 +52,18 @@ def serve_file_request(vm: Vm[String], request: Request, file: MemoryFile): Bool
   end
 end
 
-def drive_memory_file(vm: Vm[String], file: MemoryFile): String with Vm
+def drive_memory_file(
+  child: Vm[String],
+  control: ResourceHandle,
+  contents: Bytes
+): String with Vm
   loop do
-    case vm.drive()
+    # Each `drive` exposes one request before policy dispatch.
+    case child.drive()
     in Asked(request)
-      if not serve_file_request(vm, request, file)
-        vm.dispatch(request)
+      if not serve_memory_request(child, request, control, contents)
+        # `dispatch` applies policy to requests outside this driver.
+        child.dispatch(request)
       end
     in Done(text)
       return text
@@ -88,19 +75,25 @@ def drive_memory_file(vm: Vm[String], file: MemoryFile): String with Vm
 end
 
 def demonstrate_memory_file(): String with Vm
-  program = do ||: String with Fs.Open, Fs.Read, Fs.Close
-    read_memory_file()
-  end
-  child = sys.vm.Vm().from_object(program, args: ())
-  case mint_memory_file(child)
-  in Ok(file)
-    text = drive_memory_file(child, file)
-    if file.control.is_open()
-      "the child did not close the memory file"
-    else
-      text
+  child = sys.vm.Vm().from_object(read_memory_file, args: ())
+
+  # The first request opens the parent's in-memory file.
+  case child.drive()
+  in Asked(request)
+    case request.as_call(Fs.Open)
+    in Some(call)
+      # `mint_file` answers the open and routes later operations here.
+      control = child.mint_file(call)
+      text = drive_memory_file(child, control, Bytes("parent memory"))
+      if control.is_open()
+        "the child did not close the memory file"
+      else
+        text
+      end
+    in None then "the child did not request a file"
     end
-  in Err(message) then message
+  in Done(_)  then "the child completed before opening a file"
+  in Fault(_) then "the child faulted before opening a file"
   end
 end
 

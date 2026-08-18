@@ -814,7 +814,8 @@ operations, and TCP.
   attachment blocks snapshot creation.
 - Keep closed handle values as ordinary machine state. Restored closed
   handles remain closed.
-- Add fuel-bounded snapshot waiting for transient resource state.
+- Add fuel-bounded snapshot waiting over reachable procs for transient
+  resource state.
 - Register live TCP streams and listeners the same way. Do not reopen
   a connection silently.
 - Defer checkpointable file and connection types with explicit

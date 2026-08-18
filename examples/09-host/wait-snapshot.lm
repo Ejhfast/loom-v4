@@ -1,57 +1,93 @@
-# Wait until a child closes its transient file.
+# Checkpoint an application after its background indexer releases a file.
 
-def open_then_close(): String with Fs.Open, Fs.Close
+def index_file(file: FileHandle): Int with Fs.Read, Fs.Close
+  size = case file.read(1024)
+  in Ok(bytes) then bytes.len()
+  in Err(_)
+    return 0 - 1
+  end
+
+  # The indexer owns this transient file until its work ends.
+  case file.close()
+  in Ok(_)  then size
+  in Err(_) then 0 - 1
+  end
+end
+
+def start_background_index(): String with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Io.Print
   case sys.fs.open("message.txt", ReadOnly)
   in Ok(file)
-    case file.close()
-    in Ok(_)      then "the child closed its file"
-    in Err(error) then error.message()
+    # The application gives the indexer its input file.
+    worker = sys.vm.Vm().from_object(index_file, args: (file,))
+    worker.table().pass(Fs.Read)
+    worker.table().pass(Fs.Close)
+    job = sys.proc.run(worker)
+
+    # This progress log gives the supervisor a useful checkpoint point.
+    sys.io.print("the background index is running")
+
+    case job.done()
+    in Done(size) then "indexed {size} bytes"
+    in Fault(_)   then "the background index failed"
     end
   in Err(error) then error.message()
   end
 end
 
-def dispatch_open(vm: Vm[String]): Bool with Vm
-  case vm.drive()
-  in Asked(request)
-    case request.as_call(Fs.Open)
-    in Some(_)
-      vm.dispatch(request)
-      true
-    in None
-      vm.dispatch(request)
-      false
+def supervise_index(child: Vm[String]): String with Vm
+  loop do
+    # `drive` exposes each request before the child's policy handles it.
+    case child.drive()
+    in Asked(request)
+      case request.as_call(Io.Print)
+      in Some(_)
+        # The indexer still owns a live file at this progress log.
+        if child.snapshot_wait(0).is_ok()
+          return "the live file entered the first snapshot"
+        end
+
+        # One instruction cannot finish the index operation.
+        if child.snapshot_wait(1).is_ok()
+          return "the short wait ignored its fuel limit"
+        end
+
+        # Only reachable procs run while this bounded wait continues.
+        if child.snapshot_wait(1000).is_err()
+          return "the indexer did not release its file"
+        end
+
+        # The normal policy emits the observed log after the snapshot.
+        child.dispatch(request)
+        case child.run()
+        in Done(message)
+          return message
+        in Fault(_)
+          return "the application faulted"
+        end
+      in None
+        # `dispatch` applies the policy that the supervisor configured.
+        child.dispatch(request)
+      end
+    in Done(message)
+      return message
+    in Fault(_)
+      return "the application faulted"
     end
-  in Done(_)  then false
-  in Fault(_) then false
   end
+  "the supervisor stopped"
 end
 
-def demonstrate_snapshot_wait(): String with Vm, Fs.Open, Fs.Close
-  program = do ||: String with Fs.Open, Fs.Close
-    open_then_close()
-  end
-  child = sys.vm.Vm().from_object(program, args: ())
-  child.table().pass(Fs.Open)
-  child.table().pass(Fs.Close)
+def demonstrate_snapshot_wait(): String with Vm, Fs, Proc, Io.Print
+  child = sys.vm.Vm().from_object(start_background_index, args: ())
 
-  if not dispatch_open(child)
-    return "the child did not request a file"
-  end
-  if child.snapshot_wait(0).is_ok()
-    return "zero fuel did not report the live file"
-  end
-  if child.snapshot_wait(1000).is_err()
-    return "the child did not close its file before the fuel ended"
-  end
-  if child.handles().len() != 0
-    return "the closed file remained live"
-  end
+  # These entries permit the application's ordinary work.
+  child.table().pass(Fs)
+  child.table().pass(Vm)
+  child.table().pass(Proc)
+  child.table().pass(Io.Print)
 
-  case child.run()
-  in Done(message) then message
-  in Fault(_)      then "the child faulted"
-  end
+  # The supervisor handles the progress log itself.
+  supervise_index(child)
 end
 
 demonstrate_snapshot_wait()

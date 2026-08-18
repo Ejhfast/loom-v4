@@ -2262,8 +2262,9 @@ machine world. A resource control stays with its holder.
 `Vm.ResourceSame` matches two controls only while their shared entry
 is live. A closed control never matches.
 
-`Vm.SnapshotWaitHeld` spends guest instruction fuel. It returns when
-a snapshot succeeds, fuel ends, or the machine cannot progress.
+`Vm.SnapshotWaitHeld` advances only reachable scheduler-owned procs.
+Its fuel counts their retired instructions. It never runs the held root.
+It returns when capture succeeds, fuel ends, or no reachable proc can progress.
 
 ### 23.6 Proc operations
 

@@ -62,7 +62,7 @@ fn a_holder_closes_live_handles_before_a_snapshot() {
 
     assert_eq!(
         world.show_outcome(&outcome),
-        "Done(\"the restored child observed a closed file\")",
+        "Done(\"reopened snapshot data\")",
         "child fault: {:?}",
         world.fault_of(1)
     );
@@ -177,15 +177,29 @@ end
 }
 
 #[test]
-fn snapshot_wait_uses_guest_instruction_fuel() {
+fn snapshot_wait_advances_reachable_background_work() {
+    let text = source("examples/09-host/wait-snapshot.lm");
+    let bytes = compile_to_bytes("wait-snapshot.lm", &text).expect("the example compiles");
+    let loaded = load_bytes(&bytes).expect("the example loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut()
+        .set_file("message.txt", b"transient".to_vec());
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    for grant in ["Vm", "Fs", "Proc", "Io.Print"] {
+        world.allow(grant).expect("the grant exists");
+    }
+
+    let outcome = lm_proc::run_world(&mut world);
+
     assert_eq!(
-        run_example(
-            "examples/09-host/wait-snapshot.lm",
-            &["Vm", "Fs"],
-            Some(("message.txt", b"transient")),
-        ),
-        "Done(\"the child closed its file\")"
+        world.show_outcome(&outcome),
+        "Done(\"indexed 9 bytes\")",
+        "root fault: {:?}; child fault: {:?}; worker fault: {:?}",
+        world.fault_of(0),
+        world.fault_of(1),
+        world.fault_of(2)
     );
+    assert!(world.last_snapshot().is_some());
 }
 
 #[test]
@@ -203,7 +217,7 @@ fn a_closed_resource_control_survives_restore() {
 
     let outcome = lm_proc::run_world(&mut world);
 
-    assert_eq!(world.show_outcome(&outcome), "Done(true)");
+    assert_eq!(world.show_outcome(&outcome), "Done(\"cached settings\")");
     let image = world
         .last_snapshot()
         .expect("the program captured a snapshot")

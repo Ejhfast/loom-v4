@@ -1,6 +1,6 @@
-# Give a child one file that the parent already opened.
+# Give a sandboxed parser one configuration file that its parent approved.
 
-def read_shared_file(): String with Fs.Open, Fs.Read, Fs.Close
+def read_virtual_config(): String with Fs.Open, Fs.Read, Fs.Close
   case sys.fs.open("virtual.txt", ReadOnly)
   in Ok(file)
     text = case file.read(1024)
@@ -16,33 +16,33 @@ def read_shared_file(): String with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def answer_open(vm: Vm[String], file: FileHandle): Bool with Vm
+def supply_approved_file(vm: Vm[String], file: FileHandle): Bool with Vm
+  # `drive` exposes the child's next request before policy dispatch.
   case vm.drive()
   in Asked(request)
     case request.as_call(Fs.Open)
     in Some(call)
+      # `answer` gives the child an alias of the existing handle.
       vm.answer(call, Ok(file))
       true
-    in None
-      vm.dispatch(request)
-      false
+    in None then false
     end
   in Done(_)  then false
   in Fault(_) then false
   end
 end
 
-def demonstrate_shared_handle(): String with Vm, Fs.Open, Fs.Read, Fs.Close
+def demonstrate_approved_file(): String with Vm, Fs.Open, Fs.Read, Fs.Close
   case sys.fs.open("message.txt", ReadOnly)
   in Ok(parent_file)
-    program = do ||: String with Fs.Open, Fs.Read, Fs.Close
-      read_shared_file()
-    end
-    child = sys.vm.Vm().from_object(program, args: ())
+    # The parser sees only its virtual configuration path.
+    child = sys.vm.Vm().from_object(read_virtual_config, args: ())
+
+    # Later read and close requests can reach the handle's host.
     child.table().pass(Fs.Read)
     child.table().pass(Fs.Close)
 
-    if not answer_open(child, parent_file)
+    if not supply_approved_file(child, parent_file)
       return "the child did not request a file"
     end
 
@@ -52,6 +52,7 @@ def demonstrate_shared_handle(): String with Vm, Fs.Open, Fs.Read, Fs.Close
       return "the child faulted"
     end
 
+    # Closing either alias closes their shared resource entry.
     case parent_file.read(1)
     in Err(Closed) then text
     in Err(error)  then error.message()
@@ -61,4 +62,4 @@ def demonstrate_shared_handle(): String with Vm, Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-demonstrate_shared_handle()
+demonstrate_approved_file()
