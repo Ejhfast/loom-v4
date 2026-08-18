@@ -428,6 +428,14 @@ impl Machine {
                     Ok(class)
                 }
             }
+            Value::Bool(_) => {
+                let class = module.core_roles[lm_bytecode::corepin::ROLE_BOOL];
+                if class == lm_bytecode::NO_ROLE {
+                    Err(BAD_TYPE)
+                } else {
+                    Ok(class)
+                }
+            }
             Value::Obj(reference) => match self.vm.heap.get(reference) {
                 Object::Instance { class, .. } => Ok(*class),
                 _ => Err(BAD_TYPE),

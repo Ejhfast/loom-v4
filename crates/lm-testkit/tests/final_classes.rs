@@ -91,3 +91,30 @@ fn the_verifier_rejects_a_final_parent() {
     let error = lm_verify::verify_module(&module).expect_err("the module rejects");
     assert!(error.message.contains("inherit a final class"), "{error}");
 }
+
+#[test]
+fn a_final_generic_method_resolves_directly() {
+    let source = "final class Box[T]\n  value: T\n  def init(mut self, value: T)\n    \
+                  self.value = value\n  end\n  def get(self): T\n    self.value\n  end\nend\n\
+                  Box[Int](42).get()\n";
+    let module = compile_text("final_generic.lm", source).expect("the program compiles");
+    let target = module
+        .funcs
+        .iter()
+        .position(|func| func.name == "Box.get")
+        .expect("Box.get exists") as u32;
+    let entry = &module.funcs[module.entry as usize];
+    assert!(entry.blocks.iter().flatten().all(|instr| {
+        !matches!(instr, lm_bytecode::Instr::CallVirtual { .. })
+            && !matches!(instr, lm_bytecode::Instr::CallVirtualG { .. })
+    }));
+    assert!(entry
+        .blocks
+        .iter()
+        .flatten()
+        .any(|instr| matches!(instr, lm_bytecode::Instr::CallG { func, .. } if *func == target)));
+    assert_eq!(
+        run_text("final_generic.lm", source, VmConfig::default()).unwrap(),
+        "Done(42)"
+    );
+}

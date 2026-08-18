@@ -233,6 +233,11 @@ fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {
             .get("Int")
             .copied()
             .map(|class| (class, vec![])),
+        Type::Bool => ctx
+            .core_types
+            .get("Bool")
+            .copied()
+            .map(|class| (class, vec![])),
         Type::Class(c) => Some((c.0, vec![])),
         Type::Inst(c, args) => Some((c.0, args.clone())),
         _ => None,
@@ -1082,19 +1087,11 @@ impl<'o> FnChecker<'o> {
             }
             ExprKind::Not(inner) => {
                 let inner = self.check_expr(ctx, inner, BOOL)?;
-                Ok(HExpr {
-                    ty: BOOL,
-                    mutable: true,
-                    kind: HExprKind::Not(Box::new(inner)),
-                })
+                Ok(Self::primitive_operator(ctx, "Bool", "_not", vec![inner]))
             }
             ExprKind::Neg(inner) => {
                 let inner = self.check_expr(ctx, inner, INT)?;
-                Ok(HExpr {
-                    ty: INT,
-                    mutable: true,
-                    kind: HExprKind::Neg(Box::new(inner)),
-                })
+                Ok(Self::primitive_operator(ctx, "Int", "_neg", vec![inner]))
             }
             ExprKind::Binary { op, left, right } => self.synth_binary(ctx, *op, left, right),
             ExprKind::And(left, right) => {
@@ -4212,6 +4209,30 @@ impl<'o> FnChecker<'o> {
         Ok(Some(out))
     }
 
+    /// Build one direct call to a final primitive method.
+    fn primitive_operator(ctx: &Ctx, class_name: &str, name: &str, args: Vec<HExpr>) -> HExpr {
+        let class = *ctx
+            .core_types
+            .get(class_name)
+            .expect("the core primitive class exists");
+        let method = ctx.classes[class as usize]
+            .methods
+            .iter()
+            .find(|method| method.name == name)
+            .expect("the core primitive method exists");
+        debug_assert_eq!(args.len(), method.params.len() + 1);
+        HExpr {
+            ty: method.ret,
+            mutable: true,
+            kind: HExprKind::Call {
+                func: method.func,
+                targs: vec![],
+                rowargs: vec![],
+                args,
+            },
+        }
+    }
+
     fn synth_binary(
         &mut self,
         ctx: &mut Ctx,
@@ -4223,30 +4244,27 @@ impl<'o> FnChecker<'o> {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 let l = self.check_expr(ctx, left, INT)?;
                 let r = self.check_expr(ctx, right, INT)?;
-                Ok(HExpr {
-                    ty: INT,
-                    mutable: true,
-                    kind: HExprKind::Binary {
-                        op,
-                        operand_ty: INT,
-                        left: Box::new(l),
-                        right: Box::new(r),
-                    },
-                })
+                let name = match op {
+                    BinOp::Add => "_add",
+                    BinOp::Sub => "_sub",
+                    BinOp::Mul => "_mul",
+                    BinOp::Div => "_div",
+                    BinOp::Rem => "_rem",
+                    _ => unreachable!(),
+                };
+                Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let l = self.check_expr(ctx, left, INT)?;
                 let r = self.check_expr(ctx, right, INT)?;
-                Ok(HExpr {
-                    ty: BOOL,
-                    mutable: true,
-                    kind: HExprKind::Binary {
-                        op,
-                        operand_ty: INT,
-                        left: Box::new(l),
-                        right: Box::new(r),
-                    },
-                })
+                let name = match op {
+                    BinOp::Lt => "_lt",
+                    BinOp::Le => "_le",
+                    BinOp::Gt => "_gt",
+                    BinOp::Ge => "_ge",
+                    _ => unreachable!(),
+                };
+                Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
             }
             BinOp::Eq | BinOp::Ne => {
                 let l = self.synth_expr(ctx, left)?;
@@ -4306,6 +4324,11 @@ impl<'o> FnChecker<'o> {
                         ),
                         left.span,
                     ));
+                }
+                if matches!(operand_ty, INT | BOOL) {
+                    let class = if operand_ty == BOOL { "Bool" } else { "Int" };
+                    let name = if op == BinOp::Eq { "_eq" } else { "_ne" };
+                    return Ok(Self::primitive_operator(ctx, class, name, vec![l, r]));
                 }
                 Ok(HExpr {
                     ty: BOOL,

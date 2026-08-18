@@ -232,8 +232,10 @@ fn a_closure_keeps_its_creator_environment_across_a_boundary() {
 /// Every frame environment ordinal resolves during admission.
 #[test]
 fn a_nonbottom_frame_environment_must_resolve() {
-    let loaded =
-        program("def inner(): Int\n  40 + 2\nend\n\ndef outer(): Int\n  inner()\nend\n\nouter()\n");
+    let loaded = program(
+        "def inner(): Int\n  value = 40\n  value + 2\nend\n\n\
+         def outer(): Int\n  inner()\nend\n\nouter()\n",
+    );
     let images = boundaries(&loaded, &[], 20);
     let mut broken = pick(&images, "a direct callee frame", |image| {
         image.machines[0]

@@ -600,7 +600,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     .and_then(Clone::clone);
                 if targs.is_empty() && rowargs.is_empty() {
                     if let Some(template) = inline {
-                        if let Some(expr) = instantiate_inline(&template, args) {
+                        if let Some(expr) =
+                            instantiate_inline(&template, args, &self.m.inline_bodies)
+                        {
                             self.lower_expr(&expr);
                             return;
                         }
@@ -830,10 +832,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 };
                 self.emit(instr);
             }
-            HExprKind::Intrinsic { intrinsic, args } => match *intrinsic {
-                lm_abi::INTRINSIC_INT_ABS => self.lower_int_abs(&args[0]),
-                _ => unreachable!("the checker accepts only manifest intrinsics"),
-            },
+            HExprKind::Intrinsic { intrinsic, args } => self.lower_intrinsic(*intrinsic, args),
             HExprKind::Interp(parts) => {
                 self.m.intern_type(BcType::StringBuilder);
                 self.emit(Instr::SbNew);
@@ -1022,6 +1021,36 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         self.switch_to(join);
     }
 
+    /// Lower one manifest intrinsic to existing instructions.
+    fn lower_intrinsic(&mut self, intrinsic: lm_abi::IntrinsicSlot, args: &[HExpr]) {
+        if intrinsic == lm_abi::INTRINSIC_INT_ABS {
+            self.lower_int_abs(&args[0]);
+            return;
+        }
+        for arg in args {
+            self.lower_expr(arg);
+        }
+        let instr = match intrinsic {
+            lm_abi::INTRINSIC_INT_NEG => Instr::Neg,
+            lm_abi::INTRINSIC_INT_ADD => Instr::Add,
+            lm_abi::INTRINSIC_INT_SUB => Instr::Sub,
+            lm_abi::INTRINSIC_INT_MUL => Instr::Mul,
+            lm_abi::INTRINSIC_INT_DIV => Instr::Div,
+            lm_abi::INTRINSIC_INT_REM => Instr::Rem,
+            lm_abi::INTRINSIC_INT_EQ => Instr::EqInt,
+            lm_abi::INTRINSIC_INT_NE => Instr::NeInt,
+            lm_abi::INTRINSIC_INT_LT => Instr::LtInt,
+            lm_abi::INTRINSIC_INT_LE => Instr::LeInt,
+            lm_abi::INTRINSIC_INT_GT => Instr::GtInt,
+            lm_abi::INTRINSIC_INT_GE => Instr::GeInt,
+            lm_abi::INTRINSIC_BOOL_NOT => Instr::Not,
+            lm_abi::INTRINSIC_BOOL_EQ => Instr::EqBool,
+            lm_abi::INTRINSIC_BOOL_NE => Instr::NeBool,
+            _ => unreachable!("the checker accepts only manifest intrinsics"),
+        };
+        self.emit(instr);
+    }
+
     /// The argument of a core `Option[T]` result type.
     fn option_arg(&self, ty: TypeId) -> TypeId {
         match self.m.store.get(ty) {
@@ -1206,10 +1235,11 @@ fn inline_body(func: &HirFunc) -> Option<HExpr> {
 }
 
 /// Replace ordered parameter reads with the caller expressions.
-fn instantiate_inline(template: &HExpr, args: &[HExpr]) -> Option<HExpr> {
+fn instantiate_inline(template: &HExpr, args: &[HExpr], bodies: &[Option<HExpr>]) -> Option<HExpr> {
     let mut next = 0;
     let mut nodes = 0;
-    let expr = instantiate_inline_expr(template, args, &mut next, &mut nodes)?;
+    let mut active = Vec::new();
+    let expr = instantiate_inline_expr(template, args, &mut next, &mut nodes, bodies, &mut active)?;
     (next == args.len()).then_some(expr)
 }
 
@@ -1218,6 +1248,8 @@ fn instantiate_inline_expr(
     args: &[HExpr],
     next: &mut usize,
     nodes: &mut usize,
+    bodies: &[Option<HExpr>],
+    active: &mut Vec<u32>,
 ) -> Option<HExpr> {
     *nodes += 1;
     if *nodes > INLINE_NODE_LIMIT {
@@ -1235,18 +1267,48 @@ fn instantiate_inline_expr(
         }
         HExprKind::Unit | HExprKind::Int(_) | HExprKind::Str(_) | HExprKind::Bool(_) => {}
         HExprKind::Not(inner) | HExprKind::Neg(inner) => {
-            **inner = instantiate_inline_expr(inner, args, next, nodes)?;
+            **inner = instantiate_inline_expr(inner, args, next, nodes, bodies, active)?;
         }
         HExprKind::Binary { left, right, .. }
         | HExprKind::And(left, right)
         | HExprKind::Or(left, right) => {
-            **left = instantiate_inline_expr(left, args, next, nodes)?;
-            **right = instantiate_inline_expr(right, args, next, nodes)?;
+            **left = instantiate_inline_expr(left, args, next, nodes, bodies, active)?;
+            **right = instantiate_inline_expr(right, args, next, nodes, bodies, active)?;
         }
         HExprKind::Native { args: operands, .. } | HExprKind::Intrinsic { args: operands, .. } => {
             for operand in operands {
-                *operand = instantiate_inline_expr(operand, args, next, nodes)?;
+                *operand = instantiate_inline_expr(operand, args, next, nodes, bodies, active)?;
             }
+        }
+        HExprKind::Call {
+            func,
+            targs,
+            rowargs,
+            args: call_args,
+        } => {
+            if !targs.is_empty() || !rowargs.is_empty() || active.contains(func) {
+                return None;
+            }
+            for arg in call_args.iter_mut() {
+                *arg = instantiate_inline_expr(arg, args, next, nodes, bodies, active)?;
+            }
+            let template = bodies.get(*func as usize)?.as_ref()?;
+            active.push(*func);
+            let mut callee_next = 0;
+            let expanded = instantiate_inline_expr(
+                template,
+                call_args,
+                &mut callee_next,
+                nodes,
+                bodies,
+                active,
+            );
+            active.pop();
+            let expanded = expanded?;
+            if callee_next != call_args.len() {
+                return None;
+            }
+            return Some(expanded);
         }
         _ => return None,
     }
@@ -1567,6 +1629,21 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             captures: vec![],
             local_types: vec![],
             blocks: vec![vec![Instr::ConstInt(0), Instr::Return]],
+        };
+    }
+    if class.native_repr == Some(NativeRepr::Bool) {
+        let bool_ty = m.intern_type(BcType::Bool);
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: bool_ty,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::ConstBool(false), Instr::Return]],
         };
     }
     let params: Vec<u32> = class.ctor_params.iter().map(|t| m.bc_ty(*t)).collect();

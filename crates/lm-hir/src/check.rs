@@ -1845,6 +1845,7 @@ fn resolve_class(
     let (type_names, _) = split_generics(&class.generics);
     let native_repr = match (is_core, class.name.as_str()) {
         (true, "Int") => Some(NativeRepr::Int),
+        (true, "Bool") => Some(NativeRepr::Bool),
         _ => None,
     };
     if native_repr.is_some()
@@ -1860,15 +1861,16 @@ fn resolve_class(
             class.span,
         ));
     }
-    let self_ty = if native_repr == Some(NativeRepr::Int) {
-        lm_types::INT
-    } else if type_names.is_empty() {
-        ctx.store.intern(Type::Class(ClassId(idx)))
-    } else {
-        let vars: Vec<TypeId> = (0..type_names.len())
-            .map(|i| ctx.store.intern(Type::Var(i as u32)))
-            .collect();
-        ctx.store.intern(Type::Inst(ClassId(idx), vars))
+    let self_ty = match native_repr {
+        Some(NativeRepr::Int) => lm_types::INT,
+        Some(NativeRepr::Bool) => lm_types::BOOL,
+        None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
+        None => {
+            let vars: Vec<TypeId> = (0..type_names.len())
+                .map(|i| ctx.store.intern(Type::Var(i as u32)))
+                .collect();
+            ctx.store.intern(Type::Inst(ClassId(idx), vars))
+        }
     };
     let env = TyEnv {
         type_names: type_names.clone(),

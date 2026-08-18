@@ -31,7 +31,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 60;
+pub const CORE_ROLE_COUNT: usize = 61;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -670,8 +670,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// instructions. Version 15 adds bytes, file handles, resource
 /// controls, and three byte instructions. Every earlier tag keeps its
 /// byte, so each change adds encodings and moves none. Version 16 adds
-/// final class flags. Version 17 adds the `Int` core role.
-pub const VERSION: u16 = 17;
+/// final class flags. Version 17 adds the `Int` core role. Version 18
+/// adds the `Bool` core role.
+pub const VERSION: u16 = 18;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).

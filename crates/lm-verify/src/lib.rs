@@ -728,7 +728,8 @@ impl<'m> Ctx<'m> {
 ///
 /// Version 9 adds byte types, resource types, and their operations.
 /// Version 10 adds final class rules. Version 11 adds the `Int` role.
-pub const VERIFIER_VERSION: u32 = 11;
+/// Version 12 adds the `Bool` role.
+pub const VERIFIER_VERSION: u32 = 12;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -1161,6 +1162,20 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             ));
         }
     }
+    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_BOOL) {
+        let class = &module.classes[idx as usize];
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !class.fields.is_empty()
+        {
+            return Err(terr(
+                "the core role `Bool` does not name a final stateless class".to_string(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1559,6 +1574,8 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         // The canonical self type of the class.
         let own_ty = if core.int == Some(cidx as u32) {
             Some(TY_INT)
+        } else if core.boolean == Some(cidx as u32) {
+            Some(TY_BOOL)
         } else if class.type_params == 0 {
             ctx.class_ty[cidx]
         } else {
@@ -2019,6 +2036,9 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                     if ctx.core.int == Some(*class) {
                         return Err(err(fidx, at("cannot allocate a primitive core class")));
                     }
+                    if ctx.core.boolean == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
+                    }
                     if c.type_params != 0 {
                         return Err(err(fidx, at("a generic class needs a type application")));
                     }
@@ -2031,6 +2051,9 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         return Err(err(fidx, at("cannot allocate an abstract enum parent")));
                     }
                     if ctx.core.int == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
+                    }
+                    if ctx.core.boolean == Some(*class) {
                         return Err(err(fidx, at("cannot allocate a primitive core class")));
                     }
                     if c.type_params == 0 {
@@ -2419,6 +2442,9 @@ fn step(
                 BcType::Class(c) => c,
                 BcType::Int => ctx.core.int.ok_or_else(|| {
                     fail("an Int method call needs the Int core role".to_string())
+                })?,
+                BcType::Bool => ctx.core.boolean.ok_or_else(|| {
+                    fail("a Bool method call needs the Bool core role".to_string())
                 })?,
                 _ => {
                     return Err(fail(format!(

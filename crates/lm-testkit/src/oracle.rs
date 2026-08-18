@@ -400,16 +400,9 @@ impl<'m> Oracle<'m> {
                 Ok(self.alloc(OKind::Map(map)))
             }
             HExprKind::Native { op, args } => self.native(*op, args, frame, depth),
-            HExprKind::Intrinsic { intrinsic, args } => match *intrinsic {
-                lm_abi::INTRINSIC_INT_ABS => {
-                    let value = self.as_int(&self.eval(&args[0], frame, depth)?)?;
-                    value
-                        .checked_abs()
-                        .map(OV::Int)
-                        .ok_or(Stop::Fault("IntegerOverflow"))
-                }
-                _ => Err(Stop::Limit("unknown intrinsic")),
-            },
+            HExprKind::Intrinsic { intrinsic, args } => {
+                self.intrinsic(*intrinsic, args, frame, depth)
+            }
             HExprKind::Interp(parts) => {
                 let mut out = String::new();
                 for part in parts {
@@ -651,6 +644,55 @@ impl<'m> Oracle<'m> {
                 };
                 Ok(OV::Bool(if op == BinOp::Eq { equal } else { !equal }))
             }
+        }
+    }
+
+    fn intrinsic(
+        &self,
+        intrinsic: lm_abi::IntrinsicSlot,
+        args: &[HExpr],
+        frame: &mut Frame,
+        depth: u32,
+    ) -> EResult {
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(self.eval(arg, frame, depth)?);
+        }
+        let binary = match intrinsic {
+            lm_abi::INTRINSIC_INT_ADD => Some((BinOp::Add, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_SUB => Some((BinOp::Sub, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_MUL => Some((BinOp::Mul, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_DIV => Some((BinOp::Div, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_REM => Some((BinOp::Rem, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_EQ => Some((BinOp::Eq, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_NE => Some((BinOp::Ne, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_LT => Some((BinOp::Lt, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_LE => Some((BinOp::Le, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_GT => Some((BinOp::Gt, lm_types::INT)),
+            lm_abi::INTRINSIC_INT_GE => Some((BinOp::Ge, lm_types::INT)),
+            lm_abi::INTRINSIC_BOOL_EQ => Some((BinOp::Eq, lm_types::BOOL)),
+            lm_abi::INTRINSIC_BOOL_NE => Some((BinOp::Ne, lm_types::BOOL)),
+            _ => None,
+        };
+        if let Some((op, ty)) = binary {
+            return self.binary(op, ty, values[0].clone(), values[1].clone());
+        }
+        match intrinsic {
+            lm_abi::INTRINSIC_INT_ABS => self
+                .as_int(&values[0])?
+                .checked_abs()
+                .map(OV::Int)
+                .ok_or(Stop::Fault("IntegerOverflow")),
+            lm_abi::INTRINSIC_INT_NEG => self
+                .as_int(&values[0])?
+                .checked_neg()
+                .map(OV::Int)
+                .ok_or(Stop::Fault("IntegerOverflow")),
+            lm_abi::INTRINSIC_BOOL_NOT => match values[0] {
+                OV::Bool(value) => Ok(OV::Bool(!value)),
+                _ => Err(Stop::Limit("non-Bool operand")),
+            },
+            _ => Err(Stop::Limit("unknown intrinsic")),
         }
     }
 

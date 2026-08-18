@@ -750,6 +750,28 @@ A generic function name needs a direct call in this version.
 
 ### 6.4 Arithmetic, comparison, and equality
 
+`Int` and `Bool` use final core method tables. The checker maps each supported source operator to one sealed method.
+
+```text
+-a      -> a._neg()
+not a   -> a._not()
+a + b   -> a._add(b)
+a - b   -> a._sub(b)
+a * b   -> a._mul(b)
+a / b   -> a._div(b)
+a % b   -> a._rem(b)
+a == b  -> a._eq(b)
+a != b  -> a._ne(b)
+a < b   -> a._lt(b)
+a <= b  -> a._le(b)
+a > b   -> a._gt(b)
+a >= b  -> a._ge(b)
+```
+
+Each method body names one pure intrinsic manifest entry. Static resolution and trivial-body inlining emit the canonical integer or Boolean instruction.
+
+`and` and `or` remain control-flow operators. They evaluate the right operand only when required.
+
 For `Int`, `+`, `-`, and `*` are checked; `/` truncates toward zero; `%` has the dividend's sign; divide-by-zero and the one overflowing division case fault. For `Float`, `+`, `-`, `*`, and `/` follow the deterministic binary64 rules in section 2.4; division by zero produces the corresponding infinity or NaN and `%` is not defined. There is no implicit numeric conversion.
 
 Ordering requires equal numeric types. Float ordering follows ordered IEEE comparison and is false when either operand is NaN. Language equality for floats is total and hash-friendly: both signed zeros are equal and all canonical NaNs are equal. Strings compare lexicographically by Unicode scalar value; bytes lexicographically by unsigned byte.

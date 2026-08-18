@@ -88,7 +88,9 @@ impl AbiType {
 }
 
 /// The intrinsic ABI version.
-pub const INTRINSIC_ABI_VERSION: u32 = 1;
+///
+/// Version 2 adds integer and Boolean operators.
+pub const INTRINSIC_ABI_VERSION: u32 = 2;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -104,14 +106,121 @@ pub struct IntrinsicDef {
 
 /// The `int.abs` intrinsic slot.
 pub const INTRINSIC_INT_ABS: IntrinsicSlot = 0;
+pub const INTRINSIC_INT_NEG: IntrinsicSlot = 1;
+pub const INTRINSIC_INT_ADD: IntrinsicSlot = 2;
+pub const INTRINSIC_INT_SUB: IntrinsicSlot = 3;
+pub const INTRINSIC_INT_MUL: IntrinsicSlot = 4;
+pub const INTRINSIC_INT_DIV: IntrinsicSlot = 5;
+pub const INTRINSIC_INT_REM: IntrinsicSlot = 6;
+pub const INTRINSIC_INT_EQ: IntrinsicSlot = 7;
+pub const INTRINSIC_INT_NE: IntrinsicSlot = 8;
+pub const INTRINSIC_INT_LT: IntrinsicSlot = 9;
+pub const INTRINSIC_INT_LE: IntrinsicSlot = 10;
+pub const INTRINSIC_INT_GT: IntrinsicSlot = 11;
+pub const INTRINSIC_INT_GE: IntrinsicSlot = 12;
+pub const INTRINSIC_BOOL_NOT: IntrinsicSlot = 13;
+pub const INTRINSIC_BOOL_EQ: IntrinsicSlot = 14;
+pub const INTRINSIC_BOOL_NE: IntrinsicSlot = 15;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 1] = [IntrinsicDef {
-    name: "int.abs",
-    params: &[AbiType::Int],
-    reply: AbiType::Int,
-    semantic_revision: 1,
-}];
+pub const INTRINSICS: [IntrinsicDef; 16] = [
+    IntrinsicDef {
+        name: "int.abs",
+        params: &[AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.neg",
+        params: &[AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.add",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.sub",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.mul",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.div",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.rem",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.eq",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.ne",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.lt",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.le",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.gt",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.ge",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bool.not",
+        params: &[AbiType::Bool],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bool.eq",
+        params: &[AbiType::Bool, AbiType::Bool],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bool.ne",
+        params: &[AbiType::Bool, AbiType::Bool],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+];
 
 /// The number of pure intrinsic slots.
 pub const INTRINSIC_COUNT: u32 = INTRINSICS.len() as u32;
@@ -895,6 +1004,8 @@ mod tests {
     #[test]
     fn intrinsic_slots_match_the_constants() {
         assert_eq!(intrinsic_by_name("int.abs"), Some(INTRINSIC_INT_ABS));
+        assert_eq!(intrinsic_by_name("int.add"), Some(INTRINSIC_INT_ADD));
+        assert_eq!(intrinsic_by_name("bool.not"), Some(INTRINSIC_BOOL_NOT));
         assert_eq!(intrinsic(INTRINSIC_INT_ABS).reply, AbiType::Int);
     }
 

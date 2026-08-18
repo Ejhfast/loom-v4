@@ -96,6 +96,7 @@ pub enum CtorKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeRepr {
     Int,
+    Bool,
 }
 
 /// One checked class with its full field layout.

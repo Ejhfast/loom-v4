@@ -86,7 +86,7 @@ fn week_two_negative_cases_have_stable_codes() {
         "E1026"
     );
     // Member access on a non-object type.
-    assert_eq!(code_of("x = 1\nx.y\n"), "E1027");
+    assert_eq!(code_of("x = ()\nx.y\n"), "E1027");
     assert_eq!(code_of("x = 1\nx[0]\n"), "E1027");
     // A required field is not initialized on a path.
     assert_eq!(
@@ -320,7 +320,7 @@ fn cfg_dump_shows_signatures_blocks_and_jumps() {
     );
     assert!(dump.contains("b1:"), "{dump}");
     assert!(dump.contains("JumpIfFalse -> b"), "{dump}");
-    assert!(dump.contains("Call fn0"), "{dump}");
+    assert!(dump.contains("Div"), "{dump}");
     assert!(dump.contains("pop 2 push 1"), "{dump}");
     // The dump is deterministic.
     assert_eq!(dump, lm_hir::dump_cfg(&module));
