@@ -238,6 +238,11 @@ fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {
             .get("Bool")
             .copied()
             .map(|class| (class, vec![])),
+        Type::String => ctx
+            .core_types
+            .get("String")
+            .copied()
+            .map(|class| (class, vec![])),
         Type::Class(c) => Some((c.0, vec![])),
         Type::Inst(c, args) => Some((c.0, args.clone())),
         _ => None,
@@ -1087,7 +1092,12 @@ impl<'o> FnChecker<'o> {
             }
             ExprKind::Not(inner) => {
                 let inner = self.check_expr(ctx, inner, BOOL)?;
-                Ok(Self::primitive_operator(ctx, "Bool", "__not__", vec![inner]))
+                Ok(Self::primitive_operator(
+                    ctx,
+                    "Bool",
+                    "__not__",
+                    vec![inner],
+                ))
             }
             ExprKind::Neg(inner) => {
                 let inner = self.check_expr(ctx, inner, INT)?;
@@ -4241,11 +4251,25 @@ impl<'o> FnChecker<'o> {
         right: &ast::Expr,
     ) -> Result<HExpr, Diagnostic> {
         match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            BinOp::Add => {
+                let l = self.synth_expr(ctx, left)?;
+                if l.ty == STRING {
+                    let r = self.check_expr(ctx, right, STRING)?;
+                    return Ok(Self::primitive_operator(
+                        ctx,
+                        "String",
+                        "__add__",
+                        vec![l, r],
+                    ));
+                }
+                let l = self.expect_compatible(ctx, INT, l, left.span)?;
+                let r = self.check_expr(ctx, right, INT)?;
+                Ok(Self::primitive_operator(ctx, "Int", "__add__", vec![l, r]))
+            }
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 let l = self.check_expr(ctx, left, INT)?;
                 let r = self.check_expr(ctx, right, INT)?;
                 let name = match op {
-                    BinOp::Add => "__add__",
                     BinOp::Sub => "__sub__",
                     BinOp::Mul => "__mul__",
                     BinOp::Div => "__div__",
@@ -4325,8 +4349,12 @@ impl<'o> FnChecker<'o> {
                         left.span,
                     ));
                 }
-                if matches!(operand_ty, INT | BOOL) {
-                    let class = if operand_ty == BOOL { "Bool" } else { "Int" };
+                if matches!(operand_ty, INT | BOOL | STRING) {
+                    let class = match operand_ty {
+                        BOOL => "Bool",
+                        STRING => "String",
+                        _ => "Int",
+                    };
                     let name = if op == BinOp::Eq { "__eq__" } else { "__ne__" };
                     return Ok(Self::primitive_operator(ctx, class, name, vec![l, r]));
                 }

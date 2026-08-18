@@ -89,8 +89,8 @@ impl AbiType {
 
 /// The intrinsic ABI version.
 ///
-/// Version 2 adds integer and Boolean operators.
-pub const INTRINSIC_ABI_VERSION: u32 = 2;
+/// Version 3 adds immutable String operations.
+pub const INTRINSIC_ABI_VERSION: u32 = 3;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -121,9 +121,18 @@ pub const INTRINSIC_INT_GE: IntrinsicSlot = 12;
 pub const INTRINSIC_BOOL_NOT: IntrinsicSlot = 13;
 pub const INTRINSIC_BOOL_EQ: IntrinsicSlot = 14;
 pub const INTRINSIC_BOOL_NE: IntrinsicSlot = 15;
+pub const INTRINSIC_STRING_BYTE_LEN: IntrinsicSlot = 16;
+pub const INTRINSIC_STRING_CHAR_COUNT: IntrinsicSlot = 17;
+pub const INTRINSIC_STRING_CONCAT: IntrinsicSlot = 18;
+pub const INTRINSIC_STRING_STARTS_WITH: IntrinsicSlot = 19;
+pub const INTRINSIC_STRING_ENDS_WITH: IntrinsicSlot = 20;
+pub const INTRINSIC_STRING_CONTAINS: IntrinsicSlot = 21;
+pub const INTRINSIC_STRING_FIND_INDEX: IntrinsicSlot = 22;
+pub const INTRINSIC_STRING_EQ: IntrinsicSlot = 23;
+pub const INTRINSIC_STRING_NE: IntrinsicSlot = 24;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 16] = [
+pub const INTRINSICS: [IntrinsicDef; 25] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::Int],
@@ -217,6 +226,60 @@ pub const INTRINSICS: [IntrinsicDef; 16] = [
     IntrinsicDef {
         name: "bool.ne",
         params: &[AbiType::Bool, AbiType::Bool],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.byte_len",
+        params: &[AbiType::Str],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.char_count",
+        params: &[AbiType::Str],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.concat",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.starts_with",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.ends_with",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.contains",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.find_index",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.eq",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.ne",
+        params: &[AbiType::Str, AbiType::Str],
         reply: AbiType::Bool,
         semantic_revision: 1,
     },

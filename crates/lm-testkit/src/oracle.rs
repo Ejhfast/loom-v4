@@ -672,6 +672,8 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_INT_GE => Some((BinOp::Ge, lm_types::INT)),
             lm_abi::INTRINSIC_BOOL_EQ => Some((BinOp::Eq, lm_types::BOOL)),
             lm_abi::INTRINSIC_BOOL_NE => Some((BinOp::Ne, lm_types::BOOL)),
+            lm_abi::INTRINSIC_STRING_EQ => Some((BinOp::Eq, lm_types::STRING)),
+            lm_abi::INTRINSIC_STRING_NE => Some((BinOp::Ne, lm_types::STRING)),
             _ => None,
         };
         if let Some((op, ty)) = binary {
@@ -691,6 +693,43 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_BOOL_NOT => match values[0] {
                 OV::Bool(value) => Ok(OV::Bool(!value)),
                 _ => Err(Stop::Limit("non-Bool operand")),
+            },
+            lm_abi::INTRINSIC_STRING_BYTE_LEN => match &values[0] {
+                OV::Str(text) => Ok(OV::Int(text.len() as i64)),
+                _ => Err(Stop::Limit("non-String operand")),
+            },
+            lm_abi::INTRINSIC_STRING_CHAR_COUNT => match &values[0] {
+                OV::Str(text) => Ok(OV::Int(text.chars().count() as i64)),
+                _ => Err(Stop::Limit("non-String operand")),
+            },
+            lm_abi::INTRINSIC_STRING_CONCAT => match (&values[0], &values[1]) {
+                (OV::Str(left), OV::Str(right)) => {
+                    let mut text = String::with_capacity(left.len() + right.len());
+                    text.push_str(left);
+                    text.push_str(right);
+                    Ok(OV::Str(Rc::new(text)))
+                }
+                _ => Err(Stop::Limit("non-String operand")),
+            },
+            lm_abi::INTRINSIC_STRING_STARTS_WITH => match (&values[0], &values[1]) {
+                (OV::Str(text), OV::Str(prefix)) => Ok(OV::Bool(text.starts_with(prefix.as_str()))),
+                _ => Err(Stop::Limit("non-String operand")),
+            },
+            lm_abi::INTRINSIC_STRING_ENDS_WITH => match (&values[0], &values[1]) {
+                (OV::Str(text), OV::Str(suffix)) => Ok(OV::Bool(text.ends_with(suffix.as_str()))),
+                _ => Err(Stop::Limit("non-String operand")),
+            },
+            lm_abi::INTRINSIC_STRING_CONTAINS => match (&values[0], &values[1]) {
+                (OV::Str(text), OV::Str(needle)) => Ok(OV::Bool(text.contains(needle.as_str()))),
+                _ => Err(Stop::Limit("non-String operand")),
+            },
+            lm_abi::INTRINSIC_STRING_FIND_INDEX => match (&values[0], &values[1]) {
+                (OV::Str(text), OV::Str(needle)) => Ok(OV::Int(
+                    text.find(needle.as_str())
+                        .map(|index| index as i64)
+                        .unwrap_or(-1),
+                )),
+                _ => Err(Stop::Limit("non-String operand")),
             },
             _ => Err(Stop::Limit("unknown intrinsic")),
         }

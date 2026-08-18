@@ -12,6 +12,7 @@
 //! one traversal engine.
 
 pub mod shape;
+mod shared;
 
 use lm_value::ObjRef;
 #[cfg(test)]
@@ -19,6 +20,7 @@ use lm_value::Value;
 pub use shape::{
     dump_shapes, BoundaryPolicy, MapIndex, Object, ShapeDesc, MIN_OBJECT_COST, SHAPES,
 };
+pub use shared::SharedText;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -793,7 +795,7 @@ mod tests {
     use super::*;
 
     fn str_obj(text: &str) -> Object {
-        Object::Str(text.to_string())
+        Object::Str(text.into())
     }
 
     #[test]
@@ -811,6 +813,22 @@ mod tests {
             }
         );
         assert_eq!(heap.live_count(), 2);
+    }
+
+    #[test]
+    fn immutable_text_clones_share_storage() {
+        let source = SharedText::from("shared");
+        let object = Object::Str(source.clone());
+        let copied = object
+            .try_clone_remapped(|reference| reference)
+            .expect("the clone succeeds");
+        let shell = object.shell().expect("String is sendable");
+        for clone in [copied, shell] {
+            let Object::Str(text) = clone else {
+                panic!("the clone keeps its String shape");
+            };
+            assert!(source.shares_storage(&text));
+        }
     }
 
     #[test]

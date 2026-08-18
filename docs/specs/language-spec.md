@@ -750,7 +750,7 @@ A generic function name needs a direct call in this version.
 
 ### 6.4 Arithmetic, comparison, and equality
 
-`Int` and `Bool` use final core method tables. The checker maps each supported source operator to one sealed method.
+`Int`, `Bool`, and `String` use final core method tables. The checker maps each supported source operator to one sealed method.
 
 ```text
 -a      -> a.__neg__()
@@ -768,7 +768,9 @@ a > b   -> a.__gt__(b)
 a >= b  -> a.__ge__(b)
 ```
 
-Each method body names one pure intrinsic manifest entry. Static resolution and trivial-body inlining emit the canonical integer or Boolean instruction.
+Each method body names one pure intrinsic manifest entry. Static resolution and trivial-body inlining emit the canonical instruction.
+
+`String + String` uses `String.__add__`. Other arithmetic operators accept `Int` in this version.
 
 `and` and `or` remain control-flow operators. They evaluate the right operand only when required.
 
@@ -2184,7 +2186,13 @@ A `Map[K,V]` stores entries in insertion order plus an open-addressed index from
 
 Map keys must be frozen and digestible at insertion. The runtime uses a keyed 64-bit lookup hash cached on immutable keys; insertion order, equality, serialization, and digest do not depend on bucket order. The hash seed is VM configuration recorded in snapshots. Fuel charges use logical key/byte size rather than actual probe count.
 
-`String` and `Bytes` are immutable objects backed by reference-counted byte slices, permitting zero-copy sharing across trusted in-process holders. String construction validates UTF-8 once. `StringBuilder` and `ByteBuffer` use growable private buffers and produce immutable outputs by transferring or copying their allocation.
+`String` and `Bytes` own immutable reference-counted storage. A clone can share this storage across trusted in-process holders.
+
+A String stores valid UTF-8 and a visible byte range. Construction validates UTF-8 once.
+
+A String caches its content hash after the first map lookup. The cache does not affect equality, snapshots, or graph digests.
+
+`StringBuilder` and `ByteBuffer` use private growable buffers. `finish` transfers or copies the allocation into an immutable value.
 
 ### 22.10 Graph engine
 
@@ -2546,16 +2554,29 @@ freeze(self) -> Map[K,V]
 
 ### 24.6 Strings, bytes, builders, and formatting
 
-`String` is immutable valid UTF-8:
+Tier A is the implemented core String surface. It keeps all offsets in bytes.
 
 ```text
-byte_len / char_count / is_empty
+byte_len() -> Int
+char_count() -> Int
+is_empty() -> Bool
 concat(other: String) -> String
-starts_with / ends_with / contains
+starts_with(prefix: String) -> Bool
+ends_with(suffix: String) -> Bool
+contains(needle: String) -> Bool
 find(needle: String) -> Option[Int]          # byte offset
+__add__(other: String) -> String
+__eq__(other: String) -> Bool
+__ne__(other: String) -> Bool
+```
+
+`+`, `==`, and `!=` use the three String hook methods. Each hook has paired underscores.
+
+Tier B reserves the following fallible and conversion surface.
+
+```text
 slice_bytes(start,length) -> Result[String,Utf8Error]
 slice_chars(start,length) -> Result[String,IndexError]
-chars() -> List[Char]
 bytes() -> Bytes
 split(separator: String) -> List[String]
 lines() -> List[String]
@@ -2563,8 +2584,11 @@ trim / trim_start / trim_end
 replace(needle,replacement) -> String
 to_lower_ascii / to_upper_ascii
 parse_int(radix: Int) -> Result[Int,ParseIntError]
-parse_float() -> Result[Float,ParseFloatError]
 ```
+
+Core defines `Utf8Error`, `IndexError`, and `ParseIntError`. Tier B can use these types without changing its error contract.
+
+Methods that return `Char` remain deferred. Float parsing remains deferred until core defines `Float`.
 
 `Bytes` supports `len`, `get`, `at`, `slice`, `concat`, `starts_with`, `find`, `hex`, and `utf8`. `StringBuilder` supports `push_char`, `push_string`, `clear`, `len`, and `finish`; `ByteBuffer` supports `push`, `extend`, `reserve`, `clear`, and `finish`.
 

@@ -83,7 +83,7 @@ fn fs_error(message: String) -> HostValue {
         lm_vm::CoreCtor::Err,
         vec![HostValue::Ctor(
             lm_vm::CoreCtor::FsErrorFailed,
-            vec![HostValue::Str(message)],
+            vec![HostValue::Str(message.into())],
         )],
     )
 }
@@ -157,7 +157,7 @@ impl Host for CliHost {
                     key,
                     FileRequest::Open {
                         file,
-                        path: path.clone(),
+                        path: path.to_string(),
                         options: *options,
                     },
                 )
@@ -386,7 +386,7 @@ mod tests {
             &mut host,
             lm_abi::OP_FS_OPEN,
             vec![
-                HostArg::Str(path_text),
+                HostArg::Str(path_text.into()),
                 HostArg::OpenOptions(HostOpenOptions::CreateTruncate),
             ],
         )) {

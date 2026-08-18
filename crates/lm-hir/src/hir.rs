@@ -97,6 +97,7 @@ pub enum CtorKind {
 pub enum NativeRepr {
     Int,
     Bool,
+    String,
 }
 
 /// One checked class with its full field layout.

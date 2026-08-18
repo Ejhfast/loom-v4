@@ -42,10 +42,12 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/primitives.lm"),
     "\n",
+    include_str!("../../../core/string.lm"),
+    "\n",
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 19] = [
+pub const PRELUDE_TYPES: [&str; 23] = [
     "Option",
     "Result",
     "Ordering",
@@ -65,6 +67,10 @@ pub const PRELUDE_TYPES: [&str; 19] = [
     "FsError",
     "OpenOptions",
     "SeekFrom",
+    "String",
+    "Utf8Error",
+    "IndexError",
+    "ParseIntError",
 ];
 
 /// The constructor names the prelude places into unqualified scope.
@@ -1846,6 +1852,7 @@ fn resolve_class(
     let native_repr = match (is_core, class.name.as_str()) {
         (true, "Int") => Some(NativeRepr::Int),
         (true, "Bool") => Some(NativeRepr::Bool),
+        (true, "String") => Some(NativeRepr::String),
         _ => None,
     };
     if native_repr.is_some()
@@ -1864,6 +1871,7 @@ fn resolve_class(
     let self_ty = match native_repr {
         Some(NativeRepr::Int) => lm_types::INT,
         Some(NativeRepr::Bool) => lm_types::BOOL,
+        Some(NativeRepr::String) => lm_types::STRING,
         None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
         None => {
             let vars: Vec<TypeId> = (0..type_names.len())

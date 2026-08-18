@@ -3,7 +3,9 @@
 //! The scheduler thread submits plain jobs and never performs a file
 //! or stream wait. Fixed workers own all operating-system I/O.
 
-use lm_vm::{CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostSeekFrom, HostValue};
+use lm_vm::{
+    CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostSeekFrom, HostValue, SharedText,
+};
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Seek, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -62,8 +64,8 @@ impl FileRequest {
 }
 
 pub(crate) enum StreamRequest {
-    Print(String),
-    Error(String),
+    Print(SharedText),
+    Error(SharedText),
     ReadLine,
 }
 
@@ -388,7 +390,10 @@ fn read_line() -> HostValue {
             }
             HostValue::Ctor(
                 CoreCtor::Ok,
-                vec![HostValue::Ctor(CoreCtor::Some, vec![HostValue::Str(line)])],
+                vec![HostValue::Ctor(
+                    CoreCtor::Some,
+                    vec![HostValue::Str(line.into())],
+                )],
             )
         }
         Err(error) => io_error(format!("stdin read failed: {error}")),
@@ -404,7 +409,7 @@ fn fs_error(message: String) -> HostValue {
         CoreCtor::Err,
         vec![HostValue::Ctor(
             CoreCtor::FsErrorFailed,
-            vec![HostValue::Str(message)],
+            vec![HostValue::Str(message.into())],
         )],
     )
 }
@@ -414,7 +419,7 @@ fn io_error(message: String) -> HostValue {
         CoreCtor::Err,
         vec![HostValue::Ctor(
             CoreCtor::IoErrorFailed,
-            vec![HostValue::Str(message)],
+            vec![HostValue::Str(message.into())],
         )],
     )
 }

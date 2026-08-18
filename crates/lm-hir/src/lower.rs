@@ -1046,6 +1046,15 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BOOL_NOT => Instr::Not,
             lm_abi::INTRINSIC_BOOL_EQ => Instr::EqBool,
             lm_abi::INTRINSIC_BOOL_NE => Instr::NeBool,
+            lm_abi::INTRINSIC_STRING_BYTE_LEN => Instr::StrByteLen,
+            lm_abi::INTRINSIC_STRING_CHAR_COUNT => Instr::StrCharCount,
+            lm_abi::INTRINSIC_STRING_CONCAT => Instr::StrConcat,
+            lm_abi::INTRINSIC_STRING_STARTS_WITH => Instr::StrStartsWith,
+            lm_abi::INTRINSIC_STRING_ENDS_WITH => Instr::StrEndsWith,
+            lm_abi::INTRINSIC_STRING_CONTAINS => Instr::StrContains,
+            lm_abi::INTRINSIC_STRING_FIND_INDEX => Instr::StrFindIndex,
+            lm_abi::INTRINSIC_STRING_EQ => Instr::EqStr,
+            lm_abi::INTRINSIC_STRING_NE => Instr::NeStr,
             _ => unreachable!("the checker accepts only manifest intrinsics"),
         };
         self.emit(instr);
@@ -1646,6 +1655,22 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             blocks: vec![vec![Instr::ConstBool(false), Instr::Return]],
         };
     }
+    if class.native_repr == Some(NativeRepr::String) {
+        let string_ty = m.intern_type(BcType::Str);
+        let empty = m.intern_string("");
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: string_ty,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::ConstStr(empty), Instr::Return]],
+        };
+    }
     let params: Vec<u32> = class.ctor_params.iter().map(|t| m.bc_ty(*t)).collect();
     let type_params = class.type_params;
     let vars: Vec<TypeId> = Vec::new();
@@ -1757,7 +1782,12 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::EqStr
         | Instr::NeStr
         | Instr::EqRef
-        | Instr::NeRef => (2, 1),
+        | Instr::NeRef
+        | Instr::StrConcat
+        | Instr::StrStartsWith
+        | Instr::StrEndsWith
+        | Instr::StrContains
+        | Instr::StrFindIndex => (2, 1),
         Instr::Neg
         | Instr::Not
         | Instr::LoadField(_)
@@ -1769,6 +1799,8 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::SbBuild
         | Instr::BbLen
         | Instr::BbBuild
+        | Instr::StrByteLen
+        | Instr::StrCharCount
         | Instr::BytesNew
         | Instr::BytesLen
         | Instr::BytesText
@@ -1857,6 +1889,13 @@ fn instr_text(instr: &Instr) -> String {
         Instr::NeBool => "NeBool".to_string(),
         Instr::EqStr => "EqStr".to_string(),
         Instr::NeStr => "NeStr".to_string(),
+        Instr::StrByteLen => "StrByteLen".to_string(),
+        Instr::StrCharCount => "StrCharCount".to_string(),
+        Instr::StrConcat => "StrConcat".to_string(),
+        Instr::StrStartsWith => "StrStartsWith".to_string(),
+        Instr::StrEndsWith => "StrEndsWith".to_string(),
+        Instr::StrContains => "StrContains".to_string(),
+        Instr::StrFindIndex => "StrFindIndex".to_string(),
         Instr::EqRef => "EqRef".to_string(),
         Instr::NeRef => "NeRef".to_string(),
         Instr::Call(idx) => format!("Call fn{idx}"),

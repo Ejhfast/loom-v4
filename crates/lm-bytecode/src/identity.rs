@@ -74,7 +74,8 @@ use std::collections::HashMap;
 /// resource types. Version 10 adds the three byte instructions.
 /// Version 12 adds final class contracts. Version 13 adds native core
 /// class lowering. Version 14 lowers operators through core methods.
-pub const COMPILER_ABI_VERSION: u32 = 14;
+/// Version 15 adds the native String class and String instructions.
+pub const COMPILER_ABI_VERSION: u32 = 15;
 
 /// The refinement work budget of one component.
 ///
@@ -459,6 +460,13 @@ fn preflight_instr(
         | Instr::NeBool
         | Instr::EqStr
         | Instr::NeStr
+        | Instr::StrByteLen
+        | Instr::StrCharCount
+        | Instr::StrConcat
+        | Instr::StrStartsWith
+        | Instr::StrEndsWith
+        | Instr::StrContains
+        | Instr::StrFindIndex
         | Instr::EqRef
         | Instr::NeRef
         | Instr::ListLen
@@ -1256,6 +1264,13 @@ impl<'a> Resolver<'a> {
             Instr::NeBool => out.push(0x27),
             Instr::EqStr => out.push(0x28),
             Instr::NeStr => out.push(0x29),
+            Instr::StrByteLen => out.push(0x67),
+            Instr::StrCharCount => out.push(0x68),
+            Instr::StrConcat => out.push(0x69),
+            Instr::StrStartsWith => out.push(0x6a),
+            Instr::StrEndsWith => out.push(0x6b),
+            Instr::StrContains => out.push(0x6c),
+            Instr::StrFindIndex => out.push(0x6d),
             Instr::EqRef => out.push(0x2a),
             Instr::NeRef => out.push(0x2b),
             Instr::Call(f) => {

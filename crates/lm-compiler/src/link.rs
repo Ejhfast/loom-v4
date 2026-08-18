@@ -1108,6 +1108,13 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::NeBool
         | Instr::EqStr
         | Instr::NeStr
+        | Instr::StrByteLen
+        | Instr::StrCharCount
+        | Instr::StrConcat
+        | Instr::StrStartsWith
+        | Instr::StrEndsWith
+        | Instr::StrContains
+        | Instr::StrFindIndex
         | Instr::EqRef
         | Instr::NeRef
         | Instr::CallValue { .. }

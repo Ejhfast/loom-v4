@@ -438,6 +438,14 @@ impl Machine {
             }
             Value::Obj(reference) => match self.vm.heap.get(reference) {
                 Object::Instance { class, .. } => Ok(*class),
+                Object::Str(_) => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_STRING];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
                 _ => Err(BAD_TYPE),
             },
             _ => Err(BAD_TYPE),
@@ -847,10 +855,7 @@ impl Machine {
                 v.hash(&mut h);
             }
             Value::Obj(r) => match self.vm.heap.get(r) {
-                Object::Str(s) => {
-                    2u8.hash(&mut h);
-                    s.hash(&mut h);
-                }
+                Object::Str(s) => return s.lookup_hash() ^ 0x4c_6f_6f_6d_53_74_72,
                 _ => 3u8.hash(&mut h),
             },
             _ => 4u8.hash(&mut h),
@@ -1048,7 +1053,7 @@ impl Machine {
                     Some(r) => Value::Obj(r),
                     None => {
                         let text = module.strings[idx].clone();
-                        let value = self.alloc(Object::Str(text))?;
+                        let value = self.alloc(Object::Str(text.into()))?;
                         if let Value::Obj(r) = value {
                             self.vm.literals[idx] = Some(r);
                         }
@@ -1124,6 +1129,85 @@ impl Machine {
             }
             Instr::EqStr => self.str_compare(true)?,
             Instr::NeStr => self.str_compare(false)?,
+            Instr::StrByteLen => {
+                let string = self.pop_obj()?;
+                let len = match self.vm.heap.get(string) {
+                    Object::Str(text) => text.len(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let len = i64::try_from(len).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.push(Value::Int(len))?;
+            }
+            Instr::StrCharCount => {
+                let string = self.pop_obj()?;
+                let count = match self.vm.heap.get(string) {
+                    Object::Str(text) => text.char_count(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let count = i64::try_from(count).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.push(Value::Int(count))?;
+            }
+            Instr::StrConcat => {
+                let other = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let (string_text, other_text) =
+                    match (self.vm.heap.get(string), self.vm.heap.get(other)) {
+                        (Object::Str(string_text), Object::Str(other_text)) => {
+                            (string_text.clone(), other_text.clone())
+                        }
+                        _ => return Err(BAD_TYPE),
+                    };
+                let len = string_text
+                    .len()
+                    .checked_add(other_text.len())
+                    .ok_or(FaultCode::HeapLimit)?;
+                self.reserve(len, &[Value::Obj(string), Value::Obj(other)])?;
+                let text = string_text
+                    .try_concat(&other_text)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                let value = self.alloc(Object::Str(text))?;
+                self.push(value)?;
+            }
+            Instr::StrStartsWith => {
+                let prefix = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let found = match (self.vm.heap.get(string), self.vm.heap.get(prefix)) {
+                    (Object::Str(text), Object::Str(prefix)) => text.starts_with(prefix.as_str()),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(found))?;
+            }
+            Instr::StrEndsWith => {
+                let suffix = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let found = match (self.vm.heap.get(string), self.vm.heap.get(suffix)) {
+                    (Object::Str(text), Object::Str(suffix)) => text.ends_with(suffix.as_str()),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(found))?;
+            }
+            Instr::StrContains => {
+                let needle = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let found = match (self.vm.heap.get(string), self.vm.heap.get(needle)) {
+                    (Object::Str(text), Object::Str(needle)) => text.contains(needle.as_str()),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(found))?;
+            }
+            Instr::StrFindIndex => {
+                let needle = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let found = match (self.vm.heap.get(string), self.vm.heap.get(needle)) {
+                    (Object::Str(text), Object::Str(needle)) => text.find(needle.as_str()),
+                    _ => return Err(BAD_TYPE),
+                };
+                let index = match found {
+                    Some(index) => i64::try_from(index).map_err(|_| FaultCode::IntegerOverflow)?,
+                    None => -1,
+                };
+                self.push(Value::Int(index))?;
+            }
             Instr::EqRef => {
                 let b = self.pop_obj()?;
                 let a = self.pop_obj()?;
@@ -1451,7 +1535,7 @@ impl Machine {
                     Object::StrBuilder(text) => text.clone(),
                     _ => return Err(BAD_TYPE),
                 };
-                let value = self.alloc(Object::Str(text))?;
+                let value = self.alloc(Object::Str(text.into()))?;
                 self.push(value)?;
             }
             Instr::BbNew => {
@@ -1486,7 +1570,7 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 };
                 let text = String::from_utf8(bytes).map_err(|_| FaultCode::BadCast)?;
-                let value = self.alloc(Object::Str(text))?;
+                let value = self.alloc(Object::Str(text.into()))?;
                 self.push(value)?;
             }
             Instr::BytesNew => {
@@ -1513,7 +1597,7 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 }
                 .map_err(|_| FaultCode::BadCast)?;
-                let value = self.alloc(Object::Str(text))?;
+                let value = self.alloc(Object::Str(text.into()))?;
                 self.push(value)?;
             }
             Instr::Freeze => {
@@ -1624,7 +1708,7 @@ impl Machine {
                     Object::NativeFault { code, .. } => *code,
                     _ => return Err(BAD_TYPE),
                 };
-                let value = self.alloc(Object::Str(code.to_string()))?;
+                let value = self.alloc(Object::Str(code.to_string().into()))?;
                 self.push(value)?;
             }
         }
@@ -2035,11 +2119,11 @@ mod tests {
         machine.vm.operands = Vec::with_capacity(1024);
         for _ in 0..1500 {
             machine
-                .alloc(Object::Str("dead".to_string()))
+                .alloc(Object::Str("dead".into()))
                 .expect("the dead object fits");
         }
         let result = machine
-            .alloc(Object::Str("live".to_string()))
+            .alloc(Object::Str("live".into()))
             .expect("the result fits");
         machine.set_done(result);
         let Some(Terminal::Done(Value::Obj(reference))) = machine.vm.terminal else {
@@ -2049,9 +2133,6 @@ mod tests {
         assert_eq!(machine.vm.heap.slot_count(), 1);
         assert_eq!(machine.vm.locals.capacity(), 0);
         assert_eq!(machine.vm.operands.capacity(), 0);
-        assert_eq!(
-            machine.vm.heap.get(reference),
-            &Object::Str("live".to_string())
-        );
+        assert_eq!(machine.vm.heap.get(reference), &Object::Str("live".into()));
     }
 }

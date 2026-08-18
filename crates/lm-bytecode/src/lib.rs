@@ -31,7 +31,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 61;
+pub const CORE_ROLE_COUNT: usize = 62;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -221,6 +221,20 @@ pub enum Instr {
     /// String equality by content.
     EqStr,
     NeStr,
+    /// Pop a String and push its UTF-8 byte length.
+    StrByteLen,
+    /// Pop a String and push its Unicode scalar count.
+    StrCharCount,
+    /// Pop two strings, concatenate them, and push a new String.
+    StrConcat,
+    /// Pop a prefix and a String, then test the prefix.
+    StrStartsWith,
+    /// Pop a suffix and a String, then test the suffix.
+    StrEndsWith,
+    /// Pop a needle and a String, then test for the needle.
+    StrContains,
+    /// Pop a needle and a String, then push its byte index or -1.
+    StrFindIndex,
     /// Reference identity equality for heap objects.
     EqRef,
     NeRef,
@@ -671,8 +685,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// controls, and three byte instructions. Every earlier tag keeps its
 /// byte, so each change adds encodings and moves none. Version 16 adds
 /// final class flags. Version 17 adds the `Int` core role. Version 18
-/// adds the `Bool` core role.
-pub const VERSION: u16 = 18;
+/// adds the `Bool` core role. Version 19 adds the String core role and
+/// immutable String instructions.
+pub const VERSION: u16 = 19;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -746,6 +761,13 @@ const OP_TUPLE_NEW: u8 = 0x63;
 const OP_TUPLE_GET: u8 = 0x64;
 const OP_IS_TYPE: u8 = 0x65;
 const OP_CAST_TYPE: u8 = 0x66;
+const OP_STR_BYTE_LEN: u8 = 0x67;
+const OP_STR_CHAR_COUNT: u8 = 0x68;
+const OP_STR_CONCAT: u8 = 0x69;
+const OP_STR_STARTS_WITH: u8 = 0x6a;
+const OP_STR_ENDS_WITH: u8 = 0x6b;
+const OP_STR_CONTAINS: u8 = 0x6c;
+const OP_STR_FIND_INDEX: u8 = 0x6d;
 const OP_PERFORM: u8 = 0x70;
 const OP_PERFORM_VALUE: u8 = 0x71;
 const OP_OP_CONST: u8 = 0x72;
@@ -1124,6 +1146,13 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::NeBool => out.push(OP_NE_BOOL),
         Instr::EqStr => out.push(OP_EQ_STR),
         Instr::NeStr => out.push(OP_NE_STR),
+        Instr::StrByteLen => out.push(OP_STR_BYTE_LEN),
+        Instr::StrCharCount => out.push(OP_STR_CHAR_COUNT),
+        Instr::StrConcat => out.push(OP_STR_CONCAT),
+        Instr::StrStartsWith => out.push(OP_STR_STARTS_WITH),
+        Instr::StrEndsWith => out.push(OP_STR_ENDS_WITH),
+        Instr::StrContains => out.push(OP_STR_CONTAINS),
+        Instr::StrFindIndex => out.push(OP_STR_FIND_INDEX),
         Instr::EqRef => out.push(OP_EQ_REF),
         Instr::NeRef => out.push(OP_NE_REF),
         Instr::Call(idx) => {
@@ -1858,6 +1887,13 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_NE_BOOL => Instr::NeBool,
         OP_EQ_STR => Instr::EqStr,
         OP_NE_STR => Instr::NeStr,
+        OP_STR_BYTE_LEN => Instr::StrByteLen,
+        OP_STR_CHAR_COUNT => Instr::StrCharCount,
+        OP_STR_CONCAT => Instr::StrConcat,
+        OP_STR_STARTS_WITH => Instr::StrStartsWith,
+        OP_STR_ENDS_WITH => Instr::StrEndsWith,
+        OP_STR_CONTAINS => Instr::StrContains,
+        OP_STR_FIND_INDEX => Instr::StrFindIndex,
         OP_EQ_REF => Instr::EqRef,
         OP_NE_REF => Instr::NeRef,
         OP_CALL => Instr::Call(cur.u32()?),
@@ -2097,6 +2133,13 @@ mod tests {
             Instr::Pop,
             Instr::Add,
             Instr::EqStr,
+            Instr::StrByteLen,
+            Instr::StrCharCount,
+            Instr::StrConcat,
+            Instr::StrStartsWith,
+            Instr::StrEndsWith,
+            Instr::StrContains,
+            Instr::StrFindIndex,
             Instr::EqRef,
             Instr::NeRef,
             Instr::Call(0),

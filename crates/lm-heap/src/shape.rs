@@ -13,6 +13,8 @@ use lm_abi::{FaultCode, SnapshotClass};
 use lm_value::{ObjRef, Value, Witness};
 use std::collections::TryReserveError;
 
+use crate::SharedText;
+
 /// Logical byte cost of one object header.
 pub(crate) const HEADER_COST: usize = 32;
 /// The smallest logical byte cost of one heap object.
@@ -153,7 +155,7 @@ impl PartialEq for MapIndex {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Object {
     /// Immutable UTF-8 text. Born frozen.
-    Str(String),
+    Str(SharedText),
     /// A class instance. Fields follow the class layout. A field holds
     /// `Value::Uninit` before its first assignment.
     ///
@@ -488,8 +490,10 @@ pub const SHAPES: [&ShapeDesc; 20] = [
 impl Object {
     /// Clone this object and remap its object references.
     ///
-    /// Every owned buffer uses a fallible exact reservation. The map
-    /// index is derived data, so the clone starts with an empty index.
+    /// Every mutable buffer uses a fallible exact reservation.
+    /// Immutable String storage remains shared.
+    ///
+    /// The map index is derived data, so the clone starts empty.
     pub fn try_clone_remapped(
         &self,
         mut map: impl FnMut(ObjRef) -> ObjRef,
@@ -516,7 +520,7 @@ impl Object {
         }
 
         Ok(match self {
-            Object::Str(text) => Object::Str(copy_string(text)?),
+            Object::Str(text) => Object::Str(text.clone()),
             Object::Instance { class, fields, env } => Object::Instance {
                 class: *class,
                 fields: copy_values(fields, &mut map)?,
@@ -882,7 +886,7 @@ mod tests {
             generation: 0,
         };
         vec![
-            Object::Str("text".to_string()),
+            Object::Str("text".into()),
             Object::Instance {
                 class: 3,
                 fields: vec![Value::Obj(a), Value::Int(1), Value::Obj(b)],
@@ -1043,7 +1047,7 @@ mod tests {
     #[test]
     fn every_shape_tag_resolves_to_its_own_descriptor() {
         let objects = [
-            Object::Str(String::new()),
+            Object::Str(SharedText::new()),
             Object::Instance {
                 class: 0,
                 fields: vec![],

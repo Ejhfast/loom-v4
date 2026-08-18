@@ -1465,7 +1465,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
     let tag = cur.u8()?;
     let limits = &ctx.limits;
     Ok(match tag {
-        0 => Object::Str(cur.str(limits.max_string_bytes)?),
+        0 => Object::Str(cur.str(limits.max_string_bytes)?.into()),
         1 => {
             let class = class_slot(cur)?;
             let env = env_ref(cur, ctx)?;

@@ -1013,7 +1013,7 @@ impl Admit<'_> {
                 );
             }
             match &m.objects[*ordinal as usize].object {
-                Object::Str(text) if *text == self.module.strings[idx] => {}
+                Object::Str(text) if text.as_str() == self.module.strings[idx] => {}
                 _ => {
                     return fail(
                         ImageReason::Reference,

@@ -6,13 +6,14 @@
 //! into guest memory crosses this boundary in either direction.
 
 use crate::CompletionKey;
+use lm_heap::SharedText;
 use std::collections::BTreeMap;
 
 /// One plain-data operation argument.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostArg {
     Int(i64),
-    Str(String),
+    Str(SharedText),
     Bytes(Vec<u8>),
     File(u64),
     OpenOptions(HostOpenOptions),
@@ -56,7 +57,7 @@ pub enum CoreCtor {
 pub enum HostValue {
     Unit,
     Int(i64),
-    Str(String),
+    Str(SharedText),
     Bytes(Vec<u8>),
     File(u64),
     Ctor(CoreCtor, Vec<HostValue>),
@@ -188,7 +189,7 @@ fn fs_failed(message: impl Into<String>) -> HostValue {
         CoreCtor::Err,
         vec![HostValue::Ctor(
             CoreCtor::FsErrorFailed,
-            vec![HostValue::Str(message.into())],
+            vec![HostValue::Str(SharedText::from(message.into()))],
         )],
     )
 }
@@ -260,13 +261,13 @@ impl RecordingHost {
         match op {
             lm_abi::OP_IO_PRINT => {
                 if let Some(HostArg::Str(text)) = args.first() {
-                    self.printed.push(text.clone());
+                    self.printed.push(text.to_string());
                 }
                 HostStart::Completed(HostValue::Unit)
             }
             lm_abi::OP_IO_ERROR => {
                 if let Some(HostArg::Str(text)) = args.first() {
-                    self.errors.push(text.clone());
+                    self.errors.push(text.to_string());
                 }
                 HostStart::Completed(HostValue::Unit)
             }
@@ -277,7 +278,10 @@ impl RecordingHost {
                     let line = self.input.remove(0);
                     HostValue::Ctor(
                         CoreCtor::Ok,
-                        vec![HostValue::Ctor(CoreCtor::Some, vec![HostValue::Str(line)])],
+                        vec![HostValue::Ctor(
+                            CoreCtor::Some,
+                            vec![HostValue::Str(line.into())],
+                        )],
                     )
                 };
                 HostStart::Completed(reply)
@@ -317,9 +321,10 @@ impl RecordingHost {
                     HostOpenOptions::CreateTruncate => (true, true, false, true, true),
                     HostOpenOptions::Append => (false, true, true, true, false),
                 };
-                if !create && !self.files.contains_key(path) {
+                if !create && !self.files.contains_key(path.as_str()) {
                     return HostStart::Completed(fs_failed("the file does not exist"));
                 }
+                let path = path.to_string();
                 let file = self.files.entry(path.clone()).or_default();
                 if truncate {
                     file.clear();
