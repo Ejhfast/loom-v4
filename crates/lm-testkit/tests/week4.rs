@@ -1,8 +1,9 @@
 //! Week-4 suites: operations and rows, policy tables, and the three
 //! VM driving modes.
 
-use lm_testkit::{compile_text, run_allowed, run_text, run_world};
-use lm_vm::VmConfig;
+use lm_proc::{Scheduler, SchedulerMode};
+use lm_testkit::{compile_text, compile_to_bytes, run_allowed, run_text, run_world};
+use lm_vm::{RecordingHost, VmConfig, World};
 
 fn code_of(source: &str) -> String {
     let rendered = compile_text("t.lm", source).unwrap_err();
@@ -187,7 +188,9 @@ fn typed_answer_mismatch_is_static() {
 }
 
 #[test]
-fn labeled_arguments_are_restricted_to_from_fn() {
+fn a_label_must_name_a_parameter_of_the_target() {
+    // `args` is a parameter of `from_fn` alone. Another target does
+    // not gain the name.
     assert_eq!(
         code_of("def f(x: Int): Int\n  x\nend\nf(args: 3)\n"),
         "E1006"
@@ -474,6 +477,78 @@ fn reject_installs_the_supplied_fault() {
         in Done(_) then \"early-done\"\n    in Fault(_) then \"early-fault\"\n    end\n  \
         end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"PolicyDenied\")");
+}
+
+/// A driver denies one request without a second machine.
+///
+/// `Clock.Now` replies `Int`, so no error arm exists. Before
+/// `Fault.denied`, the driver had to invent a time.
+const DENY_CLOCK: &str = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
+    def go(): String with Vm\n  \
+    vm = sys.vm.Vm().from_fn(child, args: ())\n  \
+    case vm.drive()\n  in Asked(request)\n    \
+    vm.reject(request, Fault.denied(\"the clock is not permitted\"))\n    \
+    case vm.run()\n    in Done(_) then \"done\"\n    in Fault(f) then f.code()\n    end\n  \
+    in Done(_) then \"early-done\"\n  in Fault(_) then \"early-fault\"\n  end\nend\ngo()\n";
+
+#[test]
+fn a_denied_fault_stops_a_request_with_no_error_reply() {
+    assert_eq!(allowed(DENY_CLOCK, &["Vm"]), "Done(\"PolicyDenied\")");
+}
+
+/// The denied fault keeps its reason, and `reject` fills the
+/// operation from the pending record of the target.
+#[test]
+fn a_denied_fault_carries_its_reason_and_operation() {
+    let bytes = compile_to_bytes("t.lm", DENY_CLOCK).expect("the program compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the program verifies");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the grant names a group");
+    let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
+    scheduler.run(&mut world);
+    let fault = world.fault_of(1).expect("the child faulted");
+    assert_eq!(fault.code, lm_abi::FaultCode::PolicyDenied);
+    assert_eq!(fault.message, "the clock is not permitted");
+    // `reject` discards the operation of the supplied value and
+    // names the operation the target actually performed.
+    assert_eq!(fault.op, Some(lm_abi::OP_CLOCK_NOW));
+}
+
+/// A wildcard arm can deny. It holds a `Request` and no reply type,
+/// so `answer` is not available there.
+#[test]
+fn a_wildcard_arm_can_deny_a_request() {
+    let source = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
+        def go(): String with Vm\n  \
+        vm = sys.vm.Vm().from_fn(child, args: ())\n  \
+        case vm.drive()\n  in Asked(request)\n    \
+        case request\n    in Call(Io.Print, call, (_,))\n      vm.answer(call, ())\n    \
+        in _\n      vm.reject(request, Fault.denied(\"denied\"))\n    end\n    \
+        case vm.run()\n    in Done(_) then \"done\"\n    in Fault(f) then f.code()\n    end\n  \
+        in Done(_) then \"early-done\"\n  in Fault(_) then \"early-fault\"\n  end\nend\ngo()\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done(\"PolicyDenied\")");
+}
+
+#[test]
+fn fault_declares_no_other_constructor() {
+    let source = "f = Fault.overflow(\"x\")\nf.code()\n";
+    assert_eq!(code_of(source), "E1026");
+}
+
+#[test]
+fn a_denial_reason_must_be_a_string() {
+    let source = "f = Fault.denied(3)\nf.code()\n";
+    assert_eq!(code_of(source), "E1004");
+}
+
+#[test]
+fn a_denied_fault_takes_its_reason_by_label() {
+    let source = "Fault.denied(reason: \"no\").code()\n";
+    assert_eq!(runs(source), "Done(\"PolicyDenied\")");
 }
 
 #[test]

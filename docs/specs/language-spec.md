@@ -1444,6 +1444,18 @@ A bad reply faults the performing machine with `BadOperationReply`. A stale or f
 
 `reject` installs the supplied frozen fault in the performing machine. `dispatch` continues policy resolution from the saved location.
 
+`Fault.denied(reason)` builds the fault a holder needs for `reject`:
+
+```lm
+vm.reject(request, Fault.denied("the operation is not permitted"))
+```
+
+This is the one fault a program can build. Its code is always `PolicyDenied`, so no program can claim a machine-internal code such as `OutOfFuel`. The value is pure and needs no authority: only `reject` installs it, and `reject` charges `Vm`.
+
+`reject` records the operation that the target machine performed, and it ignores the operation field of the supplied value. A holder therefore states the reason alone.
+
+Live denial matches advance denial. `block` denies before the request, and `reject` denies the request in hand. Both leave the performing machine faulted with `PolicyDenied`. A holder needs the live form, because a reply type such as the `Int` of `Clock.Now` carries no error arm, and a wildcard arm holds no reply type at all.
+
 A nested VM control dispatch records an edge and returns. The next control call rebuilds the driver activation before the child runs.
 
 Tokens need not be linear in the source type system. The VM validates single use.
@@ -3053,7 +3065,7 @@ def supervise(
       in Call(Clock.Now, call, ())
         vm.answer(call, 1_700_000_000)
       in _
-        vm.reject(q, policy_denied_fault(q.op()))
+        vm.reject(q, Fault.denied("the supervisor permits print and time only"))
       end
     in Done(value)
       sys.io.print("captured {captured.len()} writes\n")
@@ -3062,6 +3074,9 @@ def supervise(
       return Fault(fault)
     end
   end
+  # `loop` has the type `()`, so a tail expression carries the
+  # declared return type. Only `return` leaves the loop above.
+  Fault(Fault.denied("the driving loop ended"))
 end
 ```
 

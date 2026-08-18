@@ -915,6 +915,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.lower_expr(fault);
                 self.emit(Instr::FaultCode);
             }
+            HExprKind::FaultDenied { reason } => {
+                self.lower_expr(reason);
+                self.emit(Instr::FaultDenied);
+            }
         }
     }
 
@@ -1269,6 +1273,7 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         }
         HExprKind::CallArgs { call } => shift_expr_in_place(call, base, max),
         HExprKind::FaultCodeGet { fault } => shift_expr_in_place(fault, base, max),
+        HExprKind::FaultDenied { reason } => shift_expr_in_place(reason, base, max),
     }
 }
 
@@ -1617,6 +1622,7 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::AsCall(_) => (1, 1),
         Instr::CallArgs => (1, 1),
         Instr::FaultCode => (1, 1),
+        Instr::FaultDenied => (1, 1),
         Instr::Unreachable => (0, 0),
     }
 }
@@ -1735,6 +1741,7 @@ fn instr_text(instr: &Instr) -> String {
         Instr::AsCall(op) => format!("AsCall {}", op_text(*op)),
         Instr::CallArgs => "CallArgs".to_string(),
         Instr::FaultCode => "FaultCode".to_string(),
+        Instr::FaultDenied => "FaultDenied".to_string(),
         Instr::Unreachable => "Unreachable".to_string(),
     }
 }

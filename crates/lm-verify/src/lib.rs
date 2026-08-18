@@ -3324,6 +3324,11 @@ fn step(
             }
             push(state, TY_STR)?;
         }
+        Instr::FaultDenied => {
+            pop_expect(state, TY_STR)?;
+            let fault = ctx.intern(BcType::Fault);
+            push(state, fault)?;
+        }
         Instr::Unreachable => {
             // A diverging terminator: no stack effect, no successor.
         }

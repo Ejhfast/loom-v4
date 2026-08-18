@@ -1,0 +1,42 @@
+# Deny with a fault: refuse a request whose reply carries no error.
+#
+# `04-deny.lm` answers `Err(Failed(...))`. That works because
+# `Fs.Open` replies with a `Result`. Most operations do not. `Clock.Now`
+# replies with `Int`, so a driver that must refuse it has no error
+# value to send. A wildcard arm has no reply type at all.
+#
+# `Fault.denied(reason)` builds the one fault a program can make. Its
+# code is always `PolicyDenied`, the same code that an advance `block`
+# installs. `reject` then stops the child.
+
+def read_clock(): String with Clock.Now, Io.Print
+  sys.io.print("the child asks for the time\n")
+  t = sys.clock.now()
+  "the child read {t}"
+end
+
+def print_only(child: Vm[String]): String with Vm, Io.Print
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request
+      in Call(Io.Print, call, (text,))
+        sys.io.print("child: {text}")
+        child.answer(call, ())
+      in _
+        # No `Int` here would be honest, so the driver refuses.
+        child.reject(request, Fault.denied("this child reads no clock"))
+      end
+    in Done(value)
+      return value
+    in Fault(fault)
+      return "the child stopped with {fault.code()}"
+    end
+  end
+  # `loop` has the type `()`, so a tail expression carries the
+  # declared return type.
+  "the supervisor stopped"
+end
+
+child = sys.vm.Vm().from_fn(read_clock, args: ())
+print_only(child)

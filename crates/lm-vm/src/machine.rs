@@ -1603,6 +1603,21 @@ impl Machine {
                 let value = self.alloc(Object::Str(code.to_string()))?;
                 self.push(value)?;
             }
+            Instr::FaultDenied => {
+                let r = self.pop_obj()?;
+                let reason = match self.vm.heap.get(r) {
+                    Object::Str(text) => text.clone(),
+                    _ => return Err(BAD_TYPE),
+                };
+                // The code is fixed. A holder states why it denied
+                // the request, and it cannot name another code.
+                let value = self.alloc(Object::NativeFault {
+                    code: FaultCode::PolicyDenied,
+                    message: reason,
+                    op: None,
+                })?;
+                self.push(value)?;
+            }
         }
         Ok(ExecOutcome::Continue)
     }

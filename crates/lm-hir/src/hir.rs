@@ -445,6 +445,10 @@ pub enum HExprKind {
     FaultCodeGet {
         fault: Box<HExpr>,
     },
+    /// `Fault.denied(reason)`: build one frozen `PolicyDenied` fault.
+    FaultDenied {
+        reason: Box<HExpr>,
+    },
 }
 
 impl HStmt {

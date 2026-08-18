@@ -121,6 +121,20 @@ fn a_supervisor_refuses_a_path_outside_its_allowlist() {
     );
 }
 
+/// The other refusal: the reply type carries no error value, so the
+/// driver installs a fault instead of an error.
+#[test]
+fn a_supervisor_denies_a_request_with_no_error_reply() {
+    assert_eq!(
+        run_example(
+            "examples/09-handles-and-supervision/13-deny-with-a-fault.lm",
+            &["Vm", "Io.Print"],
+            None,
+        ),
+        "Done(\"the child stopped with PolicyDenied\")"
+    );
+}
+
 #[test]
 fn a_driver_observes_every_read_of_a_minted_file() {
     assert_eq!(

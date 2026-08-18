@@ -2262,6 +2262,16 @@ impl<'o> FnChecker<'o> {
                     .call_named(ctx, &qualified, name_span, type_args, args, expected, span);
             }
         }
+        // `Fault.denied(reason)`: the one fault a program can build.
+        // The receiver is the type name, and no value carries it.
+        if let ExprKind::Name(type_name) = &recv.kind {
+            if type_name == "Fault"
+                && self.lookup_slot(type_name).is_none()
+                && ctx.lookup_type(type_name, &self.env).is_none()
+            {
+                return self.check_fault_denied(ctx, name, name_span, type_args, args, span);
+            }
+        }
         let recv_h = self.synth_expr(ctx, recv)?;
         let recv_ty = recv_h.ty;
         // Native control methods on the VM surface types.
@@ -2489,6 +2499,58 @@ impl<'o> FnChecker<'o> {
             ty: ret,
             mutable,
             kind: HExprKind::Native { op, args: all_args },
+        })
+    }
+
+    /// Check `Fault.denied(reason)`.
+    ///
+    /// A holder denies one request with `reject`, and `reject` needs
+    /// a `Fault`. No other expression builds one, so a holder could
+    /// not deny a request whose reply type carries no error arm.
+    ///
+    /// The code is always `PolicyDenied`. A machine-internal code
+    /// such as `OutOfFuel` states something about the runtime, and a
+    /// program must not claim it. The value is pure: it needs no
+    /// authority, because only `reject` installs it, and `reject`
+    /// charges `Vm`.
+    fn check_fault_denied(
+        &mut self,
+        ctx: &mut Ctx,
+        name: &str,
+        name_span: Span,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if name != "denied" {
+            return Err(Diagnostic::new(
+                "E1026",
+                format!("the type Fault has no constructor named `{name}`"),
+                name_span,
+            ));
+        }
+        if !type_args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1024",
+                "`Fault.denied` does not take type arguments",
+                name_span,
+            ));
+        }
+        if args.len() != 1 {
+            return Err(Diagnostic::new(
+                "E1006",
+                format!("`denied` expects 1 argument(s), found {}", args.len()),
+                span,
+            ));
+        }
+        let args = arrange_args(args, &["reason"], "denied")?;
+        let reason = self.check_expr(ctx, args[0], STRING)?;
+        Ok(HExpr {
+            ty: lm_types::FAULT,
+            mutable: true,
+            kind: HExprKind::FaultDenied {
+                reason: Box::new(reason),
+            },
         })
     }
 

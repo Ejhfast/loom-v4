@@ -383,6 +383,12 @@ pub enum Instr {
     CallArgs,
     /// Pop a Fault value and push its stable code as a string.
     FaultCode,
+    /// Pop a reason string and push one frozen `PolicyDenied` fault.
+    ///
+    /// This is the one fault a program can build. A holder needs it
+    /// to deny a request through `reject`. The code is fixed, so no
+    /// program can claim a machine-internal fault.
+    FaultDenied,
     /// The runtime backstop behind a proven-exhaustive `case`. It
     /// faults if executed. Ends the block.
     Unreachable,
@@ -753,6 +759,7 @@ const OP_UNREACHABLE: u8 = 0x77;
 const OP_DIGEST: u8 = 0x78;
 const OP_EQ_DIGEST: u8 = 0x79;
 const OP_NE_DIGEST: u8 = 0x7a;
+const OP_FAULT_DENIED: u8 = 0x7b;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1265,6 +1272,7 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         }
         Instr::CallArgs => out.push(OP_CALL_ARGS),
         Instr::FaultCode => out.push(OP_FAULT_CODE),
+        Instr::FaultDenied => out.push(OP_FAULT_DENIED),
         Instr::Unreachable => out.push(OP_UNREACHABLE),
     }
 }
@@ -1940,6 +1948,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_AS_CALL => Instr::AsCall(cur.u32()?),
         OP_CALL_ARGS => Instr::CallArgs,
         OP_FAULT_CODE => Instr::FaultCode,
+        OP_FAULT_DENIED => Instr::FaultDenied,
         OP_UNREACHABLE => Instr::Unreachable,
         other => return Err(DecodeError::BadOpcode(other)),
     };
@@ -2134,6 +2143,8 @@ mod tests {
             Instr::BbLen,
             Instr::BbBuild,
             Instr::Freeze,
+            Instr::FaultCode,
+            Instr::FaultDenied,
             Instr::Jump(0),
             Instr::JumpIfFalse(0),
             Instr::JumpIfTrue(0),
