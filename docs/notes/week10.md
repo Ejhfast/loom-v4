@@ -13,6 +13,12 @@ waits, bounded drive turns, and the request patterns that make a
 driver readable. Everything else in this note supports one of those
 two, or fell out of using them.
 
+The next step is not TCP. `String` is unfinished, and the filesystem
+already shows it: a program decodes bytes to text and then goes back
+to bytes to read the text. The network layer exchanges the same two
+types, so it would build on the same gap. Section 6 states the pass
+that closes it.
+
 Bytecode format version 20, interface format 8, compiler ABI 16,
 verifier 14, operation manifest ABI 7, snapshot container format 6.
 The core image pin is
@@ -85,10 +91,35 @@ Fallibility follows the read path. `slice` returns
 Bytes from a file are untrusted, so decoding is a result and not a
 fault. `text()` is the faulting conversion and reports `BadCast`.
 
-Specification 24.6 splits the surface into an implemented tier A and a
-reserved tier B, so the thin `String` surface is a recorded staging
-decision. `String.bytes()` is tier B; `Bytes(text)` covers the
-direction the filesystem needs today.
+`Bytes` is finished enough to carry the filesystem. `String` is not.
+
+`String` holds `byte_len`, `char_count`, `is_empty`, `concat`,
+`starts_with`, `ends_with`, `contains`, `find`, and the three hooks.
+A program can build a string and ask yes-or-no questions about it. A
+program cannot take one apart. `concat` is the only method that makes
+a new string from an old one.
+
+Two of the gaps are defects and not staging.
+
+`find` returns a byte offset, and no method consumes a byte offset.
+`String` has no `slice`. The method answers a question the type cannot
+act on, and `char_count` has the same shape: there is no character
+access of any kind.
+
+Specification 6.4 states that strings compare lexicographically by
+Unicode scalar value. `String` declares `__eq__` and `__ne__` and no
+ordering hook, so `"a" < "b"` reports "expected Int, found String". No
+program can sort strings. Specification 24.6 lists the method in
+neither of its two tiers, so this was missed rather than deferred.
+`Bytes` has the same hole: 6.4 promises byte ordering and `Bytes`
+declares no ordering hook either.
+
+The result reaches the filesystem work directly. A program reads a
+file, decodes `Bytes` to `String`, and then has to go back down to
+`Bytes` to do anything with the text, because `Bytes` has `slice` and
+`find` and `String` has only the second. The byte type is the capable
+one and the text type is not. That is the wrong way round for a layer
+whose output is text.
 
 Operators reach these classes through paired-underscore hooks. `Int`,
 `Bool`, `String`, and `Bytes` declare `__add__` and the rest, opt-in
@@ -157,7 +188,36 @@ that claims them.
 `a == b` disagree with a map lookup. Specification 6.4 says so,
 because the same gap is a common defect in other languages.
 
-## 6. Open questions
+## 6. Next: finish strings and bytes
+
+This comes before TCP and the rest of the network work. The network
+layer exchanges bytes and reports text, so it would build on the same
+incomplete type and double the cost of fixing it.
+
+The pass has three parts.
+
+**Complete the surface.** Ordering hooks on `String` and `Bytes`
+first: specification 6.4 already promises them, and no program can
+sort today. Then `slice_bytes`, which makes the existing `find` mean
+something. Then `split`, `lines`, `trim`, `replace`,
+`to_lower_ascii`, `to_upper_ascii`, `bytes()`, and `parse_int`.
+
+**Measure against CPython.** `crates/lm-testkit/tests/bench.rs` and
+`benchmarks/ops.py` already run paired workloads, and neither carries
+a string case beyond `byte_buffer` and `map_str_lookup`. Add cases for
+concatenation, builder append, slicing, `find`, `split`, comparison,
+and byte decoding. CPython is a frame of reference and not a target,
+and a string operation is where an interpreter usually loses, so the
+numbers say whether the shared-storage design pays for itself.
+
+**Prove the ergonomics.** Add `examples/11-string-and-bytes` with the
+patterns a program actually writes: split a file into lines, parse a
+key-and-value configuration, build a report with `StringBuilder`,
+decode untrusted bytes and handle the failure, and slice a byte buffer
+without copying. An operation that needs a detour through another type
+is not finished, and an example is where that shows.
+
+## 7. Open questions
 
 - **`Request` inspection is still narrow.** `op_name` gives text.
   `q.op()` needs an identity-erased `Operation` value that version 0.2
@@ -189,18 +249,24 @@ because the same gap is a common defect in other languages.
   match an exact non-`Never` signature and never returns cannot be
   written directly. One week-4 mock uses `0 == 0` for its condition.
 
-## 7. Deferred work
+## 8. Not started
 
-Carried from the build order and not started: TCP, the Unix and
-Windows platform adapters, `std/path`, explicit finite root policy
-profiles, `FileLease` as a scoped designator, `std/fs.with_open`,
-`std/fs.open_handle`, and the process environment operations.
+From the build order: TCP, the Unix and Windows platform adapters,
+`std/path`, explicit finite root policy profiles, `FileLease` as a
+scoped designator, `std/fs.with_open`, `std/fs.open_handle`, and the
+process environment operations. Section 6 comes first.
 
-Deferred from the language surface: `q.op()`, `q.ordinal()`,
-`q.args_view()`, `q.reply_type()`, tier B of the `String` surface,
-`StringBuilder.push_char`, `Char` methods, and float parsing.
+Missing from `String` and `Bytes`, and covered by section 6:
+ordering hooks, `slice_bytes`, `slice_chars`, `split`, `lines`,
+`trim`, `trim_start`, `trim_end`, `replace`, `to_lower_ascii`,
+`to_upper_ascii`, `bytes()`, and `parse_int`.
 
-## 8. Maintenance note
+Waiting on a type that version 0.2 does not define: `q.op()`,
+`q.ordinal()`, `q.args_view()`, `q.reply_type()`,
+`StringBuilder.push_char` and the rest of the `Char` methods, and
+float parsing.
+
+## 9. Maintenance note
 
 The operation manifest moved this week, so every checked artifact
 moved with it. `docs/notes/week9.md` lists two commands. The core pins
