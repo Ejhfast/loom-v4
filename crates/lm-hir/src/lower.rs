@@ -20,6 +20,8 @@ use std::fmt::Write as _;
 /// Module-wide interning state during lowering.
 struct ModLowerer<'m> {
     store: &'m TypeStore,
+    /// Small expression bodies that direct calls can inline.
+    inline_bodies: Vec<Option<HExpr>>,
     strings: Vec<String>,
     string_index: HashMap<String, u32>,
     types: Vec<BcType>,
@@ -176,6 +178,7 @@ impl<'m> ModLowerer<'m> {
 pub fn lower_module(hir: &HirModule) -> Module {
     let mut m = ModLowerer {
         store: &hir.store,
+        inline_bodies: hir.funcs.iter().map(inline_body).collect(),
         strings: Vec::new(),
         string_index: HashMap::new(),
         types: Vec::new(),
@@ -589,6 +592,19 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 rowargs,
                 args,
             } => {
+                let inline = self
+                    .m
+                    .inline_bodies
+                    .get(*func as usize)
+                    .and_then(Clone::clone);
+                if targs.is_empty() && rowargs.is_empty() {
+                    if let Some(template) = inline {
+                        if let Some(expr) = instantiate_inline(&template, args) {
+                            self.lower_expr(&expr);
+                            return;
+                        }
+                    }
+                }
                 for arg in args {
                     self.lower_expr(arg);
                 }
@@ -1143,6 +1159,73 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             self.emit(Instr::Jump(join_b));
         }
     }
+}
+
+const INLINE_NODE_LIMIT: usize = 8;
+
+/// Select one safe expression body for direct-call inlining.
+fn inline_body(func: &HirFunc) -> Option<HExpr> {
+    if func.imported
+        || func.type_params != 0
+        || func.effect_params != 0
+        || !func.row.is_empty()
+        || !func.captures.is_empty()
+        || func.locals.len() != func.params.len()
+    {
+        return None;
+    }
+    let [HStmt::Expr(expr)] = func.body.as_slice() else {
+        return None;
+    };
+    Some(expr.clone())
+}
+
+/// Replace ordered parameter reads with the caller expressions.
+fn instantiate_inline(template: &HExpr, args: &[HExpr]) -> Option<HExpr> {
+    let mut next = 0;
+    let mut nodes = 0;
+    let expr = instantiate_inline_expr(template, args, &mut next, &mut nodes)?;
+    (next == args.len()).then_some(expr)
+}
+
+fn instantiate_inline_expr(
+    expr: &HExpr,
+    args: &[HExpr],
+    next: &mut usize,
+    nodes: &mut usize,
+) -> Option<HExpr> {
+    *nodes += 1;
+    if *nodes > INLINE_NODE_LIMIT {
+        return None;
+    }
+    let mut out = expr.clone();
+    match &mut out.kind {
+        HExprKind::Local(slot) => {
+            let index = *slot as usize;
+            if index != *next || index >= args.len() {
+                return None;
+            }
+            *next += 1;
+            return Some(args[index].clone());
+        }
+        HExprKind::Unit | HExprKind::Int(_) | HExprKind::Str(_) | HExprKind::Bool(_) => {}
+        HExprKind::Not(inner) | HExprKind::Neg(inner) => {
+            **inner = instantiate_inline_expr(inner, args, next, nodes)?;
+        }
+        HExprKind::Binary { left, right, .. }
+        | HExprKind::And(left, right)
+        | HExprKind::Or(left, right) => {
+            **left = instantiate_inline_expr(left, args, next, nodes)?;
+            **right = instantiate_inline_expr(right, args, next, nodes)?;
+        }
+        HExprKind::Native { args: operands, .. } => {
+            for operand in operands {
+                *operand = instantiate_inline_expr(operand, args, next, nodes)?;
+            }
+        }
+        _ => return None,
+    }
+    Some(out)
 }
 
 /// Shift every local slot reference in a default expression by
