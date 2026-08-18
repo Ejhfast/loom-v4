@@ -85,13 +85,13 @@ in _
 end
 ```
 
-A driver can also mint a new file resource for an `Fs.Open` request.
+A driver can also serve a new file resource for an `Fs.Open` request.
 The runtime binds that resource to the driver.
 
 ```lm
 case request
 in Call(Fs.Open, call, (_, _))
-  control = vm.mint_file(call)
+  control = vm.serve_file(call)
   files.push(MemoryFile(control, Bytes(""), 0))
 in _
   vm.dispatch(request)
@@ -101,13 +101,25 @@ end
 Later file requests expose the same resource through a holder-local
 control. The driver can select its backing state without host access.
 
-`mint_file` consumes only a current `Fs.Open` call. It installs the
-successful open reply in the performing machine.
+`serve_file` consumes only a current `Fs.Open` call. It does three
+things in one step:
+
+1. It registers a file resource. The performing machine owns the
+   entry, and the driver backs it.
+2. It installs the successful open reply in the performing machine.
+   The call token is spent, so a later continuation on the same token
+   faults the caller with `InvalidRequestToken`.
+3. It returns the holder-side `ResourceHandle` of the new entry.
+
+The name states the duty of the driver. No host file stands behind the
+entry, so every later operation on it returns to the driver as a
+request. A driver-backed request that reaches the root host gives the
+performing machine an ordinary `FsError` instead.
 
 `ReplySink` validates the surface, route, target, ordinal, operation,
-and policy cursor before minting starts.
+and policy cursor before the resource exists.
 
-Minting fails atomically. A failed allocation installs no handle and
+Service starts atomically. A failed allocation installs no handle and
 leaves no resource entry.
 
 ## 6. Holder management

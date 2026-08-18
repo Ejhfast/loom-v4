@@ -42,7 +42,7 @@ fn serve(body: &str) -> String {
 const FLAT: &str = "\x20     case request\n\
                     \x20     in Call(Fs.Open, call, (_, _))\n\
                     \x20       seen.push(1)\n\
-                    \x20       vm.mint_file(call)\n\
+                    \x20       vm.serve_file(call)\n\
                     \x20       ()\n\
                     \x20     in Call(Fs.Read, call, (_, count))\n\
                     \x20       seen.push(count)\n\

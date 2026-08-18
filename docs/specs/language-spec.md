@@ -2301,7 +2301,7 @@ Vm.Stack[T]              (Vm[T]) -> [FrameView]
 Vm.Table[T]              (Vm[T]) -> PolicyTable
 Vm.Handles[T]            (Vm[T]) -> [ResourceHandle]
 Vm.Resource[T]           (Vm[T], FileHandle) -> ResourceHandle
-Vm.MintFile[T]           (Vm[T], PendingCall[(String, OpenOptions),
+Vm.ServeFile[T]           (Vm[T], PendingCall[(String, OpenOptions),
                            Result[FileHandle, FsError]]) -> ResourceHandle
 Vm.ResourceIsOpen        (ResourceHandle) -> Bool
 Vm.ResourceClose         (ResourceHandle) -> Bool

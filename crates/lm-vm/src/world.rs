@@ -3495,7 +3495,7 @@ impl<'m> World<'m> {
                 let built = self.build_resource_control(vm, target, resource);
                 self.reply_or_fault(vm, op, built);
             }
-            lm_abi::OP_VM_MINT_FILE => {
+            lm_abi::OP_VM_SERVE_FILE => {
                 let Some(surface) = self.vm_arg(vm, op, args[0]) else {
                     return;
                 };
@@ -4522,7 +4522,8 @@ impl<'m> World<'m> {
                     vm,
                     control_op,
                     FaultCode::InvalidRequestToken,
-                    "the request token is consumed or stale",
+                    "the request token is consumed or stale; `answer`, `reject`, \
+                     `dispatch`, and `serve_file` each spend it once",
                 );
                 return None;
             }
@@ -4546,7 +4547,8 @@ impl<'m> World<'m> {
                 vm,
                 control_op,
                 FaultCode::InvalidRequestToken,
-                "the request token is consumed or stale",
+                "the request token is consumed or stale; `answer`, `reject`, \
+                     `dispatch`, and `serve_file` each spend it once",
             );
             return None;
         };

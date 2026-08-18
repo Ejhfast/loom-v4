@@ -3879,11 +3879,11 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "mint_file") => {
+            (Type::Vm(_), "serve_file") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1006",
-                        format!("`mint_file` expects 1 argument(s), found {}", args.len()),
+                        format!("`serve_file` expects 1 argument(s), found {}", args.len()),
                         span,
                     ));
                 }
@@ -3893,16 +3893,16 @@ impl<'o> FnChecker<'o> {
                 if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
                     return Err(Diagnostic::new(
                         "E1004",
-                        "`mint_file` needs a current Fs.Open call",
+                        "`serve_file` needs a current Fs.Open call",
                         args[0].span,
                     ));
                 }
-                self.charge_op(ctx, lm_abi::OP_VM_MINT_FILE, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_SERVE_FILE, span)?;
                 HExpr {
                     ty: lm_types::RESOURCE_HANDLE,
                     mutable: true,
                     kind: HExprKind::Perform {
-                        op: lm_abi::OP_VM_MINT_FILE,
+                        op: lm_abi::OP_VM_SERVE_FILE,
                         args: vec![recv_h, call],
                     },
                 }

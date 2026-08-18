@@ -136,7 +136,7 @@ fn a_supervisor_denies_a_request_with_no_error_reply() {
 }
 
 #[test]
-fn a_driver_observes_every_read_of_a_minted_file() {
+fn a_driver_observes_every_read_of_a_served_file() {
     assert_eq!(
         run_example(
             "examples/09-handles-and-supervision/07-tee.lm",
@@ -181,7 +181,7 @@ end
 }
 
 #[test]
-fn a_driver_can_mint_a_file_handle() {
+fn a_driver_can_serve_a_file_handle() {
     assert_eq!(
         run_example(
             "examples/09-handles-and-supervision/06-serve-memory.lm",
@@ -207,7 +207,7 @@ fn a_supervisor_steps_the_child_to_a_quiet_capture_point() {
 }
 
 #[test]
-fn driver_termination_closes_its_minted_files() {
+fn driver_termination_closes_its_served_files() {
     let text = r#"
 child = sys.vm.Vm().from_fn(do ||: Int with Fs.Open
   case sys.fs.open("memory.txt", ReadOnly)
@@ -219,7 +219,7 @@ case child.drive()
 in Asked(request)
   case request
   in Call(Fs.Open, call, (_, _))
-    control = child.mint_file(call)
+    control = child.serve_file(call)
     control.is_open()
   in _ then false
   end

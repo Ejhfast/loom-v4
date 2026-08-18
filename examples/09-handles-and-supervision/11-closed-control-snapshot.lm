@@ -1,8 +1,13 @@
 # A closed control is ordinary state.
 #
-# The supervisor mints a file for the child, serves it from memory, and
-# closes it. The supervisor keeps the control afterwards, inside a plain
-# object field.
+# The supervisor serves a file for the child from memory and closes it.
+# The supervisor keeps the control afterwards, inside a plain object
+# field.
+#
+# `serve_file(call)` answers the pending `Fs.Open` and returns the
+# holder-side `ResourceHandle` of the new entry. The control is the
+# value this example retains. It stays valid after the entry closes,
+# and it reports that state through `is_open`.
 #
 # A live resource blocks a capture. This control is closed, so it does
 # not. The snapshot stores a closed marker with no host authority, and a
@@ -64,7 +69,7 @@ case child.drive()
 in Asked(request)
   case request
   in Call(Fs.Open, call, (_, _))
-    mine = child.mint_file(call)
+    mine = child.serve_file(call)
     served = ServedRequest(mine, serve(child, mine, Bytes("cached settings")))
 
     # The child closed the entry, so the retained control is closed.

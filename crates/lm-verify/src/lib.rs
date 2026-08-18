@@ -1782,7 +1782,7 @@ fn perform_argc(op: u32) -> u32 {
             lm_abi::OP_VM_SNAPSHOT_HELD | lm_abi::OP_VM_LOAD_SNAPSHOT => 1,
             lm_abi::OP_VM_RESTORE
             | lm_abi::OP_VM_RESOURCE
-            | lm_abi::OP_VM_MINT_FILE
+            | lm_abi::OP_VM_SERVE_FILE
             | lm_abi::OP_VM_DRIVE_FOR
             | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
             | lm_abi::OP_PROC_SNAPSHOT_WAIT
@@ -2886,7 +2886,7 @@ fn step(
                             let control = ctx.intern(BcType::ResourceHandle);
                             push(state, control)?;
                         }
-                        lm_abi::OP_VM_MINT_FILE => {
+                        lm_abi::OP_VM_SERVE_FILE => {
                             let call = pop(state)?;
                             pop_vm(state)?;
                             let args = ctx.op_args_view(lm_abi::OP_FS_OPEN).map_err(&fail)?;
@@ -2895,7 +2895,7 @@ fn step(
                                 .map_err(&fail)?;
                             if ctx.ty(call) != BcType::PendingCall(args, reply) {
                                 return Err(fail(
-                                    "`Vm.MintFile` needs an Fs.Open call".to_string(),
+                                    "`Vm.ServeFile` needs an Fs.Open call".to_string(),
                                 ));
                             }
                             let control = ctx.intern(BcType::ResourceHandle);

@@ -1,10 +1,20 @@
 # Serve from memory: the child does ordinary file work, and no file
 # exists.
 #
-# `mint_file` answers an `Fs.Open` with a fresh resource entry that the
-# supervisor owns. No host file stands behind that entry. Every later
-# operation on it therefore returns to the supervisor as a request, and
-# the supervisor must answer all of them.
+# `serve_file(call)` does three things in one step:
+#
+# 1. It creates a file resource. The child owns the entry, so the entry
+#    closes when the child ends. This supervisor backs it.
+# 2. It answers the pending `Fs.Open` with `Ok(FileHandle)` in the
+#    child. The call token is spent, so a later `answer` on the same
+#    token faults the supervisor with `InvalidRequestToken`.
+# 3. It returns a `ResourceHandle` to this supervisor. That control
+#    reads and closes the same resource from the holder side.
+#
+# The name states the duty. No host file stands behind the entry, so
+# every later `Fs.Read`, `Fs.Write`, or `Fs.Close` comes back here as a
+# request, and this supervisor must answer each one. A request that
+# reaches the root host instead gives the child an `FsError`.
 
 def read_settings(): String with Fs.Open, Fs.Read, Fs.Close
   case sys.fs.open("settings.txt", ReadOnly)
@@ -54,12 +64,13 @@ end
 
 child = sys.vm.Vm().from_fn(read_settings, args: ())
 
-# The first request is the open. Mint an entry to answer it.
+# The first request is the open. `serve_file` answers it and returns
+# the holder-side control of the new entry.
 case child.drive()
 in Asked(request)
   case request
   in Call(Fs.Open, call, (_, _))
-    mine = child.mint_file(call)
+    mine = child.serve_file(call)
     serve(child, mine, Bytes("settings from the supervisor"))
   in _ then "the child asked for something else first"
   end

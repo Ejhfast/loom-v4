@@ -182,7 +182,7 @@ pub const OP_FS_FLUSH: OpSlot = 32;
 pub const OP_FS_CLOSE: OpSlot = 33;
 pub const OP_VM_HANDLES: OpSlot = 34;
 pub const OP_VM_RESOURCE: OpSlot = 35;
-pub const OP_VM_MINT_FILE: OpSlot = 36;
+pub const OP_VM_SERVE_FILE: OpSlot = 36;
 pub const OP_VM_RESOURCE_IS_OPEN: OpSlot = 37;
 pub const OP_VM_RESOURCE_CLOSE: OpSlot = 38;
 pub const OP_VM_RESOURCE_KIND: OpSlot = 39;
@@ -532,7 +532,7 @@ pub const OPS: [OpDef; 49] = [
     },
     OpDef {
         group: "Vm",
-        member: "MintFile",
+        member: "ServeFile",
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::Unit,

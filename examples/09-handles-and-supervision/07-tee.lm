@@ -1,8 +1,15 @@
-# Tee: mint the child's file, back it with a real file, and record the
+# Tee: serve the child's file, back it with a real file, and record the
 # size of every read.
 #
 # This joins the two previous ideas. The child reads real data. The
 # supervisor sees each operation and can change the answer.
+#
+# `serve_file(call)` answers the pending `Fs.Open` with a new entry and
+# returns the holder-side `ResourceHandle` of that entry. It spends the
+# call token, so the supervisor must not answer the same call again.
+# It also takes on the duty: every later operation on that entry
+# arrives here as a request. This example forwards each read to a real
+# file, so the child sees genuine bytes and the supervisor sees sizes.
 
 def read_twice(): String with Fs.Open, Fs.Read, Fs.Close
   case sys.fs.open("input.txt", ReadOnly)
@@ -69,7 +76,7 @@ in Ok(backing)
   in Asked(request)
     case request
     in Call(Fs.Open, call, (_, _))
-      mine = child.mint_file(call)
+      mine = child.serve_file(call)
       sizes: [Int] = []
       text = tee(child, mine, backing, sizes)
       backing.close()
