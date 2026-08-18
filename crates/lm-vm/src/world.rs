@@ -894,6 +894,18 @@ impl<'m> World<'m> {
                 return RootEvent::Ran;
             };
             let act = stack[top_idx];
+            // A descendant of this driven surface parked a request
+            // while this stack waited on another task. Deliver it
+            // before the loop reads the surface state, because the
+            // surface can still be blocked on its own work.
+            if act.mode == StopMode::DriveToAsk
+                && self.machines[act.vm as usize].vm.routed.is_some()
+            {
+                if let Some(event) = self.deliver_parked_route(stack, top_idx) {
+                    return event;
+                }
+                continue;
+            }
             let state = self.machines[act.vm as usize].vm.state;
             match state {
                 MachineState::Blocked => {
@@ -926,6 +938,12 @@ impl<'m> World<'m> {
                     return RootEvent::Blocked;
                 }
                 MachineState::Done | MachineState::Faulted => {
+                    // This machine reached its terminal state inside
+                    // another task's slice, so no slice exit reports
+                    // it. Wake the tasks that wait on this machine
+                    // here, or a `done` or a full-mailbox `send` on it
+                    // never becomes runnable again.
+                    self.note_terminal(act.vm);
                     if let Some(event) = self.finish(stack, ExitKind::Terminal) {
                         return event;
                     }
@@ -997,7 +1015,15 @@ impl<'m> World<'m> {
                 // state below can reach the loop, so a machine that
                 // holds one stops instead of running under a mode its
                 // state does not accept.
-                MachineState::Empty | MachineState::Asked => {
+                // A machine parks at `Asked` when it surfaces a request
+                // to a driver on another task. Its own activation ends
+                // here, and the driver answer makes it ready again.
+                MachineState::Asked => {
+                    if let Some(event) = self.finish(stack, ExitKind::Ran) {
+                        return event;
+                    }
+                }
+                MachineState::Empty => {
                     self.machines[act.vm as usize].set_fault(
                         FaultCode::MalformedState,
                         "the machine left the driver stack state set",
@@ -1160,6 +1186,21 @@ impl<'m> World<'m> {
                 retired: false,
             },
         );
+    }
+
+    /// Wake the tasks that wait on one terminal machine.
+    ///
+    /// The scheduler reports a terminal slice exit for the task it
+    /// drove. A machine that reaches its terminal state inside another
+    /// task's slice produces no such exit, so the world reports it.
+    /// A repeated call is safe: one event batch coalesces equal keys,
+    /// and a wake only re-reads live task state.
+    fn note_terminal(&mut self, vm: VmId) {
+        let Some(key) = self.task_key(vm) else {
+            return;
+        };
+        self.emit_wake(WakeKey::Done(key));
+        self.emit_wake(WakeKey::Send(key));
     }
 
     /// The completion key of one waiting machine.
@@ -1642,6 +1683,25 @@ impl<'m> World<'m> {
         if let Some(resource) = file {
             self.retire_file(resource, close_host);
         }
+        // A machine that parked at `Asked` for its driver leaves the
+        // run set. This reply makes it runnable again, so the scheduler
+        // needs the event.
+        self.notify_task_state(vm);
+    }
+
+    /// Report the current schedulability of one machine.
+    fn notify_task_state(&mut self, vm: VmId) {
+        let Some(key) = self.task_key(vm) else {
+            return;
+        };
+        if !self.scheduler_procs.contains(key) && vm != 0 {
+            return;
+        }
+        match self.task_status(key) {
+            TaskStatus::Ready => self.emit_ready(key),
+            TaskStatus::Terminal => self.note_terminal(vm),
+            _ => {}
+        }
     }
 
     /// Convert one host reply into a guest value and install it.
@@ -2026,6 +2086,183 @@ impl<'m> World<'m> {
         self.deliver_routed_asked(route.target, parent, fresh);
     }
 
+    /// Deliver a request that a descendant parked on a driven surface.
+    ///
+    /// The driver stack reached this surface again. The activation of
+    /// the surface ends here, exactly as it ends for a request that
+    /// reached the driver on one stack.
+    fn deliver_parked_route(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        at: usize,
+    ) -> Option<RootEvent> {
+        let surface = stack[at].vm;
+        let holder = stack[at].reply_to;
+        let route = self.machines[surface as usize].vm.routed?;
+        let Some(ordinal) = self.machines[route.target as usize]
+            .vm
+            .pending
+            .as_ref()
+            .map(|pending| pending.ordinal)
+        else {
+            self.machines[surface as usize].vm.routed = None;
+            self.machines[route.target as usize].set_fault(
+                FaultCode::MalformedState,
+                "the parked request has no pending operation",
+                None,
+            );
+            return None;
+        };
+        while stack.len() > at {
+            let act = stack.pop().expect("the activation index is in the stack");
+            self.release_activation(act);
+        }
+        match holder {
+            Some(parent) => {
+                if self.machines[parent as usize].vm.nested != Some(surface) {
+                    self.machines[parent as usize].set_fault(
+                        FaultCode::MalformedState,
+                        "the parked ask has no matching control edge",
+                        None,
+                    );
+                    return None;
+                }
+                self.machines[parent as usize].vm.nested = None;
+                self.deliver_routed_asked(route.target, parent, ordinal);
+                None
+            }
+            None => Some(RootEvent::Asked(ordinal)),
+        }
+    }
+
+    /// Park one request on a surface whose driver runs on another
+    /// scheduler task.
+    ///
+    /// The performing machine stops at `Asked`, exactly as it stops for
+    /// a driver on the same stack. The wake makes the driver task
+    /// runnable, and the driver loop reads the routed request when it
+    /// resumes.
+    fn park_routed_request(&mut self, surface: VmId, target: VmId, cursor: PolicyCursor) {
+        if surface == target {
+            self.machines[target as usize].set_fault(
+                FaultCode::MalformedState,
+                "a machine cannot route a request to itself",
+                None,
+            );
+            return;
+        }
+        // Several procs of one driven world can surface at once. The
+        // driver serves one at a time. Every performer waits at
+        // `Asked` holding its own request, and the surface names only
+        // the request it serves now. `promote_next_route` finds the
+        // next waiting performer, so a waiting request needs no
+        // separate record and no snapshot field.
+        self.machines[target as usize].vm.state = MachineState::Asked;
+        if self.machines[surface as usize].vm.routed.is_none() {
+            self.machines[surface as usize].vm.routed = Some(RoutedRequest { target, cursor });
+        }
+        if let Some(key) = self.task_key(target) {
+            self.emit_removed(key);
+        }
+        if let Some(key) = self.task_key(surface) {
+            self.emit_wake(WakeKey::Asked(key));
+        }
+    }
+
+    /// The policy position of one request when `surface` serves it.
+    ///
+    /// The walk follows the pass chain of `resolve_policy`. It stops at
+    /// `surface` and answers the position after that pass. The walk
+    /// reads no driver flag, because a driver clears that flag while it
+    /// serves an earlier request.
+    fn route_cursor_to(&self, vm: VmId, op: u32, surface: VmId) -> Option<PolicyCursor> {
+        let mut cur = vm;
+        for _ in 0..=self.machines.len() {
+            let machine = &self.machines[cur as usize];
+            let Some(Action::Pass) = machine.table.lookup(op) else {
+                return None;
+            };
+            let next = match machine.vm.parent {
+                Some(parent) => PolicyCursor::Table(parent),
+                None => PolicyCursor::Root,
+            };
+            if cur == surface {
+                return Some(next);
+            }
+            let parent = machine.vm.parent?;
+            if matches!(
+                self.machines[parent as usize].vm.state,
+                MachineState::Done | MachineState::Faulted
+            ) {
+                return None;
+            }
+            cur = parent;
+        }
+        None
+    }
+
+    /// Give the free driver slot of one surface to the next waiting
+    /// request.
+    ///
+    /// A performer that surfaced while the driver served another
+    /// request waits at `Asked` with its own pending record. The walk
+    /// below finds it and rebuilds its policy position, so the world
+    /// stores no queue and a snapshot needs no queue field.
+    fn promote_next_route(&mut self, surface: VmId, served: VmId) {
+        if self.machines[surface as usize].vm.routed.is_some() {
+            return;
+        }
+        let mut found = None;
+        for vm in 0..self.machines.len() as VmId {
+            if vm == surface || vm == served {
+                continue;
+            }
+            let machine = &self.machines[vm as usize];
+            if machine.vm.state != MachineState::Asked {
+                continue;
+            }
+            let Some(op) = machine.vm.pending.as_ref().map(|pending| pending.op) else {
+                continue;
+            };
+            if let Some(cursor) = self.route_cursor_to(vm, op, surface) {
+                found = Some((vm, cursor));
+                break;
+            }
+        }
+        let Some((target, cursor)) = found else {
+            return;
+        };
+        self.machines[surface as usize].vm.routed = Some(RoutedRequest { target, cursor });
+        if let Some(key) = self.task_key(surface) {
+            self.emit_wake(WakeKey::Asked(key));
+        }
+    }
+
+    /// The wake conditions of one blocked task.
+    ///
+    /// A task that holds a `drive` call also waits for every surface it
+    /// drives. A descendant of one of those surfaces can surface a
+    /// request while the task waits for another condition.
+    pub fn block_wakes(&self, key: TaskKey, primary: WakeKey) -> Vec<WakeKey> {
+        let mut wakes = vec![primary];
+        let Some(saved) = self.suspended.get(&key.vm) else {
+            return wakes;
+        };
+        for act in &saved.activations {
+            if act.mode != StopMode::DriveToAsk {
+                continue;
+            }
+            let Some(surface) = self.task_key(act.vm) else {
+                continue;
+            };
+            let wake = WakeKey::Asked(surface);
+            if !wakes.contains(&wake) {
+                wakes.push(wake);
+            }
+        }
+        wakes
+    }
+
     /// Park a nested activation chain at its nearest active driver.
     fn route_request(
         &mut self,
@@ -2033,6 +2270,7 @@ impl<'m> World<'m> {
         surface: VmId,
         target: VmId,
         cursor: PolicyCursor,
+        dispatch_mode: DispatchMode,
     ) -> Option<RootEvent> {
         let Some(ordinal) = self.machines[target as usize]
             .vm
@@ -2051,13 +2289,18 @@ impl<'m> World<'m> {
             .iter()
             .rposition(|act| act.vm == surface && act.mode == StopMode::DriveToAsk)
         else {
-            self.machines[target as usize].set_fault(
-                FaultCode::MalformedState,
-                "the policy walk found no matching driver activation",
-                None,
-            );
+            // The driver holds its `drive` call on another scheduler
+            // task, so this stack cannot reach it. A proc of the driven
+            // world takes this path, because the scheduler runs it on
+            // its own task.
+            //
+            // Park the request on the surface and wake the driver task.
+            // The driver reads the request when its stack resumes, so
+            // the driver serves every descendant at every depth.
+            self.park_routed_request(surface, target, cursor);
             return None;
         };
+        let _ = dispatch_mode;
         let holder = stack[at].reply_to;
         if surface == target || self.machines[surface as usize].vm.routed.is_some() {
             self.machines[target as usize].set_fault(
@@ -2130,7 +2373,7 @@ impl<'m> World<'m> {
             }
             Resolution::Mock { owner, closure } => self.start_mock(stack, vm, owner, closure),
             Resolution::Driver { surface, cursor } => {
-                return self.route_request(stack, surface, vm, cursor);
+                return self.route_request(stack, surface, vm, cursor, dispatch_mode);
             }
             Resolution::Root => {
                 if lm_abi::op(op).kind == lm_abi::OpKind::VmControl {
@@ -2924,7 +3167,14 @@ impl<'m> World<'m> {
                             );
                         }
                     }
-                    MachineState::Ready | MachineState::Waiting => {
+                    // A blocked machine takes this path too. It waits
+                    // on another machine of this world, exactly as a
+                    // waiting machine waits on the host. The driver
+                    // loop suspends the whole stack at its next turn,
+                    // and the scheduler parks this holder on the same
+                    // wake condition. The holder resumes its control
+                    // call when the condition clears.
+                    MachineState::Ready | MachineState::Waiting | MachineState::Blocked => {
                         if self.machines[vm as usize].vm.nested.is_some() {
                             self.fault_caller(
                                 vm,
@@ -2949,17 +3199,6 @@ impl<'m> World<'m> {
                                 },
                             );
                         }
-                    }
-                    MachineState::Blocked => {
-                        // A holder-owned machine blocks only inside a
-                        // proc operation of its own stack, and that
-                        // stack holds an execution reference.
-                        self.fault_caller(
-                            vm,
-                            op,
-                            FaultCode::InvalidVmState,
-                            "the machine is blocked on another machine",
-                        );
                     }
                     // A running machine holds an execution reference,
                     // and the guard above already refused one.
@@ -3714,7 +3953,12 @@ impl<'m> World<'m> {
                 .vm
                 .routed
                 .is_some_and(|route| route.target == sink.target));
+            // The slot is free now, so the next waiting request of this
+            // surface takes it.
             self.machines[sink.surface as usize].vm.routed = None;
+            // The reply of `sink.target` installs after this call, so
+            // that machine still holds its request. Skip it.
+            self.promote_next_route(sink.surface, sink.target);
         }
     }
 
@@ -4636,6 +4880,15 @@ impl<'m> World<'m> {
             return TaskStatus::Dormant;
         }
         if let Some(saved) = self.suspended.get(&key.vm) {
+            // A descendant parked a request on a surface this stack
+            // drives. The task must run, whatever it waited for, so
+            // the driver can answer.
+            if saved.activations.iter().any(|act| {
+                act.mode == StopMode::DriveToAsk
+                    && self.machines[act.vm as usize].vm.routed.is_some()
+            }) {
+                return TaskStatus::Ready;
+            }
             return match saved.reason {
                 SuspendReason::Yielded => TaskStatus::Ready,
                 SuspendReason::Blocked {
@@ -4683,7 +4936,10 @@ impl<'m> World<'m> {
                 .completion_key(key.vm)
                 .map(TaskStatus::Waiting)
                 .unwrap_or(TaskStatus::Ready),
-            MachineState::Empty | MachineState::Asked | MachineState::Running => TaskStatus::Ready,
+            // An asked machine parked with a request for its driver.
+            // The driver answers it; the scheduler must not run it.
+            MachineState::Asked => TaskStatus::Dormant,
+            MachineState::Empty | MachineState::Running => TaskStatus::Ready,
             MachineState::Done | MachineState::Faulted => TaskStatus::Terminal,
         }
     }

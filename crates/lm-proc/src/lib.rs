@@ -77,6 +77,10 @@ pub struct Scheduler {
     ready_ticket: u128,
     tasks: TaskIndex,
     blocked: WakeIndex,
+    /// The extra wake keys of a task that waits on more than one
+    /// condition. A driver waits on its own condition and on every
+    /// surface it drives, so a descendant request reaches it.
+    block_keys: BTreeMap<TaskKey, Vec<WakeKey>>,
     waiting: BTreeMap<CompletionKey, TaskKey>,
     events: ScheduleEvents,
 }
@@ -206,7 +210,10 @@ impl WakeIndex {
 
 fn wake_task(wake: WakeKey) -> TaskKey {
     match wake {
-        WakeKey::Receive(task) | WakeKey::Send(task) | WakeKey::Done(task) => task,
+        WakeKey::Receive(task)
+        | WakeKey::Send(task)
+        | WakeKey::Done(task)
+        | WakeKey::Asked(task) => task,
     }
 }
 
@@ -273,6 +280,7 @@ impl Scheduler {
             ready_ticket: 0,
             tasks: TaskIndex::default(),
             blocked: WakeIndex::default(),
+            block_keys: BTreeMap::new(),
             waiting: BTreeMap::new(),
             events: ScheduleEvents::default(),
         }
@@ -368,18 +376,19 @@ impl Scheduler {
         self.ready_ticket = 0;
         self.tasks.clear();
         self.blocked.clear();
+        self.block_keys.clear();
         self.waiting.clear();
         self.events.clear();
         for (task, status) in world.scheduler_seeds(include_root) {
-            self.index_status(task, status);
+            self.index_status(world, task, status);
         }
         self.consume_events(world);
     }
 
-    fn index_status(&mut self, task: TaskKey, status: TaskStatus) {
+    fn index_status(&mut self, world: &World<'_>, task: TaskKey, status: TaskStatus) {
         match status {
             TaskStatus::Ready => self.enqueue(task),
-            TaskStatus::Blocked(wake) => self.block(task, wake),
+            TaskStatus::Blocked(wake) => self.block(world, task, wake),
             TaskStatus::Waiting(completion) => self.wait(task, completion),
             TaskStatus::Terminal | TaskStatus::Dormant => self.drop_task(task),
         }
@@ -396,13 +405,24 @@ impl Scheduler {
         self.ready.push_back((task, ticket));
     }
 
-    fn block(&mut self, task: TaskKey, wake: WakeKey) {
+    /// Index one blocked task under every condition that can wake it.
+    ///
+    /// The primary condition comes from the machine state. A task that
+    /// holds a `drive` call adds one condition for each surface it
+    /// drives, so a request from any descendant reaches it.
+    fn block(&mut self, world: &World<'_>, task: TaskKey, wake: WakeKey) {
         if self.tasks.get(&task) == Some(&IndexedState::Blocked(wake)) {
             return;
         }
         self.remove_index(task);
         self.tasks.insert(task, IndexedState::Blocked(wake));
-        self.blocked.insert(wake, task);
+        let keys = world.block_wakes(task, wake);
+        for key in &keys {
+            self.blocked.insert(*key, task);
+        }
+        if keys.len() > 1 {
+            self.block_keys.insert(task, keys);
+        }
     }
 
     fn wait(&mut self, task: TaskKey, completion: CompletionKey) {
@@ -416,9 +436,14 @@ impl Scheduler {
 
     fn remove_index(&mut self, task: TaskKey) {
         match self.tasks.get(&task).copied() {
-            Some(IndexedState::Blocked(wake)) => {
-                self.blocked.remove(wake, task);
-            }
+            Some(IndexedState::Blocked(wake)) => match self.block_keys.remove(&task) {
+                Some(keys) => {
+                    for key in keys {
+                        self.blocked.remove(key, task);
+                    }
+                }
+                None => self.blocked.remove(wake, task),
+            },
             Some(IndexedState::Waiting(completion)) => {
                 self.waiting.remove(&completion);
             }
@@ -432,7 +457,7 @@ impl Scheduler {
     }
 
     fn refresh(&mut self, world: &World<'_>, task: TaskKey) {
-        self.index_status(task, world.task_status(task));
+        self.index_status(world, task, world.task_status(task));
     }
 
     /// Apply changes produced by the last execution slice.
@@ -460,9 +485,21 @@ impl Scheduler {
             return;
         };
         waiters.for_each(|task| {
-            if self.tasks.get(&task) != Some(&IndexedState::Blocked(wake)) {
+            let Some(IndexedState::Blocked(primary)) = self.tasks.get(&task).copied() else {
+                return;
+            };
+            // The task can hold several conditions. Accept this one
+            // when it is the primary condition or one of the extras.
+            let holds = primary == wake
+                || self
+                    .block_keys
+                    .get(&task)
+                    .is_some_and(|keys| keys.contains(&wake));
+            if !holds {
                 return;
             }
+            // Leave every other condition before the task moves.
+            self.remove_index(task);
             if world.task_status(task) == TaskStatus::Ready {
                 self.stats.unblocked = self.stats.unblocked.saturating_add(1);
             }
@@ -501,7 +538,7 @@ impl Scheduler {
             }
             match world.task_status(task) {
                 TaskStatus::Ready => return Some(task),
-                status => self.index_status(task, status),
+                status => self.index_status(world, task, status),
             }
         }
         None
@@ -511,7 +548,7 @@ impl Scheduler {
     fn finish_slice(&mut self, world: &mut World<'_>, task: TaskKey, exit: Option<SliceExit>) {
         match exit {
             Some(SliceExit::Yielded) => self.enqueue(task),
-            Some(SliceExit::Blocked(wake)) => self.block(task, wake),
+            Some(SliceExit::Blocked(wake)) => self.block(world, task, wake),
             Some(SliceExit::Waiting(completion)) => self.wait(task, completion),
             Some(SliceExit::Terminal) => self.finish_terminal(world, task),
             None => self.refresh(world, task),

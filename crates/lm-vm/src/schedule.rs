@@ -23,6 +23,9 @@ pub enum WakeKey {
     Send(TaskKey),
     /// The target reached a terminal state.
     Done(TaskKey),
+    /// A machine of the target's world surfaced a request to the
+    /// driver of the target. The target is the driven surface.
+    Asked(TaskKey),
 }
 
 /// One pending host completion.
@@ -66,7 +69,7 @@ pub struct ScheduleEvents {
     wakes: Vec<WakeKey>,
     ready_marks: Vec<u64>,
     removed_marks: Vec<u64>,
-    wake_marks: Vec<[u64; 3]>,
+    wake_marks: Vec<[u64; 4]>,
 }
 
 impl ScheduleEvents {
@@ -90,7 +93,7 @@ impl ScheduleEvents {
         let (key, lane) = wake_parts(wake);
         let slot = key.vm as usize;
         if self.wake_marks.len() <= slot {
-            self.wake_marks.resize(slot + 1, [0; 3]);
+            self.wake_marks.resize(slot + 1, [0; 4]);
         }
         let mark = u64::from(key.generation) + 1;
         if self.wake_marks[slot][lane] == mark {
@@ -171,6 +174,7 @@ fn wake_parts(wake: WakeKey) -> (TaskKey, usize) {
         WakeKey::Receive(key) => (key, 0),
         WakeKey::Send(key) => (key, 1),
         WakeKey::Done(key) => (key, 2),
+        WakeKey::Asked(key) => (key, 3),
     }
 }
 
