@@ -677,8 +677,25 @@ impl<'m> World<'m> {
                     (machines.contains(&key.vm) && status == TaskStatus::Ready).then_some(key)
                 })
                 .collect();
+            let before = self.budget.fuel;
             if ready.is_empty() {
-                return Err(active);
+                // No proc of this world can move. Advance the held
+                // machine itself, so a resource that the held machine
+                // owns also reaches its release point.
+                if !matches!(
+                    self.machines[root as usize].vm.state,
+                    MachineState::Ready | MachineState::Waiting
+                ) {
+                    return Err(active);
+                }
+                let _ = self.control(root, StopMode::OneStep, Family::Step);
+                let retired = before.saturating_sub(self.budget.fuel);
+                if retired == 0 {
+                    let barrier = self.next_gate();
+                    return self.capture_snapshot(barrier, root, false);
+                }
+                fuel = fuel.saturating_sub(retired);
+                continue;
             }
             let next = last_task
                 .and_then(|last| ready.iter().position(|key| *key > last))
@@ -686,7 +703,6 @@ impl<'m> World<'m> {
             let key = ready[next];
             last_task = Some(key);
 
-            let before = self.budget.fuel;
             let exit = self.drive_slice(key, 1);
             if exit == Some(SliceExit::Terminal) {
                 self.retire_scheduler_task(key);
@@ -872,6 +888,21 @@ impl<'m> World<'m> {
         stack.push(act);
     }
 
+    /// Leave the running state of one stack that stops now.
+    ///
+    /// A stored stack executes nothing, so its machines are at a
+    /// boundary. They keep their execution references, so no control
+    /// call reaches them, and a barrier can copy them. The driver loop
+    /// makes each one running again when the stack resumes.
+    fn park_stack(&mut self, stack: &[Activation]) {
+        for act in stack {
+            let machine = &mut self.machines[act.vm as usize];
+            if machine.vm.state == MachineState::Running {
+                machine.vm.state = MachineState::Ready;
+            }
+        }
+    }
+
     /// Release the execution references of one removed activation.
     fn release_activation(&mut self, act: Activation) {
         self.machines[act.vm as usize].active -= 1;
@@ -925,6 +956,7 @@ impl<'m> World<'m> {
                     // its execution reference, so no control call can
                     // reach a machine of the stopped stack.
                     let base = stack[0].vm;
+                    self.park_stack(stack);
                     self.suspended.insert(
                         base,
                         SuspendedStack {
@@ -980,6 +1012,7 @@ impl<'m> World<'m> {
                             continue;
                         };
                         let base = stack[0].vm;
+                        self.park_stack(stack);
                         self.suspended.insert(
                             base,
                             SuspendedStack {
@@ -1055,6 +1088,7 @@ impl<'m> World<'m> {
                             continue;
                         }
                         let base = stack[0].vm;
+                        self.park_stack(stack);
                         self.suspended.insert(
                             base,
                             SuspendedStack {
@@ -5032,6 +5066,28 @@ impl<'m> World<'m> {
             .get(&vm)
             .map(|saved| saved.activations.len())
             .unwrap_or(0)
+    }
+
+    /// The execution references of one machine that stored stacks hold.
+    ///
+    /// `push_activation` charges one reference to the machine of an
+    /// activation and one to the machine that receives its exit event.
+    /// A stored stack keeps both, so a copy compares the total of one
+    /// machine against this count. A larger total means a live stack
+    /// still executes the machine.
+    pub fn suspended_refs(&self, vm: VmId) -> usize {
+        let mut count = 0;
+        for saved in self.suspended.values() {
+            for act in &saved.activations {
+                if act.vm == vm {
+                    count += 1;
+                }
+                if act.reply_to == Some(vm) {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     /// Drop the suspended activation stack of one machine.

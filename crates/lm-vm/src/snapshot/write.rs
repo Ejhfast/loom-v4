@@ -302,33 +302,28 @@ impl World<'_> {
 
     /// Check that one machine is in a state the encoder can copy.
     ///
-    /// A machine that a driver holds mid flight has activation state
-    /// outside its own record, and a snapshot copies machine state
-    /// alone. Two shapes are still copyable:
+    /// Specification 17.4 names two conditions that block a copy, and
+    /// both are ordinary typed errors. A pending host operation is one
+    /// of them, and `run_cut` reports it as `ResourceActive`.
     ///
-    /// - the root of a receiverless self snapshot. Its activation
-    ///   belongs to the original world, and the restored root holds
-    ///   the pending request instead (specification 17.6);
-    /// - a machine that blocked with its own one-activation stack
-    ///   stored. That stack holds one machine and one stop mode, and
-    ///   the scheduler rebuilds it when the block clears.
+    /// A stored activation stack blocks no copy. The machines of a
+    /// stored stack execute nothing, and each nested control edge
+    /// stays in the machine record, so the driver loop rebuilds the
+    /// chain after a restore.
+    ///
+    /// A machine that a live stack holds is still mid flight. Its
+    /// activation state lives outside its record, so the copy waits
+    /// for the boundary. The root of a receiverless self snapshot is
+    /// the one exception (specification 17.6).
     fn capturable(&self, vm: VmId, root: VmId, self_root: bool) -> Result<(), String> {
         let self_snapshot_root = self_root && vm == root;
         if self_snapshot_root {
             return Ok(());
         }
-        match self.state_of(vm) {
-            MachineState::Waiting => return Err("holds a pending host operation".to_string()),
-            MachineState::Running => {
-                return Err("is running, so it is not at a boundary".to_string())
-            }
-            _ => {}
+        if self.state_of(vm) == MachineState::Running {
+            return Err("is running, so it is not at a boundary".to_string());
         }
-        let stack = self.suspended_len(vm);
-        if stack > 1 {
-            return Err("holds a nested suspended activation stack".to_string());
-        }
-        if self.machines[vm as usize].active as usize > stack {
+        if self.machines[vm as usize].active as usize > self.suspended_refs(vm) {
             return Err("is in use by a driver".to_string());
         }
         Ok(())
