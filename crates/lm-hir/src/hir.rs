@@ -408,11 +408,12 @@ pub enum HExprKind {
     },
     /// A first-class operation value, for example `sys.io.print`.
     OpConst(u32),
-    /// A policy-table edit intrinsic on a table handle.
+    /// A policy-table edit intrinsic on a table handle. `pass`,
+    /// `block`, and `clear` accept several targets in one call, so the
+    /// node holds them all.
     TableEdit {
         action: TableAction,
-        kind: TargetKind,
-        slot: u32,
+        targets: Vec<(TargetKind, u32)>,
         table: Box<HExpr>,
         /// The handler closure of a `mock` edit.
         mock: Option<Box<HExpr>>,

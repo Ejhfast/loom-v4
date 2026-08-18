@@ -1116,7 +1116,9 @@ empty row <: Io.Print <: Io <: Io, Fs
 
 Admission checks use subsumption.
 
-Passing authority to a child is charged to the granter's row. `PolicyTable.pass(target)` has a built-in dependent static rule: its argument must preserve a known exact identity, group, or effect variable; that operation set is added to the caller's row. A value widened to identity-erased `PolicyTarget` cannot be passed. `block`, `clear`, and pure `mock` add no row.
+`pass`, `block`, and `clear` accept one target or more, so one call states one decision over a set of operations. `mock` names one exact operation, because its handler matches that signature.
+
+Passing authority to a child is charged to the granter's row, once for each target. `PolicyTable.pass(target, ...)` has a built-in dependent static rule: its argument must preserve a known exact identity, group, or effect variable; that operation set is added to the caller's row. A value widened to identity-erased `PolicyTarget` cannot be passed. `block`, `clear`, and pure `mock` add no row.
 
 The interpreter never consults rows during verified execution. Rows prove a bound; tables and manual driving decide actual requests.
 
