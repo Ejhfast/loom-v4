@@ -30,8 +30,8 @@
 
 use super::{
     codec, image_roots, AdmissionIdentity, Image, ImageBlock, ImageError, ImageMachine,
-    ImagePolicyCursor, ImageReason, ImageState, ImageTerminal, LoadLimits, SnapshotImage,
-    FORMAT_VERSION,
+    ImagePolicyCursor, ImageReason, ImageState, ImageTerminal, ImageWaitSource, LoadLimits,
+    SnapshotImage, FORMAT_VERSION,
 };
 use crate::LoadedModule;
 use lm_bytecode::closed::{ClosedType, TypeEnv, TypeEnvs};
@@ -708,6 +708,7 @@ impl Admit<'_> {
                 Object::NativeRequest { vm, .. } | Object::NativeCall { vm, .. } => Some(vm),
                 Object::NativeHandle { proc, .. } => Some(proc),
                 Object::NativeResourceHandle { surface, .. } => Some(surface),
+                Object::NativeWait { owner, .. } => Some(owner),
                 _ => None,
             };
             if let Some(target) = target {
@@ -746,6 +747,21 @@ impl Admit<'_> {
                     at(&format!(
                         "object {ordinal} is a machine handle to its own machine"
                     )),
+                );
+            }
+            if matches!(entry.object, Object::NativeWait { owner, .. } if owner != vm) {
+                return fail(
+                    ImageReason::Reference,
+                    at(&format!("object {ordinal} holds another machine's wait")),
+                );
+            }
+            if matches!(
+                entry.object,
+                Object::NativeWait { token, .. } if token == 0 || token >= m.next_wait
+            ) {
+                return fail(
+                    ImageReason::State,
+                    at(&format!("object {ordinal} holds an invalid wait token")),
                 );
             }
             // The shape table fixes the frozen state of a born-frozen
@@ -1011,7 +1027,13 @@ impl Admit<'_> {
                 return fail(ImageReason::Reference, at("the proc body names no object"));
             }
         }
-        if let Some(ImageBlock::Send { target } | ImageBlock::Done { target }) = m.block {
+        let block_target = match m.block {
+            Some(ImageBlock::Send { target })
+            | Some(ImageBlock::Done { target })
+            | Some(ImageBlock::Snapshot { target, .. }) => Some(target),
+            _ => None,
+        };
+        if let Some(target) = block_target {
             if target >= machines {
                 return fail(
                     ImageReason::Reference,
@@ -1321,6 +1343,8 @@ impl Admit<'_> {
                     ImageBlock::Receive => op == lm_abi::OP_PROC_RECV,
                     ImageBlock::Send { .. } => op == lm_abi::OP_PROC_SEND,
                     ImageBlock::Done { .. } => op == lm_abi::OP_PROC_DONE,
+                    ImageBlock::Wait { .. } => op == lm_abi::OP_WAIT_WAIT,
+                    ImageBlock::Snapshot { .. } => op == lm_abi::OP_PROC_SNAPSHOT_WAIT,
                 };
                 if !ok {
                     return fail(
@@ -1370,6 +1394,159 @@ impl Admit<'_> {
                 return fail(
                     ImageReason::State,
                     at("the pending request ordinal is not below the next ordinal"),
+                );
+            }
+        }
+        if m.next_wait == 0 {
+            return fail(ImageReason::State, at("the next wait token is zero"));
+        }
+        if m.waits.len() > crate::machine::MAX_LIVE_WAITS {
+            return fail(ImageReason::State, at("the wait table passes its limit"));
+        }
+        let tokens = m.waits.iter().map(|wait| wait.token).collect::<Vec<_>>();
+        let mut previous = 0;
+        for wait in &m.waits {
+            if wait.token == 0 || wait.token >= m.next_wait {
+                return fail(
+                    ImageReason::State,
+                    at("a wait token is outside its counter"),
+                );
+            }
+            if wait.token <= previous {
+                return fail(
+                    ImageReason::State,
+                    at("the wait table is not strictly ordered"),
+                );
+            }
+            previous = wait.token;
+            match wait.source {
+                ImageWaitSource::Receive if !m.is_proc => {
+                    return fail(
+                        ImageReason::State,
+                        at("a non-proc machine holds a receive wait"),
+                    )
+                }
+                ImageWaitSource::Drive { target } => {
+                    if target == vm || target as usize >= self.image.machines.len() {
+                        return fail(ImageReason::Reference, at("a drive wait has no child"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut parents = vec![0u8; m.waits.len()];
+        for wait in &m.waits {
+            let ImageWaitSource::Choice { first, second } = wait.source else {
+                continue;
+            };
+            if first == second || first >= wait.token || second >= wait.token {
+                return fail(ImageReason::State, at("a choice has invalid child tokens"));
+            }
+            for child in [first, second] {
+                let Ok(index) = tokens.binary_search(&child) else {
+                    return fail(ImageReason::State, at("a choice names no wait child"));
+                };
+                parents[index] = parents[index].saturating_add(1);
+                if parents[index] > 1 {
+                    return fail(ImageReason::State, at("two choices share one wait child"));
+                }
+            }
+        }
+        for (wait, parents) in m.waits.iter().zip(&parents) {
+            if wait.linked != (*parents == 1) {
+                return fail(
+                    ImageReason::State,
+                    at("a wait link flag has no matching choice"),
+                );
+            }
+        }
+        if let Some(ImageBlock::Wait { token }) = m.block {
+            let Ok(root) = tokens.binary_search(&token) else {
+                return fail(ImageReason::State, at("the active wait token is absent"));
+            };
+            if m.waits[root].linked {
+                return fail(
+                    ImageReason::State,
+                    at("the active wait token is a choice child"),
+                );
+            }
+            let receiver_matches = match m.pending.as_ref().and_then(|p| p.args.first()) {
+                Some(Value::Obj(reference)) => {
+                    m.objects.get(reference.slot as usize).is_some_and(|entry| {
+                        matches!(
+                            entry.object,
+                            Object::NativeWait { owner, token: held }
+                                if owner == vm && held == token
+                        )
+                    })
+                }
+                _ => false,
+            };
+            if !receiver_matches {
+                return fail(
+                    ImageReason::State,
+                    at("the active wait does not match its receiver"),
+                );
+            }
+            let mut stack = vec![token];
+            let mut seen = HashSet::new();
+            let mut drives = HashSet::new();
+            while let Some(current) = stack.pop() {
+                if !seen.insert(current) {
+                    return fail(ImageReason::State, at("the active wait tree has a cycle"));
+                }
+                let index = tokens.binary_search(&current).map_err(|_| {
+                    ImageError::new(ImageReason::State, at("a wait child is absent"))
+                })?;
+                match m.waits[index].source {
+                    ImageWaitSource::Receive => {}
+                    ImageWaitSource::Drive { target } => {
+                        if !drives.insert(target) {
+                            return fail(
+                                ImageReason::State,
+                                at("the active wait drives one child twice"),
+                            );
+                        }
+                        let target = self.machine(target);
+                        if target.parent != Some(vm)
+                            || target.scheduler_owned
+                            || target.state == ImageState::Empty
+                        {
+                            return fail(
+                                ImageReason::State,
+                                at("the active drive wait has no available child"),
+                            );
+                        }
+                    }
+                    ImageWaitSource::Choice { first, second } => {
+                        stack.push(second);
+                        stack.push(first);
+                    }
+                }
+            }
+        }
+        if let Some(ImageBlock::Snapshot { target, .. }) = m.block {
+            if target == vm {
+                return fail(ImageReason::State, at("a snapshot wait targets its caller"));
+            }
+            let target_machine = self.machine(target);
+            if !target_machine.scheduler_owned || target_machine.paused {
+                return fail(
+                    ImageReason::State,
+                    at("a snapshot wait target is not a running proc"),
+                );
+            }
+            let pending = m.pending.as_ref().expect("the block check found a request");
+            let receiver_matches = match pending.args.first() {
+                Some(Value::Obj(reference)) => m.objects.get(reference.slot as usize).is_some_and(
+                    |entry| matches!(entry.object, Object::NativeHandle { proc, .. } if proc == target),
+                ),
+                _ => false,
+            };
+            if !receiver_matches || !matches!(pending.args.get(1), Some(Value::Int(_))) {
+                return fail(
+                    ImageReason::State,
+                    at("a snapshot wait does not match its arguments"),
                 );
             }
         }

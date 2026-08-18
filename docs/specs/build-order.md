@@ -784,7 +784,7 @@ valid: state=asked machines=3 mailboxes=2
 
 # Part III — A practical distribution by Week 13
 
-## Week 10 — Scoped files, external resources, time, random, and TCP
+## Week 10 — Scoped files, selectable waits, time, random, and TCP
 
 Week 10 starts with the handle foundation in
 `docs/specs/handles.md`. Later slices add scoped leases, broader host
@@ -799,6 +799,13 @@ operations, and TCP.
 - Add typed resource-registry entries for every live host resource and
   pending host continuation.
 - Add typed handle values and holder-local resource controls.
+- Add holder-local, one-shot `Wait[T]` values.
+- Add waits for VM drive boundaries and proc mailbox receives.
+- Add choice, waiting, and cancellation operations for typed waits.
+- Add general `select` syntax over two or more `Wait[T]` expressions.
+- Park each proc on one scheduler wait set.
+- Let a drive wait lend temporary child execution to the scheduler.
+- Withdraw every losing drive lease at an interpreter boundary.
 - Let a holder enumerate and close resources in its controlled world.
 - Let a driver return an existing handle or mint a driver-backed
   handle for a current typed request.
@@ -814,8 +821,9 @@ operations, and TCP.
   attachment blocks snapshot creation.
 - Keep closed handle values as ordinary machine state. Restored closed
   handles remain closed.
-- Add fuel-bounded snapshot waiting over reachable procs for transient
-  resource state.
+- Add `Handle.snapshot_wait(fuel)` for transient target-proc resources.
+- Count only retired target-world instructions against snapshot fuel.
+- Let known host completions extend elapsed time without consuming fuel.
 - Register live TCP streams and listeners the same way. Do not reopen
   a connection silently.
 - Defer checkpointable file and connection types with explicit
@@ -824,6 +832,8 @@ operations, and TCP.
   snapshot root.
 - Add cancellation for blocking reads, sleeps, connects, accepts, and
   proc pause.
+- Route blocking platform I/O through a bounded host service.
+- Keep platform I/O waits off the scheduler thread.
 - Keep completion sinks single-use after cancellation or VM death.
 - Add durations/instants, random selection/shuffle, and text helpers.
 
@@ -857,6 +867,9 @@ scope returns `ResourceActive` with the lease path. A later snapshot
 succeeds after the scope closes. A live raw handle reports its
 machine path.
 
+A supervisor selects between a child drive wait and its mailbox. A
+mailbox command can stop or reconfigure active child supervision.
+
 A TCP echo client/server pair runs in separate procs. A snapshot
 attempt reports the active stream path. Deterministic manual clock and
 random answers produce byte-for-byte repeatable output.
@@ -874,6 +887,11 @@ random answers produce byte-for-byte repeatable output.
 - Platform error mapping has cross-platform golden tests.
 - Async completions are single-use and safe after cancellation or VM
   death.
+- Selection commits one ready arm and withdraws every losing arm.
+- A losing receive leaves its mailbox message queued.
+- A losing drive stops child progress at an interpreter boundary.
+- Wait tokens reject reuse after completion, choice, or cancellation.
+- Snapshot and restore preserve active wait descriptions.
 - Snapshot blocker paths follow reachability from the root.
 - Host-operation latency is excluded from interpreter dispatch
   benchmarks; completion overhead is measured separately.

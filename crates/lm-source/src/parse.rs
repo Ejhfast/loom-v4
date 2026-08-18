@@ -1515,6 +1515,7 @@ impl Parser<'_> {
             Tok::KwDo => self.closure_expr(),
             Tok::KwIf => self.if_expr(),
             Tok::KwCase => self.case_expr(),
+            Tok::KwSelect => self.select_expr(),
             other => Err(self.error("E1001", format!("expected an expression, found {other}"))),
         }
     }
@@ -1653,6 +1654,54 @@ impl Parser<'_> {
                 arms,
             },
             span: case_tok.span.to(end_tok.span),
+        })
+    }
+
+    fn select_expr(&mut self) -> Result<Expr, Diagnostic> {
+        let select_tok = self.expect(Tok::KwSelect, "`select`")?;
+        let mut arms = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::KwIn => {
+                    let in_tok = self.next();
+                    let wait = self.expr()?;
+                    self.expect(Tok::Arrow, "`->` after the wait expression")?;
+                    let (binding, binding_span) = self.ident("a select binding")?;
+                    self.expect_terminator()?;
+                    let body = self.block(&[Tok::KwIn, Tok::KwEnd])?;
+                    let hi = body.last().map(|stmt| stmt.span).unwrap_or(binding_span);
+                    arms.push(SelectArm {
+                        wait,
+                        binding,
+                        binding_span,
+                        body,
+                        span: in_tok.span.to(hi),
+                    });
+                }
+                Tok::KwEnd => break,
+                Tok::Eof => {
+                    return Err(self.error("E1003", "expected `end`, found end of file"));
+                }
+                other => {
+                    return Err(self.error(
+                        "E1003",
+                        format!("expected `in` or `end` in the select, found {other}"),
+                    ));
+                }
+            }
+        }
+        if arms.len() < 2 {
+            return Err(Diagnostic::new(
+                "E1062",
+                "a select needs at least two arms",
+                select_tok.span,
+            ));
+        }
+        let end_tok = self.expect(Tok::KwEnd, "`end`")?;
+        Ok(Expr {
+            kind: ExprKind::Select { arms },
+            span: select_tok.span.to(end_tok.span),
         })
     }
 
@@ -1984,6 +2033,21 @@ mod tests {
             },
             other => panic!("expected an expression, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_select_arms() {
+        let source = "select\nin left -> a\n  a\nin right -> b\n  b\nend\n";
+        let module = parse(source).expect("the select parses");
+        let StmtKind::Expr(expr) = &module.entry[0].kind else {
+            panic!("the module entry holds an expression");
+        };
+        let ExprKind::Select { arms } = &expr.kind else {
+            panic!("the expression is a select");
+        };
+        assert_eq!(arms.len(), 2);
+        assert_eq!(arms[0].binding, "a");
+        assert_eq!(arms[1].binding, "b");
     }
 
     #[test]

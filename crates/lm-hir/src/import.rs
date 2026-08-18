@@ -662,6 +662,10 @@ impl<'a> Materializer<'a> {
                 let t = self.resolve_type(ctx, t, span)?;
                 ctx.store.intern(Type::Vm(t))
             }
+            IfaceType::Wait(t) => {
+                let t = self.resolve_type(ctx, t, span)?;
+                ctx.store.intern(Type::Wait(t))
+            }
             IfaceType::Snapshot(t) => {
                 let t = self.resolve_type(ctx, t, span)?;
                 ctx.store.intern(Type::Snapshot(t))

@@ -36,12 +36,14 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/proc.lm"),
     "\n",
+    include_str!("../../../core/wait.lm"),
+    "\n",
     include_str!("../../../core/snapshot.lm"),
     "\n",
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 15] = [
+pub const PRELUDE_TYPES: [&str; 16] = [
     "Option",
     "Result",
     "Ordering",
@@ -52,6 +54,7 @@ pub const PRELUDE_TYPES: [&str; 15] = [
     "SendResult",
     "ProcResult",
     "ProcError",
+    "Choice",
     "SnapshotError",
     "RestoreError",
     "FsError",
@@ -739,6 +742,17 @@ pub(crate) fn resolve_type(
                 }
                 let result = resolve_type(ctx, env, &args[0])?;
                 Ok(ctx.store.intern(Type::Vm(result)))
+            }
+            "Wait" => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1024",
+                        format!("`Wait` takes 1 type argument, found {}", args.len()),
+                        ty.span,
+                    ));
+                }
+                let result = resolve_type(ctx, env, &args[0])?;
+                Ok(ctx.store.intern(Type::Wait(result)))
             }
             "Snapshot" => {
                 if args.len() != 1 {

@@ -4,12 +4,12 @@
 //! table. Commit installs that state without a fallible operation.
 
 use super::{
-    ImageBlock, ImageMachine, ImagePolicyCursor, ImageState, ImageTerminal, RestoreFail,
-    SnapshotImage,
+    ImageBlock, ImageMachine, ImagePolicyCursor, ImageState, ImageTerminal, ImageWaitSource,
+    RestoreFail, SnapshotImage,
 };
 use crate::machine::{
     Action, Block, FaultRec, Frame, Machine, MachineState, Mailbox, Ownership, Pending,
-    PolicyCursor, RoutedRequest, Terminal, VmId,
+    PolicyCursor, RoutedRequest, Terminal, VmId, WaitEntry, WaitSource,
 };
 use crate::world::World;
 use crate::VmConfig;
@@ -398,6 +398,27 @@ fn restore_state(
     machine.gate = gate;
     machine.vm.fuel = source.fuel.min(machine.config.fuel);
     machine.vm.next_ordinal = source.next_ordinal;
+    machine.vm.next_wait = source.next_wait;
+    machine.vm.waits = source
+        .waits
+        .iter()
+        .map(|entry| {
+            let source = match entry.source {
+                ImageWaitSource::Receive => WaitSource::Receive,
+                ImageWaitSource::Drive { target } => WaitSource::Drive {
+                    target: ids[target as usize],
+                },
+                ImageWaitSource::Choice { first, second } => WaitSource::Choice { first, second },
+            };
+            (
+                entry.token,
+                WaitEntry {
+                    source,
+                    linked: entry.linked,
+                },
+            )
+        })
+        .collect();
     machine.vm.frames = frames;
     machine.vm.locals = locals;
     machine.vm.operands = operands;
@@ -431,6 +452,17 @@ fn restore_state(
         ImageBlock::Done { target } => Block::Done {
             target: ids[target as usize],
             generation: generations[target as usize],
+        },
+        ImageBlock::Wait { token } => Block::Wait { token },
+        ImageBlock::Snapshot {
+            target,
+            remaining,
+            retry,
+        } => Block::Snapshot {
+            target: ids[target as usize],
+            generation: generations[target as usize],
+            remaining,
+            retry,
         },
     });
     if matches!(machine.vm.state, MachineState::Done | MachineState::Faulted) {
@@ -489,6 +521,9 @@ fn relocate_metadata(object: &mut Object, ids: &[VmId], env_map: &[TypeEnvId]) {
         }
         Object::NativeResourceHandle { surface, .. } => {
             *surface = ids[*surface as usize];
+        }
+        Object::NativeWait { owner, .. } => {
+            *owner = ids[*owner as usize];
         }
         _ => {}
     }

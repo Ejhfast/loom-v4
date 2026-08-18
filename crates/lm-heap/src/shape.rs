@@ -225,6 +225,8 @@ pub enum Object {
     NativeFileHandle { resource: u64 },
     /// A holder-local control for one file resource.
     NativeResourceHandle { surface: u32, resource: u64 },
+    /// A holder-local one-shot wait token.
+    NativeWait { owner: u32, token: u64 },
 }
 
 /// How a boundary transfer treats one shape.
@@ -448,9 +450,19 @@ const SHAPE_RESOURCE_HANDLE: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_WAIT: ShapeDesc = ShapeDesc {
+    name: "Wait",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::HolderLocal,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 19] = [
+pub const SHAPES: [&ShapeDesc; 20] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -470,6 +482,7 @@ pub const SHAPES: [&ShapeDesc; 19] = [
     &SHAPE_BYTES,
     &SHAPE_FILE_HANDLE,
     &SHAPE_RESOURCE_HANDLE,
+    &SHAPE_WAIT,
 ];
 
 impl Object {
@@ -585,6 +598,10 @@ impl Object {
                 surface: *surface,
                 resource: *resource,
             },
+            Object::NativeWait { owner, token } => Object::NativeWait {
+                owner: *owner,
+                token: *token,
+            },
         })
     }
 
@@ -612,6 +629,7 @@ impl Object {
             Object::Bytes(_) => 16,
             Object::NativeFileHandle { .. } => 17,
             Object::NativeResourceHandle { .. } => 18,
+            Object::NativeWait { .. } => 19,
         }
     }
 
@@ -638,7 +656,9 @@ impl Object {
                 | Object::NativeRequest { .. }
                 | Object::NativeCall { .. }
                 | Object::NativeHandle { .. } => VALUE_COST,
-                Object::NativeFileHandle { .. } | Object::NativeResourceHandle { .. } => VALUE_COST,
+                Object::NativeFileHandle { .. }
+                | Object::NativeResourceHandle { .. }
+                | Object::NativeWait { .. } => VALUE_COST,
                 Object::NativeFault { message, .. } => message.len(),
                 Object::NativeDigest(bytes) => bytes.len(),
                 Object::NativeSnapshot(image) => image.len(),
@@ -672,7 +692,8 @@ impl Object {
             | Object::NativeSnapshot(_)
             | Object::Bytes(_)
             | Object::NativeFileHandle { .. }
-            | Object::NativeResourceHandle { .. } => {}
+            | Object::NativeResourceHandle { .. }
+            | Object::NativeWait { .. } => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
             Object::Map { entries, .. } => {
@@ -909,6 +930,7 @@ mod tests {
                 surface: 1,
                 resource: 4,
             },
+            Object::NativeWait { owner: 1, token: 2 },
         ]
     }
 
@@ -1065,6 +1087,7 @@ mod tests {
                 surface: 0,
                 resource: 0,
             },
+            Object::NativeWait { owner: 0, token: 0 },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1201,6 +1224,7 @@ mod tests {
                 "Request",
                 "PendingCall",
                 "ResourceHandle",
+                "Wait",
             ]
         );
     }

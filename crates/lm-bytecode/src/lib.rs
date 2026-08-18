@@ -31,7 +31,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 56;
+pub const CORE_ROLE_COUNT: usize = 59;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -103,6 +103,8 @@ pub enum BcType {
     EmptyVm,
     /// A loaded virtual machine typed by its terminal result index.
     Vm(u32),
+    /// A holder-local one-shot wait typed by its result index.
+    Wait(u32),
     /// A typed pending call: argument-view type index and reply type
     /// index.
     PendingCall(u32, u32),
@@ -780,6 +782,7 @@ const TY_SNAPSHOT: u8 = 23;
 const TY_BYTES: u8 = 24;
 const TY_FILE_HANDLE: u8 = 25;
 const TY_RESOURCE_HANDLE: u8 = 26;
+const TY_WAIT: u8 = 27;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -1034,6 +1037,10 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
         BcType::EmptyVm => out.push(TY_EMPTY_VM),
         BcType::Vm(t) => {
             out.push(TY_VM);
+            write_u32(out, *t);
+        }
+        BcType::Wait(t) => {
+            out.push(TY_WAIT);
             write_u32(out, *t);
         }
         BcType::PendingCall(a, r) => {
@@ -1803,6 +1810,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_POLICY_TABLE => BcType::PolicyTable,
         TY_EMPTY_VM => BcType::EmptyVm,
         TY_VM => BcType::Vm(cur.u32()?),
+        TY_WAIT => BcType::Wait(cur.u32()?),
         TY_PENDING_CALL => BcType::PendingCall(cur.u32()?, cur.u32()?),
         TY_HANDLE => BcType::Handle(cur.u32()?, cur.u32()?),
         TY_SNAPSHOT_IMAGE => BcType::SnapshotImage,

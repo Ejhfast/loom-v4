@@ -14,6 +14,9 @@ use lm_heap::{Heap, HeapBudget, MapIndex, Object};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 use std::hash::{Hash, Hasher};
 
+/// The largest typed wait table of one machine.
+pub const MAX_LIVE_WAITS: usize = 1_024;
+
 /// The fault one machine takes when the type environment table of its
 /// world reaches a cap.
 ///
@@ -80,6 +83,34 @@ pub enum Block {
     Send { target: VmId, generation: u32 },
     /// A holder waits for the terminal result of one proc.
     Done { target: VmId, generation: u32 },
+    /// A holder waits for a proc world to reach a safe snapshot state.
+    Snapshot {
+        target: VmId,
+        generation: u32,
+        remaining: u64,
+        retry: bool,
+    },
+    /// A proc waits for one source in a typed wait tree.
+    Wait { token: u64 },
+}
+
+/// One prepared typed wait source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitSource {
+    /// Read one message from the owning proc mailbox.
+    Receive,
+    /// Drive one holder-owned child machine.
+    Drive { target: VmId },
+    /// Select between two existing wait trees.
+    Choice { first: u64, second: u64 },
+}
+
+/// One wait entry in its owner machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitEntry {
+    pub source: WaitSource,
+    /// A choice owns linked entries. Their old tokens are stale.
+    pub linked: bool,
 }
 
 /// Which side owns the execution of one machine (specification 18.2).
@@ -296,6 +327,10 @@ pub struct VmState {
     pub terminal: Option<Terminal>,
     pub parent: Option<VmId>,
     pub next_ordinal: u64,
+    /// The next holder-local wait token.
+    pub next_wait: u64,
+    /// Prepared and active typed wait descriptions.
+    pub waits: std::collections::BTreeMap<u64, WaitEntry>,
     /// The bounded mailbox of this machine. A machine that is not a
     /// proc keeps an empty closed mailbox.
     pub mailbox: Mailbox,
@@ -454,6 +489,8 @@ impl Machine {
                 terminal: None,
                 parent,
                 next_ordinal: 1,
+                next_wait: 1,
+                waits: std::collections::BTreeMap::new(),
                 // A machine that never becomes a proc keeps a closed
                 // mailbox, so no send can reach it.
                 mailbox: {
@@ -572,6 +609,7 @@ impl Machine {
         self.vm.nested = None;
         self.vm.routed = None;
         self.vm.block = None;
+        self.vm.waits.clear();
         self.vm.mailbox.queue = std::collections::VecDeque::new();
         self.start_body = None;
         self.table.exact.fill(None);

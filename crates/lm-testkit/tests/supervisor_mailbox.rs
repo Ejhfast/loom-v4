@@ -1,4 +1,8 @@
 //! A supervisor proc that owns a mailbox and drives a child.
+//!
+//! `week10_waits.rs` covers the interleaved case through `select`.
+//! This case checks the plain combination: a proc with a mailbox
+//! can hold and drive a machine.
 
 use lm_testkit::compile_to_bytes;
 use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
@@ -85,67 +89,4 @@ end
     let out = run(&src);
     println!("A drive then queued command: {out}");
     assert_eq!(out, "Done(207)");
-}
-
-/// B: the supervisor polls its mailbox between drive turns before any
-/// command arrives. `try_receive` answers `None` and the loop keeps
-/// driving, so the supervisor serves both sources.
-#[test]
-fn a_mailbox_proc_polls_its_mailbox_between_drive_turns() {
-    let src = r#"
-enum Cmd
-  Stop
-end
-
-class Supervisor < Proc[Cmd]
-  def on_spawn(self): Int with Proc, Vm, Io.Print
-    child = sys.vm.Vm().from_object(do ||: Int with Io.Print
-      sys.io.print("a")
-      sys.io.print("b")
-      7
-    end, args: ())
-    child.table().pass(Io.Print)
-    seen = 0
-    loop do
-      case child.drive()
-      in Asked(q)
-        seen = seen + 1
-        child.dispatch(q)
-        # Poll for a control command between turns. Nothing was
-        # sent yet, so this answers `None` and the loop continues.
-        case self.try_receive()
-        in Some(Msg(_))
-          seen = seen + 100
-        in Some(Closed)
-          seen = seen + 1000
-        in None
-          ()
-        end
-      in Done(v)
-        return seen * 10 + v
-      in Fault(_)
-        return 0 - 1
-      end
-    end
-    0 - 2
-  end
-end
-
-h = Supervisor.spawn()
-case h.pause()
-in Ok(m)
-  m.table().pass(Vm)
-  m.table().pass(Io.Print)
-  h.resume()
-  case h.done()
-  in Done(v)  then v
-  in Fault(_) then 0 - 9
-  end
-in Err(_)
-  0 - 8
-end
-"#;
-    let out = run(src);
-    println!("B blocking receive between turns: {out}");
-    assert_eq!(out, "Done(27)");
 }

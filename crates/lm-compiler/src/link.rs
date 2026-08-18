@@ -984,6 +984,7 @@ fn reloc_type(ty: &BcType, types: &[u32], classes: &[u32], strings: &[u32]) -> B
             reloc_row(row, strings),
         ),
         BcType::Vm(t) => BcType::Vm(types[*t as usize]),
+        BcType::Wait(t) => BcType::Wait(types[*t as usize]),
         BcType::Snapshot(t) => BcType::Snapshot(types[*t as usize]),
         BcType::PendingCall(a, r) => BcType::PendingCall(types[*a as usize], types[*r as usize]),
         BcType::Handle(m, r) => BcType::Handle(types[*m as usize], types[*r as usize]),

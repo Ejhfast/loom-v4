@@ -25,8 +25,9 @@ pub use sha::{sha256, sha256_hex};
 /// Version 4 hashes every field of one operation definition into its
 /// identity. Version 5 adds immutable bytes, file handles, and the
 /// first six filesystem operations. Version 6 adds holder resource
-/// controls and fuel-bounded snapshot waiting.
-pub const ABI_VERSION: u32 = 6;
+/// controls and fuel-bounded snapshot waiting. Version 7 adds typed
+/// waits and selectable drive and receive sources.
+pub const ABI_VERSION: u32 = 7;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -36,8 +37,8 @@ pub type OpSlot = u32;
 
 /// The effect groups, in canonical order. Groups without week-4
 /// operations exist for rows and policy targets only.
-pub const GROUPS: [&str; 9] = [
-    "Io", "Fs", "Clock", "Rand", "Net", "Proc", "Vm", "Compiler", "Reflect",
+pub const GROUPS: [&str; 10] = [
+    "Io", "Fs", "Clock", "Rand", "Net", "Proc", "Vm", "Compiler", "Reflect", "Wait",
 ];
 
 /// One manifest type. The set is closed: it covers every parameter
@@ -185,13 +186,18 @@ pub const OP_VM_MINT_FILE: OpSlot = 36;
 pub const OP_VM_RESOURCE_IS_OPEN: OpSlot = 37;
 pub const OP_VM_RESOURCE_CLOSE: OpSlot = 38;
 pub const OP_VM_RESOURCE_KIND: OpSlot = 39;
-pub const OP_VM_SNAPSHOT_WAIT_HELD: OpSlot = 40;
+pub const OP_PROC_SNAPSHOT_WAIT: OpSlot = 40;
 pub const OP_VM_RESOURCE_SAME: OpSlot = 41;
-pub const OP_PROC_TRY_RECV: OpSlot = 42;
-pub const OP_VM_DRIVE_FOR: OpSlot = 43;
+pub const OP_VM_DRIVE_WAIT: OpSlot = 42;
+pub const OP_PROC_RECV_WAIT: OpSlot = 43;
+pub const OP_WAIT_WAIT: OpSlot = 44;
+pub const OP_WAIT_CHOOSE: OpSlot = 45;
+pub const OP_WAIT_CANCEL: OpSlot = 46;
+pub const OP_VM_DRIVE_FOR: OpSlot = 47;
+pub const OP_VM_SNAPSHOT_WAIT_HELD: OpSlot = 48;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 44] = [
+pub const OPS: [OpDef; 49] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -561,12 +567,12 @@ pub const OPS: [OpDef; 44] = [
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
-        group: "Vm",
-        member: "SnapshotWaitHeld",
+        group: "Proc",
+        member: "SnapshotWait",
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::Unit,
-        schema: "[T](Vm[T], Int) -> Result[Snapshot[T], SnapshotError]",
+        schema: "[M,R](Handle[M,R], Int) -> Result[Snapshot[R], SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -579,12 +585,48 @@ pub const OPS: [OpDef; 44] = [
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
-        group: "Proc",
-        member: "TryRecv",
+        group: "Vm",
+        member: "DriveWait",
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::Unit,
-        schema: "[M](proc self) -> Option[Recv[M]]",
+        schema: "[T](Vm[T]) -> Wait[DriveEvent[T]]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Proc",
+        member: "RecvWait",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M](proc self) -> Wait[Recv[M]]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Wait",
+        member: "Wait",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](Wait[T]) -> T",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Wait",
+        member: "Choose",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[A,B](Wait[A], Wait[B]) -> Wait[Choice[A,B]]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Wait",
+        member: "Cancel",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](Wait[T]) -> Bool",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -593,7 +635,16 @@ pub const OPS: [OpDef; 44] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::Unit,
-        schema: "[T](Vm[T], Int) -> DriveEvent[T]",
+        schema: "[T](Vm[T], Int) -> Option[DriveEvent[T]]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "SnapshotWaitHeld",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](Vm[T], Int) -> Result[Snapshot[T], SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
 ];
@@ -763,6 +814,11 @@ mod tests {
         assert_eq!(op_by_name("Fs.Open"), Some(OP_FS_OPEN));
         assert_eq!(op_by_name("Fs.Close"), Some(OP_FS_CLOSE));
         assert_eq!(op_by_name("Vm.ResourceSame"), Some(OP_VM_RESOURCE_SAME));
+        assert_eq!(op_by_name("Vm.DriveWait"), Some(OP_VM_DRIVE_WAIT));
+        assert_eq!(op_by_name("Proc.RecvWait"), Some(OP_PROC_RECV_WAIT));
+        assert_eq!(op_by_name("Wait.Wait"), Some(OP_WAIT_WAIT));
+        assert_eq!(op_by_name("Wait.Choose"), Some(OP_WAIT_CHOOSE));
+        assert_eq!(op_by_name("Wait.Cancel"), Some(OP_WAIT_CANCEL));
     }
 
     #[test]

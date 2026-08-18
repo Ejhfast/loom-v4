@@ -14,10 +14,10 @@
 
 use super::{
     codec, Image, ImageBlock, ImageFrame, ImageLimits, ImageMachine, ImageMailbox, ImageObject,
-    ImagePending, ImagePolicyCursor, ImageRoutedRequest, ImageState, ImageTerminal, SnapshotFail,
-    SnapshotImage,
+    ImagePending, ImagePolicyCursor, ImageRoutedRequest, ImageState, ImageTerminal, ImageWaitEntry,
+    ImageWaitSource, SnapshotFail, SnapshotImage,
 };
-use crate::machine::{Block, MachineState, PolicyCursor, Terminal, VmId};
+use crate::machine::{Block, MachineState, PolicyCursor, Terminal, VmId, WaitSource};
 use crate::world::World;
 use crate::FaultCode;
 use lm_bytecode::closed::{ClosedType, TypeEnv};
@@ -631,6 +631,10 @@ impl World<'_> {
                     surface: self.require_ordinal(surface, ordinal_of)?,
                     resource: 0,
                 },
+                Object::NativeWait { owner, token } => Object::NativeWait {
+                    owner: self.require_ordinal(owner, ordinal_of)?,
+                    token,
+                },
                 other => other.remap(map).unwrap_or(other),
             };
             objects.push(ImageObject { frozen, object });
@@ -713,7 +717,38 @@ impl World<'_> {
             Some(Block::Done { target, .. }) => Some(ImageBlock::Done {
                 target: self.require_ordinal(target, ordinal_of)?,
             }),
+            Some(Block::Wait { token }) => Some(ImageBlock::Wait { token }),
+            Some(Block::Snapshot {
+                target,
+                remaining,
+                retry,
+                ..
+            }) => Some(ImageBlock::Snapshot {
+                target: self.require_ordinal(target, ordinal_of)?,
+                remaining,
+                retry,
+            }),
         };
+        let waits = m
+            .waits
+            .iter()
+            .map(|(token, entry)| {
+                let source = match entry.source {
+                    WaitSource::Receive => ImageWaitSource::Receive,
+                    WaitSource::Drive { target } => ImageWaitSource::Drive {
+                        target: self.require_ordinal(target, ordinal_of)?,
+                    },
+                    WaitSource::Choice { first, second } => {
+                        ImageWaitSource::Choice { first, second }
+                    }
+                };
+                Ok(ImageWaitEntry {
+                    token: *token,
+                    source,
+                    linked: entry.linked,
+                })
+            })
+            .collect::<Result<Vec<_>, SnapshotFail>>()?;
         let parent = m.parent.and_then(&ordinal_of);
         let nested = m
             .nested
@@ -748,6 +783,8 @@ impl World<'_> {
             generation: record.generation,
             fuel: m.fuel,
             next_ordinal: m.next_ordinal,
+            next_wait: m.next_wait,
+            waits,
             children: record.children,
             limits: ImageLimits {
                 fuel: record.config.fuel,

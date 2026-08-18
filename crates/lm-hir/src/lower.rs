@@ -140,6 +140,10 @@ impl<'m> ModLowerer<'m> {
                 let t = self.bc_ty(t);
                 self.intern_type(BcType::Vm(t))
             }
+            Type::Wait(t) => {
+                let t = self.bc_ty(t);
+                self.intern_type(BcType::Wait(t))
+            }
             Type::PendingCall(a, r) => {
                 let a = self.bc_ty(a);
                 let r = self.bc_ty(r);
@@ -1777,6 +1781,7 @@ fn type_text(module: &Module, idx: u32) -> String {
         BcType::EmptyVm => "EmptyVm".to_string(),
         BcType::SnapshotImage => "SnapshotImage".to_string(),
         BcType::Vm(t) => format!("Vm[{}]", type_text(module, *t)),
+        BcType::Wait(t) => format!("Wait[{}]", type_text(module, *t)),
         BcType::Snapshot(t) => format!("Snapshot[{}]", type_text(module, *t)),
         BcType::PendingCall(a, r) => format!(
             "PendingCall[{}, {}]",

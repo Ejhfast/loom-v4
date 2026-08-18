@@ -6,7 +6,7 @@
 //! `lm inspect <file.lms>` prints it, and the deterministic snapshot
 //! diff of the test suite compares two dumps line by line.
 
-use super::{Image, ImageBlock, ImagePolicyCursor, ImageTerminal, SnapshotImage};
+use super::{Image, ImageBlock, ImagePolicyCursor, ImageTerminal, ImageWaitSource, SnapshotImage};
 use lm_heap::Object;
 use lm_value::Value;
 use std::fmt::Write as _;
@@ -103,6 +103,20 @@ pub fn dump_image(world: &Image) -> String {
                 pending.args.len()
             );
         }
+        for wait in &machine.waits {
+            let source = match wait.source {
+                ImageWaitSource::Receive => "receive".to_string(),
+                ImageWaitSource::Drive { target } => format!("drive machine {target}"),
+                ImageWaitSource::Choice { first, second } => {
+                    format!("choice {first} {second}")
+                }
+            };
+            let _ = writeln!(
+                out,
+                "  wait {} linked {} source {source}",
+                wait.token, wait.linked
+            );
+        }
         if let Some(nested) = machine.nested {
             let _ = writeln!(out, "  nested {nested}");
         }
@@ -142,6 +156,19 @@ pub fn dump_image(world: &Image) -> String {
             }
             Some(ImageBlock::Done { target }) => {
                 let _ = writeln!(out, "  blocked on done of machine {target}");
+            }
+            Some(ImageBlock::Wait { token }) => {
+                let _ = writeln!(out, "  blocked on wait {token}");
+            }
+            Some(ImageBlock::Snapshot {
+                target,
+                remaining,
+                retry,
+            }) => {
+                let _ = writeln!(
+                    out,
+                    "  blocked on snapshot {target} remaining {remaining} retry {retry}"
+                );
             }
         }
         for (idx, entry) in machine.objects.iter().enumerate() {
@@ -234,6 +261,7 @@ fn payload(object: &Object) -> String {
         Object::NativeResourceHandle { surface, resource } => {
             format!("resource {resource} of machine {surface}")
         }
+        Object::NativeWait { owner, token } => format!("wait {token} of machine {owner}"),
     }
 }
 

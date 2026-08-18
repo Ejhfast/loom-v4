@@ -240,7 +240,7 @@ fn snapshot_wait_advances_reachable_background_work() {
     host.borrow_mut()
         .set_file("message.txt", b"transient".to_vec());
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
-    for grant in ["Vm", "Fs", "Proc", "Io.Print"] {
+    for grant in ["Vm", "Fs", "Proc"] {
         world.allow(grant).expect("the grant exists");
     }
 
@@ -248,11 +248,101 @@ fn snapshot_wait_advances_reachable_background_work() {
 
     assert_eq!(
         world.show_outcome(&outcome),
-        "Done(\"captured after the indexer closed its file; indexed 9 bytes\")",
+        "Done(\"captured after the file closed; indexed 9 bytes\")",
         "root fault: {:?}; child fault: {:?}; worker fault: {:?}",
         world.fault_of(0),
         world.fault_of(1),
         world.fault_of(2)
+    );
+    assert!(world.last_snapshot().is_some());
+}
+
+#[test]
+fn snapshot_wait_keeps_a_possible_mailbox_wake_live() {
+    let text = r#"
+enum Command
+  Release
+end
+
+class Worker < Proc[Command]
+  file: FileHandle
+
+  def init(mut self, file: FileHandle)
+    self.file = file
+  end
+
+  def on_spawn(self): Int with Proc, Fs.Close
+    case self.receive()
+    in Msg(Release)
+      case self.file.close()
+      in Ok(_)  then 1
+      in Err(_) then 0 - 1
+      end
+    in Closed then 0 - 2
+    end
+  end
+end
+
+class Gate < Proc
+  def on_spawn(self): Int
+    turns = 0
+    while turns < 3000
+      turns = turns + 1
+    end
+    turns
+  end
+end
+
+class Closer < Proc
+  worker: Handle[Command, Int]
+
+  def init(mut self, worker: Handle[Command, Int])
+    self.worker = worker
+  end
+
+  def on_spawn(self): Bool with Proc
+    self.worker.send(Release).is_sent()
+  end
+end
+
+case sys.fs.open("message.txt", ReadOnly)
+in Ok(file)
+  worker = Worker.spawn(file)
+  case worker.pause()
+  in Ok(vm)
+    vm.table().pass(Fs.Close)
+    worker.resume()
+    ()
+  in Err(_) then ()
+  end
+
+  # Let the worker block on its mailbox while it holds the file.
+  gate = Gate.spawn()
+  gate.done()
+
+  # The closer is runnable when snapshot_wait checks the blocked worker.
+  Closer.spawn(worker)
+  case worker.snapshot_wait(10000)
+  in Ok(_)  then "captured after the mailbox wake"
+  in Err(_) then "capture failed"
+  end
+in Err(_) then "open failed"
+end
+"#;
+    let bytes = compile_to_bytes("mailbox-snapshot-wait.lm", text).expect("the test compiles");
+    let loaded = load_bytes(&bytes).expect("the test loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().set_file("message.txt", b"data".to_vec());
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    for grant in ["Vm", "Fs", "Proc"] {
+        world.allow(grant).expect("the grant exists");
+    }
+
+    let outcome = lm_proc::run_world(&mut world);
+
+    assert_eq!(
+        world.show_outcome(&outcome),
+        "Done(\"captured after the mailbox wake\")"
     );
     assert!(world.last_snapshot().is_some());
 }

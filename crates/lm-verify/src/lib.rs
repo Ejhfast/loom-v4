@@ -249,7 +249,11 @@ impl<'m> Ctx<'m> {
     fn type_children(&self, ty: u32, out: &mut Vec<u32>) {
         match self.ty(ty) {
             BcType::Inst(_, args) | BcType::Tuple(args) => out.extend(args),
-            BcType::List(e) | BcType::Vm(e) | BcType::Snapshot(e) | BcType::Op(_, e) => out.push(e),
+            BcType::List(e)
+            | BcType::Vm(e)
+            | BcType::Wait(e)
+            | BcType::Snapshot(e)
+            | BcType::Op(_, e) => out.push(e),
             BcType::Map(a, b) | BcType::PendingCall(a, b) | BcType::Handle(a, b) => {
                 out.push(a);
                 out.push(b);
@@ -307,6 +311,7 @@ impl<'m> Ctx<'m> {
                     self.row_subst(&row, rows),
                 )),
                 BcType::Vm(t) => self.intern(BcType::Vm(child(t))),
+                BcType::Wait(t) => self.intern(BcType::Wait(child(t))),
                 BcType::Snapshot(t) => self.intern(BcType::Snapshot(child(t))),
                 BcType::PendingCall(a, r) => self.intern(BcType::PendingCall(child(a), child(r))),
                 BcType::Handle(m, r) => self.intern(BcType::Handle(child(m), child(r))),
@@ -539,6 +544,7 @@ impl<'m> Ctx<'m> {
                 | BcType::PolicyTable
                 | BcType::EmptyVm
                 | BcType::Vm(_)
+                | BcType::Wait(_)
                 | BcType::PendingCall(_, _)
                 | BcType::Handle(_, _)
                 | BcType::SnapshotImage
@@ -1276,7 +1282,7 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             | BcType::PolicyTable
             | BcType::EmptyVm
             | BcType::SnapshotImage => {}
-            BcType::Vm(t) | BcType::Snapshot(t) => check_ref(*t)?,
+            BcType::Vm(t) | BcType::Wait(t) | BcType::Snapshot(t) => check_ref(*t)?,
             BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 check_ref(*a)?;
                 check_ref(*r)?;
@@ -1753,6 +1759,7 @@ fn perform_argc(op: u32) -> u32 {
             lm_abi::OP_VM_RUN
             | lm_abi::OP_VM_STEP
             | lm_abi::OP_VM_DRIVE
+            | lm_abi::OP_VM_DRIVE_WAIT
             | lm_abi::OP_VM_TABLE
             | lm_abi::OP_VM_HANDLES
             | lm_abi::OP_VM_RESOURCE_IS_OPEN
@@ -1766,7 +1773,9 @@ fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_PROC_PAUSE
             | lm_abi::OP_PROC_RESUME
             | lm_abi::OP_PROC_RECV
-            | lm_abi::OP_PROC_TRY_RECV => 1,
+            | lm_abi::OP_PROC_RECV_WAIT
+            | lm_abi::OP_WAIT_WAIT
+            | lm_abi::OP_WAIT_CANCEL => 1,
             lm_abi::OP_PROC_SEND => 2,
             lm_abi::OP_PROC_SPAWN => 3,
             lm_abi::OP_VM_SNAPSHOT_SELF => 0,
@@ -1774,9 +1783,11 @@ fn perform_argc(op: u32) -> u32 {
             lm_abi::OP_VM_RESTORE
             | lm_abi::OP_VM_RESOURCE
             | lm_abi::OP_VM_MINT_FILE
+            | lm_abi::OP_VM_DRIVE_FOR
             | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
+            | lm_abi::OP_PROC_SNAPSHOT_WAIT
             | lm_abi::OP_VM_RESOURCE_SAME
-            | lm_abi::OP_VM_DRIVE_FOR => 2,
+            | lm_abi::OP_WAIT_CHOOSE => 2,
             _ => unreachable!("every VmControl slot has an arity"),
         },
     }
@@ -2849,6 +2860,14 @@ fn step(
                             let event = ctx.event_inst(parent, what, t).map_err(&fail)?;
                             push(state, event)?;
                         }
+                        lm_abi::OP_VM_DRIVE_WAIT => {
+                            let t = pop_vm(state)?;
+                            let event = ctx
+                                .event_inst(ctx.core.drive_event, "DriveEvent", t)
+                                .map_err(&fail)?;
+                            let wait = ctx.intern(BcType::Wait(event));
+                            push(state, wait)?;
+                        }
                         lm_abi::OP_VM_TABLE => {
                             pop_vm(state)?;
                             let table = ctx.intern(BcType::PolicyTable);
@@ -3064,7 +3083,7 @@ fn step(
                             let out = ctx.intern(BcType::Inst(result_family, vec![ok, error]));
                             push(state, out)?;
                         }
-                        lm_abi::OP_PROC_RECV => {
+                        lm_abi::OP_PROC_RECV | lm_abi::OP_PROC_RECV_WAIT => {
                             // The receiver is the performing proc. Its
                             // class fixes the mailbox type, so the
                             // rule reads the class table.
@@ -3075,22 +3094,57 @@ fn step(
                             let event = ctx
                                 .event_inst(ctx.core.recv, "Recv", mailbox)
                                 .map_err(&fail)?;
-                            push(state, event)?;
+                            if op == lm_abi::OP_PROC_RECV {
+                                push(state, event)?;
+                            } else {
+                                let wait = ctx.intern(BcType::Wait(event));
+                                push(state, wait)?;
+                            }
                         }
-                        lm_abi::OP_PROC_TRY_RECV => {
-                            // The same receiver rule as `Proc.Recv`.
-                            // The reply wraps the event, because an
-                            // open and empty mailbox answers `None`.
-                            let recv = pop(state)?;
-                            let mailbox = ctx.proc_mailbox(recv).ok_or_else(|| {
-                                fail("`Proc.TryRecv` needs a `Proc` subclass receiver".to_string())
-                            })?;
-                            let event = ctx
-                                .event_inst(ctx.core.recv, "Recv", mailbox)
+                        lm_abi::OP_WAIT_WAIT => {
+                            let wait = pop(state)?;
+                            let BcType::Wait(result) = ctx.ty(wait) else {
+                                return Err(fail("`Wait.Wait` needs a Wait value".to_string()));
+                            };
+                            push(state, result)?;
+                        }
+                        lm_abi::OP_WAIT_CHOOSE => {
+                            let right = pop(state)?;
+                            let left = pop(state)?;
+                            let BcType::Wait(right) = ctx.ty(right) else {
+                                return Err(fail(
+                                    "`Wait.Choose` needs two Wait values".to_string(),
+                                ));
+                            };
+                            let BcType::Wait(left) = ctx.ty(left) else {
+                                return Err(fail(
+                                    "`Wait.Choose` needs two Wait values".to_string(),
+                                ));
+                            };
+                            let Some(choice) = ctx.core.choice else {
+                                return Err(fail(
+                                    "the module does not carry the pinned core Choice definition"
+                                        .to_string(),
+                                ));
+                            };
+                            let choice = ctx.intern(BcType::Inst(choice, vec![left, right]));
+                            let wait = ctx.intern(BcType::Wait(choice));
+                            push(state, wait)?;
+                        }
+                        lm_abi::OP_WAIT_CANCEL => {
+                            let wait = pop(state)?;
+                            if !matches!(ctx.ty(wait), BcType::Wait(_)) {
+                                return Err(fail("`Wait.Cancel` needs a Wait value".to_string()));
+                            }
+                            push(state, TY_BOOL)?;
+                        }
+                        lm_abi::OP_VM_SNAPSHOT_HELD => {
+                            let t = pop_vm(state)?;
+                            let snapshot = ctx.intern(BcType::Snapshot(t));
+                            let error = ctx
+                                .plain_inst(ctx.core.snapshot_error, "SnapshotError")
                                 .map_err(&fail)?;
-                            let out = ctx
-                                .event_inst(ctx.core.option, "Option", event)
-                                .map_err(&fail)?;
+                            let out = ctx.result_inst(snapshot, error).map_err(&fail)?;
                             push(state, out)?;
                         }
                         lm_abi::OP_VM_DRIVE_FOR => {
@@ -3109,7 +3163,13 @@ fn step(
                                 .map_err(&fail)?;
                             push(state, out)?;
                         }
-                        lm_abi::OP_VM_SNAPSHOT_HELD => {
+                        lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
+                            let fuel = pop(state)?;
+                            if ctx.ty(fuel) != BcType::Int {
+                                return Err(fail(
+                                    "`Vm.SnapshotWaitHeld` needs a fuel count".to_string(),
+                                ));
+                            }
                             let t = pop_vm(state)?;
                             let snapshot = ctx.intern(BcType::Snapshot(t));
                             let error = ctx
@@ -3118,10 +3178,15 @@ fn step(
                             let out = ctx.result_inst(snapshot, error).map_err(&fail)?;
                             push(state, out)?;
                         }
-                        lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
+                        lm_abi::OP_PROC_SNAPSHOT_WAIT => {
                             pop_expect(state, TY_INT)?;
-                            let t = pop_vm(state)?;
-                            let snapshot = ctx.intern(BcType::Snapshot(t));
+                            let handle = pop(state)?;
+                            let BcType::Handle(_, result) = ctx.ty(handle) else {
+                                return Err(fail(
+                                    "`Proc.SnapshotWait` needs a proc handle".to_string(),
+                                ));
+                            };
+                            let snapshot = ctx.intern(BcType::Snapshot(result));
                             let error = ctx
                                 .plain_inst(ctx.core.snapshot_error, "SnapshotError")
                                 .map_err(&fail)?;

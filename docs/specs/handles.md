@@ -186,25 +186,33 @@ recover if continued execution matters.
 
 ## 8. Bounded waiting
 
-`snapshot_wait(fuel)` first tries an immediate capture.
+`Handle[M, R].snapshot_wait(fuel)` first tries an immediate capture of
+the controlled proc world.
 
-When a resource blocks capture, the call advances reachable
-scheduler-owned procs. It never runs the controlled root.
+When a resource blocks capture, the target proc continues under the
+normal scheduler. The calling proc waits.
 
-The call visits ready procs in stable round-robin order. It retries
-capture after each retired proc instruction.
+The scheduler retries capture after each relevant target boundary. A
+host completion and a resource close are also relevant boundaries.
 
-The fuel limit counts these proc instructions. It does not measure host
-time.
+The fuel limit counts target-world instructions. It does not measure
+host time.
 
 The call returns the current `ResourceActive` error when the fuel ends.
 It leaves the controlled world valid.
 
-The call also returns when no reachable proc can make progress. It does
-not spin while an external completion remains unavailable.
+The call also returns when no scheduler task can make progress toward
+the target.
 
-A host application can apply a time limit around repeated fuel-limited
-calls. The VM does not depend on a clock.
+It can remain parked for a known host completion or a possible mailbox
+wake.
+
+Host waits consume no fuel. Host waits can extend elapsed time.
+
+A later timer wait can give callers an elapsed-time limit through
+`select`.
+
+`docs/specs/waits.md` defines the scheduler wait and selection model.
 
 ## 9. Cleanup
 

@@ -72,7 +72,7 @@ use std::collections::HashMap;
 /// type of the two perform instructions to the instruction encoding
 /// and to the canonical identity encoding. Version 9 adds the three
 /// resource types. Version 10 adds the three byte instructions.
-pub const COMPILER_ABI_VERSION: u32 = 10;
+pub const COMPILER_ABI_VERSION: u32 = 11;
 
 /// The refinement work budget of one component.
 ///
@@ -311,7 +311,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
                 earlier(*ret)?;
                 check_row(&format!("type {idx}"), row)?;
             }
-            BcType::Vm(t) | BcType::Snapshot(t) => earlier(*t)?,
+            BcType::Vm(t) | BcType::Wait(t) | BcType::Snapshot(t) => earlier(*t)?,
             BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 earlier(*a)?;
                 earlier(*r)?;
@@ -723,7 +723,7 @@ impl Graph {
                     }
                     list.push(s.type_node(*ret));
                 }
-                BcType::Vm(t) | BcType::Snapshot(t) => list.push(s.type_node(*t)),
+                BcType::Vm(t) | BcType::Wait(t) | BcType::Snapshot(t) => list.push(s.type_node(*t)),
                 BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                     list.push(s.type_node(*a));
                     list.push(s.type_node(*r));
@@ -1060,6 +1060,10 @@ impl<'a> Resolver<'a> {
             BcType::Digest => out.push(20),
             BcType::Vm(t) => {
                 out.push(17);
+                out.extend_from_slice(&self.type_digest(*t));
+            }
+            BcType::Wait(t) => {
+                out.push(27);
                 out.extend_from_slice(&self.type_digest(*t));
             }
             BcType::PendingCall(a, r) => {

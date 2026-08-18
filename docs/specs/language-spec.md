@@ -439,9 +439,15 @@ The type universe has four strata.
 | `DynValue` | Explicit type/value package for dynamic APIs |
 | `ValueView` | Opaque frozen diagnostic view of a value |
 
-**Core-image nominal types** are ordinary source definitions with pinned hashes. The minimum set includes `Option`, `Result`, `Ordering`, `Pair`, `Range`, `RunResult`, `StepEvent`, `DriveEvent`, `Recv`, `ProcResult`, portable operation error enums, and the typed request-token declarations used by VM control.
+**Core-image nominal types** are ordinary source definitions with pinned hashes.
 
-**Host and holder types** such as `EmptyVm`, `Vm[T]`, typed `Snapshot[T]`, erased-but-contained `SnapshotImage`, `Handle[M,T]`, `PolicyTable`, scoped `FileLease`, file handles, and socket handles are native nominal classes with explicit boundary rules.
+The minimum set includes `Option`, `Result`, `Choice`, `Ordering`, `Pair`, `Range`, `RunResult`, `StepEvent`, `DriveEvent`, `Recv`, and `ProcResult`.
+
+It also includes portable operation errors and typed VM request tokens.
+
+**Host and holder types** include `Vm[T]`, `Wait[T]`, snapshots, proc handles, policy tables, file handles, and socket handles.
+
+Each native holder type has explicit boundary rules.
 
 There is no `nil`. Absence is `Option[T]`; ordinary failure is `Result[T,E]`; machine failure is `Fault` observed by the holder.
 
@@ -814,6 +820,25 @@ end
 ```
 
 Arms are tested in source order. An arm may use `then` with one expression or a newline body. Cases over enums and `Bool` are checked for exhaustiveness; cases over other types require a wildcard or binding arm. Duplicate unreachable arms are compile errors.
+
+### 7.4 Select
+
+```lm
+select
+in child.drive_wait() -> event
+  handle_drive(event)
+in self.receive_wait() -> command
+  handle_command(command)
+end
+```
+
+A select has at least two arms. Each arm expression has type `Wait[T]`.
+
+The arm name has type `T`. `_` discards that arm's result.
+
+The compiler lowers select to `Wait.choose`, `Wait.wait`, and `Choice`. Section 23.7 defines their operations.
+
+The runtime tests ready arms in source order whenever the proc resumes.
 
 ---
 
@@ -1766,9 +1791,13 @@ h.done(): ProcResult[R] with Proc.Done
 h.pause(): Result[Vm[R], ProcError] with Proc.Pause
 h.resume(): Result[(), ProcError] with Proc.Resume
 h.close(): SendResult with Proc.Close
+h.snapshot_wait(fuel: Int): Result[Snapshot[R], SnapshotError]
+  with Proc.SnapshotWait
 ```
 
 When `M` is not `Never`, it also supports `h.send(message: M): SendResult with Proc.Send`. No `send(Any)` escape exists. `done()` blocks the holder operation until terminal and returns `Done(value)` or `Fault(fault)`. The value is transfer-checked. Pause requests synchronize at a guest instruction/operation boundary and return the underlying paused VM; resume moves it back to scheduler ownership.
+
+`snapshot_wait` parks its caller. The scheduler continues the target world within the fuel budget.
 
 Handles are sendable typed designators. Sending a handle preserves its target and types. A handle inside a snapshot targets a captured machine, because the snapshot world is closed under reachability (17.1).
 
@@ -1809,6 +1838,8 @@ enum Recv[M]
   Closed
 end
 ```
+
+`receive_wait()` returns `Wait[Recv[M]]` with `Proc.RecvWait`. It removes no message before selection commits.
 
 Accepted messages are delivered FIFO by host acceptance order. `close` prevents later acceptance but preserves queued messages; `Closed` arrives after the queue drains. A send to a closed/dead peer returns a dedicated ordinary `SendResult`, unless malformed or holder-local data faults the sender at its boundary.
 
@@ -2188,6 +2219,8 @@ Fs.Rename      (String, String) -> Result[(), FsError]
 
 A live `FileHandle` names one resource entry and one service binding. The binding can belong to the root host or a driver. Every alias closes together. An open entry blocks snapshot creation. A closed handle remains typed machine state and restores as closed. The standard library never reopens a raw file handle silently. A later version may define a checkpointable file type with an explicit restore contract.
 
+File operations can suspend their proc. The host adapter performs blocking platform work outside the scheduler thread.
+
 ### 23.3 Clock and randomness
 
 ```text
@@ -2227,6 +2260,7 @@ Vm.FromArtifact[A,T]     (EmptyVm, LinkedEntry[A,T], control A) -> Vm[T]
 Vm.Step[T]               (Vm[T]) -> StepEvent[T]
 Vm.Run[T]                (Vm[T]) -> RunResult[T]
 Vm.Drive[T]              (Vm[T]) -> DriveEvent[T]
+Vm.DriveWait[T]          (Vm[T]) -> Wait[DriveEvent[T]]
 Vm.Answer[T,A,R]         (Vm[T], PendingCall[A,R], R) -> ()
 Vm.Reject[T]             (Vm[T], Request, Fault) -> ()
 Vm.Dispatch[T]           (Vm[T], Request) -> ()
@@ -2244,8 +2278,6 @@ Vm.SetLimits[T]          (Vm[T], Limits) -> ()
 Vm.AddFuel[T]            (Vm[T], Int) -> ()
 Vm.SnapshotHeld[T]       (Vm[T])
                           -> Result[Snapshot[T], SnapshotError]
-Vm.SnapshotWaitHeld[T]   (Vm[T], Int)
-                          -> Result[Snapshot[T], SnapshotError]
 Vm.SnapshotSelf          ()
                           -> Result[SnapshotImage, SnapshotError]
 Vm.LoadSnapshot          (Bytes)
@@ -2262,28 +2294,43 @@ machine world. A resource control stays with its holder.
 `Vm.ResourceSame` matches two controls only while their shared entry
 is live. A closed control never matches.
 
-`Vm.SnapshotWaitHeld` advances only reachable scheduler-owned procs.
-Its fuel counts their retired instructions. It never runs the held root.
-It returns when capture succeeds, fuel ends, or no reachable proc can progress.
-
 ### 23.6 Proc operations
 
 A proc handle carries both mailbox and terminal result types:
 
 ```text
-Proc.Run[M,R]       (Vm[R], Type[M]) -> Handle[M,R]
+Proc.Run[R]         (Vm[R]) -> Handle[Never,R]
 Proc.Spawn[M,R,A]   (Class[Proc[M]], control A) -> Handle[M,R]
 Proc.Send[M,R]      (Handle[M,R], M) -> SendResult
 Proc.Close[M,R]     (Handle[M,R]) -> SendResult
 Proc.Recv[M]        (proc self) -> Recv[M]
+Proc.RecvWait[M]    (proc self) -> Wait[Recv[M]]
 Proc.Done[M,R]      (Handle[M,R]) -> ProcResult[R]
 Proc.Pause[M,R]     (Handle[M,R]) -> Result[Vm[R], ProcError]
 Proc.Resume[M,R]    (Handle[M,R]) -> Result[(), ProcError]
+Proc.SnapshotWait[M,R] (Handle[M,R], Int)
+                       -> Result[Snapshot[R], SnapshotError]
 ```
 
 A proc with no mailbox uses `Never` as `M`; such a handle has no callable `send` method.
 
-### 23.7 Compiler and reflection
+`Proc.SnapshotWait` first tries an immediate capture. It parks the caller only when a live resource blocks capture.
+
+Fuel counts target-world instructions. Host completion time does not consume fuel.
+
+### 23.7 Wait operations
+
+```text
+Wait.Wait[T]          (Wait[T]) -> T
+Wait.Choose[A,B]      (Wait[A], Wait[B]) -> Wait[Choice[A,B]]
+Wait.Cancel[T]        (Wait[T]) -> Bool
+```
+
+Wait tokens are holder-local and one-shot. Section 7.4 defines select syntax.
+
+`docs/specs/waits.md` defines readiness, drive leases, and scheduler indexes.
+
+### 23.8 Compiler and reflection
 
 ```text
 Compiler.Compile  (String, CompileEnv, CompileOptions)

@@ -66,6 +66,7 @@ pub enum ClosedType {
     /// one closed effect row.
     Fn(Vec<ClosedTypeId>, Vec<bool>, ClosedTypeId, ClosedRow),
     Vm(ClosedTypeId),
+    Wait(ClosedTypeId),
     PendingCall(ClosedTypeId, ClosedTypeId),
     Handle(ClosedTypeId, ClosedTypeId),
     /// An identity-indexed operation value: the manifest slot and the
@@ -81,6 +82,7 @@ impl ClosedType {
             ClosedType::Inst(_, args) | ClosedType::Tuple(args) => args.len(),
             ClosedType::List(_)
             | ClosedType::Vm(_)
+            | ClosedType::Wait(_)
             | ClosedType::Snapshot(_)
             | ClosedType::Op(_, _) => 1,
             ClosedType::Map(_, _) | ClosedType::PendingCall(_, _) | ClosedType::Handle(_, _) => 2,
@@ -94,7 +96,10 @@ impl ClosedType {
         match self {
             ClosedType::Class(_) => Vec::new(),
             ClosedType::Inst(_, args) | ClosedType::Tuple(args) => args.clone(),
-            ClosedType::List(e) | ClosedType::Vm(e) | ClosedType::Snapshot(e) => vec![*e],
+            ClosedType::List(e)
+            | ClosedType::Vm(e)
+            | ClosedType::Wait(e)
+            | ClosedType::Snapshot(e) => vec![*e],
             ClosedType::Op(_, e) => vec![*e],
             ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
                 vec![*a, *b]
@@ -120,6 +125,7 @@ impl ClosedType {
             ClosedType::Tuple(elems) => ClosedType::Tuple(elems.iter().map(|e| map(*e)).collect()),
             ClosedType::List(e) => ClosedType::List(map(*e)),
             ClosedType::Vm(e) => ClosedType::Vm(map(*e)),
+            ClosedType::Wait(e) => ClosedType::Wait(map(*e)),
             ClosedType::Snapshot(e) => ClosedType::Snapshot(map(*e)),
             ClosedType::Op(op, e) => ClosedType::Op(*op, map(*e)),
             ClosedType::Map(a, b) => ClosedType::Map(map(*a), map(*b)),
@@ -662,6 +668,7 @@ impl TypeEnvs {
                 self.close_row(module, row, env),
             ),
             BcType::Vm(t) => ClosedType::Vm(child(self, *t)),
+            BcType::Wait(t) => ClosedType::Wait(child(self, *t)),
             BcType::Snapshot(t) => ClosedType::Snapshot(child(self, *t)),
             BcType::PendingCall(a, r) => ClosedType::PendingCall(child(self, *a), child(self, *r)),
             BcType::Handle(m, r) => ClosedType::Handle(child(self, *m), child(self, *r)),
@@ -993,7 +1000,11 @@ impl TypeEnvs {
 pub fn bc_children(node: &BcType, out: &mut Vec<u32>) {
     match node {
         BcType::Inst(_, args) | BcType::Tuple(args) => out.extend(args),
-        BcType::List(e) | BcType::Vm(e) | BcType::Snapshot(e) | BcType::Op(_, e) => out.push(*e),
+        BcType::List(e)
+        | BcType::Vm(e)
+        | BcType::Wait(e)
+        | BcType::Snapshot(e)
+        | BcType::Op(_, e) => out.push(*e),
         BcType::Map(a, b) | BcType::PendingCall(a, b) | BcType::Handle(a, b) => {
             out.push(*a);
             out.push(*b);
@@ -1043,6 +1054,7 @@ pub fn tag_of(node: &ClosedType) -> u8 {
         ClosedType::Bytes => 23,
         ClosedType::FileHandle => 24,
         ClosedType::ResourceHandle => 25,
+        ClosedType::Wait(_) => 26,
     }
 }
 

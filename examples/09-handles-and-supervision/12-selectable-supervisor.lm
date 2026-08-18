@@ -1,0 +1,80 @@
+# Stop a running child through the supervisor mailbox.
+#
+# The child does not yield by itself. `drive_wait` gives its execution
+# to the scheduler for one quantum at a time.
+#
+# The supervisor also waits for mailbox commands. The scheduler can run
+# the controller between child quanta.
+
+enum Command
+  Stop
+end
+
+def untrusted_work(): Int
+  loop do
+    ()
+  end
+  0
+end
+
+class Supervisor < Proc[Command]
+  def on_spawn(self): String with Proc, Vm, Wait
+    child = sys.vm.Vm().from_object(untrusted_work, args: ())
+
+    loop do
+      select
+      in child.drive_wait() -> event
+        # A real supervisor can inspect, answer, or reject each request.
+        case event
+        in Asked(request) then child.dispatch(request)
+        in Done(_)
+          return "the child finished"
+        in Fault(_)
+          return "the child faulted"
+        end
+      in self.receive_wait() -> received
+        case received
+        in Msg(Stop)
+          return "the supervisor stopped the child"
+        in Closed
+          return "the command mailbox closed"
+        end
+      end
+    end
+    "unreachable"
+  end
+end
+
+class Controller < Proc
+  target: Handle[Command, String]
+
+  def init(mut self, target: Handle[Command, String])
+    self.target = target
+  end
+
+  def on_spawn(self): Bool with Proc
+    # This proc runs after the supervisor starts its drive wait.
+    self.target.send(Stop).is_sent()
+  end
+end
+
+supervisor = Supervisor.spawn()
+
+# A new proc starts with a default-deny policy table. Pause the proc
+# before adding the two capabilities that its supervisor loop needs.
+case supervisor.pause()
+in Ok(vm)
+  vm.table().pass(Vm)
+  vm.table().pass(Wait)
+  supervisor.resume()
+  ()
+in Err(_) then ()
+end
+
+# The controller represents an independent parent command source.
+Controller.spawn(supervisor)
+
+case supervisor.done()
+in Done(message) then message
+in Fault(fault)  then fault.code()
+end

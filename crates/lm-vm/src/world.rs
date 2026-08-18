@@ -11,10 +11,11 @@ use crate::host::{
 };
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, Machine, MachineState, Mailbox, Ownership, Pending,
-    PolicyCursor, RoutedRequest, Terminal, VmId,
+    PolicyCursor, RoutedRequest, Terminal, VmId, WaitEntry, WaitSource, MAX_LIVE_WAITS,
 };
 use crate::schedule::{
-    ActiveProcs, CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WakeKey,
+    ActiveProcs, CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,
+    WaitSourceKey, WakeKey,
 };
 use crate::{FaultCode, LoadedModule, Outcome, VmConfig, WorldLimits};
 use lm_bytecode::corepin::CoreLayout;
@@ -75,6 +76,10 @@ enum SuspendReason {
     Waiting {
         machine: VmId,
         completion: CompletionKey,
+    },
+    Parked {
+        machine: VmId,
+        wait: WaitSetKey,
     },
 }
 
@@ -173,6 +178,19 @@ enum FileBacking {
 struct FileResource {
     owner: VmId,
     backing: FileBacking,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitLeaf {
+    Receive,
+    Drive { target: VmId },
+}
+
+#[derive(Debug)]
+struct WaitLeafPath {
+    leaf: WaitLeaf,
+    /// False selects `Choice.First`. True selects `Choice.Second`.
+    path: Vec<bool>,
 }
 
 impl WorldBudget {
@@ -341,7 +359,8 @@ pub enum TraceEvent {
     },
     Block {
         vm: VmId,
-        block: Block,
+        kind: TraceBlock,
+        target: VmId,
     },
     Unblock {
         vm: VmId,
@@ -356,6 +375,16 @@ pub enum TraceEvent {
         proc: VmId,
         faulted: bool,
     },
+}
+
+/// One compact block kind in a scheduler trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceBlock {
+    Receive,
+    Send,
+    Done,
+    Wait,
+    Snapshot,
 }
 
 /// The mailbox counters of one machine.
@@ -965,6 +994,30 @@ impl<'m> World<'m> {
             let state = self.machines[act.vm as usize].vm.state;
             match state {
                 MachineState::Blocked => {
+                    if let Some(Block::Wait { token }) = self.machines[act.vm as usize].vm.block {
+                        if self.complete_ready_wait(act.vm, token) {
+                            continue;
+                        }
+                        let wait = WaitSetKey {
+                            owner: TaskKey {
+                                vm: act.vm,
+                                generation: self.machines[act.vm as usize].generation,
+                            },
+                            token,
+                        };
+                        let base = stack[0].vm;
+                        self.suspended.insert(
+                            base,
+                            SuspendedStack {
+                                activations: std::mem::take(stack),
+                                reason: SuspendReason::Parked {
+                                    machine: act.vm,
+                                    wait,
+                                },
+                            },
+                        );
+                        return RootEvent::Blocked;
+                    }
                     if self.block_ready(act.vm) {
                         self.complete_blocked_machine(act.vm);
                         continue;
@@ -3349,6 +3402,23 @@ impl<'m> World<'m> {
                     }
                 }
             }
+            lm_abi::OP_VM_DRIVE_WAIT => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                if self.machines[target as usize].vm.state == MachineState::Empty {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is empty");
+                    return;
+                }
+                self.create_wait(vm, op, WaitSource::Drive { target });
+            }
             lm_abi::OP_VM_TABLE => {
                 let Some(target) = self.vm_arg(vm, op, args[0]) else {
                     return;
@@ -3667,6 +3737,10 @@ impl<'m> World<'m> {
                 );
             }
             lm_abi::OP_VM_RESTORE => self.restore_snapshot(vm, op, args),
+            lm_abi::OP_PROC_RECV_WAIT
+            | lm_abi::OP_WAIT_WAIT
+            | lm_abi::OP_WAIT_CHOOSE
+            | lm_abi::OP_WAIT_CANCEL => self.wait_exec(vm, op, args),
             lm_abi::OP_PROC_RUN
             | lm_abi::OP_PROC_SPAWN
             | lm_abi::OP_PROC_SEND
@@ -3675,7 +3749,7 @@ impl<'m> World<'m> {
             | lm_abi::OP_PROC_DONE
             | lm_abi::OP_PROC_PAUSE
             | lm_abi::OP_PROC_RESUME
-            | lm_abi::OP_PROC_TRY_RECV => self.proc_exec(vm, op, stored),
+            | lm_abi::OP_PROC_SNAPSHOT_WAIT => self.proc_exec(vm, op, stored),
             // Every `VmControl` slot of the manifest has an arm above.
             // A slot without one names a manifest this build does not
             // hold, so the caller faults.
@@ -3686,6 +3760,393 @@ impl<'m> World<'m> {
                 "the operation has no kernel rule",
             ),
         }
+    }
+
+    // ------------------------------------------------------------
+    // Typed waits.
+    // ------------------------------------------------------------
+
+    fn allocate_wait(&mut self, vm: VmId, source: WaitSource) -> Result<(u64, Value), FaultCode> {
+        let machine = &self.machines[vm as usize];
+        if machine.vm.waits.len() >= MAX_LIVE_WAITS || machine.vm.next_wait == u64::MAX {
+            return Err(FaultCode::BoundaryLimit);
+        }
+        let token = machine.vm.next_wait;
+        let value = self.machines[vm as usize].alloc(Object::NativeWait { owner: vm, token })?;
+        let machine = &mut self.machines[vm as usize];
+        machine.vm.next_wait += 1;
+        machine.vm.waits.insert(
+            token,
+            WaitEntry {
+                source,
+                linked: false,
+            },
+        );
+        Ok((token, value))
+    }
+
+    fn create_wait(&mut self, vm: VmId, op: u32, source: WaitSource) {
+        match self.allocate_wait(vm, source) {
+            Ok((_, value)) => self.install_value_reply(vm, value),
+            Err(code) => self.fault_caller(vm, op, code, "the wait limit is full"),
+        }
+    }
+
+    fn wait_token(&mut self, vm: VmId, op: u32, value: Value) -> Option<u64> {
+        let found = value.as_obj().and_then(|reference| {
+            match self.machines[vm as usize].vm.heap.get(reference) {
+                Object::NativeWait { owner, token } => Some((*owner, *token)),
+                _ => None,
+            }
+        });
+        match found {
+            Some((owner, token)) if owner == vm => Some(token),
+            Some(_) => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::InvalidVmState,
+                    "the wait belongs to another machine",
+                );
+                None
+            }
+            None => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the argument is not a wait token",
+                );
+                None
+            }
+        }
+    }
+
+    fn wait_root_is_current(&mut self, vm: VmId, op: u32, token: u64) -> bool {
+        match self.machines[vm as usize].vm.waits.get(&token) {
+            Some(entry) if !entry.linked => true,
+            Some(_) => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::InvalidVmState,
+                    "the wait token was consumed by a choice",
+                );
+                false
+            }
+            None => {
+                self.fault_caller(vm, op, FaultCode::InvalidVmState, "the wait token is stale");
+                false
+            }
+        }
+    }
+
+    fn wait_tree(&self, vm: VmId, root: u64) -> Result<(Vec<WaitLeafPath>, Vec<u64>), FaultCode> {
+        let waits = &self.machines[vm as usize].vm.waits;
+        let mut leaves = Vec::new();
+        let mut tokens = Vec::new();
+        let mut stack = vec![(root, Vec::new(), true)];
+        while let Some((token, path, is_root)) = stack.pop() {
+            if tokens.contains(&token) || tokens.len() >= MAX_LIVE_WAITS {
+                return Err(FaultCode::MalformedState);
+            }
+            let Some(entry) = waits.get(&token) else {
+                return Err(FaultCode::MalformedState);
+            };
+            if entry.linked == is_root {
+                return Err(FaultCode::MalformedState);
+            }
+            tokens.push(token);
+            match entry.source {
+                WaitSource::Receive => leaves.push(WaitLeafPath {
+                    leaf: WaitLeaf::Receive,
+                    path,
+                }),
+                WaitSource::Drive { target } => leaves.push(WaitLeafPath {
+                    leaf: WaitLeaf::Drive { target },
+                    path,
+                }),
+                WaitSource::Choice { first, second } => {
+                    if first == second {
+                        return Err(FaultCode::MalformedState);
+                    }
+                    let mut second_path = path.clone();
+                    second_path.push(true);
+                    stack.push((second, second_path, false));
+                    let mut first_path = path;
+                    first_path.push(false);
+                    stack.push((first, first_path, false));
+                }
+            }
+        }
+        if leaves.is_empty() {
+            return Err(FaultCode::MalformedState);
+        }
+        Ok((leaves, tokens))
+    }
+
+    fn retire_wait_tree(&mut self, vm: VmId, tokens: &[u64]) {
+        for token in tokens {
+            self.machines[vm as usize].vm.waits.remove(token);
+        }
+    }
+
+    fn wait_exec(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        match op {
+            lm_abi::OP_PROC_RECV_WAIT => {
+                if self.machines[vm as usize].owner != Ownership::Scheduler {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::InvalidVmState,
+                        "receive_wait is valid only on a scheduler-owned proc",
+                    );
+                    return;
+                }
+                self.create_wait(vm, op, WaitSource::Receive);
+            }
+            lm_abi::OP_WAIT_CHOOSE => {
+                let Some(first) = self.wait_token(vm, op, args[0]) else {
+                    return;
+                };
+                let Some(second) = self.wait_token(vm, op, args[1]) else {
+                    return;
+                };
+                if first == second {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::InvalidVmState,
+                        "a choice cannot use one wait twice",
+                    );
+                    return;
+                }
+                if !self.wait_root_is_current(vm, op, first)
+                    || !self.wait_root_is_current(vm, op, second)
+                {
+                    return;
+                }
+                let built = self.allocate_wait(vm, WaitSource::Choice { first, second });
+                let Ok((_, value)) = built else {
+                    self.fault_caller(vm, op, FaultCode::BoundaryLimit, "the wait limit is full");
+                    return;
+                };
+                self.machines[vm as usize]
+                    .vm
+                    .waits
+                    .get_mut(&first)
+                    .expect("the checked first wait exists")
+                    .linked = true;
+                self.machines[vm as usize]
+                    .vm
+                    .waits
+                    .get_mut(&second)
+                    .expect("the checked second wait exists")
+                    .linked = true;
+                self.install_value_reply(vm, value);
+            }
+            lm_abi::OP_WAIT_CANCEL => {
+                let Some(token) = self.wait_token(vm, op, args[0]) else {
+                    return;
+                };
+                if !self.wait_root_is_current(vm, op, token) {
+                    return;
+                }
+                let Ok((_, tokens)) = self.wait_tree(vm, token) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::MalformedState,
+                        "the wait tree is malformed",
+                    );
+                    return;
+                };
+                self.retire_wait_tree(vm, &tokens);
+                self.install_value_reply(vm, Value::Bool(true));
+            }
+            lm_abi::OP_WAIT_WAIT => {
+                let Some(token) = self.wait_token(vm, op, args[0]) else {
+                    return;
+                };
+                if !self.wait_root_is_current(vm, op, token) {
+                    return;
+                }
+                let Ok((leaves, _)) = self.wait_tree(vm, token) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::MalformedState,
+                        "the wait tree is malformed",
+                    );
+                    return;
+                };
+                if !self.validate_wait_leases(vm, op, &leaves) {
+                    return;
+                }
+                if self.complete_ready_wait(vm, token) {
+                    return;
+                }
+                self.block_machine(vm, Block::Wait { token });
+            }
+            _ => self.fault_caller(
+                vm,
+                op,
+                FaultCode::MalformedState,
+                "the operation has no wait rule",
+            ),
+        }
+    }
+
+    fn validate_wait_leases(&mut self, vm: VmId, op: u32, leaves: &[WaitLeafPath]) -> bool {
+        let mut drives = Vec::new();
+        for leaf in leaves {
+            let WaitLeaf::Drive { target } = leaf.leaf else {
+                continue;
+            };
+            if drives.contains(&target) {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::InvalidVmState,
+                    "a wait tree drives one machine more than once",
+                );
+                return false;
+            }
+            drives.push(target);
+            let valid = target != vm
+                && self.machines.get(target as usize).is_some_and(|machine| {
+                    machine.owner == Ownership::Holder
+                        && machine.active == 0
+                        && machine.vm.state != MachineState::Empty
+                });
+            if !valid {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::InvalidVmState,
+                    "a drive wait names a machine that is not available",
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    fn receive_wait_ready(&self, vm: VmId) -> bool {
+        let mailbox = &self.machines[vm as usize].vm.mailbox;
+        !mailbox.queue.is_empty() || mailbox.closed
+    }
+
+    fn drive_wait_ready(&self, target: VmId) -> bool {
+        self.machines[target as usize].vm.routed.is_some()
+            || matches!(
+                self.machines[target as usize].vm.state,
+                MachineState::Asked | MachineState::Done | MachineState::Faulted
+            )
+    }
+
+    fn complete_ready_wait(&mut self, vm: VmId, token: u64) -> bool {
+        let Ok((leaves, tokens)) = self.wait_tree(vm, token) else {
+            let op = self.pending_op(vm);
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the wait tree is malformed",
+                op,
+            );
+            return true;
+        };
+        for leaf in leaves {
+            let ready = match leaf.leaf {
+                WaitLeaf::Receive => self.receive_wait_ready(vm),
+                WaitLeaf::Drive { target } => self.drive_wait_ready(target),
+            };
+            if !ready {
+                continue;
+            }
+            let built = match leaf.leaf {
+                WaitLeaf::Receive => self.take_receive_wait_value(vm),
+                WaitLeaf::Drive { target } => self.take_drive_wait_value(vm, target),
+            }
+            .and_then(|value| self.wrap_wait_choice(vm, value, &leaf.path));
+            let mut seen = Vec::new();
+            self.quiesce_wait_leases(vm, token, &mut seen);
+            self.retire_wait_tree(vm, &tokens);
+            self.machines[vm as usize].vm.block = None;
+            match built {
+                Ok(value) => self.install_value_reply(vm, value),
+                Err(code) => {
+                    self.machines[vm as usize].set_fault(code, "", Some(lm_abi::OP_WAIT_WAIT))
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    fn take_receive_wait_value(&mut self, vm: VmId) -> Result<Value, FaultCode> {
+        if let Some(value) = self.machines[vm as usize].vm.mailbox.pop() {
+            if let Some(target) = self.task_key(vm) {
+                self.emit_wake(WakeKey::Send(target));
+            }
+            self.record(TraceEvent::Receive {
+                proc: vm,
+                closed: false,
+            });
+            self.make_instance(vm, self.core.recv_msg, vec![value])
+        } else if self.machines[vm as usize].vm.mailbox.closed {
+            self.record(TraceEvent::Receive {
+                proc: vm,
+                closed: true,
+            });
+            self.make_instance(vm, self.core.recv_closed, vec![])
+        } else {
+            Err(FaultCode::MalformedState)
+        }
+    }
+
+    fn take_drive_wait_value(&mut self, vm: VmId, surface: VmId) -> Result<Value, FaultCode> {
+        if let Some(route) = self.machines[surface as usize].vm.routed {
+            return self.fresh_asked_wait_value(vm, route.target);
+        }
+        match self.machines[surface as usize].vm.state {
+            MachineState::Asked => self.fresh_asked_wait_value(vm, surface),
+            MachineState::Done | MachineState::Faulted => {
+                self.build_terminal_event(surface, vm, Family::Drive)
+            }
+            _ => Err(FaultCode::MalformedState),
+        }
+    }
+
+    fn fresh_asked_wait_value(&mut self, vm: VmId, target: VmId) -> Result<Value, FaultCode> {
+        if self.machines[target as usize].vm.pending.is_none() {
+            return Err(FaultCode::MalformedState);
+        }
+        let fresh = self.machines[target as usize].take_request_ordinal()?;
+        if let Some(pending) = self.machines[target as usize].vm.pending.as_mut() {
+            pending.ordinal = fresh;
+        }
+        let request = self.machines[vm as usize].alloc(Object::NativeRequest {
+            vm: target,
+            ordinal: fresh,
+        })?;
+        self.make_instance(vm, self.core.drive_asked, vec![request])
+    }
+
+    fn wrap_wait_choice(
+        &mut self,
+        vm: VmId,
+        mut value: Value,
+        path: &[bool],
+    ) -> Result<Value, FaultCode> {
+        for second in path.iter().rev() {
+            let arm = if *second {
+                self.core.choice_second
+            } else {
+                self.core.choice_first
+            };
+            value = self.make_instance(vm, arm, vec![value])?;
+        }
+        Ok(value)
     }
 
     // ------------------------------------------------------------
@@ -4174,10 +4635,17 @@ impl<'m> World<'m> {
 
     /// Block one machine on another machine of this world.
     fn block_machine(&mut self, vm: VmId, block: Block) {
+        let (kind, target) = match block {
+            Block::Receive => (TraceBlock::Receive, 0),
+            Block::Send { target, .. } => (TraceBlock::Send, target),
+            Block::Done { target, .. } => (TraceBlock::Done, target),
+            Block::Wait { .. } => (TraceBlock::Wait, 0),
+            Block::Snapshot { target, .. } => (TraceBlock::Snapshot, target),
+        };
         let m = &mut self.machines[vm as usize];
         m.vm.block = Some(block);
         m.vm.state = MachineState::Blocked;
-        self.record(TraceEvent::Block { vm, block });
+        self.record(TraceEvent::Block { vm, kind, target });
     }
 
     /// Copy one value across a machine boundary.
@@ -4218,10 +4686,10 @@ impl<'m> World<'m> {
             lm_abi::OP_PROC_SEND => self.proc_send(vm, op, args),
             lm_abi::OP_PROC_CLOSE => self.proc_close(vm, op, args),
             lm_abi::OP_PROC_RECV => self.proc_recv(vm, op),
-            lm_abi::OP_PROC_TRY_RECV => self.proc_try_recv(vm, op),
             lm_abi::OP_PROC_DONE => self.proc_done(vm, op, args),
             lm_abi::OP_PROC_PAUSE => self.proc_pause(vm, op, args),
             lm_abi::OP_PROC_RESUME => self.proc_resume(vm, op, args),
+            lm_abi::OP_PROC_SNAPSHOT_WAIT => self.proc_snapshot_wait(vm, op, args, None),
             // Every proc slot of the manifest has an arm above.
             _ => self.fault_caller(
                 vm,
@@ -4587,46 +5055,6 @@ impl<'m> World<'m> {
         }
     }
 
-    /// `self.try_receive()` inside a proc.
-    ///
-    /// The call never blocks. `None` reports an open and empty
-    /// mailbox, so a proc can read its mailbox between other work.
-    fn proc_try_recv(&mut self, vm: VmId, op: u32) {
-        if self.machines[vm as usize].owner != Ownership::Scheduler {
-            self.fault_caller(
-                vm,
-                op,
-                FaultCode::InvalidVmState,
-                "try_receive is valid only on a scheduler-owned proc",
-            );
-            return;
-        }
-        let message = self.machines[vm as usize].vm.mailbox.pop();
-        let built = match message {
-            Some(value) => {
-                if let Some(target) = self.task_key(vm) {
-                    self.emit_wake(WakeKey::Send(target));
-                }
-                self.record(TraceEvent::Receive {
-                    proc: vm,
-                    closed: false,
-                });
-                self.make_instance(vm, self.core.recv_msg, vec![value])
-                    .and_then(|msg| self.make_instance(vm, self.core.option_some, vec![msg]))
-            }
-            None if self.machines[vm as usize].vm.mailbox.closed => {
-                self.record(TraceEvent::Receive {
-                    proc: vm,
-                    closed: true,
-                });
-                self.make_instance(vm, self.core.recv_closed, vec![])
-                    .and_then(|closed| self.make_instance(vm, self.core.option_some, vec![closed]))
-            }
-            None => self.make_instance(vm, self.core.option_none, vec![]),
-        };
-        self.reply_or_fault(vm, op, built);
-    }
-
     /// `h.done()`. The holder blocks until the proc is terminal.
     fn proc_done(&mut self, vm: VmId, op: u32, args: Args<'_>) {
         let Some((proc, generation)) = self.proc_arg(vm, op, args[0]) else {
@@ -4649,6 +5077,101 @@ impl<'m> World<'m> {
                 },
             ),
         }
+    }
+
+    /// `h.snapshot_wait(fuel)`: capture the proc at its next safe boundary.
+    fn proc_snapshot_wait(&mut self, vm: VmId, op: u32, args: Args<'_>, remaining: Option<u64>) {
+        let Some((proc, generation)) = self.proc_arg(vm, op, args[0]) else {
+            return;
+        };
+        let Value::Int(fuel) = args[1] else {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::TypeMismatch,
+                "the fuel argument is not an integer",
+            );
+            return;
+        };
+        if !self.proc_alive(proc, generation) {
+            self.fault_caller(vm, op, FaultCode::DeadProc, "the proc reference is stale");
+            return;
+        }
+        if proc == vm
+            || self.machines[proc as usize].owner != Ownership::Scheduler
+            || self.machines[proc as usize].paused
+        {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::InvalidVmState,
+                "snapshot_wait needs a running scheduler proc",
+            );
+            return;
+        }
+        let remaining = remaining.unwrap_or(fuel.max(0) as u64);
+        let barrier = self.next_gate();
+        let result = self.capture_snapshot(barrier, proc, false);
+        match result {
+            Ok(image) => self.install_snapshot_result(vm, op, Ok(image)),
+            Err(active @ crate::snapshot::SnapshotFail::ResourceActive { .. }) => {
+                if remaining == 0 || !self.snapshot_target_can_progress(vm, proc) {
+                    self.install_snapshot_result(vm, op, Err(active));
+                    return;
+                }
+                self.block_machine(
+                    vm,
+                    Block::Snapshot {
+                        target: proc,
+                        generation,
+                        remaining,
+                        retry: false,
+                    },
+                );
+            }
+            Err(fail) => self.install_snapshot_result(vm, op, Err(fail)),
+        }
+    }
+
+    fn snapshot_target_can_progress(&mut self, caller: VmId, root: VmId) -> bool {
+        let Ok(machines) = self.controlled_machines(root) else {
+            return false;
+        };
+        let mut blocked = false;
+        for vm in &machines {
+            if *vm == caller {
+                continue;
+            }
+            let Some(key) = self.task_key(*vm) else {
+                continue;
+            };
+            match self.task_status(key) {
+                TaskStatus::Ready | TaskStatus::Waiting(_) | TaskStatus::Parked(_) => return true,
+                TaskStatus::Blocked(_) => blocked = true,
+                TaskStatus::Terminal | TaskStatus::Dormant => {}
+            }
+        }
+        if !blocked {
+            return false;
+        }
+        for (key, status) in self.scheduler_seeds(true) {
+            if key.vm == caller
+                || machines.contains(&key.vm)
+                || !matches!(
+                    status,
+                    TaskStatus::Ready | TaskStatus::Waiting(_) | TaskStatus::Parked(_)
+                )
+            {
+                continue;
+            }
+            let reaches_target = self
+                .controlled_machines(key.vm)
+                .is_ok_and(|set| set.iter().any(|vm| machines.contains(vm)));
+            if reaches_target {
+                return true;
+            }
+        }
+        false
     }
 
     /// Build and install `ProcResult` for one terminal proc.
@@ -4982,6 +5505,13 @@ impl<'m> World<'m> {
                         MachineState::Done | MachineState::Faulted
                     )
             }
+            Block::Snapshot {
+                target,
+                generation,
+                remaining,
+                retry,
+            } => !self.proc_alive(target, generation) || remaining == 0 || retry,
+            Block::Wait { .. } => false,
         }
     }
 
@@ -5002,6 +5532,13 @@ impl<'m> World<'m> {
                 vm: target,
                 generation,
             })),
+            Block::Snapshot {
+                target, generation, ..
+            } => Some(WakeKey::Snapshot(TaskKey {
+                vm: target,
+                generation,
+            })),
+            Block::Wait { .. } => None,
         }
     }
 
@@ -5022,10 +5559,192 @@ impl<'m> World<'m> {
             );
             return;
         };
+        let snapshot_remaining = match self.machines[vm as usize].vm.block {
+            Some(Block::Snapshot { remaining, .. }) => Some(remaining),
+            _ => None,
+        };
         self.machines[vm as usize].vm.block = None;
         self.machines[vm as usize].vm.state = MachineState::Ready;
         self.record(TraceEvent::Unblock { vm });
-        self.proc_exec(vm, op, args);
+        if op == lm_abi::OP_PROC_SNAPSHOT_WAIT {
+            self.proc_snapshot_wait(vm, op, Args(&args), snapshot_remaining);
+        } else {
+            self.proc_exec(vm, op, args);
+        }
+    }
+
+    fn release_saved_stack(&mut self, base: VmId) {
+        let Some(saved) = self.suspended.remove(&base) else {
+            return;
+        };
+        if let SuspendReason::Parked { wait, .. } = saved.reason {
+            let mut seen = Vec::new();
+            self.quiesce_wait_leases(wait.owner.vm, wait.token, &mut seen);
+        }
+        for activation in saved.activations.into_iter().rev() {
+            self.release_activation(activation);
+        }
+    }
+
+    fn quiesce_wait_leases(&mut self, vm: VmId, token: u64, seen: &mut Vec<VmId>) {
+        if seen.contains(&vm) || seen.len() >= self.machines.len() {
+            return;
+        }
+        seen.push(vm);
+        let drives: Vec<VmId> = self
+            .wait_tree(vm, token)
+            .map(|(leaves, _)| {
+                leaves
+                    .into_iter()
+                    .filter_map(|leaf| match leaf.leaf {
+                        WaitLeaf::Drive { target } => Some(target),
+                        WaitLeaf::Receive => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for target in drives {
+            if let Some(saved) = self.suspended.get(&target) {
+                if let SuspendReason::Parked { wait, .. } = saved.reason {
+                    self.quiesce_wait_leases(wait.owner.vm, wait.token, seen);
+                }
+            }
+            self.release_saved_stack(target);
+        }
+        seen.pop();
+    }
+
+    fn mark_wait_stack_ready(&mut self, base: VmId, wait: WaitSetKey) {
+        if let Some(saved) = self.suspended.get_mut(&base) {
+            if matches!(saved.reason, SuspendReason::Parked { wait: held, .. } if held == wait) {
+                saved.reason = SuspendReason::Yielded;
+            }
+        }
+    }
+
+    fn service_wait_slice(&mut self, base: VmId, wait: WaitSetKey, quantum: u32) -> SliceExit {
+        if self.complete_ready_wait(wait.owner.vm, wait.token) {
+            self.mark_wait_stack_ready(base, wait);
+            return SliceExit::Yielded;
+        }
+        let leaves = match self.wait_tree(wait.owner.vm, wait.token) {
+            Ok((leaves, _)) => leaves,
+            Err(_) => {
+                let op = self.pending_op(wait.owner.vm);
+                self.machines[wait.owner.vm as usize].set_fault(
+                    FaultCode::MalformedState,
+                    "the wait tree is malformed",
+                    op,
+                );
+                self.mark_wait_stack_ready(base, wait);
+                return SliceExit::Yielded;
+            }
+        };
+        let mut selected = None;
+        for leaf in leaves {
+            let WaitLeaf::Drive { target } = leaf.leaf else {
+                continue;
+            };
+            let mut sources = Vec::new();
+            let mut seen = vec![wait];
+            if self.append_drive_sources(target, &mut sources, &mut seen) {
+                selected = Some(target);
+                break;
+            }
+        }
+        let Some(target) = selected else {
+            return match self.wait_set_status(wait) {
+                TaskStatus::Parked(wait) => SliceExit::Parked(wait),
+                _ => SliceExit::Yielded,
+            };
+        };
+        let _ = self.drive_holder_slice(target, quantum.max(1));
+        if self.complete_ready_wait(wait.owner.vm, wait.token) {
+            self.mark_wait_stack_ready(base, wait);
+        }
+        match self.wait_set_status(wait) {
+            TaskStatus::Parked(wait) => SliceExit::Parked(wait),
+            _ => SliceExit::Yielded,
+        }
+    }
+
+    fn drive_holder_slice(&mut self, target: VmId, quantum: u32) -> SliceExit {
+        if let Some(saved) = self.suspended.get(&target) {
+            if let SuspendReason::Parked { wait, .. } = saved.reason {
+                return self.service_wait_slice(target, wait, quantum);
+            }
+        }
+        if self.machines[target as usize].vm.routed.is_some()
+            || matches!(
+                self.machines[target as usize].vm.state,
+                MachineState::Asked | MachineState::Done | MachineState::Faulted
+            )
+        {
+            return SliceExit::Terminal;
+        }
+        if self.machines[target as usize].vm.state == MachineState::Blocked
+            && !self.suspended.contains_key(&target)
+        {
+            if matches!(
+                self.machines[target as usize].vm.block,
+                Some(Block::Wait { .. })
+            ) {
+                let Some(Block::Wait { token }) = self.machines[target as usize].vm.block else {
+                    unreachable!("the guard selects a wait block")
+                };
+                let wait = WaitSetKey {
+                    owner: TaskKey {
+                        vm: target,
+                        generation: self.machines[target as usize].generation,
+                    },
+                    token,
+                };
+                return self.service_wait_slice(target, wait, quantum);
+            }
+            if self.block_ready(target) {
+                self.complete_blocked_machine(target);
+            }
+        }
+        let event = if self.suspended.contains_key(&target) {
+            self.resume_stack_with_quantum(target, Some(quantum.max(1)))
+        } else {
+            let mut stack = Vec::new();
+            self.push_activation(
+                &mut stack,
+                Activation {
+                    vm: target,
+                    mode: StopMode::DriveToAsk,
+                    family: Family::Drive,
+                    reply_to: None,
+                    retired: false,
+                    fuel: None,
+                },
+            );
+            self.drive_stack(&mut stack, Some(quantum.max(1)))
+        };
+        match event {
+            RootEvent::Blocked => self
+                .suspended
+                .get(&target)
+                .and_then(|saved| match saved.reason {
+                    SuspendReason::Blocked { wake, .. } => Some(SliceExit::Blocked(wake)),
+                    SuspendReason::Parked { wait, .. } => Some(SliceExit::Parked(wait)),
+                    _ => None,
+                })
+                .unwrap_or(SliceExit::Yielded),
+            RootEvent::Waiting => self
+                .suspended
+                .get(&target)
+                .and_then(|saved| match saved.reason {
+                    SuspendReason::Waiting { completion, .. } => {
+                        Some(SliceExit::Waiting(completion))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(SliceExit::Yielded),
+            RootEvent::Ran => SliceExit::Yielded,
+            RootEvent::Asked(_) | RootEvent::Done(_) | RootEvent::Fault(_) => SliceExit::Terminal,
+        }
     }
 
     /// The stable identity of one current machine record.
@@ -5034,6 +5753,156 @@ impl<'m> World<'m> {
             vm,
             generation: machine.generation,
         })
+    }
+
+    fn wait_set_status(&self, wait: WaitSetKey) -> TaskStatus {
+        let mut sources = Vec::new();
+        let mut seen = Vec::new();
+        if self.append_wait_sources(wait, &mut sources, &mut seen) {
+            return TaskStatus::Ready;
+        }
+        sources.sort_unstable();
+        sources.dedup();
+        if sources.is_empty() {
+            TaskStatus::Ready
+        } else {
+            TaskStatus::Parked(wait)
+        }
+    }
+
+    /// The current scheduler sources of one parked typed wait.
+    pub fn wait_sources(&self, wait: WaitSetKey) -> Vec<WaitSourceKey> {
+        let mut sources = Vec::new();
+        let mut seen = Vec::new();
+        if !self.append_wait_sources(wait, &mut sources, &mut seen) {
+            sources.sort_unstable();
+            sources.dedup();
+        } else {
+            sources.clear();
+        }
+        sources
+    }
+
+    /// Add unavailable sources. Return true when one source can run.
+    fn append_wait_sources(
+        &self,
+        wait: WaitSetKey,
+        sources: &mut Vec<WaitSourceKey>,
+        seen: &mut Vec<WaitSetKey>,
+    ) -> bool {
+        if seen.contains(&wait) || seen.len() >= self.machines.len() {
+            return true;
+        }
+        let Some(machine) = self.machines.get(wait.owner.vm as usize) else {
+            return true;
+        };
+        if machine.generation != wait.owner.generation
+            || machine.vm.block != Some(Block::Wait { token: wait.token })
+        {
+            return true;
+        }
+        let Ok((leaves, _)) = self.wait_tree(wait.owner.vm, wait.token) else {
+            return true;
+        };
+        seen.push(wait);
+        for leaf in leaves {
+            match leaf.leaf {
+                WaitLeaf::Receive => {
+                    if self.receive_wait_ready(wait.owner.vm) {
+                        seen.pop();
+                        return true;
+                    }
+                    sources.push(WaitSourceKey::Wake(WakeKey::Receive(wait.owner)));
+                }
+                WaitLeaf::Drive { target } => {
+                    if self.append_drive_sources(target, sources, seen) {
+                        seen.pop();
+                        return true;
+                    }
+                }
+            }
+        }
+        seen.pop();
+        false
+    }
+
+    fn append_drive_sources(
+        &self,
+        target: VmId,
+        sources: &mut Vec<WaitSourceKey>,
+        seen: &mut Vec<WaitSetKey>,
+    ) -> bool {
+        let Some(machine) = self.machines.get(target as usize) else {
+            return true;
+        };
+        if machine.vm.routed.is_some()
+            || matches!(
+                machine.vm.state,
+                MachineState::Asked | MachineState::Done | MachineState::Faulted
+            )
+        {
+            return true;
+        }
+        if let Some(saved) = self.suspended.get(&target) {
+            return match saved.reason {
+                SuspendReason::Yielded => true,
+                SuspendReason::Blocked {
+                    machine: blocked,
+                    wake,
+                } => {
+                    if self.block_ready(blocked) {
+                        true
+                    } else {
+                        sources.push(WaitSourceKey::Wake(wake));
+                        false
+                    }
+                }
+                SuspendReason::Waiting {
+                    machine: waiting,
+                    completion,
+                } => {
+                    if self.machines[waiting as usize].vm.state == MachineState::Waiting {
+                        sources.push(WaitSourceKey::Completion(completion));
+                        false
+                    } else {
+                        true
+                    }
+                }
+                SuspendReason::Parked { wait, .. } => self.append_wait_sources(wait, sources, seen),
+            };
+        }
+        match machine.vm.state {
+            MachineState::Ready | MachineState::Running | MachineState::Empty => true,
+            MachineState::Waiting => match self.completion_key(target) {
+                Some(completion) => {
+                    sources.push(WaitSourceKey::Completion(completion));
+                    false
+                }
+                None => true,
+            },
+            MachineState::Blocked => match machine.vm.block {
+                Some(Block::Wait { token }) => self.append_wait_sources(
+                    WaitSetKey {
+                        owner: TaskKey {
+                            vm: target,
+                            generation: machine.generation,
+                        },
+                        token,
+                    },
+                    sources,
+                    seen,
+                ),
+                _ if self.block_ready(target) => true,
+                _ => match self.block_wake_key(target) {
+                    Some(wake) => {
+                        sources.push(WaitSourceKey::Wake(wake));
+                        false
+                    }
+                    None => true,
+                },
+            },
+            MachineState::Asked | MachineState::Done | MachineState::Faulted => true,
+        }
     }
 
     /// The scheduler view of one task without a machine-table scan.
@@ -5099,6 +5968,7 @@ impl<'m> World<'m> {
                         TaskStatus::Ready
                     }
                 }
+                SuspendReason::Parked { wait, .. } => self.wait_set_status(wait),
             };
         }
         if machine.active > 0 {
@@ -5106,6 +5976,12 @@ impl<'m> World<'m> {
         }
         match machine.vm.state {
             MachineState::Ready => TaskStatus::Ready,
+            MachineState::Blocked if matches!(machine.vm.block, Some(Block::Wait { .. })) => {
+                let Some(Block::Wait { token }) = machine.vm.block else {
+                    unreachable!("the guard selects a wait block")
+                };
+                self.wait_set_status(WaitSetKey { owner: key, token })
+            }
             MachineState::Blocked if self.block_ready(key.vm) => TaskStatus::Ready,
             MachineState::Blocked => self
                 .block_wake_key(key.vm)
@@ -5244,6 +6120,76 @@ impl<'m> World<'m> {
         self.suspended.remove(&vm);
     }
 
+    /// Limit a slice to the smallest active snapshot fuel budget.
+    pub fn snapshot_wait_quantum(&mut self, task: TaskKey, requested: u32) -> u32 {
+        let watchers = self.snapshot_watchers();
+        let mut quantum = requested.max(1);
+        for (_, target, generation, remaining, retry) in watchers {
+            if retry || remaining == 0 || !self.proc_alive(target, generation) {
+                continue;
+            }
+            let contains = self
+                .controlled_machines(target)
+                .is_ok_and(|set| set.contains(&task.vm));
+            if contains {
+                let cap = remaining.min(u64::from(u32::MAX)) as u32;
+                quantum = quantum.min(cap.max(1));
+            }
+        }
+        quantum
+    }
+
+    /// Record progress for every snapshot wait that contains this task.
+    pub fn note_scheduler_slice(&mut self, task: TaskKey, retired: u64, changed: bool) {
+        if retired == 0 && !changed {
+            return;
+        }
+        let watchers = self.snapshot_watchers();
+        let mut wakes = Vec::new();
+        for (waiter, target, generation, _, retry) in watchers {
+            if retry || !self.proc_alive(target, generation) {
+                continue;
+            }
+            let contains = self
+                .controlled_machines(target)
+                .is_ok_and(|set| set.contains(&task.vm));
+            if !contains {
+                continue;
+            }
+            let Some(Block::Snapshot {
+                remaining, retry, ..
+            }) = self.machines[waiter as usize].vm.block.as_mut()
+            else {
+                continue;
+            };
+            *remaining = remaining.saturating_sub(retired);
+            *retry = true;
+            wakes.push(WakeKey::Snapshot(TaskKey {
+                vm: target,
+                generation,
+            }));
+        }
+        for wake in wakes {
+            self.emit_wake(wake);
+        }
+    }
+
+    fn snapshot_watchers(&self) -> Vec<(VmId, VmId, u32, u64, bool)> {
+        self.machines
+            .iter()
+            .enumerate()
+            .filter_map(|(vm, machine)| match machine.vm.block {
+                Some(Block::Snapshot {
+                    target,
+                    generation,
+                    remaining,
+                    retry,
+                }) => Some((vm as VmId, target, generation, remaining, retry)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Drive one task for at most `quantum` guest instructions.
     pub fn drive_slice(&mut self, key: TaskKey, quantum: u32) -> Option<SliceExit> {
         match self.task_status(key) {
@@ -5251,7 +6197,18 @@ impl<'m> World<'m> {
             TaskStatus::Terminal => return Some(SliceExit::Terminal),
             TaskStatus::Blocked(wake) => return Some(SliceExit::Blocked(wake)),
             TaskStatus::Waiting(completion) => return Some(SliceExit::Waiting(completion)),
+            TaskStatus::Parked(wait) => return Some(SliceExit::Parked(wait)),
             TaskStatus::Ready => {}
+        }
+        if let Some(wait) = self
+            .suspended
+            .get(&key.vm)
+            .and_then(|saved| match saved.reason {
+                SuspendReason::Parked { wait, .. } => Some(wait),
+                _ => None,
+            })
+        {
+            return Some(self.service_wait_slice(key.vm, wait, quantum));
         }
         if self.machines[key.vm as usize].vm.state == MachineState::Blocked
             && !self.suspended.contains_key(&key.vm)
@@ -5278,13 +6235,15 @@ impl<'m> World<'m> {
             self.fault_event(key.vm, "the scheduler task is not ready to run")
         };
         match event {
-            RootEvent::Blocked => self.suspended.get(&key.vm).and_then(|saved| {
-                if let SuspendReason::Blocked { wake, .. } = saved.reason {
-                    Some(SliceExit::Blocked(wake))
-                } else {
-                    None
-                }
-            }),
+            RootEvent::Blocked => {
+                self.suspended
+                    .get(&key.vm)
+                    .and_then(|saved| match saved.reason {
+                        SuspendReason::Blocked { wake, .. } => Some(SliceExit::Blocked(wake)),
+                        SuspendReason::Parked { wait, .. } => Some(SliceExit::Parked(wait)),
+                        _ => None,
+                    })
+            }
             RootEvent::Waiting => self.suspended.get(&key.vm).and_then(|saved| {
                 if let SuspendReason::Waiting { completion, .. } = saved.reason {
                     Some(SliceExit::Waiting(completion))
@@ -5337,6 +6296,7 @@ impl<'m> World<'m> {
             .get(&key.vm)
             .and_then(|saved| match saved.reason {
                 SuspendReason::Blocked { machine, .. } => Some(machine),
+                SuspendReason::Parked { machine, .. } => Some(machine),
                 _ => None,
             });
         let vm = blocked.unwrap_or(key.vm);
@@ -5355,6 +6315,7 @@ impl<'m> World<'m> {
             .get(&key.vm)
             .and_then(|saved| match saved.reason {
                 SuspendReason::Waiting { machine, .. } => Some(machine),
+                SuspendReason::Parked { machine, .. } => Some(machine),
                 _ => None,
             });
         let vm = waiting.unwrap_or(key.vm);
@@ -5399,6 +6360,7 @@ impl<'m> World<'m> {
                 .get(&key.vm)
                 .and_then(|saved| match saved.reason {
                     SuspendReason::Blocked { machine, .. } => Some(machine),
+                    SuspendReason::Parked { machine, .. } => Some(machine),
                     _ => None,
                 });
             let vm = blocked.unwrap_or(key.vm);
@@ -5723,6 +6685,18 @@ impl<'m> World<'m> {
         .into_iter()
         .flatten()
         {
+            if !out.contains(&target) {
+                out.push(target);
+            }
+        }
+        for entry in self.machines[vm as usize].vm.waits.values() {
+            if let crate::machine::WaitSource::Drive { target } = entry.source {
+                if !out.contains(&target) {
+                    out.push(target);
+                }
+            }
+        }
+        if let Some(Block::Snapshot { target, .. }) = self.machines[vm as usize].vm.block {
             if !out.contains(&target) {
                 out.push(target);
             }
@@ -6130,6 +7104,9 @@ impl<'m> World<'m> {
                     Object::NativeSnapshot(image) => {
                         format!("<snapshot {} bytes>", image.len())
                     }
+                    Object::NativeWait { owner, token } => {
+                        format!("<wait {token} of machine {owner}>")
+                    }
                 }
             }
         }
@@ -6211,11 +7188,13 @@ pub(crate) fn show_trace_event(event: &TraceEvent) -> String {
         }
         TraceEvent::Receive { proc, closed } => format!("receive proc {proc} closed {closed}"),
         TraceEvent::Close { proc, first } => format!("close proc {proc} first {first}"),
-        TraceEvent::Block { vm, block } => {
-            let what = match block {
-                Block::Receive => "receive".to_string(),
-                Block::Send { target, .. } => format!("send target {target}"),
-                Block::Done { target, .. } => format!("done target {target}"),
+        TraceEvent::Block { vm, kind, target } => {
+            let what = match kind {
+                TraceBlock::Receive => "receive".to_string(),
+                TraceBlock::Send => format!("send target {target}"),
+                TraceBlock::Done => format!("done target {target}"),
+                TraceBlock::Wait => "wait".to_string(),
+                TraceBlock::Snapshot => format!("snapshot target {target}"),
             };
             format!("block vm {vm} on {what}")
         }

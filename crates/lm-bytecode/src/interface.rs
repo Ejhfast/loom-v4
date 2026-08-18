@@ -110,6 +110,7 @@ pub enum IfaceType {
         row: Vec<IfaceRow>,
     },
     Vm(Box<IfaceType>),
+    Wait(Box<IfaceType>),
     PendingCall(Box<IfaceType>, Box<IfaceType>),
     Handle(Box<IfaceType>, Box<IfaceType>),
     Op(u32, Box<IfaceType>),
@@ -377,6 +378,10 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
             out.push(16);
             encode_type(out, t);
         }
+        IfaceType::Wait(t) => {
+            out.push(26);
+            encode_type(out, t);
+        }
         IfaceType::PendingCall(a, r) => {
             out.push(17);
             encode_type(out, a);
@@ -586,6 +591,7 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
             }
         }
         16 => IfaceType::Vm(Box::new(decode_type(cur, depth + 1)?)),
+        26 => IfaceType::Wait(Box::new(decode_type(cur, depth + 1)?)),
         17 => {
             let a = decode_type(cur, depth + 1)?;
             let r = decode_type(cur, depth + 1)?;
@@ -859,6 +865,7 @@ pub fn type_text(ty: &IfaceType) -> String {
             out
         }
         IfaceType::Vm(t) => format!("Vm[{}]", type_text(t)),
+        IfaceType::Wait(t) => format!("Wait[{}]", type_text(t)),
         IfaceType::PendingCall(a, r) => {
             format!("PendingCall[{}, {}]", type_text(a), type_text(r))
         }

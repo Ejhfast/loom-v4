@@ -509,6 +509,7 @@ impl<'o> FnChecker<'o> {
             ExprKind::Case { scrut, arms } => {
                 self.check_case(ctx, scrut, arms, Some(expected), expr.span)
             }
+            ExprKind::Select { arms } => self.check_select(ctx, arms, Some(expected), expr.span),
             ExprKind::TupleLit(items) => {
                 if let Type::Tuple(elems) = ctx.store.get(expected).clone() {
                     if elems.len() == items.len() {
@@ -1216,6 +1217,7 @@ impl<'o> FnChecker<'o> {
                 self.check_if(ctx, arms, else_body, None, expr.span)
             }
             ExprKind::Case { scrut, arms } => self.check_case(ctx, scrut, arms, None, expr.span),
+            ExprKind::Select { arms } => self.check_select(ctx, arms, None, expr.span),
             ExprKind::Labeled { label, .. } => Err(Diagnostic::new(
                 "E1006",
                 format!(
@@ -1224,6 +1226,56 @@ impl<'o> FnChecker<'o> {
                 ),
                 expr.span,
             )),
+        }
+    }
+
+    /// Lower `select` to one wait and one case expression.
+    fn check_select(
+        &mut self,
+        ctx: &mut Ctx,
+        arms: &[ast::SelectArm],
+        expected: Option<TypeId>,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let Some((first, rest)) = arms.split_first() else {
+            return Err(Diagnostic::new("E1062", "a select needs two arms", span));
+        };
+        let mut combined = first.wait.clone();
+        for arm in rest {
+            combined = ast::Expr {
+                kind: ExprKind::MethodCall {
+                    recv: Box::new(combined),
+                    name: "choose".to_string(),
+                    name_span: arm.wait.span,
+                    type_args: Vec::new(),
+                    args: vec![arm.wait.clone()],
+                },
+                span: first.wait.span.to(arm.wait.span),
+            };
+        }
+        let waited = ast::Expr {
+            kind: ExprKind::MethodCall {
+                recv: Box::new(combined),
+                name: "wait".to_string(),
+                name_span: span,
+                type_args: Vec::new(),
+                args: Vec::new(),
+            },
+            span,
+        };
+        let count = arms.len();
+        let case_arms = arms
+            .iter()
+            .enumerate()
+            .map(|(index, arm)| ast::CaseArm {
+                pattern: select_pattern(arm, index, count),
+                body: arm.body.clone(),
+                span: arm.span,
+            })
+            .collect::<Vec<_>>();
+        match expected {
+            Some(ty) => self.check_case(ctx, &waited, &case_arms, Some(ty), span),
+            None => self.check_case(ctx, &waited, &case_arms, None, span),
         }
     }
 
@@ -2211,6 +2263,7 @@ impl<'o> FnChecker<'o> {
             ctx.store.get(recv_ty),
             Type::EmptyVm
                 | Type::Vm(_)
+                | Type::Wait(_)
                 | Type::PolicyTable
                 | Type::Request
                 | Type::PendingCall(_, _)
@@ -3162,49 +3215,15 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
-        // `sys.proc.try_recv()` performs `Proc.TryRecv`. It reads the
-        // same mailbox as `sys.proc.recv()` and never waits, so it
-        // answers `Option[Recv[M]]`.
-        if group == "Proc" && member == "try_recv" {
-            if !args.is_empty() {
-                return Err(Diagnostic::new(
-                    "E1006",
-                    format!(
-                        "`sys.proc.try_recv` expects 0 argument(s), found {}",
-                        args.len()
-                    ),
-                    span,
-                ));
-            }
-            let mailbox = self.proc_mailbox_type(ctx).ok_or_else(|| {
-                Diagnostic::new(
-                    "E1051",
-                    "`sys.proc.try_recv` is only valid inside a method of a `Proc` subclass",
-                    name_span,
-                )
-            })?;
-            let receiver = self.synth_self(ctx, span)?;
-            self.charge_op(ctx, lm_abi::OP_PROC_TRY_RECV, span)?;
-            let recv = Self::core_inst(ctx, "Recv", vec![mailbox]);
-            let ty = Self::core_inst(ctx, "Option", vec![recv]);
-            return Ok(HExpr {
-                ty,
-                mutable: true,
-                kind: HExprKind::Perform {
-                    op: lm_abi::OP_PROC_TRY_RECV,
-                    args: vec![receiver],
-                },
-            });
-        }
         // `sys.proc.recv()` performs `Proc.Recv`. The mailbox type
         // comes from the enclosing proc class, so the call is valid
         // only inside a method of a subclass of `Proc[M]`.
-        if group == "Proc" && member == "recv" {
+        if group == "Proc" && matches!(member, "recv" | "recv_wait") {
             if !args.is_empty() {
                 return Err(Diagnostic::new(
                     "E1006",
                     format!(
-                        "`sys.proc.recv` expects 0 argument(s), found {}",
+                        "`sys.proc.{member}` expects 0 argument(s), found {}",
                         args.len()
                     ),
                     span,
@@ -3213,7 +3232,9 @@ impl<'o> FnChecker<'o> {
             let mailbox = self.proc_mailbox_type(ctx).ok_or_else(|| {
                 Diagnostic::new(
                     "E1051",
-                    "`sys.proc.recv` is only valid inside a method of a `Proc` subclass",
+                    format!(
+                        "`sys.proc.{member}` is only valid inside a method of a `Proc` subclass"
+                    ),
                     name_span,
                 )
             })?;
@@ -3221,13 +3242,21 @@ impl<'o> FnChecker<'o> {
             // mailbox type, so the verifier reads the class table
             // instead of a claim at the call site.
             let receiver = self.synth_self(ctx, span)?;
-            self.charge_op(ctx, lm_abi::OP_PROC_RECV, span)?;
-            let ty = Self::core_inst(ctx, "Recv", vec![mailbox]);
+            let recv = Self::core_inst(ctx, "Recv", vec![mailbox]);
+            let (op, ty) = if member == "recv" {
+                (lm_abi::OP_PROC_RECV, recv)
+            } else {
+                (
+                    lm_abi::OP_PROC_RECV_WAIT,
+                    ctx.store.intern(Type::Wait(recv)),
+                )
+            };
+            self.charge_op(ctx, op, span)?;
             return Ok(HExpr {
                 ty,
                 mutable: true,
                 kind: HExprKind::Perform {
-                    op: lm_abi::OP_PROC_RECV,
+                    op,
                     args: vec![receiver],
                 },
             });
@@ -3540,6 +3569,7 @@ impl<'o> FnChecker<'o> {
             recv_ty,
             Type::EmptyVm
                 | Type::Vm(_)
+                | Type::Wait(_)
                 | Type::PolicyTable
                 | Type::Request
                 | Type::PendingCall(_, _)
@@ -3604,6 +3634,31 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (Type::Vm(t), "snapshot_wait") => {
+                // The held form. `Handle[M,R].snapshot_wait` waits on a
+                // scheduler proc; this one advances a machine the
+                // caller holds.
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`snapshot_wait` expects 1 argument, found {}", args.len()),
+                        span,
+                    ));
+                }
+                let fuel = self.check_expr(ctx, &args[0], INT)?;
+                self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_WAIT_HELD, span)?;
+                let snapshot = ctx.store.intern(Type::Snapshot(t));
+                let error = Self::core_class(ctx, "SnapshotError");
+                let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SNAPSHOT_WAIT_HELD,
+                        args: vec![recv_h, fuel],
+                    },
+                }
+            }
             (Type::Vm(t), "drive_for") => {
                 // A bounded drive turn. `None` reports that the turn
                 // spent its instructions and the machine can run again.
@@ -3651,6 +3706,20 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (Type::Vm(t), "drive_wait") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_DRIVE_WAIT, span)?;
+                let event = Self::core_inst(ctx, "DriveEvent", vec![t]);
+                let ty = ctx.store.intern(Type::Wait(event));
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_DRIVE_WAIT,
+                        args: vec![recv_h],
+                    },
+                }
+            }
             (Type::Vm(t), "snapshot") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_HELD, span)?;
@@ -3663,31 +3732,6 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform {
                         op: lm_abi::OP_VM_SNAPSHOT_HELD,
                         args: vec![recv_h],
-                    },
-                }
-            }
-            (Type::Vm(t), "snapshot_wait") => {
-                if args.len() != 1 {
-                    return Err(Diagnostic::new(
-                        "E1006",
-                        format!(
-                            "`snapshot_wait` expects 1 argument(s), found {}",
-                            args.len()
-                        ),
-                        span,
-                    ));
-                }
-                let fuel = self.check_expr(ctx, &args[0], INT)?;
-                self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_WAIT_HELD, span)?;
-                let snapshot = ctx.store.intern(Type::Snapshot(t));
-                let error = Self::core_class(ctx, "SnapshotError");
-                let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
-                HExpr {
-                    ty,
-                    mutable: true,
-                    kind: HExprKind::Perform {
-                        op: lm_abi::OP_VM_SNAPSHOT_WAIT_HELD,
-                        args: vec![recv_h, fuel],
                     },
                 }
             }
@@ -3914,6 +3958,61 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (Type::Wait(t), "wait") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_WAIT_WAIT, span)?;
+                HExpr {
+                    ty: t,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_WAIT_WAIT,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Wait(left), "choose") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`choose` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let right = self.synth_expr(ctx, &args[0])?;
+                let Type::Wait(right_result) = ctx.store.get(right.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`choose` needs a wait, found {}",
+                            ctx.store.display(right.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                self.charge_op(ctx, lm_abi::OP_WAIT_CHOOSE, span)?;
+                let choice = Self::core_inst(ctx, "Choice", vec![left, right_result]);
+                let ty = ctx.store.intern(Type::Wait(choice));
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_WAIT_CHOOSE,
+                        args: vec![recv_h, right],
+                    },
+                }
+            }
+            (Type::Wait(_), "cancel") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_WAIT_CANCEL, span)?;
+                HExpr {
+                    ty: BOOL,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_WAIT_CANCEL,
+                        args: vec![recv_h],
+                    },
+                }
+            }
             (Type::Handle(m, _), "send") => {
                 if m == NEVER {
                     return Err(Diagnostic::new(
@@ -3964,6 +4063,28 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform {
                         op: lm_abi::OP_PROC_DONE,
                         args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Handle(_, r), "snapshot_wait") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`snapshot_wait` expects 1 argument, found {}", args.len()),
+                        span,
+                    ));
+                }
+                let fuel = self.check_expr(ctx, &args[0], INT)?;
+                self.charge_op(ctx, lm_abi::OP_PROC_SNAPSHOT_WAIT, span)?;
+                let snapshot = ctx.store.intern(Type::Snapshot(r));
+                let error = Self::core_class(ctx, "SnapshotError");
+                let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_PROC_SNAPSHOT_WAIT,
+                        args: vec![recv_h, fuel],
                     },
                 }
             }
@@ -5298,5 +5419,40 @@ fn tuple_comparable(store: &lm_types::TypeStore, ty: TypeId) -> bool {
             })
         }
         _ => false,
+    }
+}
+
+/// Build the nested `Choice` pattern for one select arm.
+fn select_pattern(arm: &ast::SelectArm, index: usize, count: usize) -> ast::Pattern {
+    let mut pattern = ast::Pattern {
+        kind: if arm.binding == "_" {
+            PatternKind::Wildcard
+        } else {
+            PatternKind::Name(arm.binding.clone())
+        },
+        span: arm.binding_span,
+    };
+    if index == 0 {
+        for _ in 0..count.saturating_sub(1) {
+            pattern = wrap_choice_pattern(pattern, "First", arm.span);
+        }
+    } else {
+        pattern = wrap_choice_pattern(pattern, "Second", arm.span);
+        for _ in 0..count.saturating_sub(index + 1) {
+            pattern = wrap_choice_pattern(pattern, "First", arm.span);
+        }
+    }
+    pattern
+}
+
+fn wrap_choice_pattern(inner: ast::Pattern, name: &str, span: Span) -> ast::Pattern {
+    ast::Pattern {
+        kind: PatternKind::Ctor {
+            qualifier: Some("Choice".to_string()),
+            name: name.to_string(),
+            args: vec![inner],
+            has_parens: true,
+        },
+        span,
     }
 }

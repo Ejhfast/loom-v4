@@ -117,6 +117,8 @@ pub enum Type {
     EmptyVm,
     /// A loaded virtual machine typed by its terminal result.
     Vm(TypeId),
+    /// A holder-local one-shot wait typed by its result.
+    Wait(TypeId),
     /// A typed pending-call token: the argument view type and the
     /// reply type.
     PendingCall(TypeId, TypeId),
@@ -533,6 +535,7 @@ impl TypeStore {
                 | Type::PolicyTable
                 | Type::EmptyVm
                 | Type::Vm(_)
+                | Type::Wait(_)
                 | Type::PendingCall(_, _)
                 | Type::Handle(_, _)
                 | Type::SnapshotImage
@@ -560,6 +563,7 @@ impl TypeStore {
                 | Type::PolicyTable
                 | Type::EmptyVm
                 | Type::Vm(_)
+                | Type::Wait(_)
                 | Type::PendingCall(_, _)
                 | Type::ResourceHandle
         )
@@ -610,6 +614,10 @@ impl TypeStore {
                 let t = self.substitute(t, targs, rowargs);
                 self.intern(Type::Vm(t))
             }
+            Type::Wait(t) => {
+                let t = self.substitute(t, targs, rowargs);
+                self.intern(Type::Wait(t))
+            }
             Type::Snapshot(t) => {
                 let t = self.substitute(t, targs, rowargs);
                 self.intern(Type::Snapshot(t))
@@ -654,7 +662,7 @@ impl TypeStore {
             Type::Fn(params, _, ret, _) => {
                 params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
             }
-            Type::Vm(t) | Type::Snapshot(t) => self.contains_var(*t),
+            Type::Vm(t) | Type::Wait(t) | Type::Snapshot(t) => self.contains_var(*t),
             Type::PendingCall(a, r) => self.contains_var(*a) || self.contains_var(*r),
             Type::Handle(m, r) => self.contains_var(*m) || self.contains_var(*r),
             _ => false,
@@ -674,7 +682,7 @@ impl TypeStore {
                     || params.iter().any(|p| self.contains_effect_var(*p))
                     || self.contains_effect_var(*ret)
             }
-            Type::Vm(t) | Type::Snapshot(t) => self.contains_effect_var(*t),
+            Type::Vm(t) | Type::Wait(t) | Type::Snapshot(t) => self.contains_effect_var(*t),
             Type::PendingCall(a, r) => self.contains_effect_var(*a) || self.contains_effect_var(*r),
             Type::Handle(m, r) => self.contains_effect_var(*m) || self.contains_effect_var(*r),
             _ => false,
@@ -745,6 +753,7 @@ impl TypeStore {
             Type::PolicyTable => "PolicyTable".to_string(),
             Type::EmptyVm => "EmptyVm".to_string(),
             Type::Vm(t) => format!("Vm[{}]", self.display(*t)),
+            Type::Wait(t) => format!("Wait[{}]", self.display(*t)),
             Type::SnapshotImage => "SnapshotImage".to_string(),
             Type::Snapshot(t) => format!("Snapshot[{}]", self.display(*t)),
             Type::FileHandle => "FileHandle".to_string(),

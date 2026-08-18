@@ -102,6 +102,7 @@ impl Naming<'_> {
             },
             Type::Var(i) => IfaceType::Var(i),
             Type::Vm(t) => IfaceType::Vm(Box::new(self.ty(t))),
+            Type::Wait(t) => IfaceType::Wait(Box::new(self.ty(t))),
             Type::Snapshot(t) => IfaceType::Snapshot(Box::new(self.ty(t))),
             Type::PendingCall(a, r) => {
                 IfaceType::PendingCall(Box::new(self.ty(a)), Box::new(self.ty(r)))

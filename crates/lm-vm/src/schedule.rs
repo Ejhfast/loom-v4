@@ -26,6 +26,8 @@ pub enum WakeKey {
     /// A machine of the target's world surfaced a request to the
     /// driver of the target. The target is the driven surface.
     Asked(TaskKey),
+    /// The target world retired work during a snapshot wait.
+    Snapshot(TaskKey),
 }
 
 /// One pending host completion.
@@ -37,6 +39,22 @@ pub struct CompletionKey {
     pub ordinal: u64,
 }
 
+/// One active typed wait set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WaitSetKey {
+    /// The machine that owns the wait token.
+    pub owner: TaskKey,
+    /// The root token of the prepared wait tree.
+    pub token: u64,
+}
+
+/// One scheduler source in a typed wait set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WaitSourceKey {
+    Wake(WakeKey),
+    Completion(CompletionKey),
+}
+
 /// Why one bounded execution slice stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SliceExit {
@@ -46,6 +64,8 @@ pub enum SliceExit {
     Blocked(WakeKey),
     /// The task waits for one host completion.
     Waiting(CompletionKey),
+    /// The task waits for one source in a typed wait set.
+    Parked(WaitSetKey),
     /// The task reached a stored result or fault.
     Terminal,
 }
@@ -56,6 +76,7 @@ pub enum TaskStatus {
     Ready,
     Blocked(WakeKey),
     Waiting(CompletionKey),
+    Parked(WaitSetKey),
     Terminal,
     /// Ownership, a gate, a barrier, or a pause stops scheduling.
     Dormant,
@@ -69,7 +90,7 @@ pub struct ScheduleEvents {
     wakes: Vec<WakeKey>,
     ready_marks: Vec<u64>,
     removed_marks: Vec<u64>,
-    wake_marks: Vec<[u64; 4]>,
+    wake_marks: Vec<[u64; 5]>,
 }
 
 impl ScheduleEvents {
@@ -93,7 +114,7 @@ impl ScheduleEvents {
         let (key, lane) = wake_parts(wake);
         let slot = key.vm as usize;
         if self.wake_marks.len() <= slot {
-            self.wake_marks.resize(slot + 1, [0; 4]);
+            self.wake_marks.resize(slot + 1, [0; 5]);
         }
         let mark = u64::from(key.generation) + 1;
         if self.wake_marks[slot][lane] == mark {
@@ -175,6 +196,7 @@ fn wake_parts(wake: WakeKey) -> (TaskKey, usize) {
         WakeKey::Send(key) => (key, 1),
         WakeKey::Done(key) => (key, 2),
         WakeKey::Asked(key) => (key, 3),
+        WakeKey::Snapshot(key) => (key, 4),
     }
 }
 

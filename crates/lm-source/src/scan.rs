@@ -32,9 +32,8 @@ enum Nest {
     /// An open `(`, `[`, or `{`. Newlines inside do not end a
     /// statement.
     Delim,
-    /// An open statement block: `do`, `if`, `case`, `while`, or
-    /// `loop`, closed by `end`. Newlines inside end statements, so a
-    /// block body parses the same way at any delimiter depth.
+    /// An open statement block closed by `end`.
+    /// Newlines inside the block end statements.
     Block,
     /// An open brace closure `{ |x| ... }`. Its body is a statement
     /// block, so newlines inside end statements, and a right brace
@@ -408,6 +407,7 @@ impl<'a> Scanner<'a> {
             "mut" => Tok::KwMut,
             "as" => Tok::KwAs,
             "case" => Tok::KwCase,
+            "select" => Tok::KwSelect,
             "effect" => Tok::KwEffect,
             "enum" => Tok::KwEnum,
             "in" => Tok::KwIn,
@@ -421,7 +421,7 @@ impl<'a> Scanner<'a> {
         // Track statement blocks, so a block body inside `(`, `[`, or
         // `{` still ends its statements at newlines.
         match &tok {
-            Tok::KwIf | Tok::KwCase | Tok::KwWhile | Tok::KwLoop => {
+            Tok::KwIf | Tok::KwCase | Tok::KwSelect | Tok::KwWhile | Tok::KwLoop => {
                 self.nesting.push(Nest::Block);
             }
             Tok::KwDo => {

@@ -350,7 +350,7 @@ fn week7_examples_have_checked_output() {
             "cycle-digest.lm",
             &read("examples/06-graphs/cycle-digest.lm")
         ),
-        "Done(21bfb248dc2067305b3e3d3e3b0ac6291f6eb07a7b0519ca1bfb0292f96bccad)"
+        "Done(a2fd091cdde06d09a923a9e4543cebe298f3d78c7ea45d5985f018fea0d43b7a)"
     );
     assert_eq!(
         run(
@@ -447,7 +447,7 @@ end
 #[test]
 fn the_shape_table_declares_every_column() {
     let dump = lm_vm::dump_shapes();
-    assert_eq!(dump.lines().count(), 19);
+    assert_eq!(dump.lines().count(), 20);
     for line in dump.lines() {
         assert!(line.contains("boundary="), "{line}");
         assert!(line.contains("digestible="), "{line}");

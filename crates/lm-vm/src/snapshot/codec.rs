@@ -26,8 +26,9 @@
 use super::{
     AdmissionBudget, Image, ImageBlock, ImageError, ImageFrame, ImageLimits, ImageMachine,
     ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor, ImageReason, ImageRoutedRequest,
-    ImageState, ImageTerminal, LoadLimits, Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION,
-    MAGIC, SECTION_CODE, SECTION_HEADER, SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
+    ImageState, ImageTerminal, ImageWaitEntry, ImageWaitSource, LoadLimits, Origin, SnapshotFail,
+    SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER, SECTION_HEAPS,
+    SECTION_MACHINES, SECTION_TYPES,
 };
 use crate::LoadedModule;
 use lm_abi::FaultCode;
@@ -386,7 +387,9 @@ fn encode_closed_type(out: &mut Out, node: &ClosedType) {
             out.leb(*c as u64);
             list(out, args);
         }
-        ClosedType::List(e) | ClosedType::Vm(e) | ClosedType::Snapshot(e) => out.leb(*e as u64),
+        ClosedType::List(e) | ClosedType::Vm(e) | ClosedType::Wait(e) | ClosedType::Snapshot(e) => {
+            out.leb(*e as u64)
+        }
         ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
             out.leb(*a as u64);
             out.leb(*b as u64);
@@ -501,6 +504,10 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.leb(*surface as u64);
             out.u64(*resource);
         }
+        Object::NativeWait { owner, token } => {
+            out.leb(*owner as u64);
+            out.u64(*token);
+        }
     }
 }
 
@@ -531,6 +538,24 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
         out.u32(machine.generation);
         out.u64(machine.fuel);
         out.u64(machine.next_ordinal);
+        out.u64(machine.next_wait);
+        out.leb(machine.waits.len() as u64);
+        for wait in &machine.waits {
+            out.u64(wait.token);
+            out.u8(u8::from(wait.linked));
+            match wait.source {
+                ImageWaitSource::Receive => out.u8(0),
+                ImageWaitSource::Drive { target } => {
+                    out.u8(1);
+                    out.leb(target as u64);
+                }
+                ImageWaitSource::Choice { first, second } => {
+                    out.u8(2);
+                    out.u64(first);
+                    out.u64(second);
+                }
+            }
+        }
         out.u32(machine.children);
         encode_limits(&mut out, &machine.limits);
         out.leb(machine.frames.len() as u64);
@@ -611,6 +636,20 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
             Some(ImageBlock::Done { target }) => {
                 out.u8(3);
                 out.leb(target as u64);
+            }
+            Some(ImageBlock::Wait { token }) => {
+                out.u8(4);
+                out.u64(token);
+            }
+            Some(ImageBlock::Snapshot {
+                target,
+                remaining,
+                retry,
+            }) => {
+                out.u8(5);
+                out.leb(target as u64);
+                out.u64(remaining);
+                out.u8(u8::from(retry));
             }
         }
         if out.over_limit() {
@@ -1323,6 +1362,7 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
         23 => ClosedType::Bytes,
         24 => ClosedType::FileHandle,
         25 => ClosedType::ResourceHandle,
+        26 => ClosedType::Wait(closed_ref(cur, at)?),
         other => {
             return err(
                 ImageReason::Layout,
@@ -1523,6 +1563,10 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             surface: machine_ref(cur, ctx)?,
             resource: cur.u64()?,
         },
+        19 => Object::NativeWait {
+            owner: machine_ref(cur, ctx)?,
+            token: cur.u64()?,
+        },
         other => {
             return err(
                 ImageReason::Layout,
@@ -1594,6 +1638,34 @@ fn decode_machine(
     let generation = cur.u32()?;
     let fuel = cur.u64()?;
     let next_ordinal = cur.u64()?;
+    let next_wait = cur.u64()?;
+    let wait_count = cur.count(crate::machine::MAX_LIVE_WAITS as u64, "wait")?;
+    let mut waits = cur.vector(wait_count, "wait table")?;
+    for _ in 0..wait_count {
+        let token = cur.u64()?;
+        let linked = cur.flag()?;
+        let source = match cur.u8()? {
+            0 => ImageWaitSource::Receive,
+            1 => ImageWaitSource::Drive {
+                target: machine_ref(cur, ctx)?,
+            },
+            2 => ImageWaitSource::Choice {
+                first: cur.u64()?,
+                second: cur.u64()?,
+            },
+            other => {
+                return err(
+                    ImageReason::State,
+                    format!("the wait source tag {other} is not a source kind"),
+                )
+            }
+        };
+        waits.push(ImageWaitEntry {
+            token,
+            source,
+            linked,
+        });
+    }
     let children = cur.u32()?;
     let machine_limits = decode_limits(cur)?;
     let frame_count = cur.count(limits.max_frames as u64, "frame")?;
@@ -1707,6 +1779,12 @@ fn decode_machine(
         3 => Some(ImageBlock::Done {
             target: machine_ref(cur, ctx)?,
         }),
+        4 => Some(ImageBlock::Wait { token: cur.u64()? }),
+        5 => Some(ImageBlock::Snapshot {
+            target: machine_ref(cur, ctx)?,
+            remaining: cur.u64()?,
+            retry: cur.flag()?,
+        }),
         other => {
             return err(
                 ImageReason::State,
@@ -1725,6 +1803,8 @@ fn decode_machine(
         generation,
         fuel,
         next_ordinal,
+        next_wait,
+        waits,
         children,
         limits: machine_limits,
         objects,

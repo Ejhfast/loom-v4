@@ -1,0 +1,6 @@
+# Core: typed selection results.
+
+enum Choice[A, B]
+  First(value: A)
+  Second(value: B)
+end

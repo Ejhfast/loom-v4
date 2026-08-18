@@ -254,6 +254,16 @@ pub struct CaseArm {
     pub span: Span,
 }
 
+/// One `select` arm.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectArm {
+    pub wait: Expr,
+    pub binding: String,
+    pub binding_span: Span,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
 /// One pattern inside a `case` arm.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pattern {
@@ -380,6 +390,10 @@ pub enum ExprKind {
     Case {
         scrut: Box<Expr>,
         arms: Vec<CaseArm>,
+    },
+    /// `select in wait -> value body ... end` as an expression.
+    Select {
+        arms: Vec<SelectArm>,
     },
     /// A labeled call argument, for example `args: ()`. Valid only in
     /// the argument positions the checker accepts.
@@ -822,6 +836,17 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
                 let _ = writeln!(out, "in {}", dump_pattern(&arm.pattern));
                 for s in &arm.body {
                     dump_stmt(out, s, depth + 2);
+                }
+            }
+        }
+        ExprKind::Select { arms } => {
+            out.push_str("select\n");
+            for arm in arms {
+                indent(out, depth + 1);
+                let _ = writeln!(out, "in -> {}", arm.binding);
+                dump_expr(out, &arm.wait, depth + 2);
+                for stmt in &arm.body {
+                    dump_stmt(out, stmt, depth + 2);
                 }
             }
         }

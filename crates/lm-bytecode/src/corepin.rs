@@ -46,6 +46,8 @@ pub struct CoreLayout {
     pub drive_fault: Option<u32>,
     pub recv_msg: Option<u32>,
     pub recv_closed: Option<u32>,
+    pub choice_first: Option<u32>,
+    pub choice_second: Option<u32>,
     pub send_sent: Option<u32>,
     pub send_closed: Option<u32>,
     pub send_fault: Option<u32>,
@@ -63,6 +65,7 @@ pub struct CoreLayout {
     pub step_event: Option<u32>,
     pub drive_event: Option<u32>,
     pub recv: Option<u32>,
+    pub choice: Option<u32>,
     pub send_result: Option<u32>,
     pub proc_result: Option<u32>,
     pub proc_error: Option<u32>,
@@ -91,7 +94,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 56] = [
+pub const PINNED_LABELS: [&str; 59] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -148,6 +151,9 @@ pub const PINNED_LABELS: [&str; 56] = [
     "SeekFrom.Start",
     "SeekFrom.Current",
     "SeekFrom.End",
+    "Choice",
+    "Choice.First",
+    "Choice.Second",
 ];
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
@@ -222,6 +228,9 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Recv" => &mut layout.recv,
         "Recv.Msg" => &mut layout.recv_msg,
         "Recv.Closed" => &mut layout.recv_closed,
+        "Choice" => &mut layout.choice,
+        "Choice.First" => &mut layout.choice_first,
+        "Choice.Second" => &mut layout.choice_second,
         "SendResult" => &mut layout.send_result,
         "SendResult.Sent" => &mut layout.send_sent,
         "SendResult.Closed" => &mut layout.send_closed,

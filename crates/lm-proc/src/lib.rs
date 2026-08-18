@@ -23,7 +23,8 @@ mod barrier;
 pub use barrier::{Barrier, BarrierError, BarrierReport};
 
 use lm_vm::{
-    CompletionKey, Outcome, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WakeKey, World,
+    CompletionKey, Outcome, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,
+    WaitSourceKey, WakeKey, World,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -82,6 +83,7 @@ pub struct Scheduler {
     /// surface it drives, so a descendant request reaches it.
     block_keys: BTreeMap<TaskKey, Vec<WakeKey>>,
     waiting: BTreeMap<CompletionKey, TaskKey>,
+    parked: ParkIndex,
     events: ScheduleEvents,
 }
 
@@ -91,6 +93,7 @@ enum IndexedState {
     Running,
     Blocked(WakeKey),
     Waiting(CompletionKey),
+    Parked(WaitSetKey),
 }
 
 /// Scheduler task states indexed by dense machine identifier.
@@ -115,6 +118,14 @@ struct WakeIndex {
 struct WakeBucket {
     wake: WakeKey,
     waiters: Waiters,
+}
+
+/// Typed wait sets indexed by all current scheduler sources.
+#[derive(Debug, Default)]
+struct ParkIndex {
+    sets: BTreeMap<WaitSetKey, Vec<WaitSourceKey>>,
+    wakes: WakeIndex,
+    completions: BTreeMap<CompletionKey, Waiters>,
 }
 
 #[derive(Debug)]
@@ -208,12 +219,88 @@ impl WakeIndex {
     }
 }
 
+impl ParkIndex {
+    fn clear(&mut self) {
+        self.sets.clear();
+        self.wakes.clear();
+        self.completions.clear();
+    }
+
+    fn insert(&mut self, wait: WaitSetKey, task: TaskKey, sources: Vec<WaitSourceKey>) {
+        self.remove(wait, task);
+        for source in &sources {
+            match *source {
+                WaitSourceKey::Wake(wake) => self.wakes.insert(wake, task),
+                WaitSourceKey::Completion(completion) => {
+                    match self.completions.get_mut(&completion) {
+                        Some(waiters) => waiters.insert(task),
+                        None => {
+                            self.completions.insert(completion, Waiters::One(task));
+                        }
+                    }
+                }
+            }
+        }
+        self.sets.insert(wait, sources);
+    }
+
+    fn remove(&mut self, wait: WaitSetKey, task: TaskKey) {
+        let Some(sources) = self.sets.remove(&wait) else {
+            return;
+        };
+        for source in sources {
+            match source {
+                WaitSourceKey::Wake(wake) => self.wakes.remove(wake, task),
+                WaitSourceKey::Completion(completion) => {
+                    let remove = self
+                        .completions
+                        .get_mut(&completion)
+                        .is_some_and(|waiters| waiters.remove(task));
+                    if remove {
+                        self.completions.remove(&completion);
+                    }
+                }
+            }
+        }
+    }
+
+    fn take_wake(&mut self, wake: WakeKey) -> Option<Waiters> {
+        self.wakes.take(wake)
+    }
+
+    fn take_completion(&mut self, completion: CompletionKey) -> Option<Waiters> {
+        self.completions.remove(&completion)
+    }
+
+    fn has_completion(&self, completion: CompletionKey) -> bool {
+        self.completions.contains_key(&completion)
+    }
+
+    fn has_completions(&self) -> bool {
+        !self.completions.is_empty()
+    }
+
+    fn tasks_with_completions(&self) -> Vec<TaskKey> {
+        let mut tasks = Vec::new();
+        for waiters in self.completions.values() {
+            match waiters {
+                Waiters::One(task) => tasks.push(*task),
+                Waiters::Many(found) => tasks.extend(found.iter().copied()),
+            }
+        }
+        tasks.sort_unstable();
+        tasks.dedup();
+        tasks
+    }
+}
+
 fn wake_task(wake: WakeKey) -> TaskKey {
     match wake {
         WakeKey::Receive(task)
         | WakeKey::Send(task)
         | WakeKey::Done(task)
-        | WakeKey::Asked(task) => task,
+        | WakeKey::Asked(task)
+        | WakeKey::Snapshot(task) => task,
     }
 }
 
@@ -282,6 +369,7 @@ impl Scheduler {
             blocked: WakeIndex::default(),
             block_keys: BTreeMap::new(),
             waiting: BTreeMap::new(),
+            parked: ParkIndex::default(),
             events: ScheduleEvents::default(),
         }
     }
@@ -324,7 +412,11 @@ impl Scheduler {
                     self.stats.proc_slices = self.stats.proc_slices.saturating_add(1);
                 }
                 self.tasks.insert(task, IndexedState::Running);
-                let exit = world.drive_slice(task, self.quantum);
+                let quantum = world.snapshot_wait_quantum(task, self.quantum);
+                let before = world.world_fuel();
+                let exit = world.drive_slice(task, quantum);
+                let retired = before.saturating_sub(world.world_fuel());
+                world.note_scheduler_slice(task, retired, exit.is_some());
                 // A terminal parent loses its pass-through before a
                 // child from its last slice runs.
                 if exit == Some(SliceExit::Terminal) {
@@ -337,11 +429,11 @@ impl Scheduler {
                 continue;
             }
 
-            if !self.waiting.is_empty() {
-                if let Some(completion) =
-                    world.wait_host_completion(|key| self.waiting.contains_key(&key))
-                {
-                    self.complete_wait(world, completion);
+            if !self.waiting.is_empty() || self.parked.has_completions() {
+                if let Some(completion) = world.wait_host_completion(|key| {
+                    self.waiting.contains_key(&key) || self.parked.has_completion(key)
+                }) {
+                    self.complete_completion(world, completion);
                 } else {
                     self.fail_waiting(world);
                 }
@@ -351,7 +443,7 @@ impl Scheduler {
             if self
                 .tasks
                 .values()
-                .any(|state| matches!(state, IndexedState::Blocked(_)))
+                .any(|state| matches!(state, IndexedState::Blocked(_) | IndexedState::Parked(_)))
             {
                 self.stop = Some(StopReason::Deadlock);
                 self.fail_every_block(world);
@@ -378,6 +470,7 @@ impl Scheduler {
         self.blocked.clear();
         self.block_keys.clear();
         self.waiting.clear();
+        self.parked.clear();
         self.events.clear();
         for (task, status) in world.scheduler_seeds(include_root) {
             self.index_status(world, task, status);
@@ -390,6 +483,7 @@ impl Scheduler {
             TaskStatus::Ready => self.enqueue(task),
             TaskStatus::Blocked(wake) => self.block(world, task, wake),
             TaskStatus::Waiting(completion) => self.wait(task, completion),
+            TaskStatus::Parked(wait) => self.park(world, task, wait),
             TaskStatus::Terminal | TaskStatus::Dormant => self.drop_task(task),
         }
     }
@@ -434,6 +528,20 @@ impl Scheduler {
         self.waiting.insert(completion, task);
     }
 
+    fn park(&mut self, world: &World<'_>, task: TaskKey, wait: WaitSetKey) {
+        if self.tasks.get(&task) == Some(&IndexedState::Parked(wait)) {
+            return;
+        }
+        self.remove_index(task);
+        let sources = world.wait_sources(wait);
+        if sources.is_empty() {
+            self.enqueue(task);
+            return;
+        }
+        self.tasks.insert(task, IndexedState::Parked(wait));
+        self.parked.insert(wait, task, sources);
+    }
+
     fn remove_index(&mut self, task: TaskKey) {
         match self.tasks.get(&task).copied() {
             Some(IndexedState::Blocked(wake)) => match self.block_keys.remove(&task) {
@@ -446,6 +554,9 @@ impl Scheduler {
             },
             Some(IndexedState::Waiting(completion)) => {
                 self.waiting.remove(&completion);
+            }
+            Some(IndexedState::Parked(wait)) => {
+                self.parked.remove(wait, task);
             }
             _ => {}
         }
@@ -482,6 +593,9 @@ impl Scheduler {
     /// Move indexed waiters whose wake condition changed.
     fn wake(&mut self, world: &World<'_>, wake: WakeKey) {
         let Some(waiters) = self.blocked.take(wake) else {
+            if let Some(waiters) = self.parked.take_wake(wake) {
+                self.wake_parked(world, waiters);
+            }
             return;
         };
         waiters.for_each(|task| {
@@ -505,29 +619,45 @@ impl Scheduler {
             }
             self.refresh(world, task);
         });
+        if let Some(waiters) = self.parked.take_wake(wake) {
+            self.wake_parked(world, waiters);
+        }
+    }
+
+    fn wake_parked(&mut self, world: &World<'_>, waiters: Waiters) {
+        waiters.for_each(|task| {
+            if !matches!(self.tasks.get(&task), Some(IndexedState::Parked(_))) {
+                return;
+            }
+            if world.task_status(task) == TaskStatus::Ready {
+                self.stats.unblocked = self.stats.unblocked.saturating_add(1);
+            }
+            self.refresh(world, task);
+        });
     }
 
     /// Poll every completion that is ready now.
     fn poll_completions(&mut self, world: &mut World<'_>) {
-        if self.waiting.is_empty() {
+        if self.waiting.is_empty() && !self.parked.has_completions() {
             return;
         }
-        while let Some(completion) =
-            world.poll_host_completion(|key| self.waiting.contains_key(&key))
-        {
-            self.complete_wait(world, completion);
+        while let Some(completion) = world.poll_host_completion(|key| {
+            self.waiting.contains_key(&key) || self.parked.has_completion(key)
+        }) {
+            self.complete_completion(world, completion);
         }
     }
 
-    fn complete_wait(&mut self, world: &World<'_>, completion: CompletionKey) {
-        let Some(task) = self.waiting.remove(&completion) else {
-            return;
-        };
-        if self.tasks.get(&task) != Some(&IndexedState::Waiting(completion)) {
-            return;
+    fn complete_completion(&mut self, world: &World<'_>, completion: CompletionKey) {
+        if let Some(task) = self.waiting.remove(&completion) {
+            if self.tasks.get(&task) == Some(&IndexedState::Waiting(completion)) {
+                self.stats.unblocked = self.stats.unblocked.saturating_add(1);
+                self.refresh(world, task);
+            }
         }
-        self.stats.unblocked = self.stats.unblocked.saturating_add(1);
-        self.refresh(world, task);
+        if let Some(waiters) = self.parked.take_completion(completion) {
+            self.wake_parked(world, waiters);
+        }
     }
 
     /// Take the next valid FIFO task.
@@ -550,6 +680,7 @@ impl Scheduler {
             Some(SliceExit::Yielded) => self.enqueue(task),
             Some(SliceExit::Blocked(wake)) => self.block(world, task, wake),
             Some(SliceExit::Waiting(completion)) => self.wait(task, completion),
+            Some(SliceExit::Parked(wait)) => self.park(world, task, wait),
             Some(SliceExit::Terminal) => self.finish_terminal(world, task),
             None => self.refresh(world, task),
         }
@@ -571,7 +702,9 @@ impl Scheduler {
         let tasks: Vec<TaskKey> = self
             .tasks
             .iter()
-            .filter_map(|(task, state)| matches!(state, IndexedState::Blocked(_)).then_some(*task))
+            .filter_map(|(task, state)| {
+                matches!(state, IndexedState::Blocked(_) | IndexedState::Parked(_)).then_some(*task)
+            })
             .collect();
         for task in tasks {
             world.fail_blocked_task(task, "the scheduler found no runnable task");
@@ -581,8 +714,12 @@ impl Scheduler {
 
     /// Fault tasks when the host completion source fails.
     fn fail_waiting(&mut self, world: &mut World<'_>) {
-        let tasks: Vec<TaskKey> = self.waiting.values().copied().collect();
+        let mut tasks: Vec<TaskKey> = self.waiting.values().copied().collect();
+        tasks.extend(self.parked.tasks_with_completions());
+        tasks.sort_unstable();
+        tasks.dedup();
         self.waiting.clear();
+        self.parked.clear();
         for task in tasks {
             world.fail_waiting_task(task, "the host returned no pending completion");
             self.refresh(world, task);

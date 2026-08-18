@@ -60,7 +60,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 ///
 /// Version 3 carries nested control edges and routed requests.
 /// Version 4 carries bytes and closed file handle values.
-pub const FORMAT_VERSION: u32 = 4;
+/// Version 5 carries typed wait descriptions and active wait blocks.
+pub const FORMAT_VERSION: u32 = 5;
 
 /// The section kinds, in canonical order.
 ///
@@ -202,8 +203,36 @@ pub struct ImageMailbox {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageBlock {
     Receive,
-    Send { target: u32 },
-    Done { target: u32 },
+    Send {
+        target: u32,
+    },
+    Done {
+        target: u32,
+    },
+    Wait {
+        token: u64,
+    },
+    Snapshot {
+        target: u32,
+        remaining: u64,
+        retry: bool,
+    },
+}
+
+/// One typed wait source in a snapshot image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageWaitSource {
+    Receive,
+    Drive { target: u32 },
+    Choice { first: u64, second: u64 },
+}
+
+/// One typed wait entry in a snapshot image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageWaitEntry {
+    pub token: u64,
+    pub source: ImageWaitSource,
+    pub linked: bool,
 }
 
 /// The resource limits of one captured machine.
@@ -256,6 +285,8 @@ pub struct ImageMachine {
     /// The remaining instruction budget.
     pub fuel: u64,
     pub next_ordinal: u64,
+    pub next_wait: u64,
+    pub waits: Vec<ImageWaitEntry>,
     pub children: u32,
     pub limits: ImageLimits,
     /// The captured heap, in canonical traversal order. Every object
@@ -375,6 +406,8 @@ impl Image {
             bytes = bytes.saturating_add(machine.operands.len() * std::mem::size_of::<Value>());
             bytes =
                 bytes.saturating_add(machine.literals.len() * std::mem::size_of::<Option<u32>>());
+            bytes =
+                bytes.saturating_add(machine.waits.len() * std::mem::size_of::<ImageWaitEntry>());
             if let Some(pending) = &machine.pending {
                 bytes = bytes.saturating_add(pending.args.len() * std::mem::size_of::<Value>());
             }

@@ -24,8 +24,11 @@ pub use host::{
 };
 pub use machine::{Block, FaultRec, MachineState, Mailbox, Ownership, VmId, VmState};
 pub use resource::{ResourceKind, ResourceRecord, ResourceRegistry, ResourceState};
-pub use schedule::{CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WakeKey};
-pub use world::{MailboxMetrics, RootEvent, StopMode, TraceEvent, World};
+pub use schedule::{
+    CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey, WaitSourceKey,
+    WakeKey,
+};
+pub use world::{MailboxMetrics, RootEvent, StopMode, TraceBlock, TraceEvent, World};
 
 /// The fault codes are manifest content, and the heap and the graph
 /// engine name them too. They live in `lm-abi`.
