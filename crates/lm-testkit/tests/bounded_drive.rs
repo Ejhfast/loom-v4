@@ -54,7 +54,6 @@ def supervise(vm: Vm[Int]): Int with Vm
       return 0 - 1
     end
   end
-  0 - 2
 end
 
 supervise(sys.vm.Vm().from_fn(spin, args: ()))

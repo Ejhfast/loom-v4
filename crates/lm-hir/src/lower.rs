@@ -427,11 +427,19 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 let cond_b = self.new_block();
                 self.emit(Instr::Jump(cond_b));
                 self.switch_to(cond_b);
-                self.lower_expr(cond);
                 let body_b = self.new_block();
                 let exit_b = self.new_block();
-                self.emit(Instr::JumpIfFalse(exit_b));
-                self.emit(Instr::Jump(body_b));
+                if crate::hir::while_diverges(cond, body) {
+                    // The literal condition needs no test, and no
+                    // `break` leaves the loop. The exit block keeps no
+                    // predecessor, so the verifier skips it and the
+                    // declared result type stays unclaimed there.
+                    self.emit(Instr::Jump(body_b));
+                } else {
+                    self.lower_expr(cond);
+                    self.emit(Instr::JumpIfFalse(exit_b));
+                    self.emit(Instr::Jump(body_b));
+                }
                 self.switch_to(body_b);
                 self.loops.push((cond_b, exit_b));
                 self.lower_block_stmt(body);

@@ -35,7 +35,6 @@ def audit(child: Vm[String], mut opened: [String]): String with Vm
       return "the child faulted"
     end
   end
-  "the supervisor stopped"
 end
 
 child = sys.vm.Vm().from_fn(read_message, args: ())

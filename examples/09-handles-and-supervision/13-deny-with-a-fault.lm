@@ -33,9 +33,6 @@ def print_only(child: Vm[String]): String with Vm, Io.Print
       return "the child stopped with {fault.code()}"
     end
   end
-  # `loop` has the type `()`, so a tail expression carries the
-  # declared return type.
-  "the supervisor stopped"
 end
 
 child = sys.vm.Vm().from_fn(read_clock, args: ())

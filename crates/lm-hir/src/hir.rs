@@ -457,8 +457,69 @@ impl HStmt {
         match self {
             HStmt::Return { .. } | HStmt::Break | HStmt::Continue => true,
             HStmt::Expr(e) => e.ty == lm_types::NEVER,
+            HStmt::While { cond, body } => while_diverges(cond, body),
             _ => false,
         }
+    }
+}
+
+/// True when one loop never completes.
+///
+/// The condition must be the literal `true`, and no `break` of this
+/// loop may appear in the body. `loop do ... end` parses to
+/// `while true`, so this is the shape a driver writes.
+///
+/// The lowering pass reads the same answer. A loop that never
+/// completes emits no exit edge, so the block after it keeps no
+/// predecessor and the verifier never reconstructs a state for it.
+pub fn while_diverges(cond: &HExpr, body: &[HStmt]) -> bool {
+    matches!(cond.kind, HExprKind::Bool(true)) && !block_breaks(body)
+}
+
+/// True when one statement list holds a `break` of the loop that
+/// encloses it.
+///
+/// The test asks about the exit, and never about the body. A body that
+/// returns on one path and repeats on another still cannot reach the
+/// statement after the loop. `break` is the only exit, so its absence
+/// proves the loop never completes.
+///
+/// The walk stops at a nested `while`, because a `break` inside it
+/// leaves that loop instead. A closure body is out of reach here:
+/// `MakeClosure` names a separate function by index, and `break` is
+/// invalid across that boundary.
+fn block_breaks(body: &[HStmt]) -> bool {
+    body.iter().any(stmt_breaks)
+}
+
+fn stmt_breaks(stmt: &HStmt) -> bool {
+    match stmt {
+        HStmt::Break => true,
+        // A nested loop owns every `break` inside it.
+        HStmt::While { .. } => false,
+        HStmt::Expr(e) => expr_breaks(e),
+        HStmt::Assign { value, .. } => expr_breaks(value),
+        HStmt::AssignField { recv, value, .. } => expr_breaks(recv) || expr_breaks(value),
+        HStmt::Return { value } => value.as_ref().is_some_and(expr_breaks),
+        HStmt::Continue => false,
+    }
+}
+
+/// True when one expression holds a `break` of the enclosing loop.
+///
+/// Only `if` and `case` carry statement lists. `select` becomes a
+/// `case` before this point, so the two forms cover every block.
+fn expr_breaks(expr: &HExpr) -> bool {
+    match &expr.kind {
+        HExprKind::If { arms, else_body } => {
+            arms.iter()
+                .any(|(cond, body)| expr_breaks(cond) || block_breaks(body))
+                || else_body.as_deref().is_some_and(block_breaks)
+        }
+        HExprKind::Case { scrut, arms, .. } => {
+            expr_breaks(scrut) || arms.iter().any(|arm| block_breaks(&arm.body))
+        }
+        _ => false,
     }
 }
 

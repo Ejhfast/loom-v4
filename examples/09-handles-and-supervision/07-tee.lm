@@ -60,7 +60,6 @@ def tee(
       return "the child faulted"
     end
   end
-  "the supervisor stopped"
 end
 
 case sys.fs.open("message.txt", ReadOnly)

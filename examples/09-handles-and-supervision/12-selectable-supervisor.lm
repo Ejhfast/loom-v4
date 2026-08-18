@@ -10,11 +10,10 @@ enum Command
   Stop
 end
 
-def untrusted_work(): Int
+def untrusted_work(): Never
   loop do
     ()
   end
-  0
 end
 
 class Supervisor < Proc[Command]
@@ -41,7 +40,6 @@ class Supervisor < Proc[Command]
         end
       end
     end
-    "unreachable"
   end
 end
 

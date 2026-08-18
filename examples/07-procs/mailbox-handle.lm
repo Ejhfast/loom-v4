@@ -16,8 +16,6 @@ class Adder < Proc[Int]
         return self.total
       end
     end
-    # The `Closed` arm returns, so this tail never runs.
-    self.total
   end
 end
 

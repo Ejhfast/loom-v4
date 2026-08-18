@@ -811,7 +811,21 @@ loop do
 end
 ```
 
-`break` exits the nearest loop; `continue` begins its next iteration. Loops have type `()` unless every reachable exit is a `return` or fault, in which case they may type as `Never`.
+`break` exits the nearest loop; `continue` begins its next iteration. A loop has the type `()`.
+
+A loop whose condition is the literal `true` and whose body holds no `break` of that loop has the type `Never` instead. `loop do ... end` is the same statement as `while true`, so both take this rule. `Never` is a subtype of every type, so such a loop ends a body of any declared result type. The statement after it is unreachable, and an unreachable statement is a compile error.
+
+The body decides nothing here. A body that returns on one path and repeats on another still never reaches the statement after the loop. `break` is the only normal exit.
+
+A callable that never completes and holds no `return` states no value of its declared result type. Its result type must be `Never` or `()`; any other declared type is a compile error, because nothing in the body produces one.
+
+```lm
+def serve(): Never
+  loop do
+    handle()
+  end
+end
+```
 
 ### 7.3 Case
 
@@ -3074,9 +3088,6 @@ def supervise(
       return Fault(fault)
     end
   end
-  # `loop` has the type `()`, so a tail expression carries the
-  # declared return type. Only `return` leaves the loop above.
-  Fault(Fault.denied("the driving loop ended"))
 end
 ```
 

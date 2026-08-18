@@ -81,7 +81,6 @@ class Supervisor < Proc[Cmd]
         return 0 - 1
       end
     end
-    0 - 2
   end
 end
 {LAUNCH}"#

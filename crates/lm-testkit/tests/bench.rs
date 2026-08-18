@@ -365,7 +365,6 @@ fn bench_proc_operations() {
                   \x20       return self.total\n\
                   \x20     end\n\
                   \x20   end\n\
-                  \x20   self.total\n\
                   \x20 end\n\
                   end\n\
                   h = Adder.spawn()\n\

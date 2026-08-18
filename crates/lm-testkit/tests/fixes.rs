@@ -598,3 +598,83 @@ end
 ";
     expect_error(source, "E1042");
 }
+
+// ---------------------------------------------------------------
+// A loop with no exit never completes (specification 7.2).
+// ---------------------------------------------------------------
+
+/// The driver shape: the loop leaves only by `return`, and the
+/// declared result type needs no tail expression.
+#[test]
+fn a_loop_with_no_break_ends_a_body_of_any_type() {
+    let source = "def f(n: Int): Int\n  n + 1\nend\n\
+        def y(): Int\n  loop do\n    if true\n      return f(0)\n    end\n    ()\n  end\nend\ny()\n";
+    assert_eq!(run(source), "Done(1)");
+}
+
+/// The body decides nothing. This body never returns on any path, and
+/// the loop still ends the function.
+#[test]
+fn a_loop_that_never_returns_still_ends_a_body() {
+    let source = "def y(): Never\n  loop do\n    ()\n  end\nend\n1\n";
+    assert_eq!(run(source), "Done(1)");
+}
+
+/// A `break` gives the loop a normal exit, so its type stays `()`.
+#[test]
+fn a_loop_with_a_break_keeps_the_unit_type() {
+    let source = "def y(): Int\n  loop do\n    break\n  end\nend\n1\n";
+    expect_error(source, "expected Int, found ()");
+}
+
+/// A `break` inside a nested loop belongs to that loop.
+#[test]
+fn a_break_of_a_nested_loop_does_not_exit_the_outer_loop() {
+    let source = "def y(): Never\n  loop do\n    loop do\n      break\n    end\n  end\nend\n1\n";
+    assert_eq!(run(source), "Done(1)");
+}
+
+/// A `break` inside a `case` arm still exits the loop.
+#[test]
+fn a_break_inside_a_case_arm_exits_the_loop() {
+    let source = "def y(): Int\n  o: Option[Int] = Some(1)\n  loop do\n    \
+        case o\n    in Some(_)\n      break\n    in None\n      ()\n    end\n  end\nend\n1\n";
+    expect_error(source, "expected Int, found ()");
+}
+
+/// The declared result type needs a witness. Nothing in this body
+/// produces an `Int`, so `Never` is the honest annotation.
+#[test]
+fn a_callable_that_never_returns_cannot_claim_another_type() {
+    let source = "def y(): Int\n  loop do\n    ()\n  end\nend\n1\n";
+    expect_error(source, "declare the result type `Never`");
+}
+
+/// A `return` witnesses the declared type, so a driver keeps its own
+/// result type.
+#[test]
+fn a_return_witnesses_the_declared_type() {
+    let source = "def y(): Int\n  loop do\n    return 3\n  end\nend\ny()\n";
+    assert_eq!(run(source), "Done(3)");
+}
+
+/// A unit result claims no value, so it needs no `return`.
+#[test]
+fn a_unit_result_needs_no_return() {
+    let source = "def y()\n  loop do\n    ()\n  end\nend\n1\n";
+    assert_eq!(run(source), "Done(1)");
+}
+
+/// A tail after a loop with no exit cannot run.
+#[test]
+fn a_tail_after_an_endless_loop_is_unreachable() {
+    let source = "def y(): Int\n  loop do\n    ()\n  end\n  0\nend\n1\n";
+    expect_error(source, "unreachable");
+}
+
+/// A bounded loop still completes, so its tail stays reachable.
+#[test]
+fn a_bounded_loop_keeps_its_tail() {
+    let source = "def y(): Int\n  i = 0\n  while i < 3\n    i = i + 1\n  end\n  i\nend\ny()\n";
+    assert_eq!(run(source), "Done(3)");
+}

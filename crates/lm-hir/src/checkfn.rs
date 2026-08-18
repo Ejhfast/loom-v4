@@ -168,6 +168,9 @@ pub(crate) struct FnChecker<'o> {
     captures: Vec<CaptureRec>,
     is_closure: bool,
     loop_depth: u32,
+    /// True when the body holds a `return`. It witnesses the
+    /// declared result type.
+    saw_return: bool,
     ret: RetKind,
     pub(crate) self_class: Option<u32>,
     pub(crate) ctor: Option<CtorCtx>,
@@ -364,6 +367,7 @@ impl<'o> FnChecker<'o> {
             captures: Vec::new(),
             is_closure: false,
             loop_depth: 0,
+            saw_return: false,
             ret,
             self_class: None,
             ctor: None,
@@ -473,6 +477,21 @@ impl<'o> FnChecker<'o> {
         };
         let (body, _, _) = self.check_block(ctx, stmts, mode, span)?;
         let diverges = body.last().map(HStmt::diverges).unwrap_or(false);
+        // A callable that never completes normally and holds no
+        // `return` produces no value of its declared type. Nothing in
+        // the body states that type, so `Never` is the honest one.
+        // `()` stays legal: it claims no value in the first place.
+        if diverges && !self.saw_return && ret != UNIT && ret != NEVER {
+            return Err(Diagnostic::new(
+                "E1063",
+                format!(
+                    "this callable never returns, and no `return` gives a value \
+                     of type {}; declare the result type `Never`",
+                    ctx.store.display(ret)
+                ),
+                span,
+            ));
+        }
         Ok(CheckedBody {
             body,
             locals: self.locals.iter().map(|(t, _)| *t).collect(),
@@ -715,6 +734,16 @@ impl<'o> FnChecker<'o> {
             StmtKind::Return { .. } | StmtKind::Break | StmtKind::Continue => {
                 Ok((self.check_stmt(ctx, stmt)?, true))
             }
+            // A loop with no `break` is a diverging tail too. The
+            // body decides, so this checks the loop first.
+            StmtKind::While { .. } => {
+                let checked = self.check_stmt(ctx, stmt)?;
+                if checked.diverges() || expected == UNIT {
+                    Ok((checked, true))
+                } else {
+                    Err(self.mismatch(ctx, expected, UNIT, stmt.span))
+                }
+            }
             // A statement tail has the value `()`, so it satisfies an
             // expected unit type.
             _ if expected == UNIT => Ok((self.check_stmt(ctx, stmt)?, true)),
@@ -786,6 +815,7 @@ impl<'o> FnChecker<'o> {
                 if let Some(c) = &self.ctor {
                     require_complete(ctx, c.class, c, stmt.span)?;
                 }
+                self.saw_return = true;
                 Ok(HStmt::Return { value })
             }
             StmtKind::Break => {
@@ -2994,6 +3024,7 @@ impl<'o> FnChecker<'o> {
             captures: Vec::new(),
             is_closure: true,
             loop_depth: 0,
+            saw_return: false,
             ret: ret_kind,
             self_class: None,
             ctor: None,

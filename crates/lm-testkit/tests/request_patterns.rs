@@ -32,7 +32,6 @@ fn serve(body: &str) -> String {
          \x20     return \"the child faulted\"\n\
          \x20   end\n\
          \x20 end\n\
-         \x20 \"stopped\"\n\
          end\n\
          seen: [Int] = []\n\
          serve(sys.vm.Vm().from_fn({CHILD}, args: ()), Bytes(\"abcdef\"), seen)\n"

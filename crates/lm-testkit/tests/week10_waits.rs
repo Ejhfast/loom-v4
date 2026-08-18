@@ -43,11 +43,10 @@ end
 #[test]
 fn three_select_arms_preserve_the_selected_result() {
     let source = r#"
-def spin(): Int
+def spin(): Never
   loop do
     ()
   end
-  0
 end
 
 def answer(): Int

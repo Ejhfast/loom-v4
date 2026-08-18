@@ -314,7 +314,7 @@ fn mock_runs_pure_and_bounded() {
     // A mock that exhausts its work budget faults the guest too.
     let source = "def go(): String with Vm\n  \
         vm = sys.vm.Vm().from_fn(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
-        vm.table().mock(Clock.Now, do ||: Int\n    while true\n    end\n    1\n  end)\n  \
+        vm.table().mock(Clock.Now, do ||: Int\n    while 0 == 0\n    end\n    1\n  end)\n  \
         case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"HostFault\")");
     // A mock with captures uses the frozen captured values.
@@ -572,7 +572,7 @@ fn drive_receives_a_passed_descendant_request() {
         seen.push(text)\n        vm.answer(call, ())\n      \
         in _\n        vm.dispatch(q)\n      end\n    \
         in Done(value)\n      return seen.len() * 10 + value\n    \
-        in Fault(_)\n      return 0 - 1\n    end\n  end\n  0 - 2\nend\n\
+        in Fault(_)\n      return 0 - 1\n    end\n  end\nend\n\
         inner = do ||: Int with Vm, Io.Print\n  \
         sys.io.print(\"from A\")\n  \
         b = sys.vm.Vm().from_fn(do ||: Int with Io.Print\n    \
@@ -603,7 +603,6 @@ def drive_all(vm: Vm[Int]): Int with Vm
       return 0 - 1
     end
   end
-  0 - 2
 end
 
 inner = do ||: Int with Vm, Io.Print
@@ -648,7 +647,6 @@ def reject_print(vm: Vm[String], source_fault: Fault): String with Vm
       return "outer fault"
     end
   end
-  "loop fault"
 end
 
 blocked = sys.vm.Vm().from_fn(do || with Io.Print
@@ -700,7 +698,6 @@ def drive_without_print(vm: Vm[Int]): Int with Vm
       return 0 - 3
     end
   end
-  0 - 4
 end
 
 inner = do ||: Int with Vm, Io.Print
@@ -744,7 +741,6 @@ def drive_without_clock(vm: Vm[Int]): Int with Vm
       return 0 - 2
     end
   end
-  0 - 3
 end
 
 inner = do ||: Int with Vm, Clock.Now
@@ -786,7 +782,6 @@ def answer_through_wrong_vm(vm: Vm[Int], wrong: Vm[Int]): Int with Vm
       return 0 - 4
     end
   end
-  0 - 5
 end
 
 inner = do ||: Int with Vm, Io.Print
@@ -834,7 +829,6 @@ def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm
       return 0 - 1
     end
   end
-  0 - 2
 end
 
 def step_all(b: Vm[Int]): Int with Vm
@@ -848,7 +842,6 @@ def step_all(b: Vm[Int]): Int with Vm
       return 0 - 3
     end
   end
-  0 - 4
 end
 
 inner = do ||: Int with Vm, Io.Print
@@ -894,7 +887,6 @@ def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm
       return 0 - 1
     end
   end
-  0 - 2
 end
 
 def a_drives_b(b: Vm[Int]): Int with Vm
@@ -911,7 +903,6 @@ def a_drives_b(b: Vm[Int]): Int with Vm
       return 0 - 3
     end
   end
-  0 - 4
 end
 
 inner = do ||: Int with Vm, Io.Print
@@ -959,7 +950,6 @@ def drive_loop(vm: Vm[Int], mut seen: [String]): Int with Vm
       return 0 - 1
     end
   end
-  0 - 2
 end
 
 inner = do ||: Int with Vm, Io.Print

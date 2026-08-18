@@ -21,7 +21,6 @@ fn a_worker_thread_runs_the_whole_world() {
                   \x20       return self.total\n\
                   \x20     end\n\
                   \x20   end\n\
-                  \x20   self.total\n\
                   \x20 end\n\
                   end\n\
                   h = Adder.spawn()\n\

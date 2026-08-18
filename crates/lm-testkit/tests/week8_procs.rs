@@ -25,7 +25,6 @@ const ADDER: &str = "class Adder < Proc[Int]\n\
                      \x20       return self.total\n\
                      \x20     end\n\
                      \x20   end\n\
-                     \x20   self.total\n\
                      \x20 end\n\
                      end\n";
 
@@ -47,7 +46,6 @@ fn a_mailbox_delivers_in_fifo_order() {
                   \x20       return self.out.freeze()\n\
                   \x20     end\n\
                   \x20   end\n\
-                  \x20   self.out.freeze()\n\
                   \x20 end\n\
                   end\n\
                   h = Echo.spawn()\n\
@@ -811,7 +809,6 @@ fn a_proc_reaches_a_peer_it_learned_from_a_message() {
                   \x20       return self.seen\n\
                   \x20     end\n\
                   \x20   end\n\
-                  \x20   self.seen\n\
                   \x20 end\n\
                   end\n\
                   class Sender < Proc[Handle[Int, Int]]\n\

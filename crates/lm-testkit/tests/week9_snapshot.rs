@@ -681,7 +681,6 @@ def dispatch_to_end(vm: Vm[Int]): Int with Vm
       return 0 - 1
     end
   end
-  0 - 2
 end
 
 def go(): Int with Vm, Io.Print
@@ -730,7 +729,6 @@ def go(): Int with Vm, Io.Print
       return 0 - 8
     end
   end
-  0 - 9
 end
 
 go()

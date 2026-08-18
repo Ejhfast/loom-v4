@@ -69,7 +69,6 @@ def supervise(vm: Vm[Int]): Int with Vm
       return 0 - 2
     end
   end
-  0 - 3
 end
 
 c = sys.vm.Vm().from_fn(app, args: ())
@@ -131,7 +130,6 @@ def supervise(vm: Vm[Int], mut misses: [Int]): Int with Vm
       return 0 - 2
     end
   end
-  0 - 3
 end
 
 c = sys.vm.Vm().from_fn(app, args: ())

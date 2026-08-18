@@ -66,7 +66,6 @@ def supervise(vm: Vm[Int], mut seen: [String]): Int with Vm
       return 0 - 2
     end
   end
-  0 - 3
 end
 
 c = sys.vm.Vm().from_fn(child, args: ())
@@ -127,7 +126,6 @@ def supervise(vm: Vm[Int]): Int with Vm
       return 0 - 2
     end
   end
-  0 - 3
 end
 
 c = sys.vm.Vm().from_fn(child, args: ())
@@ -301,7 +299,6 @@ def audit(vm: Vm[Int], mut seen: [String]): Int with Vm
       return 0 - 9
     end
   end
-  0 - 8
 end
 
 c = sys.vm.Vm().from_fn(app, args: ())

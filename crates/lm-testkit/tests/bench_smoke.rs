@@ -257,7 +257,6 @@ def drive_all(vm: Vm[Int]): Int with Vm
       return 0 - 1
     end
   end
-  0 - 2
 end
 
 inner = do ||: Int with Vm, Clock.Now
@@ -382,7 +381,6 @@ fn proc_send_receive_smoke() {
                   \x20       return self.total\n\
                   \x20     end\n\
                   \x20   end\n\
-                  \x20   self.total\n\
                   \x20 end\n\
                   end\n\
                   h = Adder.spawn()\n\
