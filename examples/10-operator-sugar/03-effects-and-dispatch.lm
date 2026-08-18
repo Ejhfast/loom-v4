@@ -1,0 +1,61 @@
+# A hook is an ordinary method, so it carries an ordinary effect row
+# and it dispatches like an ordinary method.
+#
+# The row of the hook reaches the caller. `report + report` performs
+# `Io.Print`, so every function that writes that operator must declare
+# `Io.Print` too. An operator cannot hide an effect.
+#
+# `Meter` is not final, so `+` dispatches on the runtime class. The
+# subclass answers, and the static type of the operand does not decide.
+
+class Meter
+  reading: Int
+
+  def init(mut self, reading: Int)
+    self.reading = reading
+  end
+
+  def __add__(self, other: Meter): String
+    "meter {self.reading + other.reading}"
+  end
+end
+
+class Doubling < Meter
+  def init(mut self, reading: Int)
+    super.init(reading)
+  end
+
+  def __add__(self, other: Meter): String
+    "doubling {(self.reading + other.reading) * 2}"
+  end
+end
+
+final class Report
+  count: Int
+
+  def init(mut self, count: Int)
+    self.count = count
+  end
+
+  # The row travels with the hook.
+  def __add__(self, other: Report): Report with Io.Print
+    sys.io.print("merging {self.count} and {other.count}\n")
+    Report(self.count + other.count)
+  end
+end
+
+# The declared row names `Io.Print`, because the `+` below performs it.
+def merge_all(): Int with Io.Print
+  merged = Report(2) + Report(3)
+  merged.count
+end
+
+def go(): String with Io.Print
+  # The static type is `Meter`; the value is a `Doubling`.
+  m: Meter = Doubling(10)
+  dispatched = m + Meter(5)
+  total = merge_all()
+  "{dispatched}, total {total}"
+end
+
+go()

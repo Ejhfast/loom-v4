@@ -1,0 +1,46 @@
+# Operator sugar: `a + b` reads `__add__` from the class of `a`.
+#
+# An operator is one method call. The class declares the hook, and the
+# checker rewrites the operator into a call of it. Nothing else about
+# the class changes.
+#
+# `final` matters for cost, not for meaning. A final class calls the
+# hook directly, and the compiler inlines a trivial body, so `Money`
+# arithmetic costs what the field arithmetic inside it costs.
+
+final class Money
+  cents: Int
+
+  def init(mut self, cents: Int)
+    self.cents = cents
+  end
+
+  def __add__(self, other: Money): Money
+    Money(self.cents + other.cents)
+  end
+
+  def __sub__(self, other: Money): Money
+    Money(self.cents - other.cents)
+  end
+
+  # The result type is the type of the hook, and it need not be the
+  # type of the operands. Scaling gives money from money and a count.
+  def __mul__(self, count: Int): Money
+    Money(self.cents * count)
+  end
+
+  def __neg__(self): Money
+    Money(0 - self.cents)
+  end
+
+  def text(self): String
+    "{self.cents}c"
+  end
+end
+
+price = Money(150)
+tax = Money(12)
+total = (price + tax) * 3
+refund = -total
+
+"{total.text()} then {refund.text()}"

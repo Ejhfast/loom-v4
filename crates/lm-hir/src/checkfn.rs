@@ -11,7 +11,7 @@
 
 use crate::check::{
     camel_member, check_key_type, resolve_row, resolve_type, snake_member, sys_group_name, Ctx,
-    FnSig, TyEnv, UseBinding,
+    FnSig, MethodSig, TyEnv, UseBinding,
 };
 use crate::exhaust::{useful, APat, PatMeta};
 use crate::hir::*;
@@ -221,6 +221,10 @@ impl<'o> OuterScope for FnChecker<'o> {
 fn ctor_complete(c: &CtorCtx) -> bool {
     c.state.inited.iter().all(|i| *i) && (!c.needs_super || c.state.super_done)
 }
+
+/// One resolved operator hook: the receiver class, its type
+/// arguments, and the method the class declares.
+type OperatorHook = (u32, Vec<TypeId>, (MethodSig, Vec<TypeId>, u32));
 
 /// Extract the nominal class and arguments of one instance type.
 fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {
@@ -1140,8 +1144,23 @@ impl<'o> FnChecker<'o> {
                 ))
             }
             ExprKind::Neg(inner) => {
-                let inner = self.check_expr(ctx, inner, INT)?;
-                Ok(Self::primitive_operator(ctx, "Int", "__neg__", vec![inner]))
+                let value = self.synth_expr(ctx, inner)?;
+                if let Some((class, cargs, found)) =
+                    Self::find_operator_hook(ctx, value.ty, "__neg__")
+                {
+                    return self.operator_hook(
+                        ctx,
+                        value,
+                        class,
+                        cargs,
+                        found,
+                        "__neg__",
+                        &[],
+                        expr.span,
+                    );
+                }
+                let value = self.expect_compatible(ctx, INT, value, inner.span)?;
+                Ok(Self::primitive_operator(ctx, "Int", "__neg__", vec![value]))
             }
             ExprKind::Binary { op, left, right } => self.synth_binary(ctx, *op, left, right),
             ExprKind::And(left, right) => {
@@ -2374,7 +2393,61 @@ impl<'o> FnChecker<'o> {
         }
         // Class and enum methods first, then the universal `freeze`.
         if let Some((class, class_args)) = class_of(ctx, recv_ty) {
-            if let Some((sig, owner_args, owner)) = ctx.find_method_owner(class, name) {
+            if let Some(found) = ctx.find_method_owner(class, name) {
+                return self.check_declared_method(
+                    ctx, recv_h, class, class_args, found, name, name_span, type_args, args,
+                    expected, span,
+                );
+            }
+            if name == "freeze" && args.is_empty() && type_args.is_empty() {
+                return Ok(freeze_expr(recv_h));
+            }
+            if name == "digest" && args.is_empty() && type_args.is_empty() {
+                return Ok(digest_expr(recv_h));
+            }
+            return Err(Diagnostic::new(
+                "E1026",
+                format!(
+                    "the class `{}` has no method named `{name}`",
+                    ctx.classes[class as usize].name
+                ),
+                name_span,
+            ));
+        }
+        if !type_args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1024",
+                "a native method does not take type arguments",
+                name_span,
+            ));
+        }
+        self.check_native_method(ctx, recv_h, recv_ty, name, name_span, args, span)
+    }
+
+    /// Check a call of one method the class declares.
+    ///
+    /// `check_method_call` reaches it by name. The operator sugar of
+    /// specification 6.4 reaches it with a hook name such as
+    /// `__add__`, so both spellings take one path: the same dispatch
+    /// rule, the same effect charge, and the same generic binding.
+    #[allow(clippy::too_many_arguments)]
+    fn check_declared_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        class: u32,
+        class_args: Vec<TypeId>,
+        found: (MethodSig, Vec<TypeId>, u32),
+        name: &str,
+        name_span: Span,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        expected: Option<TypeId>,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let (sig, owner_args, owner) = found;
+        {
+            {
                 if sig.name == "init" {
                     return Err(Diagnostic::new(
                         "E1026",
@@ -2437,7 +2510,7 @@ impl<'o> FnChecker<'o> {
                         },
                     });
                 }
-                return Ok(HExpr {
+                Ok(HExpr {
                     ty: out.ret,
                     mutable: true,
                     kind: HExprKind::MethodCall {
@@ -2448,30 +2521,24 @@ impl<'o> FnChecker<'o> {
                         own_rowargs: out.rowargs,
                         args: out.args,
                     },
-                });
+                })
             }
-            if name == "freeze" && args.is_empty() && type_args.is_empty() {
-                return Ok(freeze_expr(recv_h));
-            }
-            if name == "digest" && args.is_empty() && type_args.is_empty() {
-                return Ok(digest_expr(recv_h));
-            }
-            return Err(Diagnostic::new(
-                "E1026",
-                format!(
-                    "the class `{}` has no method named `{name}`",
-                    ctx.classes[class as usize].name
-                ),
-                name_span,
-            ));
         }
-        if !type_args.is_empty() {
-            return Err(Diagnostic::new(
-                "E1024",
-                "a native method does not take type arguments",
-                name_span,
-            ));
-        }
+    }
+
+    /// Check a call of one native method: a collection, a builder, or
+    /// a file handle. The receiver carries no declared class.
+    #[allow(clippy::too_many_arguments)]
+    fn check_native_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        recv_ty: TypeId,
+        name: &str,
+        name_span: Span,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
         // Native methods on collections and builders.
         let store_ty = ctx.store.get(recv_ty).clone();
         if store_ty == Type::FileHandle {
@@ -4334,6 +4401,65 @@ impl<'o> FnChecker<'o> {
         }
     }
 
+    /// Check one operator against a hook the receiver class declares.
+    ///
+    /// `a + b` is sugar for `a.__add__(b)`, and the sugar reads the
+    /// hook from the class of `a`. The call takes the ordinary method
+    /// path, so the declared parameter type checks the right operand,
+    /// the declared result type is the result of the operator, the
+    /// declared row is charged to the caller, and a class that is not
+    /// `final` dispatches virtually.
+    ///
+    /// A class that declares no hook keeps the rule the caller had.
+    ///
+    /// The lookup is separate, because it needs the type alone. That
+    /// keeps the receiver un-cloned: every arithmetic node of every
+    /// program reaches this path, and a clone there costs the square
+    /// of the expression size.
+    fn find_operator_hook(ctx: &mut Ctx, ty: TypeId, hook: &str) -> Option<OperatorHook> {
+        let (class, class_args) = class_of(ctx, ty)?;
+        let found = ctx.find_method_owner(class, hook)?;
+        Some((class, class_args, found))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn operator_hook(
+        &mut self,
+        ctx: &mut Ctx,
+        recv: HExpr,
+        class: u32,
+        class_args: Vec<TypeId>,
+        found: (MethodSig, Vec<TypeId>, u32),
+        hook: &str,
+        operands: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if found.0.params.len() != operands.len() {
+            return Err(Diagnostic::new(
+                "E1006",
+                format!(
+                    "the operator hook `{hook}` of `{}` takes {} operand(s)",
+                    ctx.classes[class as usize].name,
+                    found.0.params.len()
+                ),
+                span,
+            ));
+        }
+        self.check_declared_method(
+            ctx,
+            recv,
+            class,
+            class_args,
+            found,
+            hook,
+            span,
+            &[],
+            operands,
+            None,
+            span,
+        )
+    }
+
     fn synth_binary(
         &mut self,
         ctx: &mut Ctx,
@@ -4344,6 +4470,19 @@ impl<'o> FnChecker<'o> {
         match op {
             BinOp::Add => {
                 let l = self.synth_expr(ctx, left)?;
+                if let Some((class, cargs, found)) = Self::find_operator_hook(ctx, l.ty, "__add__")
+                {
+                    return self.operator_hook(
+                        ctx,
+                        l,
+                        class,
+                        cargs,
+                        found,
+                        "__add__",
+                        std::slice::from_ref(right),
+                        left.span,
+                    );
+                }
                 if l.ty == STRING {
                     let r = self.check_expr(ctx, right, STRING)?;
                     return Ok(Self::primitive_operator(
@@ -4367,8 +4506,6 @@ impl<'o> FnChecker<'o> {
                 Ok(Self::primitive_operator(ctx, "Int", "__add__", vec![l, r]))
             }
             BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-                let l = self.check_expr(ctx, left, INT)?;
-                let r = self.check_expr(ctx, right, INT)?;
                 let name = match op {
                     BinOp::Sub => "__sub__",
                     BinOp::Mul => "__mul__",
@@ -4376,11 +4513,24 @@ impl<'o> FnChecker<'o> {
                     BinOp::Rem => "__rem__",
                     _ => unreachable!(),
                 };
+                let l = self.synth_expr(ctx, left)?;
+                if let Some((class, cargs, found)) = Self::find_operator_hook(ctx, l.ty, name) {
+                    return self.operator_hook(
+                        ctx,
+                        l,
+                        class,
+                        cargs,
+                        found,
+                        name,
+                        std::slice::from_ref(right),
+                        left.span,
+                    );
+                }
+                let l = self.expect_compatible(ctx, INT, l, left.span)?;
+                let r = self.check_expr(ctx, right, INT)?;
                 Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                let l = self.check_expr(ctx, left, INT)?;
-                let r = self.check_expr(ctx, right, INT)?;
                 let name = match op {
                     BinOp::Lt => "__lt__",
                     BinOp::Le => "__le__",
@@ -4388,10 +4538,38 @@ impl<'o> FnChecker<'o> {
                     BinOp::Ge => "__ge__",
                     _ => unreachable!(),
                 };
+                let l = self.synth_expr(ctx, left)?;
+                if let Some((class, cargs, found)) = Self::find_operator_hook(ctx, l.ty, name) {
+                    return self.operator_hook(
+                        ctx,
+                        l,
+                        class,
+                        cargs,
+                        found,
+                        name,
+                        std::slice::from_ref(right),
+                        left.span,
+                    );
+                }
+                let l = self.expect_compatible(ctx, INT, l, left.span)?;
+                let r = self.check_expr(ctx, right, INT)?;
                 Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
             }
             BinOp::Eq | BinOp::Ne => {
                 let l = self.synth_expr(ctx, left)?;
+                let hook = if op == BinOp::Eq { "__eq__" } else { "__ne__" };
+                if let Some((class, cargs, found)) = Self::find_operator_hook(ctx, l.ty, hook) {
+                    return self.operator_hook(
+                        ctx,
+                        l,
+                        class,
+                        cargs,
+                        found,
+                        hook,
+                        std::slice::from_ref(right),
+                        left.span,
+                    );
+                }
                 let r = self.synth_expr(ctx, right)?;
                 let related = ctx.store.compatible(l.ty, r.ty) || ctx.store.compatible(r.ty, l.ty);
                 if !related {

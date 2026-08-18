@@ -772,9 +772,38 @@ a > b   -> a.__gt__(b)
 a >= b  -> a.__ge__(b)
 ```
 
-Each method body names one pure intrinsic manifest entry. Static resolution and trivial-body inlining emit the canonical instruction.
+Each core method body names one pure intrinsic manifest entry. Static resolution and trivial-body inlining emit the canonical instruction.
 
-`String + String` uses `String.__add__`. Other arithmetic operators accept `Int` in this version.
+`String + String` uses `String.__add__`.
+
+Any class may declare these hooks. The operator reads the hook from the class of the left operand, and the call takes the ordinary method path:
+
+- the declared parameter type checks the right operand;
+- the declared result type is the type of the operator expression, and it needs no relation to the operand types;
+- the declared effect row is charged to the caller, so `a + b` can perform an operation, and the caller must hold the row;
+- a `final` class calls directly, and any other class dispatches virtually.
+
+A class that declares no hook keeps the rules below. The operator sugar adds a spelling and removes no rule.
+
+```lm
+final class Money
+  cents: Int
+
+  def init(mut self, cents: Int)
+    self.cents = cents
+  end
+
+  def __add__(self, other: Money): Money
+    Money(self.cents + other.cents)
+  end
+end
+
+Money(150) + Money(250)
+```
+
+Version 0.2 states no rule about the meaning of a hook. `__eq__` need not be symmetric, and `__lt__` need not order anything. A later interface or protocol feature can require such properties of a class that claims them.
+
+`__eq__` governs `==` and `!=` alone. `Map` keys, `digest`, and `std.value.deep_equal` use structural identity and never call a hook. A class can therefore make `a == b` true while `deep_equal(a, b)` is false, and while a map lookup by `b` misses an entry stored under `a`.
 
 `and` and `or` remain control-flow operators. They evaluate the right operand only when required.
 
