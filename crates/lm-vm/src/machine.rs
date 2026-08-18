@@ -417,6 +417,25 @@ pub struct Machine {
 }
 
 impl Machine {
+    /// Return the class method table for one runtime value.
+    fn virtual_class(&self, module: &Module, value: Value) -> Result<u32, FaultCode> {
+        match value {
+            Value::Int(_) => {
+                let class = module.core_roles[lm_bytecode::corepin::ROLE_INT];
+                if class == lm_bytecode::NO_ROLE {
+                    Err(BAD_TYPE)
+                } else {
+                    Ok(class)
+                }
+            }
+            Value::Obj(reference) => match self.vm.heap.get(reference) {
+                Object::Instance { class, .. } => Ok(*class),
+                _ => Err(BAD_TYPE),
+            },
+            _ => Err(BAD_TYPE),
+        }
+    }
+
     /// A machine without a loaded entry.
     #[cfg(test)]
     pub fn empty(config: VmConfig, parent: Option<VmId>) -> Machine {
@@ -1123,10 +1142,7 @@ impl Machine {
             Instr::CallVirtual { selector, argc } => {
                 let argc = argc as usize;
                 let recv = self.peek(argc)?;
-                let class = match self.vm.heap.get(recv.as_obj().ok_or(BAD_TYPE)?) {
-                    Object::Instance { class, .. } => *class,
-                    _ => return Err(BAD_TYPE),
-                };
+                let class = self.virtual_class(module, recv)?;
                 let target = method_of(dispatch, class, selector)?;
                 self.push_frame(module, target, argc + 1, None, TypeEnvId::EMPTY)?;
             }

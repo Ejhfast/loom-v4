@@ -72,7 +72,9 @@ use std::collections::HashMap;
 /// type of the two perform instructions to the instruction encoding
 /// and to the canonical identity encoding. Version 9 adds the three
 /// resource types. Version 10 adds the three byte instructions.
-pub const COMPILER_ABI_VERSION: u32 = 12;
+/// Version 12 adds final class contracts. Version 13 adds native core
+/// class lowering.
+pub const COMPILER_ABI_VERSION: u32 = 13;
 
 /// The refinement work budget of one component.
 ///

@@ -479,6 +479,7 @@ impl<'a> Materializer<'a> {
         Ok(ClassInfo {
             imported: true,
             is_final: class.is_final,
+            native_repr: None,
             name: item.name.clone(),
             parent,
             type_params,

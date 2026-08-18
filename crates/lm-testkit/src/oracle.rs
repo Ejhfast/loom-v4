@@ -400,6 +400,16 @@ impl<'m> Oracle<'m> {
                 Ok(self.alloc(OKind::Map(map)))
             }
             HExprKind::Native { op, args } => self.native(*op, args, frame, depth),
+            HExprKind::Intrinsic { intrinsic, args } => match *intrinsic {
+                lm_abi::INTRINSIC_INT_ABS => {
+                    let value = self.as_int(&self.eval(&args[0], frame, depth)?)?;
+                    value
+                        .checked_abs()
+                        .map(OV::Int)
+                        .ok_or(Stop::Fault("IntegerOverflow"))
+                }
+                _ => Err(Stop::Limit("unknown intrinsic")),
+            },
             HExprKind::Interp(parts) => {
                 let mut out = String::new();
                 for part in parts {

@@ -92,6 +92,12 @@ pub enum CtorKind {
     CaseFields,
 }
 
+/// The native value representation of one core class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeRepr {
+    Int,
+}
+
 /// One checked class with its full field layout.
 pub struct HirClass {
     /// True for an imported declaration: a shape with no method body
@@ -99,6 +105,8 @@ pub struct HirClass {
     pub imported: bool,
     /// True when the class cannot have a subclass.
     pub is_final: bool,
+    /// The primitive representation of a native core class.
+    pub native_repr: Option<NativeRepr>,
     pub name: String,
     /// The qualified key: the nominal identity of the class. A local
     /// class takes the module path, a core class takes the reserved
@@ -408,6 +416,11 @@ pub enum HExprKind {
         op: NativeOp,
         args: Vec<HExpr>,
     },
+    /// One pure operation from the intrinsic manifest.
+    Intrinsic {
+        intrinsic: lm_abi::IntrinsicSlot,
+        args: Vec<HExpr>,
+    },
     /// An interpolated string.
     Interp(Vec<HInterpPart>),
     If {
@@ -466,6 +479,11 @@ pub fn dump_classes(module: &HirModule) -> String {
     let mut out = String::new();
     for (idx, class) in module.classes.iter().enumerate() {
         let final_mark = if class.is_final { " (final)" } else { "" };
+        let native_mark = if class.native_repr.is_some() {
+            " (native)"
+        } else {
+            ""
+        };
         let kind = match class.kind {
             ClassKind::Normal => "",
             ClassKind::EnumParent => " (enum)",
@@ -475,12 +493,16 @@ pub fn dump_classes(module: &HirModule) -> String {
             Some(p) => {
                 let _ = writeln!(
                     out,
-                    "class {} {}{}{} < {}",
-                    idx, class.name, final_mark, kind, module.classes[p as usize].name
+                    "class {} {}{}{}{} < {}",
+                    idx, class.name, final_mark, native_mark, kind, module.classes[p as usize].name
                 );
             }
             None => {
-                let _ = writeln!(out, "class {} {}{}{}", idx, class.name, final_mark, kind);
+                let _ = writeln!(
+                    out,
+                    "class {} {}{}{}{}",
+                    idx, class.name, final_mark, native_mark, kind
+                );
             }
         }
         for (fidx, (name, ty)) in class

@@ -228,6 +228,11 @@ fn ctor_complete(c: &CtorCtx) -> bool {
 /// Extract the nominal class and arguments of one instance type.
 fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {
     match ctx.store.get(ty) {
+        Type::Int => ctx
+            .core_types
+            .get("Int")
+            .copied()
+            .map(|class| (class, vec![])),
         Type::Class(c) => Some((c.0, vec![])),
         Type::Inst(c, args) => Some((c.0, args.clone())),
         _ => None,
@@ -1501,6 +1506,9 @@ impl<'o> FnChecker<'o> {
         expected: Option<TypeId>,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
+        if self.env.core_scope && name == "intrinsic" {
+            return self.call_intrinsic(ctx, type_args, args, span);
+        }
         let callee = self.resolve_callee(ctx, name, name_span, type_args, expected, span)?;
         match callee {
             Callee::Value(callee_h) => {
@@ -1682,6 +1690,67 @@ impl<'o> FnChecker<'o> {
                 name_span,
             )),
         }
+    }
+
+    /// Check one named intrinsic inside the core image.
+    fn call_intrinsic(
+        &mut self,
+        ctx: &mut Ctx,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if !type_args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1024",
+                "an intrinsic does not take type arguments",
+                span,
+            ));
+        }
+        let Some((name_expr, operands)) = args.split_first() else {
+            return Err(Diagnostic::new(
+                "E1006",
+                "`intrinsic` needs a manifest name",
+                span,
+            ));
+        };
+        let ExprKind::Str(name) = &name_expr.kind else {
+            return Err(Diagnostic::new(
+                "E1006",
+                "the intrinsic name must be a string literal",
+                name_expr.span,
+            ));
+        };
+        let intrinsic = lm_abi::intrinsic_by_name(name).ok_or_else(|| {
+            Diagnostic::new(
+                "E1026",
+                format!("the intrinsic manifest has no `{name}` entry"),
+                name_expr.span,
+            )
+        })?;
+        let def = *lm_abi::intrinsic(intrinsic);
+        let params: Vec<TypeId> = def
+            .params
+            .iter()
+            .map(|param| Self::abi_type_id(ctx, *param))
+            .collect();
+        let checked = self.check_args_simple(
+            ctx,
+            operands,
+            &params,
+            &vec![false; params.len()],
+            &[],
+            def.name,
+            span,
+        )?;
+        Ok(HExpr {
+            ty: Self::abi_type_id(ctx, def.reply),
+            mutable: true,
+            kind: HExprKind::Intrinsic {
+                intrinsic,
+                args: checked,
+            },
+        })
     }
 
     /// Resolve one called name to its meaning.
@@ -2277,7 +2346,7 @@ impl<'o> FnChecker<'o> {
         }
         // Class and enum methods first, then the universal `freeze`.
         if let Some((class, class_args)) = class_of(ctx, recv_ty) {
-            if let Some((sig, owner_args, _)) = ctx.find_method_owner(class, name) {
+            if let Some((sig, owner_args, owner)) = ctx.find_method_owner(class, name) {
                 if sig.name == "init" {
                     return Err(Diagnostic::new(
                         "E1026",
@@ -2317,6 +2386,29 @@ impl<'o> FnChecker<'o> {
                     expected,
                 )?;
                 let own_targs = out.targs[own_start..].to_vec();
+                if ctx.classes[class as usize].is_final {
+                    let mut direct_targs = if owner == class {
+                        out.targs[..own_start].to_vec()
+                    } else {
+                        owner_args
+                            .iter()
+                            .map(|arg| ctx.store.substitute(*arg, &out.targs, &[]))
+                            .collect()
+                    };
+                    direct_targs.extend(own_targs);
+                    let mut all_args = vec![recv_h];
+                    all_args.extend(out.args);
+                    return Ok(HExpr {
+                        ty: out.ret,
+                        mutable: true,
+                        kind: HExprKind::Call {
+                            func: sig.func,
+                            targs: direct_targs,
+                            rowargs: out.rowargs,
+                            args: all_args,
+                        },
+                    });
+                }
                 return Ok(HExpr {
                     ty: out.ret,
                     mutable: true,
@@ -3033,6 +3125,7 @@ impl<'o> FnChecker<'o> {
     fn abi_type_id(ctx: &mut Ctx, t: lm_abi::AbiType) -> TypeId {
         match t {
             lm_abi::AbiType::Unit => UNIT,
+            lm_abi::AbiType::Bool => BOOL,
             lm_abi::AbiType::Int => INT,
             lm_abi::AbiType::Str => STRING,
             lm_abi::AbiType::Bytes => lm_types::BYTES,

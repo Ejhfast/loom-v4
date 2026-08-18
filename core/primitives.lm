@@ -1,0 +1,6 @@
+# Primitive values use these final core method tables.
+final class Int
+  def abs(self): Int
+    intrinsic("int.abs", self)
+  end
+end

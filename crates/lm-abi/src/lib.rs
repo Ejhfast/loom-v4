@@ -1,4 +1,4 @@
-//! Canonical operation and group manifest.
+//! Canonical operation, group, and intrinsic manifests.
 //!
 //! This crate is the one source for effect groups, exact operations,
 //! their signatures, and their stable identities. The checker, the
@@ -46,6 +46,7 @@ pub const GROUPS: [&str; 10] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbiType {
     Unit,
+    Bool,
     Int,
     Str,
     Bytes,
@@ -69,6 +70,7 @@ impl AbiType {
     pub fn text(&self) -> &'static str {
         match self {
             AbiType::Unit => "()",
+            AbiType::Bool => "Bool",
             AbiType::Int => "Int",
             AbiType::Str => "String",
             AbiType::Bytes => "Bytes",
@@ -83,6 +85,75 @@ impl AbiType {
             AbiType::ResultUnitFsError => "Result[(), FsError]",
         }
     }
+}
+
+/// The intrinsic ABI version.
+pub const INTRINSIC_ABI_VERSION: u32 = 1;
+
+/// A dense intrinsic slot.
+pub type IntrinsicSlot = u32;
+
+/// One pure intrinsic definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntrinsicDef {
+    pub name: &'static str,
+    pub params: &'static [AbiType],
+    pub reply: AbiType,
+    pub semantic_revision: u32,
+}
+
+/// The `int.abs` intrinsic slot.
+pub const INTRINSIC_INT_ABS: IntrinsicSlot = 0;
+
+/// Pure intrinsics in stable slot order.
+pub const INTRINSICS: [IntrinsicDef; 1] = [IntrinsicDef {
+    name: "int.abs",
+    params: &[AbiType::Int],
+    reply: AbiType::Int,
+    semantic_revision: 1,
+}];
+
+/// The number of pure intrinsic slots.
+pub const INTRINSIC_COUNT: u32 = INTRINSICS.len() as u32;
+
+/// Return one intrinsic definition.
+pub fn intrinsic(slot: IntrinsicSlot) -> &'static IntrinsicDef {
+    &INTRINSICS[slot as usize]
+}
+
+/// Find one intrinsic by its stable name.
+pub fn intrinsic_by_name(name: &str) -> Option<IntrinsicSlot> {
+    INTRINSICS
+        .iter()
+        .position(|def| def.name == name)
+        .map(|index| index as u32)
+}
+
+/// Return the stable identity of one intrinsic.
+pub fn intrinsic_identity(slot: IntrinsicSlot) -> [u8; 32] {
+    let def = intrinsic(slot);
+    let mut input = Vec::new();
+    input.extend_from_slice(b"lm-intrinsic-v1\0");
+    input.extend_from_slice(&INTRINSIC_ABI_VERSION.to_le_bytes());
+    id_field(&mut input, def.name.as_bytes());
+    id_field(&mut input, &(def.params.len() as u64).to_le_bytes());
+    for param in def.params {
+        id_field(&mut input, param.text().as_bytes());
+    }
+    id_field(&mut input, def.reply.text().as_bytes());
+    id_field(&mut input, &def.semantic_revision.to_le_bytes());
+    sha256(&input)
+}
+
+/// Return the digest of the intrinsic manifest.
+pub fn intrinsic_manifest_digest() -> [u8; 32] {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"lm-intrinsics-manifest-v1\0");
+    input.extend_from_slice(&INTRINSIC_ABI_VERSION.to_le_bytes());
+    for slot in 0..INTRINSIC_COUNT {
+        input.extend_from_slice(&intrinsic_identity(slot));
+    }
+    sha256(&input)
 }
 
 /// The behavior family of one operation.
@@ -819,6 +890,21 @@ mod tests {
         assert_eq!(op_by_name("Wait.Wait"), Some(OP_WAIT_WAIT));
         assert_eq!(op_by_name("Wait.Choose"), Some(OP_WAIT_CHOOSE));
         assert_eq!(op_by_name("Wait.Cancel"), Some(OP_WAIT_CANCEL));
+    }
+
+    #[test]
+    fn intrinsic_slots_match_the_constants() {
+        assert_eq!(intrinsic_by_name("int.abs"), Some(INTRINSIC_INT_ABS));
+        assert_eq!(intrinsic(INTRINSIC_INT_ABS).reply, AbiType::Int);
+    }
+
+    #[test]
+    fn intrinsic_identities_are_stable() {
+        assert_eq!(
+            intrinsic_identity(INTRINSIC_INT_ABS),
+            intrinsic_identity(INTRINSIC_INT_ABS)
+        );
+        assert_eq!(intrinsic_manifest_digest(), intrinsic_manifest_digest());
     }
 
     #[test]

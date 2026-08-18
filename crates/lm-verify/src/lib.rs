@@ -613,6 +613,7 @@ impl<'m> Ctx<'m> {
     fn abi_ty(&self, t: lm_abi::AbiType) -> Result<u32, String> {
         match t {
             lm_abi::AbiType::Unit => Ok(TY_UNIT),
+            lm_abi::AbiType::Bool => Ok(TY_BOOL),
             lm_abi::AbiType::Int => Ok(TY_INT),
             lm_abi::AbiType::Str => Ok(TY_STR),
             lm_abi::AbiType::Bytes => Ok(self.intern(BcType::Bytes)),
@@ -726,7 +727,8 @@ impl<'m> Ctx<'m> {
 /// key: a rule change invalidates every cached admission.
 ///
 /// Version 9 adds byte types, resource types, and their operations.
-pub const VERIFIER_VERSION: u32 = 10;
+/// Version 10 adds final class rules. Version 11 adds the `Int` role.
+pub const VERIFIER_VERSION: u32 = 11;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -1145,6 +1147,20 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             ));
         }
     }
+    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_INT) {
+        let class = &module.classes[idx as usize];
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !class.fields.is_empty()
+        {
+            return Err(terr(
+                "the core role `Int` does not name a final stateless class".to_string(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1541,7 +1557,9 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             }
         }
         // The canonical self type of the class.
-        let own_ty = if class.type_params == 0 {
+        let own_ty = if core.int == Some(cidx as u32) {
+            Some(TY_INT)
+        } else if class.type_params == 0 {
             ctx.class_ty[cidx]
         } else {
             let vars: Vec<u32> = (0..class.type_params)
@@ -1998,6 +2016,9 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                     if c.kind == BcClassKind::Abstract {
                         return Err(err(fidx, at("cannot allocate an abstract enum parent")));
                     }
+                    if ctx.core.int == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
+                    }
                     if c.type_params != 0 {
                         return Err(err(fidx, at("a generic class needs a type application")));
                     }
@@ -2008,6 +2029,9 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                     };
                     if c.kind == BcClassKind::Abstract {
                         return Err(err(fidx, at("cannot allocate an abstract enum parent")));
+                    }
+                    if ctx.core.int == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
                     }
                     if c.type_params == 0 {
                         return Err(err(fidx, at("a type application on a non-generic class")));
@@ -2393,6 +2417,9 @@ fn step(
             let recv_ty = state.stack[state.stack.len() - 1 - argc];
             let class = match ctx.ty(recv_ty) {
                 BcType::Class(c) => c,
+                BcType::Int => ctx.core.int.ok_or_else(|| {
+                    fail("an Int method call needs the Int core role".to_string())
+                })?,
                 _ => {
                     return Err(fail(format!(
                         "virtual call receiver type {recv_ty} needs the generic form \

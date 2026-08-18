@@ -30,6 +30,8 @@ const PINNED: &str = include_str!("../../../core/pinned-core-defs.txt");
 /// definition.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CoreLayout {
+    /// The core method table of immediate integer values.
+    pub int: Option<u32>,
     pub option_some: Option<u32>,
     pub option_none: Option<u32>,
     pub result_ok: Option<u32>,
@@ -94,7 +96,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 59] = [
+pub const PINNED_LABELS: [&str; 60] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -154,7 +156,11 @@ pub const PINNED_LABELS: [&str; 59] = [
     "Choice",
     "Choice.First",
     "Choice.Second",
+    "Int",
 ];
+
+/// The core role of immediate integer values.
+pub const ROLE_INT: usize = 59;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -205,6 +211,7 @@ fn pinned_map() -> &'static HashMap<(String, [u8; 32]), &'static str> {
 
 fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> {
     match label {
+        "Int" => &mut layout.int,
         "Option" => &mut layout.option,
         "Option.Some" => &mut layout.option_some,
         "Option.None" => &mut layout.option_none,

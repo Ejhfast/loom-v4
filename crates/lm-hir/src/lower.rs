@@ -830,6 +830,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 };
                 self.emit(instr);
             }
+            HExprKind::Intrinsic { intrinsic, args } => match *intrinsic {
+                lm_abi::INTRINSIC_INT_ABS => self.lower_int_abs(&args[0]),
+                _ => unreachable!("the checker accepts only manifest intrinsics"),
+            },
             HExprKind::Interp(parts) => {
                 self.m.intern_type(BcType::StringBuilder);
                 self.emit(Instr::SbNew);
@@ -996,6 +1000,26 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         self.emit_call(none_new, &[value_ty], &[]);
         self.emit(Instr::Jump(join_b));
         self.switch_to(join_b);
+    }
+
+    /// Lower `int.abs` with existing checked integer instructions.
+    fn lower_int_abs(&mut self, value: &HExpr) {
+        let slot = self.scratch_of(INT);
+        self.lower_expr(value);
+        self.emit(Instr::StoreLocal(slot));
+        self.emit(Instr::LoadLocal(slot));
+        self.emit(Instr::ConstInt(0));
+        self.emit(Instr::GeInt);
+        let negative = self.new_block();
+        let join = self.new_block();
+        self.emit(Instr::JumpIfFalse(negative));
+        self.emit(Instr::LoadLocal(slot));
+        self.emit(Instr::Jump(join));
+        self.switch_to(negative);
+        self.emit(Instr::LoadLocal(slot));
+        self.emit(Instr::Neg);
+        self.emit(Instr::Jump(join));
+        self.switch_to(join);
     }
 
     /// The argument of a core `Option[T]` result type.
@@ -1219,7 +1243,7 @@ fn instantiate_inline_expr(
             **left = instantiate_inline_expr(left, args, next, nodes)?;
             **right = instantiate_inline_expr(right, args, next, nodes)?;
         }
-        HExprKind::Native { args: operands, .. } => {
+        HExprKind::Native { args: operands, .. } | HExprKind::Intrinsic { args: operands, .. } => {
             for operand in operands {
                 *operand = instantiate_inline_expr(operand, args, next, nodes)?;
             }
@@ -1300,7 +1324,7 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
                 shift_expr_in_place(v, base, max);
             }
         }
-        HExprKind::Native { args, .. } => {
+        HExprKind::Native { args, .. } | HExprKind::Intrinsic { args, .. } => {
             for a in args {
                 shift_expr_in_place(a, base, max);
             }
@@ -1528,6 +1552,21 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             captures: vec![],
             local_types: vec![],
             blocks: vec![vec![Instr::ConstUnit, Instr::Return]],
+        };
+    }
+    if class.native_repr == Some(NativeRepr::Int) {
+        let int = m.intern_type(BcType::Int);
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: int,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::ConstInt(0), Instr::Return]],
         };
     }
     let params: Vec<u32> = class.ctor_params.iter().map(|t| m.bc_ty(*t)).collect();

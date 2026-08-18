@@ -40,6 +40,8 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/snapshot.lm"),
     "\n",
+    include_str!("../../../core/primitives.lm"),
+    "\n",
 );
 
 /// The type names the prelude places into unqualified scope.
@@ -155,6 +157,7 @@ pub(crate) struct ClassInfo {
     /// True for an imported declaration: a shape with no body.
     pub(crate) imported: bool,
     pub(crate) is_final: bool,
+    pub(crate) native_repr: Option<NativeRepr>,
     pub(crate) name: String,
     pub(crate) parent: Option<u32>,
     pub(crate) type_params: Vec<String>,
@@ -185,6 +188,7 @@ impl ClassInfo {
         ClassInfo {
             imported: false,
             is_final: false,
+            native_repr: None,
             name: String::new(),
             parent: None,
             type_params: Vec::new(),
@@ -1391,6 +1395,7 @@ fn assemble(
         hir_classes.push(HirClass {
             imported: info.imported,
             is_final: info.is_final,
+            native_repr: info.native_repr,
             name: info.name.clone(),
             key: keys[idx].clone(),
             parent: info.parent,
@@ -1838,7 +1843,26 @@ fn resolve_class(
     // and it recorded the link in the type store.
     let parent = ctx.store.class_meta(ClassId(idx)).parent.map(|p| p.0);
     let (type_names, _) = split_generics(&class.generics);
-    let self_ty = if type_names.is_empty() {
+    let native_repr = match (is_core, class.name.as_str()) {
+        (true, "Int") => Some(NativeRepr::Int),
+        _ => None,
+    };
+    if native_repr.is_some()
+        && (!class.is_final
+            || !type_names.is_empty()
+            || parent.is_some()
+            || !class.fields.is_empty()
+            || class.methods.iter().any(|method| method.name == "init"))
+    {
+        return Err(Diagnostic::new(
+            "E1040",
+            "a native core class must be final and have no state",
+            class.span,
+        ));
+    }
+    let self_ty = if native_repr == Some(NativeRepr::Int) {
+        lm_types::INT
+    } else if type_names.is_empty() {
         ctx.store.intern(Type::Class(ClassId(idx)))
     } else {
         let vars: Vec<TypeId> = (0..type_names.len())
@@ -2006,6 +2030,7 @@ fn resolve_class(
     Ok(ClassInfo {
         imported: false,
         is_final: class.is_final,
+        native_repr,
         name: class.name.clone(),
         parent,
         type_params: type_names,
@@ -2097,6 +2122,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
     ctx.classes[parent_idx as usize] = ClassInfo {
         imported: false,
         is_final: false,
+        native_repr: None,
         name: enum_def.name.clone(),
         parent: None,
         type_params: type_names.clone(),
@@ -2125,6 +2151,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         ctx.classes[arm_class as usize] = ClassInfo {
             imported: false,
             is_final: false,
+            native_repr: None,
             name: format!("{}.{}", enum_def.name, short),
             parent: Some(parent_idx),
             type_params: type_names.clone(),
