@@ -446,6 +446,30 @@ impl Machine {
                         Ok(class)
                     }
                 }
+                Object::Bytes(_) => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_BYTES];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::StrBuilder(_) => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_STRING_BUILDER];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::ByteBuf(_) => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_BYTE_BUFFER];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
                 _ => Err(BAD_TYPE),
             },
             _ => Err(BAD_TYPE),
@@ -833,6 +857,7 @@ impl Machine {
                 }
                 match (self.vm.heap.get(x), self.vm.heap.get(y)) {
                     (Object::Str(s1), Object::Str(s2)) => s1 == s2,
+                    (Object::Bytes(b1), Object::Bytes(b2)) => b1 == b2,
                     _ => false,
                 }
             }
@@ -840,9 +865,10 @@ impl Machine {
         }
     }
 
-    /// The lookup hash of one map key. Strings hash by content, so
-    /// the hash agrees with `key_eq`. The hash feeds the per-map
-    /// index only and never leaves the process.
+    /// Get the lookup hash of one map key.
+    ///
+    /// Strings and bytes hash by content. The hash agrees with
+    /// `key_eq`. It stays inside the process.
     fn key_hash(&self, key: Value) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         match key {
@@ -856,6 +882,7 @@ impl Machine {
             }
             Value::Obj(r) => match self.vm.heap.get(r) {
                 Object::Str(s) => return s.lookup_hash() ^ 0x4c_6f_6f_6d_53_74_72,
+                Object::Bytes(b) => return b.lookup_hash() ^ 0x4c_6f_6f_6d_42_79_74,
                 _ => 3u8.hash(&mut h),
             },
             _ => 4u8.hash(&mut h),
@@ -999,7 +1026,449 @@ impl Machine {
         })
     }
 
-    /// Execute exactly one instruction of the current frame.
+    /// Execute one native value instruction outside the hot dispatch body.
+    #[inline(never)]
+    fn exec_native_instr(&mut self, instr: Instr) -> Result<(), FaultCode> {
+        match instr {
+            Instr::Native(lm_bytecode::NativeInstr::EqStr) => self.str_compare(true),
+            Instr::Native(lm_bytecode::NativeInstr::NeStr) => self.str_compare(false),
+            Instr::Native(
+                lm_bytecode::NativeInstr::StrByteLen
+                | lm_bytecode::NativeInstr::StrCharCount
+                | lm_bytecode::NativeInstr::StrConcat
+                | lm_bytecode::NativeInstr::StrStartsWith
+                | lm_bytecode::NativeInstr::StrEndsWith
+                | lm_bytecode::NativeInstr::StrContains
+                | lm_bytecode::NativeInstr::StrFindIndex,
+            ) => self.exec_string_instr(instr),
+            Instr::Native(_) => self.exec_bytes_builder_instr(instr),
+            _ => unreachable!("the native dispatcher receives one native instruction"),
+        }
+    }
+
+    /// Execute one immutable String instruction outside the hot dispatch body.
+    #[inline(never)]
+    fn exec_string_instr(&mut self, instr: Instr) -> Result<(), FaultCode> {
+        match instr {
+            Instr::Native(lm_bytecode::NativeInstr::StrByteLen) => {
+                let string = self.pop_obj()?;
+                let len = match self.vm.heap.get(string) {
+                    Object::Str(text) => text.len(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let len = i64::try_from(len).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.push(Value::Int(len))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::StrCharCount) => {
+                let string = self.pop_obj()?;
+                let count = match self.vm.heap.get(string) {
+                    Object::Str(text) => text.char_count(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let count = i64::try_from(count).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.push(Value::Int(count))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::StrConcat) => {
+                let other = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let (string_text, other_text) =
+                    match (self.vm.heap.get(string), self.vm.heap.get(other)) {
+                        (Object::Str(string_text), Object::Str(other_text)) => {
+                            (string_text.clone(), other_text.clone())
+                        }
+                        _ => return Err(BAD_TYPE),
+                    };
+                let len = string_text
+                    .len()
+                    .checked_add(other_text.len())
+                    .ok_or(FaultCode::HeapLimit)?;
+                self.reserve(len, &[Value::Obj(string), Value::Obj(other)])?;
+                let text = string_text
+                    .try_concat(&other_text)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                let value = self.alloc(Object::Str(text))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::StrStartsWith) => {
+                let prefix = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let found = match (self.vm.heap.get(string), self.vm.heap.get(prefix)) {
+                    (Object::Str(text), Object::Str(prefix)) => text.starts_with(prefix.as_str()),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(found))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::StrEndsWith) => {
+                let suffix = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let found = match (self.vm.heap.get(string), self.vm.heap.get(suffix)) {
+                    (Object::Str(text), Object::Str(suffix)) => text.ends_with(suffix.as_str()),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(found))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::StrContains) => {
+                let needle = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let found = match (self.vm.heap.get(string), self.vm.heap.get(needle)) {
+                    (Object::Str(text), Object::Str(needle)) => text.contains(needle.as_str()),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(found))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::StrFindIndex) => {
+                let needle = self.pop_obj()?;
+                let string = self.pop_obj()?;
+                let found = match (self.vm.heap.get(string), self.vm.heap.get(needle)) {
+                    (Object::Str(text), Object::Str(needle)) => text.find(needle.as_str()),
+                    _ => return Err(BAD_TYPE),
+                };
+                let index = match found {
+                    Some(index) => i64::try_from(index).map_err(|_| FaultCode::IntegerOverflow)?,
+                    None => -1,
+                };
+                self.push(Value::Int(index))?;
+            }
+            _ => unreachable!("the String dispatcher receives one String instruction"),
+        }
+        Ok(())
+    }
+
+    /// Execute one Bytes or builder instruction outside the hot dispatch body.
+    #[inline(never)]
+    fn exec_bytes_builder_instr(&mut self, instr: Instr) -> Result<(), FaultCode> {
+        match instr {
+            Instr::Native(lm_bytecode::NativeInstr::SbNew) => {
+                let value = self.alloc(Object::StrBuilder(String::new()))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::SbAppendStr) => {
+                let string = self.pop_obj()?;
+                let builder = self.pop_obj()?;
+                self.frozen_guard(builder)?;
+                let len = match self.vm.heap.get(string) {
+                    Object::Str(text) => text.len(),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.reserve(len, &[Value::Obj(builder), Value::Obj(string)])?;
+                if !self.vm.heap.append_string(builder, string) {
+                    return Err(BAD_TYPE);
+                }
+                self.vm.heap.recharge(builder);
+                self.push(Value::Obj(builder))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::SbAppendInt) => {
+                let value = self.pop_int()?;
+                let builder = self.pop_obj()?;
+                self.frozen_guard(builder)?;
+                self.sb_append_int(builder, value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::SbAppendBool) => {
+                let value = self.pop_bool()?;
+                let builder = self.pop_obj()?;
+                self.frozen_guard(builder)?;
+                let text = if value { "true" } else { "false" };
+                self.sb_append(builder, text)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::SbBuild) => {
+                let builder = self.pop_obj()?;
+                let text = match self.vm.heap.get(builder) {
+                    Object::StrBuilder(text) => text.clone(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let value = self.alloc(Object::Str(text.into()))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::SbLen) => {
+                let builder = self.pop_obj()?;
+                let len = match self.vm.heap.get(builder) {
+                    Object::StrBuilder(text) => text.len(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let len = i64::try_from(len).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.push(Value::Int(len))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::SbClear) => {
+                let builder = self.pop_obj()?;
+                self.frozen_guard(builder)?;
+                match self.vm.heap.get_mut(builder) {
+                    Object::StrBuilder(text) => text.clear(),
+                    _ => return Err(BAD_TYPE),
+                }
+                self.vm.heap.recharge(builder);
+                self.push(Value::Obj(builder))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbNew) => {
+                let value = self.alloc(Object::ByteBuf(Vec::new()))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbAppend) => {
+                let value = self.pop_int()?;
+                let buffer = self.pop_obj()?;
+                self.frozen_guard(buffer)?;
+                let byte = u8::try_from(value).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.reserve(1, &[Value::Obj(buffer)])?;
+                match self.vm.heap.get_mut(buffer) {
+                    Object::ByteBuf(bytes) => {
+                        bytes.try_reserve(1).map_err(|_| FaultCode::HeapLimit)?;
+                        bytes.push(byte);
+                    }
+                    _ => return Err(BAD_TYPE),
+                }
+                self.vm.heap.recharge(buffer);
+                self.push(Value::Obj(buffer))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbLen) => {
+                let buffer = self.pop_obj()?;
+                let len = match self.vm.heap.get(buffer) {
+                    Object::ByteBuf(bytes) => bytes.len(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let len = i64::try_from(len).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.push(Value::Int(len))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbBuild) => {
+                let buffer = self.pop_obj()?;
+                let len = match self.vm.heap.get(buffer) {
+                    Object::ByteBuf(bytes) => bytes.len(),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.reserve(len, &[Value::Obj(buffer)])?;
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(len)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                match self.vm.heap.get(buffer) {
+                    Object::ByteBuf(source) => bytes.extend_from_slice(source),
+                    _ => return Err(BAD_TYPE),
+                }
+                let value = self.alloc(Object::Bytes(bytes.into()))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbExtend) => {
+                let source = self.pop_obj()?;
+                let buffer = self.pop_obj()?;
+                self.frozen_guard(buffer)?;
+                let bytes = match self.vm.heap.get(source) {
+                    Object::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.reserve(bytes.len(), &[Value::Obj(buffer), Value::Obj(source)])?;
+                match self.vm.heap.get_mut(buffer) {
+                    Object::ByteBuf(target) => {
+                        target
+                            .try_reserve(bytes.len())
+                            .map_err(|_| FaultCode::HeapLimit)?;
+                        target.extend_from_slice(bytes.as_slice());
+                    }
+                    _ => return Err(BAD_TYPE),
+                }
+                self.vm.heap.recharge(buffer);
+                self.push(Value::Obj(buffer))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbReserve) => {
+                let additional = self.pop_int()?;
+                let buffer = self.pop_obj()?;
+                self.frozen_guard(buffer)?;
+                let additional =
+                    usize::try_from(additional).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.reserve(additional, &[Value::Obj(buffer)])?;
+                match self.vm.heap.get_mut(buffer) {
+                    Object::ByteBuf(bytes) => bytes
+                        .try_reserve(additional)
+                        .map_err(|_| FaultCode::HeapLimit)?,
+                    _ => return Err(BAD_TYPE),
+                }
+                self.push(Value::Obj(buffer))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbClear) => {
+                let buffer = self.pop_obj()?;
+                self.frozen_guard(buffer)?;
+                match self.vm.heap.get_mut(buffer) {
+                    Object::ByteBuf(bytes) => bytes.clear(),
+                    _ => return Err(BAD_TYPE),
+                }
+                self.vm.heap.recharge(buffer);
+                self.push(Value::Obj(buffer))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesNew) => {
+                let string = self.pop_obj()?;
+                let text = match self.vm.heap.get(string) {
+                    Object::Str(text) => text.clone(),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.reserve(text.len(), &[Value::Obj(string)])?;
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(text.len())
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                bytes.extend_from_slice(text.as_bytes());
+                let value = self.alloc(Object::Bytes(bytes.into()))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesLen) => {
+                let bytes = self.pop_obj()?;
+                let len = match self.vm.heap.get(bytes) {
+                    Object::Bytes(bytes) => bytes.len(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let len = i64::try_from(len).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.push(Value::Int(len))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesText) => {
+                let bytes_ref = self.pop_obj()?;
+                let bytes = match self.vm.heap.get(bytes_ref) {
+                    Object::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let source =
+                    std::str::from_utf8(bytes.as_slice()).map_err(|_| FaultCode::BadCast)?;
+                self.reserve(source.len(), &[Value::Obj(bytes_ref)])?;
+                let mut text = String::new();
+                text.try_reserve_exact(source.len())
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                text.push_str(source);
+                let value = self.alloc(Object::Str(text.into()))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesAt) => {
+                let index = self.pop_int()?;
+                let bytes = self.pop_obj()?;
+                let index = usize::try_from(index).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let byte = match self.vm.heap.get(bytes) {
+                    Object::Bytes(bytes) => bytes.as_slice().get(index).copied(),
+                    _ => return Err(BAD_TYPE),
+                }
+                .ok_or(FaultCode::IndexOutOfBounds)?;
+                self.push(Value::Int(i64::from(byte)))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesGet) => {
+                let index = self.pop_int()?;
+                let bytes = self.pop_obj()?;
+                let byte =
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| match self.vm.heap.get(bytes) {
+                            Object::Bytes(bytes) => bytes.as_slice().get(index).copied(),
+                            _ => None,
+                        });
+                if !matches!(self.vm.heap.get(bytes), Object::Bytes(_)) {
+                    return Err(BAD_TYPE);
+                }
+                self.push(Value::Int(byte.map(i64::from).unwrap_or(-1)))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesSlice) => {
+                let length = self.pop_int()?;
+                let start = self.pop_int()?;
+                let bytes = self.pop_obj()?;
+                let start = usize::try_from(start).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let length = usize::try_from(length).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(FaultCode::IndexOutOfBounds)?;
+                let slice = match self.vm.heap.get(bytes) {
+                    Object::Bytes(bytes) => bytes.slice(start, end),
+                    _ => return Err(BAD_TYPE),
+                }
+                .ok_or(FaultCode::IndexOutOfBounds)?;
+                let value = self.alloc(Object::Bytes(slice))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesConcat) => {
+                let other = self.pop_obj()?;
+                let bytes = self.pop_obj()?;
+                let (left, right) = match (self.vm.heap.get(bytes), self.vm.heap.get(other)) {
+                    (Object::Bytes(left), Object::Bytes(right)) => (left.clone(), right.clone()),
+                    _ => return Err(BAD_TYPE),
+                };
+                let len = left
+                    .len()
+                    .checked_add(right.len())
+                    .ok_or(FaultCode::HeapLimit)?;
+                self.reserve(len, &[Value::Obj(bytes), Value::Obj(other)])?;
+                let joined = left.try_concat(&right).map_err(|_| FaultCode::HeapLimit)?;
+                let value = self.alloc(Object::Bytes(joined))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesStartsWith) => {
+                let prefix = self.pop_obj()?;
+                let bytes = self.pop_obj()?;
+                let found = match (self.vm.heap.get(bytes), self.vm.heap.get(prefix)) {
+                    (Object::Bytes(bytes), Object::Bytes(prefix)) => {
+                        bytes.as_slice().starts_with(prefix.as_slice())
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(found))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesFindIndex) => {
+                let needle = self.pop_obj()?;
+                let bytes = self.pop_obj()?;
+                let found = match (self.vm.heap.get(bytes), self.vm.heap.get(needle)) {
+                    (Object::Bytes(bytes), Object::Bytes(needle)) => {
+                        let needle = needle.as_slice();
+                        if needle.is_empty() {
+                            Some(0)
+                        } else {
+                            bytes
+                                .as_slice()
+                                .windows(needle.len())
+                                .position(|window| window == needle)
+                        }
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                let index = match found {
+                    Some(index) => i64::try_from(index).map_err(|_| FaultCode::IntegerOverflow)?,
+                    None => -1,
+                };
+                self.push(Value::Int(index))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesHex) => {
+                let bytes_ref = self.pop_obj()?;
+                let bytes = match self.vm.heap.get(bytes_ref) {
+                    Object::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let len = bytes.len().checked_mul(2).ok_or(FaultCode::HeapLimit)?;
+                self.reserve(len, &[Value::Obj(bytes_ref)])?;
+                let mut text = String::new();
+                text.try_reserve_exact(len)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                for byte in bytes.as_slice() {
+                    text.push(char::from(HEX[(byte >> 4) as usize]));
+                    text.push(char::from(HEX[(byte & 0x0f) as usize]));
+                }
+                let value = self.alloc(Object::Str(text.into()))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8) => {
+                let bytes = self.pop_obj()?;
+                let valid = match self.vm.heap.get(bytes) {
+                    Object::Bytes(bytes) => std::str::from_utf8(bytes.as_slice()).is_ok(),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(valid))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::EqBytes)
+            | Instr::Native(lm_bytecode::NativeInstr::NeBytes) => {
+                let right = self.pop_obj()?;
+                let left = self.pop_obj()?;
+                let equal = match (self.vm.heap.get(left), self.vm.heap.get(right)) {
+                    (Object::Bytes(left), Object::Bytes(right)) => left == right,
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(
+                    equal == matches!(instr, Instr::Native(lm_bytecode::NativeInstr::EqBytes)),
+                ))?;
+            }
+            _ => unreachable!("the Bytes dispatcher receives one native value instruction"),
+        }
+        Ok(())
+    }
+
+    /// Execute one fetched instruction of the current frame.
     ///
     /// `envs` is the type environment table of the world. A
     /// monomorphic instruction never reads it, so a monomorphic
@@ -1010,33 +1479,12 @@ impl Machine {
         module: &Module,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
+        instr: Instr,
     ) -> Result<ExecOutcome, FaultCode> {
-        if self.vm.fuel == 0 {
-            return Err(FaultCode::OutOfFuel);
+        if matches!(instr, Instr::Native(_)) {
+            self.exec_native_instr(instr)?;
+            return Ok(ExecOutcome::Continue);
         }
-        self.vm.fuel -= 1;
-        // The fetch indexes the code tables without a bounds test.
-        // Four rules together prove that every reachable position
-        // resolves:
-        //
-        // 1. `LoadedModule` construction is the only path to
-        //    execution, and it admits a module only when the import
-        //    table is empty. An imported function is the one function
-        //    that carries no body, so an executable module has none.
-        // 2. `verify_module` therefore skips no function, and
-        //    `verify_func` rejects a function with no blocks.
-        // 3. `verify_func` ends every block with a terminator,
-        //    forbids a terminator before the end, and bounds every
-        //    branch target. So a live frame never steps past its
-        //    block, and `Call`, `New`, and `ConstStr` name a real row.
-        // 4. Snapshot admission checks the function, the block, and
-        //    the counter of each restored frame.
-        //
-        // Change any one of those rules and restore the bounds test.
-        let frame = self.vm.frames.last().ok_or(BAD_STATE)?;
-        let instr =
-            module.funcs[frame.func as usize].blocks[frame.block as usize][frame.ip as usize];
-        self.vm.frames.last_mut().ok_or(BAD_STATE)?.ip += 1;
         match instr {
             Instr::ConstUnit => self.push(Value::Unit)?,
             Instr::ConstBool(v) => self.push(Value::Bool(v))?,
@@ -1084,11 +1532,11 @@ impl Machine {
                     self.vm.operands.truncate(at);
                     return Err(FaultCode::DivideByZero);
                 }
-                let Some(value) = a.checked_div(b) else {
+                if a == i64::MIN && b == -1 {
                     self.vm.operands.truncate(at);
                     return Err(FaultCode::IntegerOverflow);
-                };
-                self.replace_pair(at, Value::Int(value));
+                }
+                self.replace_pair(at, Value::Int(a / b));
             }
             Instr::Rem => {
                 let (at, a, b) = self.int_pair()?;
@@ -1096,11 +1544,11 @@ impl Machine {
                     self.vm.operands.truncate(at);
                     return Err(FaultCode::DivideByZero);
                 }
-                let Some(value) = a.checked_rem(b) else {
+                if a == i64::MIN && b == -1 {
                     self.vm.operands.truncate(at);
                     return Err(FaultCode::IntegerOverflow);
-                };
-                self.replace_pair(at, Value::Int(value));
+                }
+                self.replace_pair(at, Value::Int(a % b));
             }
             Instr::Neg => {
                 let a = self.pop_int()?;
@@ -1127,87 +1575,26 @@ impl Machine {
                 let a = self.pop_bool()?;
                 self.push(Value::Bool(a != b))?;
             }
-            Instr::EqStr => self.str_compare(true)?,
-            Instr::NeStr => self.str_compare(false)?,
-            Instr::StrByteLen => {
-                let string = self.pop_obj()?;
-                let len = match self.vm.heap.get(string) {
-                    Object::Str(text) => text.len(),
-                    _ => return Err(BAD_TYPE),
-                };
-                let len = i64::try_from(len).map_err(|_| FaultCode::IntegerOverflow)?;
-                self.push(Value::Int(len))?;
+            Instr::Jump(target) => {
+                let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
+                frame.block = target;
+                frame.ip = 0;
             }
-            Instr::StrCharCount => {
-                let string = self.pop_obj()?;
-                let count = match self.vm.heap.get(string) {
-                    Object::Str(text) => text.char_count(),
-                    _ => return Err(BAD_TYPE),
-                };
-                let count = i64::try_from(count).map_err(|_| FaultCode::IntegerOverflow)?;
-                self.push(Value::Int(count))?;
+            Instr::JumpIfFalse(target) => {
+                if !self.pop_bool()? {
+                    let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
+                    frame.block = target;
+                    frame.ip = 0;
+                }
             }
-            Instr::StrConcat => {
-                let other = self.pop_obj()?;
-                let string = self.pop_obj()?;
-                let (string_text, other_text) =
-                    match (self.vm.heap.get(string), self.vm.heap.get(other)) {
-                        (Object::Str(string_text), Object::Str(other_text)) => {
-                            (string_text.clone(), other_text.clone())
-                        }
-                        _ => return Err(BAD_TYPE),
-                    };
-                let len = string_text
-                    .len()
-                    .checked_add(other_text.len())
-                    .ok_or(FaultCode::HeapLimit)?;
-                self.reserve(len, &[Value::Obj(string), Value::Obj(other)])?;
-                let text = string_text
-                    .try_concat(&other_text)
-                    .map_err(|_| FaultCode::HeapLimit)?;
-                let value = self.alloc(Object::Str(text))?;
-                self.push(value)?;
+            Instr::JumpIfTrue(target) => {
+                if self.pop_bool()? {
+                    let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
+                    frame.block = target;
+                    frame.ip = 0;
+                }
             }
-            Instr::StrStartsWith => {
-                let prefix = self.pop_obj()?;
-                let string = self.pop_obj()?;
-                let found = match (self.vm.heap.get(string), self.vm.heap.get(prefix)) {
-                    (Object::Str(text), Object::Str(prefix)) => text.starts_with(prefix.as_str()),
-                    _ => return Err(BAD_TYPE),
-                };
-                self.push(Value::Bool(found))?;
-            }
-            Instr::StrEndsWith => {
-                let suffix = self.pop_obj()?;
-                let string = self.pop_obj()?;
-                let found = match (self.vm.heap.get(string), self.vm.heap.get(suffix)) {
-                    (Object::Str(text), Object::Str(suffix)) => text.ends_with(suffix.as_str()),
-                    _ => return Err(BAD_TYPE),
-                };
-                self.push(Value::Bool(found))?;
-            }
-            Instr::StrContains => {
-                let needle = self.pop_obj()?;
-                let string = self.pop_obj()?;
-                let found = match (self.vm.heap.get(string), self.vm.heap.get(needle)) {
-                    (Object::Str(text), Object::Str(needle)) => text.contains(needle.as_str()),
-                    _ => return Err(BAD_TYPE),
-                };
-                self.push(Value::Bool(found))?;
-            }
-            Instr::StrFindIndex => {
-                let needle = self.pop_obj()?;
-                let string = self.pop_obj()?;
-                let found = match (self.vm.heap.get(string), self.vm.heap.get(needle)) {
-                    (Object::Str(text), Object::Str(needle)) => text.find(needle.as_str()),
-                    _ => return Err(BAD_TYPE),
-                };
-                let index = match found {
-                    Some(index) => i64::try_from(index).map_err(|_| FaultCode::IntegerOverflow)?,
-                    None => -1,
-                };
-                self.push(Value::Int(index))?;
-            }
+            Instr::Native(_) => unreachable!("native instructions return before dispatch"),
             Instr::EqRef => {
                 let b = self.pop_obj()?;
                 let a = self.pop_obj()?;
@@ -1497,109 +1884,6 @@ impl Machine {
                 }
                 self.push(Value::Unit)?;
             }
-            Instr::SbNew => {
-                let value = self.alloc(Object::StrBuilder(String::new()))?;
-                self.push(value)?;
-            }
-            Instr::SbAppendStr => {
-                let s = self.pop_obj()?;
-                let sb = self.pop_obj()?;
-                self.frozen_guard(sb)?;
-                let len = match self.vm.heap.get(s) {
-                    Object::Str(text) => text.len(),
-                    _ => return Err(BAD_TYPE),
-                };
-                self.reserve(len, &[Value::Obj(sb), Value::Obj(s)])?;
-                if !self.vm.heap.append_string(sb, s) {
-                    return Err(BAD_TYPE);
-                }
-                self.vm.heap.recharge(sb);
-                self.push(Value::Obj(sb))?;
-            }
-            Instr::SbAppendInt => {
-                let v = self.pop_int()?;
-                let sb = self.pop_obj()?;
-                self.frozen_guard(sb)?;
-                self.sb_append_int(sb, v)?;
-            }
-            Instr::SbAppendBool => {
-                let v = self.pop_bool()?;
-                let sb = self.pop_obj()?;
-                self.frozen_guard(sb)?;
-                let text = if v { "true" } else { "false" };
-                self.sb_append(sb, text)?;
-            }
-            Instr::SbBuild => {
-                let sb = self.pop_obj()?;
-                let text = match self.vm.heap.get(sb) {
-                    Object::StrBuilder(text) => text.clone(),
-                    _ => return Err(BAD_TYPE),
-                };
-                let value = self.alloc(Object::Str(text.into()))?;
-                self.push(value)?;
-            }
-            Instr::BbNew => {
-                let value = self.alloc(Object::ByteBuf(Vec::new()))?;
-                self.push(value)?;
-            }
-            Instr::BbAppend => {
-                let v = self.pop_int()?;
-                let bb = self.pop_obj()?;
-                self.frozen_guard(bb)?;
-                let byte = u8::try_from(v).map_err(|_| FaultCode::IntegerOverflow)?;
-                self.reserve(1, &[Value::Obj(bb)])?;
-                match self.vm.heap.get_mut(bb) {
-                    Object::ByteBuf(bytes) => bytes.push(byte),
-                    _ => return Err(BAD_TYPE),
-                }
-                self.vm.heap.recharge(bb);
-                self.push(Value::Obj(bb))?;
-            }
-            Instr::BbLen => {
-                let bb = self.pop_obj()?;
-                let len = match self.vm.heap.get(bb) {
-                    Object::ByteBuf(bytes) => bytes.len(),
-                    _ => return Err(BAD_TYPE),
-                };
-                self.push(Value::Int(len as i64))?;
-            }
-            Instr::BbBuild => {
-                let bb = self.pop_obj()?;
-                let bytes = match self.vm.heap.get(bb) {
-                    Object::ByteBuf(bytes) => bytes.clone(),
-                    _ => return Err(BAD_TYPE),
-                };
-                let text = String::from_utf8(bytes).map_err(|_| FaultCode::BadCast)?;
-                let value = self.alloc(Object::Str(text.into()))?;
-                self.push(value)?;
-            }
-            Instr::BytesNew => {
-                let string = self.pop_obj()?;
-                let bytes = match self.vm.heap.get(string) {
-                    Object::Str(text) => text.as_bytes().to_vec(),
-                    _ => return Err(BAD_TYPE),
-                };
-                let value = self.alloc(Object::Bytes(bytes))?;
-                self.push(value)?;
-            }
-            Instr::BytesLen => {
-                let bytes = self.pop_obj()?;
-                let len = match self.vm.heap.get(bytes) {
-                    Object::Bytes(bytes) => bytes.len(),
-                    _ => return Err(BAD_TYPE),
-                };
-                self.push(Value::Int(len as i64))?;
-            }
-            Instr::BytesText => {
-                let bytes = self.pop_obj()?;
-                let text = match self.vm.heap.get(bytes) {
-                    Object::Bytes(bytes) => String::from_utf8(bytes.clone()),
-                    _ => return Err(BAD_TYPE),
-                }
-                .map_err(|_| FaultCode::BadCast)?;
-                let value = self.alloc(Object::Str(text.into()))?;
-                self.push(value)?;
-            }
             Instr::Freeze => {
                 let r = self.pop_obj()?;
                 // The freeze mode validates the whole reachable graph
@@ -1622,25 +1906,6 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 };
                 self.push(Value::Bool(equal == matches!(instr, Instr::EqDigest)))?;
-            }
-            Instr::Jump(target) => {
-                let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
-                frame.block = target;
-                frame.ip = 0;
-            }
-            Instr::JumpIfFalse(target) => {
-                if !self.pop_bool()? {
-                    let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
-                    frame.block = target;
-                    frame.ip = 0;
-                }
-            }
-            Instr::JumpIfTrue(target) => {
-                if self.pop_bool()? {
-                    let frame = self.vm.frames.last_mut().ok_or(BAD_STATE)?;
-                    frame.block = target;
-                    frame.ip = 0;
-                }
             }
             Instr::Return => {
                 let value = self.pop()?;
@@ -1733,8 +1998,32 @@ impl Machine {
         let count_expiry = u64::from(limit) <= original_fuel;
         self.vm.fuel = batch_fuel;
 
+        // Verification bounds every function, block, branch, and instruction.
+        // Snapshot admission applies the same bounds to restored frames.
+        // Keep the current block until a call or branch changes it.
+        let mut cached_func = u32::MAX;
+        let mut cached_block = u32::MAX;
+        let mut code: &[Instr] = &[];
         let outcome = loop {
-            match self.exec_instr(module, dispatch, envs) {
+            if self.vm.fuel == 0 {
+                break Err(FaultCode::OutOfFuel);
+            }
+            self.vm.fuel -= 1;
+            let Some(frame) = self.vm.frames.last() else {
+                break Err(BAD_STATE);
+            };
+            let (func, block, ip) = (frame.func, frame.block, frame.ip);
+            if func != cached_func || block != cached_block {
+                code = &module.funcs[func as usize].blocks[block as usize];
+                cached_func = func;
+                cached_block = block;
+            }
+            let instr = code[ip as usize];
+            let Some(frame) = self.vm.frames.last_mut() else {
+                break Err(BAD_STATE);
+            };
+            frame.ip += 1;
+            match self.exec_instr(module, dispatch, envs, instr) {
                 Ok(ExecOutcome::Continue) => {}
                 outcome => break outcome,
             }
@@ -1924,11 +2213,11 @@ impl Machine {
     ///
     /// An error consumes the same operands as two ordered `pop_int`
     /// calls. A successful caller replaces both operands in place.
-    #[inline]
+    #[inline(always)]
     fn int_pair(&mut self) -> Result<(usize, i64, i64), FaultCode> {
         let len = self.vm.operands.len();
-        if len == 0 {
-            return Err(BAD_STATE);
+        if len < 2 {
+            return self.short_int_pair();
         }
         let b = match self.vm.operands[len - 1] {
             Value::Int(value) => value,
@@ -1937,10 +2226,6 @@ impl Machine {
                 return Err(BAD_TYPE);
             }
         };
-        if len == 1 {
-            self.vm.operands.clear();
-            return Err(BAD_STATE);
-        }
         let at = len - 2;
         let a = match self.vm.operands[at] {
             Value::Int(value) => value,
@@ -1952,12 +2237,22 @@ impl Machine {
         Ok((at, a, b))
     }
 
-    #[inline]
+    #[cold]
+    #[inline(never)]
+    fn short_int_pair(&mut self) -> Result<(usize, i64, i64), FaultCode> {
+        match self.vm.operands.pop() {
+            None | Some(Value::Int(_)) => Err(BAD_STATE),
+            Some(_) => Err(BAD_TYPE),
+        }
+    }
+
+    #[inline(always)]
     fn replace_pair(&mut self, at: usize, value: Value) {
         self.vm.operands[at] = value;
         self.vm.operands.truncate(at + 1);
     }
 
+    #[inline(always)]
     fn int_binary(&mut self, op: impl Fn(i64, i64) -> Option<i64>) -> Result<(), FaultCode> {
         let (at, a, b) = self.int_pair()?;
         let Some(value) = op(a, b) else {
@@ -1968,6 +2263,7 @@ impl Machine {
         Ok(())
     }
 
+    #[inline(always)]
     fn int_compare(&mut self, op: impl Fn(i64, i64) -> bool) -> Result<(), FaultCode> {
         let (at, a, b) = self.int_pair()?;
         self.replace_pair(at, Value::Bool(op(a, b)));
@@ -2065,6 +2361,16 @@ mod tests {
     #[test]
     fn an_integer_pair_replaces_two_operands_in_place() {
         let mut machine = Machine::empty(VmConfig::default(), None);
+        assert_eq!(machine.int_binary(i64::checked_add), Err(BAD_STATE));
+
+        machine.vm.operands = vec![Value::Int(7)];
+        assert_eq!(machine.int_binary(i64::checked_add), Err(BAD_STATE));
+        assert!(machine.vm.operands.is_empty());
+
+        machine.vm.operands = vec![Value::Bool(false)];
+        assert_eq!(machine.int_binary(i64::checked_add), Err(BAD_TYPE));
+        assert!(machine.vm.operands.is_empty());
+
         machine.vm.operands = vec![Value::Int(7), Value::Int(5)];
         machine
             .int_binary(i64::checked_add)

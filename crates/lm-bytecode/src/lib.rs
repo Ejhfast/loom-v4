@@ -31,7 +31,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 62;
+pub const CORE_ROLE_COUNT: usize = 65;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -91,8 +91,6 @@ pub enum BcType {
     Fn(Vec<u32>, Vec<bool>, u32, Vec<BcRow>),
     /// One type parameter of the enclosing generic function.
     Var(u32),
-    StringBuilder,
-    ByteBuffer,
     /// The frozen machine `Fault` value type.
     Fault,
     /// The opaque pending-request token type.
@@ -218,23 +216,8 @@ pub enum Instr {
     NeInt,
     EqBool,
     NeBool,
-    /// String equality by content.
-    EqStr,
-    NeStr,
-    /// Pop a String and push its UTF-8 byte length.
-    StrByteLen,
-    /// Pop a String and push its Unicode scalar count.
-    StrCharCount,
-    /// Pop two strings, concatenate them, and push a new String.
-    StrConcat,
-    /// Pop a prefix and a String, then test the prefix.
-    StrStartsWith,
-    /// Pop a suffix and a String, then test the suffix.
-    StrEndsWith,
-    /// Pop a needle and a String, then test for the needle.
-    StrContains,
-    /// Pop a needle and a String, then push its byte index or -1.
-    StrFindIndex,
+    /// Run one native value instruction.
+    Native(NativeInstr),
     /// Reference identity equality for heap objects.
     EqRef,
     NeRef,
@@ -320,30 +303,6 @@ pub enum Instr {
     MapAt,
     /// Pop a value, a key, and a map, then insert or replace. Pushes unit.
     MapPut,
-    /// Allocate an empty string builder.
-    SbNew,
-    /// Pop a string and a builder, append, and push the builder.
-    SbAppendStr,
-    /// Pop an Int and a builder, append its decimal text, push the builder.
-    SbAppendInt,
-    /// Pop a Bool and a builder, append its text, push the builder.
-    SbAppendBool,
-    /// Pop a builder and push its content as a new string.
-    SbBuild,
-    /// Allocate an empty byte buffer.
-    BbNew,
-    /// Pop an Int and a buffer, append one byte, push the buffer.
-    BbAppend,
-    /// Pop a buffer and push its byte length.
-    BbLen,
-    /// Pop a buffer, decode UTF-8, and push a string. Faults `BadCast`.
-    BbBuild,
-    /// Pop a string and push its immutable UTF-8 bytes.
-    BytesNew,
-    /// Pop immutable bytes and push their length.
-    BytesLen,
-    /// Pop immutable bytes, decode UTF-8, and push a string.
-    BytesText,
     /// Pop an object reference, freeze its graph, push the same reference.
     Freeze,
     /// Pop a frozen object reference and push its canonical digest.
@@ -402,6 +361,81 @@ pub enum Instr {
     /// The runtime backstop behind a proven-exhaustive `case`. It
     /// faults if executed. Ends the block.
     Unreachable,
+}
+
+/// One native value instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeInstr {
+    /// String equality by content.
+    EqStr,
+    NeStr,
+    /// Pop a String and push its UTF-8 byte length.
+    StrByteLen,
+    /// Pop a String and push its Unicode scalar count.
+    StrCharCount,
+    /// Pop two strings, concatenate them, and push a new String.
+    StrConcat,
+    /// Pop a prefix and a String, then test the prefix.
+    StrStartsWith,
+    /// Pop a suffix and a String, then test the suffix.
+    StrEndsWith,
+    /// Pop a needle and a String, then test for the needle.
+    StrContains,
+    /// Pop a needle and a String, then push its byte index or -1.
+    StrFindIndex,
+    /// Allocate an empty string builder.
+    SbNew,
+    /// Pop a string and a builder, append, and push the builder.
+    SbAppendStr,
+    /// Pop an Int and a builder, append its decimal text, push the builder.
+    SbAppendInt,
+    /// Pop a Bool and a builder, append its text, push the builder.
+    SbAppendBool,
+    /// Pop a builder and push its content as a new string.
+    SbBuild,
+    /// Allocate an empty byte buffer.
+    BbNew,
+    /// Pop an Int and a buffer, append one byte, push the buffer.
+    BbAppend,
+    /// Pop a buffer and push its byte length.
+    BbLen,
+    /// Pop a buffer and push its content as immutable bytes.
+    BbBuild,
+    /// Pop a string and push its immutable UTF-8 bytes.
+    BytesNew,
+    /// Pop immutable bytes and push their length.
+    BytesLen,
+    /// Pop immutable bytes, decode UTF-8, and push a string.
+    BytesText,
+    /// Pop a builder and push its UTF-8 byte length.
+    SbLen,
+    /// Pop a builder, clear it, and push the builder.
+    SbClear,
+    /// Pop bytes and a buffer, extend the buffer, and push the buffer.
+    BbExtend,
+    /// Pop an Int and a buffer, reserve capacity, and push the buffer.
+    BbReserve,
+    /// Pop a buffer, clear it, and push the buffer.
+    BbClear,
+    /// Pop an index and bytes, then push the byte as an Int.
+    BytesAt,
+    /// Pop an index and bytes, then push the byte or -1.
+    BytesGet,
+    /// Pop a length, start, and bytes, then push a shared slice.
+    BytesSlice,
+    /// Pop two byte values, concatenate them, and push new bytes.
+    BytesConcat,
+    /// Pop a prefix and bytes, then test the prefix.
+    BytesStartsWith,
+    /// Pop a needle and bytes, then push its index or -1.
+    BytesFindIndex,
+    /// Pop bytes and push lowercase hexadecimal text.
+    BytesHex,
+    /// Pop bytes and push whether they contain valid UTF-8.
+    BytesIsUtf8,
+    /// Bytes equality by content.
+    EqBytes,
+    NeBytes,
 }
 
 impl Instr {
@@ -686,8 +720,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// byte, so each change adds encodings and moves none. Version 16 adds
 /// final class flags. Version 17 adds the `Int` core role. Version 18
 /// adds the `Bool` core role. Version 19 adds the String core role and
-/// immutable String instructions.
-pub const VERSION: u16 = 19;
+/// immutable String instructions. Version 20 adds Bytes and builder
+/// core roles. It also adds their native instructions.
+pub const VERSION: u16 = 20;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -768,6 +803,8 @@ const OP_STR_STARTS_WITH: u8 = 0x6a;
 const OP_STR_ENDS_WITH: u8 = 0x6b;
 const OP_STR_CONTAINS: u8 = 0x6c;
 const OP_STR_FIND_INDEX: u8 = 0x6d;
+const OP_BYTES_AT: u8 = 0x6e;
+const OP_BYTES_GET: u8 = 0x6f;
 const OP_PERFORM: u8 = 0x70;
 const OP_PERFORM_VALUE: u8 = 0x71;
 const OP_OP_CONST: u8 = 0x72;
@@ -779,6 +816,19 @@ const OP_UNREACHABLE: u8 = 0x77;
 const OP_DIGEST: u8 = 0x78;
 const OP_EQ_DIGEST: u8 = 0x79;
 const OP_NE_DIGEST: u8 = 0x7a;
+const OP_BYTES_SLICE: u8 = 0x7b;
+const OP_BYTES_CONCAT: u8 = 0x7c;
+const OP_BYTES_STARTS_WITH: u8 = 0x7d;
+const OP_BYTES_FIND_INDEX: u8 = 0x7e;
+const OP_BYTES_HEX: u8 = 0x7f;
+const OP_BYTES_IS_UTF8: u8 = 0x80;
+const OP_EQ_BYTES: u8 = 0x81;
+const OP_NE_BYTES: u8 = 0x82;
+const OP_SB_LEN: u8 = 0x83;
+const OP_SB_CLEAR: u8 = 0x84;
+const OP_BB_EXTEND: u8 = 0x85;
+const OP_BB_RESERVE: u8 = 0x86;
+const OP_BB_CLEAR: u8 = 0x87;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -789,8 +839,6 @@ const TY_CLASS: u8 = 4;
 const TY_LIST: u8 = 5;
 const TY_MAP: u8 = 6;
 const TY_FN: u8 = 7;
-const TY_SB: u8 = 8;
-const TY_BB: u8 = 9;
 const TY_INST: u8 = 10;
 const TY_TUPLE: u8 = 11;
 const TY_VAR: u8 = 12;
@@ -1056,8 +1104,6 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
             write_u32(out, *i);
         }
         BcType::Digest => out.push(TY_DIGEST),
-        BcType::StringBuilder => out.push(TY_SB),
-        BcType::ByteBuffer => out.push(TY_BB),
         BcType::Fault => out.push(TY_FAULT),
         BcType::Request => out.push(TY_REQUEST),
         BcType::PolicyTable => out.push(TY_POLICY_TABLE),
@@ -1144,15 +1190,15 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::NeInt => out.push(OP_NE_INT),
         Instr::EqBool => out.push(OP_EQ_BOOL),
         Instr::NeBool => out.push(OP_NE_BOOL),
-        Instr::EqStr => out.push(OP_EQ_STR),
-        Instr::NeStr => out.push(OP_NE_STR),
-        Instr::StrByteLen => out.push(OP_STR_BYTE_LEN),
-        Instr::StrCharCount => out.push(OP_STR_CHAR_COUNT),
-        Instr::StrConcat => out.push(OP_STR_CONCAT),
-        Instr::StrStartsWith => out.push(OP_STR_STARTS_WITH),
-        Instr::StrEndsWith => out.push(OP_STR_ENDS_WITH),
-        Instr::StrContains => out.push(OP_STR_CONTAINS),
-        Instr::StrFindIndex => out.push(OP_STR_FIND_INDEX),
+        Instr::Native(NativeInstr::EqStr) => out.push(OP_EQ_STR),
+        Instr::Native(NativeInstr::NeStr) => out.push(OP_NE_STR),
+        Instr::Native(NativeInstr::StrByteLen) => out.push(OP_STR_BYTE_LEN),
+        Instr::Native(NativeInstr::StrCharCount) => out.push(OP_STR_CHAR_COUNT),
+        Instr::Native(NativeInstr::StrConcat) => out.push(OP_STR_CONCAT),
+        Instr::Native(NativeInstr::StrStartsWith) => out.push(OP_STR_STARTS_WITH),
+        Instr::Native(NativeInstr::StrEndsWith) => out.push(OP_STR_ENDS_WITH),
+        Instr::Native(NativeInstr::StrContains) => out.push(OP_STR_CONTAINS),
+        Instr::Native(NativeInstr::StrFindIndex) => out.push(OP_STR_FIND_INDEX),
         Instr::EqRef => out.push(OP_EQ_REF),
         Instr::NeRef => out.push(OP_NE_REF),
         Instr::Call(idx) => {
@@ -1243,18 +1289,33 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::MapHas => out.push(OP_MAP_HAS),
         Instr::MapAt => out.push(OP_MAP_AT),
         Instr::MapPut => out.push(OP_MAP_PUT),
-        Instr::SbNew => out.push(OP_SB_NEW),
-        Instr::SbAppendStr => out.push(OP_SB_APPEND_STR),
-        Instr::SbAppendInt => out.push(OP_SB_APPEND_INT),
-        Instr::SbAppendBool => out.push(OP_SB_APPEND_BOOL),
-        Instr::SbBuild => out.push(OP_SB_BUILD),
-        Instr::BbNew => out.push(OP_BB_NEW),
-        Instr::BbAppend => out.push(OP_BB_APPEND),
-        Instr::BbLen => out.push(OP_BB_LEN),
-        Instr::BbBuild => out.push(OP_BB_BUILD),
-        Instr::BytesNew => out.push(OP_BYTES_NEW),
-        Instr::BytesLen => out.push(OP_BYTES_LEN),
-        Instr::BytesText => out.push(OP_BYTES_TEXT),
+        Instr::Native(NativeInstr::SbNew) => out.push(OP_SB_NEW),
+        Instr::Native(NativeInstr::SbAppendStr) => out.push(OP_SB_APPEND_STR),
+        Instr::Native(NativeInstr::SbAppendInt) => out.push(OP_SB_APPEND_INT),
+        Instr::Native(NativeInstr::SbAppendBool) => out.push(OP_SB_APPEND_BOOL),
+        Instr::Native(NativeInstr::SbBuild) => out.push(OP_SB_BUILD),
+        Instr::Native(NativeInstr::SbLen) => out.push(OP_SB_LEN),
+        Instr::Native(NativeInstr::SbClear) => out.push(OP_SB_CLEAR),
+        Instr::Native(NativeInstr::BbNew) => out.push(OP_BB_NEW),
+        Instr::Native(NativeInstr::BbAppend) => out.push(OP_BB_APPEND),
+        Instr::Native(NativeInstr::BbLen) => out.push(OP_BB_LEN),
+        Instr::Native(NativeInstr::BbBuild) => out.push(OP_BB_BUILD),
+        Instr::Native(NativeInstr::BbExtend) => out.push(OP_BB_EXTEND),
+        Instr::Native(NativeInstr::BbReserve) => out.push(OP_BB_RESERVE),
+        Instr::Native(NativeInstr::BbClear) => out.push(OP_BB_CLEAR),
+        Instr::Native(NativeInstr::BytesNew) => out.push(OP_BYTES_NEW),
+        Instr::Native(NativeInstr::BytesLen) => out.push(OP_BYTES_LEN),
+        Instr::Native(NativeInstr::BytesText) => out.push(OP_BYTES_TEXT),
+        Instr::Native(NativeInstr::BytesAt) => out.push(OP_BYTES_AT),
+        Instr::Native(NativeInstr::BytesGet) => out.push(OP_BYTES_GET),
+        Instr::Native(NativeInstr::BytesSlice) => out.push(OP_BYTES_SLICE),
+        Instr::Native(NativeInstr::BytesConcat) => out.push(OP_BYTES_CONCAT),
+        Instr::Native(NativeInstr::BytesStartsWith) => out.push(OP_BYTES_STARTS_WITH),
+        Instr::Native(NativeInstr::BytesFindIndex) => out.push(OP_BYTES_FIND_INDEX),
+        Instr::Native(NativeInstr::BytesHex) => out.push(OP_BYTES_HEX),
+        Instr::Native(NativeInstr::BytesIsUtf8) => out.push(OP_BYTES_IS_UTF8),
+        Instr::Native(NativeInstr::EqBytes) => out.push(OP_EQ_BYTES),
+        Instr::Native(NativeInstr::NeBytes) => out.push(OP_NE_BYTES),
         Instr::Freeze => out.push(OP_FREEZE),
         Instr::Digest => out.push(OP_DIGEST),
         Instr::EqDigest => out.push(OP_EQ_DIGEST),
@@ -1839,8 +1900,6 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         }
         TY_VAR => BcType::Var(cur.u32()?),
         TY_DIGEST => BcType::Digest,
-        TY_SB => BcType::StringBuilder,
-        TY_BB => BcType::ByteBuffer,
         TY_FAULT => BcType::Fault,
         TY_REQUEST => BcType::Request,
         TY_POLICY_TABLE => BcType::PolicyTable,
@@ -1885,15 +1944,15 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_NE_INT => Instr::NeInt,
         OP_EQ_BOOL => Instr::EqBool,
         OP_NE_BOOL => Instr::NeBool,
-        OP_EQ_STR => Instr::EqStr,
-        OP_NE_STR => Instr::NeStr,
-        OP_STR_BYTE_LEN => Instr::StrByteLen,
-        OP_STR_CHAR_COUNT => Instr::StrCharCount,
-        OP_STR_CONCAT => Instr::StrConcat,
-        OP_STR_STARTS_WITH => Instr::StrStartsWith,
-        OP_STR_ENDS_WITH => Instr::StrEndsWith,
-        OP_STR_CONTAINS => Instr::StrContains,
-        OP_STR_FIND_INDEX => Instr::StrFindIndex,
+        OP_EQ_STR => Instr::Native(NativeInstr::EqStr),
+        OP_NE_STR => Instr::Native(NativeInstr::NeStr),
+        OP_STR_BYTE_LEN => Instr::Native(NativeInstr::StrByteLen),
+        OP_STR_CHAR_COUNT => Instr::Native(NativeInstr::StrCharCount),
+        OP_STR_CONCAT => Instr::Native(NativeInstr::StrConcat),
+        OP_STR_STARTS_WITH => Instr::Native(NativeInstr::StrStartsWith),
+        OP_STR_ENDS_WITH => Instr::Native(NativeInstr::StrEndsWith),
+        OP_STR_CONTAINS => Instr::Native(NativeInstr::StrContains),
+        OP_STR_FIND_INDEX => Instr::Native(NativeInstr::StrFindIndex),
         OP_EQ_REF => Instr::EqRef,
         OP_NE_REF => Instr::NeRef,
         OP_CALL => Instr::Call(cur.u32()?),
@@ -1945,18 +2004,33 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_MAP_HAS => Instr::MapHas,
         OP_MAP_AT => Instr::MapAt,
         OP_MAP_PUT => Instr::MapPut,
-        OP_SB_NEW => Instr::SbNew,
-        OP_SB_APPEND_STR => Instr::SbAppendStr,
-        OP_SB_APPEND_INT => Instr::SbAppendInt,
-        OP_SB_APPEND_BOOL => Instr::SbAppendBool,
-        OP_SB_BUILD => Instr::SbBuild,
-        OP_BB_NEW => Instr::BbNew,
-        OP_BB_APPEND => Instr::BbAppend,
-        OP_BB_LEN => Instr::BbLen,
-        OP_BB_BUILD => Instr::BbBuild,
-        OP_BYTES_NEW => Instr::BytesNew,
-        OP_BYTES_LEN => Instr::BytesLen,
-        OP_BYTES_TEXT => Instr::BytesText,
+        OP_SB_NEW => Instr::Native(NativeInstr::SbNew),
+        OP_SB_APPEND_STR => Instr::Native(NativeInstr::SbAppendStr),
+        OP_SB_APPEND_INT => Instr::Native(NativeInstr::SbAppendInt),
+        OP_SB_APPEND_BOOL => Instr::Native(NativeInstr::SbAppendBool),
+        OP_SB_BUILD => Instr::Native(NativeInstr::SbBuild),
+        OP_SB_LEN => Instr::Native(NativeInstr::SbLen),
+        OP_SB_CLEAR => Instr::Native(NativeInstr::SbClear),
+        OP_BB_NEW => Instr::Native(NativeInstr::BbNew),
+        OP_BB_APPEND => Instr::Native(NativeInstr::BbAppend),
+        OP_BB_LEN => Instr::Native(NativeInstr::BbLen),
+        OP_BB_BUILD => Instr::Native(NativeInstr::BbBuild),
+        OP_BB_EXTEND => Instr::Native(NativeInstr::BbExtend),
+        OP_BB_RESERVE => Instr::Native(NativeInstr::BbReserve),
+        OP_BB_CLEAR => Instr::Native(NativeInstr::BbClear),
+        OP_BYTES_NEW => Instr::Native(NativeInstr::BytesNew),
+        OP_BYTES_LEN => Instr::Native(NativeInstr::BytesLen),
+        OP_BYTES_TEXT => Instr::Native(NativeInstr::BytesText),
+        OP_BYTES_AT => Instr::Native(NativeInstr::BytesAt),
+        OP_BYTES_GET => Instr::Native(NativeInstr::BytesGet),
+        OP_BYTES_SLICE => Instr::Native(NativeInstr::BytesSlice),
+        OP_BYTES_CONCAT => Instr::Native(NativeInstr::BytesConcat),
+        OP_BYTES_STARTS_WITH => Instr::Native(NativeInstr::BytesStartsWith),
+        OP_BYTES_FIND_INDEX => Instr::Native(NativeInstr::BytesFindIndex),
+        OP_BYTES_HEX => Instr::Native(NativeInstr::BytesHex),
+        OP_BYTES_IS_UTF8 => Instr::Native(NativeInstr::BytesIsUtf8),
+        OP_EQ_BYTES => Instr::Native(NativeInstr::EqBytes),
+        OP_NE_BYTES => Instr::Native(NativeInstr::NeBytes),
         OP_FREEZE => Instr::Freeze,
         OP_DIGEST => Instr::Digest,
         OP_EQ_DIGEST => Instr::EqDigest,
@@ -2019,8 +2093,8 @@ mod tests {
                 BcType::List(1),
                 BcType::Map(2, 1),
                 BcType::Fn(vec![1], vec![false], 1, vec![BcRow::Op(1)]),
-                BcType::StringBuilder,
-                BcType::ByteBuffer,
+                BcType::Class(0),
+                BcType::Class(0),
                 BcType::Var(0),
                 BcType::Inst(1, vec![1]),
                 BcType::Tuple(vec![1, 2]),
@@ -2132,14 +2206,14 @@ mod tests {
             Instr::StoreLocal(1),
             Instr::Pop,
             Instr::Add,
-            Instr::EqStr,
-            Instr::StrByteLen,
-            Instr::StrCharCount,
-            Instr::StrConcat,
-            Instr::StrStartsWith,
-            Instr::StrEndsWith,
-            Instr::StrContains,
-            Instr::StrFindIndex,
+            Instr::Native(NativeInstr::EqStr),
+            Instr::Native(NativeInstr::StrByteLen),
+            Instr::Native(NativeInstr::StrCharCount),
+            Instr::Native(NativeInstr::StrConcat),
+            Instr::Native(NativeInstr::StrStartsWith),
+            Instr::Native(NativeInstr::StrEndsWith),
+            Instr::Native(NativeInstr::StrContains),
+            Instr::Native(NativeInstr::StrFindIndex),
             Instr::EqRef,
             Instr::NeRef,
             Instr::Call(0),
@@ -2176,15 +2250,15 @@ mod tests {
             Instr::MapHas,
             Instr::MapAt,
             Instr::MapPut,
-            Instr::SbNew,
-            Instr::SbAppendStr,
-            Instr::SbAppendInt,
-            Instr::SbAppendBool,
-            Instr::SbBuild,
-            Instr::BbNew,
-            Instr::BbAppend,
-            Instr::BbLen,
-            Instr::BbBuild,
+            Instr::Native(NativeInstr::SbNew),
+            Instr::Native(NativeInstr::SbAppendStr),
+            Instr::Native(NativeInstr::SbAppendInt),
+            Instr::Native(NativeInstr::SbAppendBool),
+            Instr::Native(NativeInstr::SbBuild),
+            Instr::Native(NativeInstr::BbNew),
+            Instr::Native(NativeInstr::BbAppend),
+            Instr::Native(NativeInstr::BbLen),
+            Instr::Native(NativeInstr::BbBuild),
             Instr::Freeze,
             Instr::Jump(0),
             Instr::JumpIfFalse(0),

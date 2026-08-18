@@ -609,8 +609,6 @@ impl<'a> Materializer<'a> {
             IfaceType::Bool => lm_types::BOOL,
             IfaceType::Int => lm_types::INT,
             IfaceType::Str => lm_types::STRING,
-            IfaceType::StringBuilder => lm_types::STRING_BUILDER,
-            IfaceType::ByteBuffer => lm_types::BYTE_BUFFER,
             IfaceType::Bytes => lm_types::BYTES,
             IfaceType::FileHandle => lm_types::FILE_HANDLE,
             IfaceType::ResourceHandle => lm_types::RESOURCE_HANDLE,

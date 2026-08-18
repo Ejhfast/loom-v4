@@ -98,6 +98,9 @@ pub enum NativeRepr {
     Int,
     Bool,
     String,
+    Bytes,
+    StringBuilder,
+    ByteBuffer,
 }
 
 /// One checked class with its full field layout.
@@ -215,16 +218,7 @@ pub enum NativeOp {
     MapPut,
     /// Non-faulting lookup returning core `Option[V]`.
     MapGet,
-    SbNew,
-    SbAppend,
-    SbBuild,
-    BbNew,
-    BbAppend,
-    BbLen,
-    BbBuild,
     BytesNew,
-    BytesLen,
-    BytesText,
     Freeze,
     /// The canonical digest of one frozen graph.
     Digest,

@@ -1,0 +1,141 @@
+# Core: immutable bytes and mutable builders.
+
+final class Bytes
+  def len(self): Int
+    intrinsic("bytes.len", self)
+  end
+
+  def is_empty(self): Bool
+    self.len() == 0
+  end
+
+  def at(self, index: Int): Int
+    intrinsic("bytes.at", self, index)
+  end
+
+  def get(self, index: Int): Option[Int]
+    value = intrinsic("bytes.get", self, index)
+    if value < 0
+      None
+    else
+      Some(value)
+    end
+  end
+
+  def slice(self, start: Int, length: Int): Result[Bytes, IndexError]
+    if start < 0 or length < 0
+      Err(IndexError.OutOfBounds)
+    elsif start > self.len()
+      Err(IndexError.OutOfBounds)
+    elsif length > self.len() - start
+      Err(IndexError.OutOfBounds)
+    else
+      Ok(intrinsic("bytes.slice", self, start, length))
+    end
+  end
+
+  def concat(self, other: Bytes): Bytes
+    intrinsic("bytes.concat", self, other)
+  end
+
+  def starts_with(self, prefix: Bytes): Bool
+    intrinsic("bytes.starts_with", self, prefix)
+  end
+
+  def find(self, needle: Bytes): Option[Int]
+    index = intrinsic("bytes.find_index", self, needle)
+    if index < 0
+      None
+    else
+      Some(index)
+    end
+  end
+
+  def hex(self): String
+    intrinsic("bytes.hex", self)
+  end
+
+  def utf8(self): Result[String, Utf8Error]
+    if intrinsic("bytes.is_utf8", self)
+      Ok(intrinsic("bytes.text", self))
+    else
+      Err(Utf8Error.InvalidEncoding)
+    end
+  end
+
+  def text(self): String
+    intrinsic("bytes.text", self)
+  end
+
+  def __add__(self, other: Bytes): Bytes
+    intrinsic("bytes.concat", self, other)
+  end
+
+  def __eq__(self, other: Bytes): Bool
+    intrinsic("bytes.eq", self, other)
+  end
+
+  def __ne__(self, other: Bytes): Bool
+    intrinsic("bytes.ne", self, other)
+  end
+end
+
+final class StringBuilder
+  def append(mut self, text: String): StringBuilder
+    intrinsic("string_builder.append", self, text)
+  end
+
+  def push_string(mut self, text: String): StringBuilder
+    intrinsic("string_builder.append", self, text)
+  end
+
+  def len(self): Int
+    intrinsic("string_builder.len", self)
+  end
+
+  def clear(mut self): StringBuilder
+    intrinsic("string_builder.clear", self)
+  end
+
+  def build(self): String
+    intrinsic("string_builder.build", self)
+  end
+
+  def finish(self): String
+    intrinsic("string_builder.build", self)
+  end
+end
+
+final class ByteBuffer
+  def append(mut self, byte: Int): ByteBuffer
+    intrinsic("byte_buffer.append", self, byte)
+  end
+
+  def push(mut self, byte: Int): ByteBuffer
+    intrinsic("byte_buffer.append", self, byte)
+  end
+
+  def extend(mut self, bytes: Bytes): ByteBuffer
+    intrinsic("byte_buffer.extend", self, bytes)
+  end
+
+  def reserve(mut self, additional: Int): ByteBuffer
+    intrinsic("byte_buffer.reserve", self, additional)
+  end
+
+  def clear(mut self): ByteBuffer
+    intrinsic("byte_buffer.clear", self)
+  end
+
+  def len(self): Int
+    intrinsic("byte_buffer.len", self)
+  end
+
+  def build(self): Bytes
+    intrinsic("byte_buffer.build", self)
+  end
+
+  def finish(self): Bytes
+    intrinsic("byte_buffer.build", self)
+  end
+end

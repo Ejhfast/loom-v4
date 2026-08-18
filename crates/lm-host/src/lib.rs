@@ -397,7 +397,7 @@ mod tests {
             fs_ok_value(run_host(
                 &mut host,
                 lm_abi::OP_FS_WRITE,
-                vec![HostArg::File(token), HostArg::Bytes(b"hello".to_vec())],
+                vec![HostArg::File(token), HostArg::Bytes(b"hello".into())],
             )),
             HostValue::Int(5)
         );
@@ -426,7 +426,7 @@ mod tests {
                 lm_abi::OP_FS_READ,
                 vec![HostArg::File(token), HostArg::Int(5)],
             )),
-            HostValue::Bytes(b"hello".to_vec())
+            HostValue::Bytes(b"hello".into())
         );
         assert_eq!(
             fs_ok_value(run_host(

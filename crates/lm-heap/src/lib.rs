@@ -20,7 +20,7 @@ use lm_value::Value;
 pub use shape::{
     dump_shapes, BoundaryPolicy, MapIndex, Object, ShapeDesc, MIN_OBJECT_COST, SHAPES,
 };
-pub use shared::SharedText;
+pub use shared::{SharedBytes, SharedText};
 use std::cell::Cell;
 use std::rc::Rc;
 

@@ -1106,15 +1106,15 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::NeInt
         | Instr::EqBool
         | Instr::NeBool
-        | Instr::EqStr
-        | Instr::NeStr
-        | Instr::StrByteLen
-        | Instr::StrCharCount
-        | Instr::StrConcat
-        | Instr::StrStartsWith
-        | Instr::StrEndsWith
-        | Instr::StrContains
-        | Instr::StrFindIndex
+        | Instr::Native(lm_bytecode::NativeInstr::EqStr)
+        | Instr::Native(lm_bytecode::NativeInstr::NeStr)
+        | Instr::Native(lm_bytecode::NativeInstr::StrByteLen)
+        | Instr::Native(lm_bytecode::NativeInstr::StrCharCount)
+        | Instr::Native(lm_bytecode::NativeInstr::StrConcat)
+        | Instr::Native(lm_bytecode::NativeInstr::StrStartsWith)
+        | Instr::Native(lm_bytecode::NativeInstr::StrEndsWith)
+        | Instr::Native(lm_bytecode::NativeInstr::StrContains)
+        | Instr::Native(lm_bytecode::NativeInstr::StrFindIndex)
         | Instr::EqRef
         | Instr::NeRef
         | Instr::CallValue { .. }
@@ -1129,18 +1129,33 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::MapHas
         | Instr::MapAt
         | Instr::MapPut
-        | Instr::SbNew
-        | Instr::SbAppendStr
-        | Instr::SbAppendInt
-        | Instr::SbAppendBool
-        | Instr::SbBuild
-        | Instr::BbNew
-        | Instr::BbAppend
-        | Instr::BbLen
-        | Instr::BbBuild
-        | Instr::BytesNew
-        | Instr::BytesLen
-        | Instr::BytesText
+        | Instr::Native(lm_bytecode::NativeInstr::SbNew)
+        | Instr::Native(lm_bytecode::NativeInstr::SbAppendStr)
+        | Instr::Native(lm_bytecode::NativeInstr::SbAppendInt)
+        | Instr::Native(lm_bytecode::NativeInstr::SbAppendBool)
+        | Instr::Native(lm_bytecode::NativeInstr::SbBuild)
+        | Instr::Native(lm_bytecode::NativeInstr::SbLen)
+        | Instr::Native(lm_bytecode::NativeInstr::SbClear)
+        | Instr::Native(lm_bytecode::NativeInstr::BbNew)
+        | Instr::Native(lm_bytecode::NativeInstr::BbAppend)
+        | Instr::Native(lm_bytecode::NativeInstr::BbLen)
+        | Instr::Native(lm_bytecode::NativeInstr::BbBuild)
+        | Instr::Native(lm_bytecode::NativeInstr::BbExtend)
+        | Instr::Native(lm_bytecode::NativeInstr::BbReserve)
+        | Instr::Native(lm_bytecode::NativeInstr::BbClear)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesNew)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesLen)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesText)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesSlice)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesConcat)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesStartsWith)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesFindIndex)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesHex)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8)
+        | Instr::Native(lm_bytecode::NativeInstr::EqBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::NeBytes)
         | Instr::Freeze
         | Instr::Digest
         | Instr::EqDigest

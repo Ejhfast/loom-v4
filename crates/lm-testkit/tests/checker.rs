@@ -156,7 +156,7 @@ fn week_two_negative_cases_have_stable_codes() {
     );
     // Calling a value that is not a closure.
     assert_eq!(code_of("x = 1\nx(2)\n"), "E1032");
-    // A map key must be Bool, Int, or String.
+    // A map key must be Bool, Int, String, or Bytes.
     assert_eq!(code_of("m = {[1]: 2}\nm\n"), "E1033");
     assert_eq!(code_of("m: {[Int]: Int} = {}\nm\n"), "E1033");
     // Interpolation of an unsupported type.

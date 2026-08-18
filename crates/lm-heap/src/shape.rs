@@ -13,7 +13,7 @@ use lm_abi::{FaultCode, SnapshotClass};
 use lm_value::{ObjRef, Value, Witness};
 use std::collections::TryReserveError;
 
-use crate::SharedText;
+use crate::{SharedBytes, SharedText};
 
 /// Logical byte cost of one object header.
 pub(crate) const HEADER_COST: usize = 32;
@@ -193,7 +193,7 @@ pub enum Object {
     /// A byte buffer.
     ByteBuf(Vec<u8>),
     /// Immutable binary data. Born frozen.
-    Bytes(Vec<u8>),
+    Bytes(SharedBytes),
     /// A holder-local handle to one machine in the world registry.
     /// The static type separates `EmptyVm` and `Vm[T]` views.
     NativeVm { vm: u32 },
@@ -567,12 +567,7 @@ impl Object {
                 copied.extend_from_slice(bytes);
                 Object::ByteBuf(copied)
             }
-            Object::Bytes(bytes) => {
-                let mut copied = Vec::new();
-                copied.try_reserve_exact(bytes.len())?;
-                copied.extend_from_slice(bytes);
-                Object::Bytes(copied)
-            }
+            Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
             Object::NativeVm { vm } => Object::NativeVm { vm: *vm },
             Object::NativeTable { vm } => Object::NativeTable { vm: *vm },
             Object::NativeRequest { vm, ordinal } => Object::NativeRequest {
@@ -928,7 +923,7 @@ mod tests {
                 generation: 2,
             },
             Object::NativeSnapshot(std::sync::Arc::new(vec![7, 8, 9])),
-            Object::Bytes(vec![1, 2, 3]),
+            Object::Bytes(vec![1, 2, 3].into()),
             Object::NativeFileHandle { resource: 4 },
             Object::NativeResourceHandle {
                 surface: 1,
@@ -1085,7 +1080,7 @@ mod tests {
                 generation: 0,
             },
             Object::NativeSnapshot(std::sync::Arc::new(Vec::new())),
-            Object::Bytes(Vec::new()),
+            Object::Bytes(SharedBytes::new()),
             Object::NativeFileHandle { resource: 0 },
             Object::NativeResourceHandle {
                 surface: 0,

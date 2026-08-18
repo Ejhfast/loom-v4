@@ -2186,13 +2186,23 @@ A `Map[K,V]` stores entries in insertion order plus an open-addressed index from
 
 Map keys must be frozen and digestible at insertion. The runtime uses a keyed 64-bit lookup hash cached on immutable keys; insertion order, equality, serialization, and digest do not depend on bucket order. The hash seed is VM configuration recorded in snapshots. Fuel charges use logical key/byte size rather than actual probe count.
 
-`String` and `Bytes` own immutable reference-counted storage. A clone can share this storage across trusted in-process holders.
+This version accepts Bool, Int, String, and Bytes map keys.
 
-A String stores valid UTF-8 and a visible byte range. Construction validates UTF-8 once.
+`String` and `Bytes` use immutable reference-counted storage. Each value stores one visible byte range.
 
-A String caches its content hash after the first map lookup. The cache does not affect equality, snapshots, or graph digests.
+A clone or trusted boundary transfer can share the storage. A byte slice also shares its source storage.
 
-`StringBuilder` and `ByteBuffer` use private growable buffers. `finish` transfers or copies the allocation into an immutable value.
+A String contains valid UTF-8. Construction validates external text once.
+
+Bytes accepts every byte sequence. Construction does not validate UTF-8.
+
+String and Bytes cache their content hashes after the first map lookup. The caches do not affect equality, snapshots, or graph digests.
+
+`StringBuilder` and `ByteBuffer` are final nominal core classes. Their native payloads stay holder-local.
+
+Each builder uses one private growable buffer. `StringBuilder.build` returns String. `ByteBuffer.build` returns Bytes.
+
+`ByteBuffer.build` never validates UTF-8. Bytes validates UTF-8 only during an explicit text conversion.
 
 ### 22.10 Graph engine
 
@@ -2590,7 +2600,60 @@ Core defines `Utf8Error`, `IndexError`, and `ParseIntError`. Tier B can use thes
 
 Methods that return `Char` remain deferred. Float parsing remains deferred until core defines `Float`.
 
-`Bytes` supports `len`, `get`, `at`, `slice`, `concat`, `starts_with`, `find`, `hex`, and `utf8`. `StringBuilder` supports `push_char`, `push_string`, `clear`, `len`, and `finish`; `ByteBuffer` supports `push`, `extend`, `reserve`, `clear`, and `finish`.
+Tier A includes the following Bytes surface.
+
+```text
+len() -> Int
+is_empty() -> Bool
+at(index: Int) -> Int
+get(index: Int) -> Option[Int]
+slice(start: Int, length: Int) -> Result[Bytes,IndexError]
+concat(other: Bytes) -> Bytes
+starts_with(prefix: Bytes) -> Bool
+find(needle: Bytes) -> Option[Int]
+hex() -> String
+utf8() -> Result[String,Utf8Error]
+text() -> String
+__add__(other: Bytes) -> Bytes
+__eq__(other: Bytes) -> Bool
+__ne__(other: Bytes) -> Bool
+```
+
+`at` faults with `IndexOutOfBounds` for an invalid index. `get` returns `None` for an invalid index.
+
+`slice` returns `Err(IndexError.OutOfBounds)` for an invalid range. A successful slice shares immutable storage.
+
+`find` returns a byte offset. `hex` uses lowercase hexadecimal text.
+
+`utf8` reports invalid encoding through its result. `text` is a compatibility conversion that faults with `BadCast`.
+
+`+`, `==`, and `!=` use the paired-underscore Bytes hook methods.
+
+The final nominal builders have the following surface.
+
+```text
+StringBuilder.append(text: String) -> StringBuilder
+StringBuilder.push_string(text: String) -> StringBuilder
+StringBuilder.len() -> Int
+StringBuilder.clear() -> StringBuilder
+StringBuilder.build() -> String
+StringBuilder.finish() -> String
+
+ByteBuffer.append(byte: Int) -> ByteBuffer
+ByteBuffer.push(byte: Int) -> ByteBuffer
+ByteBuffer.extend(bytes: Bytes) -> ByteBuffer
+ByteBuffer.reserve(additional: Int) -> ByteBuffer
+ByteBuffer.clear() -> ByteBuffer
+ByteBuffer.len() -> Int
+ByteBuffer.build() -> Bytes
+ByteBuffer.finish() -> Bytes
+```
+
+The builders use ordinary class types in bytecode and module interfaces. Native payload tags implement their storage.
+
+File and network operations exchange Bytes. An in-process host boundary can share immutable Bytes storage.
+
+`StringBuilder.push_char` remains deferred with Char methods. `ByteBuffer.build` never performs a text conversion.
 
 Interpolation lowers to `std/fmt` append operations. The core scalar/string/bytes/digest/fault set has pinned formatting implementations. Other types format only through explicit functions because version 0.2 has no traits.
 

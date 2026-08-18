@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 7;
+const VERSION: u16 = 8;
 
 /// The domain tag of the interface hash.
 const TAG_IFACE: &[u8] = b"lm-iface-v1\0";
@@ -82,8 +82,6 @@ pub enum IfaceType {
     Bool,
     Int,
     Str,
-    StringBuilder,
-    ByteBuffer,
     Bytes,
     FileHandle,
     ResourceHandle,
@@ -324,8 +322,6 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
         IfaceType::Bool => out.push(1),
         IfaceType::Int => out.push(2),
         IfaceType::Str => out.push(3),
-        IfaceType::StringBuilder => out.push(4),
-        IfaceType::ByteBuffer => out.push(5),
         IfaceType::Fault => out.push(6),
         IfaceType::Request => out.push(7),
         IfaceType::PolicyTable => out.push(8),
@@ -543,8 +539,6 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
         1 => IfaceType::Bool,
         2 => IfaceType::Int,
         3 => IfaceType::Str,
-        4 => IfaceType::StringBuilder,
-        5 => IfaceType::ByteBuffer,
         6 => IfaceType::Fault,
         7 => IfaceType::Request,
         8 => IfaceType::PolicyTable,
@@ -816,8 +810,6 @@ pub fn type_text(ty: &IfaceType) -> String {
         IfaceType::Bool => "Bool".to_string(),
         IfaceType::Int => "Int".to_string(),
         IfaceType::Str => "String".to_string(),
-        IfaceType::StringBuilder => "StringBuilder".to_string(),
-        IfaceType::ByteBuffer => "ByteBuffer".to_string(),
         IfaceType::Bytes => "Bytes".to_string(),
         IfaceType::FileHandle => "FileHandle".to_string(),
         IfaceType::ResourceHandle => "ResourceHandle".to_string(),

@@ -44,10 +44,12 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/string.lm"),
     "\n",
+    include_str!("../../../core/bytes.lm"),
+    "\n",
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 23] = [
+pub const PRELUDE_TYPES: [&str; 26] = [
     "Option",
     "Result",
     "Ordering",
@@ -71,6 +73,9 @@ pub const PRELUDE_TYPES: [&str; 23] = [
     "Utf8Error",
     "IndexError",
     "ParseIntError",
+    "Bytes",
+    "StringBuilder",
+    "ByteBuffer",
 ];
 
 /// The constructor names the prelude places into unqualified scope.
@@ -925,13 +930,16 @@ pub(crate) fn resolve_row(
 }
 
 pub(crate) fn check_key_type(ctx: &Ctx, key: TypeId, span: Span) -> Result<(), Diagnostic> {
-    if matches!(key, lm_types::BOOL | lm_types::INT | lm_types::STRING) {
+    if matches!(
+        key,
+        lm_types::BOOL | lm_types::INT | lm_types::STRING | lm_types::BYTES
+    ) {
         Ok(())
     } else {
         Err(Diagnostic::new(
             "E1033",
             format!(
-                "a map key must be Bool, Int, or String, found {}",
+                "a map key must be Bool, Int, String, or Bytes, found {}",
                 ctx.store.display(key)
             ),
             span,
@@ -1002,6 +1010,14 @@ pub(crate) fn check_mailbox_type(ctx: &Ctx, mailbox: TypeId, span: Span) -> Resu
 fn holder_local_part(ctx: &Ctx, ty: TypeId, seen: &mut Vec<u32>) -> Option<TypeId> {
     if ctx.store.is_holder_local_native(ty) {
         return Some(ty);
+    }
+    if let Type::Class(class) = ctx.store.get(ty) {
+        if matches!(
+            ctx.classes[class.0 as usize].native_repr,
+            Some(NativeRepr::StringBuilder | NativeRepr::ByteBuffer)
+        ) {
+            return Some(ty);
+        }
     }
     match ctx.store.get(ty).clone() {
         Type::List(item) => holder_local_part(ctx, item, seen),
@@ -1853,6 +1869,9 @@ fn resolve_class(
         (true, "Int") => Some(NativeRepr::Int),
         (true, "Bool") => Some(NativeRepr::Bool),
         (true, "String") => Some(NativeRepr::String),
+        (true, "Bytes") => Some(NativeRepr::Bytes),
+        (true, "StringBuilder") => Some(NativeRepr::StringBuilder),
+        (true, "ByteBuffer") => Some(NativeRepr::ByteBuffer),
         _ => None,
     };
     if native_repr.is_some()
@@ -1872,6 +1891,10 @@ fn resolve_class(
         Some(NativeRepr::Int) => lm_types::INT,
         Some(NativeRepr::Bool) => lm_types::BOOL,
         Some(NativeRepr::String) => lm_types::STRING,
+        Some(NativeRepr::Bytes) => lm_types::BYTES,
+        Some(NativeRepr::StringBuilder) | Some(NativeRepr::ByteBuffer) => {
+            ctx.store.intern(Type::Class(ClassId(idx)))
+        }
         None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
         None => {
             let vars: Vec<TypeId> = (0..type_names.len())

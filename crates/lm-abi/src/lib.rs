@@ -50,6 +50,8 @@ pub enum AbiType {
     Int,
     Str,
     Bytes,
+    StringBuilder,
+    ByteBuffer,
     FileHandle,
     OpenOptions,
     SeekFrom,
@@ -74,6 +76,8 @@ impl AbiType {
             AbiType::Int => "Int",
             AbiType::Str => "String",
             AbiType::Bytes => "Bytes",
+            AbiType::StringBuilder => "StringBuilder",
+            AbiType::ByteBuffer => "ByteBuffer",
             AbiType::FileHandle => "FileHandle",
             AbiType::OpenOptions => "OpenOptions",
             AbiType::SeekFrom => "SeekFrom",
@@ -89,8 +93,8 @@ impl AbiType {
 
 /// The intrinsic ABI version.
 ///
-/// Version 3 adds immutable String operations.
-pub const INTRINSIC_ABI_VERSION: u32 = 3;
+/// Version 4 adds immutable Bytes operations and nominal builders.
+pub const INTRINSIC_ABI_VERSION: u32 = 4;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -130,9 +134,31 @@ pub const INTRINSIC_STRING_CONTAINS: IntrinsicSlot = 21;
 pub const INTRINSIC_STRING_FIND_INDEX: IntrinsicSlot = 22;
 pub const INTRINSIC_STRING_EQ: IntrinsicSlot = 23;
 pub const INTRINSIC_STRING_NE: IntrinsicSlot = 24;
+pub const INTRINSIC_BYTES_LEN: IntrinsicSlot = 25;
+pub const INTRINSIC_BYTES_AT: IntrinsicSlot = 26;
+pub const INTRINSIC_BYTES_GET: IntrinsicSlot = 27;
+pub const INTRINSIC_BYTES_SLICE: IntrinsicSlot = 28;
+pub const INTRINSIC_BYTES_CONCAT: IntrinsicSlot = 29;
+pub const INTRINSIC_BYTES_STARTS_WITH: IntrinsicSlot = 30;
+pub const INTRINSIC_BYTES_FIND_INDEX: IntrinsicSlot = 31;
+pub const INTRINSIC_BYTES_HEX: IntrinsicSlot = 32;
+pub const INTRINSIC_BYTES_IS_UTF8: IntrinsicSlot = 33;
+pub const INTRINSIC_BYTES_TEXT: IntrinsicSlot = 34;
+pub const INTRINSIC_BYTES_EQ: IntrinsicSlot = 35;
+pub const INTRINSIC_BYTES_NE: IntrinsicSlot = 36;
+pub const INTRINSIC_STRING_BUILDER_APPEND: IntrinsicSlot = 37;
+pub const INTRINSIC_STRING_BUILDER_LEN: IntrinsicSlot = 38;
+pub const INTRINSIC_STRING_BUILDER_CLEAR: IntrinsicSlot = 39;
+pub const INTRINSIC_STRING_BUILDER_BUILD: IntrinsicSlot = 40;
+pub const INTRINSIC_BYTE_BUFFER_APPEND: IntrinsicSlot = 41;
+pub const INTRINSIC_BYTE_BUFFER_EXTEND: IntrinsicSlot = 42;
+pub const INTRINSIC_BYTE_BUFFER_RESERVE: IntrinsicSlot = 43;
+pub const INTRINSIC_BYTE_BUFFER_CLEAR: IntrinsicSlot = 44;
+pub const INTRINSIC_BYTE_BUFFER_LEN: IntrinsicSlot = 45;
+pub const INTRINSIC_BYTE_BUFFER_BUILD: IntrinsicSlot = 46;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 25] = [
+pub const INTRINSICS: [IntrinsicDef; 47] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::Int],
@@ -281,6 +307,138 @@ pub const INTRINSICS: [IntrinsicDef; 25] = [
         name: "string.ne",
         params: &[AbiType::Str, AbiType::Str],
         reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.len",
+        params: &[AbiType::Bytes],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.at",
+        params: &[AbiType::Bytes, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.get",
+        params: &[AbiType::Bytes, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.slice",
+        params: &[AbiType::Bytes, AbiType::Int, AbiType::Int],
+        reply: AbiType::Bytes,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.concat",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bytes,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.starts_with",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.find_index",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.hex",
+        params: &[AbiType::Bytes],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.is_utf8",
+        params: &[AbiType::Bytes],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.text",
+        params: &[AbiType::Bytes],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.eq",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.ne",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.append",
+        params: &[AbiType::StringBuilder, AbiType::Str],
+        reply: AbiType::StringBuilder,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.len",
+        params: &[AbiType::StringBuilder],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.clear",
+        params: &[AbiType::StringBuilder],
+        reply: AbiType::StringBuilder,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.build",
+        params: &[AbiType::StringBuilder],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.append",
+        params: &[AbiType::ByteBuffer, AbiType::Int],
+        reply: AbiType::ByteBuffer,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.extend",
+        params: &[AbiType::ByteBuffer, AbiType::Bytes],
+        reply: AbiType::ByteBuffer,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.reserve",
+        params: &[AbiType::ByteBuffer, AbiType::Int],
+        reply: AbiType::ByteBuffer,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.clear",
+        params: &[AbiType::ByteBuffer],
+        reply: AbiType::ByteBuffer,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.len",
+        params: &[AbiType::ByteBuffer],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.build",
+        params: &[AbiType::ByteBuffer],
+        reply: AbiType::Bytes,
         semantic_revision: 1,
     },
 ];

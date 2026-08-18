@@ -29,28 +29,24 @@ pub const INT: TypeId = TypeId(2);
 pub const STRING: TypeId = TypeId(3);
 /// The bottom type for expressions that cannot complete normally.
 pub const NEVER: TypeId = TypeId(4);
-/// The `StringBuilder` native type.
-pub const STRING_BUILDER: TypeId = TypeId(5);
-/// The `ByteBuffer` native type.
-pub const BYTE_BUFFER: TypeId = TypeId(6);
 /// The frozen machine `Fault` value type.
-pub const FAULT: TypeId = TypeId(7);
+pub const FAULT: TypeId = TypeId(5);
 /// The opaque pending-request token type.
-pub const REQUEST: TypeId = TypeId(8);
+pub const REQUEST: TypeId = TypeId(6);
 /// The holder-local policy-table handle type.
-pub const POLICY_TABLE: TypeId = TypeId(9);
+pub const POLICY_TABLE: TypeId = TypeId(7);
 /// The unloaded virtual machine handle type.
-pub const EMPTY_VM: TypeId = TypeId(10);
+pub const EMPTY_VM: TypeId = TypeId(8);
 /// The frozen canonical graph digest type.
-pub const DIGEST: TypeId = TypeId(11);
+pub const DIGEST: TypeId = TypeId(9);
 /// One verified snapshot image whose result type is not yet checked.
-pub const SNAPSHOT_IMAGE: TypeId = TypeId(12);
+pub const SNAPSHOT_IMAGE: TypeId = TypeId(10);
 /// Immutable binary data.
-pub const BYTES: TypeId = TypeId(13);
+pub const BYTES: TypeId = TypeId(11);
 /// A typed file resource designator.
-pub const FILE_HANDLE: TypeId = TypeId(14);
+pub const FILE_HANDLE: TypeId = TypeId(12);
 /// A holder-local resource-management designator.
-pub const RESOURCE_HANDLE: TypeId = TypeId(15);
+pub const RESOURCE_HANDLE: TypeId = TypeId(13);
 
 /// One element of an effect row.
 ///
@@ -84,8 +80,6 @@ pub enum Type {
     Int,
     String,
     Never,
-    StringBuilder,
-    ByteBuffer,
     /// Immutable binary data.
     Bytes,
     /// The frozen canonical graph digest of one value.
@@ -194,8 +188,6 @@ impl TypeStore {
         store.intern(Type::Int);
         store.intern(Type::String);
         store.intern(Type::Never);
-        store.intern(Type::StringBuilder);
-        store.intern(Type::ByteBuffer);
         store.intern(Type::Fault);
         store.intern(Type::Request);
         store.intern(Type::PolicyTable);
@@ -384,8 +376,6 @@ impl TypeStore {
             "Never" => Some(NEVER),
             "Int" => Some(INT),
             "String" => Some(STRING),
-            "StringBuilder" => Some(STRING_BUILDER),
-            "ByteBuffer" => Some(BYTE_BUFFER),
             "Fault" => Some(FAULT),
             "Request" => Some(REQUEST),
             "PolicyTable" => Some(POLICY_TABLE),
@@ -528,8 +518,6 @@ impl TypeStore {
         matches!(
             self.get(id),
             Type::String
-                | Type::StringBuilder
-                | Type::ByteBuffer
                 | Type::Bytes
                 | Type::Digest
                 | Type::Class(_)
@@ -565,9 +553,7 @@ impl TypeStore {
     pub fn is_holder_local_native(&self, id: TypeId) -> bool {
         matches!(
             self.get(id),
-            Type::StringBuilder
-                | Type::ByteBuffer
-                | Type::Request
+            Type::Request
                 | Type::PolicyTable
                 | Type::EmptyVm
                 | Type::Vm(_)
@@ -717,8 +703,6 @@ impl TypeStore {
             Type::Int => "Int".to_string(),
             Type::String => "String".to_string(),
             Type::Never => "Never".to_string(),
-            Type::StringBuilder => "StringBuilder".to_string(),
-            Type::ByteBuffer => "ByteBuffer".to_string(),
             Type::Bytes => "Bytes".to_string(),
             Type::Digest => "Digest".to_string(),
             Type::Class(c) => self.classes[c.0 as usize].name.clone(),
@@ -804,8 +788,8 @@ mod tests {
         assert_eq!(*store.get(INT), Type::Int);
         assert_eq!(*store.get(STRING), Type::String);
         assert_eq!(*store.get(NEVER), Type::Never);
-        assert_eq!(*store.get(STRING_BUILDER), Type::StringBuilder);
-        assert_eq!(*store.get(BYTE_BUFFER), Type::ByteBuffer);
+        assert_eq!(*store.get(FAULT), Type::Fault);
+        assert_eq!(*store.get(BYTES), Type::Bytes);
     }
 
     #[test]

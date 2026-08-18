@@ -36,6 +36,12 @@ pub struct CoreLayout {
     pub boolean: Option<u32>,
     /// The core method table of immutable String values.
     pub string: Option<u32>,
+    /// The core method table of immutable Bytes values.
+    pub bytes: Option<u32>,
+    /// The core method table of StringBuilder values.
+    pub string_builder: Option<u32>,
+    /// The core method table of ByteBuffer values.
+    pub byte_buffer: Option<u32>,
     pub option_some: Option<u32>,
     pub option_none: Option<u32>,
     pub result_ok: Option<u32>,
@@ -100,7 +106,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 62] = [
+pub const PINNED_LABELS: [&str; 65] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -163,6 +169,9 @@ pub const PINNED_LABELS: [&str; 62] = [
     "Int",
     "Bool",
     "String",
+    "Bytes",
+    "StringBuilder",
+    "ByteBuffer",
 ];
 
 /// The core role of immediate integer values.
@@ -173,6 +182,15 @@ pub const ROLE_BOOL: usize = 60;
 
 /// The core role of immutable String values.
 pub const ROLE_STRING: usize = 61;
+
+/// The core role of immutable Bytes values.
+pub const ROLE_BYTES: usize = 62;
+
+/// The core role of StringBuilder values.
+pub const ROLE_STRING_BUILDER: usize = 63;
+
+/// The core role of ByteBuffer values.
+pub const ROLE_BYTE_BUFFER: usize = 64;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -226,6 +244,9 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Int" => &mut layout.int,
         "Bool" => &mut layout.boolean,
         "String" => &mut layout.string,
+        "Bytes" => &mut layout.bytes,
+        "StringBuilder" => &mut layout.string_builder,
+        "ByteBuffer" => &mut layout.byte_buffer,
         "Option" => &mut layout.option,
         "Option.Some" => &mut layout.option_some,
         "Option.None" => &mut layout.option_none,

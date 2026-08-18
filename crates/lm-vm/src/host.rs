@@ -6,7 +6,7 @@
 //! into guest memory crosses this boundary in either direction.
 
 use crate::CompletionKey;
-use lm_heap::SharedText;
+use lm_heap::{SharedBytes, SharedText};
 use std::collections::BTreeMap;
 
 /// One plain-data operation argument.
@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 pub enum HostArg {
     Int(i64),
     Str(SharedText),
-    Bytes(Vec<u8>),
+    Bytes(SharedBytes),
     File(u64),
     OpenOptions(HostOpenOptions),
     SeekFrom(HostSeekFrom),
@@ -58,7 +58,7 @@ pub enum HostValue {
     Unit,
     Int(i64),
     Str(SharedText),
-    Bytes(Vec<u8>),
+    Bytes(SharedBytes),
     File(u64),
     Ctor(CoreCtor, Vec<HostValue>),
 }
@@ -372,7 +372,7 @@ impl RecordingHost {
                 let end = handle.cursor.saturating_add(count).min(file.len());
                 let bytes = file[handle.cursor..end].to_vec();
                 handle.cursor = end;
-                HostStart::Completed(fs_ok(HostValue::Bytes(bytes)))
+                HostStart::Completed(fs_ok(HostValue::Bytes(bytes.into())))
             }
             lm_abi::OP_FS_WRITE => {
                 let (Some(HostArg::File(token)), Some(HostArg::Bytes(bytes))) =
@@ -524,5 +524,25 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
 
     fn close_file(&mut self, token: u64) -> bool {
         self.borrow_mut().close_file(token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_arguments_and_replies_clone_shared_storage() {
+        let bytes = SharedBytes::from(&[0, 255, 1]);
+        let arg = HostArg::Bytes(bytes.clone());
+        let reply = HostValue::Bytes(bytes.clone());
+        let HostArg::Bytes(arg_bytes) = arg else {
+            panic!("the argument is Bytes");
+        };
+        let HostValue::Bytes(reply_bytes) = reply else {
+            panic!("the reply is Bytes");
+        };
+        assert!(bytes.shares_storage(&arg_bytes));
+        assert!(bytes.shares_storage(&reply_bytes));
     }
 }

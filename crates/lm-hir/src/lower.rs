@@ -34,6 +34,8 @@ struct ModLowerer<'m> {
     new_base: u32,
     /// Pinned core indices for the `get` expansions.
     core: CoreIds,
+    /// The nominal class of native string builders.
+    string_builder_class: u32,
 }
 
 impl<'m> ModLowerer<'m> {
@@ -98,8 +100,6 @@ impl<'m> ModLowerer<'m> {
             Type::Bool => self.intern_type(BcType::Bool),
             Type::Int => self.intern_type(BcType::Int),
             Type::String => self.intern_type(BcType::Str),
-            Type::StringBuilder => self.intern_type(BcType::StringBuilder),
-            Type::ByteBuffer => self.intern_type(BcType::ByteBuffer),
             Type::Bytes => self.intern_type(BcType::Bytes),
             Type::FileHandle => self.intern_type(BcType::FileHandle),
             Type::ResourceHandle => self.intern_type(BcType::ResourceHandle),
@@ -189,6 +189,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
         app_index: HashMap::new(),
         new_base: hir.funcs.len() as u32,
         core: hir.core,
+        string_builder_class: hir.core_roles[lm_bytecode::corepin::ROLE_STRING_BUILDER],
     };
     // The canonical primitive prefix required by the verifier.
     m.intern_type(BcType::Unit);
@@ -802,25 +803,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     NativeOp::MapHas => Instr::MapHas,
                     NativeOp::MapAt => Instr::MapAt,
                     NativeOp::MapPut => Instr::MapPut,
-                    NativeOp::SbNew => {
-                        self.m.intern_type(BcType::StringBuilder);
-                        Instr::SbNew
-                    }
-                    NativeOp::SbAppend => Instr::SbAppendStr,
-                    NativeOp::SbBuild => Instr::SbBuild,
-                    NativeOp::BbNew => {
-                        self.m.intern_type(BcType::ByteBuffer);
-                        Instr::BbNew
-                    }
-                    NativeOp::BbAppend => Instr::BbAppend,
-                    NativeOp::BbLen => Instr::BbLen,
-                    NativeOp::BbBuild => Instr::BbBuild,
                     NativeOp::BytesNew => {
                         self.m.intern_type(BcType::Bytes);
-                        Instr::BytesNew
+                        Instr::Native(lm_bytecode::NativeInstr::BytesNew)
                     }
-                    NativeOp::BytesLen => Instr::BytesLen,
-                    NativeOp::BytesText => Instr::BytesText,
                     NativeOp::Freeze => Instr::Freeze,
                     NativeOp::Digest => {
                         // The result type must exist in the module
@@ -834,27 +820,28 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             }
             HExprKind::Intrinsic { intrinsic, args } => self.lower_intrinsic(*intrinsic, args),
             HExprKind::Interp(parts) => {
-                self.m.intern_type(BcType::StringBuilder);
-                self.emit(Instr::SbNew);
+                self.m
+                    .intern_type(BcType::Class(self.m.string_builder_class));
+                self.emit(Instr::Native(lm_bytecode::NativeInstr::SbNew));
                 for part in parts {
                     match part {
                         HInterpPart::Lit(text) => {
                             let idx = self.m.intern_string(text);
                             self.emit(Instr::ConstStr(idx));
-                            self.emit(Instr::SbAppendStr);
+                            self.emit(Instr::Native(lm_bytecode::NativeInstr::SbAppendStr));
                         }
                         HInterpPart::Expr(e) => {
                             self.lower_expr(e);
                             let instr = match e.ty {
-                                INT => Instr::SbAppendInt,
-                                BOOL => Instr::SbAppendBool,
-                                _ => Instr::SbAppendStr,
+                                INT => Instr::Native(lm_bytecode::NativeInstr::SbAppendInt),
+                                BOOL => Instr::Native(lm_bytecode::NativeInstr::SbAppendBool),
+                                _ => Instr::Native(lm_bytecode::NativeInstr::SbAppendStr),
                             };
                             self.emit(instr);
                         }
                     }
                 }
-                self.emit(Instr::SbBuild);
+                self.emit(Instr::Native(lm_bytecode::NativeInstr::SbBuild));
             }
             HExprKind::If { arms, else_body } => {
                 let join_b = self.new_block();
@@ -1046,15 +1033,65 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BOOL_NOT => Instr::Not,
             lm_abi::INTRINSIC_BOOL_EQ => Instr::EqBool,
             lm_abi::INTRINSIC_BOOL_NE => Instr::NeBool,
-            lm_abi::INTRINSIC_STRING_BYTE_LEN => Instr::StrByteLen,
-            lm_abi::INTRINSIC_STRING_CHAR_COUNT => Instr::StrCharCount,
-            lm_abi::INTRINSIC_STRING_CONCAT => Instr::StrConcat,
-            lm_abi::INTRINSIC_STRING_STARTS_WITH => Instr::StrStartsWith,
-            lm_abi::INTRINSIC_STRING_ENDS_WITH => Instr::StrEndsWith,
-            lm_abi::INTRINSIC_STRING_CONTAINS => Instr::StrContains,
-            lm_abi::INTRINSIC_STRING_FIND_INDEX => Instr::StrFindIndex,
-            lm_abi::INTRINSIC_STRING_EQ => Instr::EqStr,
-            lm_abi::INTRINSIC_STRING_NE => Instr::NeStr,
+            lm_abi::INTRINSIC_STRING_BYTE_LEN => {
+                Instr::Native(lm_bytecode::NativeInstr::StrByteLen)
+            }
+            lm_abi::INTRINSIC_STRING_CHAR_COUNT => {
+                Instr::Native(lm_bytecode::NativeInstr::StrCharCount)
+            }
+            lm_abi::INTRINSIC_STRING_CONCAT => Instr::Native(lm_bytecode::NativeInstr::StrConcat),
+            lm_abi::INTRINSIC_STRING_STARTS_WITH => {
+                Instr::Native(lm_bytecode::NativeInstr::StrStartsWith)
+            }
+            lm_abi::INTRINSIC_STRING_ENDS_WITH => {
+                Instr::Native(lm_bytecode::NativeInstr::StrEndsWith)
+            }
+            lm_abi::INTRINSIC_STRING_CONTAINS => {
+                Instr::Native(lm_bytecode::NativeInstr::StrContains)
+            }
+            lm_abi::INTRINSIC_STRING_FIND_INDEX => {
+                Instr::Native(lm_bytecode::NativeInstr::StrFindIndex)
+            }
+            lm_abi::INTRINSIC_STRING_EQ => Instr::Native(lm_bytecode::NativeInstr::EqStr),
+            lm_abi::INTRINSIC_STRING_NE => Instr::Native(lm_bytecode::NativeInstr::NeStr),
+            lm_abi::INTRINSIC_BYTES_LEN => Instr::Native(lm_bytecode::NativeInstr::BytesLen),
+            lm_abi::INTRINSIC_BYTES_AT => Instr::Native(lm_bytecode::NativeInstr::BytesAt),
+            lm_abi::INTRINSIC_BYTES_GET => Instr::Native(lm_bytecode::NativeInstr::BytesGet),
+            lm_abi::INTRINSIC_BYTES_SLICE => Instr::Native(lm_bytecode::NativeInstr::BytesSlice),
+            lm_abi::INTRINSIC_BYTES_CONCAT => Instr::Native(lm_bytecode::NativeInstr::BytesConcat),
+            lm_abi::INTRINSIC_BYTES_STARTS_WITH => {
+                Instr::Native(lm_bytecode::NativeInstr::BytesStartsWith)
+            }
+            lm_abi::INTRINSIC_BYTES_FIND_INDEX => {
+                Instr::Native(lm_bytecode::NativeInstr::BytesFindIndex)
+            }
+            lm_abi::INTRINSIC_BYTES_HEX => Instr::Native(lm_bytecode::NativeInstr::BytesHex),
+            lm_abi::INTRINSIC_BYTES_IS_UTF8 => Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8),
+            lm_abi::INTRINSIC_BYTES_TEXT => Instr::Native(lm_bytecode::NativeInstr::BytesText),
+            lm_abi::INTRINSIC_BYTES_EQ => Instr::Native(lm_bytecode::NativeInstr::EqBytes),
+            lm_abi::INTRINSIC_BYTES_NE => Instr::Native(lm_bytecode::NativeInstr::NeBytes),
+            lm_abi::INTRINSIC_STRING_BUILDER_APPEND => {
+                Instr::Native(lm_bytecode::NativeInstr::SbAppendStr)
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_LEN => Instr::Native(lm_bytecode::NativeInstr::SbLen),
+            lm_abi::INTRINSIC_STRING_BUILDER_CLEAR => {
+                Instr::Native(lm_bytecode::NativeInstr::SbClear)
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_BUILD => {
+                Instr::Native(lm_bytecode::NativeInstr::SbBuild)
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_APPEND => {
+                Instr::Native(lm_bytecode::NativeInstr::BbAppend)
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_EXTEND => {
+                Instr::Native(lm_bytecode::NativeInstr::BbExtend)
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_RESERVE => {
+                Instr::Native(lm_bytecode::NativeInstr::BbReserve)
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_CLEAR => Instr::Native(lm_bytecode::NativeInstr::BbClear),
+            lm_abi::INTRINSIC_BYTE_BUFFER_LEN => Instr::Native(lm_bytecode::NativeInstr::BbLen),
+            lm_abi::INTRINSIC_BYTE_BUFFER_BUILD => Instr::Native(lm_bytecode::NativeInstr::BbBuild),
             _ => unreachable!("the checker accepts only manifest intrinsics"),
         };
         self.emit(instr);
@@ -1137,7 +1174,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.emit(Instr::LoadLocal(src));
                     let idx = self.m.intern_string(v);
                     self.emit(Instr::ConstStr(idx));
-                    self.emit(Instr::EqStr);
+                    self.emit(Instr::Native(lm_bytecode::NativeInstr::EqStr));
                     self.emit(Instr::JumpIfFalse(fail));
                 }
             }
@@ -1513,14 +1550,14 @@ fn binary_instr(op: BinOp, operand_ty: TypeId) -> Instr {
         BinOp::Ge => Instr::GeInt,
         BinOp::Eq => match operand_ty {
             BOOL => Instr::EqBool,
-            STRING => Instr::EqStr,
+            STRING => Instr::Native(lm_bytecode::NativeInstr::EqStr),
             DIGEST => Instr::EqDigest,
             INT | NEVER | UNIT => Instr::EqInt,
             _ => Instr::EqRef,
         },
         BinOp::Ne => match operand_ty {
             BOOL => Instr::NeBool,
-            STRING => Instr::NeStr,
+            STRING => Instr::Native(lm_bytecode::NativeInstr::NeStr),
             DIGEST => Instr::NeDigest,
             INT | NEVER | UNIT => Instr::NeInt,
             _ => Instr::NeRef,
@@ -1671,6 +1708,62 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             blocks: vec![vec![Instr::ConstStr(empty), Instr::Return]],
         };
     }
+    if class.native_repr == Some(NativeRepr::Bytes) {
+        let bytes_ty = m.intern_type(BcType::Bytes);
+        let empty = m.intern_string("");
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: bytes_ty,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![
+                Instr::ConstStr(empty),
+                Instr::Native(lm_bytecode::NativeInstr::BytesNew),
+                Instr::Return,
+            ]],
+        };
+    }
+    if class.native_repr == Some(NativeRepr::StringBuilder) {
+        let builder = m.intern_type(BcType::Class(cidx));
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: builder,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![
+                Instr::Native(lm_bytecode::NativeInstr::SbNew),
+                Instr::Return,
+            ]],
+        };
+    }
+    if class.native_repr == Some(NativeRepr::ByteBuffer) {
+        let buffer = m.intern_type(BcType::Class(cidx));
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: buffer,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![
+                Instr::Native(lm_bytecode::NativeInstr::BbNew),
+                Instr::Return,
+            ]],
+        };
+    }
     let params: Vec<u32> = class.ctor_params.iter().map(|t| m.bc_ty(*t)).collect();
     let type_params = class.type_params;
     let vars: Vec<TypeId> = Vec::new();
@@ -1763,8 +1856,8 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::LoadCapture(_)
         | Instr::New(_)
         | Instr::NewG { .. }
-        | Instr::SbNew
-        | Instr::BbNew => (0, 1),
+        | Instr::Native(lm_bytecode::NativeInstr::SbNew)
+        | Instr::Native(lm_bytecode::NativeInstr::BbNew) => (0, 1),
         Instr::StoreLocal(_) | Instr::Pop => (1, 0),
         Instr::Add
         | Instr::Sub
@@ -1779,15 +1872,24 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::NeInt
         | Instr::EqBool
         | Instr::NeBool
-        | Instr::EqStr
-        | Instr::NeStr
+        | Instr::Native(lm_bytecode::NativeInstr::EqStr)
+        | Instr::Native(lm_bytecode::NativeInstr::NeStr)
         | Instr::EqRef
         | Instr::NeRef
-        | Instr::StrConcat
-        | Instr::StrStartsWith
-        | Instr::StrEndsWith
-        | Instr::StrContains
-        | Instr::StrFindIndex => (2, 1),
+        | Instr::Native(lm_bytecode::NativeInstr::StrConcat)
+        | Instr::Native(lm_bytecode::NativeInstr::StrStartsWith)
+        | Instr::Native(lm_bytecode::NativeInstr::StrEndsWith)
+        | Instr::Native(lm_bytecode::NativeInstr::StrContains)
+        | Instr::Native(lm_bytecode::NativeInstr::StrFindIndex)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesConcat)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesStartsWith)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesFindIndex)
+        | Instr::Native(lm_bytecode::NativeInstr::EqBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::NeBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::BbExtend)
+        | Instr::Native(lm_bytecode::NativeInstr::BbReserve) => (2, 1),
         Instr::Neg
         | Instr::Not
         | Instr::LoadField(_)
@@ -1796,14 +1898,19 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::CastType(_)
         | Instr::ListLen
         | Instr::MapLen
-        | Instr::SbBuild
-        | Instr::BbLen
-        | Instr::BbBuild
-        | Instr::StrByteLen
-        | Instr::StrCharCount
-        | Instr::BytesNew
-        | Instr::BytesLen
-        | Instr::BytesText
+        | Instr::Native(lm_bytecode::NativeInstr::SbBuild)
+        | Instr::Native(lm_bytecode::NativeInstr::SbLen)
+        | Instr::Native(lm_bytecode::NativeInstr::SbClear)
+        | Instr::Native(lm_bytecode::NativeInstr::BbLen)
+        | Instr::Native(lm_bytecode::NativeInstr::BbBuild)
+        | Instr::Native(lm_bytecode::NativeInstr::BbClear)
+        | Instr::Native(lm_bytecode::NativeInstr::StrByteLen)
+        | Instr::Native(lm_bytecode::NativeInstr::StrCharCount)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesNew)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesLen)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesText)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesHex)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8)
         | Instr::Freeze
         | Instr::Digest => (1, 1),
         Instr::EqDigest | Instr::NeDigest => (2, 1),
@@ -1812,11 +1919,11 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::ListPush
         | Instr::MapHas
         | Instr::MapAt
-        | Instr::SbAppendStr
-        | Instr::SbAppendInt
-        | Instr::SbAppendBool
-        | Instr::BbAppend => (2, 1),
-        Instr::MapPut => (3, 1),
+        | Instr::Native(lm_bytecode::NativeInstr::SbAppendStr)
+        | Instr::Native(lm_bytecode::NativeInstr::SbAppendInt)
+        | Instr::Native(lm_bytecode::NativeInstr::SbAppendBool)
+        | Instr::Native(lm_bytecode::NativeInstr::BbAppend) => (2, 1),
+        Instr::MapPut | Instr::Native(lm_bytecode::NativeInstr::BytesSlice) => (3, 1),
         Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
         Instr::MapNew { count, .. } => (2 * *count as usize, 1),
         Instr::MakeClosure { captures, .. } => (*captures as usize, 1),
@@ -1887,15 +1994,15 @@ fn instr_text(instr: &Instr) -> String {
         Instr::NeInt => "NeInt".to_string(),
         Instr::EqBool => "EqBool".to_string(),
         Instr::NeBool => "NeBool".to_string(),
-        Instr::EqStr => "EqStr".to_string(),
-        Instr::NeStr => "NeStr".to_string(),
-        Instr::StrByteLen => "StrByteLen".to_string(),
-        Instr::StrCharCount => "StrCharCount".to_string(),
-        Instr::StrConcat => "StrConcat".to_string(),
-        Instr::StrStartsWith => "StrStartsWith".to_string(),
-        Instr::StrEndsWith => "StrEndsWith".to_string(),
-        Instr::StrContains => "StrContains".to_string(),
-        Instr::StrFindIndex => "StrFindIndex".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::EqStr) => "EqStr".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::NeStr) => "NeStr".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::StrByteLen) => "StrByteLen".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::StrCharCount) => "StrCharCount".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::StrConcat) => "StrConcat".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::StrStartsWith) => "StrStartsWith".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::StrEndsWith) => "StrEndsWith".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::StrContains) => "StrContains".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::StrFindIndex) => "StrFindIndex".to_string(),
         Instr::EqRef => "EqRef".to_string(),
         Instr::NeRef => "NeRef".to_string(),
         Instr::Call(idx) => format!("Call fn{idx}"),
@@ -1930,18 +2037,33 @@ fn instr_text(instr: &Instr) -> String {
         Instr::MapHas => "MapHas".to_string(),
         Instr::MapAt => "MapAt".to_string(),
         Instr::MapPut => "MapPut".to_string(),
-        Instr::SbNew => "SbNew".to_string(),
-        Instr::SbAppendStr => "SbAppendStr".to_string(),
-        Instr::SbAppendInt => "SbAppendInt".to_string(),
-        Instr::SbAppendBool => "SbAppendBool".to_string(),
-        Instr::SbBuild => "SbBuild".to_string(),
-        Instr::BbNew => "BbNew".to_string(),
-        Instr::BbAppend => "BbAppend".to_string(),
-        Instr::BbLen => "BbLen".to_string(),
-        Instr::BbBuild => "BbBuild".to_string(),
-        Instr::BytesNew => "BytesNew".to_string(),
-        Instr::BytesLen => "BytesLen".to_string(),
-        Instr::BytesText => "BytesText".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbNew) => "SbNew".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbAppendStr) => "SbAppendStr".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbAppendInt) => "SbAppendInt".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbAppendBool) => "SbAppendBool".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbBuild) => "SbBuild".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbLen) => "SbLen".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbClear) => "SbClear".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbNew) => "BbNew".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbAppend) => "BbAppend".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbLen) => "BbLen".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbBuild) => "BbBuild".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbExtend) => "BbExtend".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbReserve) => "BbReserve".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbClear) => "BbClear".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesNew) => "BytesNew".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesLen) => "BytesLen".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesText) => "BytesText".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesAt) => "BytesAt".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesGet) => "BytesGet".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesSlice) => "BytesSlice".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesConcat) => "BytesConcat".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesStartsWith) => "BytesStartsWith".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesFindIndex) => "BytesFindIndex".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesHex) => "BytesHex".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8) => "BytesIsUtf8".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::EqBytes) => "EqBytes".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::NeBytes) => "NeBytes".to_string(),
         Instr::Freeze => "Freeze".to_string(),
         Instr::Digest => "Digest".to_string(),
         Instr::EqDigest => "EqDigest".to_string(),
@@ -1999,8 +2121,6 @@ fn type_text(module: &Module, idx: u32) -> String {
         BcType::Bool => "Bool".to_string(),
         BcType::Int => "Int".to_string(),
         BcType::Str => "String".to_string(),
-        BcType::StringBuilder => "StringBuilder".to_string(),
-        BcType::ByteBuffer => "ByteBuffer".to_string(),
         BcType::Bytes => "Bytes".to_string(),
         BcType::FileHandle => "FileHandle".to_string(),
         BcType::ResourceHandle => "ResourceHandle".to_string(),

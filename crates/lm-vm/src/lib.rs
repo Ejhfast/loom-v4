@@ -36,7 +36,9 @@ pub use lm_abi::{FaultCode, SnapshotClass};
 /// The heap, the native shapes, and the graph engine are separate
 /// crates. `lm-vm` re-exports the parts its callers already name.
 pub use lm_graph::{GraphCost, GraphLimits};
-pub use lm_heap::{dump_shapes, BoundaryPolicy, Heap, HeapStats, Object, ShapeDesc, SharedText};
+pub use lm_heap::{
+    dump_shapes, BoundaryPolicy, Heap, HeapStats, Object, ShapeDesc, SharedBytes, SharedText,
+};
 
 use lm_bytecode::{DecodeError, Module};
 use lm_value::Value;

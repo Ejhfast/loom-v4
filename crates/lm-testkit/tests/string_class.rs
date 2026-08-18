@@ -63,14 +63,14 @@ fn string_intrinsics_inline_to_canonical_instructions() {
         .copied()
         .collect();
     for expected in [
-        Instr::StrByteLen,
-        Instr::StrCharCount,
-        Instr::StrConcat,
-        Instr::StrStartsWith,
-        Instr::StrEndsWith,
-        Instr::StrContains,
-        Instr::EqStr,
-        Instr::NeStr,
+        Instr::Native(lm_bytecode::NativeInstr::StrByteLen),
+        Instr::Native(lm_bytecode::NativeInstr::StrCharCount),
+        Instr::Native(lm_bytecode::NativeInstr::StrConcat),
+        Instr::Native(lm_bytecode::NativeInstr::StrStartsWith),
+        Instr::Native(lm_bytecode::NativeInstr::StrEndsWith),
+        Instr::Native(lm_bytecode::NativeInstr::StrContains),
+        Instr::Native(lm_bytecode::NativeInstr::EqStr),
+        Instr::Native(lm_bytecode::NativeInstr::NeStr),
     ] {
         assert!(instructions.contains(&expected), "missing {expected:?}");
     }

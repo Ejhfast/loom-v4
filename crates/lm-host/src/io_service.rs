@@ -4,7 +4,8 @@
 //! or stream wait. Fixed workers own all operating-system I/O.
 
 use lm_vm::{
-    CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostSeekFrom, HostValue, SharedText,
+    CompletionKey, CoreCtor, HostCompletion, HostOpenOptions, HostSeekFrom, HostValue, SharedBytes,
+    SharedText,
 };
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Seek, Write};
@@ -36,7 +37,7 @@ pub(crate) enum FileRequest {
     },
     Write {
         file: u64,
-        bytes: Vec<u8>,
+        bytes: SharedBytes,
     },
     Seek {
         file: u64,
@@ -273,7 +274,7 @@ fn run_file_request(files: &mut HashMap<u64, std::fs::File>, request: FileReques
             match opened.read(&mut bytes) {
                 Ok(read) => {
                     bytes.truncate(read);
-                    fs_ok(HostValue::Bytes(bytes))
+                    fs_ok(HostValue::Bytes(bytes.into()))
                 }
                 Err(error) => fs_error(format!("file read failed: {error}")),
             }
