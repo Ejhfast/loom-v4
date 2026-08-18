@@ -92,11 +92,26 @@ pub enum CtorKind {
     CaseFields,
 }
 
+/// The native value representation of one core class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeRepr {
+    Int,
+    Bool,
+    String,
+    Bytes,
+    StringBuilder,
+    ByteBuffer,
+}
+
 /// One checked class with its full field layout.
 pub struct HirClass {
     /// True for an imported declaration: a shape with no method body
     /// and no construction body.
     pub imported: bool,
+    /// True when the class cannot have a subclass.
+    pub is_final: bool,
+    /// The primitive representation of a native core class.
+    pub native_repr: Option<NativeRepr>,
     pub name: String,
     /// The qualified key: the nominal identity of the class. A local
     /// class takes the module path, a core class takes the reserved
@@ -203,16 +218,7 @@ pub enum NativeOp {
     MapPut,
     /// Non-faulting lookup returning core `Option[V]`.
     MapGet,
-    SbNew,
-    SbAppend,
-    SbBuild,
-    BbNew,
-    BbAppend,
-    BbLen,
-    BbBuild,
     BytesNew,
-    BytesLen,
-    BytesText,
     Freeze,
     /// The canonical digest of one frozen graph.
     Digest,
@@ -406,6 +412,11 @@ pub enum HExprKind {
         op: NativeOp,
         args: Vec<HExpr>,
     },
+    /// One pure operation from the intrinsic manifest.
+    Intrinsic {
+        intrinsic: lm_abi::IntrinsicSlot,
+        args: Vec<HExpr>,
+    },
     /// An interpolated string.
     Interp(Vec<HInterpPart>),
     If {
@@ -532,6 +543,12 @@ pub fn dump_classes(module: &HirModule) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     for (idx, class) in module.classes.iter().enumerate() {
+        let final_mark = if class.is_final { " (final)" } else { "" };
+        let native_mark = if class.native_repr.is_some() {
+            " (native)"
+        } else {
+            ""
+        };
         let kind = match class.kind {
             ClassKind::Normal => "",
             ClassKind::EnumParent => " (enum)",
@@ -541,12 +558,16 @@ pub fn dump_classes(module: &HirModule) -> String {
             Some(p) => {
                 let _ = writeln!(
                     out,
-                    "class {} {}{} < {}",
-                    idx, class.name, kind, module.classes[p as usize].name
+                    "class {} {}{}{}{} < {}",
+                    idx, class.name, final_mark, native_mark, kind, module.classes[p as usize].name
                 );
             }
             None => {
-                let _ = writeln!(out, "class {} {}{}", idx, class.name, kind);
+                let _ = writeln!(
+                    out,
+                    "class {} {}{}{}{}",
+                    idx, class.name, final_mark, native_mark, kind
+                );
             }
         }
         for (fidx, (name, ty)) in class

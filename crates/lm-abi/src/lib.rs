@@ -1,4 +1,4 @@
-//! Canonical operation and group manifest.
+//! Canonical operation, group, and intrinsic manifests.
 //!
 //! This crate is the one source for effect groups, exact operations,
 //! their signatures, and their stable identities. The checker, the
@@ -46,9 +46,12 @@ pub const GROUPS: [&str; 10] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbiType {
     Unit,
+    Bool,
     Int,
     Str,
     Bytes,
+    StringBuilder,
+    ByteBuffer,
     FileHandle,
     OpenOptions,
     SeekFrom,
@@ -69,9 +72,12 @@ impl AbiType {
     pub fn text(&self) -> &'static str {
         match self {
             AbiType::Unit => "()",
+            AbiType::Bool => "Bool",
             AbiType::Int => "Int",
             AbiType::Str => "String",
             AbiType::Bytes => "Bytes",
+            AbiType::StringBuilder => "StringBuilder",
+            AbiType::ByteBuffer => "ByteBuffer",
             AbiType::FileHandle => "FileHandle",
             AbiType::OpenOptions => "OpenOptions",
             AbiType::SeekFrom => "SeekFrom",
@@ -83,6 +89,401 @@ impl AbiType {
             AbiType::ResultUnitFsError => "Result[(), FsError]",
         }
     }
+}
+
+/// The intrinsic ABI version.
+///
+/// Version 4 adds immutable Bytes operations and nominal builders.
+pub const INTRINSIC_ABI_VERSION: u32 = 4;
+
+/// A dense intrinsic slot.
+pub type IntrinsicSlot = u32;
+
+/// One pure intrinsic definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntrinsicDef {
+    pub name: &'static str,
+    pub params: &'static [AbiType],
+    pub reply: AbiType,
+    pub semantic_revision: u32,
+}
+
+/// The `int.abs` intrinsic slot.
+pub const INTRINSIC_INT_ABS: IntrinsicSlot = 0;
+pub const INTRINSIC_INT_NEG: IntrinsicSlot = 1;
+pub const INTRINSIC_INT_ADD: IntrinsicSlot = 2;
+pub const INTRINSIC_INT_SUB: IntrinsicSlot = 3;
+pub const INTRINSIC_INT_MUL: IntrinsicSlot = 4;
+pub const INTRINSIC_INT_DIV: IntrinsicSlot = 5;
+pub const INTRINSIC_INT_REM: IntrinsicSlot = 6;
+pub const INTRINSIC_INT_EQ: IntrinsicSlot = 7;
+pub const INTRINSIC_INT_NE: IntrinsicSlot = 8;
+pub const INTRINSIC_INT_LT: IntrinsicSlot = 9;
+pub const INTRINSIC_INT_LE: IntrinsicSlot = 10;
+pub const INTRINSIC_INT_GT: IntrinsicSlot = 11;
+pub const INTRINSIC_INT_GE: IntrinsicSlot = 12;
+pub const INTRINSIC_BOOL_NOT: IntrinsicSlot = 13;
+pub const INTRINSIC_BOOL_EQ: IntrinsicSlot = 14;
+pub const INTRINSIC_BOOL_NE: IntrinsicSlot = 15;
+pub const INTRINSIC_STRING_BYTE_LEN: IntrinsicSlot = 16;
+pub const INTRINSIC_STRING_CHAR_COUNT: IntrinsicSlot = 17;
+pub const INTRINSIC_STRING_CONCAT: IntrinsicSlot = 18;
+pub const INTRINSIC_STRING_STARTS_WITH: IntrinsicSlot = 19;
+pub const INTRINSIC_STRING_ENDS_WITH: IntrinsicSlot = 20;
+pub const INTRINSIC_STRING_CONTAINS: IntrinsicSlot = 21;
+pub const INTRINSIC_STRING_FIND_INDEX: IntrinsicSlot = 22;
+pub const INTRINSIC_STRING_EQ: IntrinsicSlot = 23;
+pub const INTRINSIC_STRING_NE: IntrinsicSlot = 24;
+pub const INTRINSIC_BYTES_LEN: IntrinsicSlot = 25;
+pub const INTRINSIC_BYTES_AT: IntrinsicSlot = 26;
+pub const INTRINSIC_BYTES_GET: IntrinsicSlot = 27;
+pub const INTRINSIC_BYTES_SLICE: IntrinsicSlot = 28;
+pub const INTRINSIC_BYTES_CONCAT: IntrinsicSlot = 29;
+pub const INTRINSIC_BYTES_STARTS_WITH: IntrinsicSlot = 30;
+pub const INTRINSIC_BYTES_FIND_INDEX: IntrinsicSlot = 31;
+pub const INTRINSIC_BYTES_HEX: IntrinsicSlot = 32;
+pub const INTRINSIC_BYTES_IS_UTF8: IntrinsicSlot = 33;
+pub const INTRINSIC_BYTES_TEXT: IntrinsicSlot = 34;
+pub const INTRINSIC_BYTES_EQ: IntrinsicSlot = 35;
+pub const INTRINSIC_BYTES_NE: IntrinsicSlot = 36;
+pub const INTRINSIC_STRING_BUILDER_APPEND: IntrinsicSlot = 37;
+pub const INTRINSIC_STRING_BUILDER_LEN: IntrinsicSlot = 38;
+pub const INTRINSIC_STRING_BUILDER_CLEAR: IntrinsicSlot = 39;
+pub const INTRINSIC_STRING_BUILDER_BUILD: IntrinsicSlot = 40;
+pub const INTRINSIC_BYTE_BUFFER_APPEND: IntrinsicSlot = 41;
+pub const INTRINSIC_BYTE_BUFFER_EXTEND: IntrinsicSlot = 42;
+pub const INTRINSIC_BYTE_BUFFER_RESERVE: IntrinsicSlot = 43;
+pub const INTRINSIC_BYTE_BUFFER_CLEAR: IntrinsicSlot = 44;
+pub const INTRINSIC_BYTE_BUFFER_LEN: IntrinsicSlot = 45;
+pub const INTRINSIC_BYTE_BUFFER_BUILD: IntrinsicSlot = 46;
+
+/// Pure intrinsics in stable slot order.
+pub const INTRINSICS: [IntrinsicDef; 47] = [
+    IntrinsicDef {
+        name: "int.abs",
+        params: &[AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.neg",
+        params: &[AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.add",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.sub",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.mul",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.div",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.rem",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.eq",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.ne",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.lt",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.le",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.gt",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.ge",
+        params: &[AbiType::Int, AbiType::Int],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bool.not",
+        params: &[AbiType::Bool],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bool.eq",
+        params: &[AbiType::Bool, AbiType::Bool],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bool.ne",
+        params: &[AbiType::Bool, AbiType::Bool],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.byte_len",
+        params: &[AbiType::Str],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.char_count",
+        params: &[AbiType::Str],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.concat",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.starts_with",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.ends_with",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.contains",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.find_index",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.eq",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string.ne",
+        params: &[AbiType::Str, AbiType::Str],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.len",
+        params: &[AbiType::Bytes],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.at",
+        params: &[AbiType::Bytes, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.get",
+        params: &[AbiType::Bytes, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.slice",
+        params: &[AbiType::Bytes, AbiType::Int, AbiType::Int],
+        reply: AbiType::Bytes,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.concat",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bytes,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.starts_with",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.find_index",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.hex",
+        params: &[AbiType::Bytes],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.is_utf8",
+        params: &[AbiType::Bytes],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.text",
+        params: &[AbiType::Bytes],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.eq",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.ne",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.append",
+        params: &[AbiType::StringBuilder, AbiType::Str],
+        reply: AbiType::StringBuilder,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.len",
+        params: &[AbiType::StringBuilder],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.clear",
+        params: &[AbiType::StringBuilder],
+        reply: AbiType::StringBuilder,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.build",
+        params: &[AbiType::StringBuilder],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.append",
+        params: &[AbiType::ByteBuffer, AbiType::Int],
+        reply: AbiType::ByteBuffer,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.extend",
+        params: &[AbiType::ByteBuffer, AbiType::Bytes],
+        reply: AbiType::ByteBuffer,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.reserve",
+        params: &[AbiType::ByteBuffer, AbiType::Int],
+        reply: AbiType::ByteBuffer,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.clear",
+        params: &[AbiType::ByteBuffer],
+        reply: AbiType::ByteBuffer,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.len",
+        params: &[AbiType::ByteBuffer],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.build",
+        params: &[AbiType::ByteBuffer],
+        reply: AbiType::Bytes,
+        semantic_revision: 1,
+    },
+];
+
+/// The number of pure intrinsic slots.
+pub const INTRINSIC_COUNT: u32 = INTRINSICS.len() as u32;
+
+/// Return one intrinsic definition.
+pub fn intrinsic(slot: IntrinsicSlot) -> &'static IntrinsicDef {
+    &INTRINSICS[slot as usize]
+}
+
+/// Find one intrinsic by its stable name.
+pub fn intrinsic_by_name(name: &str) -> Option<IntrinsicSlot> {
+    INTRINSICS
+        .iter()
+        .position(|def| def.name == name)
+        .map(|index| index as u32)
+}
+
+/// Return the stable identity of one intrinsic.
+pub fn intrinsic_identity(slot: IntrinsicSlot) -> [u8; 32] {
+    let def = intrinsic(slot);
+    let mut input = Vec::new();
+    input.extend_from_slice(b"lm-intrinsic-v1\0");
+    input.extend_from_slice(&INTRINSIC_ABI_VERSION.to_le_bytes());
+    id_field(&mut input, def.name.as_bytes());
+    id_field(&mut input, &(def.params.len() as u64).to_le_bytes());
+    for param in def.params {
+        id_field(&mut input, param.text().as_bytes());
+    }
+    id_field(&mut input, def.reply.text().as_bytes());
+    id_field(&mut input, &def.semantic_revision.to_le_bytes());
+    sha256(&input)
+}
+
+/// Return the digest of the intrinsic manifest.
+pub fn intrinsic_manifest_digest() -> [u8; 32] {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"lm-intrinsics-manifest-v1\0");
+    input.extend_from_slice(&INTRINSIC_ABI_VERSION.to_le_bytes());
+    for slot in 0..INTRINSIC_COUNT {
+        input.extend_from_slice(&intrinsic_identity(slot));
+    }
+    sha256(&input)
 }
 
 /// The behavior family of one operation.
@@ -819,6 +1220,23 @@ mod tests {
         assert_eq!(op_by_name("Wait.Wait"), Some(OP_WAIT_WAIT));
         assert_eq!(op_by_name("Wait.Choose"), Some(OP_WAIT_CHOOSE));
         assert_eq!(op_by_name("Wait.Cancel"), Some(OP_WAIT_CANCEL));
+    }
+
+    #[test]
+    fn intrinsic_slots_match_the_constants() {
+        assert_eq!(intrinsic_by_name("int.abs"), Some(INTRINSIC_INT_ABS));
+        assert_eq!(intrinsic_by_name("int.add"), Some(INTRINSIC_INT_ADD));
+        assert_eq!(intrinsic_by_name("bool.not"), Some(INTRINSIC_BOOL_NOT));
+        assert_eq!(intrinsic(INTRINSIC_INT_ABS).reply, AbiType::Int);
+    }
+
+    #[test]
+    fn intrinsic_identities_are_stable() {
+        assert_eq!(
+            intrinsic_identity(INTRINSIC_INT_ABS),
+            intrinsic_identity(INTRINSIC_INT_ABS)
+        );
+        assert_eq!(intrinsic_manifest_digest(), intrinsic_manifest_digest());
     }
 
     #[test]

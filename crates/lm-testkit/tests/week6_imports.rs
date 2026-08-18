@@ -157,6 +157,7 @@ fn a_class_and_its_methods_share_the_import_state() {
         name: "Local".to_string(),
         parent_args: Vec::new(),
         key: "Local".to_string(),
+        is_final: false,
         parent: lm_bytecode::NO_PARENT,
         type_params: 0,
         kind: lm_bytecode::BcClassKind::Normal,

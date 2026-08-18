@@ -470,7 +470,7 @@ go()
     let mut broken = image.clone();
     for entry in &mut broken.machines[0].objects {
         if let lm_heap::Object::Str(text) = &mut entry.object {
-            text.push('!');
+            *text = format!("{text}!").into();
         }
     }
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");

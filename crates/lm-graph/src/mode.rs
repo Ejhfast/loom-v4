@@ -777,10 +777,10 @@ mod tests {
         let mut src = Heap::new(1 << 20);
         // A small destination: the first shells fit, the last does not.
         let mut dst = Heap::new(200);
-        let anchor = dst.alloc(Object::Str("anchor".to_string()));
+        let anchor = dst.alloc(Object::Str("anchor".into()));
         let before_live = dst.live_count();
         let before_bytes = dst.used_bytes();
-        let mut chain = src.alloc(Object::Str("tail".to_string()));
+        let mut chain = src.alloc(Object::Str("tail".into()));
         for _ in 0..8 {
             chain = src.alloc(Object::Tuple {
                 items: vec![Value::Obj(chain)],
@@ -793,7 +793,7 @@ mod tests {
         );
         assert_eq!(dst.live_count(), before_live);
         assert_eq!(dst.used_bytes(), before_bytes);
-        assert_eq!(dst.get(anchor), &Object::Str("anchor".to_string()));
+        assert_eq!(dst.get(anchor), &Object::Str("anchor".into()));
     }
 
     /// A destination collection during one copy frees an earlier
@@ -802,7 +802,7 @@ mod tests {
     #[test]
     fn a_later_transfer_needs_the_earlier_result_rooted() {
         let payload = |heap: &mut Heap, text: &str| {
-            let leaf = heap.alloc(Object::Str(text.to_string()));
+            let leaf = heap.alloc(Object::Str(text.into()));
             heap.alloc(Object::Tuple {
                 items: vec![Value::Obj(leaf)],
             })
@@ -851,7 +851,7 @@ mod tests {
     fn a_failed_copy_inside_one_heap_frees_every_shell() {
         // A cap that holds the source but not a second copy of it.
         let mut heap = Heap::new(300);
-        let mut chain = heap.alloc(Object::Str("tail".to_string()));
+        let mut chain = heap.alloc(Object::Str("tail".into()));
         for _ in 0..4 {
             chain = heap.alloc(Object::Tuple {
                 items: vec![Value::Obj(chain)],
@@ -875,7 +875,7 @@ mod tests {
     fn detach_copies_a_mutable_graph_and_freezes_it() {
         let mut src = Heap::new(1 << 20);
         let mut dst = Heap::new(1 << 20);
-        let leaf = src.alloc(Object::Str("leaf".to_string()));
+        let leaf = src.alloc(Object::Str("leaf".into()));
         let root = src.alloc(Object::List {
             items: vec![Value::Obj(leaf), Value::Obj(leaf)],
         });
@@ -901,7 +901,7 @@ mod tests {
         let mut second = Heap::new(1 << 20);
         // Allocate spare objects, so the equal ring uses other slots.
         for _ in 0..5 {
-            second.alloc(Object::Str("spare".to_string()));
+            second.alloc(Object::Str("spare".into()));
         }
         let b = frozen_ring(&mut second, 1, 2);
         assert_ne!(a.slot, b.slot);
@@ -919,12 +919,12 @@ mod tests {
     #[test]
     fn the_digest_separates_sharing_from_equal_copies() {
         let mut heap = Heap::new(1 << 20);
-        let shared = heap.alloc(Object::Str("x".to_string()));
+        let shared = heap.alloc(Object::Str("x".into()));
         let one = heap.alloc(Object::Tuple {
             items: vec![Value::Obj(shared), Value::Obj(shared)],
         });
-        let left = heap.alloc(Object::Str("x".to_string()));
-        let right = heap.alloc(Object::Str("x".to_string()));
+        let left = heap.alloc(Object::Str("x".into()));
+        let right = heap.alloc(Object::Str("x".into()));
         let two = heap.alloc(Object::Tuple {
             items: vec![Value::Obj(left), Value::Obj(right)],
         });

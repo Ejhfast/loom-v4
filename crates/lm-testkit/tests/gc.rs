@@ -97,10 +97,10 @@ fn object_table_returns_to_baseline_after_a_collection() {
     // Direct heap-level baseline check on the same heap type the VM
     // uses. The count returns to the rooted baseline after a sweep.
     let mut heap = lm_vm::Heap::new(1 << 20);
-    let keep = heap.alloc(lm_vm::Object::Str("keep".to_string()));
+    let keep = heap.alloc(lm_vm::Object::Str("keep".into()));
     let baseline = heap.live_count();
     for i in 0..1000 {
-        heap.alloc(lm_vm::Object::Str(format!("garbage {i}")));
+        heap.alloc(lm_vm::Object::Str(format!("garbage {i}").into()));
     }
     assert_eq!(heap.live_count(), baseline + 1000);
     lm_graph::collect(&mut heap, [keep]);

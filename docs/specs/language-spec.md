@@ -754,6 +754,30 @@ A generic function name needs a direct call in this version.
 
 ### 6.4 Arithmetic, comparison, and equality
 
+`Int`, `Bool`, and `String` use final core method tables. The checker maps each supported source operator to one sealed method.
+
+```text
+-a      -> a.__neg__()
+not a   -> a.__not__()
+a + b   -> a.__add__(b)
+a - b   -> a.__sub__(b)
+a * b   -> a.__mul__(b)
+a / b   -> a.__div__(b)
+a % b   -> a.__rem__(b)
+a == b  -> a.__eq__(b)
+a != b  -> a.__ne__(b)
+a < b   -> a.__lt__(b)
+a <= b  -> a.__le__(b)
+a > b   -> a.__gt__(b)
+a >= b  -> a.__ge__(b)
+```
+
+Each method body names one pure intrinsic manifest entry. Static resolution and trivial-body inlining emit the canonical instruction.
+
+`String + String` uses `String.__add__`. Other arithmetic operators accept `Int` in this version.
+
+`and` and `or` remain control-flow operators. They evaluate the right operand only when required.
+
 For `Int`, `+`, `-`, and `*` are checked; `/` truncates toward zero; `%` has the dividend's sign; divide-by-zero and the one overflowing division case fault. For `Float`, `+`, `-`, `*`, and `/` follow the deterministic binary64 rules in section 2.4; division by zero produces the corresponding infinity or NaN and `%` is not defined. There is no implicit numeric conversion.
 
 Ordering requires equal numeric types. Float ordering follows ordered IEEE comparison and is false when either operand is NaN. Language equality for floats is total and hash-friendly: both signed zeros are equal and all canonical NaNs are equal. Strings compare lexicographically by Unicode scalar value; bytes lexicographically by unsigned byte.
@@ -880,6 +904,15 @@ end
 
 At `end`, the definition is sealed. Fields, layout, superclass, generic parameters, methods, selectors, signatures, and bodies can never change. A class cannot be reopened.
 
+The optional `final` modifier prevents subclass declarations:
+
+```lm
+final class Token
+end
+```
+
+Classes remain open for inheritance when they omit `final`. Enum cases remain final without this modifier.
+
 ### 8.2 Fields
 
 A field has a mandatory type and optional default:
@@ -945,7 +978,9 @@ class Child < Parent
 end
 ```
 
-Ordinary sealed definitions may be subclassed. A subclass inherits fields and methods and may add both. An override must keep parameter types and `mut` markers, may narrow the result, and may narrow but not widen the row.
+Ordinary non-final definitions may be subclassed. A subclass inherits fields and methods and may add both. A final definition rejects every subclass.
+
+An override must keep parameter types and `mut` markers. It may narrow the result and row.
 
 Constructor signatures are not inherited. A subclass initializer handles inherited required fields and may call `super.init(...)` exactly once before reading fields initialized by it.
 
@@ -956,8 +991,8 @@ A call selector is fixed at compile time; the runtime class selects the sealed i
 A class value is frozen. Four identities answer four questions about one class. Each consumer names the one it needs.
 
 - **QualifiedKey** — the nominal identity. The value is the fully qualified declaration path, for example `mathlib.geometry.Point`. Two classes are the same nominal class when their QualifiedKey values are equal. The linker uses this value. The type checker never compares it, because it works on class indices inside one module.
-- **StructuralHash** — the name-free content identity. It covers the kind, the generic arity, the parent identity, the normalized field layout, the selector set, the method signatures, the implementing function identities, and the native intrinsic identifier where applicable. It never covers the class's own name. It covers no construction function: a constructor is a function value with its own StructuralHash, and the binding `<class key>.<new>` ties it to the class (3.6). A field default and an `init` body therefore reach the constructor identity and no class identity. Section 3.7 states how a reference to another class enters it.
-- **InterfaceHash** — the named public API identity of one export. It covers the export name, the kind, the full structural signature with class references by qualified name, the field defaults, the arm names, and the initializer signature. An import slot pins it. A rename moves it.
+- **StructuralHash** — This name-free identity covers kind, final flag, generic arity, parent, fields, selectors, methods, and intrinsics. It excludes the class name and construction function. A constructor has its own StructuralHash. The `<class key>.<new>` binding ties it to the class. Section 3.7 defines reference hashing.
+- **InterfaceHash** — This named public identity covers the export name, kind, final flag, signature, defaults, arms, and initializer. An import slot pins it. A rename changes it.
 - **VerificationHash** — the exact resolved input of the verifier. It answers whether the verifier approved this exact representation.
 
 The linker merges two classes on QualifiedKey and StructuralHash together (3.6). Instance headers point to a VM-local class slot that the linker resolved. Class equality at run time stays an index comparison inside one linked program, and no run-time path compares a hash.
@@ -2184,7 +2219,23 @@ A `Map[K,V]` stores entries in insertion order plus an open-addressed index from
 
 Map keys must be frozen and digestible at insertion. The runtime uses a keyed 64-bit lookup hash cached on immutable keys; insertion order, equality, serialization, and digest do not depend on bucket order. The hash seed is VM configuration recorded in snapshots. Fuel charges use logical key/byte size rather than actual probe count.
 
-`String` and `Bytes` are immutable objects backed by reference-counted byte slices, permitting zero-copy sharing across trusted in-process holders. String construction validates UTF-8 once. `StringBuilder` and `ByteBuffer` use growable private buffers and produce immutable outputs by transferring or copying their allocation.
+This version accepts Bool, Int, String, and Bytes map keys.
+
+`String` and `Bytes` use immutable reference-counted storage. Each value stores one visible byte range.
+
+A clone or trusted boundary transfer can share the storage. A byte slice also shares its source storage.
+
+A String contains valid UTF-8. Construction validates external text once.
+
+Bytes accepts every byte sequence. Construction does not validate UTF-8.
+
+String and Bytes cache their content hashes after the first map lookup. The caches do not affect equality, snapshots, or graph digests.
+
+`StringBuilder` and `ByteBuffer` are final nominal core classes. Their native payloads stay holder-local.
+
+Each builder uses one private growable buffer. `StringBuilder.build` returns String. `ByteBuffer.build` returns Bytes.
+
+`ByteBuffer.build` never validates UTF-8. Bytes validates UTF-8 only during an explicit text conversion.
 
 ### 22.10 Graph engine
 
@@ -2546,16 +2597,29 @@ freeze(self) -> Map[K,V]
 
 ### 24.6 Strings, bytes, builders, and formatting
 
-`String` is immutable valid UTF-8:
+Tier A is the implemented core String surface. It keeps all offsets in bytes.
 
 ```text
-byte_len / char_count / is_empty
+byte_len() -> Int
+char_count() -> Int
+is_empty() -> Bool
 concat(other: String) -> String
-starts_with / ends_with / contains
+starts_with(prefix: String) -> Bool
+ends_with(suffix: String) -> Bool
+contains(needle: String) -> Bool
 find(needle: String) -> Option[Int]          # byte offset
+__add__(other: String) -> String
+__eq__(other: String) -> Bool
+__ne__(other: String) -> Bool
+```
+
+`+`, `==`, and `!=` use the three String hook methods. Each hook has paired underscores.
+
+Tier B reserves the following fallible and conversion surface.
+
+```text
 slice_bytes(start,length) -> Result[String,Utf8Error]
 slice_chars(start,length) -> Result[String,IndexError]
-chars() -> List[Char]
 bytes() -> Bytes
 split(separator: String) -> List[String]
 lines() -> List[String]
@@ -2563,10 +2627,66 @@ trim / trim_start / trim_end
 replace(needle,replacement) -> String
 to_lower_ascii / to_upper_ascii
 parse_int(radix: Int) -> Result[Int,ParseIntError]
-parse_float() -> Result[Float,ParseFloatError]
 ```
 
-`Bytes` supports `len`, `get`, `at`, `slice`, `concat`, `starts_with`, `find`, `hex`, and `utf8`. `StringBuilder` supports `push_char`, `push_string`, `clear`, `len`, and `finish`; `ByteBuffer` supports `push`, `extend`, `reserve`, `clear`, and `finish`.
+Core defines `Utf8Error`, `IndexError`, and `ParseIntError`. Tier B can use these types without changing its error contract.
+
+Methods that return `Char` remain deferred. Float parsing remains deferred until core defines `Float`.
+
+Tier A includes the following Bytes surface.
+
+```text
+len() -> Int
+is_empty() -> Bool
+at(index: Int) -> Int
+get(index: Int) -> Option[Int]
+slice(start: Int, length: Int) -> Result[Bytes,IndexError]
+concat(other: Bytes) -> Bytes
+starts_with(prefix: Bytes) -> Bool
+find(needle: Bytes) -> Option[Int]
+hex() -> String
+utf8() -> Result[String,Utf8Error]
+text() -> String
+__add__(other: Bytes) -> Bytes
+__eq__(other: Bytes) -> Bool
+__ne__(other: Bytes) -> Bool
+```
+
+`at` faults with `IndexOutOfBounds` for an invalid index. `get` returns `None` for an invalid index.
+
+`slice` returns `Err(IndexError.OutOfBounds)` for an invalid range. A successful slice shares immutable storage.
+
+`find` returns a byte offset. `hex` uses lowercase hexadecimal text.
+
+`utf8` reports invalid encoding through its result. `text` is a compatibility conversion that faults with `BadCast`.
+
+`+`, `==`, and `!=` use the paired-underscore Bytes hook methods.
+
+The final nominal builders have the following surface.
+
+```text
+StringBuilder.append(text: String) -> StringBuilder
+StringBuilder.push_string(text: String) -> StringBuilder
+StringBuilder.len() -> Int
+StringBuilder.clear() -> StringBuilder
+StringBuilder.build() -> String
+StringBuilder.finish() -> String
+
+ByteBuffer.append(byte: Int) -> ByteBuffer
+ByteBuffer.push(byte: Int) -> ByteBuffer
+ByteBuffer.extend(bytes: Bytes) -> ByteBuffer
+ByteBuffer.reserve(additional: Int) -> ByteBuffer
+ByteBuffer.clear() -> ByteBuffer
+ByteBuffer.len() -> Int
+ByteBuffer.build() -> Bytes
+ByteBuffer.finish() -> Bytes
+```
+
+The builders use ordinary class types in bytecode and module interfaces. Native payload tags implement their storage.
+
+File and network operations exchange Bytes. An in-process host boundary can share immutable Bytes storage.
+
+`StringBuilder.push_char` remains deferred with Char methods. `ByteBuffer.build` never performs a text conversion.
 
 Interpolation lowers to `std/fmt` append operations. The core scalar/string/bytes/digest/fault set has pinned formatting implementations. Other types format only through explicit functions because version 0.2 has no traits.
 
@@ -2898,7 +3018,7 @@ module          = opt_separators, { definition, separators },
 
 definition      = class_decl | enum_decl | function_decl ;
 
-class_decl      = "class", IDENT, [ type_params ], [ "<", type ], separators,
+class_decl      = [ "final" ], "class", IDENT, [ type_params ], [ "<", type ], separators,
                   { ( field_decl | method_decl ), separators },
                   "end" ;
 

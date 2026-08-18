@@ -40,10 +40,16 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/snapshot.lm"),
     "\n",
+    include_str!("../../../core/primitives.lm"),
+    "\n",
+    include_str!("../../../core/string.lm"),
+    "\n",
+    include_str!("../../../core/bytes.lm"),
+    "\n",
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 19] = [
+pub const PRELUDE_TYPES: [&str; 26] = [
     "Option",
     "Result",
     "Ordering",
@@ -63,6 +69,13 @@ pub const PRELUDE_TYPES: [&str; 19] = [
     "FsError",
     "OpenOptions",
     "SeekFrom",
+    "String",
+    "Utf8Error",
+    "IndexError",
+    "ParseIntError",
+    "Bytes",
+    "StringBuilder",
+    "ByteBuffer",
 ];
 
 /// The constructor names the prelude places into unqualified scope.
@@ -154,6 +167,8 @@ pub(crate) struct MethodSig {
 pub(crate) struct ClassInfo {
     /// True for an imported declaration: a shape with no body.
     pub(crate) imported: bool,
+    pub(crate) is_final: bool,
+    pub(crate) native_repr: Option<NativeRepr>,
     pub(crate) name: String,
     pub(crate) parent: Option<u32>,
     pub(crate) type_params: Vec<String>,
@@ -183,6 +198,8 @@ impl ClassInfo {
     pub(crate) fn placeholder(_idx: u32) -> ClassInfo {
         ClassInfo {
             imported: false,
+            is_final: false,
+            native_repr: None,
             name: String::new(),
             parent: None,
             type_params: Vec::new(),
@@ -913,13 +930,16 @@ pub(crate) fn resolve_row(
 }
 
 pub(crate) fn check_key_type(ctx: &Ctx, key: TypeId, span: Span) -> Result<(), Diagnostic> {
-    if matches!(key, lm_types::BOOL | lm_types::INT | lm_types::STRING) {
+    if matches!(
+        key,
+        lm_types::BOOL | lm_types::INT | lm_types::STRING | lm_types::BYTES
+    ) {
         Ok(())
     } else {
         Err(Diagnostic::new(
             "E1033",
             format!(
-                "a map key must be Bool, Int, or String, found {}",
+                "a map key must be Bool, Int, String, or Bytes, found {}",
                 ctx.store.display(key)
             ),
             span,
@@ -990,6 +1010,14 @@ pub(crate) fn check_mailbox_type(ctx: &Ctx, mailbox: TypeId, span: Span) -> Resu
 fn holder_local_part(ctx: &Ctx, ty: TypeId, seen: &mut Vec<u32>) -> Option<TypeId> {
     if ctx.store.is_holder_local_native(ty) {
         return Some(ty);
+    }
+    if let Type::Class(class) = ctx.store.get(ty) {
+        if matches!(
+            ctx.classes[class.0 as usize].native_repr,
+            Some(NativeRepr::StringBuilder | NativeRepr::ByteBuffer)
+        ) {
+            return Some(ty);
+        }
     }
     match ctx.store.get(ty).clone() {
         Type::List(item) => holder_local_part(ctx, item, seen),
@@ -1388,6 +1416,8 @@ fn assemble(
             .unwrap_or_default();
         hir_classes.push(HirClass {
             imported: info.imported,
+            is_final: info.is_final,
+            native_repr: info.native_repr,
             name: info.name.clone(),
             key: keys[idx].clone(),
             parent: info.parent,
@@ -1491,7 +1521,8 @@ fn register_type_names(
                    name: &str,
                    span: Span,
                    type_params: u32,
-                   kind: ClassKind|
+                   kind: ClassKind,
+                   is_final: bool|
      -> Result<u32, Diagnostic> {
         let map = if is_core {
             &mut ctx.core_types
@@ -1506,6 +1537,9 @@ fn register_type_names(
             ));
         }
         let id = ctx.store.register_class(name, type_params, kind);
+        if is_final {
+            ctx.store.set_class_final(id);
+        }
         if kind != ClassKind::EnumCase {
             let map = if is_core {
                 &mut ctx.core_types
@@ -1531,6 +1565,7 @@ fn register_type_names(
             class.name_span,
             type_names.len() as u32,
             ClassKind::Normal,
+            class.is_final,
         )?;
     }
     for enum_def in &module.enums {
@@ -1548,6 +1583,7 @@ fn register_type_names(
             enum_def.name_span,
             type_names.len() as u32,
             ClassKind::EnumParent,
+            false,
         )?;
         let mut seen: Vec<&str> = Vec::new();
         for arm in &enum_def.arms {
@@ -1566,6 +1602,7 @@ fn register_type_names(
                 arm.name_span,
                 type_names.len() as u32,
                 ClassKind::EnumCase,
+                false,
             )?;
             ctx.store.set_class_parent(ClassId(arm_id), ClassId(parent));
         }
@@ -1607,6 +1644,13 @@ fn link_class_parents(
                 Diagnostic::new("E1038", format!("unknown parent class `{pname}`"), *pspan)
             })?;
             let parent_meta = ctx.store.class_meta(ClassId(parent)).clone();
+            if parent_meta.is_final {
+                return Err(Diagnostic::new(
+                    "E1040",
+                    format!("`{pname}` is final and cannot be a parent"),
+                    *pspan,
+                ));
+            }
             match parent_meta.kind {
                 ClassKind::EnumParent | ClassKind::EnumCase => {
                     return Err(Diagnostic::new(
@@ -1821,13 +1865,43 @@ fn resolve_class(
     // and it recorded the link in the type store.
     let parent = ctx.store.class_meta(ClassId(idx)).parent.map(|p| p.0);
     let (type_names, _) = split_generics(&class.generics);
-    let self_ty = if type_names.is_empty() {
-        ctx.store.intern(Type::Class(ClassId(idx)))
-    } else {
-        let vars: Vec<TypeId> = (0..type_names.len())
-            .map(|i| ctx.store.intern(Type::Var(i as u32)))
-            .collect();
-        ctx.store.intern(Type::Inst(ClassId(idx), vars))
+    let native_repr = match (is_core, class.name.as_str()) {
+        (true, "Int") => Some(NativeRepr::Int),
+        (true, "Bool") => Some(NativeRepr::Bool),
+        (true, "String") => Some(NativeRepr::String),
+        (true, "Bytes") => Some(NativeRepr::Bytes),
+        (true, "StringBuilder") => Some(NativeRepr::StringBuilder),
+        (true, "ByteBuffer") => Some(NativeRepr::ByteBuffer),
+        _ => None,
+    };
+    if native_repr.is_some()
+        && (!class.is_final
+            || !type_names.is_empty()
+            || parent.is_some()
+            || !class.fields.is_empty()
+            || class.methods.iter().any(|method| method.name == "init"))
+    {
+        return Err(Diagnostic::new(
+            "E1040",
+            "a native core class must be final and have no state",
+            class.span,
+        ));
+    }
+    let self_ty = match native_repr {
+        Some(NativeRepr::Int) => lm_types::INT,
+        Some(NativeRepr::Bool) => lm_types::BOOL,
+        Some(NativeRepr::String) => lm_types::STRING,
+        Some(NativeRepr::Bytes) => lm_types::BYTES,
+        Some(NativeRepr::StringBuilder) | Some(NativeRepr::ByteBuffer) => {
+            ctx.store.intern(Type::Class(ClassId(idx)))
+        }
+        None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
+        None => {
+            let vars: Vec<TypeId> = (0..type_names.len())
+                .map(|i| ctx.store.intern(Type::Var(i as u32)))
+                .collect();
+            ctx.store.intern(Type::Inst(ClassId(idx), vars))
+        }
     };
     let env = TyEnv {
         type_names: type_names.clone(),
@@ -1988,6 +2062,8 @@ fn resolve_class(
     }
     Ok(ClassInfo {
         imported: false,
+        is_final: class.is_final,
+        native_repr,
         name: class.name.clone(),
         parent,
         type_params: type_names,
@@ -2078,6 +2154,8 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
     let arms: Vec<u32> = arm_infos.iter().map(|(idx, _, _, _)| *idx).collect();
     ctx.classes[parent_idx as usize] = ClassInfo {
         imported: false,
+        is_final: false,
+        native_repr: None,
         name: enum_def.name.clone(),
         parent: None,
         type_params: type_names.clone(),
@@ -2105,6 +2183,8 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         let count = field_tys.len();
         ctx.classes[arm_class as usize] = ClassInfo {
             imported: false,
+            is_final: false,
+            native_repr: None,
             name: format!("{}.{}", enum_def.name, short),
             parent: Some(parent_idx),
             type_params: type_names.clone(),

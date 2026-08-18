@@ -171,6 +171,9 @@ impl<'a> Materializer<'a> {
             .store
             .register_class(name.to_string(), class.type_params, kind)
             .0;
+        if class.is_final {
+            ctx.store.set_class_final(ClassId(id));
+        }
         self.classes.insert(key, id);
         self.pending.push(PendingClass {
             id,
@@ -475,6 +478,8 @@ impl<'a> Materializer<'a> {
         }
         Ok(ClassInfo {
             imported: true,
+            is_final: class.is_final,
+            native_repr: None,
             name: item.name.clone(),
             parent,
             type_params,
@@ -604,8 +609,6 @@ impl<'a> Materializer<'a> {
             IfaceType::Bool => lm_types::BOOL,
             IfaceType::Int => lm_types::INT,
             IfaceType::Str => lm_types::STRING,
-            IfaceType::StringBuilder => lm_types::STRING_BUILDER,
-            IfaceType::ByteBuffer => lm_types::BYTE_BUFFER,
             IfaceType::Bytes => lm_types::BYTES,
             IfaceType::FileHandle => lm_types::FILE_HANDLE,
             IfaceType::ResourceHandle => lm_types::RESOURCE_HANDLE,

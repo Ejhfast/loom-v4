@@ -1311,8 +1311,6 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
         1 => ClosedType::Bool,
         2 => ClosedType::Int,
         3 => ClosedType::Str,
-        4 => ClosedType::StringBuilder,
-        5 => ClosedType::ByteBuffer,
         6 => ClosedType::Fault,
         7 => ClosedType::Request,
         8 => ClosedType::PolicyTable,
@@ -1465,7 +1463,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
     let tag = cur.u8()?;
     let limits = &ctx.limits;
     Ok(match tag {
-        0 => Object::Str(cur.str(limits.max_string_bytes)?),
+        0 => Object::Str(cur.str(limits.max_string_bytes)?.into()),
         1 => {
             let class = class_slot(cur)?;
             let env = env_ref(cur, ctx)?;
@@ -1554,7 +1552,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
         16 => {
             let count = cur.count(limits.max_string_bytes as u64, "byte")?;
             let source = cur.take(count)?;
-            Object::Bytes(cur.copy_bytes(source, "bytes")?)
+            Object::Bytes(cur.copy_bytes(source, "bytes")?.into())
         }
         17 => Object::NativeFileHandle {
             resource: cur.u64()?,

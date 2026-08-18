@@ -72,8 +72,6 @@ impl Naming<'_> {
             // `Never` cannot appear in a declared signature; the
             // checker widens it to the declared result type.
             Type::Never => IfaceType::Unit,
-            Type::StringBuilder => IfaceType::StringBuilder,
-            Type::ByteBuffer => IfaceType::ByteBuffer,
             Type::Bytes => IfaceType::Bytes,
             Type::FileHandle => IfaceType::FileHandle,
             Type::ResourceHandle => IfaceType::ResourceHandle,
@@ -177,6 +175,7 @@ impl Naming<'_> {
             .collect();
         IfaceClass {
             kind,
+            is_final: info.is_final,
             type_params,
             parent: info.parent.map(|p| self.qual(p)),
             fields,

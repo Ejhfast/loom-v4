@@ -57,6 +57,8 @@ pub struct ParentClause {
 /// A `class` declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDef {
+    /// True when the declaration uses the `final` modifier.
+    pub is_final: bool,
     pub name: String,
     pub name_span: Span,
     pub generics: Vec<GenericParam>,

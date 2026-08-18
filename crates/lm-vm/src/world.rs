@@ -2145,7 +2145,7 @@ impl<'m> World<'m> {
 
     /// Build one ordinary file-service failure.
     fn failed_file_reply(&mut self, vm: VmId, message: &str) -> Result<Value, FaultCode> {
-        let message = self.machines[vm as usize].alloc(Object::Str(message.to_string()))?;
+        let message = self.machines[vm as usize].alloc(Object::Str(message.to_string().into()))?;
         let error = self.make_instance(vm, self.core.fs_error_failed, vec![message])?;
         self.make_instance(vm, self.core.result_err, vec![error])
     }
@@ -3612,8 +3612,7 @@ impl<'m> World<'m> {
                         self.install_value_reply(vm, Value::Bool(closed));
                     }
                     _ => {
-                        let built =
-                            self.machines[vm as usize].alloc(Object::Str("file".to_string()));
+                        let built = self.machines[vm as usize].alloc(Object::Str("file".into()));
                         self.reply_or_fault(vm, op, built);
                     }
                 }
@@ -4237,13 +4236,13 @@ impl<'m> World<'m> {
                 // while the kind string allocates.
                 let list_ref = list.as_obj().ok_or(FaultCode::MalformedState)?;
                 self.machines[vm as usize].vm.heap.push_host_root(list_ref);
-                let text = self.machines[vm as usize].alloc(Object::Str(kind.clone()));
+                let text = self.machines[vm as usize].alloc(Object::Str(kind.clone().into()));
                 self.machines[vm as usize].vm.heap.pop_host_root(list_ref);
                 let text = text?;
                 self.make_instance(vm, self.core.snapshot_resource_active, vec![list, text])
             }
             crate::snapshot::SnapshotFail::Fault(_, message) => {
-                let text = self.machines[vm as usize].alloc(Object::Str(message.clone()))?;
+                let text = self.machines[vm as usize].alloc(Object::Str(message.clone().into()))?;
                 self.make_instance(vm, self.core.snapshot_bad_image, vec![text])
             }
         }
@@ -5448,7 +5447,7 @@ impl<'m> World<'m> {
             );
             return;
         };
-        let built = self.machines[vm as usize].alloc(Object::Str(lm_abi::op_name(op)));
+        let built = self.machines[vm as usize].alloc(Object::Str(lm_abi::op_name(op).into()));
         match built.and_then(|value| self.machines[vm as usize].push(value).map(|_| ())) {
             Ok(()) => {}
             Err(code) => self.machines[vm as usize].set_fault(code, "", None),
@@ -7693,7 +7692,7 @@ mod tests {
     #[test]
     fn two_machine_heaps_share_one_world_limit() {
         let loaded = trivial_loaded();
-        let object = Object::Str("one".to_string());
+        let object = Object::Str("one".into());
         let limits = WorldLimits {
             max_heap_bytes: object.cost(),
             max_heap_objects: 1,
@@ -7715,7 +7714,7 @@ mod tests {
     #[test]
     fn a_second_machine_attaches_the_aggregate_heap_ledger() {
         let loaded = trivial_loaded();
-        let object = Object::Str("one".to_string());
+        let object = Object::Str("one".into());
         let bytes = object.cost();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
 

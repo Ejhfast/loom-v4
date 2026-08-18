@@ -149,7 +149,7 @@ fn check_one(
     value: Value,
     expect: ClosedTypeId,
 ) -> Result<(), FaultCode> {
-    match resolve(envs, expect)? {
+    match resolve(module, envs, expect)? {
         Node::Scalar(tag) => {
             let matches = match (value, tag) {
                 (Value::Unit, Scalar::Unit) => true,
@@ -184,7 +184,7 @@ fn check_one(
     }
 }
 
-fn resolve(envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Node, FaultCode> {
+fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Node, FaultCode> {
     let node = envs.ty(expect).ok_or(FaultCode::MalformedState)?;
     Ok(match node {
         ClosedType::Unit => Node::Scalar(Scalar::Unit),
@@ -192,8 +192,6 @@ fn resolve(envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Node, FaultCode> {
         ClosedType::Int => Node::Scalar(Scalar::Int),
         ClosedType::Op(op, _) => Node::Scalar(Scalar::Op(*op)),
         ClosedType::Str => Node::Heap(Kind::Str),
-        ClosedType::StringBuilder => Node::Heap(Kind::StringBuilder),
-        ClosedType::ByteBuffer => Node::Heap(Kind::ByteBuffer),
         ClosedType::Bytes => Node::Heap(Kind::Bytes),
         ClosedType::FileHandle => Node::Heap(Kind::FileHandle),
         ClosedType::ResourceHandle => Node::Heap(Kind::ResourceHandle),
@@ -211,7 +209,16 @@ fn resolve(envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Node, FaultCode> {
         ClosedType::List(_) => Node::Heap(Kind::List),
         ClosedType::Map(_, _) => Node::Heap(Kind::Map),
         ClosedType::Tuple(_) => Node::Heap(Kind::Tuple),
-        ClosedType::Class(_) | ClosedType::Inst(_, _) => Node::Heap(Kind::Instance),
+        ClosedType::Class(class) => {
+            if module.core_roles[lm_bytecode::corepin::ROLE_STRING_BUILDER] == *class {
+                Node::Heap(Kind::StringBuilder)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_BYTE_BUFFER] == *class {
+                Node::Heap(Kind::ByteBuffer)
+            } else {
+                Node::Heap(Kind::Instance)
+            }
+        }
+        ClosedType::Inst(_, _) => Node::Heap(Kind::Instance),
     })
 }
 
@@ -608,6 +615,7 @@ mod tests {
         let class = |name: &str, parent: u32, parent_args: Vec<u32>, type_params: u32| BcClass {
             name: name.to_string(),
             key: name.to_string(),
+            is_final: false,
             parent,
             parent_args,
             type_params,

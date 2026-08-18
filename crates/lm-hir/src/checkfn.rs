@@ -18,10 +18,7 @@ use crate::hir::*;
 use lm_source::ast::{self, BinOp, ExprKind, PatternKind, StmtKind};
 use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
-use lm_types::{
-    ClassId, ClassKind, Row, Type, TypeId, BOOL, BYTE_BUFFER, DIGEST, INT, NEVER, STRING,
-    STRING_BUILDER, UNIT,
-};
+use lm_types::{ClassId, ClassKind, Row, Type, TypeId, BOOL, DIGEST, INT, NEVER, STRING, UNIT};
 use std::collections::{HashMap, HashSet};
 
 /// The work budget for one pattern usefulness analysis.
@@ -136,9 +133,6 @@ enum Callee {
     Ctor {
         arm: u32,
     },
-    NativeSb,
-    NativeBb,
-    NativeBytes,
     /// `List[T]()` with explicit arguments.
     ListCtor(TypeId),
     /// `Map[K, V]()` with explicit arguments.
@@ -231,6 +225,26 @@ fn ctor_complete(c: &CtorCtx) -> bool {
 /// Extract the nominal class and arguments of one instance type.
 fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {
     match ctx.store.get(ty) {
+        Type::Int => ctx
+            .core_types
+            .get("Int")
+            .copied()
+            .map(|class| (class, vec![])),
+        Type::Bool => ctx
+            .core_types
+            .get("Bool")
+            .copied()
+            .map(|class| (class, vec![])),
+        Type::String => ctx
+            .core_types
+            .get("String")
+            .copied()
+            .map(|class| (class, vec![])),
+        Type::Bytes => ctx
+            .core_types
+            .get("Bytes")
+            .copied()
+            .map(|class| (class, vec![])),
         Type::Class(c) => Some((c.0, vec![])),
         Type::Inst(c, args) => Some((c.0, args.clone())),
         _ => None,
@@ -392,6 +406,15 @@ impl<'o> FnChecker<'o> {
             }
         }
         None
+    }
+
+    /// Find one user module function in a user body.
+    fn module_func(&self, ctx: &Ctx, name: &str) -> Option<u32> {
+        if self.env.core_scope {
+            None
+        } else {
+            ctx.func_index.get(name).copied()
+        }
     }
 
     /// Resolve a name to a local or a capture, registering transitive
@@ -893,7 +916,9 @@ impl<'o> FnChecker<'o> {
                 name_span,
             )),
             None => {
-                if ctx.func_index.contains_key(name) || ctx.lookup_type(name, &self.env).is_some() {
+                if self.module_func(ctx, name).is_some()
+                    || ctx.lookup_type(name, &self.env).is_some()
+                {
                     return Err(Diagnostic::new(
                         "E1019",
                         format!("cannot assign to `{name}`"),
@@ -1066,7 +1091,7 @@ impl<'o> FnChecker<'o> {
                     }
                     None => {}
                 }
-                if let Some(func) = ctx.func_index.get(name).copied() {
+                if let Some(func) = self.module_func(ctx, name) {
                     let sig = ctx.sigs[func as usize].clone();
                     if !sig.type_params.is_empty() || !sig.effect_params.is_empty() {
                         return Err(Diagnostic::new(
@@ -1107,19 +1132,16 @@ impl<'o> FnChecker<'o> {
             }
             ExprKind::Not(inner) => {
                 let inner = self.check_expr(ctx, inner, BOOL)?;
-                Ok(HExpr {
-                    ty: BOOL,
-                    mutable: true,
-                    kind: HExprKind::Not(Box::new(inner)),
-                })
+                Ok(Self::primitive_operator(
+                    ctx,
+                    "Bool",
+                    "__not__",
+                    vec![inner],
+                ))
             }
             ExprKind::Neg(inner) => {
                 let inner = self.check_expr(ctx, inner, INT)?;
-                Ok(HExpr {
-                    ty: INT,
-                    mutable: true,
-                    kind: HExprKind::Neg(Box::new(inner)),
-                })
+                Ok(Self::primitive_operator(ctx, "Int", "__neg__", vec![inner]))
             }
             ExprKind::Binary { op, left, right } => self.synth_binary(ctx, *op, left, right),
             ExprKind::And(left, right) => {
@@ -1531,6 +1553,9 @@ impl<'o> FnChecker<'o> {
         expected: Option<TypeId>,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
+        if self.env.core_scope && name == "intrinsic" {
+            return self.call_intrinsic(ctx, type_args, args, span);
+        }
         let callee = self.resolve_callee(ctx, name, name_span, type_args, expected, span)?;
         match callee {
             Callee::Value(callee_h) => {
@@ -1574,6 +1599,26 @@ impl<'o> FnChecker<'o> {
                 })
             }
             Callee::Class(class) => {
+                if ctx.classes[class as usize].native_repr == Some(NativeRepr::Bytes)
+                    && args.len() == 1
+                {
+                    if !type_args.is_empty() {
+                        return Err(Diagnostic::new(
+                            "E1024",
+                            "`Bytes` does not take type arguments",
+                            name_span,
+                        ));
+                    }
+                    let text = self.check_expr(ctx, &args[0], STRING)?;
+                    return Ok(HExpr {
+                        ty: lm_types::BYTES,
+                        mutable: false,
+                        kind: HExprKind::Native {
+                            op: NativeOp::BytesNew,
+                            args: vec![text],
+                        },
+                    });
+                }
                 let info = &ctx.classes[class as usize];
                 let type_names = info.type_params.clone();
                 let ret = info.self_ty;
@@ -1614,58 +1659,6 @@ impl<'o> FnChecker<'o> {
                 })
             }
             Callee::Ctor { arm } => self.construct_arm(ctx, arm, type_args, args, expected, span),
-            Callee::NativeSb => {
-                if !args.is_empty() {
-                    return Err(Diagnostic::new(
-                        "E1006",
-                        "`StringBuilder` expects 0 argument(s)",
-                        span,
-                    ));
-                }
-                Ok(HExpr {
-                    ty: STRING_BUILDER,
-                    mutable: true,
-                    kind: HExprKind::Native {
-                        op: NativeOp::SbNew,
-                        args: vec![],
-                    },
-                })
-            }
-            Callee::NativeBb => {
-                if !args.is_empty() {
-                    return Err(Diagnostic::new(
-                        "E1006",
-                        "`ByteBuffer` expects 0 argument(s)",
-                        span,
-                    ));
-                }
-                Ok(HExpr {
-                    ty: BYTE_BUFFER,
-                    mutable: true,
-                    kind: HExprKind::Native {
-                        op: NativeOp::BbNew,
-                        args: vec![],
-                    },
-                })
-            }
-            Callee::NativeBytes => {
-                if args.len() != 1 {
-                    return Err(Diagnostic::new(
-                        "E1006",
-                        format!("`Bytes` expects 1 argument(s), found {}", args.len()),
-                        span,
-                    ));
-                }
-                let text = self.check_expr(ctx, &args[0], STRING)?;
-                Ok(HExpr {
-                    ty: lm_types::BYTES,
-                    mutable: false,
-                    kind: HExprKind::Native {
-                        op: NativeOp::BytesNew,
-                        args: vec![text],
-                    },
-                })
-            }
             Callee::ListCtor(elem) => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new(
@@ -1714,6 +1707,67 @@ impl<'o> FnChecker<'o> {
         }
     }
 
+    /// Check one named intrinsic inside the core image.
+    fn call_intrinsic(
+        &mut self,
+        ctx: &mut Ctx,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if !type_args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1024",
+                "an intrinsic does not take type arguments",
+                span,
+            ));
+        }
+        let Some((name_expr, operands)) = args.split_first() else {
+            return Err(Diagnostic::new(
+                "E1006",
+                "`intrinsic` needs a manifest name",
+                span,
+            ));
+        };
+        let ExprKind::Str(name) = &name_expr.kind else {
+            return Err(Diagnostic::new(
+                "E1006",
+                "the intrinsic name must be a string literal",
+                name_expr.span,
+            ));
+        };
+        let intrinsic = lm_abi::intrinsic_by_name(name).ok_or_else(|| {
+            Diagnostic::new(
+                "E1026",
+                format!("the intrinsic manifest has no `{name}` entry"),
+                name_expr.span,
+            )
+        })?;
+        let def = *lm_abi::intrinsic(intrinsic);
+        let params: Vec<TypeId> = def
+            .params
+            .iter()
+            .map(|param| Self::abi_type_id(ctx, *param))
+            .collect();
+        let checked = self.check_args_simple(
+            ctx,
+            operands,
+            &params,
+            &vec![false; params.len()],
+            NO_NAMES,
+            def.name,
+            span,
+        )?;
+        Ok(HExpr {
+            ty: Self::abi_type_id(ctx, def.reply),
+            mutable: true,
+            kind: HExprKind::Intrinsic {
+                intrinsic,
+                args: checked,
+            },
+        })
+    }
+
     /// Resolve one called name to its meaning.
     fn resolve_callee(
         &mut self,
@@ -1735,7 +1789,7 @@ impl<'o> FnChecker<'o> {
                 kind,
             }));
         }
-        if let Some(func) = ctx.func_index.get(name).copied() {
+        if let Some(func) = self.module_func(ctx, name) {
             return Ok(Callee::Func(func));
         }
         if let Some(class) = ctx.lookup_type(name, &self.env) {
@@ -1755,9 +1809,6 @@ impl<'o> FnChecker<'o> {
             }
         }
         match name {
-            "StringBuilder" => return Ok(Callee::NativeSb),
-            "ByteBuffer" => return Ok(Callee::NativeBb),
-            "Bytes" => return Ok(Callee::NativeBytes),
             "List" => {
                 if type_args.len() == 1 {
                     let elem = resolve_type(ctx, &self.env.clone(), &type_args[0])?;
@@ -1926,7 +1977,7 @@ impl<'o> FnChecker<'o> {
             ExprKind::MapLit(entries) => !entries.is_empty(),
             ExprKind::TupleLit(items) => items.iter().all(|i| self.can_synth(ctx, i)),
             ExprKind::Name(name) => {
-                if self.lookup_slot(name).is_some() || ctx.func_index.contains_key(name) {
+                if self.lookup_slot(name).is_some() || self.module_func(ctx, name).is_some() {
                     return true;
                 }
                 let families = ctx.ctor_families(&self.env, name);
@@ -1944,7 +1995,7 @@ impl<'o> FnChecker<'o> {
             } => {
                 if !type_args.is_empty()
                     || self.lookup_slot(name).is_some()
-                    || ctx.func_index.contains_key(name)
+                    || self.module_func(ctx, name).is_some()
                 {
                     return true;
                 }
@@ -2132,7 +2183,7 @@ impl<'o> FnChecker<'o> {
     /// example the `Option` in `Option.Some`.
     fn enum_qualifier(&self, ctx: &Ctx, recv: &ast::Expr) -> Option<u32> {
         if let ExprKind::Name(name) = &recv.kind {
-            if self.lookup_slot(name).is_none() && !ctx.func_index.contains_key(name) {
+            if self.lookup_slot(name).is_none() && self.module_func(ctx, name).is_none() {
                 if let Some(class) = ctx.lookup_type(name, &self.env) {
                     if ctx.classes[class as usize].kind == ClassKind::EnumParent {
                         return Some(class);
@@ -2323,7 +2374,7 @@ impl<'o> FnChecker<'o> {
         }
         // Class and enum methods first, then the universal `freeze`.
         if let Some((class, class_args)) = class_of(ctx, recv_ty) {
-            if let Some((sig, owner_args, _)) = ctx.find_method_owner(class, name) {
+            if let Some((sig, owner_args, owner)) = ctx.find_method_owner(class, name) {
                 if sig.name == "init" {
                     return Err(Diagnostic::new(
                         "E1026",
@@ -2363,6 +2414,29 @@ impl<'o> FnChecker<'o> {
                     expected,
                 )?;
                 let own_targs = out.targs[own_start..].to_vec();
+                if ctx.classes[class as usize].is_final {
+                    let mut direct_targs = if owner == class {
+                        out.targs[..own_start].to_vec()
+                    } else {
+                        owner_args
+                            .iter()
+                            .map(|arg| ctx.store.substitute(*arg, &out.targs, &[]))
+                            .collect()
+                    };
+                    direct_targs.extend(own_targs);
+                    let mut all_args = vec![recv_h];
+                    all_args.extend(out.args);
+                    return Ok(HExpr {
+                        ty: out.ret,
+                        mutable: true,
+                        kind: HExprKind::Call {
+                            func: sig.func,
+                            targs: direct_targs,
+                            rowargs: out.rowargs,
+                            args: all_args,
+                        },
+                    });
+                }
                 return Ok(HExpr {
                     ty: out.ret,
                     mutable: true,
@@ -2467,25 +2541,6 @@ impl<'o> FnChecker<'o> {
                 let ret = ctx.option_of(*v);
                 native(NativeOp::MapGet, vec![*k], &["key"], ret, false)
             }
-            (Type::StringBuilder, "append") => native(
-                NativeOp::SbAppend,
-                vec![STRING],
-                &["text"],
-                STRING_BUILDER,
-                true,
-            ),
-            (Type::StringBuilder, "build") => {
-                native(NativeOp::SbBuild, vec![], NO_NAMES, STRING, false)
-            }
-            (Type::ByteBuffer, "append") => {
-                native(NativeOp::BbAppend, vec![INT], &["byte"], BYTE_BUFFER, true)
-            }
-            (Type::ByteBuffer, "len") => native(NativeOp::BbLen, vec![], NO_NAMES, INT, false),
-            (Type::ByteBuffer, "build") => {
-                native(NativeOp::BbBuild, vec![], NO_NAMES, STRING, false)
-            }
-            (Type::Bytes, "len") => native(NativeOp::BytesLen, vec![], NO_NAMES, INT, false),
-            (Type::Bytes, "text") => native(NativeOp::BytesText, vec![], NO_NAMES, STRING, false),
             _ if name == "freeze" && ctx.store.is_heap(recv_ty) && args.is_empty() => {
                 return Ok(freeze_expr(recv_h));
             }
@@ -3155,9 +3210,12 @@ impl<'o> FnChecker<'o> {
     fn abi_type_id(ctx: &mut Ctx, t: lm_abi::AbiType) -> TypeId {
         match t {
             lm_abi::AbiType::Unit => UNIT,
+            lm_abi::AbiType::Bool => BOOL,
             lm_abi::AbiType::Int => INT,
             lm_abi::AbiType::Str => STRING,
             lm_abi::AbiType::Bytes => lm_types::BYTES,
+            lm_abi::AbiType::StringBuilder => Self::core_class(ctx, "StringBuilder"),
+            lm_abi::AbiType::ByteBuffer => Self::core_class(ctx, "ByteBuffer"),
             lm_abi::AbiType::FileHandle => lm_types::FILE_HANDLE,
             lm_abi::AbiType::OpenOptions => Self::core_class(ctx, "OpenOptions"),
             lm_abi::AbiType::SeekFrom => Self::core_class(ctx, "SeekFrom"),
@@ -4252,6 +4310,30 @@ impl<'o> FnChecker<'o> {
         Ok(Some(out))
     }
 
+    /// Build one direct call to a final primitive method.
+    fn primitive_operator(ctx: &Ctx, class_name: &str, name: &str, args: Vec<HExpr>) -> HExpr {
+        let class = *ctx
+            .core_types
+            .get(class_name)
+            .expect("the core primitive class exists");
+        let method = ctx.classes[class as usize]
+            .methods
+            .iter()
+            .find(|method| method.name == name)
+            .expect("the core primitive method exists");
+        debug_assert_eq!(args.len(), method.params.len() + 1);
+        HExpr {
+            ty: method.ret,
+            mutable: true,
+            kind: HExprKind::Call {
+                func: method.func,
+                targs: vec![],
+                rowargs: vec![],
+                args,
+            },
+        }
+    }
+
     fn synth_binary(
         &mut self,
         ctx: &mut Ctx,
@@ -4260,33 +4342,53 @@ impl<'o> FnChecker<'o> {
         right: &ast::Expr,
     ) -> Result<HExpr, Diagnostic> {
         match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            BinOp::Add => {
+                let l = self.synth_expr(ctx, left)?;
+                if l.ty == STRING {
+                    let r = self.check_expr(ctx, right, STRING)?;
+                    return Ok(Self::primitive_operator(
+                        ctx,
+                        "String",
+                        "__add__",
+                        vec![l, r],
+                    ));
+                }
+                if l.ty == lm_types::BYTES {
+                    let r = self.check_expr(ctx, right, lm_types::BYTES)?;
+                    return Ok(Self::primitive_operator(
+                        ctx,
+                        "Bytes",
+                        "__add__",
+                        vec![l, r],
+                    ));
+                }
+                let l = self.expect_compatible(ctx, INT, l, left.span)?;
+                let r = self.check_expr(ctx, right, INT)?;
+                Ok(Self::primitive_operator(ctx, "Int", "__add__", vec![l, r]))
+            }
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 let l = self.check_expr(ctx, left, INT)?;
                 let r = self.check_expr(ctx, right, INT)?;
-                Ok(HExpr {
-                    ty: INT,
-                    mutable: true,
-                    kind: HExprKind::Binary {
-                        op,
-                        operand_ty: INT,
-                        left: Box::new(l),
-                        right: Box::new(r),
-                    },
-                })
+                let name = match op {
+                    BinOp::Sub => "__sub__",
+                    BinOp::Mul => "__mul__",
+                    BinOp::Div => "__div__",
+                    BinOp::Rem => "__rem__",
+                    _ => unreachable!(),
+                };
+                Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let l = self.check_expr(ctx, left, INT)?;
                 let r = self.check_expr(ctx, right, INT)?;
-                Ok(HExpr {
-                    ty: BOOL,
-                    mutable: true,
-                    kind: HExprKind::Binary {
-                        op,
-                        operand_ty: INT,
-                        left: Box::new(l),
-                        right: Box::new(r),
-                    },
-                })
+                let name = match op {
+                    BinOp::Lt => "__lt__",
+                    BinOp::Le => "__le__",
+                    BinOp::Gt => "__gt__",
+                    BinOp::Ge => "__ge__",
+                    _ => unreachable!(),
+                };
+                Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
             }
             BinOp::Eq | BinOp::Ne => {
                 let l = self.synth_expr(ctx, left)?;
@@ -4346,6 +4448,16 @@ impl<'o> FnChecker<'o> {
                         ),
                         left.span,
                     ));
+                }
+                if matches!(operand_ty, INT | BOOL | STRING) || operand_ty == lm_types::BYTES {
+                    let class = match operand_ty {
+                        BOOL => "Bool",
+                        STRING => "String",
+                        lm_types::BYTES => "Bytes",
+                        _ => "Int",
+                    };
+                    let name = if op == BinOp::Eq { "__eq__" } else { "__ne__" };
+                    return Ok(Self::primitive_operator(ctx, class, name, vec![l, r]));
                 }
                 Ok(HExpr {
                     ty: BOOL,

@@ -536,8 +536,6 @@ impl<'m> Ctx<'m> {
                 | BcType::Map(_, _)
                 | BcType::Tuple(_)
                 | BcType::Fn(_, _, _, _)
-                | BcType::StringBuilder
-                | BcType::ByteBuffer
                 | BcType::Digest
                 | BcType::Fault
                 | BcType::Request
@@ -613,9 +611,14 @@ impl<'m> Ctx<'m> {
     fn abi_ty(&self, t: lm_abi::AbiType) -> Result<u32, String> {
         match t {
             lm_abi::AbiType::Unit => Ok(TY_UNIT),
+            lm_abi::AbiType::Bool => Ok(TY_BOOL),
             lm_abi::AbiType::Int => Ok(TY_INT),
             lm_abi::AbiType::Str => Ok(TY_STR),
             lm_abi::AbiType::Bytes => Ok(self.intern(BcType::Bytes)),
+            lm_abi::AbiType::StringBuilder => {
+                self.plain_inst(self.core.string_builder, "StringBuilder")
+            }
+            lm_abi::AbiType::ByteBuffer => self.plain_inst(self.core.byte_buffer, "ByteBuffer"),
             lm_abi::AbiType::FileHandle => Ok(self.intern(BcType::FileHandle)),
             lm_abi::AbiType::OpenOptions => self.plain_inst(self.core.open_options, "OpenOptions"),
             lm_abi::AbiType::SeekFrom => self.plain_inst(self.core.seek_from, "SeekFrom"),
@@ -726,7 +729,10 @@ impl<'m> Ctx<'m> {
 /// key: a rule change invalidates every cached admission.
 ///
 /// Version 9 adds byte types, resource types, and their operations.
-pub const VERIFIER_VERSION: u32 = 9;
+/// Version 10 adds final class rules. Version 11 adds the `Int` role.
+/// Version 12 adds the `Bool` role. Version 13 adds the `String` role
+/// and String instructions. Version 14 adds Bytes and builder roles.
+pub const VERIFIER_VERSION: u32 = 14;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -1145,6 +1151,29 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             ));
         }
     }
+    let native_roles = [
+        (lm_bytecode::corepin::ROLE_INT, "Int"),
+        (lm_bytecode::corepin::ROLE_BOOL, "Bool"),
+        (lm_bytecode::corepin::ROLE_STRING, "String"),
+        (lm_bytecode::corepin::ROLE_BYTES, "Bytes"),
+        (lm_bytecode::corepin::ROLE_STRING_BUILDER, "StringBuilder"),
+        (lm_bytecode::corepin::ROLE_BYTE_BUFFER, "ByteBuffer"),
+    ];
+    for (role, name) in native_roles {
+        let Some(idx) = slot(role) else { continue };
+        let class = &module.classes[idx as usize];
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !class.fields.is_empty()
+        {
+            return Err(terr(format!(
+                "the core role `{name}` does not name a final stateless class"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1190,12 +1219,7 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         };
         match ty {
             BcType::Unit | BcType::Bool | BcType::Int | BcType::Str => {}
-            BcType::StringBuilder
-            | BcType::ByteBuffer
-            | BcType::Digest
-            | BcType::Bytes
-            | BcType::FileHandle
-            | BcType::ResourceHandle => {}
+            BcType::Digest | BcType::Bytes | BcType::FileHandle | BcType::ResourceHandle => {}
             BcType::Var(_) => {}
             BcType::Class(c) => {
                 if *c as usize >= module.classes.len() {
@@ -1231,10 +1255,10 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                 check_ref(*v)?;
                 if !matches!(
                     module.types[*k as usize],
-                    BcType::Bool | BcType::Int | BcType::Str
+                    BcType::Bool | BcType::Int | BcType::Str | BcType::Bytes
                 ) {
                     return Err(terr(format!(
-                        "type {idx} is a map with a key type that is not Bool, Int, or String"
+                        "type {idx} has a map key type other than Bool, Int, String, or Bytes"
                     )));
                 }
             }
@@ -1439,11 +1463,17 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         }
         match class.kind {
             BcClassKind::Abstract => {
+                if class.is_final {
+                    return Err(cerr("an abstract enum parent cannot be final".to_string()));
+                }
                 if class.parent().is_some() {
                     return Err(cerr("an abstract enum parent cannot inherit".to_string()));
                 }
             }
             BcClassKind::Case => {
+                if class.is_final {
+                    return Err(cerr("a case class cannot use the final flag".to_string()));
+                }
                 let Some(p) = class.parent() else {
                     return Err(cerr("a case class needs its enum parent".to_string()));
                 };
@@ -1468,6 +1498,9 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                 return Err(cerr(format!("parent {p} is not an earlier class entry")));
             }
             let parent = &module.classes[p as usize];
+            if parent.is_final {
+                return Err(cerr("a class cannot inherit a final class".to_string()));
+            }
             if class.kind != BcClassKind::Case {
                 if parent.kind != BcClassKind::Normal {
                     return Err(cerr(
@@ -1532,7 +1565,15 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             }
         }
         // The canonical self type of the class.
-        let own_ty = if class.type_params == 0 {
+        let own_ty = if core.int == Some(cidx as u32) {
+            Some(TY_INT)
+        } else if core.boolean == Some(cidx as u32) {
+            Some(TY_BOOL)
+        } else if core.string == Some(cidx as u32) {
+            Some(TY_STR)
+        } else if core.bytes == Some(cidx as u32) {
+            ctx.uni.borrow().index.get(&BcType::Bytes).copied()
+        } else if class.type_params == 0 {
             ctx.class_ty[cidx]
         } else {
             let vars: Vec<u32> = (0..class.type_params)
@@ -1989,6 +2030,15 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                     if c.kind == BcClassKind::Abstract {
                         return Err(err(fidx, at("cannot allocate an abstract enum parent")));
                     }
+                    if ctx.core.int == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
+                    }
+                    if ctx.core.boolean == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
+                    }
+                    if ctx.core.string == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
+                    }
                     if c.type_params != 0 {
                         return Err(err(fidx, at("a generic class needs a type application")));
                     }
@@ -1999,6 +2049,15 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                     };
                     if c.kind == BcClassKind::Abstract {
                         return Err(err(fidx, at("cannot allocate an abstract enum parent")));
+                    }
+                    if ctx.core.int == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
+                    }
+                    if ctx.core.boolean == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
+                    }
+                    if ctx.core.string == Some(*class) {
+                        return Err(err(fidx, at("cannot allocate a primitive core class")));
                     }
                     if c.type_params == 0 {
                         return Err(err(fidx, at("a type application on a non-generic class")));
@@ -2339,15 +2398,39 @@ fn step(
             pop_expect(state, TY_BOOL)?;
             push(state, TY_BOOL)?;
         }
-        Instr::EqStr | Instr::NeStr => {
+        Instr::Native(lm_bytecode::NativeInstr::EqStr)
+        | Instr::Native(lm_bytecode::NativeInstr::NeStr) => {
             pop_expect(state, TY_STR)?;
             pop_expect(state, TY_STR)?;
             push(state, TY_BOOL)?;
         }
+        Instr::Native(lm_bytecode::NativeInstr::StrByteLen)
+        | Instr::Native(lm_bytecode::NativeInstr::StrCharCount) => {
+            pop_expect(state, TY_STR)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::StrConcat) => {
+            pop_expect(state, TY_STR)?;
+            pop_expect(state, TY_STR)?;
+            push(state, TY_STR)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::StrStartsWith)
+        | Instr::Native(lm_bytecode::NativeInstr::StrEndsWith)
+        | Instr::Native(lm_bytecode::NativeInstr::StrContains) => {
+            pop_expect(state, TY_STR)?;
+            pop_expect(state, TY_STR)?;
+            push(state, TY_BOOL)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::StrFindIndex) => {
+            pop_expect(state, TY_STR)?;
+            pop_expect(state, TY_STR)?;
+            push(state, TY_INT)?;
+        }
         Instr::EqRef | Instr::NeRef => {
             let b = pop(state)?;
             let a = pop(state)?;
-            let excluded = |t: u32| matches!(ctx.ty(t), BcType::Str | BcType::Tuple(_));
+            let excluded =
+                |t: u32| matches!(ctx.ty(t), BcType::Str | BcType::Bytes | BcType::Tuple(_));
             let heap_ok = ctx.is_heap(a) && ctx.is_heap(b) && !excluded(a) && !excluded(b);
             if !heap_ok || !(ctx.is_subtype(a, b) || ctx.is_subtype(b, a)) {
                 return Err(fail(format!(
@@ -2384,6 +2467,18 @@ fn step(
             let recv_ty = state.stack[state.stack.len() - 1 - argc];
             let class = match ctx.ty(recv_ty) {
                 BcType::Class(c) => c,
+                BcType::Int => ctx.core.int.ok_or_else(|| {
+                    fail("an Int method call needs the Int core role".to_string())
+                })?,
+                BcType::Bool => ctx.core.boolean.ok_or_else(|| {
+                    fail("a Bool method call needs the Bool core role".to_string())
+                })?,
+                BcType::Str => ctx.core.string.ok_or_else(|| {
+                    fail("a String method call needs the String core role".to_string())
+                })?,
+                BcType::Bytes => ctx.core.bytes.ok_or_else(|| {
+                    fail("a Bytes method call needs the Bytes core role".to_string())
+                })?,
                 _ => {
                     return Err(fail(format!(
                         "virtual call receiver type {recv_ty} needs the generic form \
@@ -2506,11 +2601,33 @@ fn step(
             push(state, ty)?;
         }
         Instr::New(class) => {
+            let native = [
+                ctx.core.int,
+                ctx.core.boolean,
+                ctx.core.string,
+                ctx.core.bytes,
+                ctx.core.string_builder,
+                ctx.core.byte_buffer,
+            ];
+            if native.contains(&Some(*class)) {
+                return Err(fail("New cannot allocate a native core class".to_string()));
+            }
             let ty = ctx.class_ty[*class as usize]
                 .ok_or_else(|| fail("the class type is not in the type table".to_string()))?;
             push(state, ty)?;
         }
         Instr::NewG { class, app } => {
+            let native = [
+                ctx.core.int,
+                ctx.core.boolean,
+                ctx.core.string,
+                ctx.core.bytes,
+                ctx.core.string_builder,
+                ctx.core.byte_buffer,
+            ];
+            if native.contains(&Some(*class)) {
+                return Err(fail("NewG cannot allocate a native core class".to_string()));
+            }
             let app = &module.apps[*app as usize];
             let ty = ctx.intern(BcType::Inst(*class, app.types.clone()));
             push(state, ty)?;
@@ -2666,66 +2783,126 @@ fn step(
             }
             push(state, TY_UNIT)?;
         }
-        Instr::SbNew => {
-            let idx = {
-                let uni = ctx.uni.borrow();
-                uni.index.get(&BcType::StringBuilder).copied()
-            };
-            let idx =
-                idx.ok_or_else(|| fail("StringBuilder is not in the type table".to_string()))?;
+        Instr::Native(lm_bytecode::NativeInstr::SbNew) => {
+            let class = ctx
+                .core
+                .string_builder
+                .ok_or_else(|| fail("StringBuilder needs its core role".to_string()))?;
+            let idx = ctx.intern(BcType::Class(class));
             push(state, idx)?;
         }
-        Instr::SbAppendStr | Instr::SbAppendInt | Instr::SbAppendBool => {
+        Instr::Native(lm_bytecode::NativeInstr::SbAppendStr)
+        | Instr::Native(lm_bytecode::NativeInstr::SbAppendInt)
+        | Instr::Native(lm_bytecode::NativeInstr::SbAppendBool) => {
             let want = match instr {
-                Instr::SbAppendStr => TY_STR,
-                Instr::SbAppendInt => TY_INT,
+                Instr::Native(lm_bytecode::NativeInstr::SbAppendStr) => TY_STR,
+                Instr::Native(lm_bytecode::NativeInstr::SbAppendInt) => TY_INT,
                 _ => TY_BOOL,
             };
             pop_expect(state, want)?;
-            let sb = pop(state)?;
-            if ctx.ty(sb) != BcType::StringBuilder {
-                return Err(fail(format!("append on non-builder type {sb}")));
-            }
+            let class = ctx
+                .core
+                .string_builder
+                .ok_or_else(|| fail("StringBuilder needs its core role".to_string()))?;
+            let builder = ctx.intern(BcType::Class(class));
+            let sb = pop_expect(state, builder)?;
             push(state, sb)?;
         }
-        Instr::SbBuild => {
-            let sb = pop(state)?;
-            if ctx.ty(sb) != BcType::StringBuilder {
-                return Err(fail(format!("build on non-builder type {sb}")));
-            }
+        Instr::Native(lm_bytecode::NativeInstr::SbBuild) => {
+            let class = ctx
+                .core
+                .string_builder
+                .ok_or_else(|| fail("StringBuilder needs its core role".to_string()))?;
+            let builder = ctx.intern(BcType::Class(class));
+            pop_expect(state, builder)?;
             push(state, TY_STR)?;
         }
-        Instr::BbNew => {
-            let idx = {
-                let uni = ctx.uni.borrow();
-                uni.index.get(&BcType::ByteBuffer).copied()
-            };
-            let idx = idx.ok_or_else(|| fail("ByteBuffer is not in the type table".to_string()))?;
-            push(state, idx)?;
-        }
-        Instr::BbAppend => {
-            pop_expect(state, TY_INT)?;
-            let bb = pop(state)?;
-            if ctx.ty(bb) != BcType::ByteBuffer {
-                return Err(fail(format!("append on non-buffer type {bb}")));
-            }
-            push(state, bb)?;
-        }
-        Instr::BbLen => {
-            let bb = pop(state)?;
-            if ctx.ty(bb) != BcType::ByteBuffer {
-                return Err(fail(format!("len on non-buffer type {bb}")));
-            }
+        Instr::Native(lm_bytecode::NativeInstr::SbLen) => {
+            let class = ctx
+                .core
+                .string_builder
+                .ok_or_else(|| fail("StringBuilder needs its core role".to_string()))?;
+            let builder = ctx.intern(BcType::Class(class));
+            pop_expect(state, builder)?;
             push(state, TY_INT)?;
         }
-        Instr::BbBuild => {
-            let bb = pop(state)?;
-            if ctx.ty(bb) != BcType::ByteBuffer {
-                return Err(fail(format!("build on non-buffer type {bb}")));
-            }
-            push(state, TY_STR)?;
+        Instr::Native(lm_bytecode::NativeInstr::SbClear) => {
+            let class = ctx
+                .core
+                .string_builder
+                .ok_or_else(|| fail("StringBuilder needs its core role".to_string()))?;
+            let builder = ctx.intern(BcType::Class(class));
+            pop_expect(state, builder)?;
+            push(state, builder)?;
         }
-        Instr::BytesNew => {
+        Instr::Native(lm_bytecode::NativeInstr::BbNew) => {
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let idx = ctx.intern(BcType::Class(class));
+            push(state, idx)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BbAppend) => {
+            pop_expect(state, TY_INT)?;
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            let bb = pop_expect(state, buffer)?;
+            push(state, bb)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BbLen) => {
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BbBuild) => {
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            let bytes = ctx.intern(BcType::Bytes);
+            push(state, bytes)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BbExtend) => {
+            let bytes = ctx.intern(BcType::Bytes);
+            pop_expect(state, bytes)?;
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            push(state, buffer)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BbReserve) => {
+            pop_expect(state, TY_INT)?;
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            push(state, buffer)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BbClear) => {
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            push(state, buffer)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesNew) => {
             pop_expect(state, TY_STR)?;
             let idx = {
                 let uni = ctx.uni.borrow();
@@ -2734,19 +2911,84 @@ fn step(
             let idx = idx.ok_or_else(|| fail("Bytes is not in the type table".to_string()))?;
             push(state, idx)?;
         }
-        Instr::BytesLen => {
+        Instr::Native(lm_bytecode::NativeInstr::BytesLen) => {
             let bytes = pop(state)?;
             if ctx.ty(bytes) != BcType::Bytes {
                 return Err(fail(format!("len on non-bytes type {bytes}")));
             }
             push(state, TY_INT)?;
         }
-        Instr::BytesText => {
+        Instr::Native(lm_bytecode::NativeInstr::BytesText) => {
             let bytes = pop(state)?;
             if ctx.ty(bytes) != BcType::Bytes {
                 return Err(fail(format!("text on non-bytes type {bytes}")));
             }
             push(state, TY_STR)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesAt)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesGet) => {
+            pop_expect(state, TY_INT)?;
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("index on non-bytes type {bytes}")));
+            }
+            push(state, TY_INT)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesSlice) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("slice on non-bytes type {bytes}")));
+            }
+            push(state, bytes)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesConcat) => {
+            let right = pop(state)?;
+            let left = pop(state)?;
+            if ctx.ty(left) != BcType::Bytes || ctx.ty(right) != BcType::Bytes {
+                return Err(fail("concat needs two Bytes values".to_string()));
+            }
+            push(state, left)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesStartsWith) => {
+            let right = pop(state)?;
+            let left = pop(state)?;
+            if ctx.ty(left) != BcType::Bytes || ctx.ty(right) != BcType::Bytes {
+                return Err(fail("starts_with needs two Bytes values".to_string()));
+            }
+            push(state, TY_BOOL)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesFindIndex) => {
+            let right = pop(state)?;
+            let left = pop(state)?;
+            if ctx.ty(left) != BcType::Bytes || ctx.ty(right) != BcType::Bytes {
+                return Err(fail("find needs two Bytes values".to_string()));
+            }
+            push(state, TY_INT)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesHex) => {
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("hex on non-bytes type {bytes}")));
+            }
+            push(state, TY_STR)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8) => {
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("UTF-8 test on non-bytes type {bytes}")));
+            }
+            push(state, TY_BOOL)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::EqBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::NeBytes) => {
+            let right = pop(state)?;
+            let left = pop(state)?;
+            if ctx.ty(left) != BcType::Bytes || ctx.ty(right) != BcType::Bytes {
+                return Err(fail("Bytes comparison needs two Bytes values".to_string()));
+            }
+            push(state, TY_BOOL)?;
         }
         Instr::Freeze => {
             let ty = pop(state)?;
@@ -3401,6 +3643,7 @@ mod tests {
                 name: "Counter".to_string(),
                 parent_args: Vec::new(),
                 key: "Counter".to_string(),
+                is_final: false,
                 parent: NO_PARENT,
                 type_params: 0,
                 kind: BcClassKind::Normal,
@@ -3449,6 +3692,7 @@ mod tests {
                 name: "Box".to_string(),
                 parent_args: Vec::new(),
                 key: "Box".to_string(),
+                is_final: false,
                 parent: NO_PARENT,
                 type_params: 1,
                 kind: BcClassKind::Normal,
@@ -3671,6 +3915,7 @@ mod tests {
             name: "Opt".to_string(),
             parent_args: Vec::new(),
             key: "Opt".to_string(),
+            is_final: false,
             parent: NO_PARENT,
             type_params: 0,
             kind: BcClassKind::Abstract,
@@ -3688,6 +3933,7 @@ mod tests {
             name: "Opt".to_string(),
             parent_args: Vec::new(),
             key: "Opt".to_string(),
+            is_final: false,
             parent: NO_PARENT,
             type_params: 0,
             kind: BcClassKind::Abstract,
@@ -3698,6 +3944,7 @@ mod tests {
             name: "Opt.None".to_string(),
             parent_args: Vec::new(),
             key: "Opt.None".to_string(),
+            is_final: false,
             parent: 1,
             type_params: 0,
             kind: BcClassKind::Case,
@@ -3708,6 +3955,7 @@ mod tests {
             name: "Bad".to_string(),
             parent_args: Vec::new(),
             key: "Bad".to_string(),
+            is_final: false,
             parent: 2,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -3726,6 +3974,7 @@ mod tests {
             name: "Other".to_string(),
             parent_args: Vec::new(),
             key: "Other".to_string(),
+            is_final: false,
             parent: NO_PARENT,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -3862,6 +4111,7 @@ mod tests {
             name: "Fast".to_string(),
             parent_args: Vec::new(),
             key: "Fast".to_string(),
+            is_final: false,
             parent: 0,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -3887,6 +4137,7 @@ mod tests {
             name: "Loud".to_string(),
             parent_args: Vec::new(),
             key: "Loud".to_string(),
+            is_final: false,
             parent: 0,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -3917,6 +4168,7 @@ mod tests {
             name: "Bad".to_string(),
             parent_args: Vec::new(),
             key: "Bad".to_string(),
+            is_final: false,
             parent: 0,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -4145,6 +4397,7 @@ mod tests {
             name: name.to_string(),
             parent_args: Vec::new(),
             key: name.to_string(),
+            is_final: false,
             parent,
             type_params: 0,
             kind: BcClassKind::Normal,
@@ -4195,6 +4448,7 @@ mod tests {
         let class = |name: &str, parent: u32, args: Vec<u32>, params: u32| BcClass {
             name: name.to_string(),
             key: name.to_string(),
+            is_final: false,
             parent,
             parent_args: args,
             type_params: params,
@@ -4225,6 +4479,7 @@ mod tests {
         let class = |name: &str, parent: u32, args: Vec<u32>, params: u32| BcClass {
             name: name.to_string(),
             key: name.to_string(),
+            is_final: false,
             parent,
             parent_args: args,
             type_params: params,
@@ -4259,6 +4514,7 @@ mod tests {
         let class = |name: &str, parent: u32| BcClass {
             name: name.to_string(),
             key: name.to_string(),
+            is_final: false,
             parent,
             parent_args: vec![],
             type_params: 0,
@@ -4338,6 +4594,7 @@ mod tests {
                 let class = |name: &str, parent: u32| BcClass {
                     name: name.to_string(),
                     key: name.to_string(),
+                    is_final: false,
                     parent,
                     parent_args: vec![],
                     type_params: 0,

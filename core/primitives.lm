@@ -1,0 +1,68 @@
+# Primitive values use these final core method tables.
+final class Int
+  def abs(self): Int
+    intrinsic("int.abs", self)
+  end
+
+  def __neg__(self): Int
+    intrinsic("int.neg", self)
+  end
+
+  def __add__(self, other: Int): Int
+    intrinsic("int.add", self, other)
+  end
+
+  def __sub__(self, other: Int): Int
+    intrinsic("int.sub", self, other)
+  end
+
+  def __mul__(self, other: Int): Int
+    intrinsic("int.mul", self, other)
+  end
+
+  def __div__(self, other: Int): Int
+    intrinsic("int.div", self, other)
+  end
+
+  def __rem__(self, other: Int): Int
+    intrinsic("int.rem", self, other)
+  end
+
+  def __eq__(self, other: Int): Bool
+    intrinsic("int.eq", self, other)
+  end
+
+  def __ne__(self, other: Int): Bool
+    intrinsic("int.ne", self, other)
+  end
+
+  def __lt__(self, other: Int): Bool
+    intrinsic("int.lt", self, other)
+  end
+
+  def __le__(self, other: Int): Bool
+    intrinsic("int.le", self, other)
+  end
+
+  def __gt__(self, other: Int): Bool
+    intrinsic("int.gt", self, other)
+  end
+
+  def __ge__(self, other: Int): Bool
+    intrinsic("int.ge", self, other)
+  end
+end
+
+final class Bool
+  def __not__(self): Bool
+    intrinsic("bool.not", self)
+  end
+
+  def __eq__(self, other: Bool): Bool
+    intrinsic("bool.eq", self, other)
+  end
+
+  def __ne__(self, other: Bool): Bool
+    intrinsic("bool.ne", self, other)
+  end
+end

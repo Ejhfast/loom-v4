@@ -1,7 +1,6 @@
 # Core: portable operation errors.
 #
-# Week 4 ships the one error enum that a shipped operation reply
-# names. Later weeks add the other portable error enums here.
+# These values describe portable text conversion and index failures.
 
 enum IoError
   Failed(message: String)
@@ -11,4 +10,19 @@ enum IoError
     in Failed(m) then m
     end
   end
+end
+
+enum Utf8Error
+  OutOfBounds
+  InvalidBoundary
+  InvalidEncoding
+end
+
+enum IndexError
+  OutOfBounds
+end
+
+enum ParseIntError
+  Invalid
+  Overflow
 end

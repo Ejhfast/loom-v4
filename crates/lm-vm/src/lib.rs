@@ -36,7 +36,9 @@ pub use lm_abi::{FaultCode, SnapshotClass};
 /// The heap, the native shapes, and the graph engine are separate
 /// crates. `lm-vm` re-exports the parts its callers already name.
 pub use lm_graph::{GraphCost, GraphLimits};
-pub use lm_heap::{dump_shapes, BoundaryPolicy, Heap, HeapStats, Object, ShapeDesc};
+pub use lm_heap::{
+    dump_shapes, BoundaryPolicy, Heap, HeapStats, Object, ShapeDesc, SharedBytes, SharedText,
+};
 
 use lm_bytecode::{DecodeError, Module};
 use lm_value::Value;
@@ -637,6 +639,7 @@ mod tests {
             classes: vec![lm_bytecode::BcClass {
                 name: "Point".to_string(),
                 key: "Point".to_string(),
+                is_final: false,
                 parent: lm_bytecode::NO_PARENT,
                 parent_args: Vec::new(),
                 type_params: 0,

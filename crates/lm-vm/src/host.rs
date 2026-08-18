@@ -6,14 +6,15 @@
 //! into guest memory crosses this boundary in either direction.
 
 use crate::CompletionKey;
+use lm_heap::{SharedBytes, SharedText};
 use std::collections::BTreeMap;
 
 /// One plain-data operation argument.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostArg {
     Int(i64),
-    Str(String),
-    Bytes(Vec<u8>),
+    Str(SharedText),
+    Bytes(SharedBytes),
     File(u64),
     OpenOptions(HostOpenOptions),
     SeekFrom(HostSeekFrom),
@@ -56,8 +57,8 @@ pub enum CoreCtor {
 pub enum HostValue {
     Unit,
     Int(i64),
-    Str(String),
-    Bytes(Vec<u8>),
+    Str(SharedText),
+    Bytes(SharedBytes),
     File(u64),
     Ctor(CoreCtor, Vec<HostValue>),
 }
@@ -188,7 +189,7 @@ fn fs_failed(message: impl Into<String>) -> HostValue {
         CoreCtor::Err,
         vec![HostValue::Ctor(
             CoreCtor::FsErrorFailed,
-            vec![HostValue::Str(message.into())],
+            vec![HostValue::Str(SharedText::from(message.into()))],
         )],
     )
 }
@@ -260,13 +261,13 @@ impl RecordingHost {
         match op {
             lm_abi::OP_IO_PRINT => {
                 if let Some(HostArg::Str(text)) = args.first() {
-                    self.printed.push(text.clone());
+                    self.printed.push(text.to_string());
                 }
                 HostStart::Completed(HostValue::Unit)
             }
             lm_abi::OP_IO_ERROR => {
                 if let Some(HostArg::Str(text)) = args.first() {
-                    self.errors.push(text.clone());
+                    self.errors.push(text.to_string());
                 }
                 HostStart::Completed(HostValue::Unit)
             }
@@ -277,7 +278,10 @@ impl RecordingHost {
                     let line = self.input.remove(0);
                     HostValue::Ctor(
                         CoreCtor::Ok,
-                        vec![HostValue::Ctor(CoreCtor::Some, vec![HostValue::Str(line)])],
+                        vec![HostValue::Ctor(
+                            CoreCtor::Some,
+                            vec![HostValue::Str(line.into())],
+                        )],
                     )
                 };
                 HostStart::Completed(reply)
@@ -317,9 +321,10 @@ impl RecordingHost {
                     HostOpenOptions::CreateTruncate => (true, true, false, true, true),
                     HostOpenOptions::Append => (false, true, true, true, false),
                 };
-                if !create && !self.files.contains_key(path) {
+                if !create && !self.files.contains_key(path.as_str()) {
                     return HostStart::Completed(fs_failed("the file does not exist"));
                 }
+                let path = path.to_string();
                 let file = self.files.entry(path.clone()).or_default();
                 if truncate {
                     file.clear();
@@ -367,7 +372,7 @@ impl RecordingHost {
                 let end = handle.cursor.saturating_add(count).min(file.len());
                 let bytes = file[handle.cursor..end].to_vec();
                 handle.cursor = end;
-                HostStart::Completed(fs_ok(HostValue::Bytes(bytes)))
+                HostStart::Completed(fs_ok(HostValue::Bytes(bytes.into())))
             }
             lm_abi::OP_FS_WRITE => {
                 let (Some(HostArg::File(token)), Some(HostArg::Bytes(bytes))) =
@@ -519,5 +524,25 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
 
     fn close_file(&mut self, token: u64) -> bool {
         self.borrow_mut().close_file(token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_arguments_and_replies_clone_shared_storage() {
+        let bytes = SharedBytes::from(&[0, 255, 1]);
+        let arg = HostArg::Bytes(bytes.clone());
+        let reply = HostValue::Bytes(bytes.clone());
+        let HostArg::Bytes(arg_bytes) = arg else {
+            panic!("the argument is Bytes");
+        };
+        let HostValue::Bytes(reply_bytes) = reply else {
+            panic!("the reply is Bytes");
+        };
+        assert!(bytes.shares_storage(&arg_bytes));
+        assert!(bytes.shares_storage(&reply_bytes));
     }
 }

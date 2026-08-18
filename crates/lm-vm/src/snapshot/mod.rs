@@ -61,7 +61,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 3 carries nested control edges and routed requests.
 /// Version 4 carries bytes and closed file handle values.
 /// Version 5 carries typed wait descriptions and active wait blocks.
-pub const FORMAT_VERSION: u32 = 5;
+/// Version 6 encodes builders as nominal core class types.
+pub const FORMAT_VERSION: u32 = 6;
 
 /// The section kinds, in canonical order.
 ///

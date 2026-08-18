@@ -1,0 +1,52 @@
+# Core: immutable UTF-8 text.
+
+final class String
+  def byte_len(self): Int
+    intrinsic("string.byte_len", self)
+  end
+
+  def char_count(self): Int
+    intrinsic("string.char_count", self)
+  end
+
+  def is_empty(self): Bool
+    self.byte_len() == 0
+  end
+
+  def concat(self, other: String): String
+    intrinsic("string.concat", self, other)
+  end
+
+  def starts_with(self, prefix: String): Bool
+    intrinsic("string.starts_with", self, prefix)
+  end
+
+  def ends_with(self, suffix: String): Bool
+    intrinsic("string.ends_with", self, suffix)
+  end
+
+  def contains(self, needle: String): Bool
+    intrinsic("string.contains", self, needle)
+  end
+
+  def find(self, needle: String): Option[Int]
+    index = intrinsic("string.find_index", self, needle)
+    if index < 0
+      None
+    else
+      Some(index)
+    end
+  end
+
+  def __add__(self, other: String): String
+    intrinsic("string.concat", self, other)
+  end
+
+  def __eq__(self, other: String): Bool
+    intrinsic("string.eq", self, other)
+  end
+
+  def __ne__(self, other: String): Bool
+    intrinsic("string.ne", self, other)
+  end
+end

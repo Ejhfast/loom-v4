@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 6;
+const VERSION: u16 = 8;
 
 /// The domain tag of the interface hash.
 const TAG_IFACE: &[u8] = b"lm-iface-v1\0";
@@ -82,8 +82,6 @@ pub enum IfaceType {
     Bool,
     Int,
     Str,
-    StringBuilder,
-    ByteBuffer,
     Bytes,
     FileHandle,
     ResourceHandle,
@@ -174,6 +172,8 @@ impl IfaceClassKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfaceClass {
     pub kind: IfaceClassKind,
+    /// True when the class cannot have a subclass.
+    pub is_final: bool,
     pub type_params: u32,
     pub parent: Option<QualName>,
     /// The full field layout: inherited fields first.
@@ -322,8 +322,6 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
         IfaceType::Bool => out.push(1),
         IfaceType::Int => out.push(2),
         IfaceType::Str => out.push(3),
-        IfaceType::StringBuilder => out.push(4),
-        IfaceType::ByteBuffer => out.push(5),
         IfaceType::Fault => out.push(6),
         IfaceType::Request => out.push(7),
         IfaceType::PolicyTable => out.push(8),
@@ -441,6 +439,7 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
         IfaceItem::Class(class) => {
             out.push(1);
             out.push(class.kind.tag());
+            out.push(u8::from(class.is_final));
             write_u32(out, class.type_params);
             match &class.parent {
                 None => out.push(0),
@@ -540,8 +539,6 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
         1 => IfaceType::Bool,
         2 => IfaceType::Int,
         3 => IfaceType::Str,
-        4 => IfaceType::StringBuilder,
-        5 => IfaceType::ByteBuffer,
         6 => IfaceType::Fault,
         7 => IfaceType::Request,
         8 => IfaceType::PolicyTable,
@@ -663,6 +660,7 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 2 => IfaceClassKind::EnumCase,
                 other => return Err(DecodeError::BadClassKind(other)),
             };
+            let is_final = cur.flag()?;
             let type_params = cur.u32()?;
             let parent = match cur.u8()? {
                 0 => None,
@@ -715,6 +713,7 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
             };
             Ok(IfaceItem::Class(IfaceClass {
                 kind,
+                is_final,
                 type_params,
                 parent,
                 fields,
@@ -811,8 +810,6 @@ pub fn type_text(ty: &IfaceType) -> String {
         IfaceType::Bool => "Bool".to_string(),
         IfaceType::Int => "Int".to_string(),
         IfaceType::Str => "String".to_string(),
-        IfaceType::StringBuilder => "StringBuilder".to_string(),
-        IfaceType::ByteBuffer => "ByteBuffer".to_string(),
         IfaceType::Bytes => "Bytes".to_string(),
         IfaceType::FileHandle => "FileHandle".to_string(),
         IfaceType::ResourceHandle => "ResourceHandle".to_string(),
@@ -918,6 +915,9 @@ pub fn item_text(item: &IfaceItem) -> String {
         IfaceItem::Func(sig) => fn_text(sig),
         IfaceItem::Class(class) => {
             let mut out = String::new();
+            if class.is_final {
+                out.push_str("final ");
+            }
             if class.type_params > 0 {
                 let parts: Vec<String> = (0..class.type_params).map(|i| format!("${i}")).collect();
                 out.push('[');
