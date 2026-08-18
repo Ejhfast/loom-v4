@@ -131,11 +131,41 @@ pub struct RecordingHost {
     now: i64,
     monotonic: i64,
     rand_state: u64,
-    sleeps: BTreeMap<u64, (CompletionKey, u32)>,
+    /// Deferred replies, by completion token. The command-line host
+    /// serves files and streams on worker threads, so this host defers
+    /// the same operations. A test therefore meets the same boundary:
+    /// a reply arrives at a later poll, not inside `start`.
+    pending: BTreeMap<u64, Deferred>,
     next_token: u64,
     files: BTreeMap<String, Vec<u8>>,
     file_handles: BTreeMap<u64, MemoryFile>,
     next_file: u64,
+}
+
+/// One reply this host holds until a later poll.
+#[derive(Debug)]
+struct Deferred {
+    key: CompletionKey,
+    /// Polls remaining before the reply is ready.
+    left: u32,
+    value: HostValue,
+}
+
+/// True when the command-line host serves this operation off the
+/// scheduler thread. This host defers the same set.
+fn deferred_op(op: u32) -> bool {
+    matches!(
+        op,
+        lm_abi::OP_FS_OPEN
+            | lm_abi::OP_FS_READ
+            | lm_abi::OP_FS_WRITE
+            | lm_abi::OP_FS_SEEK
+            | lm_abi::OP_FS_FLUSH
+            | lm_abi::OP_FS_CLOSE
+            | lm_abi::OP_IO_PRINT
+            | lm_abi::OP_IO_ERROR
+            | lm_abi::OP_IO_READ_LINE
+    )
 }
 
 #[derive(Debug)]
@@ -178,7 +208,7 @@ impl RecordingHost {
             now: 1_000,
             monotonic: 0,
             rand_state: seed.max(1),
-            sleeps: BTreeMap::new(),
+            pending: BTreeMap::new(),
             next_token: 1,
             files: BTreeMap::new(),
             file_handles: BTreeMap::new(),
@@ -207,8 +237,26 @@ impl RecordingHost {
     }
 }
 
-impl Host for RecordingHost {
-    fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+impl RecordingHost {
+    /// Hold one reply for a later poll.
+    fn defer(&mut self, key: CompletionKey, value: HostValue) -> HostStart {
+        let token = self.next_token;
+        self.next_token += 1;
+        self.pending.insert(
+            token,
+            Deferred {
+                key,
+                left: 1,
+                value,
+            },
+        );
+        HostStart::Waiting(token)
+    }
+}
+
+impl RecordingHost {
+    fn serve(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+        let _ = key;
         match op {
             lm_abi::OP_IO_PRINT => {
                 if let Some(HostArg::Str(text)) = args.first() {
@@ -242,12 +290,7 @@ impl Host for RecordingHost {
                 self.monotonic += 1;
                 HostStart::Completed(HostValue::Int(self.monotonic))
             }
-            lm_abi::OP_CLOCK_SLEEP => {
-                let token = self.next_token;
-                self.next_token += 1;
-                self.sleeps.insert(token, (key, 1));
-                HostStart::Waiting(token)
-            }
+            lm_abi::OP_CLOCK_SLEEP => self.defer(key, HostValue::Unit),
             lm_abi::OP_RAND_INT => {
                 let (low, high) = match (args.first(), args.get(1)) {
                     (Some(HostArg::Int(low)), Some(HostArg::Int(high))) => (*low, *high),
@@ -410,23 +453,39 @@ impl Host for RecordingHost {
         }
     }
 
+    fn take_ready(&mut self, token: u64) -> Option<HostCompletion> {
+        let entry = self.pending.remove(&token)?;
+        Some(HostCompletion {
+            key: entry.key,
+            token,
+            result: Ok(entry.value),
+        })
+    }
+}
+
+impl Host for RecordingHost {
+    fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
+        // The reply is computed now, so every effect keeps submit
+        // order and the run stays deterministic. Only its delivery
+        // waits.
+        match self.serve(key, op, args) {
+            HostStart::Completed(value) if deferred_op(op) => self.defer(key, value),
+            other => other,
+        }
+    }
+
+    /// Answer the oldest ready reply. A poll with nothing ready moves
+    /// every pending reply one step closer, so the order is stable.
     fn poll(&mut self) -> Option<HostCompletion> {
         let ready = self
-            .sleeps
+            .pending
             .iter()
-            .find_map(|(token, (_, remaining))| (*remaining == 0).then_some(*token));
+            .find_map(|(token, entry)| (entry.left == 0).then_some(*token));
         match ready {
-            Some(token) => {
-                let (key, _) = self.sleeps.remove(&token)?;
-                Some(HostCompletion {
-                    key,
-                    token,
-                    result: Ok(HostValue::Unit),
-                })
-            }
+            Some(token) => self.take_ready(token),
             None => {
-                for (_, remaining) in self.sleeps.values_mut() {
-                    *remaining = remaining.saturating_sub(1);
+                for entry in self.pending.values_mut() {
+                    entry.left = entry.left.saturating_sub(1);
                 }
                 None
             }
@@ -434,13 +493,8 @@ impl Host for RecordingHost {
     }
 
     fn wait(&mut self) -> Option<HostCompletion> {
-        let token = self.sleeps.keys().next().copied()?;
-        let (key, _) = self.sleeps.remove(&token)?;
-        Some(HostCompletion {
-            key,
-            token,
-            result: Ok(HostValue::Unit),
-        })
+        let token = *self.pending.keys().next()?;
+        self.take_ready(token)
     }
 
     fn close_file(&mut self, token: u64) -> bool {

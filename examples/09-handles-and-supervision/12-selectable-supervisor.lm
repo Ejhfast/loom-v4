@@ -45,26 +45,14 @@ class Supervisor < Proc[Command]
   end
 end
 
-class Controller < Proc
-  target: Handle[Command, String]
-
-  def init(mut self, target: Handle[Command, String])
-    self.target = target
-  end
-
-  def on_spawn(self): Bool with Proc
-    # This proc runs after the supervisor starts its drive wait.
-    self.target.send(Stop).is_sent()
-  end
-end
-
 # The birth grant carries the declared row of `on_spawn`, so the
 # supervisor starts with `Proc`, `Vm`, and `Wait` already passed. This
 # spawner charges that same row, so it passes nothing it does not hold.
 supervisor = Supervisor.spawn()
 
-# The controller represents an independent parent command source.
-Controller.spawn(supervisor)
+# The child never stops by itself, and the mailbox is empty, so the
+# supervisor is parked in its select when this command arrives.
+supervisor.send(Stop)
 
 case supervisor.done()
 in Done(message) then message
