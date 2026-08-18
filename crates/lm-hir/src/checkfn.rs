@@ -4849,6 +4849,64 @@ impl<'o> FnChecker<'o> {
     ) -> Result<HPattern, Diagnostic> {
         match &pat.kind {
             PatternKind::Wildcard => Ok(HPattern::Wildcard),
+            // `Call(Op, call, args)` on a request: one operation
+            // identity test that binds the call and its arguments.
+            PatternKind::Ctor {
+                qualifier: None,
+                name,
+                args,
+                has_parens: true,
+            } if name == "Call" && matches!(ctx.store.get(scrut_ty), Type::Request) => {
+                if args.len() != 3 {
+                    return Err(Diagnostic::new(
+                        "E1041",
+                        format!(
+                            "`Call` needs an operation, a call binding, and an \
+                             argument pattern; found {} pattern(s)",
+                            args.len()
+                        ),
+                        pat.span,
+                    ));
+                }
+                let op = self.pattern_descriptor(&args[0])?;
+                let args_ty = Self::op_args_type(ctx, op);
+                let reply_ty = Self::abi_type_id(ctx, lm_abi::op(op).reply);
+                let call_ty = ctx.store.intern(Type::PendingCall(args_ty, reply_ty));
+                let option_ty = Self::core_inst(ctx, "Option", vec![call_ty]);
+                let (option_class, option_args) =
+                    class_of(ctx, option_ty).expect("the core declares Option");
+                let family = ctx
+                    .family_of(option_class)
+                    .expect("Option is an enum family");
+                let some = ctx
+                    .find_arm(family, "Some")
+                    .expect("Option declares the arm Some");
+                let some_ty =
+                    ctx.store
+                        .substitute(ctx.classes[some as usize].self_ty, &option_args, &[]);
+                let call_pat = self.check_pattern(ctx, &args[1], call_ty, scrut_mut, binds)?;
+                let args_pat = self.check_pattern(ctx, &args[2], args_ty, scrut_mut, binds)?;
+                // The call value serves twice: the binding takes it,
+                // and the argument pattern reads its arguments.
+                let both = HPattern::And(vec![
+                    call_pat,
+                    HPattern::Project {
+                        projection: Projection::CallArgs,
+                        ty: args_ty,
+                        inner: Box::new(args_pat),
+                    },
+                ]);
+                Ok(HPattern::Project {
+                    projection: Projection::AsCall(op),
+                    ty: option_ty,
+                    inner: Box::new(HPattern::Ctor {
+                        class: some,
+                        ty: some_ty,
+                        args: vec![both],
+                        field_tys: vec![call_ty],
+                    }),
+                })
+            }
             PatternKind::Tuple(elems) => {
                 let Type::Tuple(elem_tys) = ctx.store.get(scrut_ty).clone() else {
                     return Err(self.pattern_mismatch(ctx, "a tuple", scrut_ty, pat.span));
@@ -5093,6 +5151,40 @@ impl<'o> FnChecker<'o> {
             ty: arm_ty,
             args: sub,
             field_tys: sub_tys,
+        })
+    }
+
+    /// Resolve one exact operation named in pattern position, such as
+    /// `Fs.Read`. The parser reads it as a qualified constructor with
+    /// no arguments.
+    fn pattern_descriptor(&self, pat: &ast::Pattern) -> Result<u32, Diagnostic> {
+        let PatternKind::Ctor {
+            qualifier: Some(group),
+            name,
+            args,
+            has_parens: false,
+        } = &pat.kind
+        else {
+            return Err(Diagnostic::new(
+                "E1041",
+                "`Call` needs an exact operation, for example `Fs.Read`",
+                pat.span,
+            ));
+        };
+        if !args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1041",
+                "`Call` needs an exact operation, for example `Fs.Read`",
+                pat.span,
+            ));
+        }
+        let full = format!("{group}.{name}");
+        lm_abi::op_by_name(&full).ok_or_else(|| {
+            Diagnostic::new(
+                "E1051",
+                format!("`{full}` is not an operation of the manifest"),
+                pat.span,
+            )
         })
     }
 
@@ -5396,6 +5488,19 @@ fn hpat_to_apat(pat: &HPattern) -> APat {
     match pat {
         HPattern::Wildcard | HPattern::Bind(_) => APat::Wild,
         HPattern::Tuple { elems, .. } => APat::Tuple(elems.iter().map(hpat_to_apat).collect()),
+        // An operation test keeps its identity. The inner patterns
+        // stay out of the analysis, so a request arm never reads as
+        // exhaustive and never hides a later arm.
+        HPattern::Project {
+            projection: Projection::AsCall(op),
+            ..
+        } => APat::Call(*op),
+        HPattern::Project { inner, .. } => hpat_to_apat(inner),
+        HPattern::And(subs) => subs
+            .iter()
+            .map(hpat_to_apat)
+            .find(|a| *a != APat::Wild)
+            .unwrap_or(APat::Wild),
         HPattern::Int(v) => APat::Int(*v),
         HPattern::Bool(v) => APat::Bool(*v),
         HPattern::Str(v) => APat::Str(v.clone()),

@@ -23,26 +23,26 @@ def serve(child: Vm[String], mine: ResourceHandle, contents: Bytes): String with
   loop do
     case child.drive()
     in Asked(request)
-      case request.as_call(Fs.Read)
-      in Some(call)
+      # One `case` reads every operation this driver serves. Each arm
+      # names the operation, binds the call, and destructures its
+      # arguments.
+      case request
+      in Call(Fs.Read, call, (file, _))
         # `resource` converts a child handle to a supervisor control.
         # `same_resource` reports whether this is the minted entry.
-        if child.resource(call.args()[0]).same_resource(mine)
+        if child.resource(file).same_resource(mine)
           child.answer(call, Ok(contents))
         else
           child.dispatch(request)
         end
-      in None
-        case request.as_call(Fs.Close)
-        in Some(call)
-          if child.resource(call.args()[0]).same_resource(mine)
-            child.answer(call, Ok(()))
-          else
-            child.dispatch(request)
-          end
-        in None
+      in Call(Fs.Close, call, (file,))
+        if child.resource(file).same_resource(mine)
+          child.answer(call, Ok(()))
+        else
           child.dispatch(request)
         end
+      in _
+        child.dispatch(request)
       end
     in Done(value)
       return value

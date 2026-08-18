@@ -1411,6 +1411,22 @@ in None
 end
 ```
 
+A `case` over the request itself states the same test as a pattern. One `case` therefore serves several operations without one nested `as_call` for each:
+
+```lm
+case q
+in Call(Io.Print, call, (text,))
+  captured.push(text)
+  vm.answer(call, ())
+in Call(Clock.Now, call, ())
+  vm.answer(call, 123)
+in _
+  vm.dispatch(q)
+end
+```
+
+`Call(op, call, args)` names one exact operation of the manifest, binds the `PendingCall`, and matches `args` against the argument tuple. The operation set is open, so a `case` over a `Request` always needs a final wildcard arm, and two arms that name one operation report the second as unreachable.
+
 Call a continuation method on the same `Vm` receiver that produced the event. The route proves that the descendant request reached this receiver.
 
 `Request.as_call(op)` has a narrow compiler-known type rule. Its argument is an exact `Operation` descriptor known to the checker, such as `Io.Print`. If the manifest signature of that descriptor is `(A...) -> R`, the result is `Option[PendingCall[(A...), R]]`. The callable `sys` member is not used here: matching is descriptor work, and the compiler supplies the typed signature from the manifest. `PendingCall[A,R]` exposes:

@@ -1079,6 +1079,25 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     self.emit(Instr::JumpIfFalse(fail));
                 }
             }
+            HPattern::Project {
+                projection,
+                ty,
+                inner,
+            } => {
+                let slot = self.scratch_of(*ty);
+                self.emit(Instr::LoadLocal(src));
+                match projection {
+                    Projection::AsCall(op) => self.emit(Instr::AsCall(*op)),
+                    Projection::CallArgs => self.emit(Instr::CallArgs),
+                }
+                self.emit(Instr::StoreLocal(slot));
+                self.lower_pattern(inner, slot, fail);
+            }
+            HPattern::And(subs) => {
+                for sub in subs {
+                    self.lower_pattern(sub, src, fail);
+                }
+            }
             HPattern::Tuple { elems, elem_tys } => {
                 // The type fixes the arity, so a tuple needs no test.
                 for (index, sub) in elems.iter().enumerate() {
@@ -1276,6 +1295,12 @@ fn shift_pattern_in_place(pattern: &mut HPattern, base: u32, max: &mut u32) {
         HPattern::Bind(slot) => shift_slot(slot, base, max),
         HPattern::Tuple { elems, .. } => {
             for sub in elems.iter_mut() {
+                shift_pattern_in_place(sub, base, max);
+            }
+        }
+        HPattern::Project { inner, .. } => shift_pattern_in_place(inner, base, max),
+        HPattern::And(subs) => {
+            for sub in subs.iter_mut() {
                 shift_pattern_in_place(sub, base, max);
             }
         }

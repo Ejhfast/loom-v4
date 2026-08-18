@@ -16,6 +16,10 @@ pub enum APat {
     Str(String),
     /// A final case class with sub-patterns for its fields.
     Ctor(u32, Vec<APat>),
+    /// One operation-identity test on a request. The operation set is
+    /// open, so a request test never completes a signature and a
+    /// `case` over a request always needs a final wildcard.
+    Call(u32),
     /// A tuple with one sub-pattern for each element. A tuple type has
     /// one constructor, so a tuple head is always a complete
     /// signature.
@@ -65,6 +69,10 @@ pub fn useful(
             sv.extend_from_slice(&v[1..]);
             useful(meta, &spec, &sv, budget)
         }
+        APat::Call(op) => {
+            let spec = specialize_matrix(matrix, &Head::Call(*op), 0);
+            useful(meta, &spec, &v[1..], budget)
+        }
         APat::Int(value) => {
             let spec = specialize_matrix(matrix, &Head::Int(*value), 0);
             useful(meta, &spec, &v[1..], budget)
@@ -110,6 +118,7 @@ pub fn useful(
 enum Head {
     Class(u32),
     Tuple(usize),
+    Call(u32),
     Int(i64),
     Bool(bool),
     Str(String),
@@ -123,6 +132,7 @@ fn pattern_head(pat: &APat) -> Option<Head> {
         APat::Str(v) => Some(Head::Str(v.clone())),
         APat::Ctor(c, _) => Some(Head::Class(*c)),
         APat::Tuple(args) => Some(Head::Tuple(args.len())),
+        APat::Call(op) => Some(Head::Call(*op)),
     }
 }
 
@@ -154,7 +164,7 @@ fn complete_signature(meta: &impl PatMeta, heads: &[Head]) -> bool {
         // A tuple type has one constructor, so one tuple head
         // covers it.
         Head::Tuple(_) => true,
-        Head::Int(_) | Head::Str(_) => false,
+        Head::Int(_) | Head::Str(_) | Head::Call(_) => false,
     }
 }
 
@@ -164,6 +174,7 @@ fn specialize_row(row: &[APat], head: &Head, arity: usize) -> Option<Vec<APat>> 
         (APat::Wild, _) => Some(vec![APat::Wild; arity]),
         (APat::Ctor(c, args), Head::Class(h)) if c == h => Some(args.clone()),
         (APat::Tuple(args), Head::Tuple(n)) if args.len() == *n => Some(args.clone()),
+        (APat::Call(op), Head::Call(h)) if op == h => Some(Vec::new()),
         (APat::Int(v), Head::Int(h)) if v == h => Some(Vec::new()),
         (APat::Bool(v), Head::Bool(h)) if v == h => Some(Vec::new()),
         (APat::Str(v), Head::Str(h)) if v == h => Some(Vec::new()),

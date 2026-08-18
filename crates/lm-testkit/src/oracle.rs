@@ -512,6 +512,9 @@ impl<'m> Oracle<'m> {
             HPattern::Int(want) => Ok(matches!(value, OV::Int(v) if v == want)),
             HPattern::Bool(want) => Ok(matches!(value, OV::Bool(v) if v == want)),
             HPattern::Str(want) => Ok(matches!(value, OV::Str(v) if v.as_str() == want)),
+            HPattern::Project { .. } | HPattern::And(_) => {
+                Err(Stop::Limit("request patterns run in the VM only"))
+            }
             HPattern::Tuple { elems, .. } => {
                 let obj = self.as_obj(value)?;
                 let items = match &obj.borrow().kind {

@@ -243,8 +243,17 @@ pub enum TargetKind {
     Group,
 }
 
+/// One native projection a pattern may read.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Projection {
+    /// `Request.as_call(op)`: answers `Option[PendingCall[A, R]]`.
+    AsCall(u32),
+    /// `PendingCall.args()`: answers the argument tuple.
+    CallArgs,
+}
+
 /// One resolved pattern.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum HPattern {
     /// Matches anything, binds nothing.
     Wildcard,
@@ -253,6 +262,16 @@ pub enum HPattern {
     Int(i64),
     Bool(bool),
     Str(String),
+    /// Reads one native projection of the scrutinee, then matches
+    /// `inner` against the result. `ty` types the scratch slot.
+    Project {
+        projection: Projection,
+        ty: TypeId,
+        inner: Box<HPattern>,
+    },
+    /// Matches every sub-pattern against the same value. A request
+    /// pattern uses it to bind the call and read its arguments.
+    And(Vec<HPattern>),
     /// Destructures one tuple. `elem_tys` types the scratch slots.
     Tuple {
         elems: Vec<HPattern>,
