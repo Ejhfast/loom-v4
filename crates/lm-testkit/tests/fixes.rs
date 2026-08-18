@@ -3,11 +3,15 @@
 //! `mut` markers in function types, the constructor-collision note,
 //! and nested exact-arm exhaustiveness.
 
-use lm_testkit::{compile_text, run_text};
+use lm_testkit::{compile_text, run_allowed, run_text};
 use lm_vm::{LoadError, VmConfig};
 
 fn run(source: &str) -> String {
     run_text("fixes.lm", source, VmConfig::default()).unwrap()
+}
+
+fn allowed(source: &str, allow: &[&str]) -> String {
+    run_allowed("fixes.lm", source, allow).unwrap()
 }
 
 fn expect_error(source: &str, needle: &str) {
@@ -258,6 +262,86 @@ fn label_for_a_filled_parameter_is_rejected() {
 fn labels_on_a_closure_value_are_rejected() {
     let source = "f = do |x: Int|: Int x end\nf(x: 1)\n";
     expect_error(source, "does not declare a parameter named `x`");
+}
+
+/// A native method declares parameter names, so it takes labels
+/// under the one rule of specification 6.1.
+#[test]
+fn labeled_arguments_work_on_native_methods() {
+    let source = "xs: [Int] = []
+xs.push(value: 5)
+m: {String: Int} = {}
+m.put(key: \"a\", value: 2)
+b = StringBuilder()
+b.append(text: \"z\")
+extra = if b.build() == \"z\"
+  1
+else
+  0
+end
+xs.at(index: 0) + m.at(key: \"a\") + extra
+";
+    assert_eq!(run(source), "Done(8)");
+}
+
+/// `args:` is one label on a declared name, not a special case. The
+/// spelling of specification 6.1 line 704 keeps working, the other
+/// name works, and both orders work.
+#[test]
+fn from_fn_labels_follow_the_general_rule() {
+    let program = "def child(a: Int, b: Int): Int\n  a + b\nend\n";
+    let tail = "case vm.run()\nin Done(v) then v\nin Fault(_) then 0 - 1\nend\n";
+    for call in [
+        "sys.vm.Vm().from_fn(child, args: (3, 4))",
+        "sys.vm.Vm().from_fn(child, (3, 4))",
+        "sys.vm.Vm().from_fn(program: child, args: (3, 4))",
+        "sys.vm.Vm().from_fn(args: (3, 4), program: child)",
+    ] {
+        let source = format!("{program}vm = {call}\n{tail}");
+        assert_eq!(allowed(&source, &["Vm"]), "Done(7)", "call: {call}");
+    }
+}
+
+#[test]
+fn an_unknown_from_fn_label_reports_the_general_diagnostic() {
+    let source = "def child(): Int\n  1\nend\n\
+        vm = sys.vm.Vm().from_fn(child, tuple: ())\n";
+    expect_error(
+        source,
+        "`from_fn` does not declare a parameter named `tuple`",
+    );
+}
+
+#[test]
+fn a_repeated_native_label_is_rejected() {
+    let source = "m: {String: Int} = {}\nm.put(key: \"a\", key: \"b\")\n";
+    expect_error(source, "appears more than one time");
+}
+
+#[test]
+fn a_positional_argument_cannot_follow_a_native_label() {
+    let source = "m: {String: Int} = {}\nm.put(key: \"a\", 2)\n";
+    expect_error(source, "cannot follow a labeled argument");
+}
+
+/// The continuation methods name their parameters too.
+#[test]
+fn labels_work_on_the_continuation_methods() {
+    let source = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
+        vm = sys.vm.Vm().from_fn(child, args: ())\n\
+        case vm.drive()\n\
+        in Asked(request)\n  \
+        case request\n  \
+        in Call(Clock.Now, c, ())\n    \
+        vm.answer(call: c, value: 7)\n  \
+        in _\n    \
+        vm.dispatch(request)\n  \
+        end\n  \
+        case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\n\
+        in Done(_) then 0 - 2\n\
+        in Fault(_) then 0 - 3\n\
+        end\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done(7)");
 }
 
 // ---------------------------------------------------------------

@@ -704,6 +704,10 @@ obj.method(1)
 vm.from_fn(program, args: ("Ada",))
 ```
 
+A label names one declared parameter. Labels can appear in any order after the positional arguments. A call rejects an unknown name, a repeated name, a name that a positional argument already fills, and a positional argument after a label. A label changes nothing in the call ABI.
+
+A native method declares parameter names, so `list.push(value: x)` and `vm.answer(call: c, value: v)` follow the same rule. A closure value carries no names, and a direct operation call names no parameter. Both take positional arguments only.
+
 A call may place one closure after its closing parenthesis. That closure becomes the final argument:
 
 ```lm

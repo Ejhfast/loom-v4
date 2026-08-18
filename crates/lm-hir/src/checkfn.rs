@@ -1805,7 +1805,8 @@ impl<'o> FnChecker<'o> {
             };
             self.charge_op(ctx, op, span)?;
             let muts = vec![false; params.len()];
-            let args = self.check_args_simple(ctx, args, &params, &muts, &[], "operation", span)?;
+            let args =
+                self.check_args_simple(ctx, args, &params, &muts, NO_NAMES, "operation", span)?;
             return Ok(HExpr {
                 ty: ret,
                 mutable: true,
@@ -1831,7 +1832,7 @@ impl<'o> FnChecker<'o> {
         self.charge_row(ctx, &row, span)?;
         // The function type carries the `mut` markers, so a call
         // through a value needs mutable capability at mut positions.
-        let args = self.check_args_simple(ctx, args, &params, &muts, &[], "closure", span)?;
+        let args = self.check_args_simple(ctx, args, &params, &muts, NO_NAMES, "closure", span)?;
         Ok(HExpr {
             ty: ret,
             mutable: true,
@@ -1843,14 +1844,19 @@ impl<'o> FnChecker<'o> {
     }
 
     /// Check arguments against concrete parameter types.
+    ///
+    /// `param_names` holds the declared names. A declaration with
+    /// names accepts labels; an empty list accepts positional
+    /// arguments only. Both `&[String]` and `&[&str]` work, so a
+    /// native method states its names as literals.
     #[allow(clippy::too_many_arguments)]
-    fn check_args_simple(
+    fn check_args_simple<N: AsRef<str>>(
         &mut self,
         ctx: &mut Ctx,
         args: &[ast::Expr],
         params: &[TypeId],
         param_muts: &[bool],
-        param_names: &[String],
+        param_names: &[N],
         what: &str,
         span: Span,
     ) -> Result<Vec<HExpr>, Diagnostic> {
@@ -2355,12 +2361,15 @@ impl<'o> FnChecker<'o> {
         // Native methods on collections and builders.
         let store_ty = ctx.store.get(recv_ty).clone();
         if store_ty == Type::FileHandle {
-            let op = match name {
-                "read" => lm_abi::OP_FS_READ,
-                "write" => lm_abi::OP_FS_WRITE,
-                "seek" => lm_abi::OP_FS_SEEK,
-                "flush" => lm_abi::OP_FS_FLUSH,
-                "close" => lm_abi::OP_FS_CLOSE,
+            // The operation manifest carries no parameter names, so
+            // the method surface names them here. The receiver is the
+            // first manifest parameter, and the list skips it.
+            let (op, names) = match name {
+                "read" => (lm_abi::OP_FS_READ, &["max_bytes"][..]),
+                "write" => (lm_abi::OP_FS_WRITE, &["bytes"][..]),
+                "seek" => (lm_abi::OP_FS_SEEK, &["from"][..]),
+                "flush" => (lm_abi::OP_FS_FLUSH, NO_NAMES),
+                "close" => (lm_abi::OP_FS_CLOSE, NO_NAMES),
                 _ => {
                     return Err(Diagnostic::new(
                         "E1026",
@@ -2377,7 +2386,7 @@ impl<'o> FnChecker<'o> {
                 .map(|param| Self::abi_type_id(ctx, *param))
                 .collect();
             let muts = vec![false; params.len()];
-            let checked = self.check_args_simple(ctx, args, &params, &muts, &[], name, span)?;
+            let checked = self.check_args_simple(ctx, args, &params, &muts, names, name, span)?;
             self.charge_op(ctx, op, span)?;
             let mut all_args = vec![recv_h];
             all_args.extend(checked);
@@ -2387,36 +2396,56 @@ impl<'o> FnChecker<'o> {
                 kind: HExprKind::Perform { op, args: all_args },
             });
         }
-        let native = |op: NativeOp, params: Vec<TypeId>, ret: TypeId, needs_mut: bool| {
-            (op, params, ret, needs_mut)
-        };
-        let (op, params, ret, needs_mut) = match (&store_ty, name) {
-            (Type::List(_), "len") => native(NativeOp::ListLen, vec![], INT, false),
-            (Type::List(e), "at") => native(NativeOp::ListAt, vec![INT], *e, false),
-            (Type::List(e), "push") => native(NativeOp::ListPush, vec![*e], UNIT, true),
+        // Each entry states its parameter names beside its parameter
+        // types. The names come from the core method tables of
+        // specification 24.4 and 24.5, so a label matches the
+        // published signature.
+        let native = |op: NativeOp,
+                      params: Vec<TypeId>,
+                      names: &'static [&'static str],
+                      ret: TypeId,
+                      needs_mut: bool| { (op, params, names, ret, needs_mut) };
+        let (op, params, names, ret, needs_mut) = match (&store_ty, name) {
+            (Type::List(_), "len") => native(NativeOp::ListLen, vec![], NO_NAMES, INT, false),
+            (Type::List(e), "at") => native(NativeOp::ListAt, vec![INT], &["index"], *e, false),
+            (Type::List(e), "push") => native(NativeOp::ListPush, vec![*e], &["value"], UNIT, true),
             (Type::List(e), "get") => {
                 let ret = ctx.option_of(*e);
-                native(NativeOp::ListGet, vec![INT], ret, false)
+                native(NativeOp::ListGet, vec![INT], &["index"], ret, false)
             }
-            (Type::Map(_, _), "len") => native(NativeOp::MapLen, vec![], INT, false),
-            (Type::Map(k, _), "has") => native(NativeOp::MapHas, vec![*k], BOOL, false),
-            (Type::Map(k, v), "at") => native(NativeOp::MapAt, vec![*k], *v, false),
-            (Type::Map(k, v), "put") => native(NativeOp::MapPut, vec![*k, *v], UNIT, true),
+            (Type::Map(_, _), "len") => native(NativeOp::MapLen, vec![], NO_NAMES, INT, false),
+            (Type::Map(k, _), "has") => native(NativeOp::MapHas, vec![*k], &["key"], BOOL, false),
+            (Type::Map(k, v), "at") => native(NativeOp::MapAt, vec![*k], &["key"], *v, false),
+            (Type::Map(k, v), "put") => native(
+                NativeOp::MapPut,
+                vec![*k, *v],
+                &["key", "value"],
+                UNIT,
+                true,
+            ),
             (Type::Map(k, v), "get") => {
                 let ret = ctx.option_of(*v);
-                native(NativeOp::MapGet, vec![*k], ret, false)
+                native(NativeOp::MapGet, vec![*k], &["key"], ret, false)
             }
-            (Type::StringBuilder, "append") => {
-                native(NativeOp::SbAppend, vec![STRING], STRING_BUILDER, true)
+            (Type::StringBuilder, "append") => native(
+                NativeOp::SbAppend,
+                vec![STRING],
+                &["text"],
+                STRING_BUILDER,
+                true,
+            ),
+            (Type::StringBuilder, "build") => {
+                native(NativeOp::SbBuild, vec![], NO_NAMES, STRING, false)
             }
-            (Type::StringBuilder, "build") => native(NativeOp::SbBuild, vec![], STRING, false),
             (Type::ByteBuffer, "append") => {
-                native(NativeOp::BbAppend, vec![INT], BYTE_BUFFER, true)
+                native(NativeOp::BbAppend, vec![INT], &["byte"], BYTE_BUFFER, true)
             }
-            (Type::ByteBuffer, "len") => native(NativeOp::BbLen, vec![], INT, false),
-            (Type::ByteBuffer, "build") => native(NativeOp::BbBuild, vec![], STRING, false),
-            (Type::Bytes, "len") => native(NativeOp::BytesLen, vec![], INT, false),
-            (Type::Bytes, "text") => native(NativeOp::BytesText, vec![], STRING, false),
+            (Type::ByteBuffer, "len") => native(NativeOp::BbLen, vec![], NO_NAMES, INT, false),
+            (Type::ByteBuffer, "build") => {
+                native(NativeOp::BbBuild, vec![], NO_NAMES, STRING, false)
+            }
+            (Type::Bytes, "len") => native(NativeOp::BytesLen, vec![], NO_NAMES, INT, false),
+            (Type::Bytes, "text") => native(NativeOp::BytesText, vec![], NO_NAMES, STRING, false),
             _ if name == "freeze" && ctx.store.is_heap(recv_ty) && args.is_empty() => {
                 return Ok(freeze_expr(recv_h));
             }
@@ -2447,7 +2476,7 @@ impl<'o> FnChecker<'o> {
         }
         let muts = vec![false; params.len()];
         let mut all_args = vec![recv_h];
-        let checked = self.check_args_simple(ctx, args, &params, &muts, &[], name, span)?;
+        let checked = self.check_args_simple(ctx, args, &params, &muts, names, name, span)?;
         all_args.extend(checked);
         // Element reads keep the receiver capability.
         let mutable = match op {
@@ -3304,7 +3333,7 @@ impl<'o> FnChecker<'o> {
             .map(|p| Self::abi_type_id(ctx, *p))
             .collect();
         let muts = vec![false; params.len()];
-        let checked = self.check_args_simple(ctx, args, &params, &muts, &[], member, span)?;
+        let checked = self.check_args_simple(ctx, args, &params, &muts, NO_NAMES, member, span)?;
         self.charge_op(ctx, op, span)?;
         let ret = Self::abi_type_id(ctx, def.reply);
         Ok(HExpr {
@@ -3542,7 +3571,11 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let program = self.synth_expr(ctx, &args[0])?;
+                // The type of the second parameter comes from the
+                // first, so this method arranges the labels itself
+                // instead of calling `check_args_simple`.
+                let args = arrange_args(args, &["program", "args"], "from_fn")?;
+                let program = self.synth_expr(ctx, args[0])?;
                 let Type::Fn(params, _, ret, _) = ctx.store.get(program.ty).clone() else {
                     return Err(Diagnostic::new(
                         "E1004",
@@ -3553,23 +3586,12 @@ impl<'o> FnChecker<'o> {
                         args[0].span,
                     ));
                 };
-                let args_expr = match &args[1].kind {
-                    ExprKind::Labeled { label, value } if label == "args" => value.as_ref(),
-                    ExprKind::Labeled { label, .. } => {
-                        return Err(Diagnostic::new(
-                            "E1006",
-                            format!("unknown argument label `{label}`; use `args:`"),
-                            args[1].span,
-                        ));
-                    }
-                    _ => &args[1],
-                };
                 let want = if params.is_empty() {
                     UNIT
                 } else {
                     ctx.store.intern(Type::Tuple(params))
                 };
-                let tuple = self.check_expr(ctx, args_expr, want)?;
+                let tuple = self.check_expr(ctx, args[1], want)?;
                 self.charge_op(ctx, lm_abi::OP_VM_FROM_FN, span)?;
                 let vm_ty = ctx.store.intern(Type::Vm(ret));
                 HExpr {
@@ -3800,7 +3822,10 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let call = self.synth_expr(ctx, &args[0])?;
+                // The reply type comes from the call token, so this
+                // method arranges the labels itself.
+                let args = arrange_args(args, &["call", "value"], "answer")?;
+                let call = self.synth_expr(ctx, args[0])?;
                 let Type::PendingCall(_, reply) = ctx.store.get(call.ty).clone() else {
                     return Err(Diagnostic::new(
                         "E1004",
@@ -3811,7 +3836,7 @@ impl<'o> FnChecker<'o> {
                         args[0].span,
                     ));
                 };
-                let value = self.check_expr(ctx, &args[1], reply)?;
+                let value = self.check_expr(ctx, args[1], reply)?;
                 self.charge_op(ctx, lm_abi::OP_VM_ANSWER, span)?;
                 HExpr {
                     ty: UNIT,
@@ -3830,8 +3855,9 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let request = self.check_expr(ctx, &args[0], lm_types::REQUEST)?;
-                let fault = self.check_expr(ctx, &args[1], lm_types::FAULT)?;
+                let args = arrange_args(args, &["request", "fault"], "reject")?;
+                let request = self.check_expr(ctx, args[0], lm_types::REQUEST)?;
+                let fault = self.check_expr(ctx, args[1], lm_types::FAULT)?;
                 self.charge_op(ctx, lm_abi::OP_VM_REJECT, span)?;
                 HExpr {
                     ty: UNIT,
@@ -5324,15 +5350,20 @@ fn subst_ro(ctx: &Ctx, ty: TypeId, args: &[TypeId]) -> TypeId {
     }
 }
 
+/// The names of a call target that declares none. A call through a
+/// closure value and a direct operation call both use it: a closure
+/// type carries no names, and the operation manifest carries none.
+const NO_NAMES: &[&str] = &[];
+
 /// Arrange call arguments against the declared parameter names.
 ///
 /// Labels follow the positional arguments and match declared names in
 /// any order. The result unwraps the labels and orders the arguments
 /// by parameter declaration. Labels change nothing in the call ABI.
 /// The caller checks the argument count first.
-fn arrange_args<'a>(
+fn arrange_args<'a, N: AsRef<str>>(
     args: &'a [ast::Expr],
-    param_names: &[String],
+    param_names: &[N],
     what: &str,
 ) -> Result<Vec<&'a ast::Expr>, Diagnostic> {
     if args
@@ -5341,6 +5372,15 @@ fn arrange_args<'a>(
     {
         return Ok(args.iter().collect());
     }
+    // A declaration states one name for each parameter, or no name at
+    // all. The caller matched the argument count against the
+    // parameter count, so a label position indexes `slots`.
+    debug_assert!(
+        param_names.is_empty() || param_names.len() == args.len(),
+        "`{what}` states {} name(s) for {} parameter(s)",
+        param_names.len(),
+        args.len()
+    );
     let mut slots: Vec<Option<&ast::Expr>> = vec![None; args.len()];
     let mut positional = 0usize;
     let mut in_labels = false;
@@ -5348,7 +5388,7 @@ fn arrange_args<'a>(
         match &arg.kind {
             ExprKind::Labeled { label, value } => {
                 in_labels = true;
-                let Some(pos) = param_names.iter().position(|n| n == label) else {
+                let Some(pos) = param_names.iter().position(|n| n.as_ref() == label) else {
                     return Err(Diagnostic::new(
                         "E1006",
                         format!("`{what}` does not declare a parameter named `{label}`"),
