@@ -881,42 +881,30 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             }
             HExprKind::TableEdit {
                 action,
-                targets,
+                kind,
+                slot,
                 table,
                 mock,
             } => {
+                self.lower_expr(table);
+                if let Some(mock) = mock {
+                    self.lower_expr(mock);
+                }
                 let action = match action {
                     TableAction::Pass => 0,
                     TableAction::Block => 1,
                     TableAction::Mock => 2,
                     TableAction::Clear => 3,
                 };
-                // One call edits several targets, so the table value
-                // rests in a slot and each edit reads it again.
-                let table_slot = self.scratch_of(table.ty);
-                self.lower_expr(table);
-                self.emit(Instr::StoreLocal(table_slot));
-                for (index, (kind, slot)) in targets.iter().enumerate() {
-                    self.emit(Instr::LoadLocal(table_slot));
-                    if let Some(mock) = mock {
-                        debug_assert_eq!(index, 0, "a mock edit names one target");
-                        self.lower_expr(mock);
-                    }
-                    let kind = match kind {
-                        TargetKind::Exact => 0,
-                        TargetKind::Group => 1,
-                    };
-                    self.emit(Instr::TableEdit {
-                        action,
-                        kind,
-                        slot: *slot,
-                    });
-                    // Each edit answers unit. The call answers one
-                    // unit, so every earlier answer goes.
-                    if index + 1 < targets.len() {
-                        self.emit(Instr::Pop);
-                    }
-                }
+                let kind = match kind {
+                    TargetKind::Exact => 0,
+                    TargetKind::Group => 1,
+                };
+                self.emit(Instr::TableEdit {
+                    action,
+                    kind,
+                    slot: *slot,
+                });
             }
             HExprKind::AsCall { request, op } => {
                 self.lower_expr(request);

@@ -3506,36 +3506,18 @@ impl<'o> FnChecker<'o> {
                 ));
             }
         };
-        if action == TableAction::Mock {
-            if args.len() != 2 {
-                return Err(Diagnostic::new(
-                    "E1006",
-                    format!("`mock` expects 2 argument(s), found {}", args.len()),
-                    span,
-                ));
-            }
-        } else if args.is_empty() {
+        let want_args = if action == TableAction::Mock { 2 } else { 1 };
+        if args.len() != want_args {
             return Err(Diagnostic::new(
                 "E1006",
-                format!("`{name}` expects one target or more, found none"),
+                format!(
+                    "`{name}` expects {want_args} argument(s), found {}",
+                    args.len()
+                ),
                 span,
             ));
         }
-        // `pass`, `block`, and `clear` take several targets, so one
-        // call states one decision over a set of operations.
-        let descriptor_count = if action == TableAction::Mock {
-            1
-        } else {
-            args.len()
-        };
-        let mut targets: Vec<(TargetKind, u32)> = Vec::with_capacity(descriptor_count);
-        let mut target_names: Vec<String> = Vec::with_capacity(descriptor_count);
-        for arg in &args[..descriptor_count] {
-            let (kind, slot, target_name) = self.resolve_descriptor(arg)?;
-            targets.push((kind, slot));
-            target_names.push(target_name);
-        }
-        let (kind, slot) = targets[0];
+        let (kind, slot, target_name) = self.resolve_descriptor(&args[0])?;
         let mock = if action == TableAction::Mock {
             if kind != TargetKind::Exact || lm_abi::op(slot).kind != lm_abi::OpKind::Fixed {
                 return Err(Diagnostic::new(
@@ -3552,19 +3534,18 @@ impl<'o> FnChecker<'o> {
         };
         if action == TableAction::Pass {
             // The dependent grant rule: passing authority is charged
-            // to the granter's row, once for each target.
-            for target_name in &target_names {
-                let idx = ctx.store.intern_row_name(target_name);
-                let row = vec![lm_types::RowElem::Op(idx)];
-                self.charge_row(ctx, &row, span)?;
-            }
+            // to the granter's row.
+            let idx = ctx.store.intern_row_name(&target_name);
+            let row = vec![lm_types::RowElem::Op(idx)];
+            self.charge_row(ctx, &row, span)?;
         }
         Ok(HExpr {
             ty: UNIT,
             mutable: true,
             kind: HExprKind::TableEdit {
                 action,
-                targets,
+                kind,
+                slot,
                 table: Box::new(table),
                 mock,
             },
