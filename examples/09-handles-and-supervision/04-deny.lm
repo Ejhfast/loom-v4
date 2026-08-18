@@ -35,6 +35,6 @@ def allow_only(child: Vm[String], permitted: String): String with Vm
   "the supervisor stopped"
 end
 
-child = sys.vm.Vm().from_object(read_secret, args: ())
+child = sys.vm.Vm().from_fn(read_secret, args: ())
 child.table().pass(Fs)
 allow_only(child, "message.txt")

@@ -1766,7 +1766,7 @@ fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_RESOURCE_CLOSE
             | lm_abi::OP_VM_RESOURCE_KIND => 1,
             lm_abi::OP_VM_DISPATCH => 2,
-            lm_abi::OP_VM_FROM_OBJECT | lm_abi::OP_VM_ANSWER | lm_abi::OP_VM_REJECT => 3,
+            lm_abi::OP_VM_FROM_FN | lm_abi::OP_VM_ANSWER | lm_abi::OP_VM_REJECT => 3,
             lm_abi::OP_PROC_RUN
             | lm_abi::OP_PROC_CLOSE
             | lm_abi::OP_PROC_DONE
@@ -2821,19 +2821,17 @@ fn step(
                             let empty = ctx.intern(BcType::EmptyVm);
                             push(state, empty)?;
                         }
-                        lm_abi::OP_VM_FROM_OBJECT => {
+                        lm_abi::OP_VM_FROM_FN => {
                             let args_ty = pop(state)?;
                             let fn_ty = pop(state)?;
                             let recv = pop(state)?;
                             if ctx.ty(recv) != BcType::EmptyVm {
                                 return Err(fail(
-                                    "`Vm.FromObject` needs an EmptyVm receiver".to_string(),
+                                    "`Vm.FromFn` needs an EmptyVm receiver".to_string(),
                                 ));
                             }
                             let BcType::Fn(params, _, ret, _) = ctx.ty(fn_ty) else {
-                                return Err(fail(
-                                    "`Vm.FromObject` needs a function value".to_string(),
-                                ));
+                                return Err(fail("`Vm.FromFn` needs a function value".to_string()));
                             };
                             let want = if params.is_empty() {
                                 TY_UNIT
@@ -2842,7 +2840,7 @@ fn step(
                             };
                             if !ctx.is_subtype(args_ty, want) {
                                 return Err(fail(
-                                    "`Vm.FromObject` arguments do not match the \
+                                    "`Vm.FromFn` arguments do not match the \
                                      program parameters"
                                         .to_string(),
                                 ));

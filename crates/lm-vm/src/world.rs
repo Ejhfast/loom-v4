@@ -1786,7 +1786,7 @@ impl<'m> World<'m> {
     /// Every argument of one entry frame carries the parameter type
     /// its function declares.
     ///
-    /// A spawn and a `Vm.FromObject` both copy values into another
+    /// A spawn and a `Vm.FromFn` both copy values into another
     /// machine and load them as the first local slots of a frame. The
     /// declared parameter types come from verified code, and the
     /// closure states the environment its creator frame held.
@@ -3173,7 +3173,7 @@ impl<'m> World<'m> {
                     }
                 }
             }
-            lm_abi::OP_VM_FROM_OBJECT => {
+            lm_abi::OP_VM_FROM_FN => {
                 let Some(target) = self.vm_arg(vm, op, args[0]) else {
                     return;
                 };

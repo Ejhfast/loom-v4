@@ -391,7 +391,7 @@ one encoding gap.
 ### A transferred value was unrooted while the next value crossed
 
 `World` copies several values into one machine in three places: the
-mock handler arguments, the `from_object` argument view, and
+mock handler arguments, the `from_fn` argument view, and
 `call.args()`. Each loop held its results in a Rust vector only.
 
 A destination collection during one copy frees every object the

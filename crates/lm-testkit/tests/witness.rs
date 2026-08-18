@@ -189,7 +189,7 @@ fn a_witness_never_enters_a_guest_digest() {
 /// under the copied environment and admission proves the whole world.
 const CLOSURE_ACROSS_A_BOUNDARY: &str = "\
 def hold[T](v: T): Vm[T] with Vm
-  sys.vm.Vm().from_object(do ||: T v end, args: ())
+  sys.vm.Vm().from_fn(do ||: T v end, args: ())
 end
 
 def go(): Int with Vm
@@ -520,7 +520,7 @@ fn an_uninitialized_field_outside_construction_admits() {
 /// the generic body to the same result.
 const RESTORE_SOURCE: &str = "\
 def hold[T](v: T): Vm[T] with Vm
-  sys.vm.Vm().from_object(do ||: T v end, args: ())
+  sys.vm.Vm().from_fn(do ||: T v end, args: ())
 end
 
 def restore_run(snap: Snapshot[Int]): Int with Vm

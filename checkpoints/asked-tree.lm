@@ -35,7 +35,7 @@ end
 helper = Helper.spawn()
 worker = Worker.spawn()
 worker.send(helper)
-held = sys.vm.Vm().from_object(do |w: Handle[Handle[Int, Int], Int]|: Int with Clock
+held = sys.vm.Vm().from_fn(do |w: Handle[Handle[Int, Int], Int]|: Int with Clock
   sys.clock.now()
 end, args: (worker,))
 # `drive` stops the held machine before the policy lookup, so it holds

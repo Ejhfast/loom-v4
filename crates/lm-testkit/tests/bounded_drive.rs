@@ -57,7 +57,7 @@ def supervise(vm: Vm[Int]): Int with Vm
   0 - 2
 end
 
-supervise(sys.vm.Vm().from_object(spin, args: ()))
+supervise(sys.vm.Vm().from_fn(spin, args: ()))
 "#;
     let out = run(src);
     println!("bounded turns: {out}");
@@ -92,7 +92,7 @@ def supervise(vm: Vm[Int]): Int with Vm
   end
 end
 
-supervise(sys.vm.Vm().from_object(spin, args: ()))
+supervise(sys.vm.Vm().from_fn(spin, args: ()))
 "#;
     let out = run(src);
     println!("unbounded: {out}");

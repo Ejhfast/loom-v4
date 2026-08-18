@@ -38,7 +38,7 @@ def audit(child: Vm[String], mut opened: [String]): String with Vm
   "the supervisor stopped"
 end
 
-child = sys.vm.Vm().from_object(read_message, args: ())
+child = sys.vm.Vm().from_fn(read_message, args: ())
 child.table().pass(Fs)
 
 opened: [String] = []

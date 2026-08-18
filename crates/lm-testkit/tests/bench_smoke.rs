@@ -212,7 +212,7 @@ fn perform_block_smoke() {
     // Each child performs one blocked operation; the holder observes
     // the fault. This times the block path plus machine creation.
     let source = "def one(): String with Vm\n  \
-                  vm = sys.vm.Vm().from_object(do || with Io.Print\n    sys.io.print(\"x\")\n  end, args: ())\n  \
+                  vm = sys.vm.Vm().from_fn(do || with Io.Print\n    sys.io.print(\"x\")\n  end, args: ())\n  \
                   case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\n\
                   def go(): Int with Vm\n  i = 0\n  while i < 300\n    one()\n    i = i + 1\n  end\n  i\nend\ngo()\n";
     timed_world("perform_block_300", source, &["Vm"], "Done(300)");
@@ -221,7 +221,7 @@ fn perform_block_smoke() {
 #[test]
 fn perform_mock_smoke() {
     let source = "def go(): Int with Vm\n  \
-                  vm = sys.vm.Vm().from_object(do || with Clock.Now\n    \
+                  vm = sys.vm.Vm().from_fn(do || with Clock.Now\n    \
                   i = 0\n    total = 0\n    while i < 5000\n      total = total + sys.clock.now()\n      i = i + 1\n    end\n    total\n  end, args: ())\n  \
                   vm.table().mock(Clock.Now, do ||: Int 1 end)\n  \
                   case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
@@ -231,7 +231,7 @@ fn perform_mock_smoke() {
 #[test]
 fn drive_interception_smoke() {
     let source = "def go(): Int with Vm\n  \
-                  vm = sys.vm.Vm().from_object(do || with Clock.Now\n    \
+                  vm = sys.vm.Vm().from_fn(do || with Clock.Now\n    \
                   i = 0\n    total = 0\n    while i < 5000\n      total = total + sys.clock.now()\n      i = i + 1\n    end\n    total\n  end, args: ())\n  \
                   guard = 0\n  while guard < 100000\n    guard = guard + 1\n    \
                   case vm.drive()\n    in Asked(q)\n      \
@@ -261,7 +261,7 @@ def drive_all(vm: Vm[Int]): Int with Vm
 end
 
 inner = do ||: Int with Vm, Clock.Now
-  b = sys.vm.Vm().from_object(do ||: Int with Clock.Now
+  b = sys.vm.Vm().from_fn(do ||: Int with Clock.Now
     i = 0
     total = 0
     while i < 1000
@@ -277,7 +277,7 @@ inner = do ||: Int with Vm, Clock.Now
   end
 end
 
-a = sys.vm.Vm().from_object(inner, args: ())
+a = sys.vm.Vm().from_fn(inner, args: ())
 a.table().pass(Vm)
 a.table().pass(Clock.Now)
 drive_all(a)
@@ -293,7 +293,7 @@ drive_all(a)
 #[test]
 fn nested_vm_run_smoke() {
     let source = "def tower(n: Int): Int with Vm\n  if n <= 0\n    1\n  else\n    \
-                  vm = sys.vm.Vm().from_object(do || with Vm\n      tower(n - 1)\n    end, args: ())\n    \
+                  vm = sys.vm.Vm().from_fn(do || with Vm\n      tower(n - 1)\n    end, args: ())\n    \
                   vm.table().pass(Vm)\n    \
                   case vm.run()\n    in Done(v) then v + 1\n    in Fault(_) then 0 - 1\n    end\n  end\nend\ntower(40)\n";
     timed_world("nested_vm_run_40", source, &["Vm"], "Done(41)");
@@ -302,7 +302,7 @@ fn nested_vm_run_smoke() {
 #[test]
 fn async_wait_smoke() {
     let source = "def go(): Int with Vm, Clock.Sleep\n  \
-                  vm = sys.vm.Vm().from_object(do || with Clock.Sleep\n    \
+                  vm = sys.vm.Vm().from_fn(do || with Clock.Sleep\n    \
                   i = 0\n    while i < 50\n      sys.clock.sleep(1)\n      i = i + 1\n    end\n    i\n  end, args: ())\n  \
                   vm.table().pass(Clock.Sleep)\n  \
                   case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
@@ -326,7 +326,7 @@ fn deep_freeze_smoke() {
 fn boundary_transfer_smoke() {
     // A 20,000-node frozen graph crosses one machine boundary.
     let source = "def go(): Int with Vm\n  \
-                  vm = sys.vm.Vm().from_object(do ||: [[Int]]\n    \
+                  vm = sys.vm.Vm().from_fn(do ||: [[Int]]\n    \
                   xs: [[Int]] = []\n    i = 0\n    while i < 20000\n      xs.push([i])\n      i = i + 1\n    end\n    \
                   xs.freeze()\n  end, args: ())\n  \
                   case vm.run()\n  in Done(xs) then xs.len()\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
@@ -566,7 +566,7 @@ fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, r
 fn snapshot_wide_heap_smoke() {
     let source = "\
 def go(): Int with Vm, Clock
-  vm = sys.vm.Vm().from_object(do ||: Int with Clock.Now
+  vm = sys.vm.Vm().from_fn(do ||: Int with Clock.Now
     xs = [0]
     i = 0
     while i < 10000
@@ -606,7 +606,7 @@ class Node
 end
 
 def go(): Int with Vm, Clock
-  vm = sys.vm.Vm().from_object(do ||: Int with Clock.Now
+  vm = sys.vm.Vm().from_fn(do ||: Int with Clock.Now
     head = Node(0)
     i = 0
     while i < 5000

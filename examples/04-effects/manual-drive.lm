@@ -25,7 +25,7 @@ def drive_loop(vm: Vm[Int], mut captured: [String]): ([String], Int) with Vm
   (captured.freeze(), 0 - 1)
 end
 
-vm = sys.vm.Vm().from_object(do || with Io.Print, Clock.Now
+vm = sys.vm.Vm().from_fn(do || with Io.Print, Clock.Now
   sys.io.print("tick\n")
   sys.clock.now()
 end, args: ())

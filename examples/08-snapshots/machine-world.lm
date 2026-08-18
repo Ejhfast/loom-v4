@@ -57,7 +57,7 @@ end
 helper = Helper.spawn()
 worker = Worker.spawn()
 worker.send(helper)
-held = sys.vm.Vm().from_object(do |w: Handle[Handle[Int, Int], Int]|: Int with Proc
+held = sys.vm.Vm().from_fn(do |w: Handle[Handle[Int, Int], Int]|: Int with Proc
   case w.done()
   in Done(v)  then v * 2
   in Fault(_) then 0 - 1

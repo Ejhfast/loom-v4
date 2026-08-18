@@ -363,7 +363,7 @@ arguments from the position instead.
 Two answers exist. The first carries the `OpDef.reply` types inside
 `lm-vm`. The second derives the witness at the perform.
 
-### `Vm.FromObject` closes its argument types through the closure
+### `Vm.FromFn` closes its argument types through the closure
 
 `World::check_frame_args` closes the declared parameter types through
 the environment of the closure. For a restored program value that

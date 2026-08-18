@@ -138,7 +138,7 @@ fn a_successful_mock_close_retires_every_alias() {
     let text = r#"
 case sys.fs.open("message.txt", ReadOnly)
 in Ok(parent_file)
-  child = sys.vm.Vm().from_object(do |file: FileHandle|: Bool with Fs.Close
+  child = sys.vm.Vm().from_fn(do |file: FileHandle|: Bool with Fs.Close
     file.close().is_ok()
   end, args: (parent_file,))
   child.table().mock(Fs.Close, do |_: FileHandle|: Result[(), FsError]
@@ -195,7 +195,7 @@ fn a_supervisor_steps_the_child_to_a_quiet_capture_point() {
 #[test]
 fn driver_termination_closes_its_minted_files() {
     let text = r#"
-child = sys.vm.Vm().from_object(do ||: Int with Fs.Open
+child = sys.vm.Vm().from_fn(do ||: Int with Fs.Open
   case sys.fs.open("memory.txt", ReadOnly)
   in Ok(_)  then 1
   in Err(_) then 0

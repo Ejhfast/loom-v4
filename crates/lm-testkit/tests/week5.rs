@@ -55,7 +55,7 @@ fn capitalized_callable_members_get_the_casing_rule() {
 fn the_vm_constructor_keeps_its_capital() {
     assert_eq!(
         allowed(
-            "def go(): Int with Vm\n  m = sys.vm.Vm().from_object(do || 21 end, args: ())\n  \
+            "def go(): Int with Vm\n  m = sys.vm.Vm().from_fn(do || 21 end, args: ())\n  \
              case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),
@@ -74,7 +74,7 @@ fn descriptors_keep_initial_capitals() {
     let (out, host) = run_world(
         "t.lm",
         "def go(): Int with Vm, Io.Print\n  \
-         m = sys.vm.Vm().from_object(do || with Io.Print\n    sys.io.print(\"in\\n\")\n    7\n  \
+         m = sys.vm.Vm().from_fn(do || with Io.Print\n    sys.io.print(\"in\\n\")\n    7\n  \
          end, args: ())\n  m.table().pass(Io.Print)\n  \
          case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
         &["Vm", "Io.Print"],
@@ -94,7 +94,7 @@ fn use_binds_a_sys_group() {
     assert_eq!(
         allowed(
             "use sys.vm\n\ndef go(): Int with Vm\n  \
-             m = vm.Vm().from_object(do || 21 end, args: ())\n  \
+             m = vm.Vm().from_fn(do || 21 end, args: ())\n  \
              case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),
@@ -114,7 +114,7 @@ fn use_binds_the_vm_constructor() {
     assert_eq!(
         allowed(
             "use sys.vm.Vm\n\ndef go(): Int with Vm\n  \
-             m = Vm().from_object(do || 42 end, args: ())\n  \
+             m = Vm().from_fn(do || 42 end, args: ())\n  \
              case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),
@@ -238,7 +238,7 @@ fn as_call_takes_an_exact_descriptor() {
     assert_eq!(
         allowed(
             "def go(): Int with Vm\n  \
-             m = sys.vm.Vm().from_object(do || with Clock.Now\n    sys.clock.now()\n  \
+             m = sys.vm.Vm().from_fn(do || with Clock.Now\n    sys.clock.now()\n  \
              end, args: ())\n  case m.drive()\n  in Asked(q)\n    \
              case q.as_call(Clock.Now)\n    in Some(call)\n      m.answer(call, 99)\n      \
              case m.run()\n      in Done(v) then v\n      in Fault(_) then 0\n      end\n    \

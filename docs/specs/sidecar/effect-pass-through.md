@@ -67,7 +67,7 @@ end
 
 inner = do || : Int with Vm, Io.Print
   sys.io.print("from A\n")
-  b = sys.vm.Vm().from_object(do || : Int with Io.Print
+  b = sys.vm.Vm().from_fn(do || : Int with Io.Print
     sys.io.print("from B\n")
     7
   end, args: ())
@@ -78,7 +78,7 @@ inner = do || : Int with Vm, Io.Print
   end
 end
 
-a = sys.vm.Vm().from_object(inner, args: ())
+a = sys.vm.Vm().from_fn(inner, args: ())
 a.table().pass(Vm)
 a.table().pass(Io.Print)
 

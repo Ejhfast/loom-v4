@@ -154,7 +154,7 @@ pub const OP_CLOCK_MONOTONIC: OpSlot = 4;
 pub const OP_CLOCK_SLEEP: OpSlot = 5;
 pub const OP_RAND_INT: OpSlot = 6;
 pub const OP_VM_NEW: OpSlot = 7;
-pub const OP_VM_FROM_OBJECT: OpSlot = 8;
+pub const OP_VM_FROM_FN: OpSlot = 8;
 pub const OP_VM_RUN: OpSlot = 9;
 pub const OP_VM_STEP: OpSlot = 10;
 pub const OP_VM_DRIVE: OpSlot = 11;
@@ -272,7 +272,7 @@ pub const OPS: [OpDef; 49] = [
     },
     OpDef {
         group: "Vm",
-        member: "FromObject",
+        member: "FromFn",
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::Unit,

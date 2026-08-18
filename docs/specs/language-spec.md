@@ -562,7 +562,7 @@ A function type includes parameters, result, and row:
 (T) -> U with e
 ```
 
-The checker normalizes source function syntax to the structural form `Fn[A,R,e]`, where `A` is the fixed argument tuple, `R` the result, and `e` the row. `Fn` is ABI/type-checker metanotation rather than an additional source type name; it lets native APIs such as `EmptyVm.from_object` use ordinary first-order generics instead of a variadic or dependent typing rule. Function parameters are contravariant, results covariant, and effects covariant by set inclusion.
+The checker normalizes source function syntax to the structural form `Fn[A,R,e]`, where `A` is the fixed argument tuple, `R` the result, and `e` the row. `Fn` is ABI/type-checker metanotation rather than an additional source type name; it lets native APIs such as `EmptyVm.from_fn` use ordinary first-order generics instead of a variadic or dependent typing rule. Function parameters are contravariant, results covariant, and effects covariant by set inclusion.
 
 An operation object has an identity-indexed callable type:
 
@@ -701,7 +701,7 @@ Calls use parentheses. Arguments evaluate left to right; the receiver evaluates 
 ```lm
 f(1, 2)
 obj.method(1)
-vm.from_object(program, args: ("Ada",))
+vm.from_fn(program, args: ("Ada",))
 ```
 
 A call may place one closure after its closing parenthesis. That closure becomes the final argument:
@@ -1285,10 +1285,10 @@ There is no execute-an-unknown-signature shortcut. `from_artifact` requires a `L
 
 ```lm
 empty = sys.vm.Vm()
-vm = empty.from_object(program, args: ("Ada",))
+vm = empty.from_fn(program, args: ("Ada",))
 ```
 
-`Vm.New` creates an `EmptyVm` with a fresh heap, frames, limits, and default-deny table. `from_object[A,R,e](self, program: Fn[A,R,e], args: A) -> Vm[R]` is an ordinary generic native declaration over the normalized structural function form: it checks the supplied tuple, transfers code/captures/arguments through the boundary codec, creates the initial frame without executing, transitions the native receiver out of the empty state, and returns `Vm[R]`. An aliased stale `EmptyVm` handle is harmless: any second load attempt is rejected by the runtime state check.
+`Vm.New` creates an `EmptyVm` with a fresh heap, frames, limits, and default-deny table. `from_fn[A,R,e](self, program: Fn[A,R,e], args: A) -> Vm[R]` is an ordinary generic native declaration over the normalized structural function form: it checks the supplied tuple, transfers code/captures/arguments through the boundary codec, creates the initial frame without executing, transitions the native receiver out of the empty state, and returns `Vm[R]`. An aliased stale `EmptyVm` handle is harmless: any second load attempt is rejected by the runtime state check.
 
 `from_artifact` accepts only a typed `LinkedEntry[A,R]`. Tooling may inspect an entry through `TypeView`, but it must check a concrete function descriptor before obtaining a loadable entry; version 0.2 has no identity-erased dynamic invocation.
 
@@ -1487,7 +1487,7 @@ Nesting is ordinary composition of functions that use `Vm`:
 
 ```lm
 def f2(): Int with Vm
-  case sys.vm.Vm().from_object(do || 21 end, args: ()).run()
+  case sys.vm.Vm().from_fn(do || 21 end, args: ()).run()
   in Done(v)  then v
   in Fault(_) then 0
   end
@@ -1499,7 +1499,7 @@ def f1(e: () -> Int with Vm): Int with Vm
     x + x
   end
 
-  vm = sys.vm.Vm().from_object(expr, args: ())
+  vm = sys.vm.Vm().from_fn(expr, args: ())
   vm.table().pass(Vm)
   case vm.run()
   in Done(v)  then v
@@ -1750,7 +1750,7 @@ The proc instance is constructed inside its VM. The spawner receives only a type
 ### 18.2 General launch
 
 ```lm
-vm = sys.vm.Vm().from_object(program, args: ("Ada",))
+vm = sys.vm.Vm().from_fn(program, args: ("Ada",))
 vm.table().pass(Io.Print)
 vm.table().mock(Clock.Now, do || 0 end)
 
@@ -2257,7 +2257,7 @@ Generic signatures below are manifest-level schemas instantiated by the compiler
 
 ```text
 Vm.New                   () -> EmptyVm
-Vm.FromObject[A,T,e]     (EmptyVm, Fn[A,T,e], control A) -> Vm[T]
+Vm.FromFn[A,T,e]     (EmptyVm, Fn[A,T,e], control A) -> Vm[T]
 Vm.FromArtifact[A,T]     (EmptyVm, LinkedEntry[A,T], control A) -> Vm[T]
 Vm.Step[T]               (Vm[T]) -> StepEvent[T]
 Vm.Run[T]                (Vm[T]) -> RunResult[T]
@@ -3036,7 +3036,7 @@ Canonical artifact rows expand groups to exact ABI operation identities and sort
 def supervise(
   program: () -> String with Io.Print, Clock.Now
 ): RunResult[String] with Vm, Io.Print
-  vm = sys.vm.Vm().from_object(program, args: ())
+  vm = sys.vm.Vm().from_fn(program, args: ())
   captured: [String] = []
 
   loop do

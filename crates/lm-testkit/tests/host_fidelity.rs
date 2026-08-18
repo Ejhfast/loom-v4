@@ -42,7 +42,7 @@ def supervise(child: Vm[String]): String with Vm
   end
 end
 
-child = sys.vm.Vm().from_object(worker, args: ())
+child = sys.vm.Vm().from_fn(worker, args: ())
 child.table().pass(Fs)
 supervise(child)
 "#;

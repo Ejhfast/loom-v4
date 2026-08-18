@@ -53,7 +53,7 @@ def serve(child: Vm[String], mine: ResourceHandle, contents: Bytes): String with
   "the supervisor stopped"
 end
 
-child = sys.vm.Vm().from_object(read_settings, args: ())
+child = sys.vm.Vm().from_fn(read_settings, args: ())
 
 # The first request is the open. Mint an entry to answer it.
 case child.drive()

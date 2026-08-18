@@ -319,7 +319,7 @@ Hello Ada!
 ```
 
 ```lm
-vm = sys.vm.Vm().from_object(do || with Io.Print, Clock.Now
+vm = sys.vm.Vm().from_fn(do || with Io.Print, Clock.Now
   sys.io.print("tick\n")
   sys.clock.now()
 end, args: ())
@@ -546,7 +546,7 @@ This week consolidates those paths. It does not replace them.
 - Add parent resource reservation for nested VM creation.
 - Add brace closures and trailing closure arguments. Lower both
   closure spellings to one typed HIR node and one bytecode form.
-- Keep `Vm.from_object`, terminal publication, and nested VM examples
+- Keep `Vm.from_fn`, terminal publication, and nested VM examples
   on the production path throughout the migration.
 
 ### Runnable outputs
@@ -731,7 +731,7 @@ def restore_run(snap: Snapshot[Int]): Int with Vm
   end
 end
 
-vm = sys.vm.Vm().from_object({ || 20 + 22 }, args: ())
+vm = sys.vm.Vm().from_fn({ || 20 + 22 }, args: ())
 vm.step()
 case vm.snapshot()
 in Ok(snap) then (restore_run(snap), restore_run(snap))

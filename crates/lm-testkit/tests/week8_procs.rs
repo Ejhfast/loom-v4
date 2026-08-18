@@ -296,7 +296,7 @@ fn receive_is_only_valid_inside_a_proc_class() {
 /// original `Vm` handle faults until `pause()` returns it.
 #[test]
 fn a_dormant_vm_handle_faults_until_pause() {
-    let source = "vm = sys.vm.Vm().from_object(do ||: Int 41 + 1 end, args: ())\n\
+    let source = "vm = sys.vm.Vm().from_fn(do ||: Int 41 + 1 end, args: ())\n\
                   h = sys.proc.run(vm)\n\
                   vm.run()\n";
     assert_eq!(
@@ -309,7 +309,7 @@ fn a_dormant_vm_handle_faults_until_pause() {
 /// gives it to the scheduler again.
 #[test]
 fn pause_and_resume_move_execution_ownership() {
-    let source = "vm = sys.vm.Vm().from_object(do ||: Int 1 + 1 end, args: ())\n\
+    let source = "vm = sys.vm.Vm().from_fn(do ||: Int 1 + 1 end, args: ())\n\
                   h = sys.proc.run(vm)\n\
                   first = h.pause()\n\
                   second = h.pause()\n\
@@ -330,7 +330,7 @@ fn pause_and_resume_move_execution_ownership() {
 fn a_paused_proc_leaves_the_scheduler_run_set() {
     let bytes = compile_to_bytes(
         "proc.lm",
-        "vm = sys.vm.Vm().from_object(do ||: Int 1 + 1 end, args: ())\n\
+        "vm = sys.vm.Vm().from_fn(do ||: Int 1 + 1 end, args: ())\n\
          h = sys.proc.run(vm)\n\
          h.pause()\n",
     )
@@ -352,7 +352,7 @@ fn a_paused_proc_leaves_the_scheduler_run_set() {
 /// A quantum boundary lets the holder pause a task that has run.
 #[test]
 fn a_quantum_boundary_accepts_a_pause() {
-    let source = "vm = sys.vm.Vm().from_object(do ||: Int\n\
+    let source = "vm = sys.vm.Vm().from_fn(do ||: Int\n\
                   \x20 i = 0\n\
                   \x20 while i < 10000\n\
                   \x20   i = i + 1\n\
@@ -542,12 +542,12 @@ fn bounded_slices_let_a_later_short_proc_finish_first() {
 /// A waiting host operation does not stop a task that is ready.
 #[test]
 fn a_host_wait_does_not_stop_a_ready_task() {
-    let source = "nap = sys.vm.Vm().from_object(do ||: Int with Clock.Sleep\n\
+    let source = "nap = sys.vm.Vm().from_fn(do ||: Int with Clock.Sleep\n\
                   \x20 sys.clock.sleep(5)\n\
                   \x20 1\n\
                   end, args: ())\n\
                   nap.table().pass(Clock)\n\
-                  quick = sys.vm.Vm().from_object(do ||: Int 2 end, args: ())\n\
+                  quick = sys.vm.Vm().from_fn(do ||: Int 2 end, args: ())\n\
                   slow = sys.proc.run(nap)\n\
                   fast = sys.proc.run(quick)\n\
                   (slow.done(), fast.done())\n";
@@ -579,7 +579,7 @@ fn a_host_wait_does_not_stop_a_ready_task() {
 /// machine.
 #[test]
 fn host_completion_waits_for_its_controlling_task() {
-    let source = "inner = sys.vm.Vm().from_object(do ||: Int with Clock.Sleep\n\
+    let source = "inner = sys.vm.Vm().from_fn(do ||: Int with Clock.Sleep\n\
                   \x20 sys.clock.sleep(5)\n\
                   \x20 9\n\
                   end, args: ())\n\
@@ -587,7 +587,7 @@ fn host_completion_waits_for_its_controlling_task() {
                   inner.step()\n\
                   inner.step()\n\
                   inner.step()\n\
-                  nap = sys.vm.Vm().from_object(do ||: Int with Clock.Sleep\n\
+                  nap = sys.vm.Vm().from_fn(do ||: Int with Clock.Sleep\n\
                   \x20 sys.clock.sleep(5)\n\
                   \x20 7\n\
                   end, args: ())\n\
@@ -959,7 +959,7 @@ fn the_birth_grant_carries_the_declared_row() {
         .expect_err("the spawner may not pass a row it lacks");
     assert!(refused.contains("E1046"), "{refused}");
     // The explicit path grants what the launch needs.
-    let explicit = "vm = sys.vm.Vm().from_object(do ||: Int with Io.Print\n\
+    let explicit = "vm = sys.vm.Vm().from_fn(do ||: Int with Io.Print\n\
                     \x20 sys.io.print(\"x\")\n\
                     \x20 1\n\
                     end, args: ())\n\
@@ -1044,7 +1044,7 @@ fn a_nested_machine_may_block_on_a_proc() {
                   h = Q.spawn()\n\
                   h.send(9)\n\
                   h.close()\n\
-                  vm = sys.vm.Vm().from_object(do ||: Int with Proc\n\
+                  vm = sys.vm.Vm().from_fn(do ||: Int with Proc\n\
                   \x20 case h.done()\n\
                   \x20 in Done(v)  then v\n\
                   \x20 in Fault(_) then 0 - 2\n\

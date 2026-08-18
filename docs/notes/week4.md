@@ -9,7 +9,7 @@ the changed tests, one incident, and the deferred work.
   Groups: `Io`, `Fs`, `Clock`, `Rand`, `Net`, `Proc`, `Vm`,
   `Compiler`, `Reflect`. Exact operations: `Io.Print`, `Io.Error`,
   `Io.ReadLine`, `Clock.Now`, `Clock.Monotonic`, `Clock.Sleep`,
-  `Rand.Int`, and the `Vm` control family (`Vm.New`, `Vm.FromObject`,
+  `Rand.Int`, and the `Vm` control family (`Vm.New`, `Vm.FromFn`,
   `Vm.Run`, `Vm.Step`, `Vm.Drive`, `Vm.Answer`, `Vm.Reject`,
   `Vm.Dispatch`, `Vm.Table`). Each operation has a stable dense slot
   and a domain-separated SHA-256 identity over its name and full
@@ -89,7 +89,7 @@ the changed tests, one incident, and the deferred work.
 - The boundary-transfer subset: scalars, `Op` values, and deeply
   frozen graphs of strings, tuples, lists, maps, instances, closures,
   and fault values, with cycles and sharing kept. Builders and native
-  handles reject with `UnsendableValue`. `from_object` arguments
+  handles reject with `UnsendableValue`. `from_fn` arguments
   cross through the `args:` tuple envelope; terminal results cross in
   transfer mode, and an unsendable result converts the controlled
   machine to `Fault(UnsendableValue)`.
@@ -115,7 +115,7 @@ the changed tests, one incident, and the deferred work.
   tracks block keywords, so a multi-statement block body inside
   parentheses ends its statements at newlines. Labeled call
   arguments parse; in this week the checker accepted only `args:` on
-  `from_object`. The post-week-4 fix set added general labeled
+  `from_fn`. The post-week-4 fix set added general labeled
   arguments (docs/notes/week4-fixes.md).
 - Class constructor patterns: `Pair(a, b)` and user classes
   destructure the named scrutinee class in declaration order, with

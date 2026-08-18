@@ -93,7 +93,7 @@ table, so the walk cannot spin.
 | `handle_vm` | `as_obj().expect`, `unreachable!("verified handle shape")` | `TypeMismatch` |
 | `handle_proc` | `as_obj().expect`, `unreachable!("verified handle shape")` | `TypeMismatch` |
 | `kernel_exec`, `proc_exec` | `pending.expect`, `args[0..2]` | `MalformedState`, the uninitialized marker, then `TypeMismatch` |
-| `OP_VM_FROM_OBJECT` | `as_obj().expect`, two `unreachable!` | `TypeMismatch` |
+| `OP_VM_FROM_FN` | `as_obj().expect`, two `unreachable!` | `TypeMismatch` |
 | `OP_VM_RUN`, `OP_VM_STEP`, `OP_VM_DRIVE` | `unreachable!("a running machine holds an active reference")`, `pending.as_mut().expect` | `InvalidVmState`, `MalformedState` |
 | `OP_VM_ANSWER` | `as_obj().expect`, `unreachable!("verified call token shape")`, `pending.expect` | `TypeMismatch` |
 | `OP_VM_REJECT`, `OP_VM_DISPATCH` | `as_obj().expect` twice, two `unreachable!`, `pending.expect` | `TypeMismatch` |

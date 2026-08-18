@@ -19,7 +19,7 @@ end
 
 class Supervisor < Proc[Command]
   def on_spawn(self): String with Proc, Vm, Wait
-    child = sys.vm.Vm().from_object(untrusted_work, args: ())
+    child = sys.vm.Vm().from_fn(untrusted_work, args: ())
 
     loop do
       select

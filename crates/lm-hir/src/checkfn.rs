@@ -3589,11 +3589,11 @@ impl<'o> FnChecker<'o> {
             ));
         }
         let out = match (recv_ty, name) {
-            (Type::EmptyVm, "from_object") => {
+            (Type::EmptyVm, "from_fn") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(
                         "E1006",
-                        format!("`from_object` expects 2 argument(s), found {}", args.len()),
+                        format!("`from_fn` expects 2 argument(s), found {}", args.len()),
                         span,
                     ));
                 }
@@ -3602,7 +3602,7 @@ impl<'o> FnChecker<'o> {
                     return Err(Diagnostic::new(
                         "E1004",
                         format!(
-                            "`from_object` needs a function value, found {}",
+                            "`from_fn` needs a function value, found {}",
                             ctx.store.display(program.ty)
                         ),
                         args[0].span,
@@ -3625,13 +3625,13 @@ impl<'o> FnChecker<'o> {
                     ctx.store.intern(Type::Tuple(params))
                 };
                 let tuple = self.check_expr(ctx, args_expr, want)?;
-                self.charge_op(ctx, lm_abi::OP_VM_FROM_OBJECT, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_FROM_FN, span)?;
                 let vm_ty = ctx.store.intern(Type::Vm(ret));
                 HExpr {
                     ty: vm_ty,
                     mutable: true,
                     kind: HExprKind::Perform {
-                        op: lm_abi::OP_VM_FROM_OBJECT,
+                        op: lm_abi::OP_VM_FROM_FN,
                         args: vec![recv_h, program, tuple],
                     },
                 }

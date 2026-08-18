@@ -35,7 +35,7 @@ entry, wrong parameter prefix).
 
 ## 2. Labeled arguments (fixed)
 
-Status on master: reproduced. Only `args:` on `from_object` was
+Status on master: reproduced. Only `args:` on `from_fn` was
 accepted (`E1006`).
 
 The fix: labels resolve against declared parameter names for direct
@@ -46,7 +46,7 @@ check time; the call ABI does not change. Precise `E1006` errors
 cover an unknown label, a duplicate label, a positional argument
 after a label, and a label for a parameter that a positional argument
 fills. A call through a function value has no declared names and
-rejects labels. The `from_object` path is unchanged.
+rejects labels. The `from_fn` path is unchanged.
 
 ## 3. Sibling inference for arm-typed constructors (fixed)
 
@@ -175,7 +175,7 @@ re-join work entirely. No further work is planned.
 - Three collector gates in `gc.rs` churned garbage with string
   literals. Literals now intern, so the churn uses list literals.
   The gate meanings are unchanged.
-- The stray-label diagnostic text changed from the `from_object`
+- The stray-label diagnostic text changed from the `from_fn`
   wording to the general rule.
 - `check_if` now checks every condition before the branch bodies. A
   later condition runs only when the earlier bodies were skipped, so

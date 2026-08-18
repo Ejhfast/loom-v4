@@ -228,10 +228,10 @@ fn new_type_entries_check_their_references() {
 }
 
 #[test]
-fn from_object_argument_forgery_is_rejected() {
+fn from_fn_argument_forgery_is_rejected() {
     // The argument view must match the program parameters.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().from_object(do |a: Int|: Int\n    a\n  end, args: (1,))\n  1\nend\ngo()\n";
+        vm = sys.vm.Vm().from_fn(do |a: Int|: Int\n    a\n  end, args: (1,))\n  1\nend\ngo()\n";
     let mut module = compile(source);
     let go = func_index(&module, "go");
     // Retarget the tuple: replace the args-view TupleNew with a plain
@@ -246,5 +246,5 @@ fn from_object_argument_forgery_is_rejected() {
         }
     }
     assert!(hit, "the seed builds an argument tuple");
-    assert_rejected(&module, "Vm.FromObject");
+    assert_rejected(&module, "Vm.FromFn");
 }

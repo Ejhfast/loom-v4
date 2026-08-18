@@ -430,7 +430,7 @@ fn the_mailbox_rules_reject_precisely() {
 fn a_literal_that_is_not_its_pooled_string_rejects() {
     let source = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().from_object(do ||: Int
+  vm = sys.vm.Vm().from_fn(do ||: Int
     s = \"literal\"
     if s == \"literal\"
       1
@@ -546,7 +546,7 @@ def chain(n: Int): List[Int]
 end
 
 def go(): Int with Vm
-  vm = sys.vm.Vm().from_object(do ||: Int
+  vm = sys.vm.Vm().from_fn(do ||: Int
     xs = [1]
     i = 0
     while i < 20000
@@ -632,7 +632,7 @@ class Box
 end
 
 def go(): Int with Vm, Clock
-  vm = sys.vm.Vm().from_object(do ||: Int with Clock.Now
+  vm = sys.vm.Vm().from_fn(do ||: Int with Clock.Now
     b = Box(\"tag\", 3)
     sys.clock.now()
   end, args: ())
@@ -692,7 +692,7 @@ go()
 fn an_operand_of_the_wrong_shape_or_count_admits() {
     let source = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().from_object(do ||: Int
+  vm = sys.vm.Vm().from_fn(do ||: Int
     20 + 22
   end, args: ())
   vm.step()
@@ -768,7 +768,7 @@ fn an_accepted_message_that_drops_its_object_rejects_as_non_canonical() {
 fn a_terminal_machine_states_a_body_and_a_header_result_type() {
     let source = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().from_object(do ||: String
+  vm = sys.vm.Vm().from_fn(do ||: String
     \"answer\"
   end, args: ())
   case vm.run()
@@ -829,7 +829,7 @@ go()
 fn a_terminal_machine_without_a_body_function_admits() {
     let source = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().from_object(do ||: String
+  vm = sys.vm.Vm().from_fn(do ||: String
     \"answer\"
   end, args: ())
   case vm.run()
@@ -906,7 +906,7 @@ fn a_pending_argument_of_another_count_rejects() {
     // arguments the perform proved on the operand stack.
     let source = "\
 def go(): Int with Vm, Rand
-  held = sys.vm.Vm().from_object(do ||: Int with Rand.Int
+  held = sys.vm.Vm().from_fn(do ||: Int with Rand.Int
     sys.rand.int(0, 10)
   end, args: ())
   case held.drive()
@@ -1040,7 +1040,7 @@ fn a_terminal_machine_with_a_frame_or_a_frameless_operand_rejects() {
     // frames but one operand.
     let source = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().from_object(do ||: Int 7 end, args: ())
+  vm = sys.vm.Vm().from_fn(do ||: Int 7 end, args: ())
   case vm.run()
   in Done(_)  then 0
   in Fault(_) then 0

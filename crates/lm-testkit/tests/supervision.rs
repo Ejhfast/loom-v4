@@ -34,7 +34,7 @@ fn run(src: &str, grants: &[&str]) -> (String, Vec<String>) {
 fn a_driver_serves_a_child_that_waits_on_a_proc() {
     let src = r#"
 def child(): Int with Vm, Proc, Io.Print
-  worker = sys.vm.Vm().from_object(do ||: Int
+  worker = sys.vm.Vm().from_fn(do ||: Int
     i = 0
     while i < 500
       i = i + 1
@@ -69,7 +69,7 @@ def supervise(vm: Vm[Int], mut seen: [String]): Int with Vm
   0 - 3
 end
 
-c = sys.vm.Vm().from_object(child, args: ())
+c = sys.vm.Vm().from_fn(child, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
 c.table().pass(Io.Print)
@@ -92,8 +92,8 @@ r * 10 + seen.len()
 fn a_driver_serves_two_levels_of_procs() {
     let src = r#"
 def child(): Int with Vm, Proc, Io.Print
-  outer = sys.vm.Vm().from_object(do ||: Int with Vm, Proc
-    inner = sys.vm.Vm().from_object(do ||: Int
+  outer = sys.vm.Vm().from_fn(do ||: Int with Vm, Proc
+    inner = sys.vm.Vm().from_fn(do ||: Int
       i = 0
       while i < 100
         i = i + 1
@@ -130,7 +130,7 @@ def supervise(vm: Vm[Int]): Int with Vm
   0 - 3
 end
 
-c = sys.vm.Vm().from_object(child, args: ())
+c = sys.vm.Vm().from_fn(child, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
 c.table().pass(Io.Print)
@@ -163,7 +163,7 @@ class Waiter < Proc[Handle[Never, Int]]
   end
 end
 
-vm = sys.vm.Vm().from_object(do ||: Int
+vm = sys.vm.Vm().from_fn(do ||: Int
   i = 0
   while i < 200000
     i = i + 1
@@ -266,9 +266,9 @@ def worker(n: Int): Int with Io.Print
 end
 
 def app(): Int with Vm, Proc, Io.Print
-  a = sys.vm.Vm().from_object(worker, args: (10,))
+  a = sys.vm.Vm().from_fn(worker, args: (10,))
   a.table().pass(Io.Print)
-  b = sys.vm.Vm().from_object(worker, args: (20,))
+  b = sys.vm.Vm().from_fn(worker, args: (20,))
   b.table().pass(Io.Print)
   ha = sys.proc.run(a)
   hb = sys.proc.run(b)
@@ -304,7 +304,7 @@ def audit(vm: Vm[Int], mut seen: [String]): Int with Vm
   0 - 8
 end
 
-c = sys.vm.Vm().from_object(app, args: ())
+c = sys.vm.Vm().from_fn(app, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
 c.table().pass(Io.Print)

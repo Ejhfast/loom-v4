@@ -34,7 +34,7 @@ fn run(src: &str, grants: &[&str]) -> (String, bool) {
 fn a_supervisor_captures_a_child_with_one_proc() {
     let src = r#"
 def app(): Int with Vm, Proc, Io.Print
-  w = sys.vm.Vm().from_object(do ||: Int
+  w = sys.vm.Vm().from_fn(do ||: Int
     i = 0
     while i < 300
       i = i + 1
@@ -72,7 +72,7 @@ def supervise(vm: Vm[Int]): Int with Vm
   0 - 3
 end
 
-c = sys.vm.Vm().from_object(app, args: ())
+c = sys.vm.Vm().from_fn(app, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
 c.table().pass(Io.Print)
@@ -95,9 +95,9 @@ def worker(): Int with Io.Print
 end
 
 def app(): Int with Vm, Proc, Io.Print
-  a = sys.vm.Vm().from_object(worker, args: ())
+  a = sys.vm.Vm().from_fn(worker, args: ())
   a.table().pass(Io.Print)
-  b = sys.vm.Vm().from_object(worker, args: ())
+  b = sys.vm.Vm().from_fn(worker, args: ())
   b.table().pass(Io.Print)
   ha = sys.proc.run(a)
   hb = sys.proc.run(b)
@@ -134,7 +134,7 @@ def supervise(vm: Vm[Int], mut misses: [Int]): Int with Vm
   0 - 3
 end
 
-c = sys.vm.Vm().from_object(app, args: ())
+c = sys.vm.Vm().from_fn(app, args: ())
 c.table().pass(Vm)
 c.table().pass(Proc)
 c.table().pass(Io.Print)
