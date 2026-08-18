@@ -126,7 +126,7 @@ fn operators_inline_to_existing_instructions() {
         assert!(instructions.contains(&expected), "missing {expected:?}");
     }
     assert_eq!(
-        run_text("operator_method.lm", "1._add(2)\n", VmConfig::default()).unwrap(),
+        run_text("operator_method.lm", "1.__add__(2)\n", VmConfig::default()).unwrap(),
         "Done(3)"
     );
 }
@@ -134,7 +134,7 @@ fn operators_inline_to_existing_instructions() {
 #[test]
 fn a_bool_tag_supports_verified_virtual_dispatch() {
     let mut module = compile_text("bool_virtual.lm", "not false\n").expect("the program compiles");
-    let (selector, _) = primitive_method(&module, ROLE_BOOL, "_not");
+    let (selector, _) = primitive_method(&module, ROLE_BOOL, "__not__");
     module.funcs[module.entry as usize].blocks = vec![vec![
         Instr::ConstBool(false),
         Instr::CallVirtual { selector, argc: 0 },

@@ -753,19 +753,19 @@ A generic function name needs a direct call in this version.
 `Int` and `Bool` use final core method tables. The checker maps each supported source operator to one sealed method.
 
 ```text
--a      -> a._neg()
-not a   -> a._not()
-a + b   -> a._add(b)
-a - b   -> a._sub(b)
-a * b   -> a._mul(b)
-a / b   -> a._div(b)
-a % b   -> a._rem(b)
-a == b  -> a._eq(b)
-a != b  -> a._ne(b)
-a < b   -> a._lt(b)
-a <= b  -> a._le(b)
-a > b   -> a._gt(b)
-a >= b  -> a._ge(b)
+-a      -> a.__neg__()
+not a   -> a.__not__()
+a + b   -> a.__add__(b)
+a - b   -> a.__sub__(b)
+a * b   -> a.__mul__(b)
+a / b   -> a.__div__(b)
+a % b   -> a.__rem__(b)
+a == b  -> a.__eq__(b)
+a != b  -> a.__ne__(b)
+a < b   -> a.__lt__(b)
+a <= b  -> a.__le__(b)
+a > b   -> a.__gt__(b)
+a >= b  -> a.__ge__(b)
 ```
 
 Each method body names one pure intrinsic manifest entry. Static resolution and trivial-body inlining emit the canonical integer or Boolean instruction.

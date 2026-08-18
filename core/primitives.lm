@@ -4,65 +4,65 @@ final class Int
     intrinsic("int.abs", self)
   end
 
-  def _neg(self): Int
+  def __neg__(self): Int
     intrinsic("int.neg", self)
   end
 
-  def _add(self, other: Int): Int
+  def __add__(self, other: Int): Int
     intrinsic("int.add", self, other)
   end
 
-  def _sub(self, other: Int): Int
+  def __sub__(self, other: Int): Int
     intrinsic("int.sub", self, other)
   end
 
-  def _mul(self, other: Int): Int
+  def __mul__(self, other: Int): Int
     intrinsic("int.mul", self, other)
   end
 
-  def _div(self, other: Int): Int
+  def __div__(self, other: Int): Int
     intrinsic("int.div", self, other)
   end
 
-  def _rem(self, other: Int): Int
+  def __rem__(self, other: Int): Int
     intrinsic("int.rem", self, other)
   end
 
-  def _eq(self, other: Int): Bool
+  def __eq__(self, other: Int): Bool
     intrinsic("int.eq", self, other)
   end
 
-  def _ne(self, other: Int): Bool
+  def __ne__(self, other: Int): Bool
     intrinsic("int.ne", self, other)
   end
 
-  def _lt(self, other: Int): Bool
+  def __lt__(self, other: Int): Bool
     intrinsic("int.lt", self, other)
   end
 
-  def _le(self, other: Int): Bool
+  def __le__(self, other: Int): Bool
     intrinsic("int.le", self, other)
   end
 
-  def _gt(self, other: Int): Bool
+  def __gt__(self, other: Int): Bool
     intrinsic("int.gt", self, other)
   end
 
-  def _ge(self, other: Int): Bool
+  def __ge__(self, other: Int): Bool
     intrinsic("int.ge", self, other)
   end
 end
 
 final class Bool
-  def _not(self): Bool
+  def __not__(self): Bool
     intrinsic("bool.not", self)
   end
 
-  def _eq(self, other: Bool): Bool
+  def __eq__(self, other: Bool): Bool
     intrinsic("bool.eq", self, other)
   end
 
-  def _ne(self, other: Bool): Bool
+  def __ne__(self, other: Bool): Bool
     intrinsic("bool.ne", self, other)
   end
 end

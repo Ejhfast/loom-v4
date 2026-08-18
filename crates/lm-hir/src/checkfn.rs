@@ -1087,11 +1087,11 @@ impl<'o> FnChecker<'o> {
             }
             ExprKind::Not(inner) => {
                 let inner = self.check_expr(ctx, inner, BOOL)?;
-                Ok(Self::primitive_operator(ctx, "Bool", "_not", vec![inner]))
+                Ok(Self::primitive_operator(ctx, "Bool", "__not__", vec![inner]))
             }
             ExprKind::Neg(inner) => {
                 let inner = self.check_expr(ctx, inner, INT)?;
-                Ok(Self::primitive_operator(ctx, "Int", "_neg", vec![inner]))
+                Ok(Self::primitive_operator(ctx, "Int", "__neg__", vec![inner]))
             }
             ExprKind::Binary { op, left, right } => self.synth_binary(ctx, *op, left, right),
             ExprKind::And(left, right) => {
@@ -4245,11 +4245,11 @@ impl<'o> FnChecker<'o> {
                 let l = self.check_expr(ctx, left, INT)?;
                 let r = self.check_expr(ctx, right, INT)?;
                 let name = match op {
-                    BinOp::Add => "_add",
-                    BinOp::Sub => "_sub",
-                    BinOp::Mul => "_mul",
-                    BinOp::Div => "_div",
-                    BinOp::Rem => "_rem",
+                    BinOp::Add => "__add__",
+                    BinOp::Sub => "__sub__",
+                    BinOp::Mul => "__mul__",
+                    BinOp::Div => "__div__",
+                    BinOp::Rem => "__rem__",
                     _ => unreachable!(),
                 };
                 Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
@@ -4258,10 +4258,10 @@ impl<'o> FnChecker<'o> {
                 let l = self.check_expr(ctx, left, INT)?;
                 let r = self.check_expr(ctx, right, INT)?;
                 let name = match op {
-                    BinOp::Lt => "_lt",
-                    BinOp::Le => "_le",
-                    BinOp::Gt => "_gt",
-                    BinOp::Ge => "_ge",
+                    BinOp::Lt => "__lt__",
+                    BinOp::Le => "__le__",
+                    BinOp::Gt => "__gt__",
+                    BinOp::Ge => "__ge__",
                     _ => unreachable!(),
                 };
                 Ok(Self::primitive_operator(ctx, "Int", name, vec![l, r]))
@@ -4327,7 +4327,7 @@ impl<'o> FnChecker<'o> {
                 }
                 if matches!(operand_ty, INT | BOOL) {
                     let class = if operand_ty == BOOL { "Bool" } else { "Int" };
-                    let name = if op == BinOp::Eq { "_eq" } else { "_ne" };
+                    let name = if op == BinOp::Eq { "__eq__" } else { "__ne__" };
                     return Ok(Self::primitive_operator(ctx, class, name, vec![l, r]));
                 }
                 Ok(HExpr {
