@@ -3162,6 +3162,40 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
+        // `sys.proc.try_recv()` performs `Proc.TryRecv`. It reads the
+        // same mailbox as `sys.proc.recv()` and never waits, so it
+        // answers `Option[Recv[M]]`.
+        if group == "Proc" && member == "try_recv" {
+            if !args.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!(
+                        "`sys.proc.try_recv` expects 0 argument(s), found {}",
+                        args.len()
+                    ),
+                    span,
+                ));
+            }
+            let mailbox = self.proc_mailbox_type(ctx).ok_or_else(|| {
+                Diagnostic::new(
+                    "E1051",
+                    "`sys.proc.try_recv` is only valid inside a method of a `Proc` subclass",
+                    name_span,
+                )
+            })?;
+            let receiver = self.synth_self(ctx, span)?;
+            self.charge_op(ctx, lm_abi::OP_PROC_TRY_RECV, span)?;
+            let recv = Self::core_inst(ctx, "Recv", vec![mailbox]);
+            let ty = Self::core_inst(ctx, "Option", vec![recv]);
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_PROC_TRY_RECV,
+                    args: vec![receiver],
+                },
+            });
+        }
         // `sys.proc.recv()` performs `Proc.Recv`. The mailbox type
         // comes from the enclosing proc class, so the call is valid
         // only inside a method of a subclass of `Proc[M]`.
@@ -3567,6 +3601,29 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform {
                         op: lm_abi::OP_VM_FROM_OBJECT,
                         args: vec![recv_h, program, tuple],
+                    },
+                }
+            }
+            (Type::Vm(t), "drive_for") => {
+                // A bounded drive turn. `None` reports that the turn
+                // spent its instructions and the machine can run again.
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`drive_for` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let count = self.check_expr(ctx, &args[0], INT)?;
+                self.charge_op(ctx, lm_abi::OP_VM_DRIVE_FOR, span)?;
+                let event = Self::core_inst(ctx, "DriveEvent", vec![t]);
+                let ty = Self::core_inst(ctx, "Option", vec![event]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_DRIVE_FOR,
+                        args: vec![recv_h, count],
                     },
                 }
             }

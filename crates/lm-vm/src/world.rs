@@ -39,6 +39,10 @@ enum Family {
     Run,
     Step,
     Drive,
+    /// A bounded drive turn. It answers the same `DriveEvent` as
+    /// `Drive`, wrapped in `Option`. `None` reports that the turn
+    /// spent its instruction bound and the machine can run again.
+    DriveFor,
     Mock,
 }
 
@@ -54,6 +58,10 @@ struct Activation {
     /// True when this activation retired one instruction. `OneStep`
     /// stops when the flag is set and the machine can pause.
     retired: bool,
+    /// The guest instructions this activation may still retire.
+    /// `None` means no bound. `Vm.DriveFor` sets it, and the bound
+    /// covers every activation above this one.
+    fuel: Option<u32>,
 }
 
 /// Why one scheduler task saved its activation stack.
@@ -90,6 +98,9 @@ enum ExitKind {
     Terminal,
     Ran,
     Waiting,
+    /// A bounded drive turn spent its instructions. The machine can
+    /// run again, so the holder receives no event.
+    Bounded,
 }
 
 /// How one policy dispatch handles a nested VM execution operation.
@@ -845,6 +856,7 @@ impl<'m> World<'m> {
                 family,
                 reply_to: None,
                 retired: false,
+                fuel: None,
             },
         );
         self.drive_stack(&mut stack, None)
@@ -933,6 +945,19 @@ impl<'m> World<'m> {
                 && self.machines[act.vm as usize].vm.routed.is_some()
             {
                 if let Some(event) = self.deliver_parked_route(stack, top_idx) {
+                    return event;
+                }
+                continue;
+            }
+            // A bounded drive turn spent its instructions. Unwind to
+            // that activation and tell its holder that the machine can
+            // run again.
+            if let Some(at) = stack.iter().position(|a| a.fuel == Some(0)) {
+                while stack.len() > at + 1 {
+                    let popped = stack.pop().expect("the activation index is in the stack");
+                    self.release_activation(popped);
+                }
+                if let Some(event) = self.finish(stack, ExitKind::Bounded) {
                     return event;
                 }
                 continue;
@@ -1109,7 +1134,15 @@ impl<'m> World<'m> {
                         None => u32::MAX,
                     };
                     let available = self.budget.fuel.min(u64::from(u32::MAX)) as u32;
-                    let limit = requested.min(available);
+                    // A bounded drive turn caps this batch, so the turn
+                    // never retires past the bound its holder named.
+                    let turn = stack
+                        .iter()
+                        .filter_map(|a| a.fuel)
+                        .min()
+                        .unwrap_or(u32::MAX)
+                        .max(1);
+                    let limit = requested.min(available).min(turn);
                     let module = self.module;
                     let dispatch = self.dispatch;
                     let envs = &mut self.envs;
@@ -1121,6 +1154,11 @@ impl<'m> World<'m> {
                         *remaining = remaining.saturating_sub(retired);
                     }
                     stack[top_idx].retired |= retired > 0;
+                    for a in stack.iter_mut() {
+                        if let Some(left) = &mut a.fuel {
+                            *left = left.saturating_sub(retired);
+                        }
+                    }
                     match outcome {
                         Err(code) => {
                             self.machines[act.vm as usize].set_fault(code, "", None);
@@ -1188,7 +1226,7 @@ impl<'m> World<'m> {
             _ => {
                 self.machines[parent as usize].set_fault(
                     FaultCode::MalformedState,
-                    "the nested control edge names another operation",
+                    "a deferred bounded drive has no instruction bound",
                     Some(op),
                 );
                 return;
@@ -1218,6 +1256,7 @@ impl<'m> World<'m> {
                 family,
                 reply_to: Some(parent),
                 retired: false,
+                fuel: None,
             },
         );
     }
@@ -1390,7 +1429,7 @@ impl<'m> World<'m> {
         match act.reply_to {
             None => Some(match kind {
                 ExitKind::Terminal => self.terminal_root_event(act.vm),
-                ExitKind::Ran => RootEvent::Ran,
+                ExitKind::Ran | ExitKind::Bounded => RootEvent::Ran,
                 ExitKind::Waiting => RootEvent::Waiting,
             }),
             Some(parent) => {
@@ -1419,6 +1458,7 @@ impl<'m> World<'m> {
             ExitKind::Terminal => self.build_terminal_event(act.vm, parent, act.family),
             ExitKind::Ran => self.make_instance(parent, self.core.step_ran, vec![]),
             ExitKind::Waiting => self.make_instance(parent, self.core.step_waiting, vec![]),
+            ExitKind::Bounded => self.make_instance(parent, self.core.option_none, vec![]),
         };
         match value {
             Ok(value) => self.install_value_reply(parent, value),
@@ -1498,7 +1538,7 @@ impl<'m> World<'m> {
                 op: None,
             }),
         };
-        match t {
+        let built = match t {
             T::Done(value) => match self.transfer(child, parent, value) {
                 Ok(value) => {
                     let class = self.done_arm(family);
@@ -1521,7 +1561,25 @@ impl<'m> World<'m> {
                 }
             },
             T::Fault(rec) => self.build_fault_event(parent, family, &rec),
+        };
+        self.wrap_turn(parent, family, built)
+    }
+
+    /// Wrap one drive event for a bounded turn.
+    ///
+    /// `Vm.DriveFor` answers `Option[DriveEvent[T]]`, so an event of a
+    /// bounded turn arrives as `Some`.
+    fn wrap_turn(
+        &mut self,
+        parent: VmId,
+        family: Family,
+        built: Result<Value, FaultCode>,
+    ) -> Result<Value, FaultCode> {
+        if family != Family::DriveFor {
+            return built;
         }
+        let some = self.core.option_some;
+        built.and_then(|value| self.make_instance(parent, some, vec![value]))
     }
 
     /// The `Done` arm of one event family.
@@ -1533,7 +1591,7 @@ impl<'m> World<'m> {
         match family {
             Family::Run => self.core.run_done,
             Family::Step => self.core.step_done,
-            Family::Drive => self.core.drive_done,
+            Family::Drive | Family::DriveFor => self.core.drive_done,
             Family::Mock => None,
         }
     }
@@ -1542,7 +1600,7 @@ impl<'m> World<'m> {
         match family {
             Family::Run => self.core.run_fault,
             Family::Step => self.core.step_fault,
-            Family::Drive => self.core.drive_fault,
+            Family::Drive | Family::DriveFor => self.core.drive_fault,
             Family::Mock => None,
         }
     }
@@ -2055,6 +2113,13 @@ impl<'m> World<'m> {
         let built = self.machines[parent as usize]
             .alloc(Object::NativeRequest { vm: child, ordinal })
             .and_then(|request| self.make_instance(parent, self.core.drive_asked, vec![request]));
+        // A bounded turn answers `Option[DriveEvent[T]]`.
+        let family = if self.pending_op(parent) == Some(lm_abi::OP_VM_DRIVE_FOR) {
+            Family::DriveFor
+        } else {
+            Family::Drive
+        };
+        let built = self.wrap_turn(parent, family, built);
         match built {
             Ok(value) => self.install_value_reply(parent, value),
             Err(code) => self.machines[parent as usize].set_fault(code, "", None),
@@ -2069,6 +2134,13 @@ impl<'m> World<'m> {
                 ordinal,
             })
             .and_then(|request| self.make_instance(parent, self.core.drive_asked, vec![request]));
+        // A bounded turn answers `Option[DriveEvent[T]]`.
+        let family = if self.pending_op(parent) == Some(lm_abi::OP_VM_DRIVE_FOR) {
+            Family::DriveFor
+        } else {
+            Family::Drive
+        };
+        let built = self.wrap_turn(parent, family, built);
         match built {
             Ok(value) => self.install_value_reply(parent, value),
             Err(code) => self.machines[parent as usize].set_fault(code, "", None),
@@ -2824,6 +2896,7 @@ impl<'m> World<'m> {
                 family: Family::Mock,
                 reply_to: Some(vm),
                 retired: false,
+                fuel: None,
             },
         );
     }
@@ -3107,13 +3180,35 @@ impl<'m> World<'m> {
                     Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
                 }
             }
-            lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE => {
+            lm_abi::OP_VM_RUN
+            | lm_abi::OP_VM_STEP
+            | lm_abi::OP_VM_DRIVE
+            | lm_abi::OP_VM_DRIVE_FOR => {
                 let Some(target) = self.vm_arg(vm, op, args[0]) else {
                     return;
+                };
+                // `Vm.DriveFor` bounds the turn. A bound below one
+                // retires nothing, so it reads as one instruction.
+                let turn_fuel = if op == lm_abi::OP_VM_DRIVE_FOR {
+                    match args[1] {
+                        Value::Int(n) => Some((n.max(1)).min(u32::MAX as i64) as u32),
+                        _ => {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::TypeMismatch,
+                                "`Vm.DriveFor` needs an instruction count",
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    None
                 };
                 let (mode, family) = match op {
                     lm_abi::OP_VM_RUN => (StopMode::RunToTerminal, Family::Run),
                     lm_abi::OP_VM_STEP => (StopMode::OneStep, Family::Step),
+                    lm_abi::OP_VM_DRIVE_FOR => (StopMode::DriveToAsk, Family::DriveFor),
                     _ => (StopMode::DriveToAsk, Family::Drive),
                 };
                 if target == vm || self.machines[target as usize].active > 0 {
@@ -3127,7 +3222,7 @@ impl<'m> World<'m> {
                 // opens the world gate (specification 17.5).
                 self.open_gate(target);
                 if self.machines[target as usize].vm.routed.is_some() {
-                    if op == lm_abi::OP_VM_DRIVE {
+                    if matches!(op, lm_abi::OP_VM_DRIVE | lm_abi::OP_VM_DRIVE_FOR) {
                         self.recover_routed_asked(target, vm, op);
                     } else {
                         self.fault_caller(
@@ -3159,7 +3254,7 @@ impl<'m> World<'m> {
                         }
                     }
                     MachineState::Asked => {
-                        if op == lm_abi::OP_VM_DRIVE {
+                        if matches!(op, lm_abi::OP_VM_DRIVE | lm_abi::OP_VM_DRIVE_FOR) {
                             // Token recovery: the same semantic request
                             // with a fresh holder token.
                             if self.machines[target as usize].vm.pending.is_none() {
@@ -3230,6 +3325,7 @@ impl<'m> World<'m> {
                                     family,
                                     reply_to: Some(vm),
                                     retired: false,
+                                    fuel: turn_fuel,
                                 },
                             );
                         }
@@ -3571,7 +3667,8 @@ impl<'m> World<'m> {
             | lm_abi::OP_PROC_RECV
             | lm_abi::OP_PROC_DONE
             | lm_abi::OP_PROC_PAUSE
-            | lm_abi::OP_PROC_RESUME => self.proc_exec(vm, op, stored),
+            | lm_abi::OP_PROC_RESUME
+            | lm_abi::OP_PROC_TRY_RECV => self.proc_exec(vm, op, stored),
             // Every `VmControl` slot of the manifest has an arm above.
             // A slot without one names a manifest this build does not
             // hold, so the caller faults.
@@ -4114,6 +4211,7 @@ impl<'m> World<'m> {
             lm_abi::OP_PROC_SEND => self.proc_send(vm, op, args),
             lm_abi::OP_PROC_CLOSE => self.proc_close(vm, op, args),
             lm_abi::OP_PROC_RECV => self.proc_recv(vm, op),
+            lm_abi::OP_PROC_TRY_RECV => self.proc_try_recv(vm, op),
             lm_abi::OP_PROC_DONE => self.proc_done(vm, op, args),
             lm_abi::OP_PROC_PAUSE => self.proc_pause(vm, op, args),
             lm_abi::OP_PROC_RESUME => self.proc_resume(vm, op, args),
@@ -4480,6 +4578,46 @@ impl<'m> World<'m> {
             // close.
             None => self.block_machine(vm, Block::Receive),
         }
+    }
+
+    /// `self.try_receive()` inside a proc.
+    ///
+    /// The call never blocks. `None` reports an open and empty
+    /// mailbox, so a proc can read its mailbox between other work.
+    fn proc_try_recv(&mut self, vm: VmId, op: u32) {
+        if self.machines[vm as usize].owner != Ownership::Scheduler {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::InvalidVmState,
+                "try_receive is valid only on a scheduler-owned proc",
+            );
+            return;
+        }
+        let message = self.machines[vm as usize].vm.mailbox.pop();
+        let built = match message {
+            Some(value) => {
+                if let Some(target) = self.task_key(vm) {
+                    self.emit_wake(WakeKey::Send(target));
+                }
+                self.record(TraceEvent::Receive {
+                    proc: vm,
+                    closed: false,
+                });
+                self.make_instance(vm, self.core.recv_msg, vec![value])
+                    .and_then(|msg| self.make_instance(vm, self.core.option_some, vec![msg]))
+            }
+            None if self.machines[vm as usize].vm.mailbox.closed => {
+                self.record(TraceEvent::Receive {
+                    proc: vm,
+                    closed: true,
+                });
+                self.make_instance(vm, self.core.recv_closed, vec![])
+                    .and_then(|closed| self.make_instance(vm, self.core.option_some, vec![closed]))
+            }
+            None => self.make_instance(vm, self.core.option_none, vec![]),
+        };
+        self.reply_or_fault(vm, op, built);
     }
 
     /// `h.done()`. The holder blocks until the proc is terminal.
@@ -5125,6 +5263,7 @@ impl<'m> World<'m> {
                     family: Family::Run,
                     reply_to: None,
                     retired: false,
+                    fuel: None,
                 },
             );
             self.drive_stack(&mut stack, Some(quantum.max(1)))

@@ -1765,7 +1765,8 @@ fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_PROC_DONE
             | lm_abi::OP_PROC_PAUSE
             | lm_abi::OP_PROC_RESUME
-            | lm_abi::OP_PROC_RECV => 1,
+            | lm_abi::OP_PROC_RECV
+            | lm_abi::OP_PROC_TRY_RECV => 1,
             lm_abi::OP_PROC_SEND => 2,
             lm_abi::OP_PROC_SPAWN => 3,
             lm_abi::OP_VM_SNAPSHOT_SELF => 0,
@@ -1774,7 +1775,8 @@ fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_RESOURCE
             | lm_abi::OP_VM_MINT_FILE
             | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
-            | lm_abi::OP_VM_RESOURCE_SAME => 2,
+            | lm_abi::OP_VM_RESOURCE_SAME
+            | lm_abi::OP_VM_DRIVE_FOR => 2,
             _ => unreachable!("every VmControl slot has an arity"),
         },
     }
@@ -3074,6 +3076,38 @@ fn step(
                                 .event_inst(ctx.core.recv, "Recv", mailbox)
                                 .map_err(&fail)?;
                             push(state, event)?;
+                        }
+                        lm_abi::OP_PROC_TRY_RECV => {
+                            // The same receiver rule as `Proc.Recv`.
+                            // The reply wraps the event, because an
+                            // open and empty mailbox answers `None`.
+                            let recv = pop(state)?;
+                            let mailbox = ctx.proc_mailbox(recv).ok_or_else(|| {
+                                fail("`Proc.TryRecv` needs a `Proc` subclass receiver".to_string())
+                            })?;
+                            let event = ctx
+                                .event_inst(ctx.core.recv, "Recv", mailbox)
+                                .map_err(&fail)?;
+                            let out = ctx
+                                .event_inst(ctx.core.option, "Option", event)
+                                .map_err(&fail)?;
+                            push(state, out)?;
+                        }
+                        lm_abi::OP_VM_DRIVE_FOR => {
+                            let count = pop(state)?;
+                            if ctx.ty(count) != BcType::Int {
+                                return Err(fail(
+                                    "`Vm.DriveFor` needs an instruction count".to_string(),
+                                ));
+                            }
+                            let t = pop_vm(state)?;
+                            let event = ctx
+                                .event_inst(ctx.core.drive_event, "DriveEvent", t)
+                                .map_err(&fail)?;
+                            let out = ctx
+                                .event_inst(ctx.core.option, "Option", event)
+                                .map_err(&fail)?;
+                            push(state, out)?;
                         }
                         lm_abi::OP_VM_SNAPSHOT_HELD => {
                             let t = pop_vm(state)?;

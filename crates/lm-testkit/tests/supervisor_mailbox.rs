@@ -87,15 +87,11 @@ end
     assert_eq!(out, "Done(207)");
 }
 
-/// B: the supervisor reads its mailbox between drive turns before the
-/// command arrives. `receive` blocks, and only this supervisor can
-/// drive the child, so the world deadlocks.
-///
-/// This case needs a non-blocking `Proc.TryRecv`. The test records the
-/// gap; it runs when that operation lands.
+/// B: the supervisor polls its mailbox between drive turns before any
+/// command arrives. `try_receive` answers `None` and the loop keeps
+/// driving, so the supervisor serves both sources.
 #[test]
-#[ignore = "needs a non-blocking receive"]
-fn a_mailbox_proc_waits_on_receive_while_its_child_needs_driving() {
+fn a_mailbox_proc_polls_its_mailbox_between_drive_turns() {
     let src = r#"
 enum Cmd
   Stop
@@ -115,13 +111,15 @@ class Supervisor < Proc[Cmd]
       in Asked(q)
         seen = seen + 1
         child.dispatch(q)
-        # Check for a control command between turns. Nothing was sent
-        # yet, so this blocks.
-        case self.receive()
-        in Msg(_)
+        # Poll for a control command between turns. Nothing was
+        # sent yet, so this answers `None` and the loop continues.
+        case self.try_receive()
+        in Some(Msg(_))
           seen = seen + 100
-        in Closed
+        in Some(Closed)
           seen = seen + 1000
+        in None
+          ()
         end
       in Done(v)
         return seen * 10 + v
@@ -149,5 +147,5 @@ end
 "#;
     let out = run(src);
     println!("B blocking receive between turns: {out}");
-    assert_eq!(out, "Done(3007)");
+    assert_eq!(out, "Done(27)");
 }

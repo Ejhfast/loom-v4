@@ -852,7 +852,7 @@ fn no_proc_operation_erases_its_types() {
         assert!(!def.schema.contains("Any"), "{}", def.schema);
         assert!(!def.schema.is_empty(), "{}.{}", def.group, def.member);
     }
-    assert_eq!(seen, 8, "the manifest declares eight proc operations");
+    assert_eq!(seen, 9, "the manifest declares nine proc operations");
 }
 
 /// A transfer keeps the exact proc reference: the copy carries the

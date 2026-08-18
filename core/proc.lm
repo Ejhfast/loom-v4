@@ -50,4 +50,10 @@ class Proc[M]
   def receive(self): Recv[M] with Proc.Recv
     sys.proc.recv()
   end
+
+  # Read the mailbox without waiting. `None` means the mailbox is open
+  # and empty. Use it to check for messages between other work.
+  def try_receive(self): Option[Recv[M]] with Proc.TryRecv
+    sys.proc.try_recv()
+  end
 end

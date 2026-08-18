@@ -187,9 +187,11 @@ pub const OP_VM_RESOURCE_CLOSE: OpSlot = 38;
 pub const OP_VM_RESOURCE_KIND: OpSlot = 39;
 pub const OP_VM_SNAPSHOT_WAIT_HELD: OpSlot = 40;
 pub const OP_VM_RESOURCE_SAME: OpSlot = 41;
+pub const OP_PROC_TRY_RECV: OpSlot = 42;
+pub const OP_VM_DRIVE_FOR: OpSlot = 43;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 42] = [
+pub const OPS: [OpDef; 44] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -574,6 +576,24 @@ pub const OPS: [OpDef; 42] = [
         params: &[],
         reply: AbiType::Unit,
         schema: "(ResourceHandle, ResourceHandle) -> Bool",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Proc",
+        member: "TryRecv",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[M](proc self) -> Option[Recv[M]]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "DriveFor",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::Unit,
+        schema: "[T](Vm[T], Int) -> DriveEvent[T]",
         snapshot: SnapshotClass::MachineState,
     },
 ];
