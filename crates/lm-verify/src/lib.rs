@@ -3329,6 +3329,13 @@ fn step(
             let fault = ctx.intern(BcType::Fault);
             push(state, fault)?;
         }
+        Instr::RequestOp => {
+            let request = pop(state)?;
+            if ctx.ty(request) != BcType::Request {
+                return Err(fail(format!("request op on non-request type {request}")));
+            }
+            push(state, TY_STR)?;
+        }
         Instr::Unreachable => {
             // A diverging terminator: no stack effect, no successor.
         }

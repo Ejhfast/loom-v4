@@ -1220,3 +1220,66 @@ fn week4_examples_compile_twice_to_identical_bytes() {
         assert_eq!(a, b, "bytecode bytes differ for {example}");
     }
 }
+
+// ---------------------------------------------------------------
+// The erased request surface (specification 14.8).
+// ---------------------------------------------------------------
+
+/// A wildcard arm holds no operation identity. `op_name` names the
+/// operation as text, so a denial can state what it refused.
+#[test]
+fn op_name_reads_the_operation_of_a_wildcard_arm() {
+    let source = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
+        def go(): String with Vm\n  \
+        vm = sys.vm.Vm().from_fn(child, args: ())\n  \
+        case vm.drive()\n  in Asked(request)\n    \
+        name = request.op_name()\n    \
+        vm.reject(request, Fault.denied(\"{name} is not permitted\"))\n    \
+        case vm.run()\n    in Done(_) then \"done\"\n    in Fault(f) then \"{name} {f.code()}\"\n    end\n  \
+        in Done(_) then \"early-done\"\n  in Fault(_) then \"early-fault\"\n  end\nend\ngo()\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done(\"Clock.Now PolicyDenied\")");
+}
+
+/// The name comes from the pending record of the target, so a spent
+/// request cannot answer. The caller learns why.
+#[test]
+fn op_name_faults_on_a_spent_request() {
+    let source = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
+        def go(): String with Vm\n  \
+        vm = sys.vm.Vm().from_fn(child, args: ())\n  \
+        case vm.drive()\n  in Asked(request)\n    \
+        vm.dispatch(request)\n    \
+        request.op_name()\n  \
+        in Done(_) then \"early-done\"\n  in Fault(_) then \"early-fault\"\n  end\nend\ngo()\n";
+    assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidRequestToken)");
+}
+
+/// A routed descendant request names its own operation. The holder
+/// dispatches the machine-control requests and stops at the one the
+/// grandchild performed.
+#[test]
+fn op_name_reads_a_descendant_request() {
+    let source = "def inner(): Int with Io.Print\n  sys.io.print(\"x\")\n  1\nend\n\
+        def outer(): Int with Vm, Io.Print\n  \
+        b = sys.vm.Vm().from_fn(inner, args: ())\n  \
+        b.table().pass(Io.Print)\n  \
+        case b.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\n\
+        def go(): String with Vm, Io.Print\n  \
+        a = sys.vm.Vm().from_fn(outer, args: ())\n  \
+        a.table().pass(Vm)\n  a.table().pass(Io.Print)\n  \
+        loop do\n    case a.drive()\n    in Asked(request)\n      \
+        name = request.op_name()\n      \
+        if name == \"Io.Print\"\n        return name\n      end\n      \
+        a.dispatch(request)\n    \
+        in Done(_)\n      return \"done\"\n    in Fault(_)\n      return \"fault\"\n    end\n  end\nend\ngo()\n";
+    assert_eq!(allowed(source, &["Vm", "Io.Print"]), "Done(\"Io.Print\")");
+}
+
+#[test]
+fn op_name_takes_no_arguments() {
+    let source = "def go(): String with Vm\n  \
+        vm = sys.vm.Vm().from_fn(do ||: Int 1 end, args: ())\n  \
+        case vm.drive()\n  in Asked(q) then q.op_name(1)\n  \
+        in Done(_) then \"d\"\n  in Fault(_) then \"f\"\n  end\nend\n1\n";
+    assert_eq!(code_of(source), "E1006");
+}

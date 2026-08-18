@@ -4208,6 +4208,20 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            // The erased inspection surface of a request. A wildcard
+            // arm holds no operation identity, so this names the
+            // operation as text for a report or a denial message. The
+            // request must still be live: a continuation spends it.
+            (Type::Request, "op_name") => {
+                Self::expect_no_args(name, args, span)?;
+                HExpr {
+                    ty: STRING,
+                    mutable: true,
+                    kind: HExprKind::RequestOpName {
+                        request: Box::new(recv_h),
+                    },
+                }
+            }
             (Type::Fault, "code") => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new(

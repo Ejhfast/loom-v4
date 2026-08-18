@@ -8,6 +8,11 @@
 # `Fault.denied(reason)` builds the one fault a program can make. Its
 # code is always `PolicyDenied`, the same code that an advance `block`
 # installs. `reject` then stops the child.
+#
+# A wildcard arm holds no operation identity, so `request.op_name()`
+# names the operation as text for the reason. Read it before the
+# continuation: `answer`, `reject`, `dispatch`, and `serve_file` each
+# spend the request.
 
 def read_clock(): String with Clock.Now, Io.Print
   sys.io.print("the child asks for the time\n")
@@ -24,8 +29,10 @@ def print_only(child: Vm[String]): String with Vm, Io.Print
         sys.io.print("child: {text}")
         child.answer(call, ())
       in _
-        # No `Int` here would be honest, so the driver refuses.
-        child.reject(request, Fault.denied("this child reads no clock"))
+        # No `Int` here would be honest, so the driver refuses. The
+        # reason names the operation it refused.
+        denied = "{request.op_name()} is not permitted for this child"
+        child.reject(request, Fault.denied(denied))
       end
     in Done(value)
       return value

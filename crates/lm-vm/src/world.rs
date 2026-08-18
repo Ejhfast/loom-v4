@@ -1270,6 +1270,9 @@ impl<'m> World<'m> {
                         Ok(Some(ExecOutcome::AsCall { request, op })) => {
                             self.handle_as_call(act.vm, request, op)
                         }
+                        Ok(Some(ExecOutcome::RequestOp { request })) => {
+                            self.handle_request_op(act.vm, request)
+                        }
                         Ok(Some(ExecOutcome::CallArgs { call })) => {
                             self.handle_call_args(act.vm, call)
                         }
@@ -5405,6 +5408,50 @@ impl<'m> World<'m> {
         // result directly.
         if let Err(code) = self.machines[vm as usize].push(Value::Unit) {
             self.machines[vm as usize].set_fault(code, "", None);
+        }
+    }
+
+    /// `request.op_name()` executed by `vm`.
+    ///
+    /// A request token names a machine and an ordinal, and never the
+    /// operation. The name therefore comes from the pending record of
+    /// the target machine, and the request must still be live. A
+    /// continuation spends the request, so a holder reads the name
+    /// before it answers, rejects, or dispatches.
+    fn handle_request_op(&mut self, vm: VmId, request: ObjRef) {
+        let (rv, ordinal) = match self.machines[vm as usize].vm.heap.get(request) {
+            Object::NativeRequest { vm, ordinal } => (*vm, *ordinal),
+            _ => {
+                self.machines[vm as usize].set_fault(
+                    FaultCode::TypeMismatch,
+                    "the receiver is not a request token",
+                    None,
+                );
+                return;
+            }
+        };
+        let found = self.machines.get(rv as usize).and_then(|m| {
+            if m.vm.state != MachineState::Asked {
+                return None;
+            }
+            m.vm.pending
+                .as_ref()
+                .filter(|pending| pending.ordinal == ordinal)
+                .map(|pending| pending.op)
+        });
+        let Some(op) = found else {
+            self.machines[vm as usize].set_fault(
+                FaultCode::InvalidRequestToken,
+                "the request token is consumed or stale; read `op_name` \
+                 before the continuation spends the request",
+                None,
+            );
+            return;
+        };
+        let built = self.machines[vm as usize].alloc(Object::Str(lm_abi::op_name(op)));
+        match built.and_then(|value| self.machines[vm as usize].push(value).map(|_| ())) {
+            Ok(()) => {}
+            Err(code) => self.machines[vm as usize].set_fault(code, "", None),
         }
     }
 

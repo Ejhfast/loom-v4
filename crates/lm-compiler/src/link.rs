@@ -1146,6 +1146,7 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::CallArgs
         | Instr::FaultCode
         | Instr::FaultDenied
+        | Instr::RequestOp
         | Instr::Unreachable => *instr,
     }
 }

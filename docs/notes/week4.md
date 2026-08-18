@@ -192,10 +192,17 @@ An independent review confirmed one defect and one documentation gap.
   does not exist yet, so `block`/`clear` on a computed target is
   deferred with it.
 - Groups are not first-class values, `sys.vm.Vm` is not a value, and
-  `Op` values exist for fixed host operations only. `Request`
-  inspection is `as_call` only; `q.op()`, `q.ordinal()`,
-  `q.args_view()`, `q.reply_type()`, `call.reply_type()`, `stack()`,
-  `WaitView` payloads, `SetLimits`, and `AddFuel` are deferred.
+  `Op` values exist for fixed host operations only.
+- `Request` inspection is the `Call` pattern plus `q.op_name()`, which
+  gives the qualified operation name as text while the request is
+  live. `as_call` is gone: the `Call` pattern asked the same question
+  and states it better. `q.op()` stays deferred, because it needs an
+  identity-erased `Operation` value that version 0.2 does not define.
+  Design it together with the `PolicyTarget` value above: one erased
+  target type serves both, and building two would be the mistake.
+  `q.ordinal()`, `q.args_view()`, `q.reply_type()`,
+  `call.reply_type()`, `stack()`, `WaitView` payloads, `SetLimits`,
+  and `AddFuel` stay deferred.
 - The `Fault` surface is minimal: a frozen value with a stable code
   observable through `fault.code()` as text and through display.
   Message, operation, `data`, and `trace` fields exist in the record

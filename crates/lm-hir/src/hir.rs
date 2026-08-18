@@ -445,6 +445,10 @@ pub enum HExprKind {
     FaultCodeGet {
         fault: Box<HExpr>,
     },
+    /// `request.op_name()` on a live request token.
+    RequestOpName {
+        request: Box<HExpr>,
+    },
     /// `Fault.denied(reason)`: build one frozen `PolicyDenied` fault.
     FaultDenied {
         reason: Box<HExpr>,

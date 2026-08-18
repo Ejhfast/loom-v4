@@ -293,6 +293,8 @@ pub enum ExecOutcome {
     },
     /// The operation identity test of a `Call` pattern.
     AsCall { request: ObjRef, op: u32 },
+    /// `request.op_name()`.
+    RequestOp { request: ObjRef },
     /// `call.args()`.
     CallArgs { call: ObjRef },
     /// `value.digest()`. The world resolves code and class identity,
@@ -1602,6 +1604,10 @@ impl Machine {
                 };
                 let value = self.alloc(Object::Str(code.to_string()))?;
                 self.push(value)?;
+            }
+            Instr::RequestOp => {
+                let request = self.pop_obj()?;
+                return Ok(ExecOutcome::RequestOp { request });
             }
             Instr::FaultDenied => {
                 let r = self.pop_obj()?;

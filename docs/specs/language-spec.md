@@ -1406,11 +1406,14 @@ Nested VM execution uses the same rule. A descendant pass can return `Asked` thr
 That machine can be a descendant of the `Vm` receiver. Its erased inspection surface contains no `Any`:
 
 ```lm
-q.op(): Operation
-q.ordinal(): Int
-q.args_view(): [ValueView]   # returned list and views are frozen
-q.reply_type(): TypeView
+q.op_name(): String
 ```
+
+`op_name` gives the qualified name of the operation, such as `Clock.Now`. A wildcard arm carries no operation identity, so a holder reads the name for a report or for the reason of a denial.
+
+The token names a machine and an ordinal, and never the operation, so the name comes from the pending record of that machine. The request must still be live. `answer`, `reject`, `dispatch`, and `serve_file` each spend one request, and reading the name after any of them faults the caller with `InvalidRequestToken`.
+
+The wider erased surface stays deferred. `q.op(): Operation` needs an identity-erased operation value, which version 0.2 does not define; `q.args_view()` and `q.reply_type()` need `ValueView` and `TypeView` with them.
 
 To read arguments or answer, the holder matches the request against an exact typed operation object:
 

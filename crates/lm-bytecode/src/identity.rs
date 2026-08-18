@@ -486,6 +486,7 @@ fn preflight_instr(
         | Instr::CallArgs
         | Instr::FaultCode
         | Instr::FaultDenied
+        | Instr::RequestOp
         | Instr::Unreachable => Ok(()),
         Instr::ConstStr(idx) => {
             if *idx as usize >= strings {
@@ -1423,6 +1424,7 @@ impl<'a> Resolver<'a> {
             Instr::EqDigest => out.push(0x79),
             Instr::NeDigest => out.push(0x7a),
             Instr::FaultDenied => out.push(0x7b),
+            Instr::RequestOp => out.push(0x7c),
         }
     }
 }

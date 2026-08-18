@@ -451,7 +451,8 @@ impl<'m> Oracle<'m> {
             | HExprKind::TableEdit { .. }
             | HExprKind::CallArgs { .. }
             | HExprKind::FaultCodeGet { .. }
-            | HExprKind::FaultDenied { .. } => Err(Stop::Limit(
+            | HExprKind::FaultDenied { .. }
+            | HExprKind::RequestOpName { .. } => Err(Stop::Limit(
                 "the oracle models the pure subset only; programs with performs \
                  are outside the oracle",
             )),

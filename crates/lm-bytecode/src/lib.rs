@@ -383,6 +383,11 @@ pub enum Instr {
     CallArgs,
     /// Pop a Fault value and push its stable code as a string.
     FaultCode,
+    /// Pop a Request and push the qualified name of its operation.
+    ///
+    /// The name comes from the pending record of the target machine,
+    /// so the request must still be live.
+    RequestOp,
     /// Pop a reason string and push one frozen `PolicyDenied` fault.
     ///
     /// This is the one fault a program can build. A holder needs it
@@ -760,6 +765,7 @@ const OP_DIGEST: u8 = 0x78;
 const OP_EQ_DIGEST: u8 = 0x79;
 const OP_NE_DIGEST: u8 = 0x7a;
 const OP_FAULT_DENIED: u8 = 0x7b;
+const OP_REQUEST_OP: u8 = 0x7c;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1273,6 +1279,7 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::CallArgs => out.push(OP_CALL_ARGS),
         Instr::FaultCode => out.push(OP_FAULT_CODE),
         Instr::FaultDenied => out.push(OP_FAULT_DENIED),
+        Instr::RequestOp => out.push(OP_REQUEST_OP),
         Instr::Unreachable => out.push(OP_UNREACHABLE),
     }
 }
@@ -1949,6 +1956,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_CALL_ARGS => Instr::CallArgs,
         OP_FAULT_CODE => Instr::FaultCode,
         OP_FAULT_DENIED => Instr::FaultDenied,
+        OP_REQUEST_OP => Instr::RequestOp,
         OP_UNREACHABLE => Instr::Unreachable,
         other => return Err(DecodeError::BadOpcode(other)),
     };
@@ -2145,6 +2153,7 @@ mod tests {
             Instr::Freeze,
             Instr::FaultCode,
             Instr::FaultDenied,
+            Instr::RequestOp,
             Instr::Jump(0),
             Instr::JumpIfFalse(0),
             Instr::JumpIfTrue(0),
