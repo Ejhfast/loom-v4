@@ -1179,6 +1179,8 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::BbReserve)
         | Instr::Native(lm_bytecode::NativeInstr::BbClear)
         | Instr::Native(lm_bytecode::NativeInstr::BbFinish)
+        | Instr::Native(lm_bytecode::NativeInstr::BbAt)
+        | Instr::Native(lm_bytecode::NativeInstr::BbFindFrom)
         | Instr::Native(lm_bytecode::NativeInstr::BytesNew)
         | Instr::Native(lm_bytecode::NativeInstr::BytesLen)
         | Instr::Native(lm_bytecode::NativeInstr::BytesText)

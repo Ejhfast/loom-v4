@@ -107,6 +107,7 @@ pub enum NativeRepr {
     TcpResource,
     TcpStream,
     TcpListener,
+    TlsStream,
 }
 
 /// One checked class with its full field layout.

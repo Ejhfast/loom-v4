@@ -139,6 +139,7 @@ enum Kind {
     TcpResource,
     TcpStream,
     TcpListener,
+    TlsStream,
 }
 
 enum Node {
@@ -240,6 +241,8 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::TcpStream)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_TCP_LISTENER] == *class {
                 Node::Heap(Kind::TcpListener)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_TLS_STREAM] == *class {
+                Node::Heap(Kind::TlsStream)
             } else {
                 Node::Heap(Kind::Instance)
             }
@@ -273,6 +276,7 @@ fn kind_of(object: &Object) -> Kind {
         Object::Instance { .. } => Kind::Instance,
         Object::NativeTcpStream { .. } => Kind::TcpStream,
         Object::NativeTcpListener { .. } => Kind::TcpListener,
+        Object::NativeTlsStream { .. } => Kind::TlsStream,
     }
 }
 

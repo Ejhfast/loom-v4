@@ -671,6 +671,7 @@ impl<'m> Ctx<'m> {
                     lm_abi::AbiCore::NetError => (self.core.net_error, "NetError"),
                     lm_abi::AbiCore::TcpRead => (self.core.tcp_read, "TcpRead"),
                     lm_abi::AbiCore::Shutdown => (self.core.shutdown, "Shutdown"),
+                    lm_abi::AbiCore::TlsError => (self.core.tls_error, "TlsError"),
                 };
                 self.plain_inst(slot, name)
             }
@@ -683,6 +684,7 @@ impl<'m> Ctx<'m> {
                 lm_abi::AbiNative::TcpListener => {
                     self.plain_inst(self.core.tcp_listener, "TcpListener")
                 }
+                lm_abi::AbiNative::TlsStream => self.plain_inst(self.core.tls_stream, "TlsStream"),
             },
             lm_abi::AbiType::List(element) => {
                 let element = self.abi_ty(*element)?;
@@ -795,7 +797,8 @@ impl<'m> Ctx<'m> {
 /// Version 12 adds the `Bool` role. Version 13 adds the `String` role
 /// and String instructions. Version 14 adds Bytes and builder roles.
 /// Version 15 adds the sealed Text family and immediate Char rules.
-pub const VERIFIER_VERSION: u32 = 15;
+/// Version 16 adds native TLS resources and their service control.
+pub const VERIFIER_VERSION: u32 = 16;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -948,6 +951,14 @@ const ROLE_SHUTDOWN_BOTH: usize = 93;
 const ROLE_TCP_RESOURCE: usize = 94;
 const ROLE_TCP_STREAM: usize = 95;
 const ROLE_TCP_LISTENER: usize = 96;
+const ROLE_TLS_ERROR: usize = 97;
+const ROLE_TLS_INVALID_CONFIG: usize = 98;
+const ROLE_TLS_HANDSHAKE: usize = 99;
+const ROLE_TLS_CERTIFICATE: usize = 100;
+const ROLE_TLS_PROTOCOL: usize = 101;
+const ROLE_TLS_NETWORK: usize = 102;
+const ROLE_TLS_CLOSED: usize = 103;
+const ROLE_TLS_LIMIT_EXCEEDED: usize = 104;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -962,11 +973,12 @@ enum FieldShape {
     /// A list of integers, for example the bounded machine path of
     /// `SnapshotError.ResourceActive`.
     ListInt,
+    NetError,
 }
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 19] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 20] = [
     (
         ROLE_OPTION,
         1,
@@ -1096,10 +1108,24 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 19] = [
         &[ROLE_SHUTDOWN_READ, ROLE_SHUTDOWN_WRITE, ROLE_SHUTDOWN_BOTH],
         "Shutdown",
     ),
+    (
+        ROLE_TLS_ERROR,
+        0,
+        &[
+            ROLE_TLS_INVALID_CONFIG,
+            ROLE_TLS_HANDSHAKE,
+            ROLE_TLS_CERTIFICATE,
+            ROLE_TLS_PROTOCOL,
+            ROLE_TLS_NETWORK,
+            ROLE_TLS_CLOSED,
+            ROLE_TLS_LIMIT_EXCEEDED,
+        ],
+        "TlsError",
+    ),
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 60] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 67] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -1163,6 +1189,13 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 60] = [
     (ROLE_SHUTDOWN_READ, &[]),
     (ROLE_SHUTDOWN_WRITE, &[]),
     (ROLE_SHUTDOWN_BOTH, &[]),
+    (ROLE_TLS_INVALID_CONFIG, &[FieldShape::Str]),
+    (ROLE_TLS_HANDSHAKE, &[FieldShape::Str]),
+    (ROLE_TLS_CERTIFICATE, &[FieldShape::Str]),
+    (ROLE_TLS_PROTOCOL, &[FieldShape::Str]),
+    (ROLE_TLS_NETWORK, &[FieldShape::NetError]),
+    (ROLE_TLS_CLOSED, &[]),
+    (ROLE_TLS_LIMIT_EXCEEDED, &[FieldShape::Str]),
 ];
 
 /// Prove the shape of every declared core role slot.
@@ -1272,6 +1305,9 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
                         }
                         _ => false,
                     },
+                    FieldShape::NetError => {
+                        slot(ROLE_NET_ERROR).is_some_and(|class| found == &BcType::Class(class))
+                    }
                 };
                 if !ok {
                     return Err(terr(format!(
@@ -1399,6 +1435,7 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_STRING_BUILDER, "StringBuilder"),
         (lm_bytecode::corepin::ROLE_BYTE_BUFFER, "ByteBuffer"),
         (lm_bytecode::corepin::ROLE_CHAR, "Char"),
+        (lm_bytecode::corepin::ROLE_TLS_STREAM, "TlsStream"),
     ];
     for (role, name) in native_roles {
         let Some(idx) = slot(role) else { continue };
@@ -2129,6 +2166,7 @@ fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_RESOURCE
             | lm_abi::OP_VM_SERVE_FILE
             | lm_abi::OP_VM_SERVE_TCP_LISTENER
+            | lm_abi::OP_VM_SERVE_TLS_STREAM
             | lm_abi::OP_VM_DRIVE_FOR
             | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
             | lm_abi::OP_PROC_SNAPSHOT_WAIT
@@ -3385,6 +3423,28 @@ fn step(
             pop_expect(state, buffer)?;
             push(state, buffer)?;
         }
+        Instr::Native(lm_bytecode::NativeInstr::BbAt) => {
+            pop_expect(state, TY_INT)?;
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => {
+            pop_expect(state, TY_INT)?;
+            let bytes = ctx.intern(BcType::Bytes);
+            pop_expect(state, bytes)?;
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            push(state, TY_INT)?;
+        }
         Instr::Native(lm_bytecode::NativeInstr::BytesNew) => {
             pop_expect(state, TY_STR)?;
             let idx = {
@@ -3632,11 +3692,16 @@ fn step(
                                 .core
                                 .tcp_resource
                                 .map(|class| ctx.intern(BcType::Class(class)));
+                            let tls = ctx
+                                .core
+                                .tls_stream
+                                .map(|class| ctx.intern(BcType::Class(class)));
                             if ctx.ty(handle) != BcType::FileHandle
                                 && tcp.is_none_or(|tcp| !ctx.is_subtype(handle, tcp))
+                                && tls.is_none_or(|tls| handle != tls)
                             {
                                 return Err(fail(
-                                    "`Vm.Resource` needs FileHandle or TcpResource".to_string(),
+                                    "`Vm.Resource` needs a file or stream resource".to_string(),
                                 ));
                             }
                             let control = ctx.intern(BcType::ResourceHandle);
@@ -3700,6 +3765,21 @@ fn step(
                             if ctx.ty(call) != BcType::PendingCall(args, reply) {
                                 return Err(fail(
                                     "`Vm.ServeTcpListener` needs a Tcp.Listen call".to_string(),
+                                ));
+                            }
+                            let control = ctx.intern(BcType::ResourceHandle);
+                            push(state, control)?;
+                        }
+                        lm_abi::OP_VM_SERVE_TLS_STREAM => {
+                            let call = pop(state)?;
+                            pop_vm(state)?;
+                            let args = ctx.op_args_view(lm_abi::OP_TLS_HANDSHAKE).map_err(&fail)?;
+                            let reply = ctx
+                                .abi_ty(lm_abi::op(lm_abi::OP_TLS_HANDSHAKE).reply)
+                                .map_err(&fail)?;
+                            if ctx.ty(call) != BcType::PendingCall(args, reply) {
+                                return Err(fail(
+                                    "`Vm.ServeTlsStream` needs a Tls.Handshake call".to_string(),
                                 ));
                             }
                             let control = ctx.intern(BcType::ResourceHandle);

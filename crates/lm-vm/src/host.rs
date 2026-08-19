@@ -21,6 +21,8 @@ pub enum HostArg {
     SocketAddress(HostSocketAddress),
     Tcp(HostTcpResource),
     Shutdown(HostShutdown),
+    List(Vec<HostArg>),
+    Tls(u64),
 }
 
 /// One portable IP address.
@@ -106,6 +108,13 @@ pub enum CoreCtor {
     NetFailed,
     TcpReadData,
     TcpReadEnd,
+    TlsInvalidConfig,
+    TlsHandshake,
+    TlsCertificate,
+    TlsProtocol,
+    TlsNetwork,
+    TlsClosed,
+    TlsLimitExceeded,
 }
 
 /// One plain-data operation reply. `Ctor` builds a pinned core enum
@@ -121,6 +130,7 @@ pub enum HostValue {
     SocketAddress(HostSocketAddress),
     TcpStream(u64),
     TcpListener(u64),
+    TlsStream(u64),
     Ctor(CoreCtor, Vec<HostValue>),
 }
 
@@ -166,6 +176,10 @@ pub trait Host {
     }
     /// Close one TCP resource during forced cleanup.
     fn close_tcp(&mut self, _resource: HostTcpResource) -> bool {
+        false
+    }
+    /// Close one TLS stream during forced resource cleanup.
+    fn close_tls(&mut self, _token: u64) -> bool {
         false
     }
 }
@@ -214,6 +228,7 @@ pub struct RecordingHost {
     listeners: BTreeMap<u64, MemoryListener>,
     listener_addresses: BTreeMap<HostSocketAddress, u64>,
     streams: BTreeMap<u64, MemoryStream>,
+    tls_streams: std::collections::BTreeSet<u64>,
     next_tcp: u64,
     next_port: u16,
 }
@@ -232,6 +247,7 @@ enum DeferredAction {
     Ready(HostValue),
     Accept(u64),
     Read { stream: u64, count: usize },
+    TlsRead { stream: u64, count: usize },
 }
 
 /// True when the command-line host serves this operation off the
@@ -258,6 +274,13 @@ fn deferred_op(op: u32) -> bool {
             | lm_abi::OP_TCP_LOCAL_ADDRESS
             | lm_abi::OP_TCP_PEER_ADDRESS
             | lm_abi::OP_TCP_CLOSE
+            | lm_abi::OP_TLS_HANDSHAKE
+            | lm_abi::OP_TLS_READ
+            | lm_abi::OP_TLS_WRITE
+            | lm_abi::OP_TLS_SHUTDOWN
+            | lm_abi::OP_TLS_LOCAL_ADDRESS
+            | lm_abi::OP_TLS_PEER_ADDRESS
+            | lm_abi::OP_TLS_CLOSE
     )
 }
 
@@ -290,6 +313,8 @@ struct MemoryStream {
 
 const MAX_FILE_IO_BYTES: usize = 16 << 20;
 const MAX_NETWORK_IO_BYTES: usize = 16 << 20;
+const MAX_DNS_RESULTS: usize = 64;
+const MAX_VIRTUAL_STREAM_BYTES: usize = 64 << 20;
 const VIRTUAL_WRITE_CHUNK: usize = 4 << 10;
 
 fn fs_ok(value: HostValue) -> HostValue {
@@ -327,6 +352,27 @@ fn net_closed() -> HostValue {
     )
 }
 
+fn tls_ok(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn tls_error(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(
+            ctor,
+            vec![HostValue::Str(SharedText::from(message.into()))],
+        )],
+    )
+}
+
+fn tls_closed() -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(CoreCtor::TlsClosed, vec![])],
+    )
+}
+
 impl Default for RecordingHost {
     fn default() -> RecordingHost {
         RecordingHost::new(1)
@@ -358,6 +404,7 @@ impl RecordingHost {
             listeners: BTreeMap::new(),
             listener_addresses: BTreeMap::new(),
             streams: BTreeMap::new(),
+            tls_streams: std::collections::BTreeSet::new(),
             next_tcp: 1,
             next_port: 40_000,
         }
@@ -432,6 +479,30 @@ impl RecordingHost {
         None
     }
 
+    fn tls_read_value(&mut self, stream: u64, count: usize) -> Option<HostValue> {
+        if !self.tls_streams.contains(&stream) {
+            return Some(tls_closed());
+        }
+        let Some(stream) = self.streams.get_mut(&stream) else {
+            return Some(tls_closed());
+        };
+        if stream.read_closed {
+            return Some(tls_closed());
+        }
+        if !stream.incoming.is_empty() {
+            let count = count.min(stream.incoming.len());
+            let bytes: Vec<u8> = stream.incoming.drain(..count).collect();
+            return Some(tls_ok(HostValue::Ctor(
+                CoreCtor::TcpReadData,
+                vec![HostValue::Bytes(bytes.into())],
+            )));
+        }
+        if stream.peer_write_closed || stream.peer.is_none() {
+            return Some(tls_ok(HostValue::Ctor(CoreCtor::TcpReadEnd, vec![])));
+        }
+        None
+    }
+
     fn close_virtual_tcp(&mut self, resource: HostTcpResource) -> bool {
         match resource.kind {
             HostTcpKind::Listener => {
@@ -448,6 +519,7 @@ impl RecordingHost {
                 true
             }
             HostTcpKind::Stream => {
+                self.tls_streams.remove(&resource.token);
                 let Some(stream) = self.streams.remove(&resource.token) else {
                     return false;
                 };
@@ -462,12 +534,23 @@ impl RecordingHost {
         }
     }
 
+    fn close_virtual_tls(&mut self, token: u64) -> bool {
+        if !self.tls_streams.remove(&token) {
+            return false;
+        }
+        self.close_virtual_tcp(HostTcpResource {
+            kind: HostTcpKind::Stream,
+            token,
+        })
+    }
+
     fn deferred_value(&mut self, token: u64) -> Option<HostValue> {
         let action = self.pending.get(&token)?.action.clone();
         match action {
             DeferredAction::Ready(value) => Some(value),
             DeferredAction::Accept(listener) => self.accept_value(listener),
             DeferredAction::Read { stream, count } => self.read_value(stream, count),
+            DeferredAction::TlsRead { stream, count } => self.tls_read_value(stream, count),
         }
     }
 }
@@ -706,6 +789,18 @@ impl RecordingHost {
                 else {
                     return HostStart::Failed("Dns.Resolve needs a name and port".to_string());
                 };
+                if name.is_empty()
+                    || name.len() > 253
+                    || name
+                        .as_bytes()
+                        .iter()
+                        .any(|byte| *byte <= 32 || *byte >= 127)
+                {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the host name is invalid",
+                    ));
+                }
                 let Ok(port) = u16::try_from(*port) else {
                     return HostStart::Completed(net_error(
                         CoreCtor::NetInvalidInput,
@@ -718,8 +813,15 @@ impl RecordingHost {
                         "the host name has no address",
                     ));
                 };
+                if addresses.is_empty() {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetNameNotFound,
+                        "the host name has no address",
+                    ));
+                }
                 let values = addresses
                     .iter()
+                    .take(MAX_DNS_RESULTS)
                     .map(|ip| {
                         HostValue::SocketAddress(HostSocketAddress {
                             ip: *ip,
@@ -927,6 +1029,15 @@ impl RecordingHost {
                         "the stream write side is closed",
                     ));
                 }
+                if bytes.len() > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the write value is too large",
+                    ));
+                }
+                if bytes.is_empty() {
+                    return HostStart::Completed(net_ok(HostValue::Int(0)));
+                }
                 let Some(peer) = stream.peer else {
                     return HostStart::Completed(net_error(
                         CoreCtor::NetConnectionReset,
@@ -944,6 +1055,12 @@ impl RecordingHost {
                     return HostStart::Completed(net_error(
                         CoreCtor::NetConnectionReset,
                         "the peer closed its read side",
+                    ));
+                }
+                if peer.incoming.len().saturating_add(count) > MAX_VIRTUAL_STREAM_BYTES {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the virtual stream buffer is full",
                     ));
                 }
                 peer.incoming
@@ -1021,6 +1138,225 @@ impl RecordingHost {
                     HostStart::Completed(net_closed())
                 }
             }
+            lm_abi::OP_TLS_HANDSHAKE => {
+                let (
+                    Some(HostArg::Tcp(resource)),
+                    Some(HostArg::Str(server_name)),
+                    Some(HostArg::Int(root_mode)),
+                    Some(HostArg::List(roots)),
+                    Some(HostArg::List(alpn)),
+                    Some(HostArg::Int(minimum)),
+                    Some(HostArg::Int(buffer_limit)),
+                ) = (
+                    args.first(),
+                    args.get(1),
+                    args.get(2),
+                    args.get(3),
+                    args.get(4),
+                    args.get(5),
+                    args.get(6),
+                )
+                else {
+                    return HostStart::Failed("Tls.Handshake needs its configuration".to_string());
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tls.Handshake needs a TCP stream".to_string());
+                }
+                if !self.streams.contains_key(&resource.token)
+                    || self.tls_streams.contains(&resource.token)
+                {
+                    return HostStart::Completed(tls_closed());
+                }
+                let roots_valid = roots
+                    .iter()
+                    .all(|value| matches!(value, HostArg::Bytes(bytes) if !bytes.is_empty() && bytes.len() <= 1_048_576));
+                let alpn_valid = alpn.iter().all(
+                    |value| matches!(value, HostArg::Bytes(bytes) if !bytes.is_empty() && bytes.len() <= 255),
+                );
+                let root_bytes = roots.iter().fold(0_usize, |total, value| {
+                    total.saturating_add(match value {
+                        HostArg::Bytes(bytes) => bytes.len(),
+                        _ => 0,
+                    })
+                });
+                let alpn_bytes = alpn.iter().fold(0_usize, |total, value| {
+                    total.saturating_add(match value {
+                        HostArg::Bytes(bytes) => bytes.len(),
+                        _ => 0,
+                    })
+                });
+                let valid = !server_name.is_empty()
+                    && server_name.len() <= 253
+                    && server_name
+                        .as_bytes()
+                        .iter()
+                        .all(|byte| *byte > 32 && *byte < 127)
+                    && matches!(root_mode, 0 | 1)
+                    && ((*root_mode == 0 && roots.is_empty())
+                        || (*root_mode == 1 && !roots.is_empty() && roots.len() <= 128))
+                    && roots_valid
+                    && root_bytes <= 4_194_304
+                    && alpn.len() <= 32
+                    && alpn_valid
+                    && alpn_bytes <= 4_096
+                    && matches!(minimum, 12 | 13)
+                    && (1..=1_048_576).contains(buffer_limit);
+                if !valid {
+                    self.close_virtual_tcp(*resource);
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS client configuration is invalid",
+                    ));
+                }
+                self.tls_streams.insert(resource.token);
+                HostStart::Completed(tls_ok(HostValue::TlsStream(resource.token)))
+            }
+            lm_abi::OP_TLS_READ => {
+                let (Some(HostArg::Tls(stream)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tls.Read needs a stream and count".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS read count is not positive",
+                    ));
+                };
+                if count == 0 {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS read count is not positive",
+                    ));
+                }
+                if count > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsLimitExceeded,
+                        "the TLS read count is too large",
+                    ));
+                }
+                match self.tls_read_value(*stream, count) {
+                    Some(value) => HostStart::Completed(value),
+                    None => self.defer_action(
+                        key,
+                        DeferredAction::TlsRead {
+                            stream: *stream,
+                            count,
+                        },
+                    ),
+                }
+            }
+            lm_abi::OP_TLS_WRITE => {
+                let (Some(HostArg::Tls(stream)), Some(HostArg::Bytes(bytes))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tls.Write needs a stream and bytes".to_string());
+                };
+                if !self.tls_streams.contains(stream) {
+                    return HostStart::Completed(tls_closed());
+                }
+                let Some(state) = self.streams.get(stream) else {
+                    return HostStart::Completed(tls_closed());
+                };
+                if state.write_closed {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsProtocol,
+                        "the TLS write side is closed",
+                    ));
+                }
+                if bytes.len() > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsLimitExceeded,
+                        "the TLS write value is too large",
+                    ));
+                }
+                if bytes.is_empty() {
+                    return HostStart::Completed(tls_ok(HostValue::Int(0)));
+                }
+                let Some(peer) = state.peer else {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsProtocol,
+                        "the TLS peer closed the stream",
+                    ));
+                };
+                let count = bytes.len().min(VIRTUAL_WRITE_CHUNK);
+                let Some(peer) = self.streams.get_mut(&peer) else {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsProtocol,
+                        "the TLS peer closed the stream",
+                    ));
+                };
+                if peer.read_closed {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsProtocol,
+                        "the TLS peer closed its read side",
+                    ));
+                }
+                if peer.incoming.len().saturating_add(count) > MAX_VIRTUAL_STREAM_BYTES {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsLimitExceeded,
+                        "the virtual TLS stream buffer is full",
+                    ));
+                }
+                peer.incoming
+                    .extend(bytes.as_slice()[..count].iter().copied());
+                HostStart::Completed(tls_ok(HostValue::Int(count as i64)))
+            }
+            lm_abi::OP_TLS_SHUTDOWN => {
+                let Some(HostArg::Tls(stream)) = args.first() else {
+                    return HostStart::Failed("Tls.Shutdown needs a stream".to_string());
+                };
+                if !self.tls_streams.contains(stream) {
+                    return HostStart::Completed(tls_closed());
+                }
+                let Some(state) = self.streams.get_mut(stream) else {
+                    return HostStart::Completed(tls_closed());
+                };
+                state.write_closed = true;
+                let peer = state.peer;
+                if let Some(peer) = peer.and_then(|peer| self.streams.get_mut(&peer)) {
+                    peer.peer_write_closed = true;
+                }
+                HostStart::Completed(tls_ok(HostValue::Unit))
+            }
+            lm_abi::OP_TLS_LOCAL_ADDRESS => {
+                let Some(HostArg::Tls(stream)) = args.first() else {
+                    return HostStart::Failed("Tls.LocalAddress needs a stream".to_string());
+                };
+                let value = if self.tls_streams.contains(stream) {
+                    self.streams
+                        .get(stream)
+                        .map(|state| tls_ok(HostValue::SocketAddress(state.local)))
+                        .unwrap_or_else(tls_closed)
+                } else {
+                    tls_closed()
+                };
+                HostStart::Completed(value)
+            }
+            lm_abi::OP_TLS_PEER_ADDRESS => {
+                let Some(HostArg::Tls(stream)) = args.first() else {
+                    return HostStart::Failed("Tls.PeerAddress needs a stream".to_string());
+                };
+                let value = if self.tls_streams.contains(stream) {
+                    self.streams
+                        .get(stream)
+                        .map(|state| tls_ok(HostValue::SocketAddress(state.peer_address)))
+                        .unwrap_or_else(tls_closed)
+                } else {
+                    tls_closed()
+                };
+                HostStart::Completed(value)
+            }
+            lm_abi::OP_TLS_CLOSE => {
+                let Some(HostArg::Tls(stream)) = args.first() else {
+                    return HostStart::Failed("Tls.Close needs a stream".to_string());
+                };
+                if self.close_virtual_tls(*stream) {
+                    HostStart::Completed(tls_ok(HostValue::Unit))
+                } else {
+                    HostStart::Completed(tls_closed())
+                }
+            }
             _ => HostStart::Failed(format!(
                 "the test host does not implement {}",
                 lm_abi::op_name(op)
@@ -1085,6 +1421,10 @@ impl Host for RecordingHost {
     fn close_tcp(&mut self, resource: HostTcpResource) -> bool {
         self.close_virtual_tcp(resource)
     }
+
+    fn close_tls(&mut self, token: u64) -> bool {
+        self.close_virtual_tls(token)
+    }
 }
 
 /// A shared recording host, so a test keeps access to the buffers
@@ -1112,6 +1452,10 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
 
     fn close_tcp(&mut self, resource: HostTcpResource) -> bool {
         self.borrow_mut().close_tcp(resource)
+    }
+
+    fn close_tls(&mut self, token: u64) -> bool {
+        self.borrow_mut().close_tls(token)
     }
 }
 

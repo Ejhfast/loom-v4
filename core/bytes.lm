@@ -168,6 +168,24 @@ final class ByteBuffer
     intrinsic("byte_buffer.len", self)
   end
 
+  def at(self, index: Int): Option[Int]
+    value = intrinsic("byte_buffer.at", self, index)
+    if value < 0
+      None
+    else
+      Some(value)
+    end
+  end
+
+  def find_from(self, needle: Bytes, start: Int): Option[Int]
+    value = intrinsic("byte_buffer.find_from", self, needle, start)
+    if value < 0
+      None
+    else
+      Some(value)
+    end
+  end
+
   def build(self): Bytes
     intrinsic("byte_buffer.build", self)
   end

@@ -47,6 +47,12 @@ lookup: {Bytes: Int} = {Bytes("key"): 7}
   Bytes().is_empty(),
   Bytes("a") + Bytes("b") == Bytes("ab"),
   bb.len(),
+  (
+    bb.at(2),
+    bb.at(9),
+    bb.find_from(Bytes("Hi"), 1),
+    bb.find_from(Bytes("Hi"), 3)
+  ),
   text,
   lookup.at(Bytes("key"))
 )
@@ -54,7 +60,7 @@ lookup: {Bytes: Int} = {Bytes("key"): 7}
     assert_eq!(
         run_text("bytes_methods.lm", source, VmConfig::default()).unwrap(),
         "Done((4, 255, None, true, Some(2), \"00ff4869\", \"4869\", \
-         \"00ff486921\", \"invalid\", true, true, 4, \"ok\", 7))"
+         \"00ff486921\", \"invalid\", true, true, 4, (Some(72), None, Some(2), None), \"ok\", 7))"
     );
 }
 
@@ -63,6 +69,8 @@ fn bytes_and_builder_intrinsics_use_native_instructions() {
     let source = r#"
 bb = ByteBuffer()
 bb.append(1).extend(Bytes("x")).reserve(2).clear().append(2)
+bb.at(0)
+bb.find_from(Bytes("x"), 0)
 sb = StringBuilder()
 sb.append("x").clear().append("y")
 bytes = bb.build()
@@ -101,6 +109,8 @@ bytes = bb.build()
         Instr::Native(lm_bytecode::NativeInstr::BbReserve),
         Instr::Native(lm_bytecode::NativeInstr::BbClear),
         Instr::Native(lm_bytecode::NativeInstr::BbBuild),
+        Instr::Native(lm_bytecode::NativeInstr::BbAt),
+        Instr::Native(lm_bytecode::NativeInstr::BbFindFrom),
     ] {
         assert!(instructions.contains(&expected), "missing {expected:?}");
     }
@@ -169,6 +179,16 @@ buffer.len()
 "#;
     assert_eq!(
         run_text("finished_byte_buffer.lm", byte_source, VmConfig::default()).unwrap(),
+        "Fault(InvalidVmState)"
+    );
+
+    let scan_source = r#"
+buffer = ByteBuffer()
+buffer.append(1).finish()
+buffer.find_from(Bytes("x"), 0)
+"#;
+    assert_eq!(
+        run_text("finished_byte_scan.lm", scan_source, VmConfig::default()).unwrap(),
         "Fault(InvalidVmState)"
     );
 }

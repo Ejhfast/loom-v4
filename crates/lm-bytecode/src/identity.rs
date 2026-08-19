@@ -77,7 +77,9 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 15 adds the native String class and String instructions.
 /// Version 16 adds Bytes and nominal builder classes.
 /// Version 17 adds scalar Text, Substring, Char, and builder moves.
-pub const COMPILER_ABI_VERSION: u32 = 17;
+/// Version 18 adds two active byte-buffer scan instructions.
+/// Version 19 adds native TLS resources and their VM controls.
+pub const COMPILER_ABI_VERSION: u32 = 19;
 
 /// The refinement work budget of one component.
 ///
@@ -526,6 +528,8 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BbReserve)
         | Instr::Native(NativeInstr::BbClear)
         | Instr::Native(NativeInstr::BbFinish)
+        | Instr::Native(NativeInstr::BbAt)
+        | Instr::Native(NativeInstr::BbFindFrom)
         | Instr::Native(NativeInstr::BytesNew)
         | Instr::Native(NativeInstr::BytesLen)
         | Instr::Native(NativeInstr::BytesText)
@@ -1526,6 +1530,8 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::SbByteLen) => out.push(0xa3),
             Instr::Native(NativeInstr::SbFinish) => out.push(0xa4),
             Instr::Native(NativeInstr::BbFinish) => out.push(0xa5),
+            Instr::Native(NativeInstr::BbAt) => out.push(0xb4),
+            Instr::Native(NativeInstr::BbFindFrom) => out.push(0xb5),
             Instr::Jump(b) => {
                 out.push(0x31);
                 u(out, *b);

@@ -27,8 +27,9 @@ pub use sha::{sha256, sha256_hex};
 /// first six filesystem operations. Version 6 adds holder resource
 /// controls and fuel-bounded snapshot waiting. Version 7 adds typed
 /// waits and selectable drive and receive sources. Version 8 adds
-/// transparent effect sets and the DNS and TCP operations.
-pub const ABI_VERSION: u32 = 8;
+/// transparent effect sets and the DNS and TCP operations. Version 9
+/// adds the TLS client resource and its effect sets.
+pub const ABI_VERSION: u32 = 9;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -42,7 +43,7 @@ pub type OpSlot = u32;
 /// list makes a namespace group. Its members are the operations whose
 /// `group` field names that group. A nonempty list can name exact
 /// operations or other groups.
-pub const GROUPS: [&str; 17] = [
+pub const GROUPS: [&str; 21] = [
     "Io",
     "Fs",
     "Clock",
@@ -60,6 +61,10 @@ pub const GROUPS: [&str; 17] = [
     "Tcp.Client",
     "Tcp.Server",
     "Http.CleartextClient",
+    "Tls",
+    "Tls.Stream",
+    "Tls.Client",
+    "Http.Client",
 ];
 
 const TCP_STREAM_MEMBERS: &[&str] = &[
@@ -75,9 +80,19 @@ const TCP_LISTENER_MEMBERS: &[&str] =
 const TCP_CLIENT_MEMBERS: &[&str] = &["Tcp.Connect", "Tcp.Stream"];
 const TCP_SERVER_MEMBERS: &[&str] = &["Tcp.Listener", "Tcp.Stream"];
 const HTTP_CLEARTEXT_MEMBERS: &[&str] = &["Dns.Resolve", "Tcp.Client"];
+const TLS_STREAM_MEMBERS: &[&str] = &[
+    "Tls.Read",
+    "Tls.Write",
+    "Tls.Shutdown",
+    "Tls.LocalAddress",
+    "Tls.PeerAddress",
+    "Tls.Close",
+];
+const TLS_CLIENT_MEMBERS: &[&str] = &["Tls.Handshake", "Tls.Stream"];
+const HTTP_CLIENT_MEMBERS: &[&str] = &["Dns.Resolve", "Tcp.Client", "Tls.Client"];
 
 /// The explicit members of each group slot.
-pub const GROUP_MEMBERS: [&[&str]; 17] = [
+pub const GROUP_MEMBERS: [&[&str]; 21] = [
     &[],
     &[],
     &[],
@@ -95,6 +110,10 @@ pub const GROUP_MEMBERS: [&[&str]; 17] = [
     TCP_CLIENT_MEMBERS,
     TCP_SERVER_MEMBERS,
     HTTP_CLEARTEXT_MEMBERS,
+    &[],
+    TLS_STREAM_MEMBERS,
+    TLS_CLIENT_MEMBERS,
+    HTTP_CLIENT_MEMBERS,
 ];
 
 /// One primitive manifest type.
@@ -139,6 +158,7 @@ pub enum AbiCore {
     NetError,
     TcpRead,
     Shutdown,
+    TlsError,
 }
 
 impl AbiCore {
@@ -159,6 +179,7 @@ impl AbiCore {
             AbiCore::NetError => "NetError",
             AbiCore::TcpRead => "TcpRead",
             AbiCore::Shutdown => "Shutdown",
+            AbiCore::TlsError => "TlsError",
         }
     }
 }
@@ -170,6 +191,7 @@ pub enum AbiNative {
     TcpResource,
     TcpStream,
     TcpListener,
+    TlsStream,
 }
 
 impl AbiNative {
@@ -179,6 +201,7 @@ impl AbiNative {
             AbiNative::TcpResource => "TcpResource",
             AbiNative::TcpStream => "TcpStream",
             AbiNative::TcpListener => "TcpListener",
+            AbiNative::TlsStream => "TlsStream",
         }
     }
 }
@@ -242,10 +265,12 @@ impl AbiType {
     pub const NET_ERROR: AbiType = AbiType::Core(AbiCore::NetError);
     pub const TCP_READ: AbiType = AbiType::Core(AbiCore::TcpRead);
     pub const SHUTDOWN: AbiType = AbiType::Core(AbiCore::Shutdown);
+    pub const TLS_ERROR: AbiType = AbiType::Core(AbiCore::TlsError);
     pub const FILE_HANDLE: AbiType = AbiType::Native(AbiNative::FileHandle);
     pub const TCP_RESOURCE: AbiType = AbiType::Native(AbiNative::TcpResource);
     pub const TCP_STREAM: AbiType = AbiType::Native(AbiNative::TcpStream);
     pub const TCP_LISTENER: AbiType = AbiType::Native(AbiNative::TcpListener);
+    pub const TLS_STREAM: AbiType = AbiType::Native(AbiNative::TlsStream);
 
     pub const LIST_SUBSTRING: AbiType = AbiType::List(&AbiType::SUBSTRING);
     pub const RESULT_OPTION_STR_IO_ERROR: AbiType = AbiType::Apply(
@@ -270,6 +295,7 @@ impl AbiType {
     pub const RESULT_UNIT_FS_ERROR: AbiType =
         AbiType::Apply(AbiConstructor::Result, &[AbiType::UNIT, AbiType::FS_ERROR]);
     pub const LIST_SOCKET_ADDRESS: AbiType = AbiType::List(&AbiType::SOCKET_ADDRESS);
+    pub const LIST_BYTES: AbiType = AbiType::List(&AbiType::BYTES);
     pub const RESULT_LIST_SOCKET_ADDRESS_NET_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
         &[AbiType::LIST_SOCKET_ADDRESS, AbiType::NET_ERROR],
@@ -301,6 +327,22 @@ impl AbiType {
     pub const RESULT_SOCKET_ADDRESS_NET_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
         &[AbiType::SOCKET_ADDRESS, AbiType::NET_ERROR],
+    );
+    pub const RESULT_TLS_STREAM_TLS_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::TLS_STREAM, AbiType::TLS_ERROR],
+    );
+    pub const RESULT_TCP_READ_TLS_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::TCP_READ, AbiType::TLS_ERROR],
+    );
+    pub const RESULT_INT_TLS_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::INT, AbiType::TLS_ERROR]);
+    pub const RESULT_UNIT_TLS_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::UNIT, AbiType::TLS_ERROR]);
+    pub const RESULT_SOCKET_ADDRESS_TLS_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::SOCKET_ADDRESS, AbiType::TLS_ERROR],
     );
 
     /// The canonical text of this complete type expression.
@@ -339,7 +381,8 @@ impl AbiType {
 ///
 /// Version 4 adds immutable Bytes operations and nominal builders.
 /// Version 5 adds scalar text, shared views, byte search, and finish moves.
-pub const INTRINSIC_ABI_VERSION: u32 = 5;
+/// Version 6 adds bounded scans of active byte buffers.
+pub const INTRINSIC_ABI_VERSION: u32 = 6;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -443,9 +486,11 @@ pub const INTRINSIC_BYTES_ENDS_WITH: IntrinsicSlot = 85;
 pub const INTRINSIC_BYTES_CONTAINS: IntrinsicSlot = 86;
 pub const INTRINSIC_TEXT_SPLIT: IntrinsicSlot = 87;
 pub const INTRINSIC_TEXT_LINES: IntrinsicSlot = 88;
+pub const INTRINSIC_BYTE_BUFFER_AT: IntrinsicSlot = 89;
+pub const INTRINSIC_BYTE_BUFFER_FIND_FROM: IntrinsicSlot = 90;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 89] = [
+pub const INTRINSICS: [IntrinsicDef; 91] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -980,6 +1025,18 @@ pub const INTRINSICS: [IntrinsicDef; 89] = [
         reply: AbiType::LIST_SUBSTRING,
         semantic_revision: 1,
     },
+    IntrinsicDef {
+        name: "byte_buffer.at",
+        params: &[AbiType::BYTE_BUFFER, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.find_from",
+        params: &[AbiType::BYTE_BUFFER, AbiType::BYTES, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
 ];
 
 /// The number of pure intrinsic slots.
@@ -1147,9 +1204,17 @@ pub const OP_TCP_PEER_ADDRESS: OpSlot = 57;
 pub const OP_TCP_CLOSE: OpSlot = 58;
 pub const OP_VM_SERVE_TCP_STREAM: OpSlot = 59;
 pub const OP_VM_SERVE_TCP_LISTENER: OpSlot = 60;
+pub const OP_TLS_HANDSHAKE: OpSlot = 61;
+pub const OP_TLS_READ: OpSlot = 62;
+pub const OP_TLS_WRITE: OpSlot = 63;
+pub const OP_TLS_SHUTDOWN: OpSlot = 64;
+pub const OP_TLS_LOCAL_ADDRESS: OpSlot = 65;
+pub const OP_TLS_PEER_ADDRESS: OpSlot = 66;
+pub const OP_TLS_CLOSE: OpSlot = 67;
+pub const OP_VM_SERVE_TLS_STREAM: OpSlot = 68;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 61] = [
+pub const OPS: [OpDef; 69] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -1707,6 +1772,86 @@ pub const OPS: [OpDef; 61] = [
         schema: "[T](Vm[T], PendingCall[SocketAddress, Result[TcpListener, NetError]]) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
+    OpDef {
+        group: "Tls",
+        member: "Handshake",
+        kind: OpKind::Fixed,
+        params: &[
+            AbiType::TCP_STREAM,
+            AbiType::STR,
+            AbiType::INT,
+            AbiType::LIST_BYTES,
+            AbiType::LIST_BYTES,
+            AbiType::INT,
+            AbiType::INT,
+        ],
+        reply: AbiType::RESULT_TLS_STREAM_TLS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tls",
+        member: "Read",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TLS_STREAM, AbiType::INT],
+        reply: AbiType::RESULT_TCP_READ_TLS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tls",
+        member: "Write",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TLS_STREAM, AbiType::BYTES],
+        reply: AbiType::RESULT_INT_TLS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tls",
+        member: "Shutdown",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TLS_STREAM],
+        reply: AbiType::RESULT_UNIT_TLS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tls",
+        member: "LocalAddress",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TLS_STREAM],
+        reply: AbiType::RESULT_SOCKET_ADDRESS_TLS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tls",
+        member: "PeerAddress",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TLS_STREAM],
+        reply: AbiType::RESULT_SOCKET_ADDRESS_TLS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tls",
+        member: "Close",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TLS_STREAM],
+        reply: AbiType::RESULT_UNIT_TLS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ServeTlsStream",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T](Vm[T], PendingCall) -> ResourceHandle",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -1743,8 +1888,7 @@ pub fn group_members(slot: GroupSlot) -> &'static [&'static str] {
     GROUP_MEMBERS[slot as usize]
 }
 
-/// True when one group or effect set contains an exact operation.
-pub fn group_contains_op(group: GroupSlot, operation: OpSlot) -> bool {
+fn group_contains_op_uncached(group: GroupSlot, operation: OpSlot, seen: &mut [bool]) -> bool {
     fn contains(group: GroupSlot, operation: OpSlot, seen: &mut [bool]) -> bool {
         let at = group as usize;
         if seen[at] {
@@ -1769,14 +1913,36 @@ pub fn group_contains_op(group: GroupSlot, operation: OpSlot) -> bool {
         false
     }
 
-    let mut seen = vec![false; GROUP_COUNT as usize];
-    contains(group, operation, &mut seen)
+    contains(group, operation, seen)
+}
+
+fn group_operation_bits() -> &'static [Vec<bool>] {
+    static BITS: std::sync::OnceLock<Vec<Vec<bool>>> = std::sync::OnceLock::new();
+    BITS.get_or_init(|| {
+        (0..GROUP_COUNT)
+            .map(|group| {
+                (0..OP_COUNT)
+                    .map(|operation| {
+                        let mut seen = vec![false; GROUP_COUNT as usize];
+                        group_contains_op_uncached(group, operation, &mut seen)
+                    })
+                    .collect()
+            })
+            .collect()
+    })
+}
+
+/// True when one group or effect set contains an exact operation.
+pub fn group_contains_op(group: GroupSlot, operation: OpSlot) -> bool {
+    group_operation_bits()[group as usize][operation as usize]
 }
 
 /// Return the exact operation closure of one group or effect set.
 pub fn group_operations(group: GroupSlot) -> Vec<OpSlot> {
-    (0..OP_COUNT)
-        .filter(|operation| group_contains_op(group, *operation))
+    group_operation_bits()[group as usize]
+        .iter()
+        .enumerate()
+        .filter_map(|(operation, included)| included.then_some(operation as OpSlot))
         .collect()
 }
 
@@ -2022,9 +2188,15 @@ mod tests {
         assert_eq!(op_by_name("Dns.Resolve"), Some(OP_DNS_RESOLVE));
         assert_eq!(op_by_name("Tcp.Connect"), Some(OP_TCP_CONNECT));
         assert_eq!(op_by_name("Tcp.Close"), Some(OP_TCP_CLOSE));
+        assert_eq!(op_by_name("Tls.Handshake"), Some(OP_TLS_HANDSHAKE));
+        assert_eq!(op_by_name("Tls.Close"), Some(OP_TLS_CLOSE));
         assert_eq!(
             op_by_name("Vm.ServeTcpStream"),
             Some(OP_VM_SERVE_TCP_STREAM)
+        );
+        assert_eq!(
+            op_by_name("Vm.ServeTlsStream"),
+            Some(OP_VM_SERVE_TLS_STREAM)
         );
     }
 
@@ -2060,6 +2232,8 @@ mod tests {
         assert_eq!(op_group(OP_CLOCK_NOW), group_by_name("Clock").unwrap());
         assert_eq!(group_by_name("Tcp.Stream"), Some(12));
         assert_eq!(group_by_name("Http.CleartextClient"), Some(16));
+        assert_eq!(group_by_name("Tls.Stream"), Some(18));
+        assert_eq!(group_by_name("Http.Client"), Some(20));
     }
 
     #[test]
@@ -2079,6 +2253,18 @@ mod tests {
         assert!(group_contains_op(http, OP_DNS_RESOLVE));
         assert!(group_contains_op(http, OP_TCP_WRITE));
         assert!(!group_contains_op(http, OP_TCP_ACCEPT));
+
+        let tls = group_by_name("Tls.Client").unwrap();
+        assert!(group_contains_op(tls, OP_TLS_HANDSHAKE));
+        assert!(group_contains_op(tls, OP_TLS_READ));
+        assert!(!group_contains_op(tls, OP_TCP_CONNECT));
+
+        let secure_http = group_by_name("Http.Client").unwrap();
+        assert!(group_contains_op(secure_http, OP_DNS_RESOLVE));
+        assert!(group_contains_op(secure_http, OP_TCP_CONNECT));
+        assert!(group_contains_op(secure_http, OP_TLS_HANDSHAKE));
+        assert!(group_contains_op(secure_http, OP_TLS_CLOSE));
+        assert!(!group_contains_op(secure_http, OP_TCP_LISTEN));
     }
 
     #[test]
@@ -2087,6 +2273,10 @@ mod tests {
         assert!(row_name_included("Tcp.Connect", "Tcp.Client"));
         assert!(!row_name_included("Tcp.Client", "Tcp.Stream"));
         assert!(!row_name_included("Tcp.Listen", "Tcp.Client"));
+        assert!(row_name_included("Tls.Stream", "Tls.Client"));
+        assert!(row_name_included("Tls.Handshake", "Http.Client"));
+        assert!(row_name_included("Tcp.Client", "Http.Client"));
+        assert!(!row_name_included("Http.Client", "Tls.Client"));
     }
 
     #[test]
@@ -2187,6 +2377,13 @@ mod tests {
                 "Tcp.LocalAddress",
                 "Tcp.PeerAddress",
                 "Tcp.Close",
+                "Tls.Handshake",
+                "Tls.Read",
+                "Tls.Write",
+                "Tls.Shutdown",
+                "Tls.LocalAddress",
+                "Tls.PeerAddress",
+                "Tls.Close",
             ]
         );
         // A VM control operation runs inside the driver loop, so it

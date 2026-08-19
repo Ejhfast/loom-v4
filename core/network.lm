@@ -102,7 +102,12 @@ final class TcpStream < TcpResource
     length = bytes.len()
     while offset < length
       remaining = length - offset
-      part = case bytes.slice(offset, remaining)
+      count = if remaining < 65535
+        remaining
+      else
+        65535
+      end
+      part = case bytes.slice(offset, count)
       in Ok(value)  then value
       in Err(_)
         return Err(NetError.Failed("the write suffix is invalid"))
@@ -126,7 +131,13 @@ final class TcpStream < TcpResource
     end
     buffer = ByteBuffer()
     while buffer.len() < count
-      case self.read(count - buffer.len())
+      remaining = count - buffer.len()
+      chunk = if remaining < 65535
+        remaining
+      else
+        65535
+      end
+      case self.read(chunk)
       in Ok(TcpRead.Data(bytes))
         buffer.extend(bytes)
       in Ok(TcpRead.End)
@@ -207,6 +218,21 @@ final class Tcp
   end
 
   def resolve(self, host: String, port: Int): Result[List[SocketAddress], NetError] with Dns.Resolve
+    name = host.bytes()
+    if name.len() == 0 or name.len() > 253
+      return Err(NetError.InvalidInput("the host name length is invalid"))
+    end
+    index = 0
+    while index < name.len()
+      byte = name.at(index)
+      if byte <= 32 or byte >= 127
+        return Err(NetError.InvalidInput("the host name is invalid"))
+      end
+      index = index + 1
+    end
+    if port < 0 or port > 65535
+      return Err(NetError.InvalidInput("the port is outside 0 through 65535"))
+    end
     sys.dns.resolve(host, port)
   end
 

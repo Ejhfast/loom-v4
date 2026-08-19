@@ -1177,6 +1177,23 @@ impl NativeByteBuffer {
         self.buffer.as_ref().map(Vec::is_empty)
     }
 
+    /// Read one byte from an active buffer.
+    pub fn at(&self, index: usize) -> Option<u8> {
+        self.buffer.as_ref()?.get(index).copied()
+    }
+
+    /// Find immutable bytes at or after one active-buffer position.
+    pub fn find_from(&self, needle: &SharedBytes, start: usize) -> Option<usize> {
+        let bytes = self.buffer.as_ref()?;
+        let tail = bytes.get(start..)?;
+        if needle.is_empty() {
+            return Some(start);
+        }
+        tail.windows(needle.len())
+            .position(|window| window == needle.as_slice())
+            .and_then(|position| start.checked_add(position))
+    }
+
     /// Clear the active buffer.
     pub fn clear(&mut self) -> bool {
         let Some(buffer) = self.buffer.as_mut() else {

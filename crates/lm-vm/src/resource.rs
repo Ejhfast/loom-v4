@@ -70,6 +70,8 @@ pub enum ResourceKind {
     TcpStream,
     /// One open TCP listener.
     TcpListener,
+    /// One open TLS stream.
+    TlsStream,
 }
 
 impl ResourceKind {
@@ -79,7 +81,9 @@ impl ResourceKind {
             // A live completion callback has no bytes to copy.
             ResourceKind::PendingOperation => SnapshotClass::HostAttachment,
             ResourceKind::File => SnapshotClass::HostAttachment,
-            ResourceKind::TcpStream | ResourceKind::TcpListener => SnapshotClass::HostAttachment,
+            ResourceKind::TcpStream | ResourceKind::TcpListener | ResourceKind::TlsStream => {
+                SnapshotClass::HostAttachment
+            }
         }
     }
 }

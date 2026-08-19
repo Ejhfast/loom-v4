@@ -524,6 +524,14 @@ impl Machine {
                         Ok(class)
                     }
                 }
+                Object::NativeTlsStream { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_TLS_STREAM];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
                 _ => Err(BAD_TYPE),
             },
             _ => Err(BAD_TYPE),
@@ -1771,6 +1779,41 @@ impl Machine {
                 self.vm.heap.recharge_local(buffer);
                 let value = self.alloc(Object::Bytes(SharedBytes::from(bytes)))?;
                 self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbAt) => {
+                let index = self.pop_int()?;
+                let buffer = self.pop_obj()?;
+                let bytes = match self.vm.heap.get(buffer) {
+                    Object::ByteBuf(bytes) if bytes.buffer().is_some() => bytes,
+                    Object::ByteBuf(_) => return Err(FaultCode::InvalidVmState),
+                    _ => return Err(BAD_TYPE),
+                };
+                let value = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| bytes.at(index))
+                    .map(i64::from)
+                    .unwrap_or(-1);
+                self.push(Value::Int(value))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => {
+                let start = self.pop_int()?;
+                let needle = self.pop_obj()?;
+                let buffer = self.pop_obj()?;
+                let needle = match self.vm.heap.get(needle) {
+                    Object::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let bytes = match self.vm.heap.get(buffer) {
+                    Object::ByteBuf(bytes) if bytes.buffer().is_some() => bytes,
+                    Object::ByteBuf(_) => return Err(FaultCode::InvalidVmState),
+                    _ => return Err(BAD_TYPE),
+                };
+                let found = usize::try_from(start)
+                    .ok()
+                    .and_then(|start| bytes.find_from(&needle, start))
+                    .and_then(|index| i64::try_from(index).ok())
+                    .unwrap_or(-1);
+                self.push(Value::Int(found))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BytesNew) => {
                 let string = self.pop_obj()?;

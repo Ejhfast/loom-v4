@@ -244,7 +244,8 @@ impl<'m> Oracle<'m> {
                 | NativeRepr::Char
                 | NativeRepr::TcpResource
                 | NativeRepr::TcpStream
-                | NativeRepr::TcpListener,
+                | NativeRepr::TcpListener
+                | NativeRepr::TlsStream,
             ) => return Err(Stop::Limit("this native class has no direct constructor")),
             None => {}
         }

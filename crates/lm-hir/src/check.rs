@@ -34,6 +34,10 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/network.lm"),
     "\n",
+    include_str!("../../../core/tls.lm"),
+    "\n",
+    include_str!("../../../core/http.lm"),
+    "\n",
     include_str!("../../../core/vm.lm"),
     "\n",
     include_str!("../../../core/proc.lm"),
@@ -51,7 +55,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 38] = [
+pub const PRELUDE_TYPES: [&str; 50] = [
     "Option",
     "Result",
     "Ordering",
@@ -80,6 +84,18 @@ pub const PRELUDE_TYPES: [&str; 38] = [
     "TcpStream",
     "TcpListener",
     "Tcp",
+    "TlsError",
+    "TlsRoots",
+    "TlsVersion",
+    "TlsClientConfig",
+    "TlsStream",
+    "Tls",
+    "HttpError",
+    "HttpHeader",
+    "HttpLimits",
+    "HttpRequest",
+    "HttpResponse",
+    "Http",
     "Text",
     "String",
     "Substring",
@@ -260,6 +276,7 @@ pub(crate) fn sys_group_name(name: &str) -> Option<&'static str> {
         "wait" => Some("Wait"),
         "dns" => Some("Dns"),
         "tcp" => Some("Tcp"),
+        "tls" => Some("Tls"),
         _ => None,
     }
 }
@@ -1941,6 +1958,7 @@ fn resolve_class(
         (true, "TcpResource") => Some(NativeRepr::TcpResource),
         (true, "TcpStream") => Some(NativeRepr::TcpStream),
         (true, "TcpListener") => Some(NativeRepr::TcpListener),
+        (true, "TlsStream") => Some(NativeRepr::TlsStream),
         _ => None,
     };
     let text_parent = ctx.core_types.get("Text").copied();
@@ -1952,6 +1970,7 @@ fn resolve_class(
         Some(NativeRepr::TcpStream | NativeRepr::TcpListener) => {
             class.is_final && parent == tcp_parent
         }
+        Some(NativeRepr::TlsStream) => class.is_final && parent.is_none(),
         Some(_) => class.is_final && parent.is_none(),
         None => true,
     };
@@ -1983,7 +2002,8 @@ fn resolve_class(
             | NativeRepr::ByteBuffer
             | NativeRepr::TcpResource
             | NativeRepr::TcpStream
-            | NativeRepr::TcpListener,
+            | NativeRepr::TcpListener
+            | NativeRepr::TlsStream,
         ) => ctx.store.intern(Type::Class(ClassId(idx))),
         None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
         None => {

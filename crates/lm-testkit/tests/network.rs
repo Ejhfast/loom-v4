@@ -205,6 +205,41 @@ capture()
 }
 
 #[test]
+fn a_second_tcp_close_returns_closed() {
+    let source = format!(
+        r#"{LOOPBACK}
+def close_twice(): String with Tcp.Listener
+  address = case loopback(0)
+  in Ok(value) then value
+  in Err(error)
+    return error.message()
+  end
+  listener = case Tcp().listen(address, 4)
+  in Ok(value) then value
+  in Err(error)
+    return error.message()
+  end
+  case listener.close()
+  in Err(error)
+    return error.message()
+  in Ok(_) then ()
+  end
+  case listener.close()
+  in Err(Closed) then "closed"
+  in Err(error) then error.message()
+  in Ok(_) then "accepted"
+  end
+end
+
+close_twice()
+"#
+    );
+    let (outcome, resources) = run(&source, &["Tcp.Listener"]);
+    assert_eq!(outcome, "Done(\"closed\")");
+    assert_eq!(resources, 0);
+}
+
+#[test]
 fn a_driver_can_mint_and_service_a_tcp_stream() {
     let source = format!(
         r#"{LOOPBACK}

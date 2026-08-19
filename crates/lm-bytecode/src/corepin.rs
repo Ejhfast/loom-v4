@@ -138,10 +138,19 @@ pub struct CoreLayout {
     pub tcp_resource: Option<u32>,
     pub tcp_stream: Option<u32>,
     pub tcp_listener: Option<u32>,
+    pub tls_error: Option<u32>,
+    pub tls_invalid_config: Option<u32>,
+    pub tls_handshake: Option<u32>,
+    pub tls_certificate: Option<u32>,
+    pub tls_protocol: Option<u32>,
+    pub tls_network: Option<u32>,
+    pub tls_closed: Option<u32>,
+    pub tls_limit_exceeded: Option<u32>,
+    pub tls_stream: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 97] = [
+pub const PINNED_LABELS: [&str; 106] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -239,6 +248,15 @@ pub const PINNED_LABELS: [&str; 97] = [
     "TcpResource",
     "TcpStream",
     "TcpListener",
+    "TlsError",
+    "TlsError.InvalidConfig",
+    "TlsError.Handshake",
+    "TlsError.Certificate",
+    "TlsError.Protocol",
+    "TlsError.Network",
+    "TlsError.Closed",
+    "TlsError.LimitExceeded",
+    "TlsStream",
 ];
 
 /// The core role of immediate integer values.
@@ -297,6 +315,15 @@ pub const ROLE_SHUTDOWN_BOTH: usize = 93;
 pub const ROLE_TCP_RESOURCE: usize = 94;
 pub const ROLE_TCP_STREAM: usize = 95;
 pub const ROLE_TCP_LISTENER: usize = 96;
+pub const ROLE_TLS_ERROR: usize = 97;
+pub const ROLE_TLS_INVALID_CONFIG: usize = 98;
+pub const ROLE_TLS_HANDSHAKE: usize = 99;
+pub const ROLE_TLS_CERTIFICATE: usize = 100;
+pub const ROLE_TLS_PROTOCOL: usize = 101;
+pub const ROLE_TLS_NETWORK: usize = 102;
+pub const ROLE_TLS_CLOSED: usize = 103;
+pub const ROLE_TLS_LIMIT_EXCEEDED: usize = 104;
+pub const ROLE_TLS_STREAM: usize = 105;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -444,6 +471,15 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "TcpResource" => &mut layout.tcp_resource,
         "TcpStream" => &mut layout.tcp_stream,
         "TcpListener" => &mut layout.tcp_listener,
+        "TlsError" => &mut layout.tls_error,
+        "TlsError.InvalidConfig" => &mut layout.tls_invalid_config,
+        "TlsError.Handshake" => &mut layout.tls_handshake,
+        "TlsError.Certificate" => &mut layout.tls_certificate,
+        "TlsError.Protocol" => &mut layout.tls_protocol,
+        "TlsError.Network" => &mut layout.tls_network,
+        "TlsError.Closed" => &mut layout.tls_closed,
+        "TlsError.LimitExceeded" => &mut layout.tls_limit_exceeded,
+        "TlsStream" => &mut layout.tls_stream,
         _ => unreachable!("only known labels enter the map"),
     }
 }

@@ -525,7 +525,9 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.leb(*owner as u64);
             out.u64(*token);
         }
-        Object::NativeTcpStream { resource } | Object::NativeTcpListener { resource } => {
+        Object::NativeTcpStream { resource }
+        | Object::NativeTcpListener { resource }
+        | Object::NativeTlsStream { resource } => {
             out.u64(*resource);
         }
     }
@@ -1619,6 +1621,9 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             resource: cur.u64()?,
         },
         22 => Object::NativeTcpListener {
+            resource: cur.u64()?,
+        },
+        23 => Object::NativeTlsStream {
             resource: cur.u64()?,
         },
         other => {

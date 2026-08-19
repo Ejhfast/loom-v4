@@ -782,6 +782,7 @@ impl Admit<'_> {
                     | Object::NativeResourceHandle { resource, .. }
                     | Object::NativeTcpStream { resource }
                     | Object::NativeTcpListener { resource }
+                    | Object::NativeTlsStream { resource }
                     if resource != 0
             ) {
                 return fail(

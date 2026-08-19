@@ -62,7 +62,9 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 4 carries bytes and closed file handle values.
 /// Version 5 carries typed wait descriptions and active wait blocks.
 /// Version 6 encodes builders as nominal core class types.
-pub const FORMAT_VERSION: u32 = 7;
+/// Version 7 adds shared text and byte storage.
+/// Version 8 adds closed TLS stream values.
+pub const FORMAT_VERSION: u32 = 8;
 
 /// The section kinds, in canonical order.
 ///

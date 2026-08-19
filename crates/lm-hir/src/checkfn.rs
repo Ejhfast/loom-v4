@@ -1633,6 +1633,7 @@ impl<'o> FnChecker<'o> {
                             | NativeRepr::TcpResource
                             | NativeRepr::TcpStream
                             | NativeRepr::TcpListener
+                            | NativeRepr::TlsStream
                     )
                 ) {
                     return Err(Diagnostic::new(
@@ -3342,6 +3343,7 @@ impl<'o> FnChecker<'o> {
                     lm_abi::AbiCore::NetError => "NetError",
                     lm_abi::AbiCore::TcpRead => "TcpRead",
                     lm_abi::AbiCore::Shutdown => "Shutdown",
+                    lm_abi::AbiCore::TlsError => "TlsError",
                 };
                 Self::core_class(ctx, name)
             }
@@ -3350,6 +3352,7 @@ impl<'o> FnChecker<'o> {
                 lm_abi::AbiNative::TcpResource => Self::core_class(ctx, "TcpResource"),
                 lm_abi::AbiNative::TcpStream => Self::core_class(ctx, "TcpStream"),
                 lm_abi::AbiNative::TcpListener => Self::core_class(ctx, "TcpListener"),
+                lm_abi::AbiNative::TlsStream => Self::core_class(ctx, "TlsStream"),
             },
             lm_abi::AbiType::List(element) => {
                 let element = Self::abi_type_id(ctx, *element);
@@ -4052,13 +4055,15 @@ impl<'o> FnChecker<'o> {
                 }
                 let handle = self.synth_expr(ctx, &args[0])?;
                 let tcp_resource = Self::core_class(ctx, "TcpResource");
+                let tls_stream = Self::core_class(ctx, "TlsStream");
                 if handle.ty != lm_types::FILE_HANDLE
                     && !ctx.store.compatible(tcp_resource, handle.ty)
+                    && handle.ty != tls_stream
                 {
                     return Err(Diagnostic::new(
                         "E1004",
                         format!(
-                            "`resource` needs FileHandle or TcpResource, found {}",
+                            "`resource` needs a file or stream resource, found {}",
                             ctx.store.display(handle.ty)
                         ),
                         args[0].span,
@@ -4168,6 +4173,37 @@ impl<'o> FnChecker<'o> {
                     mutable: true,
                     kind: HExprKind::Perform {
                         op: lm_abi::OP_VM_SERVE_TCP_LISTENER,
+                        args: vec![recv_h, call],
+                    },
+                }
+            }
+            (Type::Vm(_), "serve_tls_stream") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`serve_tls_stream` expects 1 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let want_args = Self::op_args_type(ctx, lm_abi::OP_TLS_HANDSHAKE);
+                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TLS_HANDSHAKE).reply);
+                if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`serve_tls_stream` needs a current Tls.Handshake call",
+                        args[0].span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_SERVE_TLS_STREAM, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SERVE_TLS_STREAM,
                         args: vec![recv_h, call],
                     },
                 }

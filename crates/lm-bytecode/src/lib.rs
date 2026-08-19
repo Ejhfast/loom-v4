@@ -31,7 +31,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 97;
+pub const CORE_ROLE_COUNT: usize = 106;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -490,6 +490,10 @@ pub enum NativeInstr {
     BbReserve,
     /// Pop a buffer, clear it, and push the buffer.
     BbClear,
+    /// Pop an index and a buffer, then push one byte or -1.
+    BbAt,
+    /// Pop a start, needle, and buffer, then push an index or -1.
+    BbFindFrom,
     /// Pop an index and bytes, then push the byte as an Int.
     BytesAt,
     /// Pop an index and bytes, then push the byte or -1.
@@ -804,7 +808,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// immutable String instructions. Version 20 adds Bytes and builder
 /// core roles. It also adds their native instructions. Version 21
 /// adds Text, Substring, Char, shared storage, and move instructions.
-pub const VERSION: u16 = 21;
+/// Version 22 adds two active byte-buffer scan instructions. Version
+/// 23 adds the native `TlsStream` class representation.
+pub const VERSION: u16 = 23;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -955,6 +961,8 @@ const OP_BYTES_ENDS_WITH: u8 = 0xb0;
 const OP_BYTES_CONTAINS: u8 = 0xb1;
 const OP_TEXT_SPLIT: u8 = 0xb2;
 const OP_TEXT_LINES: u8 = 0xb3;
+const OP_BB_AT: u8 = 0xb4;
+const OP_BB_FIND_FROM: u8 = 0xb5;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1471,6 +1479,8 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::BbExtend) => out.push(OP_BB_EXTEND),
         Instr::Native(NativeInstr::BbReserve) => out.push(OP_BB_RESERVE),
         Instr::Native(NativeInstr::BbClear) => out.push(OP_BB_CLEAR),
+        Instr::Native(NativeInstr::BbAt) => out.push(OP_BB_AT),
+        Instr::Native(NativeInstr::BbFindFrom) => out.push(OP_BB_FIND_FROM),
         Instr::Native(NativeInstr::BytesNew) => out.push(OP_BYTES_NEW),
         Instr::Native(NativeInstr::BytesLen) => out.push(OP_BYTES_LEN),
         Instr::Native(NativeInstr::BytesText) => out.push(OP_BYTES_TEXT),
@@ -2230,6 +2240,8 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_BB_EXTEND => Instr::Native(NativeInstr::BbExtend),
         OP_BB_RESERVE => Instr::Native(NativeInstr::BbReserve),
         OP_BB_CLEAR => Instr::Native(NativeInstr::BbClear),
+        OP_BB_AT => Instr::Native(NativeInstr::BbAt),
+        OP_BB_FIND_FROM => Instr::Native(NativeInstr::BbFindFrom),
         OP_BYTES_NEW => Instr::Native(NativeInstr::BytesNew),
         OP_BYTES_LEN => Instr::Native(NativeInstr::BytesLen),
         OP_BYTES_TEXT => Instr::Native(NativeInstr::BytesText),
