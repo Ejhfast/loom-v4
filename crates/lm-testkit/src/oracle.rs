@@ -633,6 +633,90 @@ impl<'m> Oracle<'m> {
         }
     }
 
+    /// Test whether one type names an enum family or one of its arms.
+    fn is_enum_family(&self, ty: lm_types::TypeId) -> bool {
+        let Some((class, _)) = self.m.store.nominal_class(ty) else {
+            return false;
+        };
+        matches!(
+            self.m.store.class_meta(class).kind,
+            lm_types::ClassKind::EnumParent | lm_types::ClassKind::EnumCase
+        )
+    }
+
+    /// Structural equality of two enum values: the same case and
+    /// equal fields. Each field takes the rule of its own form, and
+    /// the walk keeps its own stack.
+    fn value_eq(&self, a: &OV, b: &OV) -> bool {
+        let mut work: Vec<(OV, OV)> = vec![(a.clone(), b.clone())];
+        while let Some((left, right)) = work.pop() {
+            let equal = match (&left, &right) {
+                (OV::Unit, OV::Unit) => true,
+                (OV::Int(x), OV::Int(y)) => x == y,
+                (OV::Bool(x), OV::Bool(y)) => x == y,
+                (OV::Char(x), OV::Char(y)) => x == y,
+                (OV::Str(x), OV::Str(y))
+                | (OV::Str(x), OV::Substring(y))
+                | (OV::Substring(x), OV::Str(y))
+                | (OV::Substring(x), OV::Substring(y)) => x == y,
+                (OV::Obj(x), OV::Obj(y)) => {
+                    if Rc::ptr_eq(x, y) {
+                        continue;
+                    }
+                    let xb = x.borrow();
+                    let yb = y.borrow();
+                    match (&xb.kind, &yb.kind) {
+                        (OKind::Bytes(p), OKind::Bytes(q)) => p == q,
+                        (
+                            OKind::Instance {
+                                class: ac,
+                                fields: af,
+                            },
+                            OKind::Instance {
+                                class: bc,
+                                fields: bf,
+                            },
+                        ) => {
+                            let is_case = self
+                                .m
+                                .classes
+                                .get(*ac as usize)
+                                .map(|c| c.kind == lm_types::ClassKind::EnumCase)
+                                .unwrap_or(false);
+                            if !is_case || ac != bc || af.len() != bf.len() {
+                                false
+                            } else {
+                                for (p, q) in af.iter().zip(bf.iter()) {
+                                    match (p, q) {
+                                        (Some(p), Some(q)) => work.push((p.clone(), q.clone())),
+                                        _ => return false,
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                        (OKind::Tuple(ai), OKind::Tuple(bi)) => {
+                            if ai.len() != bi.len() {
+                                false
+                            } else {
+                                for (p, q) in ai.iter().zip(bi.iter()) {
+                                    work.push((p.clone(), q.clone()));
+                                }
+                                continue;
+                            }
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+            if !equal {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Structural tuple equality: element pairs compare under the
     /// rules for their declared element types.
     fn tuple_eq(&self, a: &OV, b: &OV, ty: lm_types::TypeId) -> bool {
@@ -701,6 +785,8 @@ impl<'m> Oracle<'m> {
                 let is_tuple = matches!(self.m.store.get(operand_ty), lm_types::Type::Tuple(_));
                 let equal = if is_tuple {
                     self.tuple_eq(&l, &r, operand_ty)
+                } else if self.is_enum_family(operand_ty) {
+                    self.value_eq(&l, &r)
                 } else {
                     match (&l, &r) {
                         (OV::Int(a), OV::Int(b)) => a == b,

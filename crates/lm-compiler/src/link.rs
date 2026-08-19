@@ -1148,6 +1148,8 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::GtChar)
         | Instr::Native(lm_bytecode::NativeInstr::GeChar)
         | Instr::EqRef
+        | Instr::EqValue
+        | Instr::NeValue
         | Instr::NeRef
         | Instr::CallValue { .. }
         | Instr::LoadCapture(_)

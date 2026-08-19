@@ -547,6 +547,20 @@ impl<'m> Ctx<'m> {
         }
     }
 
+    /// Test whether one class is an enum parent or an enum case.
+    fn is_enum_class(&self, class: u32) -> bool {
+        self.module
+            .classes
+            .get(class as usize)
+            .map(|c| {
+                matches!(
+                    c.kind,
+                    lm_bytecode::BcClassKind::Abstract | lm_bytecode::BcClassKind::Case
+                )
+            })
+            .unwrap_or(false)
+    }
+
     /// The nominal class and arguments of one instance type.
     fn as_instance(&self, ty: u32) -> Option<(u32, Vec<u32>)> {
         match self.ty(ty) {
@@ -781,7 +795,9 @@ impl<'m> Ctx<'m> {
 /// Version 12 adds the `Bool` role. Version 13 adds the `String` role
 /// and String instructions. Version 14 adds Bytes and builder roles.
 /// Version 15 adds the sealed Text family and immediate Char rules.
-pub const VERIFIER_VERSION: u32 = 15;
+/// Version 16 adds the text extraction rules and structural enum
+/// equality.
+pub const VERIFIER_VERSION: u32 = 16;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -2684,6 +2700,29 @@ fn step(
             let value = ctx.plain_inst(ctx.core.char_value, "Char").map_err(&fail)?;
             pop_expect(state, value)?;
             pop_expect(state, value)?;
+            push(state, TY_BOOL)?;
+        }
+        Instr::EqValue | Instr::NeValue => {
+            // Structural equality reads two related enum values. The
+            // machine walks the case and the fields, so the verifier
+            // proves the operand kind and nothing about the walk.
+            let b = pop(state)?;
+            let a = pop(state)?;
+            let enum_side = |t: u32| {
+                ctx.as_instance(t)
+                    .map(|(class, _)| ctx.is_enum_class(class))
+                    .unwrap_or(false)
+            };
+            if !enum_side(a) || !enum_side(b) {
+                return Err(fail(format!(
+                    "structural equality needs two enum values, found {a} and {b}"
+                )));
+            }
+            if !(ctx.is_subtype(a, b) || ctx.is_subtype(b, a)) {
+                return Err(fail(format!(
+                    "structural equality needs related types, found {a} and {b}"
+                )));
+            }
             push(state, TY_BOOL)?;
         }
         Instr::EqRef | Instr::NeRef => {

@@ -2195,6 +2195,13 @@ impl Machine {
                 }
             }
             Instr::Native(_) => unreachable!("native instructions return before dispatch"),
+            Instr::EqValue | Instr::NeValue => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let equal = self.values_equal(module, a, b)?;
+                let want = matches!(instr, Instr::EqValue);
+                self.push(Value::Bool(equal == want))?;
+            }
             Instr::EqRef => {
                 let b = self.pop_obj()?;
                 let a = self.pop_obj()?;
@@ -2941,6 +2948,90 @@ impl Machine {
     }
 
     /// Compare references under the function identity rule.
+    /// Structural equality of two enum values (specification 6.4).
+    ///
+    /// Two values are equal when they hold the same case and every
+    /// field pair is equal. A field takes the rule of its own form: a
+    /// scalar, text, or bytes field compares by value, a nested enum
+    /// or tuple field compares structurally, and every other object
+    /// compares by reference.
+    ///
+    /// The walk keeps an explicit work stack. An enum value can nest
+    /// as deeply as its construction, and a deep value must not grow
+    /// the host stack.
+    fn values_equal(&self, module: &Module, a: Value, b: Value) -> Result<bool, FaultCode> {
+        let mut work: Vec<(Value, Value)> = vec![(a, b)];
+        while let Some((left, right)) = work.pop() {
+            let equal = match (left, right) {
+                (Value::Unit, Value::Unit) => true,
+                (Value::Bool(x), Value::Bool(y)) => x == y,
+                (Value::Int(x), Value::Int(y)) => x == y,
+                (Value::Char(x), Value::Char(y)) => x == y,
+                (Value::Op(x), Value::Op(y)) => x == y,
+                (Value::Obj(x), Value::Obj(y)) => {
+                    if x == y {
+                        continue;
+                    }
+                    match (self.vm.heap.get(x), self.vm.heap.get(y)) {
+                        (Object::Str(s), Object::Str(t))
+                        | (Object::Str(s), Object::Substring(t))
+                        | (Object::Substring(s), Object::Str(t))
+                        | (Object::Substring(s), Object::Substring(t)) => s == t,
+                        (Object::Bytes(s), Object::Bytes(t)) => s == t,
+                        (Object::NativeDigest(s), Object::NativeDigest(t)) => s == t,
+                        (
+                            Object::Instance {
+                                class: ac,
+                                fields: af,
+                                ..
+                            },
+                            Object::Instance {
+                                class: bc,
+                                fields: bf,
+                                ..
+                            },
+                        ) => {
+                            // An ordinary class keeps reference
+                            // identity, so only an enum case walks.
+                            let is_case = module
+                                .classes
+                                .get(*ac as usize)
+                                .map(|c| c.kind == lm_bytecode::BcClassKind::Case)
+                                .unwrap_or(false);
+                            if !is_case || ac != bc || af.len() != bf.len() {
+                                false
+                            } else {
+                                for (x, y) in af.iter().zip(bf.iter()) {
+                                    if matches!(x, Value::Uninit) || matches!(y, Value::Uninit) {
+                                        return Err(FaultCode::UninitializedField);
+                                    }
+                                    work.push((*x, *y));
+                                }
+                                continue;
+                            }
+                        }
+                        (Object::Tuple { items: ai }, Object::Tuple { items: bi }) => {
+                            if ai.len() != bi.len() {
+                                false
+                            } else {
+                                for (x, y) in ai.iter().zip(bi.iter()) {
+                                    work.push((*x, *y));
+                                }
+                                continue;
+                            }
+                        }
+                        _ => self.references_equal(module, x, y),
+                    }
+                }
+                _ => false,
+            };
+            if !equal {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn references_equal(&self, module: &Module, a: ObjRef, b: ObjRef) -> bool {
         if a == b {
             return true;

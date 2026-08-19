@@ -220,6 +220,10 @@ pub enum Instr {
     Native(NativeInstr),
     /// Reference identity equality for heap objects.
     EqRef,
+    /// Structural equality for a sealed enum value: the same arm and
+    /// equal fields. The walk keeps its own stack.
+    EqValue,
+    NeValue,
     NeRef,
     /// Direct call of a non-generic function by table index.
     Call(u32),
@@ -804,7 +808,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// immutable String instructions. Version 20 adds Bytes and builder
 /// core roles. It also adds their native instructions. Version 21
 /// adds Text, Substring, Char, shared storage, and move instructions.
-pub const VERSION: u16 = 21;
+/// Version 22 adds the text extraction and parsing instructions and
+/// the two structural enum equality instructions.
+pub const VERSION: u16 = 22;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -837,6 +843,8 @@ const OP_EQ_STR: u8 = 0x28;
 const OP_NE_STR: u8 = 0x29;
 const OP_EQ_REF: u8 = 0x2a;
 const OP_NE_REF: u8 = 0x2b;
+const OP_EQ_VALUE: u8 = 0xb4;
+const OP_NE_VALUE: u8 = 0xb5;
 const OP_CALL: u8 = 0x30;
 const OP_JUMP: u8 = 0x31;
 const OP_JUMP_IF_FALSE: u8 = 0x32;
@@ -1358,6 +1366,8 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::GtChar) => out.push(OP_GT_CHAR),
         Instr::Native(NativeInstr::GeChar) => out.push(OP_GE_CHAR),
         Instr::EqRef => out.push(OP_EQ_REF),
+        Instr::EqValue => out.push(OP_EQ_VALUE),
+        Instr::NeValue => out.push(OP_NE_VALUE),
         Instr::NeRef => out.push(OP_NE_REF),
         Instr::Call(idx) => {
             out.push(OP_CALL);
@@ -2156,6 +2166,8 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_GT_CHAR => Instr::Native(NativeInstr::GtChar),
         OP_GE_CHAR => Instr::Native(NativeInstr::GeChar),
         OP_EQ_REF => Instr::EqRef,
+        OP_EQ_VALUE => Instr::EqValue,
+        OP_NE_VALUE => Instr::NeValue,
         OP_NE_REF => Instr::NeRef,
         OP_CALL => Instr::Call(cur.u32()?),
         OP_CALL_G => Instr::CallG {
@@ -2443,6 +2455,8 @@ mod tests {
             Instr::Native(NativeInstr::TextSplit),
             Instr::Native(NativeInstr::TextLines),
             Instr::EqRef,
+            Instr::EqValue,
+            Instr::NeValue,
             Instr::NeRef,
             Instr::Call(0),
             Instr::CallG { func: 0, app: 0 },

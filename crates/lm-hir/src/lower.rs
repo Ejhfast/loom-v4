@@ -345,6 +345,22 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         slot
     }
 
+    /// Test whether one type names an enum family or one of its arms.
+    ///
+    /// A constructor builds a family value, so an arm type reaches
+    /// this test through an annotation alone. Both answer yes: the
+    /// value of either is a case with fields, and equality compares
+    /// the case and the fields.
+    fn is_enum_family(&self, ty: TypeId) -> bool {
+        let Some((class, _)) = self.m.store.nominal_class(ty) else {
+            return false;
+        };
+        matches!(
+            self.m.store.class_meta(class).kind,
+            lm_types::ClassKind::EnumParent | lm_types::ClassKind::EnumCase
+        )
+    }
+
     /// Allocate one scratch slot for a checker type.
     fn scratch_of(&mut self, ty: TypeId) -> u32 {
         let bc = self.m.bc_ty(ty);
@@ -569,6 +585,18 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     if matches!(op, BinOp::Ne) {
                         self.emit(Instr::Not);
                     }
+                } else if matches!(op, BinOp::Eq | BinOp::Ne) && self.is_enum_family(*operand_ty) {
+                    // A sealed enum case is a value, so equality is
+                    // the arm plus the fields. The comparison runs in
+                    // the machine, which keeps its own stack, so a
+                    // deep value costs no host frame.
+                    self.lower_expr(left);
+                    self.lower_expr(right);
+                    self.emit(if matches!(op, BinOp::Eq) {
+                        Instr::EqValue
+                    } else {
+                        Instr::NeValue
+                    });
                 } else {
                     self.lower_expr(left);
                     self.lower_expr(right);
@@ -2017,6 +2045,8 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::EqStr)
         | Instr::Native(lm_bytecode::NativeInstr::NeStr)
         | Instr::EqRef
+        | Instr::EqValue
+        | Instr::NeValue
         | Instr::NeRef
         | Instr::Native(lm_bytecode::NativeInstr::StrConcat)
         | Instr::Native(lm_bytecode::NativeInstr::StrStartsWith)
@@ -2231,6 +2261,8 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::GtChar) => "GtChar".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::GeChar) => "GeChar".to_string(),
         Instr::EqRef => "EqRef".to_string(),
+        Instr::EqValue => "EqValue".to_string(),
+        Instr::NeValue => "NeValue".to_string(),
         Instr::NeRef => "NeRef".to_string(),
         Instr::Call(idx) => format!("Call fn{idx}"),
         Instr::CallG { func, app } => format!("CallG fn{func} app{app}"),

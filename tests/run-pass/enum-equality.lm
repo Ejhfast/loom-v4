@@ -1,0 +1,51 @@
+# A sealed enum case is a value, so equality compares the case and the
+# fields. An ordinary class keeps reference identity.
+
+enum Colour
+  Red
+  Green
+  Blue(shade: Int)
+end
+
+def red(): Colour
+  Red
+end
+def blue(n: Int): Colour
+  Blue(n)
+end
+
+# Unit cases of the same arm are equal.
+same_unit = red() == red()
+# Different arms are not.
+cross = red() == blue(1)
+# Payload cases compare their fields.
+same_payload = blue(7) == blue(7)
+diff_payload = blue(7) == blue(8)
+
+# The core enums follow the same rule.
+def none(): Option[Int]
+  None
+end
+def some(v: Int): Option[Int]
+  Some(v)
+end
+core = "{none() == none()} {some(1) == some(1)} {some(1) == none()}"
+ord = Ordering.Less == Ordering.Less
+
+# A recursive enum compares to its own depth.
+enum Chain
+  Tip
+  Link(head: Int, tail: Chain)
+end
+def chain(second: Int): Chain
+  Link(1, Link(second, Tip))
+end
+deep = "{chain(2) == chain(2)} {chain(2) == chain(9)}"
+
+# An ordinary class still compares by reference.
+class Box
+  v: Int = 1
+end
+boxes = Box() == Box()
+
+"{same_unit} {cross} {same_payload} {diff_payload} | {core} | {ord} | {deep} | {boxes}"

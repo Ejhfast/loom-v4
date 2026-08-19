@@ -77,7 +77,9 @@ use std::collections::HashMap;
 /// Version 15 adds the native String class and String instructions.
 /// Version 16 adds Bytes and nominal builder classes.
 /// Version 17 adds scalar Text, Substring, Char, and builder moves.
-pub const COMPILER_ABI_VERSION: u32 = 17;
+/// Version 18 adds the text extraction and parsing lowering, and it
+/// lowers enum equality to the structural instructions.
+pub const COMPILER_ABI_VERSION: u32 = 18;
 
 /// The refinement work budget of one component.
 ///
@@ -500,6 +502,8 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::GtChar)
         | Instr::Native(NativeInstr::GeChar)
         | Instr::EqRef
+        | Instr::EqValue
+        | Instr::NeValue
         | Instr::NeRef
         | Instr::ListLen
         | Instr::ListAt
@@ -1302,6 +1306,8 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::GeChar) => out.push(0x9b),
             Instr::EqRef => out.push(0x2a),
             Instr::NeRef => out.push(0x2b),
+            Instr::EqValue => out.push(0xb4),
+            Instr::NeValue => out.push(0xb5),
             Instr::Call(f) => {
                 out.push(0x30);
                 write_ident(out, &self.func_ident(*f));
