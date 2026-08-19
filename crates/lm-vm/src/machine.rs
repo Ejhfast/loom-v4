@@ -2959,6 +2959,11 @@ impl Machine {
     /// The walk keeps an explicit work stack. An enum value can nest
     /// as deeply as its construction, and a deep value must not grow
     /// the host stack.
+    ///
+    /// The body stays out of the dispatch loop. Every instruction
+    /// pays for the size of that loop, and this comparison runs on
+    /// one instruction alone.
+    #[inline(never)]
     fn values_equal(&self, module: &Module, a: Value, b: Value) -> Result<bool, FaultCode> {
         let mut work: Vec<(Value, Value)> = vec![(a, b)];
         while let Some((left, right)) = work.pop() {

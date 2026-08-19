@@ -220,10 +220,6 @@ pub enum Instr {
     Native(NativeInstr),
     /// Reference identity equality for heap objects.
     EqRef,
-    /// Structural equality for a sealed enum value: the same arm and
-    /// equal fields. The walk keeps its own stack.
-    EqValue,
-    NeValue,
     NeRef,
     /// Direct call of a non-generic function by table index.
     Call(u32),
@@ -376,6 +372,11 @@ pub enum Instr {
     /// The runtime backstop behind a proven-exhaustive `case`. It
     /// faults if executed. Ends the block.
     Unreachable,
+    /// Structural equality for a sealed enum value: the same arm and
+    /// equal fields. The walk keeps its own stack. The two variants
+    /// sit at the end, so no existing discriminant moves.
+    EqValue,
+    NeValue,
 }
 
 /// One native value instruction.
