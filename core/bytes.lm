@@ -23,15 +23,20 @@ final class Bytes
   end
 
   def slice(self, start: Int, length: Int): Result[Bytes, IndexError]
+    byte_length = self.len()
     if start < 0 or length < 0
       Err(IndexError.OutOfBounds)
-    elsif start > self.len()
+    elsif start > byte_length
       Err(IndexError.OutOfBounds)
-    elsif length > self.len() - start
+    elsif length > byte_length - start
       Err(IndexError.OutOfBounds)
     else
       Ok(intrinsic("bytes.slice", self, start, length))
     end
+  end
+
+  def compact(self): Bytes
+    intrinsic("bytes.compact", self)
   end
 
   def concat(self, other: Bytes): Bytes
@@ -63,6 +68,14 @@ final class Bytes
     end
   end
 
+  def utf8_view(self): Result[Substring, Utf8Error]
+    if intrinsic("bytes.is_utf8", self)
+      Ok(intrinsic("bytes.text_view", self))
+    else
+      Err(Utf8Error.InvalidEncoding)
+    end
+  end
+
   def text(self): String
     intrinsic("bytes.text", self)
   end
@@ -78,19 +91,39 @@ final class Bytes
   def __ne__(self, other: Bytes): Bool
     intrinsic("bytes.ne", self, other)
   end
+
+  def __lt__(self, other: Bytes): Bool
+    intrinsic("bytes.lt", self, other)
+  end
+
+  def __le__(self, other: Bytes): Bool
+    intrinsic("bytes.le", self, other)
+  end
+
+  def __gt__(self, other: Bytes): Bool
+    intrinsic("bytes.gt", self, other)
+  end
+
+  def __ge__(self, other: Bytes): Bool
+    intrinsic("bytes.ge", self, other)
+  end
 end
 
 final class StringBuilder
-  def append(mut self, text: String): StringBuilder
+  def append(mut self, text: Text): StringBuilder
     intrinsic("string_builder.append", self, text)
   end
 
-  def push_string(mut self, text: String): StringBuilder
-    intrinsic("string_builder.append", self, text)
+  def push_char(mut self, value: Char): StringBuilder
+    intrinsic("string_builder.push_char", self, value)
   end
 
   def len(self): Int
     intrinsic("string_builder.len", self)
+  end
+
+  def byte_len(self): Int
+    intrinsic("string_builder.byte_len", self)
   end
 
   def clear(mut self): StringBuilder
@@ -101,17 +134,13 @@ final class StringBuilder
     intrinsic("string_builder.build", self)
   end
 
-  def finish(self): String
-    intrinsic("string_builder.build", self)
+  def finish(mut self): String
+    intrinsic("string_builder.finish", self)
   end
 end
 
 final class ByteBuffer
   def append(mut self, byte: Int): ByteBuffer
-    intrinsic("byte_buffer.append", self, byte)
-  end
-
-  def push(mut self, byte: Int): ByteBuffer
     intrinsic("byte_buffer.append", self, byte)
   end
 
@@ -135,7 +164,7 @@ final class ByteBuffer
     intrinsic("byte_buffer.build", self)
   end
 
-  def finish(self): Bytes
-    intrinsic("byte_buffer.build", self)
+  def finish(mut self): Bytes
+    intrinsic("byte_buffer.finish", self)
   end
 end

@@ -13,7 +13,7 @@ use lm_abi::{FaultCode, SnapshotClass};
 use lm_value::{ObjRef, Value, Witness};
 use std::collections::TryReserveError;
 
-use crate::{SharedBytes, SharedText};
+use crate::{NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText};
 
 /// Logical byte cost of one object header.
 pub(crate) const HEADER_COST: usize = 32;
@@ -189,9 +189,9 @@ pub enum Object {
         env: Witness,
     },
     /// A string builder.
-    StrBuilder(String),
+    StrBuilder(NativeStringBuilder),
     /// A byte buffer.
-    ByteBuf(Vec<u8>),
+    ByteBuf(NativeByteBuffer),
     /// Immutable binary data. Born frozen.
     Bytes(SharedBytes),
     /// A holder-local handle to one machine in the world registry.
@@ -229,6 +229,8 @@ pub enum Object {
     NativeResourceHandle { surface: u32, resource: u64 },
     /// A holder-local one-shot wait token.
     NativeWait { owner: u32, token: u64 },
+    /// An immutable UTF-8 view. Born frozen.
+    Substring(SharedText),
 }
 
 /// How a boundary transfer treats one shape.
@@ -462,9 +464,19 @@ const SHAPE_WAIT: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_SUBSTRING: ShapeDesc = ShapeDesc {
+    name: "Substring",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: true,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 20] = [
+pub const SHAPES: [&ShapeDesc; 21] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -485,6 +497,7 @@ pub const SHAPES: [&ShapeDesc; 20] = [
     &SHAPE_FILE_HANDLE,
     &SHAPE_RESOURCE_HANDLE,
     &SHAPE_WAIT,
+    &SHAPE_SUBSTRING,
 ];
 
 impl Object {
@@ -560,13 +573,8 @@ impl Object {
                 captures: copy_values(captures, &mut map)?,
                 env: *env,
             },
-            Object::StrBuilder(text) => Object::StrBuilder(copy_string(text)?),
-            Object::ByteBuf(bytes) => {
-                let mut copied = Vec::new();
-                copied.try_reserve_exact(bytes.len())?;
-                copied.extend_from_slice(bytes);
-                Object::ByteBuf(copied)
-            }
+            Object::StrBuilder(text) => Object::StrBuilder(text.try_clone_buffer()?),
+            Object::ByteBuf(bytes) => Object::ByteBuf(bytes.try_clone_buffer()?),
             Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
             Object::NativeVm { vm } => Object::NativeVm { vm: *vm },
             Object::NativeTable { vm } => Object::NativeTable { vm: *vm },
@@ -601,6 +609,7 @@ impl Object {
                 owner: *owner,
                 token: *token,
             },
+            Object::Substring(text) => Object::Substring(text.clone()),
         })
     }
 
@@ -629,6 +638,7 @@ impl Object {
             Object::NativeFileHandle { .. } => 17,
             Object::NativeResourceHandle { .. } => 18,
             Object::NativeWait { .. } => 19,
+            Object::Substring(_) => 20,
         }
     }
 
@@ -639,17 +649,25 @@ impl Object {
 
     /// The logical byte cost charged against the heap cap.
     pub fn cost(&self) -> usize {
+        self.heap_base_cost()
+            + self
+                .shared_allocation()
+                .map(|(_, capacity)| capacity)
+                .unwrap_or(0)
+    }
+
+    /// The object cost without one shared immutable byte allocation.
+    pub(crate) fn heap_base_cost(&self) -> usize {
         HEADER_COST
             + match self {
-                Object::Str(s) => s.len(),
+                Object::Str(_) | Object::Bytes(_) | Object::Substring(_) => 0,
                 Object::Instance { fields, .. } => fields.len() * VALUE_COST,
                 Object::List { items } => items.len() * VALUE_COST,
                 Object::Map { entries, .. } => entries.len() * ENTRY_COST,
                 Object::Tuple { items } => items.len() * VALUE_COST,
                 Object::Closure { captures, .. } => captures.len() * VALUE_COST,
-                Object::StrBuilder(s) => s.len(),
-                Object::ByteBuf(b) => b.len(),
-                Object::Bytes(b) => b.len(),
+                Object::StrBuilder(s) => s.retained_capacity(),
+                Object::ByteBuf(b) => b.retained_capacity(),
                 Object::NativeVm { .. }
                 | Object::NativeTable { .. }
                 | Object::NativeRequest { .. }
@@ -662,6 +680,26 @@ impl Object {
                 Object::NativeDigest(bytes) => bytes.len(),
                 Object::NativeSnapshot(image) => image.len(),
             }
+    }
+
+    /// Get the identity and capacity of shared immutable byte storage.
+    pub(crate) fn shared_allocation(&self) -> Option<(usize, usize)> {
+        match self {
+            Object::Str(text) | Object::Substring(text) => {
+                Some((text.allocation_key(), text.retained_capacity()))
+            }
+            Object::Bytes(bytes) => Some((bytes.allocation_key(), bytes.retained_capacity())),
+            _ => None,
+        }
+    }
+
+    /// Test whether no other value holds the shared allocation.
+    pub(crate) fn shared_allocation_is_unique(&self) -> bool {
+        match self {
+            Object::Str(text) | Object::Substring(text) => text.allocation_is_unique(),
+            Object::Bytes(bytes) => bytes.allocation_is_unique(),
+            _ => false,
+        }
     }
 
     /// Push every object reference inside this object onto `out`, in
@@ -693,6 +731,7 @@ impl Object {
             | Object::NativeFileHandle { .. }
             | Object::NativeResourceHandle { .. }
             | Object::NativeWait { .. } => {}
+            Object::Substring(_) => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
             Object::Map { entries, .. } => {
@@ -718,6 +757,7 @@ impl Object {
     pub fn shell(&self) -> Option<Object> {
         let shell = match self {
             Object::Str(s) => Object::Str(s.clone()),
+            Object::Substring(text) => Object::Substring(text.clone()),
             Object::NativeFault { code, message, op } => Object::NativeFault {
                 code: *code,
                 message: message.clone(),
@@ -777,6 +817,7 @@ impl Object {
         };
         let out = match self {
             Object::Str(_)
+            | Object::Substring(_)
             | Object::NativeFault { .. }
             | Object::NativeDigest(_)
             | Object::NativeHandle { .. }
@@ -902,8 +943,8 @@ mod tests {
                 captures: vec![Value::Obj(b), Value::Unit, Value::Obj(a)],
                 env: Witness(lm_value::TypeEnvId(7)),
             },
-            Object::StrBuilder("buffer".to_string()),
-            Object::ByteBuf(vec![1, 2, 3]),
+            Object::StrBuilder(NativeStringBuilder::from_string("buffer".to_string())),
+            Object::ByteBuf(NativeByteBuffer::from_vec(vec![1, 2, 3])),
             Object::NativeVm { vm: 1 },
             Object::NativeTable { vm: 1 },
             Object::NativeRequest { vm: 1, ordinal: 2 },
@@ -930,6 +971,7 @@ mod tests {
                 resource: 4,
             },
             Object::NativeWait { owner: 1, token: 2 },
+            Object::Substring("view".into()),
         ]
     }
 
@@ -1059,8 +1101,8 @@ mod tests {
                 captures: vec![],
                 env: Witness::EMPTY,
             },
-            Object::StrBuilder(String::new()),
-            Object::ByteBuf(vec![]),
+            Object::StrBuilder(NativeStringBuilder::new()),
+            Object::ByteBuf(NativeByteBuffer::new()),
             Object::NativeVm { vm: 0 },
             Object::NativeTable { vm: 0 },
             Object::NativeRequest { vm: 0, ordinal: 0 },
@@ -1087,6 +1129,7 @@ mod tests {
                 resource: 0,
             },
             Object::NativeWait { owner: 0, token: 0 },
+            Object::Substring(SharedText::new()),
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1209,6 +1252,7 @@ mod tests {
                 "Snapshot",
                 "Bytes",
                 "FileHandle",
+                "Substring",
             ]
         );
         // A builder holds a private mutable buffer.

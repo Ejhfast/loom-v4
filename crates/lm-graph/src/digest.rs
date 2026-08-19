@@ -18,7 +18,7 @@ use lm_value::{ObjRef, Value};
 
 /// The domain separator of the canonical value encoding. A change to
 /// the encoding must change this string.
-const DOMAIN: &[u8] = b"lm-value-digest-v1\0";
+const DOMAIN: &[u8] = b"lm-value-digest-v2\0";
 
 /// Value tags inside the canonical encoding.
 const V_UNIT: u8 = 0x00;
@@ -30,6 +30,7 @@ const V_OP: u8 = 0x03;
 /// encounter defines the ordinal, and every later encounter repeats
 /// it.
 const V_REF: u8 = 0x04;
+const V_CHAR: u8 = 0x05;
 
 /// The verified semantic identity of transferred code and classes.
 ///
@@ -118,6 +119,10 @@ fn encode_value(out: &mut Vec<u8>, value: Value, scratch: &GraphScratch) -> Resu
             out.push(V_INT);
             out.extend_from_slice(&v.to_le_bytes());
         }
+        Value::Char(value) => {
+            out.push(V_CHAR);
+            out.extend_from_slice(&u32::from(value).to_le_bytes());
+        }
         Value::Op(slot) => {
             // An operation crosses by manifest identity, never by
             // its dense slot.
@@ -157,7 +162,7 @@ fn encode_object(
 ) -> Result<(), FaultCode> {
     out.push(object.tag());
     match object {
-        Object::Str(text) => {
+        Object::Str(text) | Object::Substring(text) => {
             count(out, text.len())?;
             out.extend_from_slice(text.as_bytes());
         }

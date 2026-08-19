@@ -23,7 +23,9 @@ enum OV {
     Unit,
     Bool(bool),
     Int(i64),
+    Char(char),
     Str(Rc<String>),
+    Substring(Rc<String>),
     Obj(Rc<RefCell<OObj>>),
 }
 
@@ -38,8 +40,8 @@ enum OKind {
     Map(Vec<(OV, OV)>),
     Tuple(Vec<OV>),
     Closure { func: u32, captures: Vec<OV> },
-    Sb(String),
-    Bb(Vec<u8>),
+    Sb(Option<String>),
+    Bb(Option<Vec<u8>>),
     Bytes(Vec<u8>),
 }
 
@@ -203,6 +205,20 @@ impl<'m> Oracle<'m> {
         }
     }
 
+    fn as_char(&self, value: &OV) -> Result<char, Stop> {
+        match value {
+            OV::Char(value) => Ok(*value),
+            _ => Err(Stop::Limit("expected a Char value")),
+        }
+    }
+
+    fn as_text<'a>(&self, value: &'a OV) -> Result<&'a str, Stop> {
+        match value {
+            OV::Str(text) | OV::Substring(text) => Ok(text.as_str()),
+            _ => Err(Stop::Limit("expected a Text value")),
+        }
+    }
+
     fn alloc(&self, kind: OKind) -> OV {
         let frozen = matches!(
             kind,
@@ -218,8 +234,13 @@ impl<'m> Oracle<'m> {
             Some(NativeRepr::Bool) => return Ok(OV::Bool(false)),
             Some(NativeRepr::String) => return Ok(OV::Str(Rc::new(String::new()))),
             Some(NativeRepr::Bytes) => return Ok(self.alloc(OKind::Bytes(Vec::new()))),
-            Some(NativeRepr::StringBuilder) => return Ok(self.alloc(OKind::Sb(String::new()))),
-            Some(NativeRepr::ByteBuffer) => return Ok(self.alloc(OKind::Bb(Vec::new()))),
+            Some(NativeRepr::StringBuilder) => {
+                return Ok(self.alloc(OKind::Sb(Some(String::new()))))
+            }
+            Some(NativeRepr::ByteBuffer) => return Ok(self.alloc(OKind::Bb(Some(Vec::new())))),
+            Some(NativeRepr::Text | NativeRepr::Substring | NativeRepr::Char) => {
+                return Err(Stop::Limit("a text view or Char has no direct constructor"))
+            }
             None => {}
         }
         match c.ctor_kind {
@@ -420,7 +441,9 @@ impl<'m> Oracle<'m> {
                         HInterpPart::Expr(e) => match self.eval(e, frame, depth)? {
                             OV::Int(v) => out.push_str(&v.to_string()),
                             OV::Bool(v) => out.push_str(if v { "true" } else { "false" }),
+                            OV::Char(value) => out.push(value),
                             OV::Str(s) => out.push_str(&s),
+                            OV::Substring(s) => out.push_str(&s),
                             _ => return Err(Stop::Limit("non-scalar interpolation")),
                         },
                     }
@@ -565,7 +588,10 @@ impl<'m> Oracle<'m> {
         match (a, b) {
             (OV::Int(x), OV::Int(y)) => x == y,
             (OV::Bool(x), OV::Bool(y)) => x == y,
-            (OV::Str(x), OV::Str(y)) => x == y,
+            (OV::Str(x), OV::Str(y))
+            | (OV::Str(x), OV::Substring(y))
+            | (OV::Substring(x), OV::Str(y))
+            | (OV::Substring(x), OV::Substring(y)) => x == y,
             (OV::Obj(x), OV::Obj(y)) => {
                 let x = x.borrow();
                 let y = y.borrow();
@@ -695,8 +721,6 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_INT_GE => Some((BinOp::Ge, lm_types::INT)),
             lm_abi::INTRINSIC_BOOL_EQ => Some((BinOp::Eq, lm_types::BOOL)),
             lm_abi::INTRINSIC_BOOL_NE => Some((BinOp::Ne, lm_types::BOOL)),
-            lm_abi::INTRINSIC_STRING_EQ => Some((BinOp::Eq, lm_types::STRING)),
-            lm_abi::INTRINSIC_STRING_NE => Some((BinOp::Ne, lm_types::STRING)),
             _ => None,
         };
         if let Some((op, ty)) = binary {
@@ -717,43 +741,147 @@ impl<'m> Oracle<'m> {
                 OV::Bool(value) => Ok(OV::Bool(!value)),
                 _ => Err(Stop::Limit("non-Bool operand")),
             },
-            lm_abi::INTRINSIC_STRING_BYTE_LEN => match &values[0] {
-                OV::Str(text) => Ok(OV::Int(text.len() as i64)),
-                _ => Err(Stop::Limit("non-String operand")),
-            },
-            lm_abi::INTRINSIC_STRING_CHAR_COUNT => match &values[0] {
-                OV::Str(text) => Ok(OV::Int(text.chars().count() as i64)),
-                _ => Err(Stop::Limit("non-String operand")),
-            },
-            lm_abi::INTRINSIC_STRING_CONCAT => match (&values[0], &values[1]) {
-                (OV::Str(left), OV::Str(right)) => {
-                    let mut text = String::with_capacity(left.len() + right.len());
-                    text.push_str(left);
-                    text.push_str(right);
-                    Ok(OV::Str(Rc::new(text)))
+            lm_abi::INTRINSIC_STRING_BYTE_LEN => {
+                Ok(OV::Int(self.as_text(&values[0])?.len() as i64))
+            }
+            lm_abi::INTRINSIC_STRING_CHAR_COUNT => {
+                Ok(OV::Int(self.as_text(&values[0])?.chars().count() as i64))
+            }
+            lm_abi::INTRINSIC_STRING_CONCAT => {
+                let left = self.as_text(&values[0])?;
+                let right = self.as_text(&values[1])?;
+                let mut text = String::with_capacity(left.len() + right.len());
+                text.push_str(left);
+                text.push_str(right);
+                Ok(OV::Str(Rc::new(text)))
+            }
+            lm_abi::INTRINSIC_STRING_STARTS_WITH => Ok(OV::Bool(
+                self.as_text(&values[0])?
+                    .starts_with(self.as_text(&values[1])?),
+            )),
+            lm_abi::INTRINSIC_STRING_ENDS_WITH => Ok(OV::Bool(
+                self.as_text(&values[0])?
+                    .ends_with(self.as_text(&values[1])?),
+            )),
+            lm_abi::INTRINSIC_STRING_CONTAINS => Ok(OV::Bool(
+                self.as_text(&values[0])?
+                    .contains(self.as_text(&values[1])?),
+            )),
+            lm_abi::INTRINSIC_STRING_FIND_INDEX => {
+                let text = self.as_text(&values[0])?;
+                let needle = self.as_text(&values[1])?;
+                let found = text
+                    .find(needle)
+                    .map(|byte| text[..byte].chars().count() as i64)
+                    .unwrap_or(-1);
+                Ok(OV::Int(found))
+            }
+            lm_abi::INTRINSIC_TEXT_FIND_BYTE_INDEX => {
+                let text = self.as_text(&values[0])?;
+                let needle = self.as_text(&values[1])?;
+                Ok(OV::Int(
+                    text.find(needle).map(|byte| byte as i64).unwrap_or(-1),
+                ))
+            }
+            lm_abi::INTRINSIC_STRING_EQ | lm_abi::INTRINSIC_STRING_NE => {
+                let equal = self.as_text(&values[0])? == self.as_text(&values[1])?;
+                Ok(OV::Bool(
+                    equal == (intrinsic == lm_abi::INTRINSIC_STRING_EQ),
+                ))
+            }
+            lm_abi::INTRINSIC_TEXT_LT
+            | lm_abi::INTRINSIC_TEXT_LE
+            | lm_abi::INTRINSIC_TEXT_GT
+            | lm_abi::INTRINSIC_TEXT_GE => {
+                let left = self.as_text(&values[0])?;
+                let right = self.as_text(&values[1])?;
+                Ok(OV::Bool(match intrinsic {
+                    lm_abi::INTRINSIC_TEXT_LT => left < right,
+                    lm_abi::INTRINSIC_TEXT_LE => left <= right,
+                    lm_abi::INTRINSIC_TEXT_GT => left > right,
+                    _ => left >= right,
+                }))
+            }
+            lm_abi::INTRINSIC_TEXT_AT => {
+                let text = self.as_text(&values[0])?;
+                let index = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                text.chars()
+                    .nth(index)
+                    .map(OV::Char)
+                    .ok_or(Stop::Fault("IndexOutOfBounds"))
+            }
+            lm_abi::INTRINSIC_TEXT_AT_BYTE => {
+                let text = self.as_text(&values[0])?;
+                let index = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                text.get(index..)
+                    .and_then(|suffix| suffix.chars().next())
+                    .map(OV::Char)
+                    .ok_or(Stop::Fault("IndexOutOfBounds"))
+            }
+            lm_abi::INTRINSIC_TEXT_SLICE => {
+                let text = self.as_text(&values[0])?;
+                let start = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                let length = usize::try_from(self.as_int(&values[2])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                let visible: String = text.chars().skip(start).take(length).collect();
+                if visible.chars().count() != length || start > text.chars().count() {
+                    return Err(Stop::Fault("IndexOutOfBounds"));
                 }
-                _ => Err(Stop::Limit("non-String operand")),
+                Ok(OV::Substring(Rc::new(visible)))
+            }
+            lm_abi::INTRINSIC_TEXT_IS_BOUNDARY => {
+                let text = self.as_text(&values[0])?;
+                let index = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                Ok(OV::Bool(text.is_char_boundary(index)))
+            }
+            lm_abi::INTRINSIC_TEXT_SLICE_BYTES => {
+                let text = self.as_text(&values[0])?;
+                let start = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                let length = usize::try_from(self.as_int(&values[2])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(Stop::Fault("IndexOutOfBounds"))?;
+                let visible = text
+                    .get(start..end)
+                    .ok_or(Stop::Fault("IndexOutOfBounds"))?;
+                Ok(OV::Substring(Rc::new(visible.to_string())))
+            }
+            lm_abi::INTRINSIC_TEXT_BYTES => {
+                Ok(self.alloc(OKind::Bytes(self.as_text(&values[0])?.as_bytes().to_vec())))
+            }
+            lm_abi::INTRINSIC_SUBSTRING_TO_STRING => match &values[0] {
+                OV::Substring(text) => Ok(OV::Str(text.clone())),
+                _ => Err(Stop::Limit("String conversion needs a Substring")),
             },
-            lm_abi::INTRINSIC_STRING_STARTS_WITH => match (&values[0], &values[1]) {
-                (OV::Str(text), OV::Str(prefix)) => Ok(OV::Bool(text.starts_with(prefix.as_str()))),
-                _ => Err(Stop::Limit("non-String operand")),
-            },
-            lm_abi::INTRINSIC_STRING_ENDS_WITH => match (&values[0], &values[1]) {
-                (OV::Str(text), OV::Str(suffix)) => Ok(OV::Bool(text.ends_with(suffix.as_str()))),
-                _ => Err(Stop::Limit("non-String operand")),
-            },
-            lm_abi::INTRINSIC_STRING_CONTAINS => match (&values[0], &values[1]) {
-                (OV::Str(text), OV::Str(needle)) => Ok(OV::Bool(text.contains(needle.as_str()))),
-                _ => Err(Stop::Limit("non-String operand")),
-            },
-            lm_abi::INTRINSIC_STRING_FIND_INDEX => match (&values[0], &values[1]) {
-                (OV::Str(text), OV::Str(needle)) => Ok(OV::Int(
-                    text.find(needle.as_str())
-                        .map(|index| index as i64)
-                        .unwrap_or(-1),
-                )),
-                _ => Err(Stop::Limit("non-String operand")),
-            },
+            lm_abi::INTRINSIC_CHAR_CODEPOINT => {
+                Ok(OV::Int(i64::from(u32::from(self.as_char(&values[0])?))))
+            }
+            lm_abi::INTRINSIC_CHAR_UTF8_LEN => {
+                Ok(OV::Int(self.as_char(&values[0])?.len_utf8() as i64))
+            }
+            lm_abi::INTRINSIC_CHAR_EQ
+            | lm_abi::INTRINSIC_CHAR_NE
+            | lm_abi::INTRINSIC_CHAR_LT
+            | lm_abi::INTRINSIC_CHAR_LE
+            | lm_abi::INTRINSIC_CHAR_GT
+            | lm_abi::INTRINSIC_CHAR_GE => {
+                let left = self.as_char(&values[0])?;
+                let right = self.as_char(&values[1])?;
+                Ok(OV::Bool(match intrinsic {
+                    lm_abi::INTRINSIC_CHAR_EQ => left == right,
+                    lm_abi::INTRINSIC_CHAR_NE => left != right,
+                    lm_abi::INTRINSIC_CHAR_LT => left < right,
+                    lm_abi::INTRINSIC_CHAR_LE => left <= right,
+                    lm_abi::INTRINSIC_CHAR_GT => left > right,
+                    _ => left >= right,
+                }))
+            }
             lm_abi::INTRINSIC_BYTES_LEN => {
                 let obj = self.as_obj(&values[0])?;
                 let len = match &obj.borrow().kind {
@@ -864,6 +992,24 @@ impl<'m> Oracle<'m> {
                     .map(|text| OV::Str(Rc::new(text)))
                     .map_err(|_| Stop::Fault("BadCast"))
             }
+            lm_abi::INTRINSIC_BYTES_TEXT_VIEW => {
+                let bytes = self.as_obj(&values[0])?;
+                let bytes = match &bytes.borrow().kind {
+                    OKind::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                String::from_utf8(bytes)
+                    .map(|text| OV::Substring(Rc::new(text)))
+                    .map_err(|_| Stop::Fault("BadCast"))
+            }
+            lm_abi::INTRINSIC_BYTES_COMPACT => {
+                let bytes = self.as_obj(&values[0])?;
+                let bytes = match &bytes.borrow().kind {
+                    OKind::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                Ok(self.alloc(OKind::Bytes(bytes)))
+            }
             lm_abi::INTRINSIC_BYTES_EQ | lm_abi::INTRINSIC_BYTES_NE => {
                 let left = self.as_obj(&values[0])?;
                 let right = self.as_obj(&values[1])?;
@@ -873,15 +1019,30 @@ impl<'m> Oracle<'m> {
                 };
                 Ok(OV::Bool(equal == (intrinsic == lm_abi::INTRINSIC_BYTES_EQ)))
             }
+            lm_abi::INTRINSIC_BYTES_LT
+            | lm_abi::INTRINSIC_BYTES_LE
+            | lm_abi::INTRINSIC_BYTES_GT
+            | lm_abi::INTRINSIC_BYTES_GE => {
+                let left = self.as_obj(&values[0])?;
+                let right = self.as_obj(&values[1])?;
+                let result = match (&left.borrow().kind, &right.borrow().kind) {
+                    (OKind::Bytes(left), OKind::Bytes(right)) => match intrinsic {
+                        lm_abi::INTRINSIC_BYTES_LT => left < right,
+                        lm_abi::INTRINSIC_BYTES_LE => left <= right,
+                        lm_abi::INTRINSIC_BYTES_GT => left > right,
+                        _ => left >= right,
+                    },
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                Ok(OV::Bool(result))
+            }
             lm_abi::INTRINSIC_STRING_BUILDER_APPEND => {
                 let builder = self.as_obj(&values[0])?;
                 frozen_guard(&builder)?;
-                let text = match &values[1] {
-                    OV::Str(text) => text.clone(),
-                    _ => return Err(Stop::Limit("append of a non-string")),
-                };
+                let text = self.as_text(&values[1])?.to_string();
                 match &mut builder.borrow_mut().kind {
-                    OKind::Sb(buffer) => buffer.push_str(&text),
+                    OKind::Sb(Some(buffer)) => buffer.push_str(&text),
+                    OKind::Sb(None) => return Err(Stop::Fault("InvalidVmState")),
                     _ => return Err(Stop::Limit("builder op on a non-builder")),
                 }
                 Ok(values[0].clone())
@@ -889,7 +1050,8 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_STRING_BUILDER_LEN => {
                 let builder = self.as_obj(&values[0])?;
                 let len = match &builder.borrow().kind {
-                    OKind::Sb(buffer) => buffer.len(),
+                    OKind::Sb(Some(buffer)) => buffer.chars().count(),
+                    OKind::Sb(None) => return Err(Stop::Fault("InvalidVmState")),
                     _ => return Err(Stop::Limit("builder op on a non-builder")),
                 };
                 Ok(OV::Int(len as i64))
@@ -898,7 +1060,8 @@ impl<'m> Oracle<'m> {
                 let builder = self.as_obj(&values[0])?;
                 frozen_guard(&builder)?;
                 match &mut builder.borrow_mut().kind {
-                    OKind::Sb(buffer) => buffer.clear(),
+                    OKind::Sb(Some(buffer)) => buffer.clear(),
+                    OKind::Sb(None) => return Err(Stop::Fault("InvalidVmState")),
                     _ => return Err(Stop::Limit("builder op on a non-builder")),
                 }
                 Ok(values[0].clone())
@@ -906,7 +1069,37 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_STRING_BUILDER_BUILD => {
                 let builder = self.as_obj(&values[0])?;
                 let text = match &builder.borrow().kind {
-                    OKind::Sb(buffer) => buffer.clone(),
+                    OKind::Sb(Some(buffer)) => buffer.clone(),
+                    OKind::Sb(None) => return Err(Stop::Fault("InvalidVmState")),
+                    _ => return Err(Stop::Limit("builder op on a non-builder")),
+                };
+                Ok(OV::Str(Rc::new(text)))
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_PUSH_CHAR => {
+                let builder = self.as_obj(&values[0])?;
+                frozen_guard(&builder)?;
+                let value = self.as_char(&values[1])?;
+                match &mut builder.borrow_mut().kind {
+                    OKind::Sb(Some(buffer)) => buffer.push(value),
+                    OKind::Sb(None) => return Err(Stop::Fault("InvalidVmState")),
+                    _ => return Err(Stop::Limit("builder op on a non-builder")),
+                }
+                Ok(values[0].clone())
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_BYTE_LEN => {
+                let builder = self.as_obj(&values[0])?;
+                let len = match &builder.borrow().kind {
+                    OKind::Sb(Some(buffer)) => buffer.len(),
+                    OKind::Sb(None) => return Err(Stop::Fault("InvalidVmState")),
+                    _ => return Err(Stop::Limit("builder op on a non-builder")),
+                };
+                Ok(OV::Int(len as i64))
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_FINISH => {
+                let builder = self.as_obj(&values[0])?;
+                frozen_guard(&builder)?;
+                let text = match &mut builder.borrow_mut().kind {
+                    OKind::Sb(buffer) => buffer.take().ok_or(Stop::Fault("InvalidVmState"))?,
                     _ => return Err(Stop::Limit("builder op on a non-builder")),
                 };
                 Ok(OV::Str(Rc::new(text)))
@@ -917,7 +1110,8 @@ impl<'m> Oracle<'m> {
                 let byte = u8::try_from(self.as_int(&values[1])?)
                     .map_err(|_| Stop::Fault("IntegerOverflow"))?;
                 match &mut buffer.borrow_mut().kind {
-                    OKind::Bb(bytes) => bytes.push(byte),
+                    OKind::Bb(Some(bytes)) => bytes.push(byte),
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
                     _ => return Err(Stop::Limit("buffer op on a non-buffer")),
                 }
                 Ok(values[0].clone())
@@ -931,7 +1125,8 @@ impl<'m> Oracle<'m> {
                     _ => return Err(Stop::Limit("extend from a non-bytes value")),
                 };
                 match &mut buffer.borrow_mut().kind {
-                    OKind::Bb(bytes) => bytes.extend_from_slice(&source),
+                    OKind::Bb(Some(bytes)) => bytes.extend_from_slice(&source),
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
                     _ => return Err(Stop::Limit("buffer op on a non-buffer")),
                 }
                 Ok(values[0].clone())
@@ -942,9 +1137,10 @@ impl<'m> Oracle<'m> {
                 let additional = usize::try_from(self.as_int(&values[1])?)
                     .map_err(|_| Stop::Fault("IntegerOverflow"))?;
                 match &mut buffer.borrow_mut().kind {
-                    OKind::Bb(bytes) => bytes
+                    OKind::Bb(Some(bytes)) => bytes
                         .try_reserve(additional)
                         .map_err(|_| Stop::Fault("HeapLimit"))?,
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
                     _ => return Err(Stop::Limit("buffer op on a non-buffer")),
                 }
                 Ok(values[0].clone())
@@ -953,7 +1149,8 @@ impl<'m> Oracle<'m> {
                 let buffer = self.as_obj(&values[0])?;
                 frozen_guard(&buffer)?;
                 match &mut buffer.borrow_mut().kind {
-                    OKind::Bb(bytes) => bytes.clear(),
+                    OKind::Bb(Some(bytes)) => bytes.clear(),
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
                     _ => return Err(Stop::Limit("buffer op on a non-buffer")),
                 }
                 Ok(values[0].clone())
@@ -961,7 +1158,8 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_BYTE_BUFFER_LEN => {
                 let buffer = self.as_obj(&values[0])?;
                 let len = match &buffer.borrow().kind {
-                    OKind::Bb(bytes) => bytes.len(),
+                    OKind::Bb(Some(bytes)) => bytes.len(),
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
                     _ => return Err(Stop::Limit("buffer op on a non-buffer")),
                 };
                 Ok(OV::Int(len as i64))
@@ -969,7 +1167,17 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_BYTE_BUFFER_BUILD => {
                 let buffer = self.as_obj(&values[0])?;
                 let bytes = match &buffer.borrow().kind {
-                    OKind::Bb(bytes) => bytes.clone(),
+                    OKind::Bb(Some(bytes)) => bytes.clone(),
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
+                    _ => return Err(Stop::Limit("buffer op on a non-buffer")),
+                };
+                Ok(self.alloc(OKind::Bytes(bytes)))
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_FINISH => {
+                let buffer = self.as_obj(&values[0])?;
+                frozen_guard(&buffer)?;
+                let bytes = match &mut buffer.borrow_mut().kind {
+                    OKind::Bb(bytes) => bytes.take().ok_or(Stop::Fault("InvalidVmState"))?,
                     _ => return Err(Stop::Limit("buffer op on a non-buffer")),
                 };
                 Ok(self.alloc(OKind::Bytes(bytes)))
@@ -1169,7 +1377,9 @@ impl<'m> Oracle<'m> {
             OV::Unit => "()".to_string(),
             OV::Bool(v) => v.to_string(),
             OV::Int(v) => v.to_string(),
+            OV::Char(value) => format!("{value:?}"),
             OV::Str(s) => render_string(s),
+            OV::Substring(s) => render_string(s),
             OV::Obj(o) => {
                 if depth >= MAX_SHOW_DEPTH {
                     return "...".to_string();
@@ -1255,8 +1465,14 @@ impl<'m> Oracle<'m> {
                     OKind::Closure { func, .. } => {
                         format!("<closure {}>", self.m.funcs[*func as usize].name)
                     }
-                    OKind::Sb(buf) => format!("<StringBuilder len {}>", buf.len()),
-                    OKind::Bb(bytes) => format!("<ByteBuffer len {}>", bytes.len()),
+                    OKind::Sb(Some(buf)) => {
+                        format!("<StringBuilder length {}>", buf.len())
+                    }
+                    OKind::Sb(None) => "<finished StringBuilder>".to_string(),
+                    OKind::Bb(Some(bytes)) => {
+                        format!("<ByteBuffer length {}>", bytes.len())
+                    }
+                    OKind::Bb(None) => "<finished ByteBuffer>".to_string(),
                     OKind::Bytes(bytes) => format!("<Bytes len {}>", bytes.len()),
                 }
             }

@@ -425,7 +425,14 @@ fn case_class_with_normal_parent_is_rejected() {
     let parent = module
         .classes
         .iter()
-        .position(|c| c.kind == BcClassKind::Abstract)
+        .enumerate()
+        .find(|(index, class)| {
+            class.kind == BcClassKind::Abstract
+                && module.classes.iter().any(|child| {
+                    child.kind == BcClassKind::Case && child.parent() == Some(*index as u32)
+                })
+        })
+        .map(|(index, _)| index)
         .expect("the sample has an enum parent");
     module.classes[parent].kind = BcClassKind::Normal;
     expect_verify_reject(&lm_bytecode::encode(&module), "case class");

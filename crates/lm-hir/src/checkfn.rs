@@ -228,30 +228,21 @@ type OperatorHook = (u32, Vec<TypeId>, (MethodSig, Vec<TypeId>, u32));
 
 /// Extract the nominal class and arguments of one instance type.
 fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {
-    match ctx.store.get(ty) {
-        Type::Int => ctx
-            .core_types
-            .get("Int")
-            .copied()
-            .map(|class| (class, vec![])),
-        Type::Bool => ctx
-            .core_types
-            .get("Bool")
-            .copied()
-            .map(|class| (class, vec![])),
-        Type::String => ctx
-            .core_types
-            .get("String")
-            .copied()
-            .map(|class| (class, vec![])),
-        Type::Bytes => ctx
-            .core_types
-            .get("Bytes")
-            .copied()
-            .map(|class| (class, vec![])),
-        Type::Class(c) => Some((c.0, vec![])),
-        Type::Inst(c, args) => Some((c.0, args.clone())),
-        _ => None,
+    ctx.store
+        .nominal_class(ty)
+        .map(|(class, args)| (class.0, args))
+}
+
+/// Return Text for a query on any text-keyed map.
+fn map_query_key_type(ctx: &Ctx, key: TypeId) -> TypeId {
+    let Some(text_class) = ctx.core_types.get("Text").copied() else {
+        return key;
+    };
+    let text = ctx.classes[text_class as usize].self_ty;
+    if ctx.store.compatible(text, key) {
+        text
+    } else {
+        key
     }
 }
 
@@ -1618,6 +1609,16 @@ impl<'o> FnChecker<'o> {
                 })
             }
             Callee::Class(class) => {
+                if matches!(
+                    ctx.classes[class as usize].native_repr,
+                    Some(NativeRepr::Text | NativeRepr::Substring | NativeRepr::Char)
+                ) {
+                    return Err(Diagnostic::new(
+                        "E1026",
+                        format!("`{name}` values cannot be constructed directly"),
+                        name_span,
+                    ));
+                }
                 if ctx.classes[class as usize].native_repr == Some(NativeRepr::Bytes)
                     && args.len() == 1
                 {
@@ -2595,8 +2596,20 @@ impl<'o> FnChecker<'o> {
                 native(NativeOp::ListGet, vec![INT], &["index"], ret, false)
             }
             (Type::Map(_, _), "len") => native(NativeOp::MapLen, vec![], NO_NAMES, INT, false),
-            (Type::Map(k, _), "has") => native(NativeOp::MapHas, vec![*k], &["key"], BOOL, false),
-            (Type::Map(k, v), "at") => native(NativeOp::MapAt, vec![*k], &["key"], *v, false),
+            (Type::Map(k, _), "has") => native(
+                NativeOp::MapHas,
+                vec![map_query_key_type(ctx, *k)],
+                &["key"],
+                BOOL,
+                false,
+            ),
+            (Type::Map(k, v), "at") => native(
+                NativeOp::MapAt,
+                vec![map_query_key_type(ctx, *k)],
+                &["key"],
+                *v,
+                false,
+            ),
             (Type::Map(k, v), "put") => native(
                 NativeOp::MapPut,
                 vec![*k, *v],
@@ -2606,7 +2619,13 @@ impl<'o> FnChecker<'o> {
             ),
             (Type::Map(k, v), "get") => {
                 let ret = ctx.option_of(*v);
-                native(NativeOp::MapGet, vec![*k], &["key"], ret, false)
+                native(
+                    NativeOp::MapGet,
+                    vec![map_query_key_type(ctx, *k)],
+                    &["key"],
+                    ret,
+                    false,
+                )
             }
             _ if name == "freeze" && ctx.store.is_heap(recv_ty) && args.is_empty() => {
                 return Ok(freeze_expr(recv_h));
@@ -2973,7 +2992,7 @@ impl<'o> FnChecker<'o> {
                 })
             }
             Type::Map(k, v) => {
-                let key = self.check_expr(ctx, index, k)?;
+                let key = self.check_expr(ctx, index, map_query_key_type(ctx, k))?;
                 let mutable = recv_h.mutable;
                 Ok(HExpr {
                     ty: v,
@@ -3279,7 +3298,10 @@ impl<'o> FnChecker<'o> {
             lm_abi::AbiType::Unit => UNIT,
             lm_abi::AbiType::Bool => BOOL,
             lm_abi::AbiType::Int => INT,
+            lm_abi::AbiType::Text => Self::core_class(ctx, "Text"),
             lm_abi::AbiType::Str => STRING,
+            lm_abi::AbiType::Substring => Self::core_class(ctx, "Substring"),
+            lm_abi::AbiType::Char => Self::core_class(ctx, "Char"),
             lm_abi::AbiType::Bytes => lm_types::BYTES,
             lm_abi::AbiType::StringBuilder => Self::core_class(ctx, "StringBuilder"),
             lm_abi::AbiType::ByteBuffer => Self::core_class(ctx, "ByteBuffer"),

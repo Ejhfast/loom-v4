@@ -76,7 +76,8 @@ use std::collections::HashMap;
 /// class lowering. Version 14 lowers operators through core methods.
 /// Version 15 adds the native String class and String instructions.
 /// Version 16 adds Bytes and nominal builder classes.
-pub const COMPILER_ABI_VERSION: u32 = 16;
+/// Version 17 adds scalar Text, Substring, Char, and builder moves.
+pub const COMPILER_ABI_VERSION: u32 = 17;
 
 /// The refinement work budget of one component.
 ///
@@ -466,6 +467,26 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::StrEndsWith)
         | Instr::Native(NativeInstr::StrContains)
         | Instr::Native(NativeInstr::StrFindIndex)
+        | Instr::Native(NativeInstr::TextFindByteIndex)
+        | Instr::Native(NativeInstr::TextAtByte)
+        | Instr::Native(NativeInstr::TextAt)
+        | Instr::Native(NativeInstr::TextSlice)
+        | Instr::Native(NativeInstr::TextIsBoundary)
+        | Instr::Native(NativeInstr::TextSliceBytes)
+        | Instr::Native(NativeInstr::TextBytes)
+        | Instr::Native(NativeInstr::TextLt)
+        | Instr::Native(NativeInstr::TextLe)
+        | Instr::Native(NativeInstr::TextGt)
+        | Instr::Native(NativeInstr::TextGe)
+        | Instr::Native(NativeInstr::SubstringToString)
+        | Instr::Native(NativeInstr::CharCodepoint)
+        | Instr::Native(NativeInstr::CharUtf8Len)
+        | Instr::Native(NativeInstr::EqChar)
+        | Instr::Native(NativeInstr::NeChar)
+        | Instr::Native(NativeInstr::LtChar)
+        | Instr::Native(NativeInstr::LeChar)
+        | Instr::Native(NativeInstr::GtChar)
+        | Instr::Native(NativeInstr::GeChar)
         | Instr::EqRef
         | Instr::NeRef
         | Instr::ListLen
@@ -482,6 +503,9 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::SbBuild)
         | Instr::Native(NativeInstr::SbLen)
         | Instr::Native(NativeInstr::SbClear)
+        | Instr::Native(NativeInstr::SbAppendChar)
+        | Instr::Native(NativeInstr::SbByteLen)
+        | Instr::Native(NativeInstr::SbFinish)
         | Instr::Native(NativeInstr::BbNew)
         | Instr::Native(NativeInstr::BbAppend)
         | Instr::Native(NativeInstr::BbLen)
@@ -489,6 +513,7 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BbExtend)
         | Instr::Native(NativeInstr::BbReserve)
         | Instr::Native(NativeInstr::BbClear)
+        | Instr::Native(NativeInstr::BbFinish)
         | Instr::Native(NativeInstr::BytesNew)
         | Instr::Native(NativeInstr::BytesLen)
         | Instr::Native(NativeInstr::BytesText)
@@ -502,6 +527,12 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BytesIsUtf8)
         | Instr::Native(NativeInstr::EqBytes)
         | Instr::Native(NativeInstr::NeBytes)
+        | Instr::Native(NativeInstr::LtBytes)
+        | Instr::Native(NativeInstr::LeBytes)
+        | Instr::Native(NativeInstr::GtBytes)
+        | Instr::Native(NativeInstr::GeBytes)
+        | Instr::Native(NativeInstr::BytesCompact)
+        | Instr::Native(NativeInstr::BytesTextView)
         | Instr::Freeze
         | Instr::Digest
         | Instr::EqDigest
@@ -1285,6 +1316,26 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::StrEndsWith) => out.push(0x6b),
             Instr::Native(NativeInstr::StrContains) => out.push(0x6c),
             Instr::Native(NativeInstr::StrFindIndex) => out.push(0x6d),
+            Instr::Native(NativeInstr::TextFindByteIndex) => out.push(0xa6),
+            Instr::Native(NativeInstr::TextAtByte) => out.push(0xa7),
+            Instr::Native(NativeInstr::TextAt) => out.push(0x8a),
+            Instr::Native(NativeInstr::TextSlice) => out.push(0x8b),
+            Instr::Native(NativeInstr::TextIsBoundary) => out.push(0x8c),
+            Instr::Native(NativeInstr::TextSliceBytes) => out.push(0x8d),
+            Instr::Native(NativeInstr::TextBytes) => out.push(0x8e),
+            Instr::Native(NativeInstr::TextLt) => out.push(0x8f),
+            Instr::Native(NativeInstr::TextLe) => out.push(0x90),
+            Instr::Native(NativeInstr::TextGt) => out.push(0x91),
+            Instr::Native(NativeInstr::TextGe) => out.push(0x92),
+            Instr::Native(NativeInstr::SubstringToString) => out.push(0x93),
+            Instr::Native(NativeInstr::CharCodepoint) => out.push(0x94),
+            Instr::Native(NativeInstr::CharUtf8Len) => out.push(0x95),
+            Instr::Native(NativeInstr::EqChar) => out.push(0x96),
+            Instr::Native(NativeInstr::NeChar) => out.push(0x97),
+            Instr::Native(NativeInstr::LtChar) => out.push(0x98),
+            Instr::Native(NativeInstr::LeChar) => out.push(0x99),
+            Instr::Native(NativeInstr::GtChar) => out.push(0x9a),
+            Instr::Native(NativeInstr::GeChar) => out.push(0x9b),
             Instr::EqRef => out.push(0x2a),
             Instr::NeRef => out.push(0x2b),
             Instr::Call(f) => {
@@ -1424,6 +1475,16 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::BytesIsUtf8) => out.push(0x80),
             Instr::Native(NativeInstr::EqBytes) => out.push(0x81),
             Instr::Native(NativeInstr::NeBytes) => out.push(0x82),
+            Instr::Native(NativeInstr::BytesCompact) => out.push(0x9c),
+            Instr::Native(NativeInstr::BytesTextView) => out.push(0x9d),
+            Instr::Native(NativeInstr::LtBytes) => out.push(0x9e),
+            Instr::Native(NativeInstr::LeBytes) => out.push(0x9f),
+            Instr::Native(NativeInstr::GtBytes) => out.push(0xa0),
+            Instr::Native(NativeInstr::GeBytes) => out.push(0xa1),
+            Instr::Native(NativeInstr::SbAppendChar) => out.push(0xa2),
+            Instr::Native(NativeInstr::SbByteLen) => out.push(0xa3),
+            Instr::Native(NativeInstr::SbFinish) => out.push(0xa4),
+            Instr::Native(NativeInstr::BbFinish) => out.push(0xa5),
             Instr::Jump(b) => {
                 out.push(0x31);
                 u(out, *b);

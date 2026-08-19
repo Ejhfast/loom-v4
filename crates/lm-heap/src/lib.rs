@@ -20,8 +20,11 @@ use lm_value::Value;
 pub use shape::{
     dump_shapes, BoundaryPolicy, MapIndex, Object, ShapeDesc, MIN_OBJECT_COST, SHAPES,
 };
-pub use shared::{SharedBytes, SharedText};
+pub use shared::{
+    process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
+};
 use std::cell::Cell;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 
 /// Object-table slots per page.
@@ -33,7 +36,46 @@ struct Header {
     frozen: bool,
     /// The logical byte cost currently charged for the object.
     bytes: usize,
+    /// The shared immutable allocation charged through this object.
+    shared: Option<usize>,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct SharedCharge {
+    capacity: usize,
+    references: usize,
+}
+
+/// Hash trusted allocation addresses for the shared-storage ledger.
+#[derive(Default)]
+struct AllocationHasher(u64);
+
+impl Hasher for AllocationHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = hash;
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        let mut hash = value as u64;
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+        self.0 = hash ^ (hash >> 31);
+    }
+}
+
+type SharedAllocations =
+    std::collections::HashMap<usize, SharedCharge, BuildHasherDefault<AllocationHasher>>;
 
 /// One object-table entry.
 struct Entry {
@@ -239,6 +281,8 @@ pub struct Heap {
     digests: std::collections::HashMap<u32, ([u8; 32], u32)>,
     /// The aggregate ledger of the owning world.
     budget: Option<HeapBudget>,
+    /// Shared immutable allocations referenced by this heap.
+    shared_allocations: SharedAllocations,
 }
 
 impl Heap {
@@ -264,6 +308,7 @@ impl Heap {
             scratch: GraphScratch::default(),
             digests: std::collections::HashMap::new(),
             budget,
+            shared_allocations: SharedAllocations::default(),
         }
     }
 
@@ -315,6 +360,57 @@ impl Heap {
     /// True when charging `cost` more bytes would exceed the cap.
     pub fn would_exceed(&self, cost: usize) -> bool {
         self.would_exceed_batch(cost, 1)
+    }
+
+    /// Get the incremental cost of one object allocation.
+    pub fn allocation_cost(&self, object: &Object) -> usize {
+        object.heap_base_cost()
+            + object
+                .shared_allocation()
+                .filter(|(key, _)| {
+                    object.shared_allocation_is_unique()
+                        || !self.shared_allocations.contains_key(key)
+                })
+                .map(|(_, capacity)| capacity)
+                .unwrap_or(0)
+    }
+
+    fn add_shared(&mut self, shared: Option<(usize, usize)>) -> usize {
+        let Some((key, capacity)) = shared else {
+            return 0;
+        };
+        match self.shared_allocations.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                debug_assert_eq!(entry.get().capacity, capacity);
+                entry.get_mut().references += 1;
+                0
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(SharedCharge {
+                    capacity,
+                    references: 1,
+                });
+                capacity
+            }
+        }
+    }
+
+    fn remove_shared(&mut self, key: Option<usize>) -> usize {
+        let Some(key) = key else {
+            return 0;
+        };
+        let Some(charge) = self.shared_allocations.get_mut(&key) else {
+            debug_assert!(false, "a shared allocation has a heap charge");
+            return 0;
+        };
+        charge.references -= 1;
+        if charge.references != 0 {
+            return 0;
+        }
+        self.shared_allocations
+            .remove(&key)
+            .map(|charge| charge.capacity)
+            .unwrap_or(0)
     }
 
     /// True when object growth would exceed a byte limit.
@@ -391,9 +487,9 @@ impl Heap {
             return false;
         }
         match (&mut builder_entry.live, &source_entry.live) {
-            (Some((_, Object::StrBuilder(builder))), Some((_, Object::Str(source)))) => {
-                builder.push_str(source);
-                true
+            (Some((_, Object::StrBuilder(builder))), Some((_, Object::Str(source))))
+            | (Some((_, Object::StrBuilder(builder))), Some((_, Object::Substring(source)))) => {
+                builder.append(source)
             }
             _ => false,
         }
@@ -402,10 +498,15 @@ impl Heap {
     /// Allocate one object. The caller must check the cap first with
     /// `would_exceed` and run a collection when needed.
     pub fn alloc(&mut self, object: Object) -> ObjRef {
-        let cost = object.cost();
+        let base = object.heap_base_cost();
+        let shared = object.shared_allocation();
+        let shared_key = shared.map(|(key, _)| key);
+        let shared_cost = self.add_shared(shared);
+        let cost = base + shared_cost;
         let header = Header {
             frozen: object.shape().born_frozen,
-            bytes: cost,
+            bytes: base,
+            shared: shared_key,
         };
         self.used_bytes += cost;
         self.live += 1;
@@ -450,7 +551,7 @@ impl Heap {
 
     /// Allocate one object with a fallible table reservation.
     pub fn try_alloc(&mut self, object: Object) -> Result<ObjRef, Object> {
-        if self.would_exceed(object.cost()) {
+        if self.would_exceed(self.allocation_cost(&object)) {
             return Err(object);
         }
         if self.free.is_empty() {
@@ -536,12 +637,52 @@ impl Heap {
 
     /// Update the charged byte count of one object after a mutation.
     pub fn recharge(&mut self, r: ObjRef) {
+        let (old_cost, old_shared, new_cost, new_shared) = {
+            let entry = self.entry(r.slot);
+            assert_eq!(entry.generation, r.generation, "stale object reference");
+            let (header, object) = entry.live.as_ref().expect("live object");
+            (
+                header.bytes,
+                header.shared,
+                object.heap_base_cost(),
+                object.shared_allocation(),
+            )
+        };
+        let new_shared_key = new_shared.map(|(key, _)| key);
+        let (released, added) = if old_shared == new_shared_key {
+            (0, 0)
+        } else {
+            (self.remove_shared(old_shared), self.add_shared(new_shared))
+        };
         let entry = self.entry_mut(r.slot);
-        assert_eq!(entry.generation, r.generation, "stale object reference");
-        let (header, object) = entry.live.as_mut().expect("live object");
-        let new_cost = object.cost();
-        let old_cost = header.bytes;
+        let (header, _) = entry.live.as_mut().expect("live object");
         header.bytes = new_cost;
+        header.shared = new_shared_key;
+        self.used_bytes = self.used_bytes - old_cost - released + new_cost + added;
+        if let Some(budget) = &self.budget {
+            let old_total = old_cost + released;
+            let new_total = new_cost + added;
+            if new_total >= old_total {
+                budget.charge(new_total - old_total, 0);
+            } else {
+                budget.release(old_total - new_total, 0);
+            }
+        }
+    }
+
+    /// Update one object that has no shared allocation.
+    pub fn recharge_local(&mut self, r: ObjRef) {
+        let (old_cost, new_cost) = {
+            let entry = self.entry_mut(r.slot);
+            assert_eq!(entry.generation, r.generation, "stale object reference");
+            let (header, object) = entry.live.as_mut().expect("live object");
+            debug_assert!(header.shared.is_none());
+            debug_assert!(object.shared_allocation().is_none());
+            let old_cost = header.bytes;
+            let new_cost = object.heap_base_cost();
+            header.bytes = new_cost;
+            (old_cost, new_cost)
+        };
         self.used_bytes = self.used_bytes - old_cost + new_cost;
         if let Some(budget) = &self.budget {
             if new_cost >= old_cost {
@@ -564,10 +705,12 @@ impl Heap {
         let (header, _) = entry.live.take().expect("live object");
         entry.generation = entry.generation.wrapping_add(1);
         self.generations[slot as usize] = entry.generation;
-        self.used_bytes -= header.bytes;
+        let shared = self.remove_shared(header.shared);
+        let released = header.bytes + shared;
+        self.used_bytes -= released;
         self.live -= 1;
         if let Some(budget) = &self.budget {
-            budget.release(header.bytes, 1);
+            budget.release(released, 1);
         }
         self.free.push(slot);
         self.digests.remove(&slot);
@@ -638,6 +781,7 @@ impl Heap {
         // Most heaps hold no digest at all. The lookup per freed slot
         // costs a hash, so the empty case skips it.
         let has_digests = !self.digests.is_empty();
+        let shared_allocations = &mut self.shared_allocations;
         for (page_idx, page) in self.pages.iter_mut().enumerate() {
             for (idx, entry) in page.iter_mut().enumerate() {
                 let slot = (page_idx * PAGE_SLOTS + idx) as u32;
@@ -646,6 +790,18 @@ impl Heap {
                 }
                 let (header, _) = entry.live.take().expect("live object");
                 freed_bytes += header.bytes;
+                if let Some(key) = header.shared {
+                    let charge = shared_allocations
+                        .get_mut(&key)
+                        .expect("a shared allocation has a heap charge");
+                    charge.references -= 1;
+                    if charge.references == 0 {
+                        freed_bytes += shared_allocations
+                            .remove(&key)
+                            .expect("the shared allocation exists")
+                            .capacity;
+                    }
+                }
                 freed += 1;
                 entry.generation = entry.generation.wrapping_add(1);
                 self.generations[slot as usize] = entry.generation;
@@ -762,6 +918,7 @@ impl Heap {
         self.host_roots = mapped_host_roots;
         self.scratch = std::mem::take(&mut compacted.scratch);
         self.digests = std::mem::take(&mut compacted.digests);
+        self.shared_allocations = std::mem::take(&mut compacted.shared_allocations);
         roots.copy_from_slice(&mapped_roots);
         Ok(())
     }
@@ -832,14 +989,76 @@ mod tests {
     }
 
     #[test]
+    fn shared_text_and_bytes_charge_one_backing_allocation() {
+        let mut heap = Heap::new(1 << 20);
+        let text = SharedText::from("aé猫z");
+        let view = text.scalar_slice(1, 2).expect("the scalar range is valid");
+        let bytes = text.bytes();
+        let string_base = Object::Str(text.clone()).heap_base_cost();
+        let view_base = Object::Substring(view.clone()).heap_base_cost();
+        let bytes_base = Object::Bytes(bytes.clone()).heap_base_cost();
+        let capacity = text.retained_capacity();
+        let pending_view = Object::Substring(view.clone());
+
+        let string = heap.alloc(Object::Str(text));
+        assert_eq!(heap.used_bytes(), string_base + capacity);
+        assert_eq!(heap.allocation_cost(&pending_view), view_base);
+        let substring = heap.alloc(Object::Substring(view));
+        assert_eq!(heap.used_bytes(), string_base + view_base + capacity);
+        let binary = heap.alloc(Object::Bytes(bytes));
+        assert_eq!(
+            heap.used_bytes(),
+            string_base + view_base + bytes_base + capacity
+        );
+
+        heap.free(string);
+        assert_eq!(heap.used_bytes(), view_base + bytes_base + capacity);
+        heap.free(substring);
+        assert_eq!(heap.used_bytes(), bytes_base + capacity);
+        heap.free(binary);
+        assert_eq!(heap.used_bytes(), 0);
+        assert_eq!(heap.allocation_cost(&pending_view), view_base + capacity);
+    }
+
+    #[test]
+    fn text_views_from_bytes_charge_one_backing_allocation() {
+        let mut heap = Heap::new(1 << 20);
+        let bytes = SharedBytes::from("aé猫z".as_bytes());
+        let text = bytes.utf8_view().expect("the bytes contain UTF-8");
+        let view = text.scalar_slice(1, 2).expect("the scalar range is valid");
+        let text_base = Object::Str(text.clone()).heap_base_cost();
+        let view_base = Object::Substring(view.clone()).heap_base_cost();
+        let capacity = text.retained_capacity();
+
+        let string = heap.alloc(Object::Str(text));
+        assert_eq!(heap.used_bytes(), text_base + capacity);
+        assert_eq!(
+            heap.allocation_cost(&Object::Substring(view.clone())),
+            view_base
+        );
+        let substring = heap.alloc(Object::Substring(view));
+        assert_eq!(heap.used_bytes(), text_base + view_base + capacity);
+
+        heap.free(string);
+        assert_eq!(heap.used_bytes(), view_base + capacity);
+        heap.free(substring);
+        assert_eq!(heap.used_bytes(), 0);
+    }
+
+    #[test]
     fn a_builder_appends_a_string_without_changing_the_source() {
         let mut heap = Heap::new(1 << 20);
-        let builder = heap.alloc(Object::StrBuilder("a".to_string()));
+        let builder = heap.alloc(Object::StrBuilder(NativeStringBuilder::from_string(
+            "a".to_string(),
+        )));
         let source = heap.alloc(str_obj("bc"));
 
         assert!(heap.append_string(builder, source));
-        heap.recharge(builder);
-        assert_eq!(heap.get(builder), &Object::StrBuilder("abc".to_string()));
+        heap.recharge_local(builder);
+        assert_eq!(
+            heap.get(builder),
+            &Object::StrBuilder(NativeStringBuilder::from_string("abc".to_string()))
+        );
         assert_eq!(heap.get(source), &str_obj("bc"));
     }
 

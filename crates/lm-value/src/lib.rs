@@ -76,6 +76,8 @@ pub enum Value {
     Unit,
     Bool(bool),
     Int(i64),
+    /// One Unicode scalar value.
+    Char(char),
     /// A reference to a heap object: string, instance, list, map,
     /// closure, builder, or native handle.
     Obj(ObjRef),
@@ -117,6 +119,11 @@ mod tests {
     fn int_keeps_full_width() {
         let v = Value::Int(i64::MIN);
         assert_eq!(v, Value::Int(i64::MIN));
+    }
+
+    #[test]
+    fn char_keeps_one_unicode_scalar() {
+        assert_eq!(Value::Char('猫'), Value::Char('猫'));
     }
 
     #[test]

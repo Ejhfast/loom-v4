@@ -31,7 +31,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 65;
+pub const CORE_ROLE_COUNT: usize = 68;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -377,14 +377,14 @@ pub enum Instr {
 /// One native value instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeInstr {
-    /// String equality by content.
+    /// Text equality by Unicode scalar content.
     EqStr,
     NeStr,
-    /// Pop a String and push its UTF-8 byte length.
+    /// Pop Text and push its UTF-8 byte length.
     StrByteLen,
-    /// Pop a String and push its Unicode scalar count.
+    /// Pop Text and push its Unicode scalar count.
     StrCharCount,
-    /// Pop two strings, concatenate them, and push a new String.
+    /// Pop two Text values and push their String concatenation.
     StrConcat,
     /// Pop a prefix and a String, then test the prefix.
     StrStartsWith,
@@ -392,8 +392,38 @@ pub enum NativeInstr {
     StrEndsWith,
     /// Pop a needle and a String, then test for the needle.
     StrContains,
-    /// Pop a needle and a String, then push its byte index or -1.
+    /// Pop a needle and Text, then push its scalar index or -1.
     StrFindIndex,
+    /// Pop a needle and Text, then push its byte index or -1.
+    TextFindByteIndex,
+    /// Pop a byte position and Text, then push one Char.
+    TextAtByte,
+    /// Pop a scalar index and Text, then push one Char.
+    TextAt,
+    /// Pop a scalar range and Text, then push one shared Substring.
+    TextSlice,
+    /// Pop a byte position and Text, then test its UTF-8 boundary.
+    TextIsBoundary,
+    /// Pop a byte range and Text, then push one shared Substring.
+    TextSliceBytes,
+    /// Pop Text and push shared immutable bytes.
+    TextBytes,
+    TextLt,
+    TextLe,
+    TextGt,
+    TextGe,
+    /// Pop a Substring and push a bounded String.
+    SubstringToString,
+    /// Pop a Char and push its scalar code point.
+    CharCodepoint,
+    /// Pop a Char and push its UTF-8 byte length.
+    CharUtf8Len,
+    EqChar,
+    NeChar,
+    LtChar,
+    LeChar,
+    GtChar,
+    GeChar,
     /// Allocate an empty string builder.
     SbNew,
     /// Pop a string and a builder, append, and push the builder.
@@ -404,6 +434,12 @@ pub enum NativeInstr {
     SbAppendBool,
     /// Pop a builder and push its content as a new string.
     SbBuild,
+    /// Pop a Char and builder, append, and push the builder.
+    SbAppendChar,
+    /// Pop a builder and push its UTF-8 byte length.
+    SbByteLen,
+    /// Move a builder into String storage and invalidate it.
+    SbFinish,
     /// Allocate an empty byte buffer.
     BbNew,
     /// Pop an Int and a buffer, append one byte, push the buffer.
@@ -412,6 +448,8 @@ pub enum NativeInstr {
     BbLen,
     /// Pop a buffer and push its content as immutable bytes.
     BbBuild,
+    /// Move a buffer into Bytes storage and invalidate it.
+    BbFinish,
     /// Pop a string and push its immutable UTF-8 bytes.
     BytesNew,
     /// Pop immutable bytes and push their length.
@@ -447,6 +485,14 @@ pub enum NativeInstr {
     /// Bytes equality by content.
     EqBytes,
     NeBytes,
+    LtBytes,
+    LeBytes,
+    GtBytes,
+    GeBytes,
+    /// Pop bytes and push an exact copied span.
+    BytesCompact,
+    /// Pop valid UTF-8 bytes and push one shared Substring.
+    BytesTextView,
 }
 
 impl Instr {
@@ -732,8 +778,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// final class flags. Version 17 adds the `Int` core role. Version 18
 /// adds the `Bool` core role. Version 19 adds the String core role and
 /// immutable String instructions. Version 20 adds Bytes and builder
-/// core roles. It also adds their native instructions.
-pub const VERSION: u16 = 20;
+/// core roles. It also adds their native instructions. Version 21
+/// adds Text, Substring, Char, shared storage, and move instructions.
+pub const VERSION: u16 = 21;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -842,6 +889,36 @@ const OP_BB_RESERVE: u8 = 0x86;
 const OP_BB_CLEAR: u8 = 0x87;
 const OP_FAULT_DENIED: u8 = 0x88;
 const OP_REQUEST_OP: u8 = 0x89;
+const OP_TEXT_AT: u8 = 0x8a;
+const OP_TEXT_SLICE: u8 = 0x8b;
+const OP_TEXT_IS_BOUNDARY: u8 = 0x8c;
+const OP_TEXT_SLICE_BYTES: u8 = 0x8d;
+const OP_TEXT_BYTES: u8 = 0x8e;
+const OP_TEXT_LT: u8 = 0x8f;
+const OP_TEXT_LE: u8 = 0x90;
+const OP_TEXT_GT: u8 = 0x91;
+const OP_TEXT_GE: u8 = 0x92;
+const OP_SUBSTRING_TO_STRING: u8 = 0x93;
+const OP_CHAR_CODEPOINT: u8 = 0x94;
+const OP_CHAR_UTF8_LEN: u8 = 0x95;
+const OP_EQ_CHAR: u8 = 0x96;
+const OP_NE_CHAR: u8 = 0x97;
+const OP_LT_CHAR: u8 = 0x98;
+const OP_LE_CHAR: u8 = 0x99;
+const OP_GT_CHAR: u8 = 0x9a;
+const OP_GE_CHAR: u8 = 0x9b;
+const OP_BYTES_COMPACT: u8 = 0x9c;
+const OP_BYTES_TEXT_VIEW: u8 = 0x9d;
+const OP_LT_BYTES: u8 = 0x9e;
+const OP_LE_BYTES: u8 = 0x9f;
+const OP_GT_BYTES: u8 = 0xa0;
+const OP_GE_BYTES: u8 = 0xa1;
+const OP_SB_APPEND_CHAR: u8 = 0xa2;
+const OP_SB_BYTE_LEN: u8 = 0xa3;
+const OP_SB_FINISH: u8 = 0xa4;
+const OP_BB_FINISH: u8 = 0xa5;
+const OP_TEXT_FIND_BYTE_INDEX: u8 = 0xa6;
+const OP_TEXT_AT_BYTE: u8 = 0xa7;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1212,6 +1289,26 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::StrEndsWith) => out.push(OP_STR_ENDS_WITH),
         Instr::Native(NativeInstr::StrContains) => out.push(OP_STR_CONTAINS),
         Instr::Native(NativeInstr::StrFindIndex) => out.push(OP_STR_FIND_INDEX),
+        Instr::Native(NativeInstr::TextFindByteIndex) => out.push(OP_TEXT_FIND_BYTE_INDEX),
+        Instr::Native(NativeInstr::TextAtByte) => out.push(OP_TEXT_AT_BYTE),
+        Instr::Native(NativeInstr::TextAt) => out.push(OP_TEXT_AT),
+        Instr::Native(NativeInstr::TextSlice) => out.push(OP_TEXT_SLICE),
+        Instr::Native(NativeInstr::TextIsBoundary) => out.push(OP_TEXT_IS_BOUNDARY),
+        Instr::Native(NativeInstr::TextSliceBytes) => out.push(OP_TEXT_SLICE_BYTES),
+        Instr::Native(NativeInstr::TextBytes) => out.push(OP_TEXT_BYTES),
+        Instr::Native(NativeInstr::TextLt) => out.push(OP_TEXT_LT),
+        Instr::Native(NativeInstr::TextLe) => out.push(OP_TEXT_LE),
+        Instr::Native(NativeInstr::TextGt) => out.push(OP_TEXT_GT),
+        Instr::Native(NativeInstr::TextGe) => out.push(OP_TEXT_GE),
+        Instr::Native(NativeInstr::SubstringToString) => out.push(OP_SUBSTRING_TO_STRING),
+        Instr::Native(NativeInstr::CharCodepoint) => out.push(OP_CHAR_CODEPOINT),
+        Instr::Native(NativeInstr::CharUtf8Len) => out.push(OP_CHAR_UTF8_LEN),
+        Instr::Native(NativeInstr::EqChar) => out.push(OP_EQ_CHAR),
+        Instr::Native(NativeInstr::NeChar) => out.push(OP_NE_CHAR),
+        Instr::Native(NativeInstr::LtChar) => out.push(OP_LT_CHAR),
+        Instr::Native(NativeInstr::LeChar) => out.push(OP_LE_CHAR),
+        Instr::Native(NativeInstr::GtChar) => out.push(OP_GT_CHAR),
+        Instr::Native(NativeInstr::GeChar) => out.push(OP_GE_CHAR),
         Instr::EqRef => out.push(OP_EQ_REF),
         Instr::NeRef => out.push(OP_NE_REF),
         Instr::Call(idx) => {
@@ -1313,6 +1410,16 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::BbAppend) => out.push(OP_BB_APPEND),
         Instr::Native(NativeInstr::BbLen) => out.push(OP_BB_LEN),
         Instr::Native(NativeInstr::BbBuild) => out.push(OP_BB_BUILD),
+        Instr::Native(NativeInstr::SbAppendChar) => out.push(OP_SB_APPEND_CHAR),
+        Instr::Native(NativeInstr::SbByteLen) => out.push(OP_SB_BYTE_LEN),
+        Instr::Native(NativeInstr::SbFinish) => out.push(OP_SB_FINISH),
+        Instr::Native(NativeInstr::BbFinish) => out.push(OP_BB_FINISH),
+        Instr::Native(NativeInstr::BytesCompact) => out.push(OP_BYTES_COMPACT),
+        Instr::Native(NativeInstr::BytesTextView) => out.push(OP_BYTES_TEXT_VIEW),
+        Instr::Native(NativeInstr::LtBytes) => out.push(OP_LT_BYTES),
+        Instr::Native(NativeInstr::LeBytes) => out.push(OP_LE_BYTES),
+        Instr::Native(NativeInstr::GtBytes) => out.push(OP_GT_BYTES),
+        Instr::Native(NativeInstr::GeBytes) => out.push(OP_GE_BYTES),
         Instr::Native(NativeInstr::BbExtend) => out.push(OP_BB_EXTEND),
         Instr::Native(NativeInstr::BbReserve) => out.push(OP_BB_RESERVE),
         Instr::Native(NativeInstr::BbClear) => out.push(OP_BB_CLEAR),
@@ -1968,6 +2075,26 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_STR_ENDS_WITH => Instr::Native(NativeInstr::StrEndsWith),
         OP_STR_CONTAINS => Instr::Native(NativeInstr::StrContains),
         OP_STR_FIND_INDEX => Instr::Native(NativeInstr::StrFindIndex),
+        OP_TEXT_FIND_BYTE_INDEX => Instr::Native(NativeInstr::TextFindByteIndex),
+        OP_TEXT_AT_BYTE => Instr::Native(NativeInstr::TextAtByte),
+        OP_TEXT_AT => Instr::Native(NativeInstr::TextAt),
+        OP_TEXT_SLICE => Instr::Native(NativeInstr::TextSlice),
+        OP_TEXT_IS_BOUNDARY => Instr::Native(NativeInstr::TextIsBoundary),
+        OP_TEXT_SLICE_BYTES => Instr::Native(NativeInstr::TextSliceBytes),
+        OP_TEXT_BYTES => Instr::Native(NativeInstr::TextBytes),
+        OP_TEXT_LT => Instr::Native(NativeInstr::TextLt),
+        OP_TEXT_LE => Instr::Native(NativeInstr::TextLe),
+        OP_TEXT_GT => Instr::Native(NativeInstr::TextGt),
+        OP_TEXT_GE => Instr::Native(NativeInstr::TextGe),
+        OP_SUBSTRING_TO_STRING => Instr::Native(NativeInstr::SubstringToString),
+        OP_CHAR_CODEPOINT => Instr::Native(NativeInstr::CharCodepoint),
+        OP_CHAR_UTF8_LEN => Instr::Native(NativeInstr::CharUtf8Len),
+        OP_EQ_CHAR => Instr::Native(NativeInstr::EqChar),
+        OP_NE_CHAR => Instr::Native(NativeInstr::NeChar),
+        OP_LT_CHAR => Instr::Native(NativeInstr::LtChar),
+        OP_LE_CHAR => Instr::Native(NativeInstr::LeChar),
+        OP_GT_CHAR => Instr::Native(NativeInstr::GtChar),
+        OP_GE_CHAR => Instr::Native(NativeInstr::GeChar),
         OP_EQ_REF => Instr::EqRef,
         OP_NE_REF => Instr::NeRef,
         OP_CALL => Instr::Call(cur.u32()?),
@@ -2030,6 +2157,16 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_BB_APPEND => Instr::Native(NativeInstr::BbAppend),
         OP_BB_LEN => Instr::Native(NativeInstr::BbLen),
         OP_BB_BUILD => Instr::Native(NativeInstr::BbBuild),
+        OP_SB_APPEND_CHAR => Instr::Native(NativeInstr::SbAppendChar),
+        OP_SB_BYTE_LEN => Instr::Native(NativeInstr::SbByteLen),
+        OP_SB_FINISH => Instr::Native(NativeInstr::SbFinish),
+        OP_BB_FINISH => Instr::Native(NativeInstr::BbFinish),
+        OP_BYTES_COMPACT => Instr::Native(NativeInstr::BytesCompact),
+        OP_BYTES_TEXT_VIEW => Instr::Native(NativeInstr::BytesTextView),
+        OP_LT_BYTES => Instr::Native(NativeInstr::LtBytes),
+        OP_LE_BYTES => Instr::Native(NativeInstr::LeBytes),
+        OP_GT_BYTES => Instr::Native(NativeInstr::GtBytes),
+        OP_GE_BYTES => Instr::Native(NativeInstr::GeBytes),
         OP_BB_EXTEND => Instr::Native(NativeInstr::BbExtend),
         OP_BB_RESERVE => Instr::Native(NativeInstr::BbReserve),
         OP_BB_CLEAR => Instr::Native(NativeInstr::BbClear),
@@ -2231,6 +2368,8 @@ mod tests {
             Instr::Native(NativeInstr::StrEndsWith),
             Instr::Native(NativeInstr::StrContains),
             Instr::Native(NativeInstr::StrFindIndex),
+            Instr::Native(NativeInstr::TextFindByteIndex),
+            Instr::Native(NativeInstr::TextAtByte),
             Instr::EqRef,
             Instr::NeRef,
             Instr::Call(0),

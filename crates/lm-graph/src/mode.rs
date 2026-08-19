@@ -194,7 +194,9 @@ fn copy_value(
     mode: CopyMode,
 ) -> Result<Value, FaultCode> {
     let root = match value {
-        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Op(_) => return Ok(value),
+        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Char(_) | Value::Op(_) => {
+            return Ok(value)
+        }
         // A verified read never produces the marker, and a local slot
         // that holds it is unreadable. A caller that still hands one
         // over takes a local fault instead of a host panic.
@@ -238,7 +240,9 @@ pub fn copy_within(
     limits: &GraphLimits,
 ) -> Result<Value, FaultCode> {
     let root = match value {
-        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Op(_) => return Ok(value),
+        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Char(_) | Value::Op(_) => {
+            return Ok(value)
+        }
         // A verified read never produces the marker, and a local slot
         // that holds it is unreadable. A caller that still hands one
         // over takes a local fault instead of a host panic.
@@ -292,9 +296,10 @@ fn copy_passes_within(
             result = Err(FaultCode::UnsendableValue);
             break;
         };
-        let cost = shell.cost();
+        let mut cost = heap.allocation_cost(&shell);
         if heap.would_exceed(cost) {
             collect(heap, roots.iter().copied());
+            cost = heap.allocation_cost(&shell);
             if heap.would_exceed(cost) {
                 result = Err(FaultCode::HeapLimit);
                 break;
@@ -356,12 +361,13 @@ fn copy_passes(
             result = Err(FaultCode::UnsendableValue);
             break;
         };
-        let cost = shell.cost();
+        let mut cost = dst.allocation_cost(&shell);
         if dst.would_exceed(cost) {
             // The shells are host-rooted already, so a collection
             // here keeps the partial copy. A shell holds unit
             // placeholders, so it roots nothing else.
             collect(dst, dst_roots.iter().copied());
+            cost = dst.allocation_cost(&shell);
             if dst.would_exceed(cost) {
                 result = Err(FaultCode::HeapLimit);
                 break;

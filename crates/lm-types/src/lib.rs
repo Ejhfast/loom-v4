@@ -162,6 +162,8 @@ pub struct TypeStore {
     classes: Vec<ClassMeta>,
     row_names: Vec<String>,
     row_name_index: HashMap<String, u32>,
+    /// Primitive type identifiers mapped to their native core classes.
+    native_classes: HashMap<TypeId, ClassId>,
     /// Memoized subtype answers keyed by `(expected, found)`.
     subtype_cache: RefCell<HashMap<(TypeId, TypeId), bool>>,
 }
@@ -180,6 +182,7 @@ impl TypeStore {
             classes: Vec::new(),
             row_names: Vec::new(),
             row_name_index: HashMap::new(),
+            native_classes: HashMap::new(),
             subtype_cache: RefCell::new(HashMap::new()),
         };
         // Keep this order aligned with the public constants.
@@ -329,6 +332,40 @@ impl TypeStore {
         self.subtype_cache.borrow_mut().clear();
     }
 
+    /// Link one primitive type to its nominal native core class.
+    pub fn set_native_class(&mut self, ty: TypeId, class: ClassId) {
+        self.native_classes.insert(ty, class);
+        self.subtype_cache.borrow_mut().clear();
+    }
+
+    /// Get the nominal class of a primitive or class instance type.
+    pub fn nominal_class(&self, ty: TypeId) -> Option<(ClassId, Vec<TypeId>)> {
+        match self.get(ty) {
+            Type::Class(class) => Some((*class, Vec::new())),
+            Type::Inst(class, args) => Some((*class, args.clone())),
+            _ => self
+                .native_classes
+                .get(&ty)
+                .copied()
+                .map(|class| (class, Vec::new())),
+        }
+    }
+
+    fn type_for_nominal(&mut self, class: ClassId, args: Vec<TypeId>) -> TypeId {
+        if args.is_empty() {
+            if let Some((ty, _)) = self
+                .native_classes
+                .iter()
+                .find(|(_, native)| **native == class)
+            {
+                return *ty;
+            }
+            self.intern(Type::Class(class))
+        } else {
+            self.intern(Type::Inst(class, args))
+        }
+    }
+
     /// The type arguments of `ancestor` seen from an instance of
     /// `child` applied to `args`. `None` when `child` does not inherit
     /// `ancestor`.
@@ -415,39 +452,45 @@ impl TypeStore {
         if let Some(hit) = self.subtype_cache.borrow().get(&key) {
             return *hit;
         }
-        let answer = match (self.get(found), self.get(expected)) {
-            (Type::Class(a), Type::Class(b)) => self.class_extends(*a, *b),
-            // A class may inherit a generic parent, so a plain class
-            // instance can satisfy an application type.
-            (Type::Class(a), Type::Inst(b, ys)) => {
-                self.ancestor_args(*a, &[], *b).as_ref() == Some(ys)
+        let answer = if let (Some((a, xs)), Some((b, ys))) =
+            (self.nominal_class(found), self.nominal_class(expected))
+        {
+            self.ancestor_args(a, &xs, b).as_ref() == Some(&ys)
+        } else {
+            match (self.get(found), self.get(expected)) {
+                (Type::Class(a), Type::Class(b)) => self.class_extends(*a, *b),
+                // A class may inherit a generic parent, so a plain class
+                // instance can satisfy an application type.
+                (Type::Class(a), Type::Inst(b, ys)) => {
+                    self.ancestor_args(*a, &[], *b).as_ref() == Some(ys)
+                }
+                (Type::Inst(a, xs), Type::Class(b)) => {
+                    self.ancestor_args(*a, xs, *b) == Some(Vec::new())
+                }
+                (Type::Inst(a, xs), Type::Inst(b, ys)) => {
+                    self.ancestor_args(*a, xs, *b).as_ref() == Some(ys)
+                }
+                (Type::Tuple(xs), Type::Tuple(ys)) => {
+                    xs.len() == ys.len()
+                        && xs
+                            .iter()
+                            .zip(ys.iter())
+                            .all(|(x, y)| self.compatible(*y, *x))
+                }
+                (Type::Fn(fp, fm, fr, frow), Type::Fn(ep, em, er, erow)) => {
+                    // A function that needs a `mut` argument is not valid
+                    // where the expected type promises a read-only call.
+                    fp.len() == ep.len()
+                        && fp
+                            .iter()
+                            .zip(ep.iter())
+                            .all(|(f, e)| self.compatible(*f, *e))
+                        && fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
+                        && self.compatible(*er, *fr)
+                        && self.row_included(frow, erow)
+                }
+                _ => false,
             }
-            (Type::Inst(a, xs), Type::Class(b)) => {
-                self.ancestor_args(*a, xs, *b) == Some(Vec::new())
-            }
-            (Type::Inst(a, xs), Type::Inst(b, ys)) => {
-                self.ancestor_args(*a, xs, *b).as_ref() == Some(ys)
-            }
-            (Type::Tuple(xs), Type::Tuple(ys)) => {
-                xs.len() == ys.len()
-                    && xs
-                        .iter()
-                        .zip(ys.iter())
-                        .all(|(x, y)| self.compatible(*y, *x))
-            }
-            (Type::Fn(fp, fm, fr, frow), Type::Fn(ep, em, er, erow)) => {
-                // A function that needs a `mut` argument is not valid
-                // where the expected type promises a read-only call.
-                fp.len() == ep.len()
-                    && fp
-                        .iter()
-                        .zip(ep.iter())
-                        .all(|(f, e)| self.compatible(*f, *e))
-                    && fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
-                    && self.compatible(*er, *fr)
-                    && self.row_included(frow, erow)
-            }
-            _ => false,
         };
         self.subtype_cache.borrow_mut().insert(key, answer);
         answer
@@ -462,6 +505,15 @@ impl TypeStore {
         }
         if self.compatible(a, b) {
             return Some(a);
+        }
+        if let (Some((ca, xs)), Some((cb, ys))) = (self.nominal_class(a), self.nominal_class(b)) {
+            let common = self.common_ancestor(ca, cb)?;
+            let left = self.ancestor_args(ca, &xs, common)?;
+            let right = self.ancestor_args(cb, &ys, common)?;
+            if left != right {
+                return None;
+            }
+            return Some(self.type_for_nominal(common, left));
         }
         match (self.get(a).clone(), self.get(b).clone()) {
             (Type::Class(ca), Type::Class(cb)) => {

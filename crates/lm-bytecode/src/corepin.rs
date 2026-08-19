@@ -36,6 +36,12 @@ pub struct CoreLayout {
     pub boolean: Option<u32>,
     /// The core method table of immutable String values.
     pub string: Option<u32>,
+    /// The sealed abstract parent of immutable text values.
+    pub text: Option<u32>,
+    /// The core method table of shared Substring values.
+    pub substring: Option<u32>,
+    /// The core method table of immediate Char values.
+    pub char_value: Option<u32>,
     /// The core method table of immutable Bytes values.
     pub bytes: Option<u32>,
     /// The core method table of StringBuilder values.
@@ -106,7 +112,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 65] = [
+pub const PINNED_LABELS: [&str; 68] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -172,6 +178,9 @@ pub const PINNED_LABELS: [&str; 65] = [
     "Bytes",
     "StringBuilder",
     "ByteBuffer",
+    "Text",
+    "Substring",
+    "Char",
 ];
 
 /// The core role of immediate integer values.
@@ -191,6 +200,15 @@ pub const ROLE_STRING_BUILDER: usize = 63;
 
 /// The core role of ByteBuffer values.
 pub const ROLE_BYTE_BUFFER: usize = 64;
+
+/// The core role of the sealed Text parent.
+pub const ROLE_TEXT: usize = 65;
+
+/// The core role of shared Substring values.
+pub const ROLE_SUBSTRING: usize = 66;
+
+/// The core role of immediate Unicode scalar values.
+pub const ROLE_CHAR: usize = 67;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -244,6 +262,9 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Int" => &mut layout.int,
         "Bool" => &mut layout.boolean,
         "String" => &mut layout.string,
+        "Text" => &mut layout.text,
+        "Substring" => &mut layout.substring,
+        "Char" => &mut layout.char_value,
         "Bytes" => &mut layout.bytes,
         "StringBuilder" => &mut layout.string_builder,
         "ByteBuffer" => &mut layout.byte_buffer,

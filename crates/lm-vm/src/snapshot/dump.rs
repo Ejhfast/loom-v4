@@ -244,9 +244,16 @@ fn payload(object: &Object) -> String {
                 values(captures)
             )
         }
-        Object::StrBuilder(text) => format!("builder len {}", text.len()),
-        Object::ByteBuf(bytes) => format!("buffer len {}", bytes.len()),
+        Object::StrBuilder(text) => match text.byte_len() {
+            Some(len) => format!("builder length {len}"),
+            None => "finished builder".to_string(),
+        },
+        Object::ByteBuf(bytes) => match bytes.len() {
+            Some(len) => format!("buffer length {len}"),
+            None => "finished buffer".to_string(),
+        },
         Object::Bytes(bytes) => format!("bytes len {}", bytes.len()),
+        Object::Substring(text) => format!("substring {text:?}"),
         Object::NativeVm { vm } => format!("machine {vm}"),
         Object::NativeTable { vm } => format!("table of machine {vm}"),
         Object::NativeRequest { vm, ordinal } => format!("request {ordinal} of machine {vm}"),
@@ -286,6 +293,7 @@ fn show(value: Value) -> String {
         Value::Unit => "()".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Int(v) => v.to_string(),
+        Value::Char(value) => format!("{value:?}"),
         Value::Op(op) => format!("<op {}>", op_text(op)),
         Value::Obj(r) => format!("#{}", r.slot),
         Value::Uninit => "<uninit>".to_string(),

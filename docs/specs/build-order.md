@@ -900,7 +900,8 @@ random answers produce byte-for-byte repeatable output.
 
 ### Land
 
-- Harden, optimize where measured, and finish edge-case conformance for the already sealed `List`, `Map`, `String`, `Bytes`, builder, `Option`, and `Result` method tables from Week 3; no ABI-expanding convenience method is added here.
+- Harden the existing core method tables. This set includes collections, Text, String, Substring, Char, Bytes, builders, Option, and Result.
+- Optimize measured costs and finish edge-case conformance. Add no ABI-expanding convenience method here.
 - `std/set`, eager effect-polymorphic collection algorithms, sorting, text utilities, deterministic formatting, numeric/math helpers, `Range`, value utilities, and pure path operations.
 - Iterative bounded `std/json` parser/stringifier over ordinary core values.
 - Library docs generated from canonical signatures and executable examples.

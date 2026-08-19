@@ -222,10 +222,8 @@ fn bench_language_operations() {
         base,
     );
 
-    // String interpolation: format one integer into a fresh short
-    // string. The String method surface of specification 24.6 is not
-    // implemented yet, so interpolation is the one string workload
-    // available. Accumulating instead would measure quadratic copying.
+    // String interpolation formats one integer into new short text.
+    // Accumulation here would measure quadratic copying instead.
     report(
         "string_interp",
         200_000,
@@ -315,12 +313,21 @@ fn bench_language_operations() {
         base,
     );
 
-    // The string builder: the growable path the String methods will
-    // use once specification 24.6 lands.
+    // The string builder uses the growable text path.
     report(
         "string_builder",
         500_000,
         "b = StringBuilder()\ni = 0\nwhile i < 500000\n  b.append(\"x\")\n  i = i + 1\nend\nb.build()\n",
+        base,
+    );
+
+    // Scalar traversal uses one forward UTF-8 byte cursor.
+    report(
+        "text_each",
+        600_000,
+        "def ignore(value: Char): ()\n  ()\nend\n\
+         text = \"aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫aé猫\"\n\
+         i = 0\nwhile i < 10000\n  text.each(ignore)\n  i = i + 1\nend\ntext.len()\n",
         base,
     );
 
