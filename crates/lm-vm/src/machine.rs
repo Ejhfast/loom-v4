@@ -1068,6 +1068,14 @@ impl Machine {
                 | lm_bytecode::NativeInstr::TextLe
                 | lm_bytecode::NativeInstr::TextGt
                 | lm_bytecode::NativeInstr::TextGe
+                | lm_bytecode::NativeInstr::TextTrim
+                | lm_bytecode::NativeInstr::TextTrimStart
+                | lm_bytecode::NativeInstr::TextTrimEnd
+                | lm_bytecode::NativeInstr::TextToLowerAscii
+                | lm_bytecode::NativeInstr::TextToUpperAscii
+                | lm_bytecode::NativeInstr::TextReplace
+                | lm_bytecode::NativeInstr::TextParseIntStatus
+                | lm_bytecode::NativeInstr::TextParseIntValue
                 | lm_bytecode::NativeInstr::SubstringToString,
             ) => self.exec_string_instr(instr),
             Instr::Native(
@@ -1224,6 +1232,120 @@ impl Machine {
                 let bytes = self.text_value(text)?.bytes();
                 let value = self.alloc(Object::Bytes(bytes))?;
                 self.push(value)?;
+            }
+            Instr::Native(
+                lm_bytecode::NativeInstr::TextTrim
+                | lm_bytecode::NativeInstr::TextTrimStart
+                | lm_bytecode::NativeInstr::TextTrimEnd,
+            ) => {
+                let text = self.pop_obj()?;
+                let value = self.text_value(text)?;
+                let source = value.as_str();
+                // Both bounds come from the trimmed views of the same
+                // text, so each one sits on a scalar boundary.
+                let start = match instr {
+                    Instr::Native(lm_bytecode::NativeInstr::TextTrimEnd) => 0,
+                    _ => source.len() - source.trim_start().len(),
+                };
+                let end = match instr {
+                    Instr::Native(lm_bytecode::NativeInstr::TextTrimStart) => source.len(),
+                    _ => source.trim_end().len(),
+                };
+                let end = end.max(start);
+                let slice = value.slice(start, end).ok_or(FaultCode::IndexOutOfBounds)?;
+                let value = self.alloc(Object::Substring(slice))?;
+                self.push(value)?;
+            }
+            Instr::Native(
+                lm_bytecode::NativeInstr::TextToLowerAscii
+                | lm_bytecode::NativeInstr::TextToUpperAscii,
+            ) => {
+                let text = self.pop_obj()?;
+                let value = self.text_value(text)?;
+                // ASCII case mapping keeps every byte width, so the
+                // result has the byte length of the input.
+                let len = value.len();
+                let lower = matches!(
+                    instr,
+                    Instr::Native(lm_bytecode::NativeInstr::TextToLowerAscii)
+                );
+                let mapped = if lower {
+                    value.as_str().to_ascii_lowercase()
+                } else {
+                    value.as_str().to_ascii_uppercase()
+                };
+                self.reserve(len, &[Value::Obj(text)])?;
+                let mapped =
+                    SharedText::try_from_string(mapped).map_err(|_| FaultCode::HeapLimit)?;
+                let value = self.alloc(Object::Str(mapped))?;
+                self.push(value)?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::TextReplace) => {
+                let replacement = self.pop_obj()?;
+                let needle = self.pop_obj()?;
+                let text = self.pop_obj()?;
+                let source = self.text_value(text)?.as_str();
+                let needle_text = self.text_value(needle)?.as_str();
+                let replacement_text = self.text_value(replacement)?.as_str();
+                // Size the result before the allocation. An empty
+                // needle matches at every scalar boundary, so the
+                // count comes from the match walk and never from a
+                // caller-supplied length.
+                let matches = source.match_indices(needle_text).count();
+                let removed = matches
+                    .checked_mul(needle_text.len())
+                    .ok_or(FaultCode::HeapLimit)?;
+                let added = matches
+                    .checked_mul(replacement_text.len())
+                    .ok_or(FaultCode::HeapLimit)?;
+                let len = source
+                    .len()
+                    .checked_sub(removed)
+                    .and_then(|kept| kept.checked_add(added))
+                    .ok_or(FaultCode::HeapLimit)?;
+                self.reserve(
+                    len,
+                    &[
+                        Value::Obj(text),
+                        Value::Obj(needle),
+                        Value::Obj(replacement),
+                    ],
+                )?;
+                let source = self.text_value(text)?.as_str();
+                let needle_text = self.text_value(needle)?.as_str();
+                let replacement_text = self.text_value(replacement)?.as_str();
+                let joined = source.replace(needle_text, replacement_text);
+                let joined =
+                    SharedText::try_from_string(joined).map_err(|_| FaultCode::HeapLimit)?;
+                let value = self.alloc(Object::Str(joined))?;
+                self.push(value)?;
+            }
+            Instr::Native(
+                lm_bytecode::NativeInstr::TextParseIntStatus
+                | lm_bytecode::NativeInstr::TextParseIntValue,
+            ) => {
+                let radix = self.pop_int()?;
+                let text = self.pop_obj()?;
+                let radix = u32::try_from(radix)
+                    .ok()
+                    .filter(|radix| (2..=36).contains(radix))
+                    .ok_or(FaultCode::BadCast)?;
+                let parsed = i64::from_str_radix(self.text_value(text)?.as_str(), radix);
+                let status = matches!(
+                    instr,
+                    Instr::Native(lm_bytecode::NativeInstr::TextParseIntStatus)
+                );
+                let answer = match (status, parsed) {
+                    (true, Ok(_)) => 0,
+                    (true, Err(error)) => match error.kind() {
+                        std::num::IntErrorKind::PosOverflow
+                        | std::num::IntErrorKind::NegOverflow => 2,
+                        _ => 1,
+                    },
+                    (false, Ok(value)) => value,
+                    (false, Err(_)) => 0,
+                };
+                self.push(Value::Int(answer))?;
             }
             Instr::Native(
                 lm_bytecode::NativeInstr::TextLt
@@ -1708,6 +1830,33 @@ impl Machine {
                 let found = match (self.vm.heap.get(bytes), self.vm.heap.get(prefix)) {
                     (Object::Bytes(bytes), Object::Bytes(prefix)) => {
                         bytes.as_slice().starts_with(prefix.as_slice())
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(found))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith) => {
+                let suffix = self.pop_obj()?;
+                let bytes = self.pop_obj()?;
+                let found = match (self.vm.heap.get(bytes), self.vm.heap.get(suffix)) {
+                    (Object::Bytes(bytes), Object::Bytes(suffix)) => {
+                        bytes.as_slice().ends_with(suffix.as_slice())
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Bool(found))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BytesContains) => {
+                let needle = self.pop_obj()?;
+                let bytes = self.pop_obj()?;
+                let found = match (self.vm.heap.get(bytes), self.vm.heap.get(needle)) {
+                    (Object::Bytes(bytes), Object::Bytes(needle)) => {
+                        let needle = needle.as_slice();
+                        needle.is_empty()
+                            || bytes
+                                .as_slice()
+                                .windows(needle.len())
+                                .any(|window| window == needle)
                     }
                     _ => return Err(BAD_TYPE),
                 };

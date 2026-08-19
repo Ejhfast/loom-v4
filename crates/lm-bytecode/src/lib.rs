@@ -398,6 +398,26 @@ pub enum NativeInstr {
     TextFindByteIndex,
     /// Pop a byte position and Text, then push one Char.
     TextAtByte,
+    /// Pop a Text, then push the Substring without outer whitespace.
+    TextTrim,
+    /// Pop a Text, then push the Substring without leading whitespace.
+    TextTrimStart,
+    /// Pop a Text, then push the Substring without trailing whitespace.
+    TextTrimEnd,
+    /// Pop a Text, then push new text with ASCII letters in lower case.
+    TextToLowerAscii,
+    /// Pop a Text, then push new text with ASCII letters in upper case.
+    TextToUpperAscii,
+    /// Pop a replacement, a needle, and a Text, then push new text.
+    TextReplace,
+    /// Pop a radix and Text, then push the parse status code.
+    TextParseIntStatus,
+    /// Pop a radix and Text, then push the parsed integer.
+    TextParseIntValue,
+    /// Pop a suffix and Bytes, then push whether it ends with it.
+    BytesEndsWith,
+    /// Pop a needle and Bytes, then push whether it contains it.
+    BytesContains,
     /// Pop a scalar index and Text, then push one Char.
     TextAt,
     /// Pop a scalar range and Text, then push one shared Substring.
@@ -919,6 +939,16 @@ const OP_SB_FINISH: u8 = 0xa4;
 const OP_BB_FINISH: u8 = 0xa5;
 const OP_TEXT_FIND_BYTE_INDEX: u8 = 0xa6;
 const OP_TEXT_AT_BYTE: u8 = 0xa7;
+const OP_TEXT_TRIM: u8 = 0xa8;
+const OP_TEXT_TRIM_START: u8 = 0xa9;
+const OP_TEXT_TRIM_END: u8 = 0xaa;
+const OP_TEXT_TO_LOWER_ASCII: u8 = 0xab;
+const OP_TEXT_TO_UPPER_ASCII: u8 = 0xac;
+const OP_TEXT_REPLACE: u8 = 0xad;
+const OP_TEXT_PARSE_INT_STATUS: u8 = 0xae;
+const OP_TEXT_PARSE_INT_VALUE: u8 = 0xaf;
+const OP_BYTES_ENDS_WITH: u8 = 0xb0;
+const OP_BYTES_CONTAINS: u8 = 0xb1;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1291,6 +1321,16 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::StrFindIndex) => out.push(OP_STR_FIND_INDEX),
         Instr::Native(NativeInstr::TextFindByteIndex) => out.push(OP_TEXT_FIND_BYTE_INDEX),
         Instr::Native(NativeInstr::TextAtByte) => out.push(OP_TEXT_AT_BYTE),
+        Instr::Native(NativeInstr::TextTrim) => out.push(OP_TEXT_TRIM),
+        Instr::Native(NativeInstr::TextTrimStart) => out.push(OP_TEXT_TRIM_START),
+        Instr::Native(NativeInstr::TextTrimEnd) => out.push(OP_TEXT_TRIM_END),
+        Instr::Native(NativeInstr::TextToLowerAscii) => out.push(OP_TEXT_TO_LOWER_ASCII),
+        Instr::Native(NativeInstr::TextToUpperAscii) => out.push(OP_TEXT_TO_UPPER_ASCII),
+        Instr::Native(NativeInstr::TextReplace) => out.push(OP_TEXT_REPLACE),
+        Instr::Native(NativeInstr::TextParseIntStatus) => out.push(OP_TEXT_PARSE_INT_STATUS),
+        Instr::Native(NativeInstr::TextParseIntValue) => out.push(OP_TEXT_PARSE_INT_VALUE),
+        Instr::Native(NativeInstr::BytesEndsWith) => out.push(OP_BYTES_ENDS_WITH),
+        Instr::Native(NativeInstr::BytesContains) => out.push(OP_BYTES_CONTAINS),
         Instr::Native(NativeInstr::TextAt) => out.push(OP_TEXT_AT),
         Instr::Native(NativeInstr::TextSlice) => out.push(OP_TEXT_SLICE),
         Instr::Native(NativeInstr::TextIsBoundary) => out.push(OP_TEXT_IS_BOUNDARY),
@@ -2077,6 +2117,16 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_STR_FIND_INDEX => Instr::Native(NativeInstr::StrFindIndex),
         OP_TEXT_FIND_BYTE_INDEX => Instr::Native(NativeInstr::TextFindByteIndex),
         OP_TEXT_AT_BYTE => Instr::Native(NativeInstr::TextAtByte),
+        OP_TEXT_TRIM => Instr::Native(NativeInstr::TextTrim),
+        OP_TEXT_TRIM_START => Instr::Native(NativeInstr::TextTrimStart),
+        OP_TEXT_TRIM_END => Instr::Native(NativeInstr::TextTrimEnd),
+        OP_TEXT_TO_LOWER_ASCII => Instr::Native(NativeInstr::TextToLowerAscii),
+        OP_TEXT_TO_UPPER_ASCII => Instr::Native(NativeInstr::TextToUpperAscii),
+        OP_TEXT_REPLACE => Instr::Native(NativeInstr::TextReplace),
+        OP_TEXT_PARSE_INT_STATUS => Instr::Native(NativeInstr::TextParseIntStatus),
+        OP_TEXT_PARSE_INT_VALUE => Instr::Native(NativeInstr::TextParseIntValue),
+        OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),
+        OP_BYTES_CONTAINS => Instr::Native(NativeInstr::BytesContains),
         OP_TEXT_AT => Instr::Native(NativeInstr::TextAt),
         OP_TEXT_SLICE => Instr::Native(NativeInstr::TextSlice),
         OP_TEXT_IS_BOUNDARY => Instr::Native(NativeInstr::TextIsBoundary),
@@ -2370,6 +2420,16 @@ mod tests {
             Instr::Native(NativeInstr::StrFindIndex),
             Instr::Native(NativeInstr::TextFindByteIndex),
             Instr::Native(NativeInstr::TextAtByte),
+            Instr::Native(NativeInstr::TextTrim),
+            Instr::Native(NativeInstr::TextTrimStart),
+            Instr::Native(NativeInstr::TextTrimEnd),
+            Instr::Native(NativeInstr::TextToLowerAscii),
+            Instr::Native(NativeInstr::TextToUpperAscii),
+            Instr::Native(NativeInstr::TextReplace),
+            Instr::Native(NativeInstr::TextParseIntStatus),
+            Instr::Native(NativeInstr::TextParseIntValue),
+            Instr::Native(NativeInstr::BytesEndsWith),
+            Instr::Native(NativeInstr::BytesContains),
             Instr::EqRef,
             Instr::NeRef,
             Instr::Call(0),

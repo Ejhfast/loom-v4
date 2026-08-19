@@ -108,6 +108,84 @@ class Text
     intrinsic("text.bytes", self)
   end
 
+  def trim(self): Substring
+    intrinsic("text.trim", self)
+  end
+
+  def trim_start(self): Substring
+    intrinsic("text.trim_start", self)
+  end
+
+  def trim_end(self): Substring
+    intrinsic("text.trim_end", self)
+  end
+
+  def to_lower_ascii(self): String
+    intrinsic("text.to_lower_ascii", self)
+  end
+
+  def to_upper_ascii(self): String
+    intrinsic("text.to_upper_ascii", self)
+  end
+
+  def replace(self, needle: Text, replacement: Text): String
+    intrinsic("text.replace", self, needle, replacement)
+  end
+
+  def parse_int(self, radix: Int): Result[Int, ParseIntError]
+    status = intrinsic("text.parse_int_status", self, radix)
+    if status == 0
+      Ok(intrinsic("text.parse_int_value", self, radix))
+    elsif status == 2
+      Err(ParseIntError.Overflow)
+    else
+      Err(ParseIntError.Invalid)
+    end
+  end
+
+  # The three methods below compose `find_bytes` and `slice_bytes`.
+  # Each one gives a valid piece, so a caller never handles a
+  # boundary error that cannot happen.
+
+  def split_once(self, separator: Text): Option[(Substring, Substring)]
+    case self.find_bytes(separator)
+    in Some(at)
+      rest = at + separator.byte_len()
+      case self.slice_bytes(0, at)
+      in Ok(head)
+        case self.slice_bytes(rest, self.byte_len() - rest)
+        in Ok(tail) then Some((head, tail))
+        in Err(_) then None
+        end
+      in Err(_) then None
+      end
+    in None then None
+    end
+  end
+
+  def strip_prefix(self, prefix: Text): Option[Substring]
+    if self.starts_with(prefix)
+      start = prefix.byte_len()
+      case self.slice_bytes(start, self.byte_len() - start)
+      in Ok(rest) then Some(rest)
+      in Err(_) then None
+      end
+    else
+      None
+    end
+  end
+
+  def strip_suffix(self, suffix: Text): Option[Substring]
+    if self.ends_with(suffix)
+      case self.slice_bytes(0, self.byte_len() - suffix.byte_len())
+      in Ok(rest) then Some(rest)
+      in Err(_) then None
+      end
+    else
+      None
+    end
+  end
+
   def concat(self, other: Text): String
     intrinsic("text.concat", self, other)
   end

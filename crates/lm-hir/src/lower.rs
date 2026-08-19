@@ -1163,6 +1163,30 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 Instr::Native(lm_bytecode::NativeInstr::TextFindByteIndex)
             }
             lm_abi::INTRINSIC_TEXT_AT_BYTE => Instr::Native(lm_bytecode::NativeInstr::TextAtByte),
+            lm_abi::INTRINSIC_TEXT_TRIM => Instr::Native(lm_bytecode::NativeInstr::TextTrim),
+            lm_abi::INTRINSIC_TEXT_TRIM_START => {
+                Instr::Native(lm_bytecode::NativeInstr::TextTrimStart)
+            }
+            lm_abi::INTRINSIC_TEXT_TRIM_END => Instr::Native(lm_bytecode::NativeInstr::TextTrimEnd),
+            lm_abi::INTRINSIC_TEXT_TO_LOWER_ASCII => {
+                Instr::Native(lm_bytecode::NativeInstr::TextToLowerAscii)
+            }
+            lm_abi::INTRINSIC_TEXT_TO_UPPER_ASCII => {
+                Instr::Native(lm_bytecode::NativeInstr::TextToUpperAscii)
+            }
+            lm_abi::INTRINSIC_TEXT_REPLACE => Instr::Native(lm_bytecode::NativeInstr::TextReplace),
+            lm_abi::INTRINSIC_TEXT_PARSE_INT_STATUS => {
+                Instr::Native(lm_bytecode::NativeInstr::TextParseIntStatus)
+            }
+            lm_abi::INTRINSIC_TEXT_PARSE_INT_VALUE => {
+                Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue)
+            }
+            lm_abi::INTRINSIC_BYTES_ENDS_WITH => {
+                Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith)
+            }
+            lm_abi::INTRINSIC_BYTES_CONTAINS => {
+                Instr::Native(lm_bytecode::NativeInstr::BytesContains)
+            }
             _ => unreachable!("the checker accepts only manifest intrinsics"),
         };
         self.emit(instr);
@@ -1999,6 +2023,16 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::StrFindIndex)
         | Instr::Native(lm_bytecode::NativeInstr::TextFindByteIndex)
         | Instr::Native(lm_bytecode::NativeInstr::TextAtByte)
+        | Instr::Native(lm_bytecode::NativeInstr::TextTrim)
+        | Instr::Native(lm_bytecode::NativeInstr::TextTrimStart)
+        | Instr::Native(lm_bytecode::NativeInstr::TextTrimEnd)
+        | Instr::Native(lm_bytecode::NativeInstr::TextToLowerAscii)
+        | Instr::Native(lm_bytecode::NativeInstr::TextToUpperAscii)
+        | Instr::Native(lm_bytecode::NativeInstr::TextReplace)
+        | Instr::Native(lm_bytecode::NativeInstr::TextParseIntStatus)
+        | Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesContains)
         | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
         | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
         | Instr::Native(lm_bytecode::NativeInstr::BytesConcat)
@@ -2156,6 +2190,20 @@ fn instr_text(instr: &Instr) -> String {
             "TextFindByteIndex".to_string()
         }
         Instr::Native(lm_bytecode::NativeInstr::TextAtByte) => "TextAtByte".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextTrim) => "TextTrim".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextTrimStart) => "TextTrimStart".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextTrimEnd) => "TextTrimEnd".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextToLowerAscii) => "TextToLowerAscii".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextToUpperAscii) => "TextToUpperAscii".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextReplace) => "TextReplace".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextParseIntStatus) => {
+            "TextParseIntStatus".to_string()
+        }
+        Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue) => {
+            "TextParseIntValue".to_string()
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith) => "BytesEndsWith".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesContains) => "BytesContains".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextAt) => "TextAt".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextSlice) => "TextSlice".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextIsBoundary) => "TextIsBoundary".to_string(),

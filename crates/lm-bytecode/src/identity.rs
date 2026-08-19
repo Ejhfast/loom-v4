@@ -469,6 +469,16 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::StrFindIndex)
         | Instr::Native(NativeInstr::TextFindByteIndex)
         | Instr::Native(NativeInstr::TextAtByte)
+        | Instr::Native(NativeInstr::TextTrim)
+        | Instr::Native(NativeInstr::TextTrimStart)
+        | Instr::Native(NativeInstr::TextTrimEnd)
+        | Instr::Native(NativeInstr::TextToLowerAscii)
+        | Instr::Native(NativeInstr::TextToUpperAscii)
+        | Instr::Native(NativeInstr::TextReplace)
+        | Instr::Native(NativeInstr::TextParseIntStatus)
+        | Instr::Native(NativeInstr::TextParseIntValue)
+        | Instr::Native(NativeInstr::BytesEndsWith)
+        | Instr::Native(NativeInstr::BytesContains)
         | Instr::Native(NativeInstr::TextAt)
         | Instr::Native(NativeInstr::TextSlice)
         | Instr::Native(NativeInstr::TextIsBoundary)
@@ -1318,6 +1328,16 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::StrFindIndex) => out.push(0x6d),
             Instr::Native(NativeInstr::TextFindByteIndex) => out.push(0xa6),
             Instr::Native(NativeInstr::TextAtByte) => out.push(0xa7),
+            Instr::Native(NativeInstr::TextTrim) => out.push(0xa8),
+            Instr::Native(NativeInstr::TextTrimStart) => out.push(0xa9),
+            Instr::Native(NativeInstr::TextTrimEnd) => out.push(0xaa),
+            Instr::Native(NativeInstr::TextToLowerAscii) => out.push(0xab),
+            Instr::Native(NativeInstr::TextToUpperAscii) => out.push(0xac),
+            Instr::Native(NativeInstr::TextReplace) => out.push(0xad),
+            Instr::Native(NativeInstr::TextParseIntStatus) => out.push(0xae),
+            Instr::Native(NativeInstr::TextParseIntValue) => out.push(0xaf),
+            Instr::Native(NativeInstr::BytesEndsWith) => out.push(0xb0),
+            Instr::Native(NativeInstr::BytesContains) => out.push(0xb1),
             Instr::Native(NativeInstr::TextAt) => out.push(0x8a),
             Instr::Native(NativeInstr::TextSlice) => out.push(0x8b),
             Instr::Native(NativeInstr::TextIsBoundary) => out.push(0x8c),

@@ -47,6 +47,14 @@ final class Bytes
     intrinsic("bytes.starts_with", self, prefix)
   end
 
+  def ends_with(self, suffix: Bytes): Bool
+    intrinsic("bytes.ends_with", self, suffix)
+  end
+
+  def contains(self, needle: Bytes): Bool
+    intrinsic("bytes.contains", self, needle)
+  end
+
   def find(self, needle: Bytes): Option[Int]
     index = intrinsic("bytes.find_index", self, needle)
     if index < 0

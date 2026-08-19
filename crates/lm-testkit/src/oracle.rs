@@ -340,10 +340,16 @@ impl<'m> Oracle<'m> {
                 for arg in args {
                     values.push(self.eval(arg, frame, depth)?);
                 }
-                let obj = self.as_obj(&recv_v)?;
-                let class = match &obj.borrow().kind {
-                    OKind::Instance { class, .. } => *class,
-                    _ => return Err(Stop::Limit("method call on a non-instance")),
+                let class = match self.native_class(&recv_v) {
+                    Some(class) => class,
+                    None => {
+                        let obj = self.as_obj(&recv_v)?;
+                        let class = match &obj.borrow().kind {
+                            OKind::Instance { class, .. } => *class,
+                            _ => return Err(Stop::Limit("method call on a non-instance")),
+                        };
+                        class
+                    }
                 };
                 let func = self
                     .find_method(class, selector)
@@ -492,6 +498,25 @@ impl<'m> Oracle<'m> {
                  are outside the oracle",
             )),
         }
+    }
+
+    /// The class of one value with a native representation.
+    ///
+    /// A native text or scalar value carries no instance object, so a
+    /// virtual call on a `Text` receiver needs the class from the
+    /// value form. The VM reads the same relation from its heap tag.
+    fn native_class(&self, value: &OV) -> Option<u32> {
+        let want = match value {
+            OV::Str(_) => NativeRepr::String,
+            OV::Substring(_) => NativeRepr::Substring,
+            OV::Char(_) => NativeRepr::Char,
+            _ => return None,
+        };
+        self.m
+            .classes
+            .iter()
+            .position(|class| class.native_repr == Some(want))
+            .map(|index| index as u32)
     }
 
     fn find_method(&self, mut class: u32, selector: &str) -> Option<u32> {
@@ -783,6 +808,51 @@ impl<'m> Oracle<'m> {
                     text.find(needle).map(|byte| byte as i64).unwrap_or(-1),
                 ))
             }
+            lm_abi::INTRINSIC_TEXT_TRIM => {
+                let text = self.as_text(&values[0])?;
+                Ok(OV::Substring(Rc::new(text.trim().to_string())))
+            }
+            lm_abi::INTRINSIC_TEXT_TRIM_START => {
+                let text = self.as_text(&values[0])?;
+                Ok(OV::Substring(Rc::new(text.trim_start().to_string())))
+            }
+            lm_abi::INTRINSIC_TEXT_TRIM_END => {
+                let text = self.as_text(&values[0])?;
+                Ok(OV::Substring(Rc::new(text.trim_end().to_string())))
+            }
+            lm_abi::INTRINSIC_TEXT_TO_LOWER_ASCII => {
+                let text = self.as_text(&values[0])?;
+                Ok(OV::Str(Rc::new(text.to_ascii_lowercase())))
+            }
+            lm_abi::INTRINSIC_TEXT_TO_UPPER_ASCII => {
+                let text = self.as_text(&values[0])?;
+                Ok(OV::Str(Rc::new(text.to_ascii_uppercase())))
+            }
+            lm_abi::INTRINSIC_TEXT_REPLACE => {
+                let text = self.as_text(&values[0])?;
+                let needle = self.as_text(&values[1])?;
+                let replacement = self.as_text(&values[2])?;
+                Ok(OV::Str(Rc::new(text.replace(needle, replacement))))
+            }
+            lm_abi::INTRINSIC_TEXT_PARSE_INT_STATUS | lm_abi::INTRINSIC_TEXT_PARSE_INT_VALUE => {
+                let text = self.as_text(&values[0])?.to_string();
+                let radix = u32::try_from(self.as_int(&values[1])?)
+                    .ok()
+                    .filter(|radix| (2..=36).contains(radix))
+                    .ok_or(Stop::Fault("BadCast"))?;
+                let parsed = i64::from_str_radix(&text, radix);
+                if intrinsic == lm_abi::INTRINSIC_TEXT_PARSE_INT_VALUE {
+                    return Ok(OV::Int(parsed.unwrap_or(0)));
+                }
+                Ok(OV::Int(match parsed {
+                    Ok(_) => 0,
+                    Err(error) => match error.kind() {
+                        std::num::IntErrorKind::PosOverflow
+                        | std::num::IntErrorKind::NegOverflow => 2,
+                        _ => 1,
+                    },
+                }))
+            }
             lm_abi::INTRINSIC_STRING_EQ | lm_abi::INTRINSIC_STRING_NE => {
                 let equal = self.as_text(&values[0])? == self.as_text(&values[1])?;
                 Ok(OV::Bool(
@@ -941,6 +1011,27 @@ impl<'m> Oracle<'m> {
                 let prefix = self.as_obj(&values[1])?;
                 let found = match (&bytes.borrow().kind, &prefix.borrow().kind) {
                     (OKind::Bytes(bytes), OKind::Bytes(prefix)) => bytes.starts_with(prefix),
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                Ok(OV::Bool(found))
+            }
+            lm_abi::INTRINSIC_BYTES_ENDS_WITH => {
+                let bytes = self.as_obj(&values[0])?;
+                let suffix = self.as_obj(&values[1])?;
+                let found = match (&bytes.borrow().kind, &suffix.borrow().kind) {
+                    (OKind::Bytes(bytes), OKind::Bytes(suffix)) => bytes.ends_with(suffix),
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                Ok(OV::Bool(found))
+            }
+            lm_abi::INTRINSIC_BYTES_CONTAINS => {
+                let bytes = self.as_obj(&values[0])?;
+                let needle = self.as_obj(&values[1])?;
+                let found = match (&bytes.borrow().kind, &needle.borrow().kind) {
+                    (OKind::Bytes(bytes), OKind::Bytes(needle)) => {
+                        needle.is_empty()
+                            || bytes.windows(needle.len()).any(|window| window == needle)
+                    }
                     _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
                 };
                 Ok(OV::Bool(found))

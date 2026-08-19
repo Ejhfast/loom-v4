@@ -2594,6 +2594,49 @@ fn step(
             pop_expect(state, text)?;
             push(state, ctx.intern(BcType::Bytes))?;
         }
+        Instr::Native(
+            lm_bytecode::NativeInstr::TextTrim
+            | lm_bytecode::NativeInstr::TextTrimStart
+            | lm_bytecode::NativeInstr::TextTrimEnd,
+        ) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            pop_expect(state, text)?;
+            let value = ctx
+                .plain_inst(ctx.core.substring, "Substring")
+                .map_err(&fail)?;
+            push(state, value)?;
+        }
+        Instr::Native(
+            lm_bytecode::NativeInstr::TextToLowerAscii | lm_bytecode::NativeInstr::TextToUpperAscii,
+        ) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            pop_expect(state, text)?;
+            push(state, TY_STR)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::TextReplace) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            pop_expect(state, text)?;
+            pop_expect(state, text)?;
+            pop_expect(state, text)?;
+            push(state, TY_STR)?;
+        }
+        Instr::Native(
+            lm_bytecode::NativeInstr::TextParseIntStatus
+            | lm_bytecode::NativeInstr::TextParseIntValue,
+        ) => {
+            pop_expect(state, TY_INT)?;
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            pop_expect(state, text)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Native(
+            lm_bytecode::NativeInstr::BytesEndsWith | lm_bytecode::NativeInstr::BytesContains,
+        ) => {
+            let bytes = ctx.intern(BcType::Bytes);
+            pop_expect(state, bytes)?;
+            pop_expect(state, bytes)?;
+            push(state, TY_BOOL)?;
+        }
         Instr::Native(lm_bytecode::NativeInstr::SubstringToString) => {
             let value = ctx
                 .plain_inst(ctx.core.substring, "Substring")

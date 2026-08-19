@@ -1,0 +1,41 @@
+# The narrowing methods give a Substring and copy nothing.
+# The transforming methods give a String.
+
+header = "  Content-Length: 42  "
+field = header.trim()
+
+name = case field.split_once(": ")
+in Some((key, _)) then key.to_lower_ascii()
+in None then "no field"
+end
+
+length = case field.split_once(": ")
+in Some((_, value))
+  case value.parse_int(10)
+  in Ok(number)  then number
+  in Err(_)      then 0 - 1
+  end
+in None then 0 - 2
+end
+
+route = case "/api/users".strip_prefix("/api/")
+in Some(rest) then rest
+in None then "no prefix"
+end
+
+stem = case "report.txt".strip_suffix(".txt")
+in Some(rest) then rest
+in None then "no suffix"
+end
+
+# A Substring interpolates without a copy.
+padded = "  x  "
+edges = "[{padded.trim_start()}][{padded.trim_end()}]"
+
+raw = "hello".bytes()
+suffix = "lo".bytes()
+middle = "ell".bytes()
+flags = "{raw.ends_with(suffix)} {raw.contains(middle)}"
+swapped = "a-b".replace("-", "+")
+
+"{name} {length} {route} {stem} {edges} {swapped} {flags}"

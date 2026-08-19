@@ -193,9 +193,19 @@ pub const INTRINSIC_STRING_BUILDER_FINISH: IntrinsicSlot = 73;
 pub const INTRINSIC_BYTE_BUFFER_FINISH: IntrinsicSlot = 74;
 pub const INTRINSIC_TEXT_FIND_BYTE_INDEX: IntrinsicSlot = 75;
 pub const INTRINSIC_TEXT_AT_BYTE: IntrinsicSlot = 76;
+pub const INTRINSIC_TEXT_TRIM: IntrinsicSlot = 77;
+pub const INTRINSIC_TEXT_TRIM_START: IntrinsicSlot = 78;
+pub const INTRINSIC_TEXT_TRIM_END: IntrinsicSlot = 79;
+pub const INTRINSIC_TEXT_TO_LOWER_ASCII: IntrinsicSlot = 80;
+pub const INTRINSIC_TEXT_TO_UPPER_ASCII: IntrinsicSlot = 81;
+pub const INTRINSIC_TEXT_REPLACE: IntrinsicSlot = 82;
+pub const INTRINSIC_TEXT_PARSE_INT_STATUS: IntrinsicSlot = 83;
+pub const INTRINSIC_TEXT_PARSE_INT_VALUE: IntrinsicSlot = 84;
+pub const INTRINSIC_BYTES_ENDS_WITH: IntrinsicSlot = 85;
+pub const INTRINSIC_BYTES_CONTAINS: IntrinsicSlot = 86;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 77] = [
+pub const INTRINSICS: [IntrinsicDef; 87] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::Int],
@@ -656,6 +666,66 @@ pub const INTRINSICS: [IntrinsicDef; 77] = [
         name: "text.at_byte",
         params: &[AbiType::Text, AbiType::Int],
         reply: AbiType::Char,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.trim",
+        params: &[AbiType::Text],
+        reply: AbiType::Substring,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.trim_start",
+        params: &[AbiType::Text],
+        reply: AbiType::Substring,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.trim_end",
+        params: &[AbiType::Text],
+        reply: AbiType::Substring,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.to_lower_ascii",
+        params: &[AbiType::Text],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.to_upper_ascii",
+        params: &[AbiType::Text],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.replace",
+        params: &[AbiType::Text, AbiType::Text, AbiType::Text],
+        reply: AbiType::Str,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.parse_int_status",
+        params: &[AbiType::Text, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.parse_int_value",
+        params: &[AbiType::Text, AbiType::Int],
+        reply: AbiType::Int,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.ends_with",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.contains",
+        params: &[AbiType::Bytes, AbiType::Bytes],
+        reply: AbiType::Bool,
         semantic_revision: 1,
     },
 ];

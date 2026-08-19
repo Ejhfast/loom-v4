@@ -1389,12 +1389,17 @@ impl<'o> FnChecker<'o> {
                 ast::InterpPart::Lit(text) => checked.push(HInterpPart::Lit(text.clone())),
                 ast::InterpPart::Expr(e) => {
                     let h = self.synth_expr(ctx, e)?;
-                    if !matches!(h.ty, INT | BOOL | STRING) {
+                    // Every Text form appends through the same builder
+                    // path, so a Substring interpolates without a copy.
+                    let text = Self::core_class(ctx, "Text");
+                    let interpolable =
+                        matches!(h.ty, INT | BOOL | STRING) || ctx.store.compatible(text, h.ty);
+                    if !interpolable {
                         return Err(Diagnostic::new(
                             "E1034",
                             format!(
                                 "cannot interpolate a value of type {}; this slice \
-                                 interpolates Int, Bool, and String",
+                                 interpolates Int, Bool, and Text",
                                 ctx.store.display(h.ty)
                             ),
                             e.span,
