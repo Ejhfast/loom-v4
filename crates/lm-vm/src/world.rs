@@ -3614,7 +3614,7 @@ impl<'m> World<'m> {
         }
         let mut live = vec![false; count];
         let mut queue: Vec<VmId> = Vec::new();
-        let mut root = |live: &mut Vec<bool>, queue: &mut Vec<VmId>, vm: VmId| {
+        let root = |live: &mut Vec<bool>, queue: &mut Vec<VmId>, vm: VmId| {
             if (vm as usize) < count && !live[vm as usize] {
                 live[vm as usize] = true;
                 queue.push(vm);

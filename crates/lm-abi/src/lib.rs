@@ -2125,8 +2125,13 @@ pub fn identity_of(name: &str, def: &OpDef) -> [u8; 32] {
 /// operation identity in slot order.
 pub fn manifest_digest() -> [u8; 32] {
     static CACHE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-    return *CACHE.get_or_init(manifest_digest_uncached);
+    *CACHE.get_or_init(manifest_digest_uncached)
 }
+
+/// The digest, computed from the compiled tables.
+///
+/// The manifest is compile-time data, so the digest never changes in
+/// one process. The caller above computes it once.
 fn manifest_digest_uncached() -> [u8; 32] {
     validate_manifest().expect("the compiled operation manifest is valid");
     let identities: Vec<[u8; 32]> = (0..OP_COUNT).map(op_identity).collect();
