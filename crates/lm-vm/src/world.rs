@@ -169,15 +169,16 @@ struct PreparedRestoreReply {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum FileBacking {
+enum ResourceBacking {
     Host(u64),
     Driver(VmId),
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FileResource {
+struct BoundResource {
     owner: VmId,
-    backing: FileBacking,
+    kind: crate::ResourceKind,
+    backing: ResourceBacking,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,10 +264,10 @@ pub struct World<'m> {
     /// restore never grows shared module state.
     pub(crate) envs: lm_bytecode::closed::TypeEnvs,
     host: Box<dyn Host>,
-    /// Open file resources, keyed by unforgeable world identifiers.
-    files: std::collections::BTreeMap<u64, FileResource>,
-    /// The next file resource identifier. Zero marks a closed handle.
-    next_file: u64,
+    /// Open external resources, keyed by unforgeable world identifiers.
+    bound_resources: std::collections::BTreeMap<u64, BoundResource>,
+    /// The next resource identifier. Zero marks a closed handle.
+    next_resource: u64,
     config: VmConfig,
     /// Aggregate limits and current resource charges.
     budget: WorldBudget,
@@ -449,8 +450,8 @@ impl<'m> World<'m> {
             gate_groups: Vec::new(),
             envs: lm_bytecode::closed::TypeEnvs::new(config.max_closed_types, config.max_type_envs),
             host,
-            files: std::collections::BTreeMap::new(),
-            next_file: 1,
+            bound_resources: std::collections::BTreeMap::new(),
+            next_resource: 1,
             config,
             budget,
             heap_shared: !local_heap_is_aggregate,
@@ -1501,7 +1502,7 @@ impl<'m> World<'m> {
             Err(message) => {
                 let op = self.pending_op(key.machine.vm);
                 self.machines[key.machine.vm as usize].set_fault(FaultCode::HostFault, message, op);
-                self.close_files_for_machine(key.machine.vm);
+                self.close_resources_for_machine(key.machine.vm);
             }
         }
         Some(key)
@@ -1515,7 +1516,7 @@ impl<'m> World<'m> {
         };
         self.release_activation(act);
         if kind == ExitKind::Terminal {
-            self.close_files_for_machine(act.vm);
+            self.close_resources_for_machine(act.vm);
         }
         match act.reply_to {
             None => Some(match kind {
@@ -1836,18 +1837,33 @@ impl<'m> World<'m> {
 
     /// Install one reply and apply a successful file close.
     fn install_value_reply_with_file_close(&mut self, vm: VmId, value: Value, close_host: bool) {
-        let file = (self.pending_op(vm) == Some(lm_abi::OP_FS_CLOSE)
-            && self.value_is_result_ok(vm, value))
-        .then(|| self.pending_file_resource(vm))
-        .flatten();
+        let closing = match self.pending_op(vm) {
+            Some(lm_abi::OP_FS_CLOSE) if self.value_is_result_ok(vm, value) => {
+                self.pending_file_resource(vm)
+            }
+            Some(lm_abi::OP_TCP_CLOSE)
+                if self.value_is_result_ok(vm, value)
+                    || self.value_is_result_error_class(vm, value, self.core.net_closed) =>
+            {
+                self.pending_tcp_resource(vm)
+            }
+            Some(lm_abi::OP_TLS_HANDSHAKE) => self.pending_tcp_resource(vm),
+            Some(lm_abi::OP_TLS_CLOSE)
+                if self.value_is_result_ok(vm, value)
+                    || self.value_is_result_error_class(vm, value, self.core.tls_closed) =>
+            {
+                self.pending_tls_resource(vm)
+            }
+            _ => None,
+        };
         if let Err(code) = self.check_reply(vm, value) {
             self.machines[vm as usize].set_fault(
                 code,
                 "the reply does not carry the type of its perform",
                 None,
             );
-            if let Some(resource) = file {
-                self.retire_file(resource, close_host);
+            if let Some(resource) = closing {
+                self.retire_resource(resource, close_host);
             }
             return;
         }
@@ -1863,8 +1879,8 @@ impl<'m> World<'m> {
         } else if m.vm.state != MachineState::Running {
             m.vm.state = MachineState::Ready;
         }
-        if let Some(resource) = file {
-            self.retire_file(resource, close_host);
+        if let Some(resource) = closing {
+            self.retire_resource(resource, close_host);
         }
         // A machine that parked at `Asked` for its driver leaves the
         // run set. This reply makes it runnable again, so the scheduler
@@ -1894,7 +1910,7 @@ impl<'m> World<'m> {
             Err(code) => self.machines[vm as usize].set_fault(code, "", None),
         }
         if self.machines[vm as usize].vm.state == MachineState::Faulted {
-            self.close_files_for_machine(vm);
+            self.close_resources_for_machine(vm);
         }
     }
 
@@ -1907,6 +1923,21 @@ impl<'m> World<'m> {
                 self.machines[vm as usize].alloc(Object::Bytes(bytes.clone()))
             }
             HostValue::File(token) => self.build_host_file(vm, *token),
+            HostValue::List(values) => {
+                let mut items = Vec::with_capacity(values.len());
+                for value in values {
+                    items.push(self.build_host_value(vm, value)?);
+                }
+                self.machines[vm as usize].alloc(Object::List { items })
+            }
+            HostValue::SocketAddress(address) => self.build_host_address(vm, *address),
+            HostValue::TcpStream(token) => {
+                self.build_host_tcp(vm, *token, crate::ResourceKind::TcpStream)
+            }
+            HostValue::TcpListener(token) => {
+                self.build_host_tcp(vm, *token, crate::ResourceKind::TcpListener)
+            }
+            HostValue::TlsStream(token) => self.build_host_tls(vm, *token),
             HostValue::Ctor(ctor, parts) => {
                 let mut fields = Vec::with_capacity(parts.len());
                 for part in parts {
@@ -1920,16 +1951,173 @@ impl<'m> World<'m> {
                     CoreCtor::IoErrorFailed => self.core.io_error_failed,
                     CoreCtor::FsErrorClosed => self.core.fs_error_closed,
                     CoreCtor::FsErrorFailed => self.core.fs_error_failed,
+                    CoreCtor::Pair => self.core.pair,
+                    CoreCtor::NetInvalidInput => self.core.net_invalid_input,
+                    CoreCtor::NetNameNotFound => self.core.net_name_not_found,
+                    CoreCtor::NetUnavailable => self.core.net_unavailable,
+                    CoreCtor::NetPermissionDenied => self.core.net_permission_denied,
+                    CoreCtor::NetAddressInUse => self.core.net_address_in_use,
+                    CoreCtor::NetConnectionRefused => self.core.net_connection_refused,
+                    CoreCtor::NetConnectionReset => self.core.net_connection_reset,
+                    CoreCtor::NetNotConnected => self.core.net_not_connected,
+                    CoreCtor::NetTimedOut => self.core.net_timed_out,
+                    CoreCtor::NetClosed => self.core.net_closed,
+                    CoreCtor::NetLimitExceeded => self.core.net_limit_exceeded,
+                    CoreCtor::NetUnsupported => self.core.net_unsupported,
+                    CoreCtor::NetFailed => self.core.net_failed,
+                    CoreCtor::TcpReadData => self.core.tcp_read_data,
+                    CoreCtor::TcpReadEnd => self.core.tcp_read_end,
+                    CoreCtor::TlsInvalidConfig => self.core.tls_invalid_config,
+                    CoreCtor::TlsHandshake => self.core.tls_handshake,
+                    CoreCtor::TlsCertificate => self.core.tls_certificate,
+                    CoreCtor::TlsProtocol => self.core.tls_protocol,
+                    CoreCtor::TlsNetwork => self.core.tls_network,
+                    CoreCtor::TlsClosed => self.core.tls_closed,
+                    CoreCtor::TlsLimitExceeded => self.core.tls_limit_exceeded,
                 };
                 self.make_instance(vm, class, fields)
             }
         }
     }
 
+    /// Build one portable socket address inside a machine.
+    fn build_host_address(
+        &mut self,
+        vm: VmId,
+        address: crate::HostSocketAddress,
+    ) -> Result<Value, FaultCode> {
+        let (class, bytes) = match address.ip {
+            crate::HostIpAddress::V4(bytes) => (self.core.ip_v4, bytes.to_vec()),
+            crate::HostIpAddress::V6(bytes) => (self.core.ip_v6, bytes.to_vec()),
+        };
+        let bytes = self.machines[vm as usize].alloc(Object::Bytes(bytes.into()))?;
+        let ip = self.make_instance(vm, class, vec![bytes])?;
+        let address = self.make_instance(
+            vm,
+            self.core.socket_address,
+            vec![
+                ip,
+                Value::Int(i64::from(address.port)),
+                Value::Int(i64::from(address.flow_info)),
+                Value::Int(i64::from(address.scope_id)),
+            ],
+        )?;
+        let reference = address.as_obj().ok_or(FaultCode::MalformedState)?;
+        lm_graph::freeze(
+            &mut self.machines[vm as usize].vm.heap,
+            reference,
+            &self.config.graph,
+        )?;
+        Ok(address)
+    }
+
+    /// Register one host TCP resource and build its guest handle.
+    fn build_host_tcp(
+        &mut self,
+        vm: VmId,
+        token: u64,
+        kind: crate::ResourceKind,
+    ) -> Result<Value, FaultCode> {
+        let resource = self.next_resource;
+        self.next_resource = resource.checked_add(1).ok_or(FaultCode::IntegerOverflow)?;
+        let op = self.pending_op(vm).unwrap_or(lm_abi::OP_TCP_CONNECT);
+        if let Err(code) =
+            self.machines[vm as usize]
+                .resources
+                .register(kind, vm, resource, u64::MAX, op)
+        {
+            let host_kind = match kind {
+                crate::ResourceKind::TcpStream => crate::HostTcpKind::Stream,
+                crate::ResourceKind::TcpListener => crate::HostTcpKind::Listener,
+                _ => return Err(FaultCode::MalformedState),
+            };
+            self.host.close_tcp(crate::HostTcpResource {
+                kind: host_kind,
+                token,
+            });
+            return Err(code);
+        }
+        self.bound_resources.insert(
+            resource,
+            BoundResource {
+                owner: vm,
+                kind,
+                backing: ResourceBacking::Host(token),
+            },
+        );
+        let object = match kind {
+            crate::ResourceKind::TcpStream => Object::NativeTcpStream { resource },
+            crate::ResourceKind::TcpListener => Object::NativeTcpListener { resource },
+            _ => return Err(FaultCode::MalformedState),
+        };
+        match self.machines[vm as usize].alloc(object) {
+            Ok(value) => Ok(value),
+            Err(code) => {
+                self.retire_resource(resource, true);
+                Err(code)
+            }
+        }
+    }
+
+    /// Register one host TLS stream and build its guest handle.
+    fn build_host_tls(&mut self, vm: VmId, token: u64) -> Result<Value, FaultCode> {
+        if self.pending_op(vm) != Some(lm_abi::OP_TLS_HANDSHAKE) {
+            self.host.close_tls(token);
+            return Err(FaultCode::TypeMismatch);
+        }
+        let Some(source) = self.pending_tcp_resource(vm) else {
+            self.host.close_tls(token);
+            return Err(FaultCode::TypeMismatch);
+        };
+        let valid_source = self.bound_resources.get(&source).is_some_and(|bound| {
+            bound.owner == vm
+                && bound.kind == crate::ResourceKind::TcpStream
+                && matches!(bound.backing, ResourceBacking::Host(_))
+        });
+        if !valid_source {
+            self.host.close_tls(token);
+            return Err(FaultCode::TypeMismatch);
+        }
+        // The host consumed the TCP stream during the handshake.
+        // Retire it before the TLS stream takes the same limit slot.
+        self.retire_resource(source, false);
+        let resource = self.next_resource;
+        let Some(next_resource) = resource.checked_add(1) else {
+            self.host.close_tls(token);
+            return Err(FaultCode::IntegerOverflow);
+        };
+        self.next_resource = next_resource;
+        if let Err(code) = self.machines[vm as usize].resources.register(
+            crate::ResourceKind::TlsStream,
+            vm,
+            resource,
+            u64::MAX,
+            lm_abi::OP_TLS_HANDSHAKE,
+        ) {
+            self.host.close_tls(token);
+            return Err(code);
+        }
+        self.bound_resources.insert(
+            resource,
+            BoundResource {
+                owner: vm,
+                kind: crate::ResourceKind::TlsStream,
+                backing: ResourceBacking::Host(token),
+            },
+        );
+        match self.machines[vm as usize].alloc(Object::NativeTlsStream { resource }) {
+            Ok(value) => Ok(value),
+            Err(code) => {
+                self.retire_resource(resource, true);
+                Err(code)
+            }
+        }
+    }
+
     /// Register one host file and build its guest handle.
     fn build_host_file(&mut self, vm: VmId, token: u64) -> Result<Value, FaultCode> {
-        let resource = self.next_file;
-        self.next_file = resource.checked_add(1).ok_or(FaultCode::IntegerOverflow)?;
+        let resource = self.next_resource;
+        self.next_resource = resource.checked_add(1).ok_or(FaultCode::IntegerOverflow)?;
         if let Err(code) = self.machines[vm as usize].resources.register(
             crate::ResourceKind::File,
             vm,
@@ -1940,11 +2128,12 @@ impl<'m> World<'m> {
             self.host.close_file(token);
             return Err(code);
         }
-        self.files.insert(
+        self.bound_resources.insert(
             resource,
-            FileResource {
+            BoundResource {
                 owner: vm,
-                backing: FileBacking::Host(token),
+                kind: crate::ResourceKind::File,
+                backing: ResourceBacking::Host(token),
             },
         );
         match self.machines[vm as usize].alloc(Object::NativeFileHandle { resource }) {
@@ -1958,38 +2147,62 @@ impl<'m> World<'m> {
 
     /// Remove one file resource. Close its host token when requested.
     fn retire_file(&mut self, resource: u64, close_host: bool) -> bool {
-        let Some(file) = self.files.remove(&resource) else {
+        self.retire_resource(resource, close_host)
+    }
+
+    /// Remove one bound resource. Close its host token when requested.
+    fn retire_resource(&mut self, resource: u64, close_host: bool) -> bool {
+        let Some(bound) = self.bound_resources.remove(&resource) else {
             return false;
         };
         if close_host {
-            match file.backing {
-                FileBacking::Host(token) => {
-                    self.host.close_file(token);
-                }
-                FileBacking::Driver(_) => {}
+            match bound.backing {
+                ResourceBacking::Host(token) => match bound.kind {
+                    crate::ResourceKind::File => {
+                        self.host.close_file(token);
+                    }
+                    crate::ResourceKind::TcpStream | crate::ResourceKind::TcpListener => {
+                        let kind = if bound.kind == crate::ResourceKind::TcpStream {
+                            crate::HostTcpKind::Stream
+                        } else {
+                            crate::HostTcpKind::Listener
+                        };
+                        self.host.close_tcp(crate::HostTcpResource { kind, token });
+                    }
+                    crate::ResourceKind::TlsStream => {
+                        self.host.close_tls(token);
+                    }
+                    crate::ResourceKind::PendingOperation => {}
+                },
+                ResourceBacking::Driver(_) => {}
             }
         }
-        if let Some(machine) = self.machines.get_mut(file.owner as usize) {
-            machine
-                .resources
-                .close_kind(crate::ResourceKind::File, resource);
+        if let Some(machine) = self.machines.get_mut(bound.owner as usize) {
+            machine.resources.close_kind(bound.kind, resource);
         }
         true
     }
 
-    /// Close every file resource owned or serviced by one machine.
-    fn close_files_for_machine(&mut self, machine: VmId) {
+    /// Close every external resource owned or serviced by one machine.
+    fn close_resources_for_machine(&mut self, machine: VmId) {
+        let pending: Vec<u64> = self.machines[machine as usize]
+            .resources
+            .pending_scopes()
+            .collect();
+        for token in pending {
+            self.host.cancel(token);
+        }
         let resources: Vec<u64> = self
-            .files
+            .bound_resources
             .iter()
-            .filter_map(|(resource, file)| {
+            .filter_map(|(resource, bound)| {
                 let serviced =
-                    matches!(file.backing, FileBacking::Driver(driver) if driver == machine);
-                (file.owner == machine || serviced).then_some(*resource)
+                    matches!(bound.backing, ResourceBacking::Driver(driver) if driver == machine);
+                (bound.owner == machine || serviced).then_some(*resource)
             })
             .collect();
         for resource in resources {
-            self.retire_file(resource, true);
+            self.retire_resource(resource, true);
         }
     }
 
@@ -2004,10 +2217,44 @@ impl<'m> World<'m> {
         }
     }
 
+    /// Return the TCP resource in the first pending argument.
+    fn pending_tcp_resource(&self, vm: VmId) -> Option<u64> {
+        let machine = self.machines.get(vm as usize)?;
+        let value = *machine.vm.pending.as_ref()?.args.first()?;
+        let reference = value.as_obj()?;
+        match machine.vm.heap.get(reference) {
+            Object::NativeTcpStream { resource } | Object::NativeTcpListener { resource } => {
+                Some(*resource)
+            }
+            _ => None,
+        }
+    }
+
+    /// Return the TLS resource in the first pending argument.
+    fn pending_tls_resource(&self, vm: VmId) -> Option<u64> {
+        let machine = self.machines.get(vm as usize)?;
+        let value = *machine.vm.pending.as_ref()?.args.first()?;
+        let reference = value.as_obj()?;
+        match machine.vm.heap.get(reference) {
+            Object::NativeTlsStream { resource } => Some(*resource),
+            _ => None,
+        }
+    }
+
+    /// Return the external resource in the first pending argument.
+    fn pending_bound_resource(&self, vm: VmId) -> Option<u64> {
+        self.pending_file_resource(vm)
+            .or_else(|| self.pending_tcp_resource(vm))
+            .or_else(|| self.pending_tls_resource(vm))
+    }
+
     fn file_handle_resource(&self, holder: VmId, value: Value) -> Option<u64> {
         let reference = value.as_obj()?;
         match self.machines[holder as usize].vm.heap.get(reference) {
-            Object::NativeFileHandle { resource } => Some(*resource),
+            Object::NativeFileHandle { resource }
+            | Object::NativeTcpStream { resource }
+            | Object::NativeTcpListener { resource } => Some(*resource),
+            Object::NativeTlsStream { resource } => Some(*resource),
             _ => None,
         }
     }
@@ -2025,6 +2272,31 @@ impl<'m> World<'m> {
             matches!(
                 self.machines[holder as usize].vm.heap.get(reference),
                 Object::Instance { class, .. } if Some(*class) == self.core.result_ok
+            )
+        })
+    }
+
+    fn value_is_result_error_class(
+        &self,
+        holder: VmId,
+        value: Value,
+        error_class: Option<u32>,
+    ) -> bool {
+        let Some(result) = value.as_obj() else {
+            return false;
+        };
+        let Object::Instance { class, fields, .. } =
+            self.machines[holder as usize].vm.heap.get(result)
+        else {
+            return false;
+        };
+        if Some(*class) != self.core.result_err || fields.len() != 1 {
+            return false;
+        }
+        fields[0].as_obj().is_some_and(|error| {
+            matches!(
+                self.machines[holder as usize].vm.heap.get(error),
+                Object::Instance { class, .. } if Some(*class) == error_class
             )
         })
     }
@@ -2060,7 +2332,7 @@ impl<'m> World<'m> {
     fn controlled_file_resources(&mut self, root: VmId) -> Result<Vec<u64>, FaultCode> {
         let machines = self.controlled_machines(root)?;
         let mut resources = std::collections::BTreeSet::new();
-        for (resource, file) in &self.files {
+        for (resource, file) in &self.bound_resources {
             if machines.contains(&file.owner) {
                 resources.insert(*resource);
             }
@@ -2071,10 +2343,13 @@ impl<'m> World<'m> {
             for reference in order {
                 let resource = match heap.get(reference) {
                     Object::NativeFileHandle { resource }
-                    | Object::NativeResourceHandle { resource, .. } => *resource,
+                    | Object::NativeResourceHandle { resource, .. }
+                    | Object::NativeTcpStream { resource }
+                    | Object::NativeTcpListener { resource } => *resource,
+                    Object::NativeTlsStream { resource } => *resource,
                     _ => continue,
                 };
-                if self.files.contains_key(&resource) {
+                if self.bound_resources.contains_key(&resource) {
                     resources.insert(resource);
                 }
             }
@@ -2117,21 +2392,28 @@ impl<'m> World<'m> {
     }
 
     fn register_driver_file(&mut self, owner: VmId, driver: VmId) -> Result<u64, FaultCode> {
+        self.register_driver_resource(owner, driver, crate::ResourceKind::File, lm_abi::OP_FS_OPEN)
+    }
+
+    fn register_driver_resource(
+        &mut self,
+        owner: VmId,
+        driver: VmId,
+        kind: crate::ResourceKind,
+        op: u32,
+    ) -> Result<u64, FaultCode> {
         self.machines[owner as usize].resources.prepare_register()?;
-        let resource = self.next_file;
-        self.next_file = resource.checked_add(1).ok_or(FaultCode::IntegerOverflow)?;
-        self.machines[owner as usize].resources.register(
-            crate::ResourceKind::File,
-            owner,
+        let resource = self.next_resource;
+        self.next_resource = resource.checked_add(1).ok_or(FaultCode::IntegerOverflow)?;
+        self.machines[owner as usize]
+            .resources
+            .register(kind, owner, resource, u64::MAX, op)?;
+        self.bound_resources.insert(
             resource,
-            u64::MAX,
-            lm_abi::OP_FS_OPEN,
-        )?;
-        self.files.insert(
-            resource,
-            FileResource {
+            BoundResource {
                 owner,
-                backing: FileBacking::Driver(driver),
+                kind,
+                backing: ResourceBacking::Driver(driver),
             },
         );
         Ok(resource)
@@ -2147,6 +2429,40 @@ impl<'m> World<'m> {
     fn failed_file_reply(&mut self, vm: VmId, message: &str) -> Result<Value, FaultCode> {
         let message = self.machines[vm as usize].alloc(Object::Str(message.to_string().into()))?;
         let error = self.make_instance(vm, self.core.fs_error_failed, vec![message])?;
+        self.make_instance(vm, self.core.result_err, vec![error])
+    }
+
+    /// Build the ordinary result for a closed network operation.
+    fn closed_net_reply(&mut self, vm: VmId) -> Result<Value, FaultCode> {
+        let closed = self.make_instance(vm, self.core.net_closed, vec![])?;
+        self.make_instance(vm, self.core.result_err, vec![closed])
+    }
+
+    /// Build the ordinary result for a closed TLS operation.
+    fn closed_tls_reply(&mut self, vm: VmId) -> Result<Value, FaultCode> {
+        let closed = self.make_instance(vm, self.core.tls_closed, vec![])?;
+        self.make_instance(vm, self.core.result_err, vec![closed])
+    }
+
+    /// Build one ordinary network-service failure.
+    fn failed_net_reply(&mut self, vm: VmId, message: &str) -> Result<Value, FaultCode> {
+        let message = self.machines[vm as usize].alloc(Object::Str(message.to_string().into()))?;
+        let error = self.make_instance(vm, self.core.net_failed, vec![message])?;
+        self.make_instance(vm, self.core.result_err, vec![error])
+    }
+
+    /// Build one ordinary TLS service failure.
+    fn failed_tls_reply(&mut self, vm: VmId, message: &str) -> Result<Value, FaultCode> {
+        let message = self.machines[vm as usize].alloc(Object::Str(message.to_string().into()))?;
+        let network = self.make_instance(vm, self.core.net_failed, vec![message])?;
+        let error = self.make_instance(vm, self.core.tls_network, vec![network])?;
+        self.make_instance(vm, self.core.result_err, vec![error])
+    }
+
+    /// Build one ordinary invalid network argument.
+    fn invalid_net_reply(&mut self, vm: VmId, message: &str) -> Result<Value, FaultCode> {
+        let message = self.machines[vm as usize].alloc(Object::Str(message.to_string().into()))?;
+        let error = self.make_instance(vm, self.core.net_invalid_input, vec![message])?;
         self.make_instance(vm, self.core.result_err, vec![error])
     }
 
@@ -2585,33 +2901,84 @@ impl<'m> World<'m> {
                             | lm_abi::OP_FS_CLOSE
                     ) && self
                         .pending_file_resource(vm)
-                        .is_none_or(|resource| !self.files.contains_key(&resource))
+                        .is_none_or(|resource| !self.bound_resources.contains_key(&resource))
                     {
                         let built = self.closed_file_reply(vm);
                         self.reply_or_fault(vm, op, built);
                         return None;
                     }
-                    let driver = self.pending_file_resource(vm).and_then(|resource| {
-                        self.files
+                    if matches!(
+                        op,
+                        lm_abi::OP_TCP_ACCEPT
+                            | lm_abi::OP_TCP_READ
+                            | lm_abi::OP_TCP_WRITE
+                            | lm_abi::OP_TCP_SHUTDOWN
+                            | lm_abi::OP_TCP_LOCAL_ADDRESS
+                            | lm_abi::OP_TCP_PEER_ADDRESS
+                    ) && self
+                        .pending_tcp_resource(vm)
+                        .is_none_or(|resource| !self.bound_resources.contains_key(&resource))
+                    {
+                        let built = self.closed_net_reply(vm);
+                        self.reply_or_fault(vm, op, built);
+                        return None;
+                    }
+                    if op == lm_abi::OP_TCP_CLOSE
+                        && self
+                            .pending_tcp_resource(vm)
+                            .is_none_or(|resource| !self.bound_resources.contains_key(&resource))
+                    {
+                        let built = self.closed_net_reply(vm);
+                        self.reply_or_fault(vm, op, built);
+                        return None;
+                    }
+                    if matches!(
+                        op,
+                        lm_abi::OP_TLS_READ
+                            | lm_abi::OP_TLS_WRITE
+                            | lm_abi::OP_TLS_SHUTDOWN
+                            | lm_abi::OP_TLS_LOCAL_ADDRESS
+                            | lm_abi::OP_TLS_PEER_ADDRESS
+                            | lm_abi::OP_TLS_CLOSE
+                    ) && self
+                        .pending_tls_resource(vm)
+                        .is_none_or(|resource| !self.bound_resources.contains_key(&resource))
+                    {
+                        let built = self.closed_tls_reply(vm);
+                        self.reply_or_fault(vm, op, built);
+                        return None;
+                    }
+                    let driver = self.pending_bound_resource(vm).and_then(|resource| {
+                        self.bound_resources
                             .get(&resource)
                             .and_then(|file| match file.backing {
-                                FileBacking::Driver(driver) => Some(driver),
-                                FileBacking::Host(_) => None,
+                                ResourceBacking::Driver(driver) => Some(driver),
+                                ResourceBacking::Host(_) => None,
                             })
                     });
                     if let Some(driver) = driver {
-                        let built = self.failed_file_reply(
-                            vm,
-                            &format!(
-                                "a file backed by driver machine {driver} reached the root host"
-                            ),
+                        let message = format!(
+                            "a resource backed by driver machine {driver} reached the root host"
                         );
+                        let built = if self.pending_file_resource(vm).is_some() {
+                            self.failed_file_reply(vm, &message)
+                        } else if self.pending_tls_resource(vm).is_some() {
+                            self.failed_tls_reply(vm, &message)
+                        } else {
+                            self.failed_net_reply(vm, &message)
+                        };
                         self.reply_or_fault(vm, op, built);
                         return None;
                     }
                     let args = match self.host_args(vm) {
                         Ok(args) => args,
                         Err(code) => {
+                            if matches!(op, lm_abi::OP_TCP_CONNECT | lm_abi::OP_TCP_LISTEN) {
+                                let built = self
+                                    .invalid_net_reply(vm, "the socket address has invalid fields");
+                                self.reply_or_fault(vm, op, built);
+                                return None;
+                            }
                             self.fault_caller(
                                 vm,
                                 op,
@@ -2720,13 +3087,74 @@ impl<'m> World<'m> {
                 Value::Int(v) => Ok(HostArg::Int(*v)),
                 Value::Obj(r) => match m.vm.heap.get(*r) {
                     Object::Str(text) => Ok(HostArg::Str(text.clone())),
-                    Object::Bytes(bytes) => Ok(HostArg::Bytes(bytes.clone())),
+                    Object::Bytes(bytes) => bytes
+                        .try_bounded()
+                        .map(HostArg::Bytes)
+                        .map_err(|_| FaultCode::HeapLimit),
                     Object::NativeFileHandle { resource } => {
-                        let file = self.files.get(resource).ok_or(FaultCode::TypeMismatch)?;
+                        let file = self
+                            .bound_resources
+                            .get(resource)
+                            .ok_or(FaultCode::TypeMismatch)?;
                         match file.backing {
-                            FileBacking::Host(token) => Ok(HostArg::File(token)),
-                            FileBacking::Driver(_) => Err(FaultCode::TypeMismatch),
+                            ResourceBacking::Host(token) => Ok(HostArg::File(token)),
+                            ResourceBacking::Driver(_) => Err(FaultCode::TypeMismatch),
                         }
+                    }
+                    Object::NativeTcpStream { resource } => {
+                        self.host_tcp_arg(*resource, crate::HostTcpKind::Stream)
+                    }
+                    Object::NativeTcpListener { resource } => {
+                        self.host_tcp_arg(*resource, crate::HostTcpKind::Listener)
+                    }
+                    Object::NativeTlsStream { resource } => {
+                        let bound = self
+                            .bound_resources
+                            .get(resource)
+                            .ok_or(FaultCode::TypeMismatch)?;
+                        if bound.kind != crate::ResourceKind::TlsStream {
+                            return Err(FaultCode::TypeMismatch);
+                        }
+                        match bound.backing {
+                            ResourceBacking::Host(token) => Ok(HostArg::Tls(token)),
+                            ResourceBacking::Driver(_) => Err(FaultCode::TypeMismatch),
+                        }
+                    }
+                    Object::List { items } => {
+                        let mut values = Vec::with_capacity(items.len());
+                        for item in items {
+                            let Value::Obj(reference) = item else {
+                                return Err(FaultCode::TypeMismatch);
+                            };
+                            let Object::Bytes(bytes) = m.vm.heap.get(*reference) else {
+                                return Err(FaultCode::TypeMismatch);
+                            };
+                            values.push(HostArg::Bytes(
+                                bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
+                            ));
+                        }
+                        Ok(HostArg::List(values))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.socket_address =>
+                    {
+                        self.host_socket_address(vm, fields)
+                            .map(HostArg::SocketAddress)
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.shutdown_read && fields.is_empty() =>
+                    {
+                        Ok(HostArg::Shutdown(crate::HostShutdown::Read))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.shutdown_write && fields.is_empty() =>
+                    {
+                        Ok(HostArg::Shutdown(crate::HostShutdown::Write))
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.shutdown_both && fields.is_empty() =>
+                    {
+                        Ok(HostArg::Shutdown(crate::HostShutdown::Both))
                     }
                     Object::Instance { class, fields, .. }
                         if Some(*class) == self.core.open_read_only && fields.is_empty() =>
@@ -2793,6 +3221,85 @@ impl<'m> World<'m> {
                 _ => Err(FaultCode::TypeMismatch),
             })
             .collect()
+    }
+
+    /// Convert one live TCP resource to an opaque host token.
+    fn host_tcp_arg(
+        &self,
+        resource: u64,
+        expected: crate::HostTcpKind,
+    ) -> Result<HostArg, FaultCode> {
+        let bound = self
+            .bound_resources
+            .get(&resource)
+            .ok_or(FaultCode::TypeMismatch)?;
+        let found = match bound.kind {
+            crate::ResourceKind::TcpStream => crate::HostTcpKind::Stream,
+            crate::ResourceKind::TcpListener => crate::HostTcpKind::Listener,
+            _ => return Err(FaultCode::TypeMismatch),
+        };
+        if found != expected {
+            return Err(FaultCode::TypeMismatch);
+        }
+        match bound.backing {
+            ResourceBacking::Host(token) => {
+                Ok(HostArg::Tcp(crate::HostTcpResource { kind: found, token }))
+            }
+            ResourceBacking::Driver(_) => Err(FaultCode::TypeMismatch),
+        }
+    }
+
+    /// Decode and validate one guest socket address.
+    fn host_socket_address(
+        &self,
+        vm: VmId,
+        fields: &[Value],
+    ) -> Result<crate::HostSocketAddress, FaultCode> {
+        let [Value::Obj(ip), Value::Int(port), Value::Int(flow_info), Value::Int(scope_id)] =
+            fields
+        else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let heap = &self.machines[vm as usize].vm.heap;
+        let ip = match heap.get(*ip) {
+            Object::Instance { class, fields, .. }
+                if Some(*class) == self.core.ip_v4 && fields.len() == 1 =>
+            {
+                let Value::Obj(bytes) = fields[0] else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let Object::Bytes(bytes) = heap.get(bytes) else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let bytes: [u8; 4] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| FaultCode::TypeMismatch)?;
+                crate::HostIpAddress::V4(bytes)
+            }
+            Object::Instance { class, fields, .. }
+                if Some(*class) == self.core.ip_v6 && fields.len() == 1 =>
+            {
+                let Value::Obj(bytes) = fields[0] else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let Object::Bytes(bytes) = heap.get(bytes) else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let bytes: [u8; 16] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| FaultCode::TypeMismatch)?;
+                crate::HostIpAddress::V6(bytes)
+            }
+            _ => return Err(FaultCode::TypeMismatch),
+        };
+        Ok(crate::HostSocketAddress {
+            ip,
+            port: u16::try_from(*port).map_err(|_| FaultCode::TypeMismatch)?,
+            flow_info: u32::try_from(*flow_info).map_err(|_| FaultCode::TypeMismatch)?,
+            scope_id: u32::try_from(*scope_id).map_err(|_| FaultCode::TypeMismatch)?,
+        })
     }
 
     /// Walk one policy chain from a saved resolution position.
@@ -3491,7 +3998,7 @@ impl<'m> World<'m> {
                         vm,
                         op,
                         FaultCode::TypeMismatch,
-                        "the argument is not a file handle",
+                        "the argument is not an external resource",
                     );
                     return;
                 };
@@ -3568,6 +4075,288 @@ impl<'m> World<'m> {
                 self.consume_reply_sink(sink);
                 self.install_value_reply(vm, control);
             }
+            lm_abi::OP_VM_SERVE_TCP_STREAM => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|reference| {
+                    match self.machines[vm as usize].vm.heap.get(reference) {
+                        Object::NativeCall {
+                            vm,
+                            ordinal,
+                            op: call_op,
+                        } => Some((*vm, *ordinal, *call_op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                if token.2 != lm_abi::OP_TCP_CONNECT && token.2 != lm_abi::OP_TCP_ACCEPT {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::InvalidRequestToken,
+                        "the call token is not for Tcp.Connect or Tcp.Accept",
+                    );
+                    return;
+                }
+                let Some(sink) = self.reply_sink(vm, op, surface, token.0, token.1, Some(token.2))
+                else {
+                    return;
+                };
+                let peer = match self.transfer(vm, sink.target, args[2]) {
+                    Ok(peer) => peer,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the peer address is not sendable");
+                        return;
+                    }
+                };
+                let resource = match self.register_driver_resource(
+                    sink.target,
+                    vm,
+                    crate::ResourceKind::TcpStream,
+                    token.2,
+                ) {
+                    Ok(resource) => resource,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the resource limit is full");
+                        return;
+                    }
+                };
+                let built = self.machines[sink.target as usize]
+                    .alloc(Object::NativeTcpStream { resource })
+                    .and_then(|stream| {
+                        if token.2 == lm_abi::OP_TCP_ACCEPT {
+                            self.make_instance(sink.target, self.core.pair, vec![stream, peer])
+                        } else {
+                            Ok(stream)
+                        }
+                    })
+                    .and_then(|value| {
+                        self.make_instance(sink.target, self.core.result_ok, vec![value])
+                    });
+                let reply = match built {
+                    Ok(reply) => reply,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the TCP reply allocation failed");
+                        return;
+                    }
+                };
+                let control = match self.build_resource_control(vm, surface, resource) {
+                    Ok(control) => control,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the resource control allocation failed");
+                        return;
+                    }
+                };
+                self.install_value_reply(sink.target, reply);
+                if self.machines[sink.target as usize].vm.state == MachineState::Faulted {
+                    self.retire_resource(resource, false);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the minted reply did not match the TCP call",
+                    );
+                    return;
+                }
+                self.consume_reply_sink(sink);
+                self.install_value_reply(vm, control);
+            }
+            lm_abi::OP_VM_SERVE_TCP_LISTENER => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|reference| {
+                    match self.machines[vm as usize].vm.heap.get(reference) {
+                        Object::NativeCall {
+                            vm,
+                            ordinal,
+                            op: call_op,
+                        } => Some((*vm, *ordinal, *call_op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                let Some(sink) = self.reply_sink(
+                    vm,
+                    op,
+                    surface,
+                    token.0,
+                    token.1,
+                    Some(lm_abi::OP_TCP_LISTEN),
+                ) else {
+                    return;
+                };
+                let resource = match self.register_driver_resource(
+                    sink.target,
+                    vm,
+                    crate::ResourceKind::TcpListener,
+                    lm_abi::OP_TCP_LISTEN,
+                ) {
+                    Ok(resource) => resource,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the resource limit is full");
+                        return;
+                    }
+                };
+                let built = self.machines[sink.target as usize]
+                    .alloc(Object::NativeTcpListener { resource })
+                    .and_then(|listener| {
+                        self.make_instance(sink.target, self.core.result_ok, vec![listener])
+                    });
+                let reply = match built {
+                    Ok(reply) => reply,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the TCP reply allocation failed");
+                        return;
+                    }
+                };
+                let control = match self.build_resource_control(vm, surface, resource) {
+                    Ok(control) => control,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the resource control allocation failed");
+                        return;
+                    }
+                };
+                self.install_value_reply(sink.target, reply);
+                if self.machines[sink.target as usize].vm.state == MachineState::Faulted {
+                    self.retire_resource(resource, false);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the minted reply did not match Tcp.Listen",
+                    );
+                    return;
+                }
+                self.consume_reply_sink(sink);
+                self.install_value_reply(vm, control);
+            }
+            lm_abi::OP_VM_SERVE_TLS_STREAM => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|reference| {
+                    match self.machines[vm as usize].vm.heap.get(reference) {
+                        Object::NativeCall {
+                            vm,
+                            ordinal,
+                            op: call_op,
+                        } => Some((*vm, *ordinal, *call_op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                let Some(sink) = self.reply_sink(
+                    vm,
+                    op,
+                    surface,
+                    token.0,
+                    token.1,
+                    Some(lm_abi::OP_TLS_HANDSHAKE),
+                ) else {
+                    return;
+                };
+                let Some(source) = self.pending_tcp_resource(sink.target) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the TLS handshake has no TCP stream",
+                    );
+                    return;
+                };
+                let valid_source = self.bound_resources.get(&source).is_some_and(|bound| {
+                    bound.owner == sink.target
+                        && bound.kind == crate::ResourceKind::TcpStream
+                        && matches!(bound.backing, ResourceBacking::Driver(driver) if driver == vm)
+                });
+                if !valid_source {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the TLS handshake does not use this driver's TCP stream",
+                    );
+                    return;
+                }
+                // The handshake consumes its TCP stream.
+                self.retire_resource(source, false);
+                let resource = match self.register_driver_resource(
+                    sink.target,
+                    vm,
+                    crate::ResourceKind::TlsStream,
+                    lm_abi::OP_TLS_HANDSHAKE,
+                ) {
+                    Ok(resource) => resource,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the resource limit is full");
+                        return;
+                    }
+                };
+                let built = self.machines[sink.target as usize]
+                    .alloc(Object::NativeTlsStream { resource })
+                    .and_then(|stream| {
+                        self.make_instance(sink.target, self.core.result_ok, vec![stream])
+                    });
+                let reply = match built {
+                    Ok(reply) => reply,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the TLS reply allocation failed");
+                        return;
+                    }
+                };
+                let control = match self.build_resource_control(vm, surface, resource) {
+                    Ok(control) => control,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the resource control allocation failed");
+                        return;
+                    }
+                };
+                self.install_value_reply(sink.target, reply);
+                if self.machines[sink.target as usize].vm.state == MachineState::Faulted {
+                    self.retire_resource(resource, false);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the minted reply did not match Tls.Handshake",
+                    );
+                    return;
+                }
+                self.consume_reply_sink(sink);
+                self.install_value_reply(vm, control);
+            }
             lm_abi::OP_VM_RESOURCE_SAME => {
                 let Some((_left_surface, left)) = self.resource_control(vm, args[0]) else {
                     self.fault_caller(
@@ -3587,7 +4376,7 @@ impl<'m> World<'m> {
                     );
                     return;
                 };
-                let same = left == right && self.files.contains_key(&left);
+                let same = left == right && self.bound_resources.contains_key(&left);
                 self.install_value_reply(vm, Value::Bool(same));
             }
             lm_abi::OP_VM_RESOURCE_IS_OPEN
@@ -3604,15 +4393,26 @@ impl<'m> World<'m> {
                 };
                 match op {
                     lm_abi::OP_VM_RESOURCE_IS_OPEN => {
-                        let open = self.files.contains_key(&resource);
+                        let open = self.bound_resources.contains_key(&resource);
                         self.install_value_reply(vm, Value::Bool(open));
                     }
                     lm_abi::OP_VM_RESOURCE_CLOSE => {
-                        let closed = self.retire_file(resource, true);
+                        let closed = self.retire_resource(resource, true);
                         self.install_value_reply(vm, Value::Bool(closed));
                     }
                     _ => {
-                        let built = self.machines[vm as usize].alloc(Object::Str("file".into()));
+                        let name = self
+                            .bound_resources
+                            .get(&resource)
+                            .map(|bound| match bound.kind {
+                                crate::ResourceKind::File => "file",
+                                crate::ResourceKind::TcpStream => "tcp-stream",
+                                crate::ResourceKind::TcpListener => "tcp-listener",
+                                crate::ResourceKind::TlsStream => "tls-stream",
+                                crate::ResourceKind::PendingOperation => "pending-operation",
+                            })
+                            .unwrap_or("closed");
+                        let built = self.machines[vm as usize].alloc(Object::Str(name.into()));
                         self.reply_or_fault(vm, op, built);
                     }
                 }
@@ -6848,10 +7648,12 @@ impl<'m> World<'m> {
         for reference in &order {
             let resource = match heap.get(*reference) {
                 Object::NativeFileHandle { resource }
-                | Object::NativeResourceHandle { resource, .. } => Some(*resource),
+                | Object::NativeResourceHandle { resource, .. }
+                | Object::NativeTcpStream { resource }
+                | Object::NativeTcpListener { resource } => Some(*resource),
                 _ => None,
             };
-            if resource.is_some_and(|resource| self.files.contains_key(&resource)) {
+            if resource.is_some_and(|resource| self.bound_resources.contains_key(&resource)) {
                 return Err(FaultCode::BoundaryViolation);
             }
         }
@@ -6875,6 +7677,9 @@ impl<'m> World<'m> {
                     format!("a pending {}", lm_abi::op_name(record.op))
                 }
                 crate::ResourceKind::File => "file handle".to_string(),
+                crate::ResourceKind::TcpStream => "TCP stream".to_string(),
+                crate::ResourceKind::TcpListener => "TCP listener".to_string(),
+                crate::ResourceKind::TlsStream => "TLS stream".to_string(),
             });
         if registered.is_some() {
             return registered;
@@ -6884,12 +7689,21 @@ impl<'m> World<'m> {
         order.into_iter().find_map(|reference| {
             let resource = match heap.get(reference) {
                 Object::NativeFileHandle { resource }
-                | Object::NativeResourceHandle { resource, .. } => *resource,
+                | Object::NativeResourceHandle { resource, .. }
+                | Object::NativeTcpStream { resource }
+                | Object::NativeTcpListener { resource } => *resource,
+                Object::NativeTlsStream { resource } => *resource,
                 _ => return None,
             };
-            self.files
-                .contains_key(&resource)
-                .then(|| "file handle".to_string())
+            self.bound_resources
+                .get(&resource)
+                .map(|bound| match bound.kind {
+                    crate::ResourceKind::File => "file handle".to_string(),
+                    crate::ResourceKind::TcpStream => "TCP stream".to_string(),
+                    crate::ResourceKind::TcpListener => "TCP listener".to_string(),
+                    crate::ResourceKind::TlsStream => "TLS stream".to_string(),
+                    crate::ResourceKind::PendingOperation => "pending operation".to_string(),
+                })
         })
     }
 
@@ -7207,6 +8021,27 @@ impl<'m> World<'m> {
                     }
                     Object::NativeWait { owner, token } => {
                         format!("<wait {token} of machine {owner}>")
+                    }
+                    Object::NativeTcpStream { resource } => {
+                        if *resource == 0 {
+                            "<TCP stream closed>".to_string()
+                        } else {
+                            format!("<TCP stream {resource}>")
+                        }
+                    }
+                    Object::NativeTcpListener { resource } => {
+                        if *resource == 0 {
+                            "<TCP listener closed>".to_string()
+                        } else {
+                            format!("<TCP listener {resource}>")
+                        }
+                    }
+                    Object::NativeTlsStream { resource } => {
+                        if *resource == 0 {
+                            "<TLS stream closed>".to_string()
+                        } else {
+                            format!("<TLS stream {resource}>")
+                        }
                     }
                 }
             }

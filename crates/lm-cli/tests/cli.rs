@@ -352,6 +352,43 @@ fn run_machine_world_prints_three_equal_results() {
 }
 
 #[test]
+fn run_http_codec_example_prints_the_parsed_response() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "examples/12-network-effects/01-http-codec.lm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done((112, \"200 world\"))\n");
+}
+
+#[test]
+fn run_tcp_loopback_example_moves_plaintext() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Tcp",
+        "examples/12-network-effects/02-tcp-loopback.lm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(\"hello\")\n");
+}
+
+#[test]
+fn run_tls_driver_example_exposes_lower_requests() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Vm",
+        "examples/12-network-effects/03-drive-tls.lm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(5)\n");
+}
+
+#[test]
 fn snapshot_verify_reports_the_checkpoint_world() {
     let out = lm(&["snapshot", "verify", "checkpoints/asked-tree.lms"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -403,7 +440,7 @@ fn inspect_dumps_the_checkpoint_container() {
     let out = lm(&["inspect", "checkpoints/asked-tree.lms"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let dump = stdout(&out);
-    assert!(dump.starts_with("container 882 bytes hash "), "{dump}");
+    assert!(dump.starts_with("container 892 bytes hash "), "{dump}");
     assert!(dump.contains("machine 0 state asked"), "{dump}");
     assert!(dump.contains("pending Clock.Now"), "{dump}");
     assert!(dump.contains("obj 1 Handle frozen proc 1.0"), "{dump}");

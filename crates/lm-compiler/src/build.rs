@@ -65,6 +65,25 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     let mut modules: Vec<ModuleReport> = Vec::new();
     // The stage-2 key inputs, in link order.
     let mut contents: Vec<(String, [u8; 32])> = Vec::new();
+    let standard_uses: Vec<Vec<String>> = workspace
+        .order
+        .iter()
+        .flat_map(|name| workspace.package(name).modules.iter())
+        .flat_map(|module| module.uses.iter().cloned())
+        .collect();
+    let standard = crate::standard::modules_for_uses(&standard_uses);
+    for module in &standard {
+        let interface_id = interface_identity(&module.interface);
+        interfaces.insert(module.path.clone(), interface_id);
+        env.bind_interface(module.interface.clone())
+            .map_err(|error| format!("error: {error}\n"))?;
+        contents.push((module.path.clone(), module.container_hash));
+        units.push(LinkUnit {
+            path: module.path.clone(),
+            module: module.module.clone(),
+            interface: module.interface.clone(),
+        });
+    }
     for package_name in &workspace.order {
         let package = workspace.package(package_name);
         // The root set of every module of this package: the
@@ -82,7 +101,21 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
                 .map_err(|e| format!("error: cannot read `{}`: {e}\n", module.file.display()))?;
             let visible: Vec<(String, [u8; 32])> =
                 interfaces.iter().map(|(k, v)| (k.clone(), *v)).collect();
-            let key = compile_key(&module.path, module.is_main, &text, &roots, &visible);
+            let uses_standard = module
+                .uses
+                .iter()
+                .any(|path| path.first().map(String::as_str) == Some("std"));
+            let mut compile_roots = roots.clone();
+            if uses_standard {
+                compile_roots.push(("std".to_string(), "std".to_string()));
+            }
+            let key = compile_key(
+                &module.path,
+                module.is_main,
+                &text,
+                &compile_roots,
+                &visible,
+            );
             let mut compiled = None;
             let mut cached = false;
             if let Some((artifact, interface_bytes)) = dir.read(&key) {
@@ -109,6 +142,9 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
                 Some(entry) => entry,
                 None => {
                     let mut local = env.clone();
+                    if uses_standard {
+                        local.bind_standard_root();
+                    }
                     for (name, prefix) in &roots {
                         local
                             .bind_root(name, prefix)

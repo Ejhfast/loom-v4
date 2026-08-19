@@ -782,7 +782,7 @@ valid: state=asked machines=3 mailboxes=2
 
 # Part III — A practical distribution by Week 13
 
-## Week 10 — Scoped files, selectable waits, time, random, and TCP
+## Week 10 — Handles, waits, filesystem, and network effects
 
 Week 10 starts with the handle foundation in
 `docs/specs/sidecar/handles.md`. Later slices add scoped leases, broader host
@@ -824,6 +824,19 @@ operations, and TCP.
 - Let known host completions extend elapsed time without consuming fuel.
 - Register live TCP streams and listeners the same way. Do not reopen
   a connection silently.
+- Add transparent effect sets for TCP, TLS, and HTTP clients.
+- Normalize each set to its transitive exact-operation closure.
+- Include set membership in the operation manifest digest.
+- Add bounded DNS workers and one nonblocking TCP reactor.
+- Keep sockets and TLS state outside `lm-vm`.
+- Add `TcpStream`, `TcpListener`, and `TlsStream` native resources.
+- Let a typed driver create each network resource for a current call.
+- Add explicit TLS roots, server names, versions, ALPN, and buffers in `std.tls`.
+- Consume the TCP resource after each submitted TLS handshake.
+- Use pinned rustls only inside `lm-host`.
+- Add bounded HTTP/1.1 parsing and serialization in `std.http` Loom code.
+- Use one response parser for TCP and TLS readers.
+- Keep cleartext and secure HTTP effect sets separate.
 - Defer checkpointable file and connection types with explicit
   restore contracts to a later version.
 - Report precise resource blocker paths along reachability from the
@@ -858,6 +871,18 @@ second line
 $ lm run examples/09-handles-and-supervision/word-count.lm \
     --allow Fs.Open,Fs.Read,Fs.Close -- book.txt
 lines=1240 words=18302 bytes=100771
+```
+
+```text
+$ lm run --show-result --allow Tcp \
+    examples/12-network-effects/02-tcp-loopback.lm
+Done("hello")
+```
+
+```text
+$ lm run --show-result --allow Vm \
+    examples/12-network-effects/03-drive-tls.lm
+Done(5)
 ```
 
 A proc performs long work inside `with_open`. A snapshot during that

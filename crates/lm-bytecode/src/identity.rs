@@ -57,7 +57,7 @@
 use crate::hash::sha256;
 use crate::{BcClassKind, BcRow, BcType, Instr, Module, NativeInstr, NO_PARENT, VERSION};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// The compiler ABI version. It covers the canonical bytecode
 /// semantics, the identity encoding, and the lowering conventions.
@@ -78,8 +78,11 @@ use std::collections::HashMap;
 /// Version 16 adds Bytes and nominal builder classes.
 /// Version 17 adds scalar Text, Substring, Char, and builder moves.
 /// Version 18 adds the text extraction and parsing lowering, and it
-/// lowers enum equality to the structural instructions.
-pub const COMPILER_ABI_VERSION: u32 = 18;
+/// lowers enum equality to the structural instructions. Version 19
+/// adds two active byte-buffer scan instructions and native TLS
+/// resources with their VM controls. Both landed on separate
+/// branches, so version 20 is the first that carries them together.
+pub const COMPILER_ABI_VERSION: u32 = 20;
 
 /// The refinement work budget of one component.
 ///
@@ -530,6 +533,8 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BbReserve)
         | Instr::Native(NativeInstr::BbClear)
         | Instr::Native(NativeInstr::BbFinish)
+        | Instr::Native(NativeInstr::BbAt)
+        | Instr::Native(NativeInstr::BbFindFrom)
         | Instr::Native(NativeInstr::BytesNew)
         | Instr::Native(NativeInstr::BytesLen)
         | Instr::Native(NativeInstr::BytesText)
@@ -992,21 +997,38 @@ impl<'a> Resolver<'a> {
         self.state.body_final[f as usize].expect("body digest scheduled")
     }
 
-    /// The canonical row bytes: operation names inline, variables by
-    /// index.
+    /// The canonical row bytes use exact operations and variables.
     fn row_bytes(&self, out: &mut Vec<u8>, row: &[BcRow]) {
-        out.extend_from_slice(&(row.len() as u32).to_le_bytes());
+        let mut operations = BTreeSet::new();
+        let mut variables = BTreeSet::new();
         for elem in row {
             match elem {
                 BcRow::Op(idx) => {
-                    out.push(0x00);
-                    write_str(out, &self.module.strings[*idx as usize]);
+                    let name = &self.module.strings[*idx as usize];
+                    match lm_abi::row_name_operations(name) {
+                        Some(expanded) if !expanded.is_empty() => {
+                            for operation in expanded {
+                                operations.insert(lm_abi::op_name(operation));
+                            }
+                        }
+                        _ => {
+                            operations.insert(name.clone());
+                        }
+                    }
                 }
                 BcRow::Var(v) => {
-                    out.push(0x01);
-                    out.extend_from_slice(&v.to_le_bytes());
+                    variables.insert(*v);
                 }
             }
+        }
+        out.extend_from_slice(&((operations.len() + variables.len()) as u32).to_le_bytes());
+        for operation in operations {
+            out.push(0x00);
+            write_str(out, &operation);
+        }
+        for variable in variables {
+            out.push(0x01);
+            out.extend_from_slice(&variable.to_le_bytes());
         }
     }
 
@@ -1279,8 +1301,8 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::GeChar) => 0x9b,
             Instr::EqRef => 0x2a,
             Instr::NeRef => 0x2b,
-            Instr::EqValue => 0xb4,
-            Instr::NeValue => 0xb5,
+            Instr::EqValue => 0xb6,
+            Instr::NeValue => 0xb7,
             Instr::Call(..) => 0x30,
             Instr::CallG { .. } => 0x60,
             Instr::CallVirtual { .. } => 0x40,
@@ -1319,6 +1341,8 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::BbExtend) => 0x85,
             Instr::Native(NativeInstr::BbReserve) => 0x86,
             Instr::Native(NativeInstr::BbClear) => 0x87,
+            Instr::Native(NativeInstr::BbAt) => 0xb4,
+            Instr::Native(NativeInstr::BbFindFrom) => 0xb5,
             Instr::Freeze => 0x59,
             Instr::Native(NativeInstr::BytesNew) => 0x5a,
             Instr::Native(NativeInstr::BytesLen) => 0x5b,
@@ -1483,6 +1507,7 @@ impl<'a> Resolver<'a> {
                 out.extend_from_slice(&self.type_digest(*ty));
                 u(out, *count);
             }
+
             Instr::Jump(b) => {
                 u(out, *b);
             }
@@ -1595,6 +1620,8 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::BbExtend)
             | Instr::Native(NativeInstr::BbReserve)
             | Instr::Native(NativeInstr::BbClear)
+            | Instr::Native(NativeInstr::BbAt)
+            | Instr::Native(NativeInstr::BbFindFrom)
             | Instr::Freeze
             | Instr::Native(NativeInstr::BytesNew)
             | Instr::Native(NativeInstr::BytesLen)

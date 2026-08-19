@@ -1,0 +1,50 @@
+# Run with `--allow Tcp`.
+
+def loopback(port: Int): Result[SocketAddress, NetError]
+  bytes = ByteBuffer()
+  bytes.append(127).append(0).append(0).append(1)
+  Tcp().address(IpAddress.V4(bytes.finish()), port, 0, 0)
+end
+
+def exchange(): String with Tcp
+  address = case loopback(0)
+  in Ok(value) then value
+  in Err(error)
+    return error.message()
+  end
+  listener = case Tcp().listen(address, 4)
+  in Ok(value) then value
+  in Err(error)
+    return error.message()
+  end
+  bound = case listener.local_address()
+  in Ok(value) then value
+  in Err(error)
+    return error.message()
+  end
+  client = case Tcp().connect(bound)
+  in Ok(value) then value
+  in Err(error)
+    return error.message()
+  end
+  server = case listener.accept()
+  in Ok(value) then value.first
+  in Err(error)
+    return error.message()
+  end
+  case client.write_all(Bytes("hello"))
+  in Ok(_) then ()
+  in Err(error)
+    return error.message()
+  end
+  result = case server.read_exact(5)
+  in Ok(value) then value.text()
+  in Err(error) then error.message()
+  end
+  client.close()
+  server.close()
+  listener.close()
+  result
+end
+
+exchange()

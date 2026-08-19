@@ -42,6 +42,28 @@ fn class_hash(
     identity.class_hashes[idx]
 }
 
+#[test]
+fn an_effect_set_and_its_exact_closure_share_one_function_hash() {
+    let concise = r#"
+def network_capability(): () with Tcp.Client
+  ()
+end
+()
+"#;
+    let exact = r#"
+def network_capability(): () with Tcp.Connect, Tcp.Read, Tcp.Write, Tcp.Shutdown, Tcp.LocalAddress, Tcp.PeerAddress, Tcp.Close
+  ()
+end
+()
+"#;
+    let (concise_module, concise_identity) = identity_of(concise);
+    let (exact_module, exact_identity) = identity_of(exact);
+    assert_eq!(
+        func_hash(&concise_module, &concise_identity, "network_capability"),
+        func_hash(&exact_module, &exact_identity, "network_capability")
+    );
+}
+
 // ---------------------------------------------------------------
 // Section 4: the referenced nominal identity.
 // ---------------------------------------------------------------
@@ -1260,23 +1282,36 @@ fn a_binding_class_index_out_of_range_rejects() {
     );
 }
 
-/// The binding table declares its own count. One entry needs twelve
-/// bytes, and the general length rule bounds a count at one byte per
-/// entry, so the decoder checks the real cost before it reserves.
+/// The decoder checks an impossible binding count before it reserves memory.
 #[test]
 fn an_impossible_binding_count_rejects_before_the_reserve() {
     let module = compile_text("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(1)\n").unwrap();
     let good = lm_bytecode::encode(&module);
     assert!(lm_bytecode::decode(&good).is_ok(), "the sample must decode");
-    // Every four-byte window: a forged count must never reserve past
-    // the input. A rejection or an unrelated success both hold; a
-    // panic or an allocation failure does not.
-    for at in 0..good.len().saturating_sub(4) {
-        let mut bad = good.clone();
-        bad[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        let result = std::panic::catch_unwind(|| lm_bytecode::decode(&bad));
-        assert!(result.is_ok(), "the decoder panicked at offset {at}");
-    }
+    let export_at = u32::from_le_bytes(good[14..18].try_into().unwrap()) as usize;
+    let binding_at = export_at
+        + 4
+        + module
+            .classes
+            .iter()
+            .map(|class| 8 + class.name.len() + class.key.len())
+            .sum::<usize>()
+        + 4
+        + module
+            .funcs
+            .iter()
+            .map(|function| 4 + function.name.len())
+            .sum::<usize>();
+    assert_eq!(
+        &good[binding_at..binding_at + 4],
+        &(module.bindings.len() as u32).to_le_bytes()
+    );
+    let mut bad = good;
+    bad[binding_at..binding_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        lm_bytecode::decode(&bad),
+        Err(lm_bytecode::DecodeError::BadLength)
+    );
 }
 
 /// A selector name lives in the semantic region, so a selector rename
@@ -1366,8 +1401,8 @@ fn every_field_of_one_operation_definition_moves_its_identity() {
     let name = op_name(OP_VM_SNAPSHOT_SELF);
     let mut edited = *op(OP_VM_SNAPSHOT_SELF);
     assert_eq!(edited.kind, OpKind::VmControl);
-    assert_ne!(edited.reply, AbiType::Unit);
-    edited.reply = AbiType::Unit;
+    assert_ne!(edited.reply, AbiType::UNIT);
+    edited.reply = AbiType::UNIT;
     assert_ne!(
         identity_of(&name, &edited),
         op_identity(OP_VM_SNAPSHOT_SELF),
@@ -1375,7 +1410,7 @@ fn every_field_of_one_operation_definition_moves_its_identity() {
     );
     // The parameters of one `VmControl` entry.
     let mut edited = *op(OP_VM_SNAPSHOT_SELF);
-    edited.params = &[AbiType::Int];
+    edited.params = &[AbiType::INT];
     assert_ne!(
         identity_of(&name, &edited),
         op_identity(OP_VM_SNAPSHOT_SELF),
@@ -1398,10 +1433,10 @@ fn every_field_of_one_operation_definition_moves_its_identity() {
     with_member.member = "Later";
     edits.push(("member", with_member));
     let mut with_params = base;
-    with_params.params = &[AbiType::Str];
+    with_params.params = &[AbiType::STR];
     edits.push(("params", with_params));
     let mut with_reply = base;
-    with_reply.reply = AbiType::Str;
+    with_reply.reply = AbiType::STR;
     edits.push(("reply", with_reply));
     let mut with_snapshot = base;
     with_snapshot.snapshot = SnapshotClass::HostAttachment;

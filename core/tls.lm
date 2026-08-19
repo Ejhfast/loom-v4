@@ -1,0 +1,126 @@
+# Core: TLS stream resources and operation boundary values.
+
+enum TlsError
+  InvalidConfig(message: String)
+  Handshake(message: String)
+  Certificate(message: String)
+  Protocol(message: String)
+  Network(error: NetError)
+  Closed
+  LimitExceeded(message: String)
+
+  def message(self): String
+    case self
+    in InvalidConfig(value) then value
+    in Handshake(value)     then value
+    in Certificate(value)   then value
+    in Protocol(value)      then value
+    in Network(error)       then error.message()
+    in Closed               then "TLS stream is closed"
+    in LimitExceeded(value) then value
+    end
+  end
+end
+
+final class TlsStream
+  def read(self, max_bytes: Int): Result[TcpRead, TlsError] with Tls.Read
+    sys.tls.read(self, max_bytes)
+  end
+
+  def write(self, bytes: Bytes): Result[Int, TlsError] with Tls.Write
+    sys.tls.write(self, bytes)
+  end
+
+  def shutdown(self): Result[(), TlsError] with Tls.Shutdown
+    sys.tls.shutdown(self)
+  end
+
+  def local_address(self): Result[SocketAddress, TlsError] with Tls.LocalAddress
+    sys.tls.local_address(self)
+  end
+
+  def peer_address(self): Result[SocketAddress, TlsError] with Tls.PeerAddress
+    sys.tls.peer_address(self)
+  end
+
+  def close(self): Result[(), TlsError] with Tls.Close
+    sys.tls.close(self)
+  end
+
+  def write_all(self, bytes: Bytes): Result[(), TlsError] with Tls.Stream
+    offset = 0
+    while offset < bytes.len()
+      remaining = bytes.len() - offset
+      count = if remaining < 65535
+        remaining
+      else
+        65535
+      end
+      part = case bytes.slice(offset, count)
+      in Ok(value) then value
+      in Err(_)
+        return Err(TlsError.Protocol("the TLS write suffix is invalid"))
+      end
+      case self.write(part)
+      in Ok(written)
+        if written <= 0
+          return Err(TlsError.Protocol("the TLS stream made no write progress"))
+        end
+        offset = offset + written
+      in Err(error)
+        return Err(error)
+      end
+    end
+    Ok(())
+  end
+
+  def read_exact(self, count: Int): Result[Bytes, TlsError] with Tls.Stream
+    if count < 0
+      return Err(TlsError.InvalidConfig("the TLS read count is negative"))
+    end
+    buffer = ByteBuffer()
+    while buffer.len() < count
+      remaining = count - buffer.len()
+      chunk = if remaining < 65535
+        remaining
+      else
+        65535
+      end
+      case self.read(chunk)
+      in Ok(TcpRead.Data(bytes))
+        buffer.extend(bytes)
+      in Ok(TcpRead.End)
+        return Err(TlsError.Protocol("the TLS stream ended before the read completed"))
+      in Err(error)
+        return Err(error)
+      end
+    end
+    Ok(buffer.finish())
+  end
+
+  def read_to_end(self, max_total: Int): Result[Bytes, TlsError] with Tls.Stream
+    if max_total < 0
+      return Err(TlsError.InvalidConfig("the TLS byte limit is negative"))
+    end
+    buffer = ByteBuffer()
+    loop do
+      remaining = max_total - buffer.len()
+      count = if remaining < 65535
+        remaining + 1
+      else
+        65535
+      end
+      case self.read(count)
+      in Ok(TcpRead.Data(bytes))
+        if bytes.len() > remaining
+          return Err(TlsError.LimitExceeded("the TLS stream passed the byte limit"))
+        end
+        buffer.extend(bytes)
+      in Ok(TcpRead.End)
+        return Ok(buffer.finish())
+      in Err(error)
+        return Err(error)
+      end
+    end
+  end
+end

@@ -17,9 +17,7 @@ use std::rc::Rc;
 /// diagnostics. `Err` holds the fully rendered diagnostic.
 pub fn compile_text(name: &str, text: &str) -> Result<lm_bytecode::Module, String> {
     let source = SourceFile::new(name, text);
-    let ast = lm_source::parse::parse(&source.text).map_err(|d| d.render(&source))?;
-    let hir = lm_hir::check_module(&ast).map_err(|d| d.render(&source))?;
-    Ok(lm_hir::lower_module(&hir))
+    lm_compiler::compile_program("", &source)
 }
 
 /// Compile source text to serialized bytecode bytes.

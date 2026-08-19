@@ -7,3 +7,12 @@ license.workspace = true
 [dependencies]
 lm-abi = { path = "../lm-abi" }
 lm-vm = { path = "../lm-vm" }
+mio = { version = "1.0", features = ["net", "os-poll"] }
+rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+socket2 = "0.6"
+webpki-roots = "=1.0.3"
+
+[dev-dependencies]
+lm-proc = { path = "../lm-proc" }
+lm-testkit = { path = "../lm-testkit" }
+rcgen = "=0.14.5"

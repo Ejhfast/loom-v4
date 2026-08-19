@@ -282,11 +282,7 @@ impl TypeStore {
                 sup.iter().any(|s| match s {
                     RowElem::Op(m) => {
                         let sup_name = &self.row_names[*m as usize];
-                        sup_name == name
-                            || name
-                                .split_once('.')
-                                .map(|(group, _)| group == sup_name)
-                                .unwrap_or(false)
+                        lm_abi::row_name_included(name, sup_name)
                     }
                     RowElem::Var(_) => false,
                 })

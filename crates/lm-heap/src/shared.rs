@@ -735,6 +735,11 @@ impl SharedBytes {
         self.span.retained_capacity()
     }
 
+    /// Test the durable byte backing limit.
+    pub fn has_bounded_retention(&self) -> bool {
+        self.retained_capacity() <= STRING_RETENTION_FLOOR.max(self.len().saturating_mul(2))
+    }
+
     pub(crate) fn allocation_key(&self) -> usize {
         self.span.storage.allocation_key()
     }
@@ -759,6 +764,22 @@ impl SharedBytes {
             .utf8_state
             .store(self.utf8_state.load(Ordering::Relaxed), Ordering::Relaxed);
         compact
+    }
+
+    /// Copy these bytes into bounded storage when needed.
+    pub fn bounded(&self) -> SharedBytes {
+        if self.has_bounded_retention() {
+            return self.clone();
+        }
+        self.compact()
+    }
+
+    /// Make bounded byte storage with a fallible copy.
+    pub fn try_bounded(&self) -> Result<SharedBytes, TryReserveError> {
+        if self.has_bounded_retention() {
+            return Ok(self.clone());
+        }
+        self.try_compact()
     }
 
     /// Copy this span with a fallible exact allocation.
@@ -1156,6 +1177,23 @@ impl NativeByteBuffer {
         self.buffer.as_ref().map(Vec::is_empty)
     }
 
+    /// Read one byte from an active buffer.
+    pub fn at(&self, index: usize) -> Option<u8> {
+        self.buffer.as_ref()?.get(index).copied()
+    }
+
+    /// Find immutable bytes at or after one active-buffer position.
+    pub fn find_from(&self, needle: &SharedBytes, start: usize) -> Option<usize> {
+        let bytes = self.buffer.as_ref()?;
+        let tail = bytes.get(start..)?;
+        if needle.is_empty() {
+            return Some(start);
+        }
+        tail.windows(needle.len())
+            .position(|window| window == needle.as_slice())
+            .and_then(|position| start.checked_add(position))
+    }
+
     /// Clear the active buffer.
     pub fn clear(&mut self) -> bool {
         let Some(buffer) = self.buffer.as_mut() else {
@@ -1259,6 +1297,16 @@ mod tests {
         let durable = small.utf8_bounded().expect("the bytes contain UTF-8");
         assert!(durable.has_bounded_retention());
         assert!(!durable.shares_bytes_storage(&bytes));
+    }
+
+    #[test]
+    fn durable_bytes_compact_a_small_view_of_large_storage() {
+        let bytes = SharedBytes::from(vec![b'x'; 32 * 1024]);
+        let small = bytes.slice(0, 2).expect("the range is valid");
+        assert!(!small.has_bounded_retention());
+        let durable = small.bounded();
+        assert!(durable.has_bounded_retention());
+        assert!(!durable.shares_storage(&bytes));
     }
 
     #[test]

@@ -1134,11 +1134,13 @@ One graph walker must define reachability and ordering for freeze, verification,
 
 ```text
 sys.io       sys.fs       sys.clock    sys.rand
-sys.net      sys.proc     sys.vm       sys.compiler
-sys.reflect
+sys.dns      sys.tcp      sys.tls      sys.proc
+sys.vm       sys.compiler sys.reflect  sys.wait
 ```
 
-The ABI also supplies effect/policy descriptor constants `Io`, `Fs`, `Clock`, `Rand`, `Net`, `Proc`, `Vm`, `Compiler`, and `Reflect`, plus exact constants such as `Io.Print` and `Clock.Now`.
+The ABI supplies one descriptor constant for each exact operation and group.
+
+Examples include `Io`, `Tcp.Stream`, `Http.Client`, `Io.Print`, and `Tls.Handshake`.
 
 A group constant is an `OperationGroup`; an exact constant is an `Operation`. `sys.io.print` is the callable `Op[Io.Print, (String) -> ()]` corresponding to descriptor `Io.Print`. Scope grants nothing.
 
@@ -1179,7 +1181,15 @@ def apply[T, U, effect e](x: T, f: (T) -> U with e): U with e
 end
 ```
 
-A group denotes its fixed ABI operation set. Omitting `with` means empty row.
+A namespace group denotes every exact operation declared in that namespace.
+
+An effect set denotes explicit operations and other effect sets.
+
+The checker expands every group to its transitive exact-operation closure.
+
+Unknown members, duplicate members, and membership cycles reject during ABI validation.
+
+Omitting `with` means the empty row.
 
 For each body the checker unions direct performs, declared rows of statically selected calls, effect variables of called higher-order values, and initializer rows. The declared row must be a superset. Checking is local; no whole-program inference is required.
 
@@ -1207,6 +1217,10 @@ empty row <: Io.Print <: Io <: Io, Fs
 ```
 
 Admission checks use subsumption.
+
+Row identity uses the normalized exact-operation closure.
+
+The operation manifest digest covers each effect-set membership edge.
 
 Passing authority to a child is charged to the granter's row. `PolicyTable.pass(target)` has a built-in dependent static rule: its argument must preserve a known exact identity, group, or effect variable; that operation set is added to the caller's row. A value widened to identity-erased `PolicyTarget` cannot be passed. `block`, `clear`, and pure `mock` add no row.
 
@@ -2402,17 +2416,49 @@ Range validation is ordinary deterministic checking before host entropy use.
 ### 23.4 Networking
 
 ```text
-Net.Resolve       (String, String) -> Result[[SocketAddress], NetError]
-Net.Connect       (SocketAddress) -> Result[TcpHandle, NetError]
-Net.Listen        (SocketAddress, Int) -> Result[ListenerHandle, NetError]
-Net.Accept        (ListenerHandle) -> Result[Pair[TcpHandle, SocketAddress], NetError]
-Net.Read          (TcpHandle, Int) -> Result[Bytes, NetError]
-Net.Write         (TcpHandle, Bytes) -> Result[Int, NetError]
-Net.Shutdown      (TcpHandle) -> Result[(), NetError]
-Net.Close         (NetHandle) -> Result[(), NetError]
+Dns.Resolve       (String, Int) -> Result[[SocketAddress], NetError]
+
+Tcp.Connect       (SocketAddress) -> Result[TcpStream, NetError]
+Tcp.Listen        (SocketAddress, Int) -> Result[TcpListener, NetError]
+Tcp.Accept        (TcpListener) -> Result[Pair[TcpStream, SocketAddress], NetError]
+Tcp.Read          (TcpStream, Int) -> Result[TcpRead, NetError]
+Tcp.Write         (TcpStream, Bytes) -> Result[Int, NetError]
+Tcp.Shutdown      (TcpStream, Shutdown) -> Result[(), NetError]
+Tcp.LocalAddress  (TcpResource) -> Result[SocketAddress, NetError]
+Tcp.PeerAddress   (TcpStream) -> Result[SocketAddress, NetError]
+Tcp.Close         (TcpResource) -> Result[(), NetError]
+
+Tls.Handshake     (TcpStream, String, Int, [Bytes], [Bytes], Int, Int)
+                  -> Result[TlsStream, TlsError]
+Tls.Read          (TlsStream, Int) -> Result[TcpRead, TlsError]
+Tls.Write         (TlsStream, Bytes) -> Result[Int, TlsError]
+Tls.Shutdown      (TlsStream) -> Result[(), TlsError]
+Tls.LocalAddress  (TlsStream) -> Result[SocketAddress, TlsError]
+Tls.PeerAddress   (TlsStream) -> Result[SocketAddress, TlsError]
+Tls.Close         (TlsStream) -> Result[(), TlsError]
 ```
 
-`NetHandle` is the sealed native resource parent of `TcpHandle` and `ListenerHandle`; it is unrelated to the `Any` top type. Live TCP streams and listeners are host attachments and block snapshot creation while open. TLS, DNS policy, proxies, and certificates are library/host extensions, not ambient behavior.
+`TcpResource` is the sealed native parent of `TcpStream` and `TcpListener`.
+
+`TlsStream` is a separate final native resource class.
+
+Live TCP and TLS resources block snapshot creation.
+
+`TcpRead.Data` carries nonempty bytes. `TcpRead.End` reports orderly peer closure.
+
+A submitted TLS handshake consumes its TCP stream on every result.
+
+Certificate roots, server names, versions, ALPN, and buffers are explicit values.
+
+The transparent effect sets include `Tcp.Stream`, `Tcp.Listener`, `Tcp.Client`, and `Tcp.Server`.
+
+They also include `Tls.Stream`, `Tls.Client`, `Http.CleartextClient`, and `Http.Client`.
+
+An effect set expands to a finite exact-operation closure.
+
+It creates no runtime operation and hides no request from a driver.
+
+The network sidecar defines limits, ownership, errors, and HTTP/TLS layers.
 
 ### 23.5 VM operations
 
@@ -2432,9 +2478,13 @@ Vm.Dispatch[T]           (Vm[T], Request) -> ()
 Vm.Stack[T]              (Vm[T]) -> [FrameView]
 Vm.Table[T]              (Vm[T]) -> PolicyTable
 Vm.Handles[T]            (Vm[T]) -> [ResourceHandle]
-Vm.Resource[T]           (Vm[T], FileHandle) -> ResourceHandle
+Vm.Resource[T,R]         (Vm[T], R) -> ResourceHandle
 Vm.ServeFile[T]           (Vm[T], PendingCall[(String, OpenOptions),
                            Result[FileHandle, FsError]]) -> ResourceHandle
+Vm.ServeTcpStream[T]      (Vm[T], PendingCall, SocketAddress)
+                           -> ResourceHandle
+Vm.ServeTcpListener[T]    (Vm[T], PendingCall) -> ResourceHandle
+Vm.ServeTlsStream[T]      (Vm[T], PendingCall) -> ResourceHandle
 Vm.ResourceIsOpen        (ResourceHandle) -> Bool
 Vm.ResourceClose         (ResourceHandle) -> Bool
 Vm.ResourceKind          (ResourceHandle) -> String
@@ -2455,6 +2505,10 @@ The held and receiverless forms use separate exact operation identities because 
 
 `Vm.Handles` returns controls for the live resources in the controlled
 machine world. A resource control stays with its holder.
+
+`Vm.Resource` accepts a file, TCP, or TLS resource value.
+
+Each `Serve` operation requires a compatible current typed call.
 
 `Vm.ResourceSame` matches two controls only while their shared entry
 is live. A closed control never matches.
@@ -2558,7 +2612,13 @@ class Range
 end
 ```
 
-It also contains `StepEvent`, `RunResult`, `DriveEvent`, `Recv`, `ProcResult`, `SendResult`, `PendingCall`, `SnapshotImage`, `SnapshotError`, `RestoreError`, portable operation error enums, `OpenOptions`, `SeekFrom`, `FileInfo`, `SocketAddress`, `Duration`, `Instant`, `CompileOptions`, and related ABI records.
+It also contains VM, proc, snapshot, filesystem, and network boundary values.
+
+These values include portable errors, addresses, TCP helpers, and native TCP and TLS resource classes.
+
+`std.tls` contains TLS configuration values and client helpers.
+
+`std.http` contains bounded HTTP/1.1 values, codecs, and client helpers.
 
 `List`, `Map`, `Text`, its concrete classes, `Char`, and `Bytes` are native core classes in the pinned image.
 
@@ -2568,16 +2628,26 @@ The image seals their complete method tables. Some bodies use intrinsics, while 
 
 ### 24.2 Prelude
 
-The prelude introduces only names used in nearly every module:
+The prelude introduces the pinned value and resource surface:
 
 ```text
-(), Never, Bool, Int, Float, Byte, Text, String, Substring, Char, Bytes
-List, Map, Option, Some, None, Result, Ok, Err
-Ordering, Pair, Range
+(), Never, Bool, Int, Float, Byte, List, Map
+Option, Some, None, Result, Ok, Err, Ordering, Pair, Range
+RunResult, StepEvent, DriveEvent, Proc, Recv, SendResult, ProcResult, ProcError
+Choice, SnapshotError, RestoreError, FsError, OpenOptions, SeekFrom
+IpAddress, SocketAddress, NetError, TcpRead, Shutdown
+TcpResource, TcpStream, TcpListener, Tcp
+TlsError, TlsStream
+Text, String, Substring, Char, Utf8Error, IndexError, ParseIntError, Bytes
+StringBuilder, ByteBuffer
 identity, assert, assert_message
 ```
 
-`Any` remains an explicit primitive type, while `DynValue`, VM/proc/compiler/reflection types, file/network types, and all effectful wrappers require explicit qualification or bindings. The prelude contains no I/O function and grants no operation.
+`Any` remains an explicit primitive type.
+
+The prelude binds type names and constructors. It grants no operation.
+
+The prelude contains no function that performs I/O.
 
 `identity`, `assert`, and `assert_message` are pinned pure/native core functions; the prelude only imports their names. `assert` and `assert_message` deterministically fault the current machine when their condition is false.
 
@@ -2952,7 +3022,19 @@ There are no finalizers. Scoped cleanup is host-managed. Raw handle ownership re
 
 `std/time` defines frozen `Duration` and `Instant`, checked conversion helpers, `now`, `monotonic`, and `sleep`. `std/random` provides `bytes`, half-open integer ranges, Boolean selection, list `choose`, and Fisher-Yates `shuffle`, with exact `Rand` rows.
 
-`std/net` wraps resolve/connect/listen/accept/read/write/shutdown/close for TCP. A live TCP handle is a host attachment and blocks snapshot creation. TLS, HTTP, and DNS policy are separate packages because they introduce substantial policy and dependency choices.
+Core network code defines DNS, TCP, and native TLS stream operations.
+
+`std.tls` wraps TLS configuration and client operations.
+
+`std.http` implements bounded HTTP/1.1 messages and direct clients.
+
+A live TCP or TLS handle is a host attachment and blocks snapshot creation.
+
+Cleartext HTTP uses `Http.CleartextClient`.
+
+Secure HTTP uses `Http.Client` and an explicit `TlsClientConfig`.
+
+Proxy policy, redirects, cookies, decompression, and connection pools remain separate code.
 
 Command-line arguments are passed as the root entry tuple by the CLI rather than read ambiently. `Process.EnvGet` and `Process.CurrentDir` are optional explicit host operations; `std/process` wraps them when the host ABI enables that group.
 
@@ -3010,7 +3092,11 @@ The compiler test harness has UI diagnostics, compile-pass, run-pass, run-fail, 
 
 ### 24.15 Deliberate omissions
 
-The minimal standard library does not include an iterator trait hierarchy, async/await, regex engine, TLS/HTTP stack, database client, package registry client, GUI, locale framework, or automatic serialization derivation. Without traits, eager collection methods are clearer than a nominal iterator protocol; richer facilities remain ordinary packages.
+The minimal library does not include an iterator trait hierarchy, async/await, regex engine, database client, GUI, or locale framework.
+
+It also omits HTTP/2, HTTP/3, TLS servers, automatic redirects, cookies, proxies, and decompression.
+
+Richer facilities remain ordinary packages over explicit effects.
 
 ## 25. Host and intrinsic ABI
 

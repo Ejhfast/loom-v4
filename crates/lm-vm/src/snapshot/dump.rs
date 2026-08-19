@@ -269,6 +269,9 @@ fn payload(object: &Object) -> String {
             format!("resource {resource} of machine {surface}")
         }
         Object::NativeWait { owner, token } => format!("wait {token} of machine {owner}"),
+        Object::NativeTcpStream { resource } => format!("TCP stream resource {resource}"),
+        Object::NativeTcpListener { resource } => format!("TCP listener resource {resource}"),
+        Object::NativeTlsStream { resource } => format!("TLS stream resource {resource}"),
     }
 }
 

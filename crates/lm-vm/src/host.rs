@@ -7,7 +7,7 @@
 
 use crate::CompletionKey;
 use lm_heap::{SharedBytes, SharedText};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 /// One plain-data operation argument.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +18,49 @@ pub enum HostArg {
     File(u64),
     OpenOptions(HostOpenOptions),
     SeekFrom(HostSeekFrom),
+    SocketAddress(HostSocketAddress),
+    Tcp(HostTcpResource),
+    Shutdown(HostShutdown),
+    List(Vec<HostArg>),
+    Tls(u64),
+}
+
+/// One portable IP address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HostIpAddress {
+    V4([u8; 4]),
+    V6([u8; 16]),
+}
+
+/// One portable socket address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HostSocketAddress {
+    pub ip: HostIpAddress,
+    pub port: u16,
+    pub flow_info: u32,
+    pub scope_id: u32,
+}
+
+/// One TCP resource kind at the host boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostTcpKind {
+    Stream,
+    Listener,
+}
+
+/// One opaque TCP resource token at the host boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostTcpResource {
+    pub kind: HostTcpKind,
+    pub token: u64,
+}
+
+/// One portable TCP shutdown direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostShutdown {
+    Read,
+    Write,
+    Both,
 }
 
 /// One portable file-open mode.
@@ -49,6 +92,29 @@ pub enum CoreCtor {
     IoErrorFailed,
     FsErrorClosed,
     FsErrorFailed,
+    Pair,
+    NetInvalidInput,
+    NetNameNotFound,
+    NetUnavailable,
+    NetPermissionDenied,
+    NetAddressInUse,
+    NetConnectionRefused,
+    NetConnectionReset,
+    NetNotConnected,
+    NetTimedOut,
+    NetClosed,
+    NetLimitExceeded,
+    NetUnsupported,
+    NetFailed,
+    TcpReadData,
+    TcpReadEnd,
+    TlsInvalidConfig,
+    TlsHandshake,
+    TlsCertificate,
+    TlsProtocol,
+    TlsNetwork,
+    TlsClosed,
+    TlsLimitExceeded,
 }
 
 /// One plain-data operation reply. `Ctor` builds a pinned core enum
@@ -60,6 +126,11 @@ pub enum HostValue {
     Str(SharedText),
     Bytes(SharedBytes),
     File(u64),
+    List(Vec<HostValue>),
+    SocketAddress(HostSocketAddress),
+    TcpStream(u64),
+    TcpListener(u64),
+    TlsStream(u64),
     Ctor(CoreCtor, Vec<HostValue>),
 }
 
@@ -97,6 +168,18 @@ pub trait Host {
     fn wait(&mut self) -> Option<HostCompletion>;
     /// Close one file token during forced resource cleanup.
     fn close_file(&mut self, _token: u64) -> bool {
+        false
+    }
+    /// Cancel one pending completion token.
+    fn cancel(&mut self, _token: u64) -> bool {
+        false
+    }
+    /// Close one TCP resource during forced cleanup.
+    fn close_tcp(&mut self, _resource: HostTcpResource) -> bool {
+        false
+    }
+    /// Close one TLS stream during forced resource cleanup.
+    fn close_tls(&mut self, _token: u64) -> bool {
         false
     }
 }
@@ -141,6 +224,13 @@ pub struct RecordingHost {
     files: BTreeMap<String, Vec<u8>>,
     file_handles: BTreeMap<u64, MemoryFile>,
     next_file: u64,
+    dns: BTreeMap<String, Vec<HostIpAddress>>,
+    listeners: BTreeMap<u64, MemoryListener>,
+    listener_addresses: BTreeMap<HostSocketAddress, u64>,
+    streams: BTreeMap<u64, MemoryStream>,
+    tls_streams: std::collections::BTreeSet<u64>,
+    next_tcp: u64,
+    next_port: u16,
 }
 
 /// One reply this host holds until a later poll.
@@ -149,7 +239,15 @@ struct Deferred {
     key: CompletionKey,
     /// Polls remaining before the reply is ready.
     left: u32,
-    value: HostValue,
+    action: DeferredAction,
+}
+
+#[derive(Debug, Clone)]
+enum DeferredAction {
+    Ready(HostValue),
+    Accept(u64),
+    Read { stream: u64, count: usize },
+    TlsRead { stream: u64, count: usize },
 }
 
 /// True when the command-line host serves this operation off the
@@ -166,6 +264,23 @@ fn deferred_op(op: u32) -> bool {
             | lm_abi::OP_IO_PRINT
             | lm_abi::OP_IO_ERROR
             | lm_abi::OP_IO_READ_LINE
+            | lm_abi::OP_DNS_RESOLVE
+            | lm_abi::OP_TCP_CONNECT
+            | lm_abi::OP_TCP_LISTEN
+            | lm_abi::OP_TCP_ACCEPT
+            | lm_abi::OP_TCP_READ
+            | lm_abi::OP_TCP_WRITE
+            | lm_abi::OP_TCP_SHUTDOWN
+            | lm_abi::OP_TCP_LOCAL_ADDRESS
+            | lm_abi::OP_TCP_PEER_ADDRESS
+            | lm_abi::OP_TCP_CLOSE
+            | lm_abi::OP_TLS_HANDSHAKE
+            | lm_abi::OP_TLS_READ
+            | lm_abi::OP_TLS_WRITE
+            | lm_abi::OP_TLS_SHUTDOWN
+            | lm_abi::OP_TLS_LOCAL_ADDRESS
+            | lm_abi::OP_TLS_PEER_ADDRESS
+            | lm_abi::OP_TLS_CLOSE
     )
 }
 
@@ -178,7 +293,29 @@ struct MemoryFile {
     append: bool,
 }
 
+#[derive(Debug)]
+struct MemoryListener {
+    address: HostSocketAddress,
+    backlog: usize,
+    incoming: VecDeque<(u64, HostSocketAddress)>,
+}
+
+#[derive(Debug)]
+struct MemoryStream {
+    local: HostSocketAddress,
+    peer_address: HostSocketAddress,
+    peer: Option<u64>,
+    incoming: VecDeque<u8>,
+    read_closed: bool,
+    write_closed: bool,
+    peer_write_closed: bool,
+}
+
 const MAX_FILE_IO_BYTES: usize = 16 << 20;
+const MAX_NETWORK_IO_BYTES: usize = 16 << 20;
+const MAX_DNS_RESULTS: usize = 64;
+const MAX_VIRTUAL_STREAM_BYTES: usize = 64 << 20;
+const VIRTUAL_WRITE_CHUNK: usize = 4 << 10;
 
 fn fs_ok(value: HostValue) -> HostValue {
     HostValue::Ctor(CoreCtor::Ok, vec![value])
@@ -194,6 +331,48 @@ fn fs_failed(message: impl Into<String>) -> HostValue {
     )
 }
 
+fn net_ok(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn net_error(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(
+            ctor,
+            vec![HostValue::Str(SharedText::from(message.into()))],
+        )],
+    )
+}
+
+fn net_closed() -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(CoreCtor::NetClosed, vec![])],
+    )
+}
+
+fn tls_ok(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn tls_error(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(
+            ctor,
+            vec![HostValue::Str(SharedText::from(message.into()))],
+        )],
+    )
+}
+
+fn tls_closed() -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(CoreCtor::TlsClosed, vec![])],
+    )
+}
+
 impl Default for RecordingHost {
     fn default() -> RecordingHost {
         RecordingHost::new(1)
@@ -202,6 +381,13 @@ impl Default for RecordingHost {
 
 impl RecordingHost {
     pub fn new(seed: u64) -> RecordingHost {
+        let mut dns = BTreeMap::new();
+        dns.insert(
+            "localhost".to_string(),
+            vec![HostIpAddress::V6([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ])],
+        );
         RecordingHost {
             printed: Vec::new(),
             errors: Vec::new(),
@@ -214,6 +400,13 @@ impl RecordingHost {
             files: BTreeMap::new(),
             file_handles: BTreeMap::new(),
             next_file: 1,
+            dns,
+            listeners: BTreeMap::new(),
+            listener_addresses: BTreeMap::new(),
+            streams: BTreeMap::new(),
+            tls_streams: std::collections::BTreeSet::new(),
+            next_tcp: 1,
+            next_port: 40_000,
         }
     }
 
@@ -227,6 +420,11 @@ impl RecordingHost {
         self.files.get(path).map(Vec::as_slice)
     }
 
+    /// Set one deterministic DNS answer.
+    pub fn set_dns(&mut self, name: impl Into<String>, addresses: Vec<HostIpAddress>) {
+        self.dns.insert(name.into(), addresses);
+    }
+
     fn next_rand(&mut self) -> u64 {
         // xorshift64*: deterministic and dependency-free.
         let mut x = self.rand_state;
@@ -235,6 +433,125 @@ impl RecordingHost {
         x ^= x >> 27;
         self.rand_state = x;
         x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn take_tcp_token(&mut self) -> Option<u64> {
+        let token = self.next_tcp;
+        self.next_tcp = token.checked_add(1)?;
+        Some(token)
+    }
+
+    fn take_port(&mut self) -> Option<u16> {
+        let port = self.next_port;
+        self.next_port = port.checked_add(1)?;
+        Some(port)
+    }
+
+    fn accept_value(&mut self, listener: u64) -> Option<HostValue> {
+        let Some(listener) = self.listeners.get_mut(&listener) else {
+            return Some(net_closed());
+        };
+        let (stream, peer) = listener.incoming.pop_front()?;
+        Some(net_ok(HostValue::Ctor(
+            CoreCtor::Pair,
+            vec![HostValue::TcpStream(stream), HostValue::SocketAddress(peer)],
+        )))
+    }
+
+    fn read_value(&mut self, stream: u64, count: usize) -> Option<HostValue> {
+        let Some(stream) = self.streams.get_mut(&stream) else {
+            return Some(net_closed());
+        };
+        if stream.read_closed {
+            return Some(net_closed());
+        }
+        if !stream.incoming.is_empty() {
+            let count = count.min(stream.incoming.len());
+            let bytes: Vec<u8> = stream.incoming.drain(..count).collect();
+            return Some(net_ok(HostValue::Ctor(
+                CoreCtor::TcpReadData,
+                vec![HostValue::Bytes(bytes.into())],
+            )));
+        }
+        if stream.peer_write_closed || stream.peer.is_none() {
+            return Some(net_ok(HostValue::Ctor(CoreCtor::TcpReadEnd, vec![])));
+        }
+        None
+    }
+
+    fn tls_read_value(&mut self, stream: u64, count: usize) -> Option<HostValue> {
+        if !self.tls_streams.contains(&stream) {
+            return Some(tls_closed());
+        }
+        let Some(stream) = self.streams.get_mut(&stream) else {
+            return Some(tls_closed());
+        };
+        if stream.read_closed {
+            return Some(tls_closed());
+        }
+        if !stream.incoming.is_empty() {
+            let count = count.min(stream.incoming.len());
+            let bytes: Vec<u8> = stream.incoming.drain(..count).collect();
+            return Some(tls_ok(HostValue::Ctor(
+                CoreCtor::TcpReadData,
+                vec![HostValue::Bytes(bytes.into())],
+            )));
+        }
+        if stream.peer_write_closed || stream.peer.is_none() {
+            return Some(tls_ok(HostValue::Ctor(CoreCtor::TcpReadEnd, vec![])));
+        }
+        None
+    }
+
+    fn close_virtual_tcp(&mut self, resource: HostTcpResource) -> bool {
+        match resource.kind {
+            HostTcpKind::Listener => {
+                let Some(listener) = self.listeners.remove(&resource.token) else {
+                    return false;
+                };
+                self.listener_addresses.remove(&listener.address);
+                for (stream, _) in listener.incoming {
+                    self.close_virtual_tcp(HostTcpResource {
+                        kind: HostTcpKind::Stream,
+                        token: stream,
+                    });
+                }
+                true
+            }
+            HostTcpKind::Stream => {
+                self.tls_streams.remove(&resource.token);
+                let Some(stream) = self.streams.remove(&resource.token) else {
+                    return false;
+                };
+                if let Some(peer) = stream.peer {
+                    if let Some(peer) = self.streams.get_mut(&peer) {
+                        peer.peer = None;
+                        peer.peer_write_closed = true;
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    fn close_virtual_tls(&mut self, token: u64) -> bool {
+        if !self.tls_streams.remove(&token) {
+            return false;
+        }
+        self.close_virtual_tcp(HostTcpResource {
+            kind: HostTcpKind::Stream,
+            token,
+        })
+    }
+
+    fn deferred_value(&mut self, token: u64) -> Option<HostValue> {
+        let action = self.pending.get(&token)?.action.clone();
+        match action {
+            DeferredAction::Ready(value) => Some(value),
+            DeferredAction::Accept(listener) => self.accept_value(listener),
+            DeferredAction::Read { stream, count } => self.read_value(stream, count),
+            DeferredAction::TlsRead { stream, count } => self.tls_read_value(stream, count),
+        }
     }
 }
 
@@ -248,7 +565,22 @@ impl RecordingHost {
             Deferred {
                 key,
                 left: 1,
-                value,
+                action: DeferredAction::Ready(value),
+            },
+        );
+        HostStart::Waiting(token)
+    }
+
+    /// Hold one network request until its resource becomes ready.
+    fn defer_action(&mut self, key: CompletionKey, action: DeferredAction) -> HostStart {
+        let token = self.next_token;
+        self.next_token += 1;
+        self.pending.insert(
+            token,
+            Deferred {
+                key,
+                left: 1,
+                action,
             },
         );
         HostStart::Waiting(token)
@@ -451,6 +783,580 @@ impl RecordingHost {
                 }
                 HostStart::Completed(fs_ok(HostValue::Unit))
             }
+            lm_abi::OP_DNS_RESOLVE => {
+                let (Some(HostArg::Str(name)), Some(HostArg::Int(port))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Dns.Resolve needs a name and port".to_string());
+                };
+                if name.is_empty()
+                    || name.len() > 253
+                    || name
+                        .as_bytes()
+                        .iter()
+                        .any(|byte| *byte <= 32 || *byte >= 127)
+                {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the host name is invalid",
+                    ));
+                }
+                let Ok(port) = u16::try_from(*port) else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the port is outside 0 through 65535",
+                    ));
+                };
+                let Some(addresses) = self.dns.get(name.as_str()) else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetNameNotFound,
+                        "the host name has no address",
+                    ));
+                };
+                if addresses.is_empty() {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetNameNotFound,
+                        "the host name has no address",
+                    ));
+                }
+                let values = addresses
+                    .iter()
+                    .take(MAX_DNS_RESULTS)
+                    .map(|ip| {
+                        HostValue::SocketAddress(HostSocketAddress {
+                            ip: *ip,
+                            port,
+                            flow_info: 0,
+                            scope_id: 0,
+                        })
+                    })
+                    .collect();
+                HostStart::Completed(net_ok(HostValue::List(values)))
+            }
+            lm_abi::OP_TCP_LISTEN => {
+                let (Some(HostArg::SocketAddress(address)), Some(HostArg::Int(backlog))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed(
+                        "Tcp.Listen needs an address and backlog".to_string(),
+                    );
+                };
+                let Ok(backlog) = usize::try_from(*backlog) else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the backlog is not positive",
+                    ));
+                };
+                if backlog == 0 || backlog > 65_535 {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the backlog is outside 1 through 65535",
+                    ));
+                }
+                let mut address = *address;
+                if address.port == 0 {
+                    let Some(port) = self.take_port() else {
+                        return HostStart::Completed(net_error(
+                            CoreCtor::NetLimitExceeded,
+                            "the virtual port space is exhausted",
+                        ));
+                    };
+                    address.port = port;
+                }
+                if self.listener_addresses.contains_key(&address) {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetAddressInUse,
+                        "the address already has a listener",
+                    ));
+                }
+                let Some(token) = self.take_tcp_token() else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the virtual TCP token space is exhausted",
+                    ));
+                };
+                self.listeners.insert(
+                    token,
+                    MemoryListener {
+                        address,
+                        backlog,
+                        incoming: VecDeque::new(),
+                    },
+                );
+                self.listener_addresses.insert(address, token);
+                HostStart::Completed(net_ok(HostValue::TcpListener(token)))
+            }
+            lm_abi::OP_TCP_CONNECT => {
+                let Some(HostArg::SocketAddress(address)) = args.first() else {
+                    return HostStart::Failed("Tcp.Connect needs an address".to_string());
+                };
+                let Some(listener_token) = self.listener_addresses.get(address).copied() else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetConnectionRefused,
+                        "the address has no listener",
+                    ));
+                };
+                let full = self
+                    .listeners
+                    .get(&listener_token)
+                    .is_none_or(|listener| listener.incoming.len() >= listener.backlog);
+                if full {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetUnavailable,
+                        "the listener backlog is full",
+                    ));
+                }
+                let Some(client) = self.take_tcp_token() else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the virtual TCP token space is exhausted",
+                    ));
+                };
+                let Some(server) = self.take_tcp_token() else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the virtual TCP token space is exhausted",
+                    ));
+                };
+                let Some(port) = self.take_port() else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the virtual port space is exhausted",
+                    ));
+                };
+                let local = HostSocketAddress {
+                    ip: address.ip,
+                    port,
+                    flow_info: 0,
+                    scope_id: 0,
+                };
+                self.streams.insert(
+                    client,
+                    MemoryStream {
+                        local,
+                        peer_address: *address,
+                        peer: Some(server),
+                        incoming: VecDeque::new(),
+                        read_closed: false,
+                        write_closed: false,
+                        peer_write_closed: false,
+                    },
+                );
+                self.streams.insert(
+                    server,
+                    MemoryStream {
+                        local: *address,
+                        peer_address: local,
+                        peer: Some(client),
+                        incoming: VecDeque::new(),
+                        read_closed: false,
+                        write_closed: false,
+                        peer_write_closed: false,
+                    },
+                );
+                self.listeners
+                    .get_mut(&listener_token)
+                    .expect("the listener remains open")
+                    .incoming
+                    .push_back((server, local));
+                HostStart::Completed(net_ok(HostValue::TcpStream(client)))
+            }
+            lm_abi::OP_TCP_ACCEPT => {
+                let Some(HostArg::Tcp(resource)) = args.first() else {
+                    return HostStart::Failed("Tcp.Accept needs a listener".to_string());
+                };
+                if resource.kind != HostTcpKind::Listener {
+                    return HostStart::Failed("Tcp.Accept needs a listener".to_string());
+                }
+                match self.accept_value(resource.token) {
+                    Some(value) => HostStart::Completed(value),
+                    None => self.defer_action(key, DeferredAction::Accept(resource.token)),
+                }
+            }
+            lm_abi::OP_TCP_READ => {
+                let (Some(HostArg::Tcp(resource)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tcp.Read needs a stream and count".to_string());
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tcp.Read needs a stream".to_string());
+                }
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the read count is not positive",
+                    ));
+                };
+                if count == 0 {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the read count is not positive",
+                    ));
+                }
+                if count > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the read count is too large",
+                    ));
+                }
+                match self.read_value(resource.token, count) {
+                    Some(value) => HostStart::Completed(value),
+                    None => self.defer_action(
+                        key,
+                        DeferredAction::Read {
+                            stream: resource.token,
+                            count,
+                        },
+                    ),
+                }
+            }
+            lm_abi::OP_TCP_WRITE => {
+                let (Some(HostArg::Tcp(resource)), Some(HostArg::Bytes(bytes))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tcp.Write needs a stream and bytes".to_string());
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tcp.Write needs a stream".to_string());
+                }
+                let Some(stream) = self.streams.get(&resource.token) else {
+                    return HostStart::Completed(net_closed());
+                };
+                if stream.write_closed {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetNotConnected,
+                        "the stream write side is closed",
+                    ));
+                }
+                if bytes.len() > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the write value is too large",
+                    ));
+                }
+                if bytes.is_empty() {
+                    return HostStart::Completed(net_ok(HostValue::Int(0)));
+                }
+                let Some(peer) = stream.peer else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetConnectionReset,
+                        "the peer closed the stream",
+                    ));
+                };
+                let count = bytes.len().min(VIRTUAL_WRITE_CHUNK);
+                let Some(peer) = self.streams.get_mut(&peer) else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetConnectionReset,
+                        "the peer closed the stream",
+                    ));
+                };
+                if peer.read_closed {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetConnectionReset,
+                        "the peer closed its read side",
+                    ));
+                }
+                if peer.incoming.len().saturating_add(count) > MAX_VIRTUAL_STREAM_BYTES {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the virtual stream buffer is full",
+                    ));
+                }
+                peer.incoming
+                    .extend(bytes.as_slice()[..count].iter().copied());
+                HostStart::Completed(net_ok(HostValue::Int(count as i64)))
+            }
+            lm_abi::OP_TCP_SHUTDOWN => {
+                let (Some(HostArg::Tcp(resource)), Some(HostArg::Shutdown(direction))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed(
+                        "Tcp.Shutdown needs a stream and direction".to_string(),
+                    );
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tcp.Shutdown needs a stream".to_string());
+                }
+                let Some(stream) = self.streams.get_mut(&resource.token) else {
+                    return HostStart::Completed(net_closed());
+                };
+                let peer = stream.peer;
+                if matches!(direction, HostShutdown::Read | HostShutdown::Both) {
+                    stream.read_closed = true;
+                    stream.incoming.clear();
+                }
+                if matches!(direction, HostShutdown::Write | HostShutdown::Both) {
+                    stream.write_closed = true;
+                    if let Some(peer) = peer.and_then(|peer| self.streams.get_mut(&peer)) {
+                        peer.peer_write_closed = true;
+                    }
+                }
+                HostStart::Completed(net_ok(HostValue::Unit))
+            }
+            lm_abi::OP_TCP_LOCAL_ADDRESS => {
+                let Some(HostArg::Tcp(resource)) = args.first() else {
+                    return HostStart::Failed("Tcp.LocalAddress needs a resource".to_string());
+                };
+                let address = match resource.kind {
+                    HostTcpKind::Stream => {
+                        self.streams.get(&resource.token).map(|stream| stream.local)
+                    }
+                    HostTcpKind::Listener => self
+                        .listeners
+                        .get(&resource.token)
+                        .map(|listener| listener.address),
+                };
+                match address {
+                    Some(address) => {
+                        HostStart::Completed(net_ok(HostValue::SocketAddress(address)))
+                    }
+                    None => HostStart::Completed(net_closed()),
+                }
+            }
+            lm_abi::OP_TCP_PEER_ADDRESS => {
+                let Some(HostArg::Tcp(resource)) = args.first() else {
+                    return HostStart::Failed("Tcp.PeerAddress needs a stream".to_string());
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tcp.PeerAddress needs a stream".to_string());
+                }
+                match self.streams.get(&resource.token) {
+                    Some(stream) => {
+                        HostStart::Completed(net_ok(HostValue::SocketAddress(stream.peer_address)))
+                    }
+                    None => HostStart::Completed(net_closed()),
+                }
+            }
+            lm_abi::OP_TCP_CLOSE => {
+                let Some(HostArg::Tcp(resource)) = args.first() else {
+                    return HostStart::Failed("Tcp.Close needs a resource".to_string());
+                };
+                if self.close_virtual_tcp(*resource) {
+                    HostStart::Completed(net_ok(HostValue::Unit))
+                } else {
+                    HostStart::Completed(net_closed())
+                }
+            }
+            lm_abi::OP_TLS_HANDSHAKE => {
+                let (
+                    Some(HostArg::Tcp(resource)),
+                    Some(HostArg::Str(server_name)),
+                    Some(HostArg::Int(root_mode)),
+                    Some(HostArg::List(roots)),
+                    Some(HostArg::List(alpn)),
+                    Some(HostArg::Int(minimum)),
+                    Some(HostArg::Int(buffer_limit)),
+                ) = (
+                    args.first(),
+                    args.get(1),
+                    args.get(2),
+                    args.get(3),
+                    args.get(4),
+                    args.get(5),
+                    args.get(6),
+                )
+                else {
+                    return HostStart::Failed("Tls.Handshake needs its configuration".to_string());
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tls.Handshake needs a TCP stream".to_string());
+                }
+                if !self.streams.contains_key(&resource.token)
+                    || self.tls_streams.contains(&resource.token)
+                {
+                    return HostStart::Completed(tls_closed());
+                }
+                let roots_valid = roots
+                    .iter()
+                    .all(|value| matches!(value, HostArg::Bytes(bytes) if !bytes.is_empty() && bytes.len() <= 1_048_576));
+                let alpn_valid = alpn.iter().all(
+                    |value| matches!(value, HostArg::Bytes(bytes) if !bytes.is_empty() && bytes.len() <= 255),
+                );
+                let root_bytes = roots.iter().fold(0_usize, |total, value| {
+                    total.saturating_add(match value {
+                        HostArg::Bytes(bytes) => bytes.len(),
+                        _ => 0,
+                    })
+                });
+                let alpn_bytes = alpn.iter().fold(0_usize, |total, value| {
+                    total.saturating_add(match value {
+                        HostArg::Bytes(bytes) => bytes.len(),
+                        _ => 0,
+                    })
+                });
+                let valid = !server_name.is_empty()
+                    && server_name.len() <= 253
+                    && server_name
+                        .as_bytes()
+                        .iter()
+                        .all(|byte| *byte > 32 && *byte < 127)
+                    && matches!(root_mode, 0 | 1)
+                    && ((*root_mode == 0 && roots.is_empty())
+                        || (*root_mode == 1 && !roots.is_empty() && roots.len() <= 128))
+                    && roots_valid
+                    && root_bytes <= 4_194_304
+                    && alpn.len() <= 32
+                    && alpn_valid
+                    && alpn_bytes <= 4_096
+                    && matches!(minimum, 12 | 13)
+                    && (1..=1_048_576).contains(buffer_limit);
+                if !valid {
+                    self.close_virtual_tcp(*resource);
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS client configuration is invalid",
+                    ));
+                }
+                self.tls_streams.insert(resource.token);
+                HostStart::Completed(tls_ok(HostValue::TlsStream(resource.token)))
+            }
+            lm_abi::OP_TLS_READ => {
+                let (Some(HostArg::Tls(stream)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tls.Read needs a stream and count".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS read count is not positive",
+                    ));
+                };
+                if count == 0 {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsInvalidConfig,
+                        "the TLS read count is not positive",
+                    ));
+                }
+                if count > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsLimitExceeded,
+                        "the TLS read count is too large",
+                    ));
+                }
+                match self.tls_read_value(*stream, count) {
+                    Some(value) => HostStart::Completed(value),
+                    None => self.defer_action(
+                        key,
+                        DeferredAction::TlsRead {
+                            stream: *stream,
+                            count,
+                        },
+                    ),
+                }
+            }
+            lm_abi::OP_TLS_WRITE => {
+                let (Some(HostArg::Tls(stream)), Some(HostArg::Bytes(bytes))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tls.Write needs a stream and bytes".to_string());
+                };
+                if !self.tls_streams.contains(stream) {
+                    return HostStart::Completed(tls_closed());
+                }
+                let Some(state) = self.streams.get(stream) else {
+                    return HostStart::Completed(tls_closed());
+                };
+                if state.write_closed {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsProtocol,
+                        "the TLS write side is closed",
+                    ));
+                }
+                if bytes.len() > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsLimitExceeded,
+                        "the TLS write value is too large",
+                    ));
+                }
+                if bytes.is_empty() {
+                    return HostStart::Completed(tls_ok(HostValue::Int(0)));
+                }
+                let Some(peer) = state.peer else {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsProtocol,
+                        "the TLS peer closed the stream",
+                    ));
+                };
+                let count = bytes.len().min(VIRTUAL_WRITE_CHUNK);
+                let Some(peer) = self.streams.get_mut(&peer) else {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsProtocol,
+                        "the TLS peer closed the stream",
+                    ));
+                };
+                if peer.read_closed {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsProtocol,
+                        "the TLS peer closed its read side",
+                    ));
+                }
+                if peer.incoming.len().saturating_add(count) > MAX_VIRTUAL_STREAM_BYTES {
+                    return HostStart::Completed(tls_error(
+                        CoreCtor::TlsLimitExceeded,
+                        "the virtual TLS stream buffer is full",
+                    ));
+                }
+                peer.incoming
+                    .extend(bytes.as_slice()[..count].iter().copied());
+                HostStart::Completed(tls_ok(HostValue::Int(count as i64)))
+            }
+            lm_abi::OP_TLS_SHUTDOWN => {
+                let Some(HostArg::Tls(stream)) = args.first() else {
+                    return HostStart::Failed("Tls.Shutdown needs a stream".to_string());
+                };
+                if !self.tls_streams.contains(stream) {
+                    return HostStart::Completed(tls_closed());
+                }
+                let Some(state) = self.streams.get_mut(stream) else {
+                    return HostStart::Completed(tls_closed());
+                };
+                state.write_closed = true;
+                let peer = state.peer;
+                if let Some(peer) = peer.and_then(|peer| self.streams.get_mut(&peer)) {
+                    peer.peer_write_closed = true;
+                }
+                HostStart::Completed(tls_ok(HostValue::Unit))
+            }
+            lm_abi::OP_TLS_LOCAL_ADDRESS => {
+                let Some(HostArg::Tls(stream)) = args.first() else {
+                    return HostStart::Failed("Tls.LocalAddress needs a stream".to_string());
+                };
+                let value = if self.tls_streams.contains(stream) {
+                    self.streams
+                        .get(stream)
+                        .map(|state| tls_ok(HostValue::SocketAddress(state.local)))
+                        .unwrap_or_else(tls_closed)
+                } else {
+                    tls_closed()
+                };
+                HostStart::Completed(value)
+            }
+            lm_abi::OP_TLS_PEER_ADDRESS => {
+                let Some(HostArg::Tls(stream)) = args.first() else {
+                    return HostStart::Failed("Tls.PeerAddress needs a stream".to_string());
+                };
+                let value = if self.tls_streams.contains(stream) {
+                    self.streams
+                        .get(stream)
+                        .map(|state| tls_ok(HostValue::SocketAddress(state.peer_address)))
+                        .unwrap_or_else(tls_closed)
+                } else {
+                    tls_closed()
+                };
+                HostStart::Completed(value)
+            }
+            lm_abi::OP_TLS_CLOSE => {
+                let Some(HostArg::Tls(stream)) = args.first() else {
+                    return HostStart::Failed("Tls.Close needs a stream".to_string());
+                };
+                if self.close_virtual_tls(*stream) {
+                    HostStart::Completed(tls_ok(HostValue::Unit))
+                } else {
+                    HostStart::Completed(tls_closed())
+                }
+            }
             _ => HostStart::Failed(format!(
                 "the test host does not implement {}",
                 lm_abi::op_name(op)
@@ -459,11 +1365,12 @@ impl RecordingHost {
     }
 
     fn take_ready(&mut self, token: u64) -> Option<HostCompletion> {
+        let value = self.deferred_value(token)?;
         let entry = self.pending.remove(&token)?;
         Some(HostCompletion {
             key: entry.key,
             token,
-            result: Ok(entry.value),
+            result: Ok(value),
         })
     }
 }
@@ -482,28 +1389,41 @@ impl Host for RecordingHost {
     /// Answer the oldest ready reply. A poll with nothing ready moves
     /// every pending reply one step closer, so the order is stable.
     fn poll(&mut self) -> Option<HostCompletion> {
-        let ready = self
+        let tokens: Vec<u64> = self
             .pending
             .iter()
-            .find_map(|(token, entry)| (entry.left == 0).then_some(*token));
-        match ready {
-            Some(token) => self.take_ready(token),
-            None => {
-                for entry in self.pending.values_mut() {
-                    entry.left = entry.left.saturating_sub(1);
-                }
-                None
+            .filter_map(|(token, entry)| (entry.left == 0).then_some(*token))
+            .collect();
+        for token in tokens {
+            if let Some(completion) = self.take_ready(token) {
+                return Some(completion);
             }
         }
+        for entry in self.pending.values_mut() {
+            entry.left = entry.left.saturating_sub(1);
+        }
+        None
     }
 
     fn wait(&mut self) -> Option<HostCompletion> {
-        let token = *self.pending.keys().next()?;
-        self.take_ready(token)
+        let tokens: Vec<u64> = self.pending.keys().copied().collect();
+        tokens.into_iter().find_map(|token| self.take_ready(token))
     }
 
     fn close_file(&mut self, token: u64) -> bool {
         self.file_handles.remove(&token).is_some()
+    }
+
+    fn cancel(&mut self, token: u64) -> bool {
+        self.pending.remove(&token).is_some()
+    }
+
+    fn close_tcp(&mut self, resource: HostTcpResource) -> bool {
+        self.close_virtual_tcp(resource)
+    }
+
+    fn close_tls(&mut self, token: u64) -> bool {
+        self.close_virtual_tls(token)
     }
 }
 
@@ -524,6 +1444,18 @@ impl Host for std::rc::Rc<std::cell::RefCell<RecordingHost>> {
 
     fn close_file(&mut self, token: u64) -> bool {
         self.borrow_mut().close_file(token)
+    }
+
+    fn cancel(&mut self, token: u64) -> bool {
+        self.borrow_mut().cancel(token)
+    }
+
+    fn close_tcp(&mut self, resource: HostTcpResource) -> bool {
+        self.borrow_mut().close_tcp(resource)
+    }
+
+    fn close_tls(&mut self, token: u64) -> bool {
+        self.borrow_mut().close_tls(token)
     }
 }
 

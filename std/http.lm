@@ -1,0 +1,1654 @@
+# Standard library: bounded HTTP/1.1 messages over explicit TCP streams.
+
+use std.tls.Tls
+use std.tls.TlsClientConfig
+
+enum HttpError
+  InvalidRequest(message: String)
+  InvalidResponse(message: String)
+  LimitExceeded(message: String)
+  Network(error: NetError)
+  Tls(error: TlsError)
+
+  def message(self): String
+    case self
+    in InvalidRequest(value)  then value
+    in InvalidResponse(value) then value
+    in LimitExceeded(value)   then value
+    in Network(error)         then error.message()
+    in Tls(error)             then error.message()
+    end
+  end
+end
+
+final class HttpHeader
+  name: String
+  value: Bytes
+
+  def init(mut self, name: String, value: Bytes)
+    self.name = name
+    self.value = value
+  end
+end
+
+final class HttpLimits
+  max_header_bytes: Int
+  max_headers: Int
+  max_body_bytes: Int
+  max_chunks: Int
+  max_wire_bytes: Int
+  read_chunk_bytes: Int
+
+  def init(
+    mut self,
+    max_header_bytes: Int,
+    max_headers: Int,
+    max_body_bytes: Int,
+    max_chunks: Int,
+    max_wire_bytes: Int,
+    read_chunk_bytes: Int
+  )
+    self.max_header_bytes = max_header_bytes
+    self.max_headers = max_headers
+    self.max_body_bytes = max_body_bytes
+    self.max_chunks = max_chunks
+    self.max_wire_bytes = max_wire_bytes
+    self.read_chunk_bytes = read_chunk_bytes
+  end
+end
+
+final class HttpRequest
+  method: String
+  target: String
+  headers: [HttpHeader]
+  body: Bytes
+
+  def init(
+    mut self,
+    method: String,
+    target: String,
+    headers: [HttpHeader],
+    body: Bytes
+  )
+    self.method = method
+    self.target = target
+    self.headers = headers
+    self.body = body
+  end
+
+  def header(self, name: Text): Option[Bytes]
+    wanted = name.to_lower_ascii()
+    index = 0
+    while index < self.headers.len()
+      header = self.headers.at(index)
+      if header.name.to_lower_ascii() == wanted
+        return Some(header.value)
+      end
+      index = index + 1
+    end
+    None
+  end
+end
+
+final class HttpResponse
+  status: Int
+  headers: [HttpHeader]
+  body: Bytes
+
+  def init(mut self, status: Int, headers: [HttpHeader], body: Bytes)
+    self.status = status
+    self.headers = headers
+    self.body = body
+  end
+
+  def header(self, name: Text): Option[Bytes]
+    wanted = name.to_lower_ascii()
+    index = 0
+    while index < self.headers.len()
+      header = self.headers.at(index)
+      if header.name.to_lower_ascii() == wanted
+        return Some(header.value)
+      end
+      index = index + 1
+    end
+    None
+  end
+end
+
+# Internal parsed header state.
+final class HttpHead
+  headers: [HttpHeader]
+  content_length: Int
+  chunked: Bool
+  host_count: Int
+
+  def init(
+    mut self,
+    headers: [HttpHeader],
+    content_length: Int,
+    chunked: Bool,
+    host_count: Int
+  )
+    self.headers = headers
+    self.content_length = content_length
+    self.chunked = chunked
+    self.host_count = host_count
+  end
+end
+
+# Internal stream framing state.
+final class HttpFrame
+  body_start: Int
+  content_length: Int
+  chunked: Bool
+  close_delimited: Bool
+  header_count: Int
+
+  def init(
+    mut self,
+    body_start: Int,
+    content_length: Int,
+    chunked: Bool,
+    close_delimited: Bool,
+    header_count: Int
+  )
+    self.body_start = body_start
+    self.content_length = content_length
+    self.chunked = chunked
+    self.close_delimited = close_delimited
+    self.header_count = header_count
+  end
+end
+
+# Internal incremental chunk scan state.
+final class HttpChunkScan
+  cursor: Int
+  total: Int
+  chunks: Int
+  trailer_start: Int
+  trailer_scan: Int
+
+  def init(mut self, start: Int)
+    self.cursor = start
+    self.total = 0
+    self.chunks = 0
+    self.trailer_start = 0 - 1
+    self.trailer_scan = start
+  end
+end
+
+final class Http
+  def default_limits(self): HttpLimits
+    HttpLimits(65536, 128, 16777216, 4096, 18874368, 65536).freeze()
+  end
+
+  def validate_limits(self, limits: HttpLimits): Result[(), HttpError]
+    if limits.max_header_bytes <= 0 or limits.max_header_bytes > 1048576
+      return Err(HttpError.LimitExceeded("the HTTP header limit is invalid"))
+    end
+    if limits.max_headers < 0 or limits.max_headers > 4096
+      return Err(HttpError.LimitExceeded("the HTTP field limit is invalid"))
+    end
+    if limits.max_body_bytes < 0 or limits.max_body_bytes > 67108864
+      return Err(HttpError.LimitExceeded("the HTTP body limit is invalid"))
+    end
+    if limits.max_chunks <= 0 or limits.max_chunks > 1048576
+      return Err(HttpError.LimitExceeded("the HTTP chunk limit is invalid"))
+    end
+    if limits.max_wire_bytes < limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the HTTP wire limit is too small"))
+    end
+    if limits.max_wire_bytes < limits.max_body_bytes
+      return Err(HttpError.LimitExceeded("the HTTP wire limit is too small"))
+    end
+    if limits.max_wire_bytes > 134217728
+      return Err(HttpError.LimitExceeded("the HTTP wire limit is too large"))
+    end
+    if limits.read_chunk_bytes <= 0 or limits.read_chunk_bytes > 1048576
+      return Err(HttpError.LimitExceeded("the HTTP read size is invalid"))
+    end
+    Ok(())
+  end
+
+  def invalid(self, response: Bool, message: String): HttpError
+    if response
+      HttpError.InvalidResponse(message)
+    else
+      HttpError.InvalidRequest(message)
+    end
+  end
+
+  def token_byte(self, value: Int): Bool
+    alpha = (value >= 65 and value <= 90) or (value >= 97 and value <= 122)
+    digit = value >= 48 and value <= 57
+    alpha or digit or value == 33 or value == 35 or value == 36 or
+      value == 37 or value == 38 or value == 39 or value == 42 or
+      value == 43 or value == 45 or value == 46 or value == 94 or
+      value == 95 or value == 96 or value == 124 or value == 126
+  end
+
+  def valid_token(self, value: Bytes): Bool
+    if value.len() == 0
+      return false
+    end
+    index = 0
+    while index < value.len()
+      if not self.token_byte(value.at(index))
+        return false
+      end
+      index = index + 1
+    end
+    true
+  end
+
+  def valid_target(self, value: String): Bool
+    bytes = value.bytes()
+    if bytes.len() == 0
+      return false
+    end
+    index = 0
+    while index < bytes.len()
+      byte = bytes.at(index)
+      if byte < 33 or byte > 126
+        return false
+      end
+      index = index + 1
+    end
+    true
+  end
+
+  def valid_host(self, value: String): Bool
+    bytes = value.bytes()
+    if bytes.len() == 0 or bytes.len() > 253
+      return false
+    end
+    index = 0
+    while index < bytes.len()
+      byte = bytes.at(index)
+      if byte < 33 or byte > 126
+        return false
+      end
+      index = index + 1
+    end
+    true
+  end
+
+  def valid_header_value(self, value: Bytes): Bool
+    index = 0
+    while index < value.len()
+      byte = value.at(index)
+      if (byte < 32 and byte != 9) or byte == 127
+        return false
+      end
+      index = index + 1
+    end
+    true
+  end
+
+  def valid_reason(self, value: String): Bool
+    bytes = value.bytes()
+    index = 0
+    while index < bytes.len()
+      byte = bytes.at(index)
+      if (byte < 32 and byte != 9) or byte == 127
+        return false
+      end
+      index = index + 1
+    end
+    true
+  end
+
+  def decimal_bytes(self, value: Bytes): Bool
+    if value.len() == 0
+      return false
+    end
+    index = 0
+    while index < value.len()
+      byte = value.at(index)
+      if byte < 48 or byte > 57
+        return false
+      end
+      index = index + 1
+    end
+    true
+  end
+
+  def response_status(self, line: Bytes): Result[Int, HttpError]
+    if line.len() < 13 or line.at(8) != 32 or line.at(12) != 32
+      return Err(HttpError.InvalidResponse("the HTTP status line is malformed"))
+    end
+    version = case line.slice(0, 8)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidResponse("the HTTP version is invalid"))
+    end
+    if version != Bytes("HTTP/1.1") and version != Bytes("HTTP/1.0")
+      return Err(HttpError.InvalidResponse("the HTTP version is unsupported"))
+    end
+    code = case line.slice(9, 3)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidResponse("the HTTP status code is invalid"))
+    end
+    if not self.decimal_bytes(code)
+      return Err(HttpError.InvalidResponse("the HTTP status code is invalid"))
+    end
+    reason = case line.slice(13, line.len() - 13)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidResponse("the HTTP reason is invalid"))
+    end
+    if not self.valid_header_value(reason)
+      return Err(HttpError.InvalidResponse("the HTTP reason is invalid"))
+    end
+    text = case code.utf8()
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidResponse("the HTTP status code is invalid"))
+    end
+    status = case text.parse_int(10)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidResponse("the HTTP status code is invalid"))
+    end
+    if status < 100 or status > 599
+      return Err(HttpError.InvalidResponse("the HTTP status code is invalid"))
+    end
+    if status < 200
+      return Err(HttpError.InvalidResponse("informational HTTP responses are unsupported"))
+    end
+    Ok(status)
+  end
+
+  def serialize_request(
+    self,
+    host: String,
+    port: Int,
+    request: HttpRequest,
+    limits: HttpLimits
+  ): Result[Bytes, HttpError]
+    case self.validate_limits(limits)
+    in Err(error)
+      return Err(error)
+    in Ok(_)      then ()
+    end
+    if port < 0 or port > 65535
+      return Err(HttpError.InvalidRequest("the HTTP port is outside its range"))
+    end
+    if not self.valid_host(host)
+      return Err(HttpError.InvalidRequest("the HTTP host is invalid"))
+    end
+    method_bytes = request.method.bytes()
+    target_bytes = request.target.bytes()
+    host_bytes = host.bytes()
+    if not self.valid_token(method_bytes)
+      return Err(HttpError.InvalidRequest("the HTTP method is invalid"))
+    end
+    if not self.valid_target(request.target)
+      return Err(HttpError.InvalidRequest("the HTTP target is invalid"))
+    end
+    if request.headers.len() > limits.max_headers - 3
+      return Err(HttpError.LimitExceeded("the request has too many header fields"))
+    end
+    if request.body.len() > limits.max_body_bytes
+      return Err(HttpError.LimitExceeded("the request body is too large"))
+    end
+    if host_bytes.len() > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the request headers are too large"))
+    end
+
+    wire = ByteBuffer()
+    if method_bytes.len() > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the request headers are too large"))
+    end
+    wire.extend(method_bytes)
+    wire.extend(Bytes(" "))
+    if target_bytes.len() > limits.max_header_bytes - wire.len()
+      return Err(HttpError.LimitExceeded("the request headers are too large"))
+    end
+    wire.extend(target_bytes)
+    wire.extend(Bytes(" HTTP/1.1\r\nHost: "))
+    authority = if host.contains(":")
+      "[{host}]"
+    else
+      host
+    end
+    if port != 80
+      authority = "{authority}:{port}"
+    end
+    authority_bytes = authority.bytes()
+    if authority_bytes.len() > limits.max_header_bytes - wire.len()
+      return Err(HttpError.LimitExceeded("the request headers are too large"))
+    end
+    wire.extend(authority_bytes)
+    wire.extend(Bytes("\r\nConnection: close\r\n"))
+    if wire.len() > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the request headers are too large"))
+    end
+
+    index = 0
+    while index < request.headers.len()
+      header = request.headers.at(index)
+      name_bytes = header.name.bytes()
+      if not self.valid_token(name_bytes)
+        return Err(HttpError.InvalidRequest("an HTTP header name is invalid"))
+      end
+      if not self.valid_header_value(header.value)
+        return Err(HttpError.InvalidRequest("an HTTP header value is invalid"))
+      end
+      name = header.name.to_lower_ascii()
+      if name == "host" or name == "connection" or
+        name == "content-length" or name == "transfer-encoding"
+        return Err(HttpError.InvalidRequest("a reserved HTTP header was supplied"))
+      end
+      if name_bytes.len() > limits.max_header_bytes - wire.len()
+        return Err(HttpError.LimitExceeded("the request headers are too large"))
+      end
+      wire.extend(name_bytes)
+      wire.extend(Bytes(": "))
+      if wire.len() > limits.max_header_bytes or
+        header.value.len() > limits.max_header_bytes - wire.len()
+        return Err(HttpError.LimitExceeded("the request headers are too large"))
+      end
+      wire.extend(header.value)
+      wire.extend(Bytes("\r\n"))
+      if wire.len() > limits.max_header_bytes
+        return Err(HttpError.LimitExceeded("the request headers are too large"))
+      end
+      index = index + 1
+    end
+    wire.extend(Bytes("Content-Length: {request.body.len()}\r\n\r\n"))
+    if wire.len() > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the request headers are too large"))
+    end
+    if wire.len() + request.body.len() > limits.max_wire_bytes
+      return Err(HttpError.LimitExceeded("the request wire value is too large"))
+    end
+    wire.extend(request.body)
+    Ok(wire.finish())
+  end
+
+  def serialize_response(
+    self,
+    response: HttpResponse,
+    reason: String,
+    limits: HttpLimits
+  ): Result[Bytes, HttpError]
+    case self.validate_limits(limits)
+    in Err(error)
+      return Err(error)
+    in Ok(_)      then ()
+    end
+    if response.status < 100 or response.status > 599
+      return Err(HttpError.InvalidResponse("the HTTP status is invalid"))
+    end
+    if not self.valid_reason(reason)
+      return Err(HttpError.InvalidResponse("the HTTP reason is invalid"))
+    end
+    if response.headers.len() > limits.max_headers - 2
+      return Err(HttpError.LimitExceeded("the response has too many header fields"))
+    end
+    if response.body.len() > limits.max_body_bytes
+      return Err(HttpError.LimitExceeded("the response body is too large"))
+    end
+
+    wire = ByteBuffer()
+    if reason.bytes().len() > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the response headers are too large"))
+    end
+    wire.extend(Bytes("HTTP/1.1 {response.status} {reason}\r\nConnection: close\r\n"))
+    if wire.len() > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the response headers are too large"))
+    end
+    index = 0
+    while index < response.headers.len()
+      header = response.headers.at(index)
+      name_bytes = header.name.bytes()
+      if not self.valid_token(name_bytes)
+        return Err(HttpError.InvalidResponse("an HTTP header name is invalid"))
+      end
+      if not self.valid_header_value(header.value)
+        return Err(HttpError.InvalidResponse("an HTTP header value is invalid"))
+      end
+      name = header.name.to_lower_ascii()
+      if name == "connection" or name == "content-length" or name == "transfer-encoding"
+        return Err(HttpError.InvalidResponse("a reserved HTTP header was supplied"))
+      end
+      if name_bytes.len() > limits.max_header_bytes - wire.len()
+        return Err(HttpError.LimitExceeded("the response headers are too large"))
+      end
+      wire.extend(name_bytes)
+      wire.extend(Bytes(": "))
+      if wire.len() > limits.max_header_bytes or
+        header.value.len() > limits.max_header_bytes - wire.len()
+        return Err(HttpError.LimitExceeded("the response headers are too large"))
+      end
+      wire.extend(header.value)
+      wire.extend(Bytes("\r\n"))
+      if wire.len() > limits.max_header_bytes
+        return Err(HttpError.LimitExceeded("the response headers are too large"))
+      end
+      index = index + 1
+    end
+    wire.extend(Bytes("Content-Length: {response.body.len()}\r\n\r\n"))
+    if wire.len() > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the response headers are too large"))
+    end
+    if wire.len() + response.body.len() > limits.max_wire_bytes
+      return Err(HttpError.LimitExceeded("the response wire value is too large"))
+    end
+    wire.extend(response.body)
+    Ok(wire.finish())
+  end
+
+  def parse_headers(
+    self,
+    wire: Bytes,
+    start: Int,
+    stop: Int,
+    limits: HttpLimits,
+    response: Bool
+  ): Result[HttpHead, HttpError]
+    if start < 0 or stop < start or stop > wire.len()
+      return Err(self.invalid(response, "the HTTP header range is invalid"))
+    end
+    headers: [HttpHeader] = []
+    content_length = 0 - 1
+    chunked = false
+    host_count = 0
+    cursor = start
+    crlf = Bytes("\r\n")
+    while cursor < stop
+      remaining = case wire.slice(cursor, stop - cursor)
+      in Ok(value) then value
+      in Err(_)
+        return Err(self.invalid(response, "the HTTP header range is invalid"))
+      end
+      relative = case remaining.find(crlf)
+      in Some(value) then value
+      in None        then remaining.len()
+      end
+      line_end = cursor + relative
+      line = case wire.slice(cursor, line_end - cursor)
+      in Ok(value) then value
+      in Err(_)
+        return Err(self.invalid(response, "the HTTP header line is invalid"))
+      end
+      colon = case line.find(Bytes(":"))
+      in Some(value) then value
+      in None
+        return Err(self.invalid(response, "an HTTP header line has no colon"))
+      end
+      if colon == 0
+        return Err(self.invalid(response, "an HTTP header name is empty"))
+      end
+      name_bytes = case line.slice(0, colon)
+      in Ok(value) then value
+      in Err(_)
+        return Err(self.invalid(response, "the HTTP header name is invalid"))
+      end
+      if not self.valid_token(name_bytes)
+        return Err(self.invalid(response, "an HTTP header name is invalid"))
+      end
+      name = case name_bytes.utf8()
+      in Ok(value) then value.to_lower_ascii()
+      in Err(_)
+        return Err(self.invalid(response, "an HTTP header name is not ASCII"))
+      end
+
+      value_start = colon + 1
+      while value_start < line.len() and
+        (line.at(value_start) == 32 or line.at(value_start) == 9)
+        value_start = value_start + 1
+      end
+      value_end = line.len()
+      while value_end > value_start and
+        (line.at(value_end - 1) == 32 or line.at(value_end - 1) == 9)
+        value_end = value_end - 1
+      end
+      value = case line.slice(value_start, value_end - value_start)
+      in Ok(bytes) then bytes.compact()
+      in Err(_)
+        return Err(self.invalid(response, "the HTTP header value is invalid"))
+      end
+      if not self.valid_header_value(value)
+        return Err(self.invalid(response, "an HTTP header value is invalid"))
+      end
+
+      if name == "content-length"
+        if content_length >= 0
+          return Err(self.invalid(response, "HTTP has more than one content length"))
+        end
+        text = case value.utf8()
+        in Ok(found) then found
+        in Err(_)
+          return Err(self.invalid(response, "the HTTP content length is invalid"))
+        end
+        if not self.decimal_bytes(value)
+          return Err(self.invalid(response, "the HTTP content length is invalid"))
+        end
+        parsed = case text.parse_int(10)
+        in Ok(found) then found
+        in Err(_)
+          return Err(self.invalid(response, "the HTTP content length is invalid"))
+        end
+        if parsed < 0
+          return Err(self.invalid(response, "the HTTP content length is negative"))
+        end
+        content_length = parsed
+      elsif name == "transfer-encoding"
+        if chunked
+          return Err(self.invalid(response, "HTTP has more than one transfer encoding"))
+        end
+        coding = case value.utf8()
+        in Ok(found) then found.to_lower_ascii()
+        in Err(_)
+          return Err(self.invalid(response, "the HTTP transfer encoding is invalid"))
+        end
+        if coding != "chunked"
+          return Err(self.invalid(response, "the HTTP transfer encoding is unsupported"))
+        end
+        chunked = true
+      elsif name == "host"
+        host_count = host_count + 1
+      end
+
+      headers.push(HttpHeader(name, value).freeze())
+      if headers.len() > limits.max_headers
+        return Err(HttpError.LimitExceeded("the HTTP message has too many header fields"))
+      end
+      if line_end == stop
+        cursor = stop
+      else
+        cursor = line_end + 2
+      end
+    end
+    if cursor != stop
+      return Err(self.invalid(response, "the HTTP header block is malformed"))
+    end
+    if chunked and content_length >= 0
+      return Err(self.invalid(response, "the HTTP body framing conflicts"))
+    end
+    Ok(HttpHead(headers, content_length, chunked, host_count))
+  end
+
+  def decode_chunked(
+    self,
+    wire: Bytes,
+    limits: HttpLimits,
+    response: Bool,
+    header_bytes: Int,
+    header_count: Int
+  ): Result[Bytes, HttpError]
+    output = ByteBuffer()
+    cursor = 0
+    chunks = 0
+    crlf = Bytes("\r\n")
+    while cursor < wire.len()
+      remaining = case wire.slice(cursor, wire.len() - cursor)
+      in Ok(value) then value
+      in Err(_)
+        return Err(self.invalid(response, "the chunk range is invalid"))
+      end
+      line_length = case remaining.find(crlf)
+      in Some(value) then value
+      in None
+        return Err(self.invalid(response, "a chunk size has no terminator"))
+      end
+      if line_length == 0 or line_length > 1024
+        return Err(self.invalid(response, "a chunk size line is invalid"))
+      end
+      line = case remaining.slice(0, line_length)
+      in Ok(value) then value
+      in Err(_)
+        return Err(self.invalid(response, "the chunk size is invalid"))
+      end
+      size_bytes = case line.find(Bytes(";"))
+      in Some(mark)
+        extension = case line.slice(mark + 1, line.len() - mark - 1)
+        in Ok(value) then value
+        in Err(_)
+          return Err(self.invalid(response, "the chunk extension is invalid"))
+        end
+        if extension.len() == 0 or not self.valid_header_value(extension)
+          return Err(self.invalid(response, "the chunk extension is invalid"))
+        end
+        case line.slice(0, mark)
+        in Ok(value) then value
+        in Err(_)
+          return Err(self.invalid(response, "the chunk size is invalid"))
+        end
+      in None then line
+      end
+      if size_bytes.len() == 0
+        return Err(self.invalid(response, "the chunk size is empty"))
+      end
+      index = 0
+      while index < size_bytes.len()
+        byte = size_bytes.at(index)
+        digit = byte >= 48 and byte <= 57
+        lower = byte >= 97 and byte <= 102
+        upper = byte >= 65 and byte <= 70
+        if not digit and not lower and not upper
+          return Err(self.invalid(response, "the chunk size is not hexadecimal"))
+        end
+        index = index + 1
+      end
+      size_text = case size_bytes.utf8()
+      in Ok(value) then value
+      in Err(_)
+        return Err(self.invalid(response, "the chunk size is not ASCII"))
+      end
+      size = case size_text.parse_int(16)
+      in Ok(value) then value
+      in Err(_)
+        return Err(self.invalid(response, "the chunk size is outside its range"))
+      end
+      cursor = cursor + line_length + 2
+      chunks = chunks + 1
+      if chunks > limits.max_chunks
+        return Err(HttpError.LimitExceeded("the HTTP message has too many chunks"))
+      end
+      if size == 0
+        if wire.len() - cursor == 2 and wire.at(cursor) == 13 and
+          wire.at(cursor + 1) == 10
+          return Ok(output.finish())
+        end
+        trailers = case wire.slice(cursor, wire.len() - cursor)
+        in Ok(value) then value
+        in Err(_)
+          return Err(self.invalid(response, "the HTTP trailers are invalid"))
+        end
+        marker = case trailers.find(Bytes("\r\n\r\n"))
+        in Some(value) then value
+        in None
+          return Err(self.invalid(response, "the HTTP trailers are incomplete"))
+        end
+        if marker + 4 != trailers.len()
+          return Err(self.invalid(response, "bytes follow the HTTP trailers"))
+        end
+        if marker > limits.max_header_bytes - header_bytes
+          return Err(HttpError.LimitExceeded("the HTTP trailers are too large"))
+        end
+        case self.parse_headers(wire, cursor, cursor + marker, limits, response)
+        in Err(error)
+          return Err(error)
+        in Ok(head)
+          if head.headers.len() > limits.max_headers - header_count
+            return Err(HttpError.LimitExceeded("the HTTP message has too many header fields"))
+          end
+          if head.content_length >= 0 or head.chunked
+            return Err(self.invalid(response, "an HTTP trailer changes body framing"))
+          end
+        end
+        return Ok(output.finish())
+      end
+      if size > limits.max_body_bytes - output.len()
+        return Err(HttpError.LimitExceeded("the HTTP body is too large"))
+      end
+      if cursor > wire.len() or wire.len() - cursor < 2
+        return Err(self.invalid(response, "the chunk data is incomplete"))
+      end
+      if size > wire.len() - cursor - 2
+        return Err(self.invalid(response, "the chunk data is incomplete"))
+      end
+      data = case wire.slice(cursor, size)
+      in Ok(value) then value
+      in Err(_)
+        return Err(self.invalid(response, "the chunk data is invalid"))
+      end
+      cursor = cursor + size
+      if wire.at(cursor) != 13 or wire.at(cursor + 1) != 10
+        return Err(self.invalid(response, "the chunk data has no terminator"))
+      end
+      cursor = cursor + 2
+      output.extend(data)
+    end
+    Err(self.invalid(response, "the chunked HTTP body has no final chunk"))
+  end
+
+  def request_frame(
+    self,
+    wire: Bytes,
+    marker: Int,
+    limits: HttpLimits
+  ): Result[HttpFrame, HttpError]
+    body_start = marker + 4
+    if body_start > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the HTTP request headers are too large"))
+    end
+    line_end = case wire.find(Bytes("\r\n"))
+    in Some(value) then value
+    in None
+      return Err(HttpError.InvalidRequest("the HTTP request line is incomplete"))
+    end
+    if line_end > marker
+      return Err(HttpError.InvalidRequest("the HTTP request line is malformed"))
+    end
+    line_bytes = case wire.slice(0, line_end)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidRequest("the HTTP request line is invalid"))
+    end
+    line = case line_bytes.utf8()
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidRequest("the HTTP request line is not ASCII"))
+    end
+    parts = line.split(" ")
+    if parts.len() != 3
+      return Err(HttpError.InvalidRequest("the HTTP request line needs three fields"))
+    end
+    if not self.valid_token(parts.at(0).bytes())
+      return Err(HttpError.InvalidRequest("the HTTP method is invalid"))
+    end
+    if not self.valid_target(parts.at(1).to_string())
+      return Err(HttpError.InvalidRequest("the HTTP target is invalid"))
+    end
+    version = parts.at(2)
+    if version != "HTTP/1.1" and version != "HTTP/1.0"
+      return Err(HttpError.InvalidRequest("the HTTP version is unsupported"))
+    end
+    header_start = if line_end == marker
+      marker
+    else
+      line_end + 2
+    end
+    head = case self.parse_headers(wire, header_start, marker, limits, false)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    if head.host_count > 1 or (version == "HTTP/1.1" and head.host_count != 1)
+      return Err(HttpError.InvalidRequest("the HTTP Host header count is invalid"))
+    end
+    length = if head.chunked
+      0 - 1
+    elsif head.content_length >= 0
+      head.content_length
+    else
+      0
+    end
+    Ok(HttpFrame(
+      body_start,
+      length,
+      head.chunked,
+      false,
+      head.headers.len()
+    ))
+  end
+
+  def response_frame(
+    self,
+    wire: Bytes,
+    marker: Int,
+    request_method: String,
+    limits: HttpLimits
+  ): Result[HttpFrame, HttpError]
+    body_start = marker + 4
+    if body_start > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the HTTP response headers are too large"))
+    end
+    line_end = case wire.find(Bytes("\r\n"))
+    in Some(value) then value
+    in None
+      return Err(HttpError.InvalidResponse("the HTTP status line is incomplete"))
+    end
+    if line_end > marker
+      return Err(HttpError.InvalidResponse("the HTTP status line is malformed"))
+    end
+    line_bytes = case wire.slice(0, line_end)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidResponse("the HTTP status line is invalid"))
+    end
+    status = case self.response_status(line_bytes)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    header_start = if line_end == marker
+      marker
+    else
+      line_end + 2
+    end
+    head = case self.parse_headers(wire, header_start, marker, limits, true)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    no_body = request_method == "HEAD" or status == 204 or status == 304
+    if no_body
+      return Ok(HttpFrame(body_start, 0, false, false, head.headers.len()))
+    end
+    if head.chunked
+      Ok(HttpFrame(body_start, 0 - 1, true, false, head.headers.len()))
+    elsif head.content_length >= 0
+      Ok(HttpFrame(
+        body_start,
+        head.content_length,
+        false,
+        false,
+        head.headers.len()
+      ))
+    else
+      Ok(HttpFrame(body_start, 0 - 1, false, true, head.headers.len()))
+    end
+  end
+
+  def chunked_trailer_end(
+    self,
+    buffer: ByteBuffer,
+    mut scan: HttpChunkScan,
+    header_bytes: Int,
+    limits: HttpLimits
+  ): Result[Int, HttpError]
+    cursor = scan.trailer_start
+    marker_bytes = Bytes("\r\n\r\n")
+    if buffer.len() - cursor < 2
+      return Ok(0 - 1)
+    end
+    first = buffer.at_or(cursor, 0 - 1)
+    second = buffer.at_or(cursor + 1, 0 - 1)
+    if first == 13 and second == 10
+      return Ok(cursor + 2)
+    end
+    trailer_end = buffer.find_from_or(marker_bytes, scan.trailer_scan, 0 - 1)
+    if trailer_end < 0
+      if buffer.len() - cursor > limits.max_header_bytes - header_bytes
+        return Err(HttpError.LimitExceeded("the HTTP trailers are too large"))
+      end
+      scan.trailer_scan = if buffer.len() - cursor > 3
+        buffer.len() - 3
+      else
+        cursor
+      end
+      return Ok(0 - 1)
+    end
+    if trailer_end - cursor > limits.max_header_bytes - header_bytes
+      return Err(HttpError.LimitExceeded("the HTTP trailers are too large"))
+    end
+    Ok(trailer_end + 4)
+  end
+
+  def chunked_end(
+    self,
+    buffer: ByteBuffer,
+    mut scan: HttpChunkScan,
+    header_bytes: Int,
+    limits: HttpLimits,
+    response: Bool
+  ): Result[Int, HttpError]
+    if scan.trailer_start >= 0
+      return self.chunked_trailer_end(buffer, scan, header_bytes, limits)
+    end
+    cursor = scan.cursor
+    total = scan.total
+    chunks = scan.chunks
+    crlf = Bytes("\r\n")
+    while cursor <= buffer.len()
+      line_end = buffer.find_from_or(crlf, cursor, 0 - 1)
+      if line_end < 0
+        if buffer.len() - cursor > 1024
+          return Err(self.invalid(response, "a chunk size line is too large"))
+        end
+        return Ok(0 - 1)
+      end
+      if line_end == cursor or line_end - cursor > 1024
+        return Err(self.invalid(response, "a chunk size line is invalid"))
+      end
+      size_end = line_end
+      index = cursor
+      while index < line_end
+        byte = buffer.at_or(index, 0 - 1)
+        if byte == 59
+          size_end = index
+          index = line_end
+        else
+          index = index + 1
+        end
+      end
+      if size_end == cursor
+        return Err(self.invalid(response, "the chunk size is empty"))
+      end
+      if size_end < line_end
+        if size_end + 1 == line_end
+          return Err(self.invalid(response, "the chunk extension is invalid"))
+        end
+        index = size_end + 1
+        while index < line_end
+          byte = buffer.at_or(index, 0 - 1)
+          if (byte < 32 and byte != 9) or byte == 127
+            return Err(self.invalid(response, "the chunk extension is invalid"))
+          end
+          index = index + 1
+        end
+      end
+      size = 0
+      index = cursor
+      while index < size_end
+        byte = buffer.at_or(index, 0 - 1)
+        digit = if byte >= 48 and byte <= 57
+          byte - 48
+        elsif byte >= 97 and byte <= 102
+          byte - 87
+        elsif byte >= 65 and byte <= 70
+          byte - 55
+        else
+          return Err(self.invalid(response, "the chunk size is not hexadecimal"))
+        end
+        if size > (limits.max_body_bytes - digit) / 16
+          return Err(HttpError.LimitExceeded("the HTTP body is too large"))
+        end
+        size = size * 16 + digit
+        index = index + 1
+      end
+      cursor = line_end + 2
+      chunks = chunks + 1
+      if chunks > limits.max_chunks
+        return Err(HttpError.LimitExceeded("the HTTP message has too many chunks"))
+      end
+      if size == 0
+        scan.trailer_start = cursor
+        scan.trailer_scan = cursor
+        return self.chunked_trailer_end(buffer, scan, header_bytes, limits)
+      end
+      if size > limits.max_body_bytes - total
+        return Err(HttpError.LimitExceeded("the HTTP body is too large"))
+      end
+      if buffer.len() - cursor < size
+        return Ok(0 - 1)
+      end
+      if buffer.len() - cursor - size < 2
+        return Ok(0 - 1)
+      end
+      first = buffer.at_or(cursor + size, 0 - 1)
+      second = buffer.at_or(cursor + size + 1, 0 - 1)
+      if first != 13 or second != 10
+        return Err(self.invalid(response, "the chunk data has no terminator"))
+      end
+      cursor = cursor + size + 2
+      total = total + size
+      scan.cursor = cursor
+      scan.total = total
+      scan.chunks = chunks
+    end
+    Ok(0 - 1)
+  end
+
+  def read_request(
+    self,
+    stream: TcpStream,
+    limits: HttpLimits
+  ): Result[HttpRequest, HttpError] with Tcp.Read
+    case self.validate_limits(limits)
+    in Err(error)
+      return Err(error)
+    in Ok(_) then ()
+    end
+    buffer = ByteBuffer()
+    marker = 0 - 1
+    scan = 0
+    delimiter = Bytes("\r\n\r\n")
+    while marker < 0
+      marker = buffer.find_from_or(delimiter, scan, 0 - 1)
+      if marker < 0
+        if buffer.len() >= limits.max_header_bytes
+          return Err(HttpError.LimitExceeded("the HTTP request headers are too large"))
+        end
+        count = limits.read_chunk_bytes
+        remaining = limits.max_header_bytes - buffer.len()
+        if count > remaining
+          count = remaining
+        end
+        old_length = buffer.len()
+        case stream.read(count)
+        in Ok(TcpRead.Data(bytes))
+          if bytes.len() == 0
+            return Err(HttpError.Network(NetError.Failed("the TCP read made no progress")))
+          end
+          buffer.extend(bytes)
+          scan = if old_length > 3
+            old_length - 3
+          else
+            0
+          end
+        in Ok(TcpRead.End)
+          return Err(HttpError.InvalidRequest("the HTTP request headers are incomplete"))
+        in Err(error)
+          return Err(HttpError.Network(error))
+        end
+      end
+    end
+    snapshot = buffer.build()
+    frame = case self.request_frame(snapshot, marker, limits)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    chunk_scan = HttpChunkScan(frame.body_start)
+    target = if frame.chunked
+      case self.chunked_end(
+        buffer,
+        chunk_scan,
+        frame.body_start,
+        limits,
+        false
+      )
+      in Ok(value) then value
+      in Err(error)
+        return Err(error)
+      end
+    else
+      if frame.content_length > limits.max_body_bytes
+        return Err(HttpError.LimitExceeded("the HTTP request body is too large"))
+      end
+      if frame.content_length > limits.max_wire_bytes - frame.body_start
+        return Err(HttpError.LimitExceeded("the HTTP request wire value is too large"))
+      end
+      frame.body_start + frame.content_length
+    end
+    while target < 0 or buffer.len() < target
+      if buffer.len() >= limits.max_wire_bytes
+        return Err(HttpError.LimitExceeded("the HTTP request wire value is too large"))
+      end
+      count = limits.read_chunk_bytes
+      remaining = limits.max_wire_bytes - buffer.len()
+      if not frame.chunked and target - buffer.len() < remaining
+        remaining = target - buffer.len()
+      end
+      if count > remaining
+        count = remaining
+      end
+      case stream.read(count)
+      in Ok(TcpRead.Data(bytes))
+        if bytes.len() == 0
+          return Err(HttpError.Network(NetError.Failed("the TCP read made no progress")))
+        end
+        buffer.extend(bytes)
+      in Ok(TcpRead.End)
+        return Err(HttpError.InvalidRequest("the HTTP request body is incomplete"))
+      in Err(error)
+        return Err(HttpError.Network(error))
+      end
+      if frame.chunked
+        target = case self.chunked_end(
+          buffer,
+          chunk_scan,
+          frame.body_start,
+          limits,
+          false
+        )
+        in Ok(value) then value
+        in Err(error)
+          return Err(error)
+        end
+      end
+    end
+    if buffer.len() != target
+      return Err(HttpError.InvalidRequest("bytes follow the HTTP request"))
+    end
+    self.parse_request(buffer.finish(), limits)
+  end
+
+  def read_response_with[effect e](
+    self,
+    read: (Int) -> Result[TcpRead, HttpError] with e,
+    request_method: String,
+    limits: HttpLimits
+  ): Result[HttpResponse, HttpError] with e
+    case self.validate_limits(limits)
+    in Err(error)
+      return Err(error)
+    in Ok(_) then ()
+    end
+    buffer = ByteBuffer()
+    marker = 0 - 1
+    scan = 0
+    delimiter = Bytes("\r\n\r\n")
+    while marker < 0
+      marker = buffer.find_from_or(delimiter, scan, 0 - 1)
+      if marker < 0
+        if buffer.len() >= limits.max_header_bytes
+          return Err(HttpError.LimitExceeded("the HTTP response headers are too large"))
+        end
+        count = limits.read_chunk_bytes
+        remaining = limits.max_header_bytes - buffer.len()
+        if count > remaining
+          count = remaining
+        end
+        old_length = buffer.len()
+        case read(count)
+        in Ok(TcpRead.Data(bytes))
+          if bytes.len() == 0
+            return Err(HttpError.Network(NetError.Failed("the TCP read made no progress")))
+          end
+          buffer.extend(bytes)
+          scan = if old_length > 3
+            old_length - 3
+          else
+            0
+          end
+        in Ok(TcpRead.End)
+          return Err(HttpError.InvalidResponse("the HTTP response headers are incomplete"))
+        in Err(error)
+          return Err(error)
+        end
+      end
+    end
+    snapshot = buffer.build()
+    frame = case self.response_frame(snapshot, marker, request_method, limits)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    if frame.content_length > limits.max_body_bytes
+      return Err(HttpError.LimitExceeded("the HTTP response body is too large"))
+    end
+    if frame.content_length >= 0 and
+      frame.content_length > limits.max_wire_bytes - frame.body_start
+      return Err(HttpError.LimitExceeded("the HTTP response wire value is too large"))
+    end
+    chunk_scan = HttpChunkScan(frame.body_start)
+    target = if frame.chunked
+      case self.chunked_end(
+        buffer,
+        chunk_scan,
+        frame.body_start,
+        limits,
+        true
+      )
+      in Ok(value) then value
+      in Err(error)
+        return Err(error)
+      end
+    elsif frame.close_delimited
+      0 - 1
+    else
+      frame.body_start + frame.content_length
+    end
+    ended = false
+    while not ended and (target < 0 or buffer.len() < target)
+      remaining = limits.max_wire_bytes - buffer.len()
+      if remaining < 0
+        return Err(HttpError.LimitExceeded("the HTTP response wire value is too large"))
+      end
+      count = limits.read_chunk_bytes
+      if frame.close_delimited and remaining == 0
+        count = 1
+      else
+        if not frame.chunked and not frame.close_delimited and
+          target - buffer.len() < remaining
+          remaining = target - buffer.len()
+        end
+        if count > remaining
+          count = remaining
+        end
+      end
+      case read(count)
+      in Ok(TcpRead.Data(bytes))
+        if bytes.len() == 0
+          return Err(HttpError.Network(NetError.Failed("the TCP read made no progress")))
+        end
+        if bytes.len() > limits.max_wire_bytes - buffer.len()
+          return Err(HttpError.LimitExceeded("the HTTP response wire value is too large"))
+        end
+        buffer.extend(bytes)
+        ()
+      in Ok(TcpRead.End)
+        ended = true
+      in Err(error)
+        return Err(error)
+      end
+      if frame.chunked
+        target = case self.chunked_end(
+          buffer,
+          chunk_scan,
+          frame.body_start,
+          limits,
+          true
+        )
+        in Ok(value) then value
+        in Err(error)
+          return Err(error)
+        end
+      end
+    end
+    if frame.close_delimited
+      if not ended
+        return Err(HttpError.InvalidResponse("the HTTP response body is incomplete"))
+      end
+    else
+      if target < 0 or buffer.len() != target
+        return Err(HttpError.InvalidResponse("bytes follow the HTTP response"))
+      end
+    end
+    self.parse_response(buffer.finish(), request_method, limits)
+  end
+
+  def read_response(
+    self,
+    stream: TcpStream,
+    request_method: String,
+    limits: HttpLimits
+  ): Result[HttpResponse, HttpError] with Tcp.Read
+    self.read_response_with(
+      do |count: Int|: Result[TcpRead, HttpError] with Tcp.Read
+        case stream.read(count)
+        in Ok(value)   then Ok(value)
+        in Err(error) then Err(HttpError.Network(error))
+        end
+      end,
+      request_method,
+      limits
+    )
+  end
+
+  def read_tls_response(
+    self,
+    stream: TlsStream,
+    request_method: String,
+    limits: HttpLimits
+  ): Result[HttpResponse, HttpError] with Tls.Read
+    self.read_response_with(
+      do |count: Int|: Result[TcpRead, HttpError] with Tls.Read
+        case stream.read(count)
+        in Ok(value)   then Ok(value)
+        in Err(error) then Err(HttpError.Tls(error))
+        end
+      end,
+      request_method,
+      limits
+    )
+  end
+
+  def send(
+    self,
+    host: String,
+    port: Int,
+    request: HttpRequest,
+    limits: HttpLimits
+  ): Result[HttpResponse, HttpError] with Http.CleartextClient
+    wire = case self.serialize_request(host, port, request, limits)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    stream = case Tcp().connect_host(host, port)
+    in Ok(value) then value
+    in Err(error)
+      return Err(HttpError.Network(error))
+    end
+    case stream.write_all(wire)
+    in Err(error)
+      stream.close()
+      return Err(HttpError.Network(error))
+    in Ok(_) then ()
+    end
+    result = self.read_response(stream, request.method, limits)
+    close_result = stream.close()
+    case result
+    in Err(error)
+      Err(error)
+    in Ok(response)
+      case close_result
+      in Ok(_)      then Ok(response)
+      in Err(error) then Err(HttpError.Network(error))
+      end
+    end
+  end
+
+  def send_secure(
+    self,
+    host: String,
+    port: Int,
+    request: HttpRequest,
+    config: TlsClientConfig,
+    limits: HttpLimits
+  ): Result[HttpResponse, HttpError] with Http.Client
+    case Tls().validate_config(config)
+    in Err(error)
+      return Err(HttpError.Tls(error))
+    in Ok(_) then ()
+    end
+    if config.alpn.len() > 1 or
+      (config.alpn.len() == 1 and config.alpn.at(0) != Bytes("http/1.1"))
+      return Err(HttpError.Tls(TlsError.InvalidConfig(
+        "the HTTP client can offer only HTTP/1.1 with ALPN"
+      )))
+    end
+    wire = case self.serialize_request(host, port, request, limits)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    stream = case Tls().connect_host(host, port, config)
+    in Ok(value) then value
+    in Err(error)
+      return Err(HttpError.Tls(error))
+    end
+    case stream.write_all(wire)
+    in Err(error)
+      stream.close()
+      return Err(HttpError.Tls(error))
+    in Ok(_) then ()
+    end
+    result = self.read_tls_response(stream, request.method, limits)
+    shutdown_result = stream.shutdown()
+    close_result = stream.close()
+    case result
+    in Err(error)
+      Err(error)
+    in Ok(response)
+      case shutdown_result
+      in Err(error)
+        Err(HttpError.Tls(error))
+      in Ok(_)
+        case close_result
+        in Ok(_)      then Ok(response)
+        in Err(error) then Err(HttpError.Tls(error))
+        end
+      end
+    end
+  end
+
+  def write_response(
+    self,
+    stream: TcpStream,
+    response: HttpResponse,
+    reason: String,
+    limits: HttpLimits
+  ): Result[(), HttpError] with Tcp.Stream
+    wire = case self.serialize_response(response, reason, limits)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    case stream.write_all(wire)
+    in Ok(_)      then Ok(())
+    in Err(error) then Err(HttpError.Network(error))
+    end
+  end
+
+  def parse_response(
+    self,
+    wire: Bytes,
+    request_method: String,
+    limits: HttpLimits
+  ): Result[HttpResponse, HttpError]
+    case self.validate_limits(limits)
+    in Err(error)
+      return Err(error)
+    in Ok(_) then ()
+    end
+    if wire.len() > limits.max_wire_bytes
+      return Err(HttpError.LimitExceeded("the HTTP response wire value is too large"))
+    end
+    marker = case wire.find(Bytes("\r\n\r\n"))
+    in Some(value) then value
+    in None
+      return Err(HttpError.InvalidResponse("the HTTP response headers are incomplete"))
+    end
+    body_start = marker + 4
+    if body_start > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the HTTP response headers are too large"))
+    end
+    status_end = case wire.find(Bytes("\r\n"))
+    in Some(value) then value
+    in None
+      return Err(HttpError.InvalidResponse("the HTTP status line is incomplete"))
+    end
+    if status_end > marker
+      return Err(HttpError.InvalidResponse("the HTTP status line is malformed"))
+    end
+    status_bytes = case wire.slice(0, status_end)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidResponse("the HTTP status line is invalid"))
+    end
+    status = case self.response_status(status_bytes)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    header_start = if status_end == marker
+      marker
+    else
+      status_end + 2
+    end
+    head = case self.parse_headers(wire, header_start, marker, limits, true)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    body_wire = case wire.slice(body_start, wire.len() - body_start)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidResponse("the HTTP response body is invalid"))
+    end
+    no_body = request_method == "HEAD" or status < 200 or status == 204 or status == 304
+    body = if no_body
+      if body_wire.len() != 0
+        return Err(HttpError.InvalidResponse("this HTTP response cannot have a body"))
+      end
+      Bytes()
+    elsif head.chunked
+      case self.decode_chunked(body_wire, limits, true, body_start, head.headers.len())
+      in Ok(value) then value
+      in Err(error)
+        return Err(error)
+      end
+    elsif head.content_length >= 0
+      if head.content_length > limits.max_body_bytes
+        return Err(HttpError.LimitExceeded("the HTTP response body is too large"))
+      end
+      if body_wire.len() != head.content_length
+        return Err(HttpError.InvalidResponse("the HTTP response body length is wrong"))
+      end
+      body_wire.compact()
+    else
+      if body_wire.len() > limits.max_body_bytes
+        return Err(HttpError.LimitExceeded("the HTTP response body is too large"))
+      end
+      body_wire.compact()
+    end
+    Ok(HttpResponse(status, head.headers, body).freeze())
+  end
+
+  def parse_request(
+    self,
+    wire: Bytes,
+    limits: HttpLimits
+  ): Result[HttpRequest, HttpError]
+    case self.validate_limits(limits)
+    in Err(error)
+      return Err(error)
+    in Ok(_) then ()
+    end
+    if wire.len() > limits.max_wire_bytes
+      return Err(HttpError.LimitExceeded("the HTTP request wire value is too large"))
+    end
+    marker = case wire.find(Bytes("\r\n\r\n"))
+    in Some(value) then value
+    in None
+      return Err(HttpError.InvalidRequest("the HTTP request headers are incomplete"))
+    end
+    body_start = marker + 4
+    if body_start > limits.max_header_bytes
+      return Err(HttpError.LimitExceeded("the HTTP request headers are too large"))
+    end
+    line_end = case wire.find(Bytes("\r\n"))
+    in Some(value) then value
+    in None
+      return Err(HttpError.InvalidRequest("the HTTP request line is incomplete"))
+    end
+    if line_end > marker
+      return Err(HttpError.InvalidRequest("the HTTP request line is malformed"))
+    end
+    line_bytes = case wire.slice(0, line_end)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidRequest("the HTTP request line is invalid"))
+    end
+    line = case line_bytes.utf8()
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidRequest("the HTTP request line is not ASCII"))
+    end
+    parts = line.split(" ")
+    if parts.len() != 3
+      return Err(HttpError.InvalidRequest("the HTTP request line needs three fields"))
+    end
+    method = parts.at(0).to_string()
+    target = parts.at(1).to_string()
+    version = parts.at(2)
+    if not self.valid_token(method.bytes())
+      return Err(HttpError.InvalidRequest("the HTTP method is invalid"))
+    end
+    if not self.valid_target(target)
+      return Err(HttpError.InvalidRequest("the HTTP target is invalid"))
+    end
+    if version != "HTTP/1.1" and version != "HTTP/1.0"
+      return Err(HttpError.InvalidRequest("the HTTP version is unsupported"))
+    end
+    header_start = if line_end == marker
+      marker
+    else
+      line_end + 2
+    end
+    head = case self.parse_headers(wire, header_start, marker, limits, false)
+    in Ok(value) then value
+    in Err(error)
+      return Err(error)
+    end
+    if head.host_count > 1 or (version == "HTTP/1.1" and head.host_count != 1)
+      return Err(HttpError.InvalidRequest("the HTTP Host header count is invalid"))
+    end
+    body_wire = case wire.slice(body_start, wire.len() - body_start)
+    in Ok(value) then value
+    in Err(_)
+      return Err(HttpError.InvalidRequest("the HTTP request body is invalid"))
+    end
+    body = if head.chunked
+      case self.decode_chunked(body_wire, limits, false, body_start, head.headers.len())
+      in Ok(value) then value
+      in Err(error)
+        return Err(error)
+      end
+    elsif head.content_length >= 0
+      if head.content_length > limits.max_body_bytes
+        return Err(HttpError.LimitExceeded("the HTTP request body is too large"))
+      end
+      if body_wire.len() != head.content_length
+        return Err(HttpError.InvalidRequest("the HTTP request body length is wrong"))
+      end
+      body_wire.compact()
+    else
+      if body_wire.len() != 0
+        return Err(HttpError.InvalidRequest("the HTTP request body has no framing"))
+      end
+      Bytes()
+    end
+    Ok(HttpRequest(method, target, head.headers, body).freeze())
+  end
+end

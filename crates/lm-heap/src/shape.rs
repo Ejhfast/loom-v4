@@ -231,6 +231,12 @@ pub enum Object {
     NativeWait { owner: u32, token: u64 },
     /// An immutable UTF-8 view. Born frozen.
     Substring(SharedText),
+    /// A TCP stream resource designator. Zero marks a closed handle.
+    NativeTcpStream { resource: u64 },
+    /// A TCP listener resource designator. Zero marks a closed handle.
+    NativeTcpListener { resource: u64 },
+    /// A TLS stream resource designator. Zero marks a closed handle.
+    NativeTlsStream { resource: u64 },
 }
 
 /// How a boundary transfer treats one shape.
@@ -474,9 +480,39 @@ const SHAPE_SUBSTRING: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_TCP_STREAM: ShapeDesc = ShapeDesc {
+    name: "TcpStream",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_TCP_LISTENER: ShapeDesc = ShapeDesc {
+    name: "TcpListener",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_TLS_STREAM: ShapeDesc = ShapeDesc {
+    name: "TlsStream",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 21] = [
+pub const SHAPES: [&ShapeDesc; 24] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -498,6 +534,9 @@ pub const SHAPES: [&ShapeDesc; 21] = [
     &SHAPE_RESOURCE_HANDLE,
     &SHAPE_WAIT,
     &SHAPE_SUBSTRING,
+    &SHAPE_TCP_STREAM,
+    &SHAPE_TCP_LISTENER,
+    &SHAPE_TLS_STREAM,
 ];
 
 impl Object {
@@ -610,6 +649,15 @@ impl Object {
                 token: *token,
             },
             Object::Substring(text) => Object::Substring(text.clone()),
+            Object::NativeTcpStream { resource } => Object::NativeTcpStream {
+                resource: *resource,
+            },
+            Object::NativeTcpListener { resource } => Object::NativeTcpListener {
+                resource: *resource,
+            },
+            Object::NativeTlsStream { resource } => Object::NativeTlsStream {
+                resource: *resource,
+            },
         })
     }
 
@@ -639,6 +687,9 @@ impl Object {
             Object::NativeResourceHandle { .. } => 18,
             Object::NativeWait { .. } => 19,
             Object::Substring(_) => 20,
+            Object::NativeTcpStream { .. } => 21,
+            Object::NativeTcpListener { .. } => 22,
+            Object::NativeTlsStream { .. } => 23,
         }
     }
 
@@ -675,7 +726,10 @@ impl Object {
                 | Object::NativeHandle { .. } => VALUE_COST,
                 Object::NativeFileHandle { .. }
                 | Object::NativeResourceHandle { .. }
-                | Object::NativeWait { .. } => VALUE_COST,
+                | Object::NativeWait { .. }
+                | Object::NativeTcpStream { .. }
+                | Object::NativeTcpListener { .. } => VALUE_COST,
+                Object::NativeTlsStream { .. } => VALUE_COST,
                 Object::NativeFault { message, .. } => message.len(),
                 Object::NativeDigest(bytes) => bytes.len(),
                 Object::NativeSnapshot(image) => image.len(),
@@ -730,7 +784,10 @@ impl Object {
             | Object::Bytes(_)
             | Object::NativeFileHandle { .. }
             | Object::NativeResourceHandle { .. }
-            | Object::NativeWait { .. } => {}
+            | Object::NativeWait { .. }
+            | Object::NativeTcpStream { .. }
+            | Object::NativeTcpListener { .. } => {}
+            Object::NativeTlsStream { .. } => {}
             Object::Substring(_) => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
@@ -772,6 +829,15 @@ impl Object {
             Object::NativeSnapshot(image) => Object::NativeSnapshot(image.clone()),
             Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
             Object::NativeFileHandle { resource } => Object::NativeFileHandle {
+                resource: *resource,
+            },
+            Object::NativeTcpStream { resource } => Object::NativeTcpStream {
+                resource: *resource,
+            },
+            Object::NativeTcpListener { resource } => Object::NativeTcpListener {
+                resource: *resource,
+            },
+            Object::NativeTlsStream { resource } => Object::NativeTlsStream {
                 resource: *resource,
             },
             Object::Tuple { items } => Object::Tuple {
@@ -822,7 +888,11 @@ impl Object {
             | Object::NativeDigest(_)
             | Object::NativeHandle { .. }
             | Object::NativeSnapshot(_) => return None,
-            Object::Bytes(_) | Object::NativeFileHandle { .. } => return None,
+            Object::Bytes(_)
+            | Object::NativeFileHandle { .. }
+            | Object::NativeTcpStream { .. }
+            | Object::NativeTcpListener { .. } => return None,
+            Object::NativeTlsStream { .. } => return None,
             Object::Tuple { items } => Object::Tuple {
                 items: items.iter().map(|v| value(*v)).collect(),
             },
@@ -972,6 +1042,9 @@ mod tests {
             },
             Object::NativeWait { owner: 1, token: 2 },
             Object::Substring("view".into()),
+            Object::NativeTcpStream { resource: 5 },
+            Object::NativeTcpListener { resource: 6 },
+            Object::NativeTlsStream { resource: 7 },
         ]
     }
 
@@ -1130,6 +1203,9 @@ mod tests {
             },
             Object::NativeWait { owner: 0, token: 0 },
             Object::Substring(SharedText::new()),
+            Object::NativeTcpStream { resource: 0 },
+            Object::NativeTcpListener { resource: 0 },
+            Object::NativeTlsStream { resource: 0 },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1225,7 +1301,7 @@ mod tests {
     /// snapshots among the sendable values, and specification 16.4
     /// calls a snapshot machine state with bytes the codec can copy.
     ///
-    /// Immutable bytes and file handles are sendable. A resource
+    /// Immutable bytes and resource handles are sendable. A resource
     /// control stays with its holder.
     #[test]
     fn every_shape_declares_its_boundary_column() {
@@ -1253,6 +1329,9 @@ mod tests {
                 "Bytes",
                 "FileHandle",
                 "Substring",
+                "TcpStream",
+                "TcpListener",
+                "TlsStream",
             ]
         );
         // A builder holds a private mutable buffer.

@@ -1,2 +1,2 @@
-error[E1052]: the standard library does not ship with this toolchain yet; use a path dependency or the `sys` operations
+error[E1052]: `std.io` names no module of `std`
   --> tests/ui/std-not-available.lm:1:1

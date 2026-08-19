@@ -109,10 +109,48 @@ pub struct CoreLayout {
     pub seek_start: Option<u32>,
     pub seek_current: Option<u32>,
     pub seek_end: Option<u32>,
+    pub pair: Option<u32>,
+    pub ip_address: Option<u32>,
+    pub ip_v4: Option<u32>,
+    pub ip_v6: Option<u32>,
+    pub socket_address: Option<u32>,
+    pub net_error: Option<u32>,
+    pub net_invalid_input: Option<u32>,
+    pub net_name_not_found: Option<u32>,
+    pub net_unavailable: Option<u32>,
+    pub net_permission_denied: Option<u32>,
+    pub net_address_in_use: Option<u32>,
+    pub net_connection_refused: Option<u32>,
+    pub net_connection_reset: Option<u32>,
+    pub net_not_connected: Option<u32>,
+    pub net_timed_out: Option<u32>,
+    pub net_closed: Option<u32>,
+    pub net_limit_exceeded: Option<u32>,
+    pub net_unsupported: Option<u32>,
+    pub net_failed: Option<u32>,
+    pub tcp_read: Option<u32>,
+    pub tcp_read_data: Option<u32>,
+    pub tcp_read_end: Option<u32>,
+    pub shutdown: Option<u32>,
+    pub shutdown_read: Option<u32>,
+    pub shutdown_write: Option<u32>,
+    pub shutdown_both: Option<u32>,
+    pub tcp_resource: Option<u32>,
+    pub tcp_stream: Option<u32>,
+    pub tcp_listener: Option<u32>,
+    pub tls_error: Option<u32>,
+    pub tls_invalid_config: Option<u32>,
+    pub tls_handshake: Option<u32>,
+    pub tls_certificate: Option<u32>,
+    pub tls_protocol: Option<u32>,
+    pub tls_network: Option<u32>,
+    pub tls_closed: Option<u32>,
+    pub tls_limit_exceeded: Option<u32>,
+    pub tls_stream: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 68] = [
+pub const PINNED_LABELS: [&str; 106] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -181,6 +219,44 @@ pub const PINNED_LABELS: [&str; 68] = [
     "Text",
     "Substring",
     "Char",
+    "Pair",
+    "IpAddress",
+    "IpAddress.V4",
+    "IpAddress.V6",
+    "SocketAddress",
+    "NetError",
+    "NetError.InvalidInput",
+    "NetError.NameNotFound",
+    "NetError.Unavailable",
+    "NetError.PermissionDenied",
+    "NetError.AddressInUse",
+    "NetError.ConnectionRefused",
+    "NetError.ConnectionReset",
+    "NetError.NotConnected",
+    "NetError.TimedOut",
+    "NetError.Closed",
+    "NetError.LimitExceeded",
+    "NetError.Unsupported",
+    "NetError.Failed",
+    "TcpRead",
+    "TcpRead.Data",
+    "TcpRead.End",
+    "Shutdown",
+    "Shutdown.Read",
+    "Shutdown.Write",
+    "Shutdown.Both",
+    "TcpResource",
+    "TcpStream",
+    "TcpListener",
+    "TlsError",
+    "TlsError.InvalidConfig",
+    "TlsError.Handshake",
+    "TlsError.Certificate",
+    "TlsError.Protocol",
+    "TlsError.Network",
+    "TlsError.Closed",
+    "TlsError.LimitExceeded",
+    "TlsStream",
 ];
 
 /// The core role of immediate integer values.
@@ -209,6 +285,45 @@ pub const ROLE_SUBSTRING: usize = 66;
 
 /// The core role of immediate Unicode scalar values.
 pub const ROLE_CHAR: usize = 67;
+
+pub const ROLE_PAIR: usize = 68;
+pub const ROLE_IP_ADDRESS: usize = 69;
+pub const ROLE_IP_V4: usize = 70;
+pub const ROLE_IP_V6: usize = 71;
+pub const ROLE_SOCKET_ADDRESS: usize = 72;
+pub const ROLE_NET_ERROR: usize = 73;
+pub const ROLE_NET_INVALID_INPUT: usize = 74;
+pub const ROLE_NET_NAME_NOT_FOUND: usize = 75;
+pub const ROLE_NET_UNAVAILABLE: usize = 76;
+pub const ROLE_NET_PERMISSION_DENIED: usize = 77;
+pub const ROLE_NET_ADDRESS_IN_USE: usize = 78;
+pub const ROLE_NET_CONNECTION_REFUSED: usize = 79;
+pub const ROLE_NET_CONNECTION_RESET: usize = 80;
+pub const ROLE_NET_NOT_CONNECTED: usize = 81;
+pub const ROLE_NET_TIMED_OUT: usize = 82;
+pub const ROLE_NET_CLOSED: usize = 83;
+pub const ROLE_NET_LIMIT_EXCEEDED: usize = 84;
+pub const ROLE_NET_UNSUPPORTED: usize = 85;
+pub const ROLE_NET_FAILED: usize = 86;
+pub const ROLE_TCP_READ: usize = 87;
+pub const ROLE_TCP_READ_DATA: usize = 88;
+pub const ROLE_TCP_READ_END: usize = 89;
+pub const ROLE_SHUTDOWN: usize = 90;
+pub const ROLE_SHUTDOWN_READ: usize = 91;
+pub const ROLE_SHUTDOWN_WRITE: usize = 92;
+pub const ROLE_SHUTDOWN_BOTH: usize = 93;
+pub const ROLE_TCP_RESOURCE: usize = 94;
+pub const ROLE_TCP_STREAM: usize = 95;
+pub const ROLE_TCP_LISTENER: usize = 96;
+pub const ROLE_TLS_ERROR: usize = 97;
+pub const ROLE_TLS_INVALID_CONFIG: usize = 98;
+pub const ROLE_TLS_HANDSHAKE: usize = 99;
+pub const ROLE_TLS_CERTIFICATE: usize = 100;
+pub const ROLE_TLS_PROTOCOL: usize = 101;
+pub const ROLE_TLS_NETWORK: usize = 102;
+pub const ROLE_TLS_CLOSED: usize = 103;
+pub const ROLE_TLS_LIMIT_EXCEEDED: usize = 104;
+pub const ROLE_TLS_STREAM: usize = 105;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -327,6 +442,44 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "SeekFrom.Start" => &mut layout.seek_start,
         "SeekFrom.Current" => &mut layout.seek_current,
         "SeekFrom.End" => &mut layout.seek_end,
+        "Pair" => &mut layout.pair,
+        "IpAddress" => &mut layout.ip_address,
+        "IpAddress.V4" => &mut layout.ip_v4,
+        "IpAddress.V6" => &mut layout.ip_v6,
+        "SocketAddress" => &mut layout.socket_address,
+        "NetError" => &mut layout.net_error,
+        "NetError.InvalidInput" => &mut layout.net_invalid_input,
+        "NetError.NameNotFound" => &mut layout.net_name_not_found,
+        "NetError.Unavailable" => &mut layout.net_unavailable,
+        "NetError.PermissionDenied" => &mut layout.net_permission_denied,
+        "NetError.AddressInUse" => &mut layout.net_address_in_use,
+        "NetError.ConnectionRefused" => &mut layout.net_connection_refused,
+        "NetError.ConnectionReset" => &mut layout.net_connection_reset,
+        "NetError.NotConnected" => &mut layout.net_not_connected,
+        "NetError.TimedOut" => &mut layout.net_timed_out,
+        "NetError.Closed" => &mut layout.net_closed,
+        "NetError.LimitExceeded" => &mut layout.net_limit_exceeded,
+        "NetError.Unsupported" => &mut layout.net_unsupported,
+        "NetError.Failed" => &mut layout.net_failed,
+        "TcpRead" => &mut layout.tcp_read,
+        "TcpRead.Data" => &mut layout.tcp_read_data,
+        "TcpRead.End" => &mut layout.tcp_read_end,
+        "Shutdown" => &mut layout.shutdown,
+        "Shutdown.Read" => &mut layout.shutdown_read,
+        "Shutdown.Write" => &mut layout.shutdown_write,
+        "Shutdown.Both" => &mut layout.shutdown_both,
+        "TcpResource" => &mut layout.tcp_resource,
+        "TcpStream" => &mut layout.tcp_stream,
+        "TcpListener" => &mut layout.tcp_listener,
+        "TlsError" => &mut layout.tls_error,
+        "TlsError.InvalidConfig" => &mut layout.tls_invalid_config,
+        "TlsError.Handshake" => &mut layout.tls_handshake,
+        "TlsError.Certificate" => &mut layout.tls_certificate,
+        "TlsError.Protocol" => &mut layout.tls_protocol,
+        "TlsError.Network" => &mut layout.tls_network,
+        "TlsError.Closed" => &mut layout.tls_closed,
+        "TlsError.LimitExceeded" => &mut layout.tls_limit_exceeded,
+        "TlsStream" => &mut layout.tls_stream,
         _ => unreachable!("only known labels enter the map"),
     }
 }

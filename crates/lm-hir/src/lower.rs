@@ -1187,6 +1187,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BYTE_BUFFER_FINISH => {
                 Instr::Native(lm_bytecode::NativeInstr::BbFinish)
             }
+            lm_abi::INTRINSIC_BYTE_BUFFER_AT => Instr::Native(lm_bytecode::NativeInstr::BbAt),
+            lm_abi::INTRINSIC_BYTE_BUFFER_FIND_FROM => {
+                Instr::Native(lm_bytecode::NativeInstr::BbFindFrom)
+            }
             lm_abi::INTRINSIC_TEXT_FIND_BYTE_INDEX => {
                 Instr::Native(lm_bytecode::NativeInstr::TextFindByteIndex)
             }
@@ -1789,6 +1793,29 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             blocks: vec![vec![Instr::ConstUnit, Instr::Return]],
         };
     }
+    if matches!(
+        class.native_repr,
+        Some(
+            NativeRepr::TcpResource
+                | NativeRepr::TcpStream
+                | NativeRepr::TcpListener
+                | NativeRepr::TlsStream
+        )
+    ) {
+        let ret = m.intern_type(BcType::Class(cidx));
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::Unreachable]],
+        };
+    }
     if class.native_repr == Some(NativeRepr::Int) {
         let int = m.intern_type(BcType::Int);
         return Func {
@@ -2076,6 +2103,7 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::NeBytes)
         | Instr::Native(lm_bytecode::NativeInstr::BbExtend)
         | Instr::Native(lm_bytecode::NativeInstr::BbReserve)
+        | Instr::Native(lm_bytecode::NativeInstr::BbAt)
         | Instr::Native(lm_bytecode::NativeInstr::TextAt)
         | Instr::Native(lm_bytecode::NativeInstr::TextIsBoundary)
         | Instr::Native(lm_bytecode::NativeInstr::TextLt)
@@ -2138,7 +2166,8 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::MapPut
         | Instr::Native(lm_bytecode::NativeInstr::BytesSlice)
         | Instr::Native(lm_bytecode::NativeInstr::TextSlice)
-        | Instr::Native(lm_bytecode::NativeInstr::TextSliceBytes) => (3, 1),
+        | Instr::Native(lm_bytecode::NativeInstr::TextSliceBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => (3, 1),
         Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
         Instr::MapNew { count, .. } => (2 * *count as usize, 1),
         Instr::MakeClosure { captures, .. } => (*captures as usize, 1),
@@ -2333,6 +2362,8 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::SbByteLen) => "SbByteLen".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::SbFinish) => "SbFinish".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BbFinish) => "BbFinish".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbAt) => "BbAt".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => "BbFindFrom".to_string(),
         Instr::Freeze => "Freeze".to_string(),
         Instr::Digest => "Digest".to_string(),
         Instr::EqDigest => "EqDigest".to_string(),

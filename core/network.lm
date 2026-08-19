@@ -1,0 +1,286 @@
+# Core: portable DNS and TCP values.
+
+enum IpAddress
+  V4(bytes: Bytes)
+  V6(bytes: Bytes)
+end
+
+final class SocketAddress
+  ip: IpAddress
+  port: Int
+  flow_info: Int
+  scope_id: Int
+
+  def init(
+    mut self,
+    ip: IpAddress,
+    port: Int,
+    flow_info: Int,
+    scope_id: Int
+  )
+    self.ip = ip
+    self.port = port
+    self.flow_info = flow_info
+    self.scope_id = scope_id
+  end
+end
+
+enum NetError
+  InvalidInput(message: String)
+  NameNotFound(message: String)
+  Unavailable(message: String)
+  PermissionDenied(message: String)
+  AddressInUse(message: String)
+  ConnectionRefused(message: String)
+  ConnectionReset(message: String)
+  NotConnected(message: String)
+  TimedOut(message: String)
+  Closed
+  LimitExceeded(message: String)
+  Unsupported(message: String)
+  Failed(message: String)
+
+  def message(self): String
+    case self
+    in InvalidInput(m)     then m
+    in NameNotFound(m)     then m
+    in Unavailable(m)      then m
+    in PermissionDenied(m) then m
+    in AddressInUse(m)     then m
+    in ConnectionRefused(m) then m
+    in ConnectionReset(m)  then m
+    in NotConnected(m)     then m
+    in TimedOut(m)         then m
+    in Closed              then "network resource is closed"
+    in LimitExceeded(m)    then m
+    in Unsupported(m)      then m
+    in Failed(m)           then m
+    end
+  end
+end
+
+enum TcpRead
+  Data(bytes: Bytes)
+  End
+end
+
+enum Shutdown
+  Read
+  Write
+  Both
+end
+
+class TcpResource
+  def local_address(self): Result[SocketAddress, NetError] with Tcp.LocalAddress
+    sys.tcp.local_address(self)
+  end
+
+  def close(self): Result[(), NetError] with Tcp.Close
+    sys.tcp.close(self)
+  end
+end
+
+final class TcpStream < TcpResource
+  def read(self, max_bytes: Int): Result[TcpRead, NetError] with Tcp.Read
+    sys.tcp.read(self, max_bytes)
+  end
+
+  def write(self, bytes: Bytes): Result[Int, NetError] with Tcp.Write
+    sys.tcp.write(self, bytes)
+  end
+
+  def shutdown(self, direction: Shutdown): Result[(), NetError] with Tcp.Shutdown
+    sys.tcp.shutdown(self, direction)
+  end
+
+  def peer_address(self): Result[SocketAddress, NetError] with Tcp.PeerAddress
+    sys.tcp.peer_address(self)
+  end
+
+  def write_all(self, bytes: Bytes): Result[(), NetError] with Tcp.Stream
+    offset = 0
+    length = bytes.len()
+    while offset < length
+      remaining = length - offset
+      count = if remaining < 65535
+        remaining
+      else
+        65535
+      end
+      part = case bytes.slice(offset, count)
+      in Ok(value)  then value
+      in Err(_)
+        return Err(NetError.Failed("the write suffix is invalid"))
+      end
+      case self.write(part)
+      in Ok(written)
+        if written <= 0
+          return Err(NetError.Failed("the stream made no write progress"))
+        end
+        offset = offset + written
+      in Err(error)
+        return Err(error)
+      end
+    end
+    Ok(())
+  end
+
+  def read_exact(self, count: Int): Result[Bytes, NetError] with Tcp.Stream
+    if count < 0
+      return Err(NetError.InvalidInput("the read count is negative"))
+    end
+    buffer = ByteBuffer()
+    while buffer.len() < count
+      remaining = count - buffer.len()
+      chunk = if remaining < 65535
+        remaining
+      else
+        65535
+      end
+      case self.read(chunk)
+      in Ok(TcpRead.Data(bytes))
+        buffer.extend(bytes)
+      in Ok(TcpRead.End)
+        return Err(NetError.Unavailable("the stream ended before the read completed"))
+      in Err(error)
+        return Err(error)
+      end
+    end
+    Ok(buffer.finish())
+  end
+
+  def read_to_end(self, max_total: Int): Result[Bytes, NetError] with Tcp.Stream
+    if max_total < 0
+      return Err(NetError.InvalidInput("the byte limit is negative"))
+    end
+    buffer = ByteBuffer()
+    loop do
+      remaining = max_total - buffer.len()
+      chunk = if remaining < 65535
+        remaining + 1
+      else
+        65535
+      end
+      case self.read(chunk)
+      in Ok(TcpRead.Data(bytes))
+        if bytes.len() > remaining
+          return Err(NetError.LimitExceeded("the stream passed the byte limit"))
+        end
+        buffer.extend(bytes)
+      in Ok(TcpRead.End)
+        return Ok(buffer.finish())
+      in Err(error)
+        return Err(error)
+      end
+    end
+  end
+end
+
+final class TcpListener < TcpResource
+  def accept(self): Result[Pair[TcpStream, SocketAddress], NetError] with Tcp.Accept
+    sys.tcp.accept(self)
+  end
+end
+
+# Core: direct DNS and TCP entry operations.
+
+final class Tcp
+  def address(
+    self,
+    ip: IpAddress,
+    port: Int,
+    flow_info: Int,
+    scope_id: Int
+  ): Result[SocketAddress, NetError]
+    if port < 0 or port > 65535
+      return Err(NetError.InvalidInput("the port is outside 0 through 65535"))
+    end
+    if flow_info < 0 or flow_info > 4294967295
+      return Err(NetError.InvalidInput("the flow value is outside its range"))
+    end
+    if scope_id < 0 or scope_id > 4294967295
+      return Err(NetError.InvalidInput("the scope value is outside its range"))
+    end
+    case ip
+    in IpAddress.V4(bytes)
+      if bytes.len() != 4
+        return Err(NetError.InvalidInput("an IPv4 address needs four bytes"))
+      end
+      if flow_info != 0 or scope_id != 0
+        return Err(NetError.InvalidInput("an IPv4 address cannot have IPv6 fields"))
+      end
+    in IpAddress.V6(bytes)
+      if bytes.len() != 16
+        return Err(NetError.InvalidInput("an IPv6 address needs sixteen bytes"))
+      end
+    end
+    Ok(SocketAddress(ip, port, flow_info, scope_id).freeze())
+  end
+
+  def resolve(self, host: String, port: Int): Result[List[SocketAddress], NetError] with Dns.Resolve
+    name = host.bytes()
+    if name.len() == 0 or name.len() > 253
+      return Err(NetError.InvalidInput("the host name length is invalid"))
+    end
+    index = 0
+    while index < name.len()
+      byte = name.at(index)
+      if byte <= 32 or byte >= 127
+        return Err(NetError.InvalidInput("the host name is invalid"))
+      end
+      index = index + 1
+    end
+    if port < 0 or port > 65535
+      return Err(NetError.InvalidInput("the port is outside 0 through 65535"))
+    end
+    sys.dns.resolve(host, port)
+  end
+
+  def connect(self, address: SocketAddress): Result[TcpStream, NetError] with Tcp.Connect
+    sys.tcp.connect(address)
+  end
+
+  def listen(self, address: SocketAddress, backlog: Int): Result[TcpListener, NetError] with Tcp.Listen
+    sys.tcp.listen(address, backlog)
+  end
+
+  def connect_host(self, host: String, port: Int): Result[TcpStream, NetError] with Dns.Resolve, Tcp.Client
+    case self.resolve(host, port)
+    in Err(error)
+      Err(error)
+    in Ok(addresses)
+      if addresses.len() == 0
+        return Err(NetError.NameNotFound("the host name has no address"))
+      end
+      index = 0
+      last: NetError = NetError.Unavailable("no address accepted the connection")
+      while index < addresses.len()
+        case self.connect(addresses.at(index))
+        in Ok(stream)
+          return Ok(stream)
+        in Err(error)
+          last = error
+        end
+        index = index + 1
+      end
+      Err(last)
+    end
+  end
+
+  def with_connection[R, effect e](
+    self,
+    address: SocketAddress,
+    body: (TcpStream) -> R with e
+  ): Result[R, NetError] with Tcp.Connect, Tcp.Close, e
+    case self.connect(address)
+    in Err(error)
+      Err(error)
+    in Ok(stream)
+      value = body(stream)
+      case stream.close()
+      in Ok(_)      then Ok(value)
+      in Err(error) then Err(error)
+      end
+    end
+  end
+end

@@ -10,9 +10,8 @@ use lm_vm::{
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Seek, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
 
 const FILE_WORKERS: usize = 4;
 const MAX_PENDING_IO: usize = 1_024;
@@ -183,13 +182,6 @@ impl IoService {
 
     pub(crate) fn wait(&self) -> Option<HostCompletion> {
         self.completions.recv().ok()
-    }
-
-    pub(crate) fn wait_timeout(
-        &self,
-        duration: Duration,
-    ) -> Result<HostCompletion, RecvTimeoutError> {
-        self.completions.recv_timeout(duration)
     }
 
     fn reserve(&self) -> bool {

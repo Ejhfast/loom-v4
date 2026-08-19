@@ -19,8 +19,9 @@ mod typecheck;
 mod world;
 
 pub use host::{
-    CoreCtor, Host, HostArg, HostCompletion, HostOpenOptions, HostSeekFrom, HostStart, HostValue,
-    NullHost, RecordingHost,
+    CoreCtor, Host, HostArg, HostCompletion, HostIpAddress, HostOpenOptions, HostSeekFrom,
+    HostShutdown, HostSocketAddress, HostStart, HostTcpKind, HostTcpResource, HostValue, NullHost,
+    RecordingHost,
 };
 pub use machine::{Block, FaultRec, MachineState, Mailbox, Ownership, VmId, VmState};
 pub use resource::{ResourceKind, ResourceRecord, ResourceRegistry, ResourceState};

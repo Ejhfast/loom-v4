@@ -1631,9 +1631,27 @@ impl<'o> FnChecker<'o> {
                 })
             }
             Callee::Class(class) => {
+                if !self.env.core_scope
+                    && ctx.classes[class as usize].name == "SocketAddress"
+                    && ctx.core_types.get("SocketAddress") == Some(&class)
+                {
+                    return Err(Diagnostic::new(
+                        "E1026",
+                        "use `Tcp().address` to construct a SocketAddress",
+                        name_span,
+                    ));
+                }
                 if matches!(
                     ctx.classes[class as usize].native_repr,
-                    Some(NativeRepr::Text | NativeRepr::Substring | NativeRepr::Char)
+                    Some(
+                        NativeRepr::Text
+                            | NativeRepr::Substring
+                            | NativeRepr::Char
+                            | NativeRepr::TcpResource
+                            | NativeRepr::TcpStream
+                            | NativeRepr::TcpListener
+                            | NativeRepr::TlsStream
+                    )
                 ) {
                     return Err(Diagnostic::new(
                         "E1026",
@@ -3317,53 +3335,59 @@ impl<'o> FnChecker<'o> {
     /// Convert one manifest type to a checker type.
     fn abi_type_id(ctx: &mut Ctx, t: lm_abi::AbiType) -> TypeId {
         match t {
-            lm_abi::AbiType::Unit => UNIT,
-            lm_abi::AbiType::Bool => BOOL,
-            lm_abi::AbiType::Int => INT,
-            lm_abi::AbiType::Text => Self::core_class(ctx, "Text"),
-            lm_abi::AbiType::Str => STRING,
-            lm_abi::AbiType::Substring => Self::core_class(ctx, "Substring"),
-            lm_abi::AbiType::Char => Self::core_class(ctx, "Char"),
-            lm_abi::AbiType::Bytes => lm_types::BYTES,
-            lm_abi::AbiType::StringBuilder => Self::core_class(ctx, "StringBuilder"),
-            lm_abi::AbiType::ByteBuffer => Self::core_class(ctx, "ByteBuffer"),
-            lm_abi::AbiType::FileHandle => lm_types::FILE_HANDLE,
-            lm_abi::AbiType::OpenOptions => Self::core_class(ctx, "OpenOptions"),
-            lm_abi::AbiType::SeekFrom => Self::core_class(ctx, "SeekFrom"),
-            lm_abi::AbiType::ListSubstring => {
-                let elem = Self::core_class(ctx, "Substring");
-                ctx.store.intern(Type::List(elem))
+            lm_abi::AbiType::Primitive(primitive) => match primitive {
+                lm_abi::AbiPrimitive::Unit => UNIT,
+                lm_abi::AbiPrimitive::Bool => BOOL,
+                lm_abi::AbiPrimitive::Int => INT,
+                lm_abi::AbiPrimitive::String => STRING,
+                lm_abi::AbiPrimitive::Bytes => lm_types::BYTES,
+                lm_abi::AbiPrimitive::SnapshotImage => lm_types::SNAPSHOT_IMAGE,
+            },
+            lm_abi::AbiType::Core(core) => {
+                let name = match core {
+                    lm_abi::AbiCore::Text => "Text",
+                    lm_abi::AbiCore::Substring => "Substring",
+                    lm_abi::AbiCore::Char => "Char",
+                    lm_abi::AbiCore::StringBuilder => "StringBuilder",
+                    lm_abi::AbiCore::ByteBuffer => "ByteBuffer",
+                    lm_abi::AbiCore::OpenOptions => "OpenOptions",
+                    lm_abi::AbiCore::SeekFrom => "SeekFrom",
+                    lm_abi::AbiCore::IoError => "IoError",
+                    lm_abi::AbiCore::FsError => "FsError",
+                    lm_abi::AbiCore::SnapshotError => "SnapshotError",
+                    lm_abi::AbiCore::IpAddress => "IpAddress",
+                    lm_abi::AbiCore::SocketAddress => "SocketAddress",
+                    lm_abi::AbiCore::NetError => "NetError",
+                    lm_abi::AbiCore::TcpRead => "TcpRead",
+                    lm_abi::AbiCore::Shutdown => "Shutdown",
+                    lm_abi::AbiCore::TlsError => "TlsError",
+                };
+                Self::core_class(ctx, name)
             }
-            lm_abi::AbiType::ResultOptionStrIoError => {
-                let option = ctx.core_types["Option"];
-                let result = ctx.core_types["Result"];
-                let io_error = ctx.core_types["IoError"];
-                let opt_str = ctx
-                    .store
-                    .intern(Type::Inst(lm_types::ClassId(option), vec![STRING]));
-                let err = ctx.store.intern(Type::Class(lm_types::ClassId(io_error)));
-                ctx.store
-                    .intern(Type::Inst(lm_types::ClassId(result), vec![opt_str, err]))
+            lm_abi::AbiType::Native(native) => match native {
+                lm_abi::AbiNative::FileHandle => lm_types::FILE_HANDLE,
+                lm_abi::AbiNative::TcpResource => Self::core_class(ctx, "TcpResource"),
+                lm_abi::AbiNative::TcpStream => Self::core_class(ctx, "TcpStream"),
+                lm_abi::AbiNative::TcpListener => Self::core_class(ctx, "TcpListener"),
+                lm_abi::AbiNative::TlsStream => Self::core_class(ctx, "TlsStream"),
+            },
+            lm_abi::AbiType::List(element) => {
+                let element = Self::abi_type_id(ctx, *element);
+                ctx.store.intern(Type::List(element))
             }
-            lm_abi::AbiType::ResultSnapshotImageError => {
-                let error = Self::core_class(ctx, "SnapshotError");
-                Self::core_inst(ctx, "Result", vec![lm_types::SNAPSHOT_IMAGE, error])
+            lm_abi::AbiType::Tuple(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|element| Self::abi_type_id(ctx, *element))
+                    .collect();
+                ctx.store.intern(Type::Tuple(elements))
             }
-            lm_abi::AbiType::ResultFileHandleFsError => {
-                let error = Self::core_class(ctx, "FsError");
-                Self::core_inst(ctx, "Result", vec![lm_types::FILE_HANDLE, error])
-            }
-            lm_abi::AbiType::ResultBytesFsError => {
-                let error = Self::core_class(ctx, "FsError");
-                Self::core_inst(ctx, "Result", vec![lm_types::BYTES, error])
-            }
-            lm_abi::AbiType::ResultIntFsError => {
-                let error = Self::core_class(ctx, "FsError");
-                Self::core_inst(ctx, "Result", vec![INT, error])
-            }
-            lm_abi::AbiType::ResultUnitFsError => {
-                let error = Self::core_class(ctx, "FsError");
-                Self::core_inst(ctx, "Result", vec![UNIT, error])
+            lm_abi::AbiType::Apply(constructor, arguments) => {
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| Self::abi_type_id(ctx, *argument))
+                    .collect();
+                Self::core_inst(ctx, constructor.text(), arguments)
             }
         }
     }
@@ -3703,9 +3727,14 @@ impl<'o> FnChecker<'o> {
                     if let Some(slot) = lm_abi::op_by_name(&full) {
                         return Ok((TargetKind::Exact, slot, full));
                     }
+                    if let Some(slot) = lm_abi::group_by_name(&full) {
+                        return Ok((TargetKind::Group, slot, full));
+                    }
                     return Err(Diagnostic::new(
                         "E1051",
-                        format!("`{full}` is not an operation in the operation manifest"),
+                        format!(
+                            "`{full}` is not an operation or effect set in the operation manifest"
+                        ),
                         expr.span,
                     ));
                 }
@@ -4041,7 +4070,22 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let handle = self.check_expr(ctx, &args[0], lm_types::FILE_HANDLE)?;
+                let handle = self.synth_expr(ctx, &args[0])?;
+                let tcp_resource = Self::core_class(ctx, "TcpResource");
+                let tls_stream = Self::core_class(ctx, "TlsStream");
+                if handle.ty != lm_types::FILE_HANDLE
+                    && !ctx.store.compatible(tcp_resource, handle.ty)
+                    && handle.ty != tls_stream
+                {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`resource` needs a file or stream resource, found {}",
+                            ctx.store.display(handle.ty)
+                        ),
+                        args[0].span,
+                    ));
+                }
                 self.charge_op(ctx, lm_abi::OP_VM_RESOURCE, span)?;
                 HExpr {
                     ty: lm_types::RESOURCE_HANDLE,
@@ -4076,6 +4120,107 @@ impl<'o> FnChecker<'o> {
                     mutable: true,
                     kind: HExprKind::Perform {
                         op: lm_abi::OP_VM_SERVE_FILE,
+                        args: vec![recv_h, call],
+                    },
+                }
+            }
+            (Type::Vm(_), "serve_tcp_stream") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`serve_tcp_stream` expects 2 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let connect_args = Self::op_args_type(ctx, lm_abi::OP_TCP_CONNECT);
+                let connect_reply =
+                    Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TCP_CONNECT).reply);
+                let accept_args = Self::op_args_type(ctx, lm_abi::OP_TCP_ACCEPT);
+                let accept_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TCP_ACCEPT).reply);
+                let valid = ctx.store.get(call.ty)
+                    == &Type::PendingCall(connect_args, connect_reply)
+                    || ctx.store.get(call.ty) == &Type::PendingCall(accept_args, accept_reply);
+                if !valid {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`serve_tcp_stream` needs a current Tcp.Connect or Tcp.Accept call",
+                        args[0].span,
+                    ));
+                }
+                let address = Self::core_class(ctx, "SocketAddress");
+                let peer = self.check_expr(ctx, &args[1], address)?;
+                self.charge_op(ctx, lm_abi::OP_VM_SERVE_TCP_STREAM, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SERVE_TCP_STREAM,
+                        args: vec![recv_h, call, peer],
+                    },
+                }
+            }
+            (Type::Vm(_), "serve_tcp_listener") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`serve_tcp_listener` expects 1 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let want_args = Self::op_args_type(ctx, lm_abi::OP_TCP_LISTEN);
+                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TCP_LISTEN).reply);
+                if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`serve_tcp_listener` needs a current Tcp.Listen call",
+                        args[0].span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_SERVE_TCP_LISTENER, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SERVE_TCP_LISTENER,
+                        args: vec![recv_h, call],
+                    },
+                }
+            }
+            (Type::Vm(_), "serve_tls_stream") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`serve_tls_stream` expects 1 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let want_args = Self::op_args_type(ctx, lm_abi::OP_TLS_HANDSHAKE);
+                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TLS_HANDSHAKE).reply);
+                if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`serve_tls_stream` needs a current Tls.Handshake call",
+                        args[0].span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_SERVE_TLS_STREAM, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SERVE_TLS_STREAM,
                         args: vec![recv_h, call],
                     },
                 }

@@ -92,6 +92,33 @@ fn section_offset(bytes: &[u8], idx: usize) -> usize {
     u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes")) as usize
 }
 
+/// Return the offset after one LEB128 integer.
+fn after_leb(bytes: &[u8], mut at: usize) -> usize {
+    loop {
+        let byte = bytes[at];
+        at += 1;
+        if byte & 0x80 == 0 {
+            return at;
+        }
+    }
+}
+
+/// Encode one LEB128 integer.
+fn encode_leb(mut value: u64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+        if value == 0 {
+            return bytes;
+        }
+    }
+}
+
 // ---------------------------------------------------------------
 // The container frame.
 // ---------------------------------------------------------------
@@ -234,14 +261,19 @@ fn one_decode_budget_covers_all_container_allocations() {
 fn the_code_manifest_rules_reject_precisely() {
     let (loaded, bytes) = asked_tree();
     let code = section_offset(&bytes, 1);
+    let first_func = after_leb(&bytes, code);
+    let first_hash = after_leb(&bytes, first_func);
     // A damaged definition hash rejects: the slot exists, and its
     // recorded identity does not match the program.
     let mut bad = bytes.clone();
-    bad[code + 2] ^= 1;
+    bad[first_hash] ^= 1;
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Code);
     // A function slot the program has not.
+    let first_func_end = after_leb(&bytes, first_func);
+    let unknown = encode_leb(loaded.module().funcs.len() as u64);
+    assert_eq!(unknown.len(), first_func_end - first_func);
     let mut bad = bytes.clone();
-    bad[code + 1] = 0x7f;
+    bad[first_func..first_func_end].copy_from_slice(&unknown);
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Code);
 }
 
