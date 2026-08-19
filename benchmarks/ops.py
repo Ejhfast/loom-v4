@@ -373,6 +373,70 @@ def byte_buffer():
     return len(b)
 
 
+def text_each():
+    text = "aé猫" * 20
+    total = 0
+    i = 0
+    while i < 10000:
+        for scalar in text:
+            total = total + 1
+        i = i + 1
+    return total
+
+
+def text_split():
+    row = "alpha,beta,gamma,delta,epsilon,zeta,eta,theta,iota,kappa"
+    total = 0
+    i = 0
+    while i < 32000:
+        total = total + len(row.split(","))
+        i = i + 1
+    return total
+
+
+def text_split_once():
+    line = "content-length: 4096"
+    total = 0
+    i = 0
+    while i < 200000:
+        head, sep, _ = line.partition(": ")
+        total = total + (len(head) if sep else 0)
+        i = i + 1
+    return total
+
+
+def text_trim():
+    padded = "   content-length   "
+    total = 0
+    i = 0
+    while i < 500000:
+        total = total + len(padded.strip())
+        i = i + 1
+    return total
+
+
+def bytes_decode():
+    raw = b"a" * 512
+    total = 0
+    j = 0
+    while j < 200000:
+        total = total + len(raw.decode("utf-8"))
+        j = j + 1
+    return total
+
+
+def text_compare():
+    a = "content-length"
+    b = "content-type"
+    total = 0
+    i = 0
+    while i < 1000000:
+        if a < b:
+            total = total + 1
+        i = i + 1
+    return total
+
+
 CASES.extend(
     [
         ("arith_mix", arith_mix, 1000000),
@@ -386,6 +450,12 @@ CASES.extend(
         ("map_str_lookup", map_str_lookup, 500000),
         ("string_builder", string_builder, 500000),
         ("byte_buffer", byte_buffer, 500000),
+        ("text_each", text_each, 600000),
+        ("text_split", text_split, 320000),
+        ("text_split_once", text_split_once, 200000),
+        ("text_trim", text_trim, 500000),
+        ("bytes_decode", bytes_decode, 200000),
+        ("text_compare", text_compare, 1000000),
     ]
 )
 

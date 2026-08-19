@@ -25,4 +25,7 @@ end
 enum ParseIntError
   Invalid
   Overflow
+  # The radix is outside 2 to 36. A radix can come from data, so this
+  # is an ordinary failure and not a fault.
+  BadRadix
 end

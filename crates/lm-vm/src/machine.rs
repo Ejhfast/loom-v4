@@ -1326,15 +1326,20 @@ impl Machine {
             ) => {
                 let radix = self.pop_int()?;
                 let text = self.pop_obj()?;
-                let radix = u32::try_from(radix)
-                    .ok()
-                    .filter(|radix| (2..=36).contains(radix))
-                    .ok_or(FaultCode::BadCast)?;
-                let parsed = i64::from_str_radix(self.text_value(text)?.as_str(), radix);
                 let status = matches!(
                     instr,
                     Instr::Native(lm_bytecode::NativeInstr::TextParseIntStatus)
                 );
+                // Both operands can come from data, so neither one
+                // faults. A radix outside 2 to 36 reports status 3.
+                let radix = u32::try_from(radix)
+                    .ok()
+                    .filter(|radix| (2..=36).contains(radix));
+                let Some(radix) = radix else {
+                    self.push(Value::Int(if status { 3 } else { 0 }))?;
+                    return Ok(());
+                };
+                let parsed = i64::from_str_radix(self.text_value(text)?.as_str(), radix);
                 let answer = match (status, parsed) {
                     (true, Ok(_)) => 0,
                     (true, Err(error)) => match error.kind() {
@@ -1850,17 +1855,28 @@ impl Machine {
                     match separator {
                         Some(reference) => {
                             let needle = self.text_value(reference)?.as_str();
-                            if needle.is_empty() {
-                                return Err(FaultCode::BadCast);
-                            }
                             let mut ranges = Vec::new();
-                            let mut start = 0;
-                            while let Some(at) = visible[start..].find(needle) {
-                                let at = start + at;
-                                ranges.push((start, at));
-                                start = at + needle.len();
+                            if needle.is_empty() {
+                                // An empty separator matches at every
+                                // scalar boundary, so the result holds
+                                // one empty piece at each end and one
+                                // piece for each scalar.
+                                ranges.push((0, 0));
+                                let mut start = 0;
+                                for (at, scalar) in visible.char_indices() {
+                                    ranges.push((at, at + scalar.len_utf8()));
+                                    start = at + scalar.len_utf8();
+                                }
+                                ranges.push((start, visible.len()));
+                            } else {
+                                let mut start = 0;
+                                while let Some(at) = visible[start..].find(needle) {
+                                    let at = start + at;
+                                    ranges.push((start, at));
+                                    start = at + needle.len();
+                                }
+                                ranges.push((start, visible.len()));
                             }
-                            ranges.push((start, visible.len()));
                             ranges
                         }
                         None => {

@@ -331,6 +331,61 @@ fn bench_language_operations() {
         base,
     );
 
+    // Split a document into fields. This case measures the design and
+    // not the search: a Loom piece shares the source allocation, and
+    // a CPython piece is a copy. The count is pieces, not iterations.
+    report(
+        "text_split",
+        320_000,
+        "row = \"alpha,beta,gamma,delta,epsilon,zeta,eta,theta,iota,kappa\"\n\
+         total = 0\ni = 0\nwhile i < 32000\n  total = total + row.split(\",\").len()\n\
+         \x20 i = i + 1\nend\ntotal\n",
+        base,
+    );
+
+    // Split a line into a key and a value. This is the shape a
+    // configuration or header parser writes, and it allocates one
+    // Option and one tuple for each line.
+    report(
+        "text_split_once",
+        200_000,
+        "line = \"content-length: 4096\"\ntotal = 0\ni = 0\nwhile i < 200000\n\
+         \x20 total = total + case line.split_once(\": \")\n\
+         \x20 in Some((key, _)) then key.byte_len()\n  in None then 0\n  end\n\
+         \x20 i = i + 1\nend\ntotal\n",
+        base,
+    );
+
+    // Narrow one piece and keep it as a view. Loom copies nothing.
+    report(
+        "text_trim",
+        500_000,
+        "padded = \"   content-length   \"\ntotal = 0\ni = 0\nwhile i < 500000\n\
+         \x20 total = total + padded.trim().byte_len()\n  i = i + 1\nend\ntotal\n",
+        base,
+    );
+
+    // Decode bytes to text. Loom validates once and shares the
+    // allocation. CPython allocates and copies.
+    report(
+        "bytes_decode",
+        200_000,
+        "b = ByteBuffer()\ni = 0\nwhile i < 512\n  b.append(97)\n  i = i + 1\nend\n\
+         raw = b.finish()\ntotal = 0\nj = 0\nwhile j < 200000\n\
+         \x20 total = total + case raw.utf8_view()\n  in Ok(text) then text.byte_len()\n\
+         \x20 in Err(_) then 0\n  end\n  j = j + 1\nend\ntotal\n",
+        base,
+    );
+
+    // Compare two strings. The ordering hooks reach one intrinsic.
+    report(
+        "text_compare",
+        1_000_000,
+        "a = \"content-length\"\nb = \"content-type\"\ntotal = 0\ni = 0\n\
+         while i < 1000000\n  if a < b\n    total = total + 1\n  end\n  i = i + 1\nend\ntotal\n",
+        base,
+    );
+
     // The byte buffer.
     report(
         "byte_buffer",

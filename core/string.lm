@@ -108,8 +108,9 @@ class Text
     intrinsic("text.bytes", self)
   end
 
-  # `split` faults on an empty separator. A split at every boundary
-  # has no use, and the empty case hides a caller mistake.
+  # `split` is total. A separator can come from data, so no input
+  # makes it fault. An empty separator matches at every scalar
+  # boundary, and the result holds one empty piece at each end.
   def split(self, separator: Text): List[Substring]
     intrinsic("text.split", self, separator)
   end
@@ -144,12 +145,16 @@ class Text
     intrinsic("text.replace", self, needle, replacement)
   end
 
+  # `parse_int` is total. Both the text and the radix can come from
+  # data, so no input makes it fault.
   def parse_int(self, radix: Int): Result[Int, ParseIntError]
     status = intrinsic("text.parse_int_status", self, radix)
     if status == 0
       Ok(intrinsic("text.parse_int_value", self, radix))
     elsif status == 2
       Err(ParseIntError.Overflow)
+    elsif status == 3
+      Err(ParseIntError.BadRadix)
     else
       Err(ParseIntError.Invalid)
     end

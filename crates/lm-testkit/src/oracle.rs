@@ -836,12 +836,15 @@ impl<'m> Oracle<'m> {
             }
             lm_abi::INTRINSIC_TEXT_PARSE_INT_STATUS | lm_abi::INTRINSIC_TEXT_PARSE_INT_VALUE => {
                 let text = self.as_text(&values[0])?.to_string();
+                let value = intrinsic == lm_abi::INTRINSIC_TEXT_PARSE_INT_VALUE;
                 let radix = u32::try_from(self.as_int(&values[1])?)
                     .ok()
-                    .filter(|radix| (2..=36).contains(radix))
-                    .ok_or(Stop::Fault("BadCast"))?;
+                    .filter(|radix| (2..=36).contains(radix));
+                let Some(radix) = radix else {
+                    return Ok(OV::Int(if value { 0 } else { 3 }));
+                };
                 let parsed = i64::from_str_radix(&text, radix);
-                if intrinsic == lm_abi::INTRINSIC_TEXT_PARSE_INT_VALUE {
+                if value {
                     return Ok(OV::Int(parsed.unwrap_or(0)));
                 }
                 Ok(OV::Int(match parsed {
@@ -1018,9 +1021,6 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_TEXT_SPLIT => {
                 let text = self.as_text(&values[0])?;
                 let needle = self.as_text(&values[1])?;
-                if needle.is_empty() {
-                    return Err(Stop::Fault("BadCast"));
-                }
                 let pieces: Vec<OV> = text
                     .split(needle)
                     .map(|piece| OV::Substring(Rc::new(piece.to_string())))

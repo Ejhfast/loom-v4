@@ -1,1 +1,1 @@
-Done("name:loom version:2 mode:fast | rows=4 pairs=3 fields=4 third=[]")
+Done("name:loom version:2 mode:fast | rows=4 pairs=3 fields=4 third=[] scalars=4 [aé]")

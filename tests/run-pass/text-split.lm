@@ -22,4 +22,9 @@ end
 # An empty piece between two separators stays in the result.
 fields = "a,b,,c".split(",")
 
-"{out.finish()}| rows={rows.len()} pairs={pairs} fields={fields.len()} third=[{fields.at(2)}]"
+# `split` is total. A separator from data never faults, and an empty
+# separator matches at every scalar boundary.
+empty = ""
+scalars = "aé".split(empty)
+
+"{out.finish()}| rows={rows.len()} pairs={pairs} fields={fields.len()} third=[{fields.at(2)}] scalars={scalars.len()} [{scalars.at(1)}{scalars.at(2)}]"

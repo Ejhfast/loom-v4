@@ -1234,6 +1234,17 @@ end
 
 File-not-found, end-of-input, parse failure, connection refusal, mailbox closure, snapshot blockers, and restore binding failures belong in ordinary result types.
 
+A library or user method must be total. It must give an answer for every input of its declared parameter types, and it must not fault. Two forms satisfy the rule: the method defines a meaning for the whole input range, or it reports the failure through `Option` or `Result`.
+
+The test is the source of the argument. Any argument can come from a file, a socket, or a configuration value, so an argument range is untrusted input. A separator, a radix, a pattern, and a length all reach a method from data in ordinary programs.
+
+Two exceptions stand:
+
+- An index method may fault when the same class publishes a total sibling. `at` faults and `get` answers `Option`, so a caller chooses the form it needs. Section 24.4 states the pair.
+- A machine-integrity failure faults, because no value can describe it. Section 12.2 lists those.
+
+Prefer a defined meaning over a reported failure when one exists, because a reported failure costs the caller a `case` at every call. `split` with an empty separator matches at every scalar boundary, so it needs no result type.
+
 ### 12.2 Machine faults
 
 A fault halts the current machine immediately. There is no catch, unwinding, `finally`, destructor, or user-visible stack unwinding. The holder receives a frozen `Fault` through VM/proc supervisory APIs.
