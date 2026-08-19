@@ -53,7 +53,9 @@ Pure native intrinsics are deterministic core operations such as arithmetic, str
 
 ### 1.3 Conformance boundary
 
-Source syntax, static checking, artifact and snapshot validity, canonical hashing, operation identities, boundary behavior, policy behavior, and fault behavior are normative. Collector strategy, host thread-pool shape, internal caching, and physical sharing of frozen storage are not observable.
+Source syntax, static checks, artifact validity, snapshot validity, hashes, operation identities, boundaries, policies, and faults are normative.
+
+Collector strategy, host thread-pool shape, and internal caching are not observable. Section 22.9 defines observable text and byte storage charges.
 
 ---
 
@@ -414,7 +416,6 @@ The type universe has four strata.
 | `Int` | Signed 64-bit integer |
 | `Float` | IEEE 754 binary64 |
 | `Byte` | 0 through 255 |
-| `Char` | Unicode scalar value |
 | `(T,)`, `(T, U)`, ... | Fixed-arity structural tuples |
 | `(A, B) -> R with e` | Function type with effect row |
 | `Op[id, (A, B) -> R]` | Identity-indexed operation type |
@@ -423,7 +424,10 @@ The type universe has four strata.
 
 | Type | Meaning |
 |---|---|
+| `Text` | Sealed abstract UTF-8 text base |
 | `String` | Immutable UTF-8 text |
+| `Substring` | Immutable shared UTF-8 text view |
+| `Char` | Immediate Unicode scalar value |
 | `Bytes` | Immutable byte sequence |
 | `Digest` | 256-bit digest |
 | `List[T]` | Mutable growable contiguous sequence; `[T]` sugar |
@@ -774,7 +778,7 @@ a >= b  -> a.__ge__(b)
 
 Each core method body names one pure intrinsic manifest entry. Static resolution and trivial-body inlining emit the canonical instruction.
 
-`String + String` uses `String.__add__`.
+`String + Text` uses `String.__add__`.
 
 Any class may declare these hooks. The operator reads the hook from the class of the left operand, and the call takes the ordinary method path:
 
@@ -803,7 +807,11 @@ Money(150) + Money(250)
 
 Version 0.2 states no rule about the meaning of a hook. `__eq__` need not be symmetric, and `__lt__` need not order anything. A later interface or protocol feature can require such properties of a class that claims them.
 
-`__eq__` governs `==` and `!=` alone. `Map` keys, `digest`, and `std.value.deep_equal` use structural identity and never call a hook. A class can therefore make `a == b` true while `deep_equal(a, b)` is false, and while a map lookup by `b` misses an entry stored under `a`.
+`__eq__` governs `==` and `!=` alone. `Map` keys, `digest`, and `std.value.deep_equal` never call a hook.
+
+Text map keys use their visible UTF-8 content. A `String` key and a `Substring` key match when their visible content matches.
+
+Other classes use structural identity for map keys. A class hook can therefore disagree with map lookup and deep equality.
 
 `and` and `or` remain control-flow operators. They evaluate the right operand only when required.
 
@@ -2246,25 +2254,53 @@ A `List[T]` object stores length, capacity, and a reference to a contiguous `Val
 
 A `Map[K,V]` stores entries in insertion order plus an open-addressed index from hash to entry position. Replacing a value retains the original position; removal leaves/reuses an internal tombstone while public iteration remains dense and deterministic. Lookup is expected O(1), iteration O(n).
 
-Map keys must be frozen and digestible at insertion. The runtime uses a keyed 64-bit lookup hash cached on immutable keys; insertion order, equality, serialization, and digest do not depend on bucket order. The hash seed is VM configuration recorded in snapshots. Fuel charges use logical key/byte size rather than actual probe count.
+Map keys must be frozen and digestible at insertion. The runtime uses a process-keyed 64-bit lookup hash cached on immutable keys.
 
-This version accepts Bool, Int, String, and Bytes map keys.
+The process key is not guest state. Snapshots rebuild derived map indexes with the active process key.
 
-`String` and `Bytes` use immutable reference-counted storage. Each value stores one visible byte range.
+Insertion order, equality, serialization, and digest do not depend on bucket order. Fuel charges use logical key size, not actual probe count.
 
-A clone or trusted boundary transfer can share the storage. A byte slice also shares its source storage.
+This version accepts Bool, Int, Text, and Bytes map keys. String and Substring are the concrete Text key types.
 
-A String contains valid UTF-8. Construction validates external text once.
+String, Substring, and Bytes use immutable reference-counted byte storage. Each value stores one visible byte range.
+
+A String contains valid UTF-8. A String also caches its scalar count and ASCII state.
+
+A String can retain at most `max(4096, 2 * byte_len)` bytes of backing capacity. Construction and conversion enforce this limit.
+
+A Substring is an explicit view. It can retain an allocation of any size until the view dies.
+
+`Substring.to_string` and `Substring.compact` return a String with bounded retention. They copy only when the bound requires a copy.
+
+A Bytes slice is also an explicit view. `Bytes.compact` copies the visible bytes into a new allocation.
+
+Text and Bytes can share one physical byte allocation. A heap charges this allocation once for all its local views.
+
+`Text.bytes` shares storage. `Bytes.utf8_view` validates UTF-8 and returns a shared Substring.
+
+`Bytes.utf8` validates UTF-8 and returns a bounded String. It copies only when the retention bound requires a copy.
 
 Bytes accepts every byte sequence. Construction does not validate UTF-8.
 
-String and Bytes cache their content hashes after the first map lookup. The caches do not affect equality, snapshots, or graph digests.
+Each Bytes view caches its UTF-8 validation result. `utf8` and `utf8_view` reuse this result.
+
+Text and Bytes cache their content hashes after the first map lookup. The caches do not affect snapshots or graph digests.
+
+String and Substring use one Text hash domain. Their map equality compares visible UTF-8 content across both concrete types.
 
 `StringBuilder` and `ByteBuffer` are final nominal core classes. Their native payloads stay holder-local.
 
-Each builder uses one private growable buffer. `StringBuilder.build` returns String. `ByteBuffer.build` returns Bytes.
+Each builder uses one private growable buffer. `build` copies the visible content and leaves the builder active.
 
-`ByteBuffer.build` never validates UTF-8. Bytes validates UTF-8 only during an explicit text conversion.
+StringBuilder tracks its scalar count and ASCII state. `finish` transfers this metadata with the buffer.
+
+`ByteBuffer.finish` transfers its buffer. `StringBuilder.finish` transfers its buffer when the String retention bound permits this transfer.
+
+`StringBuilder.finish` compacts excessive retained capacity. Both methods invalidate the builder.
+
+A later builder operation faults with `InvalidVmState`.
+
+`ByteBuffer.build` and `ByteBuffer.finish` never validate UTF-8. Bytes validates UTF-8 only during an explicit text conversion.
 
 ### 22.10 Graph engine
 
@@ -2511,14 +2547,18 @@ end
 
 It also contains `StepEvent`, `RunResult`, `DriveEvent`, `Recv`, `ProcResult`, `SendResult`, `PendingCall`, `SnapshotImage`, `SnapshotError`, `RestoreError`, portable operation error enums, `OpenOptions`, `SeekFrom`, `FileInfo`, `SocketAddress`, `Duration`, `Instant`, `CompileOptions`, and related ABI records.
 
-`List`, `Map`, `String`, `Bytes`, builders, type descriptors, faults, empty/typed VM, snapshot, proc, scoped file lease, and resource handles are native core classes declared in the same pinned image. Their complete method tables are sealed there; some bodies are intrinsics and some are ordinary verified bytecode attached during the core build.
+`List`, `Map`, `Text`, its concrete classes, `Char`, and `Bytes` are native core classes in the pinned image.
+
+Builders, type descriptors, faults, VMs, snapshots, procs, file leases, and resource handles are also native core classes.
+
+The image seals their complete method tables. Some bodies use intrinsics, while other bodies use ordinary verified bytecode.
 
 ### 24.2 Prelude
 
 The prelude introduces only names used in nearly every module:
 
 ```text
-(), Never, Bool, Int, Float, Byte, Char, String, Bytes
+(), Never, Bool, Int, Float, Byte, Text, String, Substring, Char, Bytes
 List, Map, Option, Some, None, Result, Ok, Err
 Ordering, Pair, Range
 identity, assert, assert_message
@@ -2626,44 +2666,98 @@ freeze(self) -> Map[K,V]
 
 ### 24.6 Strings, bytes, builders, and formatting
 
-The core String surface keeps all offsets in bytes.
+`Text` is a sealed abstract core class. `String` and `Substring` are its only concrete classes.
+
+`String` and `Substring` are final. Programs cannot construct `Text`, `Substring`, or `Char` with an ordinary class call.
+
+String literals and builders produce String values. Text slices and UTF-8 byte views produce Substring values.
+
+Char is a final core class with an immediate VM representation. A Char payload contains one Unicode scalar value.
+
+`Text.len` counts Unicode scalar values. `Text.byte_len` counts UTF-8 bytes.
+
+Scalar positions are the default text positions. Explicit byte methods use byte positions.
+
+The common Text surface follows.
 
 ```text
+len() -> Int
 byte_len() -> Int
-char_count() -> Int
 is_empty() -> Bool
-concat(other: String) -> String
-starts_with(prefix: String) -> Bool
-ends_with(suffix: String) -> Bool
-contains(needle: String) -> Bool
-find(needle: String) -> Option[Int]              # byte offset
-slice_bytes(start: Int, length: Int) -> Result[String,Utf8Error]
+at(index: Int) -> Option[Char]
+slice(start: Int, length: Int) -> Result[Substring,IndexError]
+slice_bytes(start: Int, length: Int) -> Result[Substring,Utf8Error]
+find(needle: Text) -> Option[Int]                 # scalar position
+find_bytes(needle: Text) -> Option[Int]           # byte position
+each[e](f: (Char) -> () with e) -> () with e
+map[e](f: (Char) -> Char with e) -> String with e
+starts_with(prefix: Text) -> Bool
+ends_with(suffix: Text) -> Bool
+contains(needle: Text) -> Bool
 bytes() -> Bytes
-split(separator: String) -> List[String]
-lines() -> List[String]
-trim() -> String
-trim_start() -> String
-trim_end() -> String
-replace(needle: String, replacement: String) -> String
-to_lower_ascii() -> String
-to_upper_ascii() -> String
-parse_int(radix: Int) -> Result[Int,ParseIntError]
-__add__(other: String) -> String
-__eq__(other: String) -> Bool
-__ne__(other: String) -> Bool
-__lt__(other: String) -> Bool
-__le__(other: String) -> Bool
-__gt__(other: String) -> Bool
-__ge__(other: String) -> Bool
+__eq__(other: Text) -> Bool
+__ne__(other: Text) -> Bool
+__lt__(other: Text) -> Bool
+__le__(other: Text) -> Bool
+__gt__(other: Text) -> Bool
+__ge__(other: Text) -> Bool
 ```
 
-`+`, `==`, `!=`, and the four ordering operators use the String hook methods. Each hook has paired underscores. The ordering hooks carry the lexicographic rule of section 6.4.
+`at`, `slice`, `find`, `each`, and `map` use Unicode scalar positions. `at` returns None for an invalid position.
 
-`find` gives a byte offset, and `slice_bytes` takes one, so a search and an extraction compose. `slice_bytes` reports `Utf8Error` for a boundary that splits a character.
+`slice` reports `IndexError.OutOfBounds` for an invalid scalar range. A successful slice shares storage.
 
-Core defines `Utf8Error`, `IndexError`, and `ParseIntError`.
+`slice_bytes` reports `Utf8Error.OutOfBounds` for an invalid range. It reports `Utf8Error.InvalidBoundary` when a boundary splits one scalar.
 
-Methods that return `Char` are not defined here, and neither is float parsing. Both wait on a core type: `Char` and `Float`.
+`find_bytes` supports byte-oriented parsers. It avoids the scalar-position conversion that `find` requires.
+
+The implementation uses one lazy sparse scalar index for each text root. It records every 64th scalar position.
+
+The first indexed operation can build this index in O(n) time. A later scalar boundary lookup scans at most 63 scalars.
+
+`each` is the primary scalar traversal operation. `map` transforms each scalar and returns a new String.
+
+Both methods decode each scalar once. They use a forward UTF-8 byte cursor.
+
+Text ordering compares Unicode scalar values lexicographically. Text equality compares visible scalar sequences without normalization.
+
+Loom performs no automatic Unicode normalization. A library can provide normalization and grapheme-cluster operations.
+
+String adds these methods.
+
+```text
+concat(other: Text) -> String
+__add__(other: Text) -> String
+```
+
+`String + Text` produces a bounded String. Concatenation creates new storage.
+
+Substring adds these methods.
+
+```text
+to_string() -> String
+compact() -> String
+```
+
+Both methods enforce the String retention bound. They can return shared storage when that storage already meets the bound.
+
+Char has this surface.
+
+```text
+codepoint() -> Int
+utf8_len() -> Int
+is_ascii() -> Bool
+__eq__(other: Char) -> Bool
+__ne__(other: Char) -> Bool
+__lt__(other: Char) -> Bool
+__le__(other: Char) -> Bool
+__gt__(other: Char) -> Bool
+__ge__(other: Char) -> Bool
+```
+
+`Text.at` allocates no Char object. Its successful path allocates only the `Option.Some` result object.
+
+Core defines `Utf8Error` and `IndexError`. Float parsing remains deferred.
 
 The core Bytes surface follows.
 
@@ -2673,11 +2767,13 @@ is_empty() -> Bool
 at(index: Int) -> Int
 get(index: Int) -> Option[Int]
 slice(start: Int, length: Int) -> Result[Bytes,IndexError]
+compact() -> Bytes
 concat(other: Bytes) -> Bytes
 starts_with(prefix: Bytes) -> Bool
 find(needle: Bytes) -> Option[Int]
 hex() -> String
 utf8() -> Result[String,Utf8Error]
+utf8_view() -> Result[Substring,Utf8Error]
 text() -> String
 __add__(other: Bytes) -> Bytes
 __eq__(other: Bytes) -> Bool
@@ -2692,24 +2788,30 @@ __ge__(other: Bytes) -> Bool
 
 `slice` returns `Err(IndexError.OutOfBounds)` for an invalid range. A successful slice shares immutable storage.
 
+`compact` copies the visible bytes into a new allocation. Use it to release a large retained allocation.
+
 `find` returns a byte offset. `hex` uses lowercase hexadecimal text.
 
-`utf8` reports invalid encoding through its result. `text` is a compatibility conversion that faults with `BadCast`.
+`utf8` reports invalid encoding through its result. It returns a bounded String.
+
+`utf8_view` reports invalid encoding through its result. It returns a shared Substring without a content copy.
+
+`text` is a compatibility conversion that faults with `BadCast`. It returns a bounded String after successful validation.
 
 `+`, `==`, `!=`, and the four ordering operators use the paired-underscore Bytes hook methods. The ordering hooks carry the unsigned byte rule of section 6.4.
 
 The final nominal builders have the following surface.
 
 ```text
-StringBuilder.append(text: String) -> StringBuilder
-StringBuilder.push_string(text: String) -> StringBuilder
+StringBuilder.append(text: Text) -> StringBuilder
+StringBuilder.push_char(value: Char) -> StringBuilder
 StringBuilder.len() -> Int
+StringBuilder.byte_len() -> Int
 StringBuilder.clear() -> StringBuilder
 StringBuilder.build() -> String
 StringBuilder.finish() -> String
 
 ByteBuffer.append(byte: Int) -> ByteBuffer
-ByteBuffer.push(byte: Int) -> ByteBuffer
 ByteBuffer.extend(bytes: Bytes) -> ByteBuffer
 ByteBuffer.reserve(additional: Int) -> ByteBuffer
 ByteBuffer.clear() -> ByteBuffer
@@ -2720,9 +2822,21 @@ ByteBuffer.finish() -> Bytes
 
 The builders use ordinary class types in bytecode and module interfaces. Native payload tags implement their storage.
 
+`StringBuilder.len` counts Unicode scalar values. `StringBuilder.byte_len` counts UTF-8 bytes.
+
+`build` copies the current content and leaves the builder active. Later writes do not change an earlier result.
+
+`ByteBuffer.finish` transfers the private buffer into the result.
+
+`StringBuilder.finish` transfers the buffer when its retained capacity meets the String bound. It otherwise compacts the result.
+
+Both methods then invalidate the builder.
+
+Any operation on a finished builder faults with `InvalidVmState`.
+
 File and network operations exchange Bytes. An in-process host boundary can share immutable Bytes storage.
 
-`StringBuilder.push_char` remains deferred with Char methods. `ByteBuffer.build` never performs a text conversion.
+`ByteBuffer.build` and `ByteBuffer.finish` never perform a text conversion.
 
 Interpolation lowers to `std/fmt` append operations. The core scalar/string/bytes/digest/fault set has pinned formatting implementations. Other types format only through explicit functions because version 0.2 has no traits.
 
@@ -2899,7 +3013,9 @@ The host never receives arbitrary writable pointers into the guest heap. An `ins
 
 An intrinsic is deterministic, has the empty row, cannot suspend, and cannot call host operations. Its manifest specifies exact signature, semantic revision, and fuel formula. It receives checked guest values and may allocate only through the controlled VM heap under limits.
 
-Native `List`, `Map`, `String`, `Bytes`, builder, graph, numeric, and type-test operations are intrinsics or kernel instructions, not host operations. Their faults are deterministic language faults.
+Native collection, text, byte, builder, graph, numeric, and type-test operations use intrinsics or kernel instructions.
+
+They are not host operations. Their faults are deterministic language faults.
 
 ### 25.5 Native classes, graph shapes, and resource registry
 

@@ -6996,7 +6996,9 @@ impl<'m> World<'m> {
 #[inline]
 fn scalar_copy(value: Value) -> Option<Result<Value, FaultCode>> {
     match value {
-        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Op(_) => Some(Ok(value)),
+        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Char(_) | Value::Op(_) => {
+            Some(Ok(value))
+        }
         Value::Uninit => Some(Err(FaultCode::BoundaryViolation)),
         Value::Obj(_) => None,
     }
@@ -7083,6 +7085,7 @@ impl<'m> World<'m> {
             Value::Unit => "()".to_string(),
             Value::Bool(v) => v.to_string(),
             Value::Int(v) => v.to_string(),
+            Value::Char(value) => format!("{value:?}"),
             Value::Op(op) => format!("<op {}>", lm_abi::op_name(op)),
             Value::Uninit => "<uninit>".to_string(),
             Value::Obj(r) => {
@@ -7094,6 +7097,7 @@ impl<'m> World<'m> {
                 }
                 match heap.get(r) {
                     Object::Str(text) => render_string(text),
+                    Object::Substring(text) => render_string(text),
                     Object::List { items } => {
                         visited.push(r);
                         let parts: Vec<String> = items
@@ -7168,8 +7172,14 @@ impl<'m> World<'m> {
                     Object::Closure { func, .. } => {
                         format!("<closure {}>", self.module.funcs[*func as usize].name)
                     }
-                    Object::StrBuilder(buf) => format!("<StringBuilder len {}>", buf.len()),
-                    Object::ByteBuf(bytes) => format!("<ByteBuffer len {}>", bytes.len()),
+                    Object::StrBuilder(buf) => match buf.byte_len() {
+                        Some(len) => format!("<StringBuilder length {len}>"),
+                        None => "<finished StringBuilder>".to_string(),
+                    },
+                    Object::ByteBuf(bytes) => match bytes.len() {
+                        Some(len) => format!("<ByteBuffer length {len}>"),
+                        None => "<finished ByteBuffer>".to_string(),
+                    },
                     Object::Bytes(bytes) => format!("<Bytes len {}>", bytes.len()),
                     Object::NativeFileHandle { resource } => {
                         if *resource == 0 {

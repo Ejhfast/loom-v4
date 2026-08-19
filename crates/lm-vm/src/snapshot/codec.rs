@@ -34,7 +34,7 @@ use crate::LoadedModule;
 use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
-use lm_heap::{MapIndex, Object};
+use lm_heap::{MapIndex, NativeByteBuffer, NativeStringBuilder, Object};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 use std::cell::Cell;
 
@@ -90,6 +90,7 @@ const V_INT: u8 = 2;
 const V_OP: u8 = 3;
 const V_OBJ: u8 = 4;
 const V_UNINIT: u8 = 5;
+const V_CHAR: u8 = 6;
 
 /// The container hash of one byte prefix.
 pub fn container_hash(prefix: &[u8]) -> [u8; 32] {
@@ -199,6 +200,10 @@ impl Out {
             Value::Int(i) => {
                 self.u8(V_INT);
                 self.i64(i);
+            }
+            Value::Char(value) => {
+                self.u8(V_CHAR);
+                self.u32(u32::from(value));
             }
             Value::Op(op) => {
                 self.u8(V_OP);
@@ -458,15 +463,27 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.leb(env.env().0 as u64);
             out.values(captures);
         }
-        Object::StrBuilder(text) => out.str(text),
+        Object::StrBuilder(builder) => match builder.buffer() {
+            Some(text) => {
+                out.u8(1);
+                out.str(text);
+            }
+            None => out.u8(0),
+        },
         Object::ByteBuf(bytes) => {
-            out.leb(bytes.len() as u64);
-            out.bytes.extend_from_slice(bytes);
+            if let Some(bytes) = bytes.buffer() {
+                out.u8(1);
+                out.leb(bytes.len() as u64);
+                out.bytes.extend_from_slice(bytes);
+            } else {
+                out.u8(0);
+            }
         }
         Object::Bytes(bytes) => {
             out.leb(bytes.len() as u64);
             out.bytes.extend_from_slice(bytes);
         }
+        Object::Substring(text) => out.str(text),
         Object::NativeVm { vm } | Object::NativeTable { vm } => out.leb(*vm as u64),
         Object::NativeRequest { vm, ordinal } => {
             out.leb(*vm as u64);
@@ -1408,6 +1425,13 @@ fn decode_value(cur: &mut Cursor<'_, '_>, objects: u32) -> Read<Value> {
             })
         }
         V_UNINIT => Value::Uninit,
+        V_CHAR => {
+            let value = cur.u32()?;
+            let Some(value) = char::from_u32(value) else {
+                return err(ImageReason::Layout, "a Char value is not a Unicode scalar");
+            };
+            Value::Char(value)
+        }
         other => {
             return err(
                 ImageReason::Layout,
@@ -1501,12 +1525,34 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 env,
             }
         }
-        6 => Object::StrBuilder(cur.str(limits.max_string_bytes)?),
-        7 => {
-            let count = cur.count(limits.max_string_bytes as u64, "buffer byte")?;
-            let source = cur.take(count)?;
-            Object::ByteBuf(cur.copy_bytes(source, "buffer bytes")?)
-        }
+        6 => match cur.u8()? {
+            0 => Object::StrBuilder(NativeStringBuilder::finished()),
+            1 => Object::StrBuilder(NativeStringBuilder::from_string(
+                cur.str(limits.max_string_bytes)?,
+            )),
+            _ => {
+                return Err(ImageError::new(
+                    ImageReason::Code,
+                    "a string builder state flag is invalid",
+                ));
+            }
+        },
+        7 => match cur.u8()? {
+            0 => Object::ByteBuf(NativeByteBuffer::finished()),
+            1 => {
+                let count = cur.count(limits.max_string_bytes as u64, "buffer byte")?;
+                let source = cur.take(count)?;
+                Object::ByteBuf(NativeByteBuffer::from_vec(
+                    cur.copy_bytes(source, "buffer bytes")?,
+                ))
+            }
+            _ => {
+                return Err(ImageError::new(
+                    ImageReason::Code,
+                    "a byte buffer state flag is invalid",
+                ));
+            }
+        },
         8 => Object::NativeVm {
             vm: machine_ref(cur, ctx)?,
         },
@@ -1565,6 +1611,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             owner: machine_ref(cur, ctx)?,
             token: cur.u64()?,
         },
+        20 => Object::Substring(cur.str(limits.max_string_bytes)?.into()),
         other => {
             return err(
                 ImageReason::Layout,

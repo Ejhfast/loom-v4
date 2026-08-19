@@ -116,6 +116,64 @@ bytes = bb.build()
 }
 
 #[test]
+fn bytes_views_ordering_and_builder_moves_have_value_semantics() {
+    let source = r#"
+sb = StringBuilder()
+built = sb.append("é").build()
+string_lengths = (sb.len(), sb.byte_len())
+finished = sb.finish()
+bb = ByteBuffer()
+copy = bb.append(0).append(255).build()
+moved = bb.finish()
+bytes = Bytes("é")
+(
+  built,
+  string_lengths,
+  finished,
+  copy.hex(),
+  moved.hex(),
+  bytes.compact() == bytes,
+  bytes.utf8(),
+  bytes.utf8_view(),
+  Bytes("a") < Bytes("b"),
+  Bytes("b") >= Bytes("b")
+)
+"#;
+    assert_eq!(
+        run_text("bytes_views.lm", source, VmConfig::default()).unwrap(),
+        "Done((\"é\", (1, 2), \"é\", \"00ff\", \"00ff\", true, Ok(\"é\"), Ok(\"é\"), true, true))"
+    );
+}
+
+#[test]
+fn finished_builders_reject_later_use() {
+    let string_source = r#"
+builder = StringBuilder()
+builder.append("done").finish()
+builder.len()
+"#;
+    assert_eq!(
+        run_text(
+            "finished_string_builder.lm",
+            string_source,
+            VmConfig::default()
+        )
+        .unwrap(),
+        "Fault(InvalidVmState)"
+    );
+
+    let byte_source = r#"
+buffer = ByteBuffer()
+buffer.append(1).finish()
+buffer.len()
+"#;
+    assert_eq!(
+        run_text("finished_byte_buffer.lm", byte_source, VmConfig::default()).unwrap(),
+        "Fault(InvalidVmState)"
+    );
+}
+
+#[test]
 fn a_bytes_tag_supports_verified_virtual_dispatch() {
     let mut module =
         compile_text("bytes_virtual.lm", "Bytes(\"abc\").len()\n").expect("the program compiles");

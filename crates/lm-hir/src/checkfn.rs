@@ -228,31 +228,9 @@ type OperatorHook = (u32, Vec<TypeId>, (MethodSig, Vec<TypeId>, u32));
 
 /// Extract the nominal class and arguments of one instance type.
 fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {
-    match ctx.store.get(ty) {
-        Type::Int => ctx
-            .core_types
-            .get("Int")
-            .copied()
-            .map(|class| (class, vec![])),
-        Type::Bool => ctx
-            .core_types
-            .get("Bool")
-            .copied()
-            .map(|class| (class, vec![])),
-        Type::String => ctx
-            .core_types
-            .get("String")
-            .copied()
-            .map(|class| (class, vec![])),
-        Type::Bytes => ctx
-            .core_types
-            .get("Bytes")
-            .copied()
-            .map(|class| (class, vec![])),
-        Type::Class(c) => Some((c.0, vec![])),
-        Type::Inst(c, args) => Some((c.0, args.clone())),
-        _ => None,
-    }
+    ctx.store
+        .nominal_class(ty)
+        .map(|(class, args)| (class.0, args))
 }
 
 /// Collect the type-variable indices inside one type.
@@ -1618,6 +1596,16 @@ impl<'o> FnChecker<'o> {
                 })
             }
             Callee::Class(class) => {
+                if matches!(
+                    ctx.classes[class as usize].native_repr,
+                    Some(NativeRepr::Text | NativeRepr::Substring | NativeRepr::Char)
+                ) {
+                    return Err(Diagnostic::new(
+                        "E1026",
+                        format!("`{name}` values cannot be constructed directly"),
+                        name_span,
+                    ));
+                }
                 if ctx.classes[class as usize].native_repr == Some(NativeRepr::Bytes)
                     && args.len() == 1
                 {
@@ -3279,7 +3267,10 @@ impl<'o> FnChecker<'o> {
             lm_abi::AbiType::Unit => UNIT,
             lm_abi::AbiType::Bool => BOOL,
             lm_abi::AbiType::Int => INT,
+            lm_abi::AbiType::Text => Self::core_class(ctx, "Text"),
             lm_abi::AbiType::Str => STRING,
+            lm_abi::AbiType::Substring => Self::core_class(ctx, "Substring"),
+            lm_abi::AbiType::Char => Self::core_class(ctx, "Char"),
             lm_abi::AbiType::Bytes => lm_types::BYTES,
             lm_abi::AbiType::StringBuilder => Self::core_class(ctx, "StringBuilder"),
             lm_abi::AbiType::ByteBuffer => Self::core_class(ctx, "ByteBuffer"),

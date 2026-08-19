@@ -106,6 +106,7 @@ enum Scalar {
     Unit,
     Bool,
     Int,
+    Char,
     Op(u32),
 }
 
@@ -113,6 +114,8 @@ enum Scalar {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Str,
+    Text,
+    Substring,
     StringBuilder,
     ByteBuffer,
     Bytes,
@@ -155,6 +158,7 @@ fn check_one(
                 (Value::Unit, Scalar::Unit) => true,
                 (Value::Bool(_), Scalar::Bool) => true,
                 (Value::Int(_), Scalar::Int) => true,
+                (Value::Char(_), Scalar::Char) => true,
                 (Value::Op(slot), Scalar::Op(op)) => slot == op,
                 _ => false,
             };
@@ -166,7 +170,8 @@ fn check_one(
             };
             let object = heap.get(reference);
             let found = kind_of(object);
-            if found != kind && !(found == Kind::Vm && kind == Kind::EmptyVm) {
+            let text_match = kind == Kind::Text && matches!(found, Kind::Str | Kind::Substring);
+            if found != kind && !text_match && !(found == Kind::Vm && kind == Kind::EmptyVm) {
                 return Err(FaultCode::TypeMismatch);
             }
 
@@ -214,6 +219,12 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::StringBuilder)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_BYTE_BUFFER] == *class {
                 Node::Heap(Kind::ByteBuffer)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_CHAR] == *class {
+                Node::Scalar(Scalar::Char)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_TEXT] == *class {
+                Node::Heap(Kind::Text)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_SUBSTRING] == *class {
+                Node::Heap(Kind::Substring)
             } else {
                 Node::Heap(Kind::Instance)
             }
@@ -225,6 +236,7 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
 fn kind_of(object: &Object) -> Kind {
     match object {
         Object::Str(_) => Kind::Str,
+        Object::Substring(_) => Kind::Substring,
         Object::StrBuilder(_) => Kind::StringBuilder,
         Object::ByteBuf(_) => Kind::ByteBuffer,
         Object::Bytes(_) => Kind::Bytes,

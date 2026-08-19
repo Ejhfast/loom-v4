@@ -49,7 +49,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 26] = [
+pub const PRELUDE_TYPES: [&str; 29] = [
     "Option",
     "Result",
     "Ordering",
@@ -69,7 +69,10 @@ pub const PRELUDE_TYPES: [&str; 26] = [
     "FsError",
     "OpenOptions",
     "SeekFrom",
+    "Text",
     "String",
+    "Substring",
+    "Char",
     "Utf8Error",
     "IndexError",
     "ParseIntError",
@@ -930,16 +933,34 @@ pub(crate) fn resolve_row(
 }
 
 pub(crate) fn check_key_type(ctx: &Ctx, key: TypeId, span: Span) -> Result<(), Diagnostic> {
-    if matches!(
-        key,
-        lm_types::BOOL | lm_types::INT | lm_types::STRING | lm_types::BYTES
+    let mut text_key = false;
+    if let (Some((mut class, _)), Some(text)) = (
+        ctx.store.nominal_class(key),
+        ctx.core_types.get("Text").copied(),
     ) {
+        loop {
+            if class.0 == text {
+                text_key = true;
+                break;
+            }
+            let Some(parent) = ctx.store.class_meta(class).parent else {
+                break;
+            };
+            class = parent;
+        }
+    }
+    if text_key
+        || matches!(
+            key,
+            lm_types::BOOL | lm_types::INT | lm_types::STRING | lm_types::BYTES
+        )
+    {
         Ok(())
     } else {
         Err(Diagnostic::new(
             "E1033",
             format!(
-                "a map key must be Bool, Int, String, or Bytes, found {}",
+                "a map key must be Bool, Int, Text, String, Substring, or Bytes, found {}",
                 ctx.store.display(key)
             ),
             span,
@@ -1131,9 +1152,8 @@ pub fn check_module_with(
     // type. Phase B fills the declarations after the core lands.
     let mut materializer = crate::import::Materializer::new(&options.imports);
     ctx.uses = resolve_uses(&mut ctx, &mut materializer, &options.imports, &module.uses)?;
+    link_class_parents(&mut ctx, core, true).expect("the core class parents link");
     link_class_parents(&mut ctx, module, false)?;
-    // The core has no user-style inheritance, only enum families,
-    // which were linked during registration.
     let option_class = ctx.core_types["Option"];
     ctx.core = CoreIds {
         option_class,
@@ -1559,7 +1579,7 @@ fn register_type_names(
                 class.name_span,
             ));
         }
-        declare(
+        let idx = declare(
             ctx,
             &class.name,
             class.name_span,
@@ -1567,6 +1587,18 @@ fn register_type_names(
             ClassKind::Normal,
             class.is_final,
         )?;
+        if is_core {
+            let primitive = match class.name.as_str() {
+                "Int" => Some(lm_types::INT),
+                "Bool" => Some(lm_types::BOOL),
+                "String" => Some(lm_types::STRING),
+                "Bytes" => Some(lm_types::BYTES),
+                _ => None,
+            };
+            if let Some(ty) = primitive {
+                ctx.store.set_native_class(ty, ClassId(idx));
+            }
+        }
     }
     for enum_def in &module.enums {
         let (type_names, effect_names) = split_generics(&enum_def.generics);
@@ -1644,6 +1676,13 @@ fn link_class_parents(
                 Diagnostic::new("E1038", format!("unknown parent class `{pname}`"), *pspan)
             })?;
             let parent_meta = ctx.store.class_meta(ClassId(parent)).clone();
+            if !is_core && pname == "Text" && ctx.core_types.get("Text") == Some(&parent) {
+                return Err(Diagnostic::new(
+                    "E1040",
+                    "`Text` is sealed and permits only core text classes",
+                    *pspan,
+                ));
+            }
             if parent_meta.is_final {
                 return Err(Diagnostic::new(
                     "E1040",
@@ -1868,22 +1907,34 @@ fn resolve_class(
     let native_repr = match (is_core, class.name.as_str()) {
         (true, "Int") => Some(NativeRepr::Int),
         (true, "Bool") => Some(NativeRepr::Bool),
+        (true, "Text") => Some(NativeRepr::Text),
         (true, "String") => Some(NativeRepr::String),
+        (true, "Substring") => Some(NativeRepr::Substring),
+        (true, "Char") => Some(NativeRepr::Char),
         (true, "Bytes") => Some(NativeRepr::Bytes),
         (true, "StringBuilder") => Some(NativeRepr::StringBuilder),
         (true, "ByteBuffer") => Some(NativeRepr::ByteBuffer),
         _ => None,
     };
-    if native_repr.is_some()
-        && (!class.is_final
-            || !type_names.is_empty()
-            || parent.is_some()
-            || !class.fields.is_empty()
-            || class.methods.iter().any(|method| method.name == "init"))
-    {
+    let text_parent = ctx.core_types.get("Text").copied();
+    let valid_native_layout = match native_repr {
+        Some(NativeRepr::Text) => !class.is_final && parent.is_none(),
+        Some(NativeRepr::String | NativeRepr::Substring) => class.is_final && parent == text_parent,
+        Some(_) => class.is_final && parent.is_none(),
+        None => true,
+    };
+    let valid_native_shape = native_repr.is_none()
+        || valid_native_layout
+            && type_names.is_empty()
+            && class.fields.is_empty()
+            && !class.methods.iter().any(|method| method.name == "init");
+    if !valid_native_shape {
         return Err(Diagnostic::new(
             "E1040",
-            "a native core class must be final and have no state",
+            format!(
+                "native core class `{}` has an invalid inheritance or state layout",
+                class.name
+            ),
             class.span,
         ));
     }
@@ -1892,9 +1943,13 @@ fn resolve_class(
         Some(NativeRepr::Bool) => lm_types::BOOL,
         Some(NativeRepr::String) => lm_types::STRING,
         Some(NativeRepr::Bytes) => lm_types::BYTES,
-        Some(NativeRepr::StringBuilder) | Some(NativeRepr::ByteBuffer) => {
-            ctx.store.intern(Type::Class(ClassId(idx)))
-        }
+        Some(
+            NativeRepr::Text
+            | NativeRepr::Substring
+            | NativeRepr::Char
+            | NativeRepr::StringBuilder
+            | NativeRepr::ByteBuffer,
+        ) => ctx.store.intern(Type::Class(ClassId(idx))),
         None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
         None => {
             let vars: Vec<TypeId> = (0..type_names.len())

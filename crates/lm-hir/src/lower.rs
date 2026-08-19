@@ -220,6 +220,9 @@ pub fn lower_module(hir: &HirModule) -> Module {
             parent_args: class.parent_args.iter().map(|t| m.bc_ty(*t)).collect(),
             type_params: class.type_params,
             kind: match class.kind {
+                ClassKind::Normal if class.native_repr == Some(NativeRepr::Text) => {
+                    BcClassKind::Abstract
+                }
                 ClassKind::Normal => BcClassKind::Normal,
                 ClassKind::EnumParent => BcClassKind::Abstract,
                 ClassKind::EnumCase => BcClassKind::Case,
@@ -1108,6 +1111,58 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BYTE_BUFFER_CLEAR => Instr::Native(lm_bytecode::NativeInstr::BbClear),
             lm_abi::INTRINSIC_BYTE_BUFFER_LEN => Instr::Native(lm_bytecode::NativeInstr::BbLen),
             lm_abi::INTRINSIC_BYTE_BUFFER_BUILD => Instr::Native(lm_bytecode::NativeInstr::BbBuild),
+            lm_abi::INTRINSIC_TEXT_AT => Instr::Native(lm_bytecode::NativeInstr::TextAt),
+            lm_abi::INTRINSIC_TEXT_SLICE => Instr::Native(lm_bytecode::NativeInstr::TextSlice),
+            lm_abi::INTRINSIC_TEXT_IS_BOUNDARY => {
+                Instr::Native(lm_bytecode::NativeInstr::TextIsBoundary)
+            }
+            lm_abi::INTRINSIC_TEXT_SLICE_BYTES => {
+                Instr::Native(lm_bytecode::NativeInstr::TextSliceBytes)
+            }
+            lm_abi::INTRINSIC_TEXT_BYTES => Instr::Native(lm_bytecode::NativeInstr::TextBytes),
+            lm_abi::INTRINSIC_TEXT_LT => Instr::Native(lm_bytecode::NativeInstr::TextLt),
+            lm_abi::INTRINSIC_TEXT_LE => Instr::Native(lm_bytecode::NativeInstr::TextLe),
+            lm_abi::INTRINSIC_TEXT_GT => Instr::Native(lm_bytecode::NativeInstr::TextGt),
+            lm_abi::INTRINSIC_TEXT_GE => Instr::Native(lm_bytecode::NativeInstr::TextGe),
+            lm_abi::INTRINSIC_SUBSTRING_TO_STRING => {
+                Instr::Native(lm_bytecode::NativeInstr::SubstringToString)
+            }
+            lm_abi::INTRINSIC_CHAR_CODEPOINT => {
+                Instr::Native(lm_bytecode::NativeInstr::CharCodepoint)
+            }
+            lm_abi::INTRINSIC_CHAR_UTF8_LEN => Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len),
+            lm_abi::INTRINSIC_CHAR_EQ => Instr::Native(lm_bytecode::NativeInstr::EqChar),
+            lm_abi::INTRINSIC_CHAR_NE => Instr::Native(lm_bytecode::NativeInstr::NeChar),
+            lm_abi::INTRINSIC_CHAR_LT => Instr::Native(lm_bytecode::NativeInstr::LtChar),
+            lm_abi::INTRINSIC_CHAR_LE => Instr::Native(lm_bytecode::NativeInstr::LeChar),
+            lm_abi::INTRINSIC_CHAR_GT => Instr::Native(lm_bytecode::NativeInstr::GtChar),
+            lm_abi::INTRINSIC_CHAR_GE => Instr::Native(lm_bytecode::NativeInstr::GeChar),
+            lm_abi::INTRINSIC_BYTES_COMPACT => {
+                Instr::Native(lm_bytecode::NativeInstr::BytesCompact)
+            }
+            lm_abi::INTRINSIC_BYTES_TEXT_VIEW => {
+                Instr::Native(lm_bytecode::NativeInstr::BytesTextView)
+            }
+            lm_abi::INTRINSIC_BYTES_LT => Instr::Native(lm_bytecode::NativeInstr::LtBytes),
+            lm_abi::INTRINSIC_BYTES_LE => Instr::Native(lm_bytecode::NativeInstr::LeBytes),
+            lm_abi::INTRINSIC_BYTES_GT => Instr::Native(lm_bytecode::NativeInstr::GtBytes),
+            lm_abi::INTRINSIC_BYTES_GE => Instr::Native(lm_bytecode::NativeInstr::GeBytes),
+            lm_abi::INTRINSIC_STRING_BUILDER_PUSH_CHAR => {
+                Instr::Native(lm_bytecode::NativeInstr::SbAppendChar)
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_BYTE_LEN => {
+                Instr::Native(lm_bytecode::NativeInstr::SbByteLen)
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_FINISH => {
+                Instr::Native(lm_bytecode::NativeInstr::SbFinish)
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_FINISH => {
+                Instr::Native(lm_bytecode::NativeInstr::BbFinish)
+            }
+            lm_abi::INTRINSIC_TEXT_FIND_BYTE_INDEX => {
+                Instr::Native(lm_bytecode::NativeInstr::TextFindByteIndex)
+            }
+            lm_abi::INTRINSIC_TEXT_AT_BYTE => Instr::Native(lm_bytecode::NativeInstr::TextAtByte),
             _ => unreachable!("the checker accepts only manifest intrinsics"),
         };
         self.emit(instr);
@@ -1664,7 +1719,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             blocks: vec![],
         };
     }
-    if class.kind == ClassKind::EnumParent {
+    if class.kind == ClassKind::EnumParent || class.native_repr == Some(NativeRepr::Text) {
         // An abstract enum parent is never constructed. Its `<new>`
         // slot only keeps the index arithmetic dense.
         return Func {
@@ -1724,6 +1779,49 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             captures: vec![],
             local_types: vec![],
             blocks: vec![vec![Instr::ConstStr(empty), Instr::Return]],
+        };
+    }
+    if class.native_repr == Some(NativeRepr::Substring) {
+        let substring_ty = m.intern_type(BcType::Class(cidx));
+        let empty = m.intern_string("");
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: substring_ty,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![
+                Instr::ConstStr(empty),
+                Instr::ConstInt(0),
+                Instr::ConstInt(0),
+                Instr::Native(lm_bytecode::NativeInstr::TextSlice),
+                Instr::Return,
+            ]],
+        };
+    }
+    if class.native_repr == Some(NativeRepr::Char) {
+        let char_ty = m.intern_type(BcType::Class(cidx));
+        let space = m.intern_string(" ");
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: char_ty,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![
+                Instr::ConstStr(space),
+                Instr::ConstInt(0),
+                Instr::Native(lm_bytecode::NativeInstr::TextAt),
+                Instr::Return,
+            ]],
         };
     }
     if class.native_repr == Some(NativeRepr::Bytes) {
@@ -1899,6 +1997,8 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::StrEndsWith)
         | Instr::Native(lm_bytecode::NativeInstr::StrContains)
         | Instr::Native(lm_bytecode::NativeInstr::StrFindIndex)
+        | Instr::Native(lm_bytecode::NativeInstr::TextFindByteIndex)
+        | Instr::Native(lm_bytecode::NativeInstr::TextAtByte)
         | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
         | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
         | Instr::Native(lm_bytecode::NativeInstr::BytesConcat)
@@ -1907,7 +2007,24 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::EqBytes)
         | Instr::Native(lm_bytecode::NativeInstr::NeBytes)
         | Instr::Native(lm_bytecode::NativeInstr::BbExtend)
-        | Instr::Native(lm_bytecode::NativeInstr::BbReserve) => (2, 1),
+        | Instr::Native(lm_bytecode::NativeInstr::BbReserve)
+        | Instr::Native(lm_bytecode::NativeInstr::TextAt)
+        | Instr::Native(lm_bytecode::NativeInstr::TextIsBoundary)
+        | Instr::Native(lm_bytecode::NativeInstr::TextLt)
+        | Instr::Native(lm_bytecode::NativeInstr::TextLe)
+        | Instr::Native(lm_bytecode::NativeInstr::TextGt)
+        | Instr::Native(lm_bytecode::NativeInstr::TextGe)
+        | Instr::Native(lm_bytecode::NativeInstr::EqChar)
+        | Instr::Native(lm_bytecode::NativeInstr::NeChar)
+        | Instr::Native(lm_bytecode::NativeInstr::LtChar)
+        | Instr::Native(lm_bytecode::NativeInstr::LeChar)
+        | Instr::Native(lm_bytecode::NativeInstr::GtChar)
+        | Instr::Native(lm_bytecode::NativeInstr::GeChar)
+        | Instr::Native(lm_bytecode::NativeInstr::LtBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::LeBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::GtBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::GeBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::SbAppendChar) => (2, 1),
         Instr::Neg
         | Instr::Not
         | Instr::LoadField(_)
@@ -1929,6 +2046,15 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::BytesText)
         | Instr::Native(lm_bytecode::NativeInstr::BytesHex)
         | Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8)
+        | Instr::Native(lm_bytecode::NativeInstr::TextBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::SubstringToString)
+        | Instr::Native(lm_bytecode::NativeInstr::CharCodepoint)
+        | Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesCompact)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesTextView)
+        | Instr::Native(lm_bytecode::NativeInstr::SbByteLen)
+        | Instr::Native(lm_bytecode::NativeInstr::SbFinish)
+        | Instr::Native(lm_bytecode::NativeInstr::BbFinish)
         | Instr::Freeze
         | Instr::Digest => (1, 1),
         Instr::EqDigest | Instr::NeDigest => (2, 1),
@@ -1941,7 +2067,10 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::SbAppendInt)
         | Instr::Native(lm_bytecode::NativeInstr::SbAppendBool)
         | Instr::Native(lm_bytecode::NativeInstr::BbAppend) => (2, 1),
-        Instr::MapPut | Instr::Native(lm_bytecode::NativeInstr::BytesSlice) => (3, 1),
+        Instr::MapPut
+        | Instr::Native(lm_bytecode::NativeInstr::BytesSlice)
+        | Instr::Native(lm_bytecode::NativeInstr::TextSlice)
+        | Instr::Native(lm_bytecode::NativeInstr::TextSliceBytes) => (3, 1),
         Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
         Instr::MapNew { count, .. } => (2 * *count as usize, 1),
         Instr::MakeClosure { captures, .. } => (*captures as usize, 1),
@@ -2023,6 +2152,30 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::StrEndsWith) => "StrEndsWith".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::StrContains) => "StrContains".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::StrFindIndex) => "StrFindIndex".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextFindByteIndex) => {
+            "TextFindByteIndex".to_string()
+        }
+        Instr::Native(lm_bytecode::NativeInstr::TextAtByte) => "TextAtByte".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextAt) => "TextAt".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextSlice) => "TextSlice".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextIsBoundary) => "TextIsBoundary".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextSliceBytes) => "TextSliceBytes".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextBytes) => "TextBytes".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextLt) => "TextLt".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextLe) => "TextLe".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextGt) => "TextGt".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextGe) => "TextGe".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SubstringToString) => {
+            "SubstringToString".to_string()
+        }
+        Instr::Native(lm_bytecode::NativeInstr::CharCodepoint) => "CharCodepoint".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len) => "CharUtf8Len".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::EqChar) => "EqChar".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::NeChar) => "NeChar".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::LtChar) => "LtChar".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::LeChar) => "LeChar".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::GtChar) => "GtChar".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::GeChar) => "GeChar".to_string(),
         Instr::EqRef => "EqRef".to_string(),
         Instr::NeRef => "NeRef".to_string(),
         Instr::Call(idx) => format!("Call fn{idx}"),
@@ -2084,6 +2237,16 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8) => "BytesIsUtf8".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::EqBytes) => "EqBytes".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::NeBytes) => "NeBytes".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::LtBytes) => "LtBytes".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::LeBytes) => "LeBytes".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::GtBytes) => "GtBytes".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::GeBytes) => "GeBytes".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesCompact) => "BytesCompact".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesTextView) => "BytesTextView".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbAppendChar) => "SbAppendChar".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbByteLen) => "SbByteLen".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::SbFinish) => "SbFinish".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbFinish) => "BbFinish".to_string(),
         Instr::Freeze => "Freeze".to_string(),
         Instr::Digest => "Digest".to_string(),
         Instr::EqDigest => "EqDigest".to_string(),

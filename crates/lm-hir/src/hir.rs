@@ -97,7 +97,10 @@ pub enum CtorKind {
 pub enum NativeRepr {
     Int,
     Bool,
+    Text,
     String,
+    Substring,
+    Char,
     Bytes,
     StringBuilder,
     ByteBuffer,

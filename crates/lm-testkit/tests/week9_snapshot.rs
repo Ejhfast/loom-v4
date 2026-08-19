@@ -164,6 +164,37 @@ fn a_snapshot_round_trips_at_every_boundary_of_the_example_corpus() {
     }
 }
 
+#[test]
+fn text_views_chars_and_finished_builders_round_trip() {
+    let source = r#"
+text_builder = StringBuilder()
+text = text_builder.append("aé").finish()
+byte_builder = ByteBuffer()
+bytes = byte_builder.append(195).append(169).finish()
+(
+  text.at(1),
+  text.slice(1, 1),
+  bytes.utf8_view(),
+  text_builder,
+  byte_builder
+)
+"#;
+    let loaded = program(source);
+    let mut world = world_of(&loaded, &[]);
+    let outcome = drive(&mut world);
+    let expected = world.show_outcome(&outcome);
+    let gate = world.next_gate();
+    let image = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the terminal capture succeeds");
+    let admitted = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
+        .expect("the text snapshot loads");
+    let again = codec::encode(admitted.world(), usize::MAX).expect("the image encodes");
+    assert_eq!(&again, image.bytes().as_ref());
+    let (mut restored, root) = restore_into(&loaded, &image);
+    assert_eq!(run_restored(&mut restored, root), expected);
+}
+
 // ---------------------------------------------------------------
 // Gate: machine ordinals are deterministic and independent from
 // scheduler identifiers.

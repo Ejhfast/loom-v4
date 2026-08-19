@@ -1,36 +1,58 @@
-# Core: immutable UTF-8 text.
+# Core: immutable UTF-8 text and Unicode scalar values.
 
-final class String
-  def byte_len(self): Int
-    intrinsic("string.byte_len", self)
+class Text
+  def len(self): Int
+    intrinsic("text.len", self)
   end
 
-  def char_count(self): Int
-    intrinsic("string.char_count", self)
+  def byte_len(self): Int
+    intrinsic("text.byte_len", self)
   end
 
   def is_empty(self): Bool
-    self.byte_len() == 0
+    self.len() == 0
   end
 
-  def concat(self, other: String): String
-    intrinsic("string.concat", self, other)
+  def at(self, index: Int): Option[Char]
+    if index < 0 or index >= self.len()
+      None
+    else
+      Some(intrinsic("text.at", self, index))
+    end
   end
 
-  def starts_with(self, prefix: String): Bool
-    intrinsic("string.starts_with", self, prefix)
+  def slice(self, start: Int, length: Int): Result[Substring, IndexError]
+    text_length = self.len()
+    if start < 0 or length < 0
+      Err(IndexError.OutOfBounds)
+    elsif start > text_length
+      Err(IndexError.OutOfBounds)
+    elsif length > text_length - start
+      Err(IndexError.OutOfBounds)
+    else
+      Ok(intrinsic("text.slice", self, start, length))
+    end
   end
 
-  def ends_with(self, suffix: String): Bool
-    intrinsic("string.ends_with", self, suffix)
+  def slice_bytes(self, start: Int, length: Int): Result[Substring, Utf8Error]
+    text_length = self.byte_len()
+    if start < 0 or length < 0
+      Err(Utf8Error.OutOfBounds)
+    elsif start > text_length
+      Err(Utf8Error.OutOfBounds)
+    elsif length > text_length - start
+      Err(Utf8Error.OutOfBounds)
+    elsif not intrinsic("text.is_boundary", self, start)
+      Err(Utf8Error.InvalidBoundary)
+    elsif not intrinsic("text.is_boundary", self, start + length)
+      Err(Utf8Error.InvalidBoundary)
+    else
+      Ok(intrinsic("text.slice_bytes", self, start, length))
+    end
   end
 
-  def contains(self, needle: String): Bool
-    intrinsic("string.contains", self, needle)
-  end
-
-  def find(self, needle: String): Option[Int]
-    index = intrinsic("string.find_index", self, needle)
+  def find(self, needle: Text): Option[Int]
+    index = intrinsic("text.find_index", self, needle)
     if index < 0
       None
     else
@@ -38,15 +60,133 @@ final class String
     end
   end
 
-  def __add__(self, other: String): String
-    intrinsic("string.concat", self, other)
+  def find_bytes(self, needle: Text): Option[Int]
+    index = intrinsic("text.find_byte_index", self, needle)
+    if index < 0
+      None
+    else
+      Some(index)
+    end
   end
 
-  def __eq__(self, other: String): Bool
-    intrinsic("string.eq", self, other)
+  def each[effect e](self, f: (Char) -> () with e): () with e
+    index = 0
+    length = self.byte_len()
+    while index < length
+      value = intrinsic("text.at_byte", self, index)
+      f(value)
+      index = index + value.utf8_len()
+    end
+    ()
   end
 
-  def __ne__(self, other: String): Bool
-    intrinsic("string.ne", self, other)
+  def map[effect e](self, f: (Char) -> Char with e): String with e
+    builder = StringBuilder()
+    index = 0
+    length = self.byte_len()
+    while index < length
+      value = intrinsic("text.at_byte", self, index)
+      builder.push_char(f(value))
+      index = index + value.utf8_len()
+    end
+    builder.finish()
+  end
+
+  def starts_with(self, prefix: Text): Bool
+    intrinsic("text.starts_with", self, prefix)
+  end
+
+  def ends_with(self, suffix: Text): Bool
+    intrinsic("text.ends_with", self, suffix)
+  end
+
+  def contains(self, needle: Text): Bool
+    intrinsic("text.contains", self, needle)
+  end
+
+  def bytes(self): Bytes
+    intrinsic("text.bytes", self)
+  end
+
+  def __eq__(self, other: Text): Bool
+    intrinsic("text.eq", self, other)
+  end
+
+  def __ne__(self, other: Text): Bool
+    intrinsic("text.ne", self, other)
+  end
+
+  def __lt__(self, other: Text): Bool
+    intrinsic("text.lt", self, other)
+  end
+
+  def __le__(self, other: Text): Bool
+    intrinsic("text.le", self, other)
+  end
+
+  def __gt__(self, other: Text): Bool
+    intrinsic("text.gt", self, other)
+  end
+
+  def __ge__(self, other: Text): Bool
+    intrinsic("text.ge", self, other)
+  end
+end
+
+final class String < Text
+  def concat(self, other: Text): String
+    intrinsic("text.concat", self, other)
+  end
+
+  def __add__(self, other: Text): String
+    intrinsic("text.concat", self, other)
+  end
+end
+
+final class Substring < Text
+  def to_string(self): String
+    intrinsic("substring.to_string", self)
+  end
+
+  def compact(self): String
+    intrinsic("substring.to_string", self)
+  end
+end
+
+final class Char
+  def codepoint(self): Int
+    intrinsic("char.codepoint", self)
+  end
+
+  def utf8_len(self): Int
+    intrinsic("char.utf8_len", self)
+  end
+
+  def is_ascii(self): Bool
+    self.codepoint() < 128
+  end
+
+  def __eq__(self, other: Char): Bool
+    intrinsic("char.eq", self, other)
+  end
+
+  def __ne__(self, other: Char): Bool
+    intrinsic("char.ne", self, other)
+  end
+
+  def __lt__(self, other: Char): Bool
+    intrinsic("char.lt", self, other)
+  end
+
+  def __le__(self, other: Char): Bool
+    intrinsic("char.le", self, other)
+  end
+
+  def __gt__(self, other: Char): Bool
+    intrinsic("char.gt", self, other)
+  end
+
+  def __ge__(self, other: Char): Bool
+    intrinsic("char.ge", self, other)
   end
 end

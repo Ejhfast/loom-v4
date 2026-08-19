@@ -13,18 +13,15 @@ waits, bounded drive turns, and the request patterns that make a
 driver readable. Everything else in this note supports one of those
 two, or fell out of using them.
 
-The next step is not TCP. `String` is unfinished, and the filesystem
-already shows it: a program decodes bytes to text and then goes back
-to bytes to read the text. The network layer exchanges the same two
-types, so it would build on the same gap. Section 6 states the pass
-that closes it.
+The text and byte storage pass now supports later network work.
+Section 6 records its architecture and limits.
 
-Bytecode format version 20, interface format 8, compiler ABI 16,
-verifier 14, operation manifest ABI 7, snapshot container format 6.
+Bytecode format version 21, interface format 8, compiler ABI 17,
+verifier 15, operation manifest ABI 7, snapshot container format 7.
 The core image pin is
-`14cd0e479b753c3fedf0c45123c1991f69278b041197e120a341499848b04676`
-and `core/pinned-core-defs.txt` holds 68 definition hashes. The shape
-table holds 20 shapes.
+`97773efbe8eed25d8099225593578ae893f24c2688cd83ebdf989f2aea452075`
+and `core/pinned-core-defs.txt` holds 71 definition hashes. The shape
+table holds 21 shapes.
 
 The branch is 135 files, about 15,000 lines added. It carries 16 new
 test files, 16 new examples, and two new sidecar specifications.
@@ -73,62 +70,61 @@ wildcard arm reads `request.op_name()` for the operation as text.
 
 ## 3. Strings and bytes
 
-The filesystem exchanges `Bytes`, so `Bytes` had to be a real type
-before the filesystem could be one. `core/string.lm` and
-`core/bytes.lm` declare `String`, `Bytes`, `StringBuilder`, and
-`ByteBuffer` as final core classes over native storage.
+The filesystem and network exchange Bytes. Text decoding now produces
+either a bounded String or an explicit shared Substring.
 
-`SharedText` and `SharedBytes` are reference-counted storage with a
-start, a length, and a cached lookup hash. A slice clones the handle
-and moves the window, so it copies nothing, and a text slice refuses a
-position that is not a character boundary. The host boundary carries
-`SharedBytes`, so a file read reaches the guest without a copy. That
-is the property that makes `Bytes` a foundation rather than a wrapper.
+`Text` is a sealed abstract core class. Final classes String and
+Substring provide its two concrete forms.
 
-Fallibility follows the read path. `slice` returns
-`Result[Bytes, IndexError]`, `utf8()` returns
-`Result[String, Utf8Error]`, `at` faults and `get` answers `Option`.
-Bytes from a file are untrusted, so decoding is a result and not a
-fault. `text()` is the faulting conversion and reports `BadCast`.
+String is the durable text value. Its retained capacity cannot exceed
+`max(4096, 2 * byte_len)`.
 
-`Bytes` is finished enough to carry the filesystem. `String` is not.
+Substring is an explicit view. It can retain any source allocation.
+`to_string` and `compact` enforce the String retention bound.
 
-`String` holds `byte_len`, `char_count`, `is_empty`, `concat`,
-`starts_with`, `ends_with`, `contains`, `find`, and the three hooks.
-A program can build a string and ask yes-or-no questions about it. A
-program cannot take one apart. `concat` is the only method that makes
-a new string from an old one.
+String, Substring, and Bytes can share one immutable byte allocation.
+One heap charges that allocation once for all local views.
 
-Two of the gaps are defects and not staging.
+`Text.bytes` shares storage. `Bytes.utf8_view` validates and returns a
+shared Substring.
 
-`find` returns a byte offset, and no method consumes a byte offset.
-`String` has no `slice`. The method answers a question the type cannot
-act on, and `char_count` has the same shape: there is no character
-access of any kind.
+`Bytes.utf8` validates and returns a bounded String. `Bytes.compact`
+copies only the visible byte range.
 
-Specification 6.4 states that strings compare lexicographically by
-Unicode scalar value. `String` declares `__eq__` and `__ne__` and no
-ordering hook, so `"a" < "b"` reports "expected Int, found String". No
-program can sort strings. `Bytes` has the same hole: 6.4 promises byte
-ordering and `Bytes` declares no ordering hook either.
+Each byte view caches its UTF-8 validation result. Conversion does not
+repeat the validation pass.
 
-Specification 24.6 described these two surfaces in an implemented tier
-and a reserved tier. That framing let an unfinished type read as a
-plan, and it still left the ordering hooks out of both lists. The
-section now states one surface for each type. The implementation is
-behind it, and this note is where that belongs.
+Text methods use Unicode scalar positions by default. `len`, `at`,
+`slice`, `find`, `each`, and `map` use scalar values.
 
-The result reaches the filesystem work directly. A program reads a
-file, decodes `Bytes` to `String`, and then has to go back down to
-`Bytes` to do anything with the text, because `Bytes` has `slice` and
-`find` and `String` has only the second. The byte type is the capable
-one and the text type is not. That is the wrong way round for a layer
-whose output is text.
+`byte_len`, `slice_bytes`, and `find_bytes` support byte-oriented code.
+Byte slices reject a position inside a UTF-8 scalar.
 
-Operators reach these classes through paired-underscore hooks. `Int`,
-`Bool`, `String`, and `Bytes` declare `__add__` and the rest, opt-in
-`final` classes allow a direct call, and trivial expression bodies
-inline, so `a + b * 2` still emits `Mul` and `Add`.
+One lazy sparse index records every 64th scalar. Later scalar boundary
+lookups scan at most 63 scalars.
+
+`each` and `map` decode each scalar once. They use a forward UTF-8 byte cursor.
+
+`find_bytes` avoids the scalar conversion after a byte search. This
+method keeps byte-oriented parsing to one search path.
+
+Char uses an immediate VM value. `Text.at` does not allocate a Char
+object.
+
+Text equality and ordering compare visible content. String and
+Substring also use one content relation for map keys.
+
+The VM keeps map hashes internal. The public surface does not expose
+`__hash__` or a process-specific hash value.
+
+StringBuilder and ByteBuffer own unique mutable buffers. `build`
+copies, while `finish` invalidates the builder.
+
+ByteBuffer transfers its buffer. StringBuilder compacts first when its
+retained capacity exceeds the String bound.
+
+Operators reach these classes through paired-underscore hooks. Final
+receivers allow direct calls, and trivial bodies inline.
 
 ## 4. What fell out of using it
 
@@ -187,39 +183,36 @@ where the answer to "can this have effects" is no rather than yes and
 visible. A later interface feature can require properties of a class
 that claims them.
 
-**`__eq__` governs `==` alone.** `Map` keys, `digest`, and
-`deep_equal` keep structural identity. A class can therefore make
-`a == b` disagree with a map lookup. Specification 6.4 says so,
-because the same gap is a common defect in other languages.
+**`__eq__` governs `==` alone.** Map lookup never calls a user hook.
+Text keys use one built-in content relation across String and
+Substring. Other classes keep structural identity.
 
-## 6. Next: finish strings and bytes
+## 6. Text storage decisions
 
-This comes before TCP and the rest of the network work. The network
-layer exchanges bytes and reports text, so it would build on the same
-incomplete type and double the cost of fixing it.
+The implementation uses flat UTF-8 storage. It does not use ropes or
+a permanent tree.
 
-The pass has three parts.
+Flat storage keeps host boundaries and network writes simple. It also
+keeps contiguous byte access available without flattening.
 
-**Complete the surface.** Ordering hooks on `String` and `Bytes`
-first: specification 6.4 already promises them, and no program can
-sort today. Then `slice_bytes`, which makes the existing `find` mean
-something. Then `split`, `lines`, `trim`, `replace`,
-`to_lower_ascii`, `to_upper_ascii`, `bytes()`, and `parse_int`.
+String uses bounded retention because it is the durable value.
+Substring permits arbitrary retention because its type makes that cost
+explicit.
 
-**Measure against CPython.** `crates/lm-testkit/tests/bench.rs` and
-`benchmarks/ops.py` already run paired workloads, and neither carries
-a string case beyond `byte_buffer` and `map_str_lookup`. Add cases for
-concatenation, builder append, slicing, `find`, `split`, comparison,
-and byte decoding. CPython is a frame of reference and not a target,
-and a string operation is where an interpreter usually loses, so the
-numbers say whether the shared-storage design pays for itself.
+Bytes follows the explicit-view rule. `compact` gives callers direct
+control over retained binary storage.
 
-**Prove the ergonomics.** Add `examples/11-string-and-bytes` with the
-patterns a program actually writes: split a file into lines, parse a
-key-and-value configuration, build a report with `StringBuilder`,
-decode untrusted bytes and handle the failure, and slice a byte buffer
-without copying. An operation that needs a detour through another type
-is not finished, and an example is where that shows.
+Text and Bytes share physical storage because both expose immutable
+byte ranges. UTF-8 metadata stays on the Text view.
+
+Scalar indexing is the default because the surface presents text.
+Explicit byte operations remain available for protocols and parsers.
+
+Text does not normalize Unicode. Automatic normalization would change
+content, equality, and protocol bytes.
+
+Scalar traversal uses `each` and `map`. Version 0.2 still has no
+iterator trait hierarchy.
 
 ## 7. Open questions
 
@@ -228,12 +221,9 @@ is not finished, and an example is where that shows.
   does not define. Design it with the deferred first-class
   `PolicyTarget` of `docs/notes/week4.md`: one erased target type
   serves both, and building two would be the mistake.
-- **The builders carry four alias pairs.** `StringBuilder.append` and
-  `push_string` have one body, and so do `build` and `finish`;
-  `ByteBuffer.append` and `push`, and `build` and `finish`, do the
-  same. Specification 24.6 lists both spellings of each. The project
-  rule asks for one term per thing, and nothing records which name is
-  the transitional one. Choosing now is cheap.
+- **String utilities remain small.** `split`, `lines`, trimming,
+  replacement, normalization, and parsing can use the Text surface.
+  Their final package placement remains open.
 - **`fault.message()` does not exist.** A denial reason reaches a
   snapshot dump and an embedder, and no guest accessor reads it. An
   accessor would make every internal runtime message an observable
@@ -258,17 +248,10 @@ is not finished, and an example is where that shows.
 From the build order: TCP, the Unix and Windows platform adapters,
 `std/path`, explicit finite root policy profiles, `FileLease` as a
 scoped designator, `std/fs.with_open`, `std/fs.open_handle`, and the
-process environment operations. Section 6 comes first.
-
-Missing from `String` and `Bytes`, and covered by section 6:
-ordering hooks, `slice_bytes`, `slice_chars`, `split`, `lines`,
-`trim`, `trim_start`, `trim_end`, `replace`, `to_lower_ascii`,
-`to_upper_ascii`, `bytes()`, and `parse_int`.
+process environment operations.
 
 Waiting on a type that version 0.2 does not define: `q.op()`,
-`q.ordinal()`, `q.args_view()`, `q.reply_type()`,
-`StringBuilder.push_char` and the rest of the `Char` methods, and
-float parsing.
+`q.ordinal()`, `q.args_view()`, `q.reply_type()`, and float parsing.
 
 ## 9. Maintenance note
 
@@ -277,10 +260,12 @@ moved with it. `docs/notes/week9.md` lists two commands. The core pins
 need a third, and this note records all three:
 
 ```sh
-cargo test -p lm-testkit --test core_image regenerate_core_pins -- --ignored
-lm snapshot save --allow Proc,Vm,Clock \
-  checkpoints/asked-tree.lm checkpoints/asked-tree.lms
-cargo test -p lm-testkit --test fuzz regenerate_fuzz_corpus -- --ignored
+nix-shell --run "cargo test -p lm-testkit --test core_image \
+  regenerate_core_pins -- --ignored"
+nix-shell --run "lm snapshot save --allow Proc,Vm,Clock \
+  checkpoints/asked-tree.lm checkpoints/asked-tree.lms"
+nix-shell --run "cargo test -p lm-testkit --test fuzz \
+  regenerate_fuzz_corpus -- --ignored"
 ```
 
 Each failing test names its own command, so a stale artifact cannot
