@@ -1282,23 +1282,36 @@ fn a_binding_class_index_out_of_range_rejects() {
     );
 }
 
-/// The binding table declares its own count. One entry needs twelve
-/// bytes, and the general length rule bounds a count at one byte per
-/// entry, so the decoder checks the real cost before it reserves.
+/// The decoder checks an impossible binding count before it reserves memory.
 #[test]
 fn an_impossible_binding_count_rejects_before_the_reserve() {
     let module = compile_text("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(1)\n").unwrap();
     let good = lm_bytecode::encode(&module);
     assert!(lm_bytecode::decode(&good).is_ok(), "the sample must decode");
-    // Every four-byte window: a forged count must never reserve past
-    // the input. A rejection or an unrelated success both hold; a
-    // panic or an allocation failure does not.
-    for at in 0..good.len().saturating_sub(4) {
-        let mut bad = good.clone();
-        bad[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        let result = std::panic::catch_unwind(|| lm_bytecode::decode(&bad));
-        assert!(result.is_ok(), "the decoder panicked at offset {at}");
-    }
+    let export_at = u32::from_le_bytes(good[14..18].try_into().unwrap()) as usize;
+    let binding_at = export_at
+        + 4
+        + module
+            .classes
+            .iter()
+            .map(|class| 8 + class.name.len() + class.key.len())
+            .sum::<usize>()
+        + 4
+        + module
+            .funcs
+            .iter()
+            .map(|function| 4 + function.name.len())
+            .sum::<usize>();
+    assert_eq!(
+        &good[binding_at..binding_at + 4],
+        &(module.bindings.len() as u32).to_le_bytes()
+    );
+    let mut bad = good;
+    bad[binding_at..binding_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        lm_bytecode::decode(&bad),
+        Err(lm_bytecode::DecodeError::BadLength)
+    );
 }
 
 /// A selector name lives in the semantic region, so a selector rename

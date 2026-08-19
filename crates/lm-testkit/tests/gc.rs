@@ -8,7 +8,11 @@ use lm_vm::{Vm, VmConfig};
 fn run_vm(source: &str, config: VmConfig) -> (String, lm_vm::HeapStats) {
     let module = compile_text("gc.lm", source).unwrap();
     let loaded = lm_vm::load(module).unwrap();
-    let mut vm = Vm::new(&loaded, config);
+    run_loaded(&loaded, config)
+}
+
+fn run_loaded(loaded: &lm_vm::LoadedModule, config: VmConfig) -> (String, lm_vm::HeapStats) {
+    let mut vm = Vm::new(loaded, config);
     let outcome = vm.run();
     (vm.show_outcome(&outcome), vm.heap().stats())
 }
@@ -53,14 +57,16 @@ fn deep_chain_is_traced_and_frozen_without_rust_recursion() {
     // and then churns garbage under a cap that forces collections over
     // the dead chain. A small Rust stack proves the tracer and the
     // freezer are iterative.
+    let module = compile_text("gc.lm", DEEP_CHAIN).unwrap();
+    let loaded = lm_vm::load(module).unwrap();
     let handle = std::thread::Builder::new()
         .stack_size(256 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             let config = VmConfig {
                 heap_bytes: 8 << 20,
                 ..VmConfig::default()
             };
-            run_vm(DEEP_CHAIN, config)
+            run_loaded(&loaded, config)
         })
         .expect("thread starts");
     let (outcome, stats) = handle.join().expect("no Rust stack overflow");

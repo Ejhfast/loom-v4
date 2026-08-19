@@ -29,7 +29,7 @@ pub struct CliHost {
     next_token: u64,
     next_file: u64,
     next_tcp: u64,
-    io: IoService,
+    io: Option<IoService>,
     network: Option<NetworkService>,
 }
 
@@ -43,7 +43,7 @@ impl CliHost {
             next_token: 1,
             next_file: 1,
             next_tcp: 1,
-            io: IoService::new(),
+            io: None,
             network: None,
         }
     }
@@ -62,7 +62,7 @@ impl CliHost {
         let Some(token) = self.take_token() else {
             return HostStart::Failed("the completion token space is exhausted".to_string());
         };
-        if self.io.submit_file(key, token, request) {
+        if self.io().submit_file(key, token, request) {
             HostStart::Waiting(token)
         } else {
             HostStart::Completed(fs_error("the I/O queue is full".to_string()))
@@ -73,7 +73,7 @@ impl CliHost {
         let Some(token) = self.take_token() else {
             return HostStart::Failed("the completion token space is exhausted".to_string());
         };
-        if self.io.submit_stream(key, token, request) {
+        if self.io().submit_stream(key, token, request) {
             HostStart::Waiting(token)
         } else {
             HostStart::Failed("the I/O queue is full".to_string())
@@ -136,6 +136,10 @@ impl CliHost {
 
     fn network(&mut self) -> &mut NetworkService {
         self.network.get_or_insert_with(NetworkService::new)
+    }
+
+    fn io(&mut self) -> &mut IoService {
+        self.io.get_or_insert_with(IoService::new)
     }
 }
 
@@ -653,8 +657,10 @@ impl Host for CliHost {
     }
 
     fn poll(&mut self) -> Option<HostCompletion> {
-        if let Some(completion) = self.io.poll() {
-            return Some(completion);
+        if let Some(io) = &self.io {
+            if let Some(completion) = io.poll() {
+                return Some(completion);
+            }
         }
         if let Some(network) = &self.network {
             if let Some(completion) = network.poll() {
@@ -694,15 +700,24 @@ impl Host for CliHost {
                 Some(network) => match network.wait_timeout(duration) {
                     Ok(completion) => return Some(completion),
                     Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return self.io.wait(),
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return self.io.as_ref().and_then(IoService::wait);
+                    }
                 },
-                None => std::thread::sleep(duration),
+                None => {
+                    if deadline.is_none() {
+                        if let Some(io) = &self.io {
+                            return io.wait();
+                        }
+                    }
+                    std::thread::sleep(duration);
+                }
             }
         }
     }
 
     fn close_file(&mut self, token: u64) -> bool {
-        self.io.force_close(token)
+        self.io.as_ref().is_some_and(|io| io.force_close(token))
     }
 
     fn cancel(&mut self, token: u64) -> bool {

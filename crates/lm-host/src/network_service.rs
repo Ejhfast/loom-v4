@@ -155,7 +155,7 @@ enum Control {
 enum Entry {
     Stream(StreamState),
     Listener(ListenerState),
-    Tls(TlsState),
+    Tls(Box<TlsState>),
 }
 
 struct StreamState {
@@ -200,16 +200,13 @@ impl TcpRequest {
 
 impl TlsClientSettings {
     fn retained_bytes(&self) -> usize {
-        self.roots
-            .iter()
-            .chain(self.alpn.iter())
-            .fold(
-                self.server_name
-                    .len()
-                    .saturating_add(self.buffer_limit.saturating_mul(2))
-                    .saturating_add(TLS_CONFIG_OVERHEAD),
-                |total, bytes| total.saturating_add(bytes.retained_capacity()),
-            )
+        self.roots.iter().chain(self.alpn.iter()).fold(
+            self.server_name
+                .len()
+                .saturating_add(self.buffer_limit.saturating_mul(2))
+                .saturating_add(TLS_CONFIG_OVERHEAD),
+            |total, bytes| total.saturating_add(bytes.retained_capacity()),
+        )
     }
 }
 
@@ -263,9 +260,7 @@ impl NetworkService {
             let canceled = Arc::clone(&canceled_dns);
             std::thread::Builder::new()
                 .name(format!("loom-dns-{worker}"))
-                .spawn(move || {
-                    dns_worker(jobs, completions, pending, retained, active, canceled)
-                })
+                .spawn(move || dns_worker(jobs, completions, pending, retained, active, canceled))
                 .expect("the DNS worker starts");
         }
 
@@ -538,20 +533,12 @@ fn reactor(
         while let Ok(control) = controls.try_recv() {
             match control {
                 Control::Cancel(token) => {
-                    if let Some(resource) =
-                        cancel_token(&mut entries, &pending, &retained, token)
-                    {
+                    if let Some(resource) = cancel_token(&mut entries, &pending, &retained, token) {
                         close_entry(&poll, &mut entries, &completions, &pending, resource);
                     }
                 }
                 Control::ForceClose(resource) => {
-                    close_entry(
-                        &poll,
-                        &mut entries,
-                        &completions,
-                        &pending,
-                        resource.token,
-                    );
+                    close_entry(&poll, &mut entries, &completions, &pending, resource.token);
                 }
                 Control::ForceCloseTls(stream) => {
                     close_entry(&poll, &mut entries, &completions, &pending, stream);
@@ -921,7 +908,7 @@ fn handle_tls_request(
             pending.retained = 0;
             entries.insert(
                 stream,
-                Entry::Tls(TlsState {
+                Entry::Tls(Box::new(TlsState {
                     socket: state.socket,
                     connection,
                     registered: false,
@@ -934,7 +921,7 @@ fn handle_tls_request(
                     write_shutdown: false,
                     close_notify_sent: false,
                     _retained: live_retained,
-                }),
+                })),
             );
             drive_tls(poll, entries, completions, count, stream, true, true);
         }
@@ -1953,11 +1940,7 @@ mod tests {
     fn retained_bytes_have_one_global_limit() {
         let pending = AtomicUsize::new(0);
         let retained = AtomicUsize::new(0);
-        assert!(reserve(
-            &pending,
-            &retained,
-            MAX_RETAINED_NETWORK_BYTES - 1
-        ));
+        assert!(reserve(&pending, &retained, MAX_RETAINED_NETWORK_BYTES - 1));
         assert!(!reserve(&pending, &retained, 2));
         assert_eq!(pending.load(Ordering::Relaxed), 1);
         assert_eq!(

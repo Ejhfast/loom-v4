@@ -177,11 +177,8 @@ fn check_one(
             let text_match = kind == Kind::Text && matches!(found, Kind::Str | Kind::Substring);
             let tcp_match =
                 kind == Kind::TcpResource && matches!(found, Kind::TcpStream | Kind::TcpListener);
-            if found != kind
-                && !text_match
-                && !tcp_match
-                && !(found == Kind::Vm && kind == Kind::EmptyVm)
-            {
+            let empty_vm_match = found == Kind::Vm && kind == Kind::EmptyVm;
+            if !(found == kind || text_match || tcp_match || empty_vm_match) {
                 return Err(FaultCode::TypeMismatch);
             }
 

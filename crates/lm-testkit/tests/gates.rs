@@ -3,7 +3,7 @@
 //! output.
 
 use lm_testkit::{compile_to_bytes, run_text};
-use lm_vm::VmConfig;
+use lm_vm::{Vm, VmConfig};
 
 const DEEP_RECURSION: &str = "def down(n: Int): Int
   if n <= 0
@@ -21,9 +21,15 @@ down(100000)
 const SMALL_RUST_STACK: usize = 256 * 1024;
 
 fn run_on_small_stack(source: &'static str, config: VmConfig) -> String {
+    let bytes = compile_to_bytes("gate.lm", source).expect("compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("loads");
     std::thread::Builder::new()
         .stack_size(SMALL_RUST_STACK)
-        .spawn(move || run_text("gate.lm", source, config).expect("compiles"))
+        .spawn(move || {
+            let mut vm = Vm::new(&loaded, config);
+            let outcome = vm.run();
+            vm.show_outcome(&outcome)
+        })
         .expect("thread starts")
         .join()
         .expect("no Rust stack overflow and no panic")

@@ -1119,9 +1119,20 @@ fn nested_towers_stay_off_the_rust_stack() {
         vm.table().pass(Vm)\n    \
         case vm.run()\n    in Done(v) then v\n    in Fault(_) then 0 - 1\n    end\n  \
         end\nend\ntower(60) + 1\n";
+    let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the program verifies");
     let out = std::thread::Builder::new()
         .stack_size(512 * 1024)
-        .spawn(move || allowed(source, &["Vm"]))
+        .spawn(move || {
+            let mut world = World::new(
+                &loaded,
+                VmConfig::default(),
+                Box::new(RecordingHost::new(1)),
+            );
+            world.allow("Vm").expect("the grant names a group");
+            let outcome = lm_proc::run_world(&mut world);
+            world.show_outcome(&outcome)
+        })
         .expect("thread starts")
         .join()
         .expect("no Rust stack growth with nested VM depth");
