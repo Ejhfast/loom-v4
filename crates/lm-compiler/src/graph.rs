@@ -370,46 +370,39 @@ pub fn module_order(package: &Package) -> Result<Vec<usize>, String> {
         out.dedup();
         out
     };
-    let mut order: Vec<usize> = Vec::new();
-    let mut state = vec![0u8; package.modules.len()];
-    let mut stack: Vec<(usize, bool)> = (0..package.modules.len())
-        .rev()
-        .map(|i| (i, false))
+    // The components of the import graph give the order and the
+    // cycles in one walk. A component emits after every component it
+    // needs, so the component order is the module order. A component
+    // with more than one member is an import cycle, and it names every
+    // module in the cycle instead of one of them.
+    let succ: Vec<Vec<u32>> = package
+        .modules
+        .iter()
+        .map(|m| needs(m).into_iter().map(|i| i as u32).collect())
         .collect();
-    while let Some((idx, expanded)) = stack.pop() {
-        if state[idx] == 2 {
-            continue;
-        }
-        if expanded {
-            state[idx] = 2;
-            order.push(idx);
-            continue;
-        }
-        if state[idx] == 1 {
+    let (comps, _) = lm_scc::components(package.modules.len(), &succ);
+    let mut order: Vec<usize> = Vec::with_capacity(package.modules.len());
+    for comp in &comps {
+        if comp.len() > 1 {
+            let mut names: Vec<&str> = comp
+                .iter()
+                .map(|i| package.modules[*i as usize].relative.as_str())
+                .collect();
+            names.sort_unstable();
             return Err(format!(
-                "error: the modules of `{}` form an import cycle through `{}`\n",
-                package.name, package.modules[idx].relative
+                "error: the modules of `{}` form an import cycle: {}\n",
+                package.name,
+                names.join(", ")
             ));
         }
-        state[idx] = 1;
-        stack.push((idx, true));
-        for need in needs(&package.modules[idx]) {
-            if need == idx {
-                return Err(format!(
-                    "error: the module `{}` of `{}` imports itself\n",
-                    package.modules[idx].relative, package.name
-                ));
-            }
-            if state[need] == 1 {
-                return Err(format!(
-                    "error: the modules `{}` and `{}` of `{}` import each other\n",
-                    package.modules[idx].relative, package.modules[need].relative, package.name
-                ));
-            }
-            if state[need] == 0 {
-                stack.push((need, false));
-            }
+        let idx = comp[0] as usize;
+        if succ[idx].contains(&(idx as u32)) {
+            return Err(format!(
+                "error: the module `{}` of `{}` imports itself\n",
+                package.modules[idx].relative, package.name
+            ));
         }
+        order.push(idx);
     }
     Ok(order)
 }

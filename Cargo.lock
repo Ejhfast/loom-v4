@@ -108,6 +108,7 @@ dependencies = [
  "lm-abi",
  "lm-bytecode",
  "lm-hir",
+ "lm-scc",
  "lm-source",
  "lm-types",
  "lm-verify",

@@ -587,6 +587,26 @@ fn a_module_cannot_import_itself() {
     assert!(error.contains("imports itself"), "{error}");
 }
 
+/// Two modules that import each other form an import cycle, and the
+/// diagnostic names every module in it.
+#[test]
+fn two_modules_cannot_import_each_other() {
+    let tree = TempTree::new("mutual-import");
+    workspace(&tree);
+    tree.write(
+        "app/src/left.lm",
+        "use right\n\ndef here(): Int\n  1\nend\n",
+    );
+    tree.write(
+        "app/src/right.lm",
+        "use left\n\ndef there(): Int\n  2\nend\n",
+    );
+    let error = tree.build("app").expect_err("the cycle must reject");
+    assert!(error.contains("import cycle"), "{error}");
+    assert!(error.contains("left"), "{error}");
+    assert!(error.contains("right"), "{error}");
+}
+
 /// A class cannot inherit an imported class, and the diagnostic names
 /// the fix.
 #[test]
