@@ -1,12 +1,12 @@
 # Network Effects, Resources, and Protocol Layers
 
-Status: accepted design. Week 10 implements the DNS and TCP foundation.
+Status: accepted design. The network-effects branch implements this foundation.
 
 ## 1. Purpose
 
 This document defines Loom network effects and their host resource model.
 
-The first implementation adds DNS resolution, TCP streams, TCP listeners, and direct HTTP/1.1 support.
+The first implementation adds DNS, TCP, TLS clients, and direct HTTP/1.1 support.
 
 The design keeps operating-system network state outside `lm-vm`.
 
@@ -27,7 +27,10 @@ The network foundation uses these decisions:
 - Effect sets do not create new runtime operations.
 - Direct HTTP uses lower DNS and TCP operations.
 - HTTP request bodies and response bodies have explicit limits.
-- TLS remains a separate transport layer.
+- TLS uses a separate stream resource above TCP.
+- A TLS handshake consumes its TCP stream after host submission.
+- TLS policy, roots, names, versions, ALPN, and buffers stay explicit.
+- Secure HTTP uses the same verified parser as cleartext HTTP.
 - Live network resources block snapshots.
 - Closed network handles remain typed machine state.
 
@@ -96,6 +99,15 @@ Tcp.Shutdown      (TcpStream, Shutdown) -> Result[(), NetError]
 Tcp.LocalAddress  (TcpResource) -> Result[SocketAddress, NetError]
 Tcp.PeerAddress   (TcpStream) -> Result[SocketAddress, NetError]
 Tcp.Close         (TcpResource) -> Result[(), NetError]
+
+Tls.Handshake     (TcpStream, String, Int, List[Bytes], List[Bytes], Int, Int)
+                  -> Result[TlsStream, TlsError]
+Tls.Read          (TlsStream, Int) -> Result[TcpRead, TlsError]
+Tls.Write         (TlsStream, Bytes) -> Result[Int, TlsError]
+Tls.Shutdown      (TlsStream) -> Result[(), TlsError]
+Tls.LocalAddress  (TlsStream) -> Result[SocketAddress, TlsError]
+Tls.PeerAddress   (TlsStream) -> Result[SocketAddress, TlsError]
+Tls.Close         (TlsStream) -> Result[(), TlsError]
 ```
 
 Only exact operations execute `PERFORM`.
@@ -104,7 +116,17 @@ Only exact operations execute `PERFORM`.
 
 DNS accepts a numeric port. Service-name lookup is not part of this operation.
 
+The first DNS name limit is 253 visible ASCII bytes.
+
 The host preserves the bounded address order that its resolver returns.
+
+`Tls.Handshake` uses flattened boundary values from `TlsClientConfig`.
+
+The root mode is zero for WebPKI roots and one for custom roots.
+
+The minimum version is 12 for TLS 1.2 and 13 for TLS 1.3.
+
+The final integer limits retained TLS plaintext and ciphertext buffers.
 
 ## 5. Effect sets
 
@@ -149,9 +171,37 @@ Http.CleartextClient = {
   Dns.Resolve,
   Tcp.Client
 }
+
+Tls.Stream = {
+  Tls.Read,
+  Tls.Write,
+  Tls.Shutdown,
+  Tls.LocalAddress,
+  Tls.PeerAddress,
+  Tls.Close
+}
+
+Tls.Client = {
+  Tls.Handshake,
+  Tls.Stream
+}
+
+Http.Client = {
+  Dns.Resolve,
+  Tcp.Client,
+  Tls.Client
+}
 ```
 
-The manifest can add `Tls.Client` and `Http.Client` with the TLS layer.
+`Tls.Client` does not include DNS or TCP connection creation.
+
+It accepts an existing `TcpStream` and adds TLS authority.
+
+`Http.Client` combines all lower client operations for secure HTTP.
+
+`Http.CleartextClient` keeps its smaller operation closure.
+
+The names do not hide runtime requests from a driver.
 
 ### 5.2 Transparency
 
@@ -361,7 +411,7 @@ ServiceBinding
 creation operation
 ```
 
-`ResourceKind` initially includes `File`, `TcpStream`, and `TcpListener`.
+`ResourceKind` includes `File`, `TcpStream`, `TcpListener`, and `TlsStream`.
 
 `ServiceBinding` has these forms:
 
@@ -405,9 +455,12 @@ The public helpers remain typed:
 ```text
 serve_tcp_stream(current Tcp.Connect or Tcp.Accept call)
 serve_tcp_listener(current Tcp.Listen call)
+serve_tls_stream(current Tls.Handshake call)
 ```
 
-Both helpers use the generic internal resource creation path.
+The TLS helper replaces the consumed TCP resource with one TLS resource.
+
+All helpers use the generic internal resource creation path.
 
 ## 12. Read semantics
 
@@ -432,6 +485,8 @@ A maximum above the host limit returns `NetError.LimitExceeded`.
 
 One read returns no more than the requested maximum.
 
+The first host read limit is 16 MiB.
+
 The host copies received bytes into immutable `Bytes` storage once.
 
 ## 13. Write semantics
@@ -441,6 +496,10 @@ The host copies received bytes into immutable `Bytes` storage once.
 An empty input completes with zero.
 
 A nonempty successful write reports positive progress.
+
+The first host write limit is 16 MiB.
+
+The core helpers submit at most 65535 bytes in one read or write.
 
 The core `write_all` helper repeats partial writes.
 
@@ -468,9 +527,9 @@ Write shutdown rejects later writes with `NetError.Closed`.
 
 `Tcp.Close` closes both directions and releases the backing socket.
 
-Close is idempotent.
+A later guest close returns `NetError.Closed`.
 
-Forced holder cleanup uses the same host close path.
+Forced holder cleanup is idempotent.
 
 ## 15. Concurrency and ordering
 
@@ -484,6 +543,8 @@ Write progress does not wait for read progress.
 
 Each listener has one FIFO accept queue.
 
+The root host passes the requested backlog to the operating system.
+
 The reactor preserves completion order within each queue.
 
 The scheduler still decides the order of guest continuation execution.
@@ -496,19 +557,27 @@ Queue limits return `NetError.LimitExceeded`.
 
 The command-line host uses one event-driven socket reactor.
 
+The command-line host starts the reactor and DNS workers on the first network operation.
+
 The reactor owns all nonblocking TCP sockets.
 
 The fixed file worker pool does not execute socket reads or writes.
 
 DNS uses a separate bounded worker pool because platform resolution can block.
 
-The reactor accepts commands through a bounded channel.
+The reactor accepts operation requests through a bounded channel.
+
+A separate control channel carries only tokens from bounded operations and resources.
 
 The reactor sends completions through the common host completion channel.
 
 The scheduler thread never waits on a platform socket.
 
 The reactor enforces global limits for sockets, queued requests, and retained bytes.
+
+The first global retained network-data limit is 64 MiB.
+
+The limit covers pending values, unread completions, and live TLS configuration state.
 
 ## 17. Cancellation and races
 
@@ -540,7 +609,7 @@ Higher loops can report partial progress when cancellation interrupts them.
 
 ## 18. Snapshots and transfer
 
-A live stream or listener is a host attachment.
+A live TCP stream, TCP listener, or TLS stream is a host attachment.
 
 A live network resource blocks snapshot creation with `ResourceActive`.
 
@@ -552,7 +621,9 @@ A closed handle serializes as a closed marker.
 
 Restore creates no resource entry for that marker.
 
-A restored closed handle returns `NetError.Closed`.
+A restored closed TCP handle returns `NetError.Closed`.
+
+A restored closed TLS handle returns `TlsError.Closed`.
 
 The runtime never reconnects or relistens during restore.
 
@@ -595,19 +666,60 @@ It returns the last connection error when every address fails.
 
 The first HTTP layer is direct verified Loom code.
 
-It performs operations from `Http.CleartextClient`.
+It defines these message values:
+
+```text
+HttpHeader(name: String, value: Bytes)
+HttpRequest(method: String, target: String, headers: [HttpHeader], body: Bytes)
+HttpResponse(status: Int, headers: [HttpHeader], body: Bytes)
+
+HttpLimits(
+  max_header_bytes: Int,
+  max_headers: Int,
+  max_body_bytes: Int,
+  max_chunks: Int,
+  max_wire_bytes: Int,
+  read_chunk_bytes: Int
+)
+```
+
+It returns this closed error family:
+
+```lm
+enum HttpError
+  InvalidRequest(message: String)
+  InvalidResponse(message: String)
+  LimitExceeded(message: String)
+  Network(error: NetError)
+  Tls(error: TlsError)
+end
+```
+
+Pure methods serialize and parse complete message bytes.
+
+Stream methods find framing before they wait for more bytes.
+
+The response reader accepts an effect-polymorphic read function.
+
+TCP and TLS wrappers map transport errors into `HttpError`.
+
+`Http.send` performs operations from `Http.CleartextClient`.
+
+`Http.send_secure` performs operations from `Http.Client`.
 
 It does not perform an exact `Http.Request` operation.
 
 The initial client uses one connection for one request.
 
-It sends `Connection: close` unless the caller supplies a stricter valid value.
+It sends `Connection: close` and rejects a caller-supplied connection field.
 
 The client supports content length, chunked transfer coding, and end-of-stream bodies.
 
 The client rejects conflicting body framing.
 
 The client rejects an invalid status line or header field.
+
+A status code is from 100 through 599. The first parser rejects codes below 200.
 
 Headers use an ordered `List[HttpHeader]`.
 
@@ -617,7 +729,11 @@ Header-name comparison uses ASCII case folding.
 
 Header values remain bytes until the caller requests validated text.
 
-The request and response types carry explicit limits.
+Each parser, serializer, and stream helper receives explicit limits.
+
+The header count includes fields that serializers add.
+
+The first parser rejects informational responses.
 
 The client does not follow redirects automatically.
 
@@ -627,7 +743,7 @@ The client does not read proxy or environment settings.
 
 The client does not decompress a body automatically.
 
-The client does not select certificate policy automatically.
+The secure client receives one explicit `TlsClientConfig`.
 
 The first layer does not implement HTTP/2 or HTTP/3.
 
@@ -651,9 +767,11 @@ The library adds no hidden global server state.
 
 It gives the direct client one concise public row.
 
-Passing this set grants its lower DNS and TCP operations.
+`Http.Client` is the corresponding secure client set.
 
-A manual driver observes those lower operations.
+Passing either set grants its lower exact operations.
+
+A manual driver observes DNS, TCP, and TLS requests separately.
 
 The set cannot support one HTTP-level mock or transcript entry.
 
@@ -665,27 +783,192 @@ The normal client path does not use an isolated machine.
 
 An isolated machine remains available for an untrusted service boundary.
 
-## 23. TLS extension
+## 23. TLS client
+
+### 23.1 Public values
 
 TLS is a separate transport layer above TCP.
 
-It must not change TCP read or write semantics.
+Core Loom code defines this explicit client configuration:
 
-The TLS layer can use a reviewed external Rust library inside `lm-host`.
+```text
+TlsRoots = WebPki | Custom(List[Bytes])
+TlsVersion = Tls12 | Tls13
 
-`lm-vm` still sees only plain boundary values and resource tokens.
+TlsClientConfig {
+  server_name: String,
+  roots: TlsRoots,
+  alpn: List[Bytes],
+  minimum_version: TlsVersion,
+  max_buffer_bytes: Int
+}
+```
 
-Certificate roots, server names, protocol versions, and verification policy remain explicit inputs.
+`WebPki` uses the root set compiled into `lm-host`.
 
-The TLS layer defines its own stream resource and exact operations.
+`Custom` accepts DER certificate values and replaces the WebPKI roots.
 
-`Tls.Client` includes only those exact TLS operations and required lower effects.
+No configuration disables certificate or server-name verification.
 
-`Http.Client` can unite `Dns.Resolve`, `Tcp.Client`, and `Tls.Client`.
+The minimum version allows TLS 1.2 or TLS 1.3.
 
-Adding TLS membership changes the effect-set and ABI digests.
+The maximum version is TLS 1.3 in this ABI.
 
-The cleartext client remains available with its narrower row.
+The ALPN list preserves caller order.
+
+The buffer limit controls retained plaintext and TLS records.
+
+Core validation applies these limits:
+
+- A server name contains from 1 through 253 printable ASCII bytes.
+- A custom root list contains from 1 through 128 certificates.
+- One certificate contains at most 1 MiB.
+- All custom certificates contain at most 4 MiB.
+- The ALPN list contains at most 32 values.
+- One ALPN value contains from 1 through 255 bytes.
+- All ALPN values contain at most 4096 bytes.
+- The TLS buffer limit is from 1 through 1 MiB.
+
+The host repeats all validation before certificate parsing or allocation.
+
+Core Loom code defines these entry points:
+
+```text
+Tls.handshake(stream, config) with Tls.Handshake
+Tls.connect_host(host, port, config) with Dns.Resolve, Tcp.Client, Tls.Client
+
+TlsStream.read(max_bytes) with Tls.Read
+TlsStream.write(bytes) with Tls.Write
+TlsStream.shutdown() with Tls.Shutdown
+TlsStream.local_address() with Tls.LocalAddress
+TlsStream.peer_address() with Tls.PeerAddress
+TlsStream.close() with Tls.Close
+TlsStream.write_all(bytes) with Tls.Stream
+TlsStream.read_exact(count) with Tls.Stream
+TlsStream.read_to_end(max_total) with Tls.Stream
+```
+
+### 23.2 Stream ownership
+
+`TlsStream` is a final native resource class.
+
+A successful handshake replaces one `TcpStream` resource with one `TlsStream` resource.
+
+An accepted host handshake consumes the TCP resource on success or failure.
+
+A pure configuration rejection occurs before host submission and leaves the TCP stream open.
+
+Every alias of the consumed TCP stream becomes closed.
+
+The VM performs resource replacement as one reply transition.
+
+`serve_tls_stream` performs the same transition for a driver-backed handshake.
+
+A live TLS stream blocks snapshots as a host attachment.
+
+A closed TLS value remains typed snapshot state.
+
+### 23.3 Host implementation
+
+`lm-host` uses pinned rustls with its ring provider.
+
+The root host owns each rustls connection and its nonblocking socket.
+
+`lm-vm` sees only the TLS resource kind, a host token, and plain boundary values.
+
+The existing socket reactor drives TLS reads and writes.
+
+TLS does not use the blocking file worker pool.
+
+Each TLS stream has separate FIFO read and write queues.
+
+Read progress does not wait for application write progress.
+
+The handshake returns only after all required client handshake records enter the socket.
+
+`Tls.Write` can accept a partial input when the configured buffer is full.
+
+`Tls.Read` returns the same `TcpRead.Data` and `TcpRead.End` values as TCP.
+
+`Data` never contains zero bytes.
+
+`End` requires a valid TLS `close_notify` after all plaintext data.
+
+A transport end without `close_notify` returns `TlsError.Protocol`.
+
+`Tls.Shutdown` sends `close_notify`, flushes it, and closes the socket write direction.
+
+`Tls.Close` releases the resource without an additional protocol exchange.
+
+### 23.4 Errors
+
+TLS returns this closed error family:
+
+```lm
+enum TlsError
+  InvalidConfig(message: String)
+  Handshake(message: String)
+  Certificate(message: String)
+  Protocol(message: String)
+  Network(error: NetError)
+  Closed
+  LimitExceeded(message: String)
+end
+```
+
+Certificate validation failures use `Certificate`.
+
+Other handshake failures use `Handshake`.
+
+TLS record and closure failures use `Protocol`.
+
+Socket failures retain their stable `NetError` category inside `Network`.
+
+Diagnostic text is bounded to 512 Unicode scalar values.
+
+The host never exposes a raw platform error number.
+
+### 23.5 ALPN rule
+
+The generic TLS layer accepts an ordered ALPN candidate list.
+
+This ABI does not expose the selected ALPN value.
+
+A protocol adapter with one wire protocol passes zero or one ALPN value.
+
+The HTTP/1.1 client accepts no ALPN value or the single value `http/1.1`.
+
+It rejects a configuration that can negotiate another protocol.
+
+A later metadata operation can expose selected ALPN without changing stream I/O.
+
+### 23.6 Secure HTTP
+
+`Http.send_secure` performs operations from `Http.Client`.
+
+It uses `Tls.connect_host` and the same bounded HTTP/1.1 codec.
+
+The cleartext and TLS readers call one effect-polymorphic response reader.
+
+The method sends one request on one new connection.
+
+It sends TLS shutdown after the response and always closes the stream.
+
+An HTTP error keeps its HTTP category.
+
+A TLS error appears as `HttpError.Tls`.
+
+The initial client does not pool connections, follow redirects, or negotiate HTTP/2.
+
+### 23.7 Deferred TLS features
+
+This slice does not add TLS listeners or server certificates.
+
+It does not add client certificates, certificate pin sets, or session-cache policy.
+
+These features require new explicit values and operation identities.
+
+They do not require a new VM resource kernel.
 
 ## 24. Deterministic testing
 
@@ -717,7 +1000,13 @@ DNS result counts have a fixed upper bound.
 
 Pending request queues have fixed upper bounds.
 
+Pending data and live TLS configurations share one retained-byte budget.
+
 HTTP header bytes, header count, body bytes, and chunk counts have explicit limits.
+
+TLS roots, ALPN data, and internal buffers have explicit limits.
+
+The host verifies TLS values before it builds a rustls configuration.
 
 The host charges retained immutable byte roots, not only visible views.
 
@@ -738,6 +1027,8 @@ One ready TCP read uses one host completion and one guest byte allocation.
 One ready TCP write retains no bytes after completion.
 
 Full-duplex traffic progresses without head-of-line blocking between directions.
+
+The streaming chunk scanner resumes at its last complete chunk boundary.
 
 Resource cleanup remains linear in the live resource count.
 
@@ -801,4 +1092,9 @@ Network benchmarks run separately from interpreter dispatch benchmarks.
 - Restored closed handles stay closed.
 - Client policy never grants listen or accept.
 - HTTP parsing enforces every configured bound.
+- A submitted TLS handshake consumes its TCP resource on every result.
+- TLS configuration limits are enforced in Loom and at the host boundary.
+- TLS end-of-stream requires `close_notify`.
+- Local certificate tests use no external network access.
+- `Http.Client` expands to DNS, TCP client, and TLS client operations.
 - The full workspace tests, formatting, and lint checks pass.

@@ -1,0 +1,105 @@
+# A holder observes TCP and TLS requests behind their effect sets.
+
+def loopback(port: Int): Result[SocketAddress, NetError]
+  bytes = ByteBuffer()
+  bytes.append(127).append(0).append(0).append(1)
+  Tcp().address(IpAddress.V4(bytes.finish()), port, 0, 0)
+end
+
+def config(): TlsClientConfig
+  TlsClientConfig(
+    "service.test",
+    TlsRoots.Custom([Bytes("test root")]),
+    [Bytes("demo")],
+    TlsVersion.Tls13,
+    65536
+  ).freeze()
+end
+
+def client(address: SocketAddress): Int with Tcp.Connect, Tls.Client
+  stream = case Tcp().connect(address)
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 1
+  end
+  secure = case Tls().handshake(stream, config())
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 2
+  end
+  written = case secure.write(Bytes("hello"))
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 3
+  end
+  secure.close()
+  written
+end
+
+def finish(child: Vm[Int], secure: ResourceHandle): Int with Vm
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request
+      in Call(Tls.Write, call, (stream, bytes))
+        if child.resource(stream).same_resource(secure)
+          child.answer(call, Ok(bytes.len()))
+        else
+          child.dispatch(request)
+        end
+      in Call(Tls.Close, call, (stream,))
+        if child.resource(stream).same_resource(secure)
+          child.answer(call, Ok(()))
+        else
+          child.dispatch(request)
+        end
+      in _
+        child.dispatch(request)
+      end
+    in Done(value)
+      if secure.is_open()
+        return 0 - 4
+      end
+      return value
+    in Fault(_)
+      return 0 - 5
+    end
+  end
+end
+
+def upgrade(child: Vm[Int], tcp: ResourceHandle): Int with Vm
+  case child.drive()
+  in Asked(request)
+    case request
+    in Call(Tls.Handshake, call, (stream, _, _, _, _, _, _))
+      if not child.resource(stream).same_resource(tcp)
+        return 0 - 6
+      end
+      secure = child.serve_tls_stream(call)
+      if tcp.is_open()
+        return 0 - 7
+      end
+      finish(child, secure)
+    in _ then 0 - 8
+    end
+  in Done(_)  then 0 - 9
+  in Fault(_) then 0 - 10
+  end
+end
+
+case loopback(8443)
+in Err(_) then 0 - 11
+in Ok(address)
+  child = sys.vm.Vm().from_fn(client, args: (address,))
+  case child.drive()
+  in Asked(request)
+    case request
+    in Call(Tcp.Connect, call, (peer,))
+      tcp = child.serve_tcp_stream(call, peer)
+      upgrade(child, tcp)
+    in _ then 0 - 12
+    end
+  in Done(_)  then 0 - 13
+  in Fault(_) then 0 - 14
+  end
+end

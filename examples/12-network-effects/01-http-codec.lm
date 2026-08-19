@@ -1,0 +1,23 @@
+# Build and parse bounded HTTP/1.1 values without network authority.
+
+http = Http()
+limits = http.default_limits()
+request = HttpRequest(
+  "POST",
+  "/echo",
+  [HttpHeader("Content-Type", Bytes("text/plain"))],
+  Bytes("hello")
+)
+request_bytes = case http.serialize_request("example.test", 80, request, limits)
+in Ok(value) then value.len()
+in Err(_)     then 0
+end
+response = case http.parse_response(
+  Bytes("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nworld"),
+  request.method,
+  limits
+)
+in Ok(value) then "{value.status} {value.body.text()}"
+in Err(error) then error.message()
+end
+(request_bytes, response)
