@@ -50,7 +50,7 @@ impl World<'_> {
         let running = self.identity().map_err(|_| RestoreFail::OtherProgram)?;
         let identity = admitted.identity();
         if identity.module_semantic != running.semantic_hash
-            || identity.verification != lm_bytecode::identity::verification_hash(self.module())
+            || identity.verification != self.verification_hash()
         {
             return Err(RestoreFail::OtherProgram);
         }

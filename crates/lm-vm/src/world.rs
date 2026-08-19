@@ -321,7 +321,14 @@ pub struct World<'m> {
     /// A byte budget bounds retained decoded graphs. It never rejects
     /// an image. An evicted image runs admission again at its next
     /// restore.
-    trusted: Vec<([u8; 32], crate::snapshot::SnapshotImage, usize)>,
+    /// The insertion order of the trusted cache, newest first. It
+    /// decides eviction alone; a lookup reads the index below.
+    trusted: std::collections::VecDeque<([u8; 32], crate::snapshot::SnapshotImage, usize)>,
+    /// The trusted cache by container hash.
+    ///
+    /// A restore of an in-process capture reaches this index once per
+    /// restored world, so the lookup must not scan the cache.
+    trusted_index: std::collections::HashMap<[u8; 32], crate::snapshot::SnapshotImage>,
     /// The canonical byte size charged by the trusted image cache.
     trusted_bytes: usize,
     /// The last image a guest capture produced in this world.
@@ -460,7 +467,8 @@ impl<'m> World<'m> {
             gate: 0,
             restored_any: false,
             checks: 0,
-            trusted: Vec::new(),
+            trusted: std::collections::VecDeque::new(),
+            trusted_index: std::collections::HashMap::new(),
             trusted_bytes: 0,
             last_image: None,
             check: crate::typecheck::BoundaryScratch::default(),
@@ -7461,7 +7469,7 @@ impl<'m> World<'m> {
     /// Remember one admitted image of this world.
     pub fn trust_image(&mut self, image: &crate::snapshot::SnapshotImage) {
         let hash = image.hash();
-        if self.trusted.iter().any(|(held, _, _)| *held == hash) {
+        if self.trusted_index.contains_key(&hash) {
             return;
         }
         let bytes = image.resident_bytes();
@@ -7474,21 +7482,20 @@ impl<'m> World<'m> {
             .checked_add(bytes)
             .is_none_or(|total| total > limit)
         {
-            let Some((_, _, removed)) = self.trusted.pop() else {
+            let Some((evicted, _, removed)) = self.trusted.pop_back() else {
                 break;
             };
+            self.trusted_index.remove(&evicted);
             self.trusted_bytes = self.trusted_bytes.saturating_sub(removed);
         }
-        self.trusted.insert(0, (hash, image.clone(), bytes));
+        self.trusted_index.insert(hash, image.clone());
+        self.trusted.push_front((hash, image.clone(), bytes));
         self.trusted_bytes += bytes;
     }
 
     /// The admitted image with this container hash.
     fn trusted_image(&self, hash: &[u8; 32]) -> Option<crate::snapshot::SnapshotImage> {
-        self.trusted
-            .iter()
-            .find(|(held, _, _)| held == hash)
-            .map(|(_, image, _)| image.clone())
+        self.trusted_index.get(hash).cloned()
     }
 
     /// Install one external snapshot container into this world.
@@ -7715,6 +7722,14 @@ impl<'m> World<'m> {
     /// The verified semantic identity of the loaded program.
     pub fn identity(&self) -> Result<&lm_bytecode::identity::ModuleIdentity, FaultCode> {
         self.loaded.identity()
+    }
+
+    /// The verification hash of the loaded program.
+    ///
+    /// Snapshot capture and restore both name the program by this
+    /// hash. The module computes it once (`LoadedModule`).
+    pub(crate) fn verification_hash(&self) -> [u8; 32] {
+        self.loaded.verification_hash()
     }
 
     /// The loaded program.

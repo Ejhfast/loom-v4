@@ -2124,6 +2124,10 @@ pub fn identity_of(name: &str, def: &OpDef) -> [u8; 32] {
 /// The digest of the full manifest: version, groups, and every
 /// operation identity in slot order.
 pub fn manifest_digest() -> [u8; 32] {
+    static CACHE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    return *CACHE.get_or_init(manifest_digest_uncached);
+}
+fn manifest_digest_uncached() -> [u8; 32] {
     validate_manifest().expect("the compiled operation manifest is valid");
     let identities: Vec<[u8; 32]> = (0..OP_COUNT).map(op_identity).collect();
     manifest_digest_of(&identities)

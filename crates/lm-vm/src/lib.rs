@@ -217,11 +217,25 @@ pub struct LoadedModule {
     /// program. The identity pass is expensive, so it runs once, on
     /// the first digest of the process.
     identity: std::sync::OnceLock<Result<lm_bytecode::identity::ModuleIdentity, String>>,
+    /// The verification hash of this module.
+    ///
+    /// The hash covers the operation manifest and every semantic
+    /// table of the module, so one pass reads the whole program.
+    /// Snapshot capture and restore both read the hash. A search
+    /// restores many worlds, so the pass runs once here.
+    verification: std::sync::OnceLock<[u8; 32]>,
 }
 
 impl LoadedModule {
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    /// The verification hash of this module.
+    pub fn verification_hash(&self) -> [u8; 32] {
+        *self
+            .verification
+            .get_or_init(|| lm_bytecode::identity::verification_hash(&self.module))
     }
 
     /// The verified semantic identity of this module.
@@ -450,6 +464,7 @@ fn admit(module: Module) -> LoadedModule {
         dispatch,
         core,
         identity: std::sync::OnceLock::new(),
+        verification: std::sync::OnceLock::new(),
     }
 }
 

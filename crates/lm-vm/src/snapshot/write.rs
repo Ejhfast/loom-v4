@@ -215,7 +215,7 @@ impl World<'_> {
         })?;
         Ok(super::AdmissionIdentity {
             module_semantic: identity.semantic_hash,
-            verification: lm_bytecode::identity::verification_hash(self.module()),
+            verification: self.verification_hash(),
             format: super::FORMAT_VERSION,
             abi_version: lm_abi::ABI_VERSION,
             compiler_abi: lm_bytecode::identity::COMPILER_ABI_VERSION,
