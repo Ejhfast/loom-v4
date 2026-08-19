@@ -425,6 +425,16 @@ def bytes_decode():
     return total
 
 
+def bytes_decode_large():
+    raw = b"a" * 65536
+    total = 0
+    j = 0
+    while j < 20000:
+        total = total + len(raw.decode("utf-8"))
+        j = j + 1
+    return total
+
+
 def text_compare():
     a = "content-length"
     b = "content-type"
@@ -455,6 +465,7 @@ CASES.extend(
         ("text_split_once", text_split_once, 200000),
         ("text_trim", text_trim, 500000),
         ("bytes_decode", bytes_decode, 200000),
+        ("bytes_decode_large", bytes_decode_large, 20000),
         ("text_compare", text_compare, 1000000),
     ]
 )

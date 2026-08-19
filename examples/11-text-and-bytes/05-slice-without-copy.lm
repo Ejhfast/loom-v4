@@ -1,0 +1,37 @@
+# Hold a view, or take a durable value.
+#
+# `Substring` and `Bytes` are both explicit shared views. A view over
+# a large source keeps that source alive, and the type says so.
+# `to_string` and `compact` end the sharing.
+
+# Stand in for a large read.
+source = StringBuilder()
+i = 0
+while i < 2000
+  source.append("x")
+  i = i + 1
+end
+source.append("|name=loom|")
+document = source.finish()
+
+# A view costs no copy and keeps the whole document alive.
+view = case document.split_once("|name=")
+in Some((_, tail))
+  case tail.split_once("|")
+  in Some((value, _)) then value
+  in None             then tail
+  end
+in None then document.trim()
+end
+
+# `to_string` takes the String retention bound. A small piece of a
+# large source copies here, so the durable value holds its own bytes.
+durable = view.to_string()
+
+# `Bytes` keeps the opposite rule: a slice always shares, and
+# `compact` is the explicit release.
+raw = document.bytes()
+window = case raw.slice(0, 8) in Ok(part) then part in Err(_) then raw end
+owned = window.compact()
+
+"view={view} durable={durable} window={window.len()} owned={owned.len()} source={document.byte_len()}"

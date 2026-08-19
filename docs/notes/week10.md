@@ -126,6 +126,30 @@ retained capacity exceeds the String bound.
 Operators reach these classes through paired-underscore hooks. Final
 receivers allow direct calls, and trivial bodies inline.
 
+The extraction surface follows one rule. A method that narrows its
+receiver gives a Substring and copies nothing. A method that builds
+new content gives a String. `split`, `lines`, `trim`, `trim_start`,
+`trim_end`, `strip_prefix`, and `strip_suffix` give views.
+`to_lower_ascii`, `to_upper_ascii`, and `replace` give durable values.
+
+Every text method is total. Section 12.1 of the specification states
+the rule: any argument can come from a file or a socket, so an
+argument range is untrusted input. `split` with an empty separator
+matches at every scalar boundary, and `parse_int` reports
+`ParseIntError.BadRadix` rather than faulting.
+
+`split_once`, `strip_prefix`, and `strip_suffix` give a valid piece by
+construction. A parser reaches a key and a value with no `case` over a
+boundary error that its input cannot cause.
+
+Interpolation accepts any Text. Every narrowing method gives a
+Substring, so the earlier String-only rule made a program copy for the
+most common use of a piece.
+
+`examples/11-text-and-bytes` holds five programs: a configuration
+parser, an untrusted decode, a request head reader, a report builder,
+and the view-against-durable-value contrast.
+
 ## 4. What fell out of using it
 
 These were not planned work. Each one is a defect that writing the
@@ -221,9 +245,15 @@ iterator trait hierarchy.
   does not define. Design it with the deferred first-class
   `PolicyTarget` of `docs/notes/week4.md`: one erased target type
   serves both, and building two would be the mistake.
-- **String utilities remain small.** `split`, `lines`, trimming,
-  replacement, normalization, and parsing can use the Text surface.
-  Their final package placement remains open.
+- **Allocation cost sets every losing text ratio.** Loom pays about
+  104 ns for one object where CPython pays about 25 ns, so every case
+  that allocates once per operation loses by that factor and nothing
+  else. `docs/notes/week10-text-bench.md` shows it, and the language
+  table already showed it through `option_case` and `class_init`. The
+  work has reach across the language and is not text work.
+- **Unicode operations remain outside core.** Normalization, case
+  folding beyond ASCII, and grapheme segmentation need a pinned
+  Unicode data version. Their package placement remains open.
 - **`fault.message()` does not exist.** A denial reason reaches a
   snapshot dump and an embedder, and no guest accessor reads it. An
   accessor would make every internal runtime message an observable

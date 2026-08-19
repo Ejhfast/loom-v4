@@ -377,6 +377,19 @@ fn bench_language_operations() {
         base,
     );
 
+    // The same decode over a large buffer. The Loom cost is one
+    // validation plus one allocation and does not grow with the copy
+    // CPython must make, so this pair locates the crossing point.
+    report(
+        "bytes_decode_large",
+        20_000,
+        "b = ByteBuffer()\ni = 0\nwhile i < 65536\n  b.append(97)\n  i = i + 1\nend\n\
+         raw = b.finish()\ntotal = 0\nj = 0\nwhile j < 20000\n\
+         \x20 total = total + case raw.utf8_view()\n  in Ok(text) then text.byte_len()\n\
+         \x20 in Err(_) then 0\n  end\n  j = j + 1\nend\ntotal\n",
+        base,
+    );
+
     // Compare two strings. The ordering hooks reach one intrinsic.
     report(
         "text_compare",

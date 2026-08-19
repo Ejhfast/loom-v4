@@ -1,0 +1,77 @@
+# Read a request head the way the network layer will.
+#
+# The frame arrives as Bytes. The program finds the blank line, keeps
+# the body as Bytes, and reads the head as text. No step copies the
+# payload: every piece is a view over the one frame allocation.
+
+def frame(): Bytes
+  head = "GET /api/users HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\n\r\n"
+  buffer = ByteBuffer()
+  buffer.extend(head.bytes())
+  buffer.extend("hello".bytes())
+  buffer.finish()
+end
+
+# The target sits between the two spaces of the request line.
+def target(line: Text): String
+  case line.split_once(" ")
+  in Some((_, rest))
+    case rest.split_once(" ")
+    in Some((path, _)) then path.to_string()
+    in None            then "/"
+    end
+  in None then "/"
+  end
+end
+
+# Header names are case-insensitive, so the match folds ASCII case.
+def declared_length(line: Text): Int
+  case line.split_once(": ")
+  in Some((name, value))
+    if name.to_lower_ascii() == "content-length"
+      case value.trim().parse_int(10)
+      in Ok(number) then number
+      in Err(_)     then 0
+      end
+    else
+      0
+    end
+  in None then 0
+  end
+end
+
+def read_head(head: Text): Pair[String, Int]
+  rows = head.lines()
+  path = "/"
+  length = 0
+  row = 0
+  while row < rows.len()
+    line = rows.at(row)
+    if row == 0
+      path = target(line)
+    else
+      declared = declared_length(line)
+      if declared > 0
+        length = declared
+      end
+    end
+    row = row + 1
+  end
+  Pair(path, length)
+end
+
+message = frame()
+marker = "\r\n\r\n".bytes()
+
+case message.find(marker)
+in Some(at)
+  head = case message.slice(0, at) in Ok(part) then part in Err(_) then message end
+  rest = message.len() - at - marker.len()
+  body = case message.slice(at + marker.len(), rest) in Ok(part) then part in Err(_) then message end
+  request = case head.utf8_view()
+  in Ok(text) then read_head(text)
+  in Err(_)   then Pair("/", 0)
+  end
+  "{request.first} declares {request.second} and carries {body.len()}"
+in None then "no header end"
+end

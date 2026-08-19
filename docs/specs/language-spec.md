@@ -2710,6 +2710,18 @@ starts_with(prefix: Text) -> Bool
 ends_with(suffix: Text) -> Bool
 contains(needle: Text) -> Bool
 bytes() -> Bytes
+split(separator: Text) -> List[Substring]
+split_once(separator: Text) -> Option[(Substring, Substring)]
+lines() -> List[Substring]
+trim() -> Substring
+trim_start() -> Substring
+trim_end() -> Substring
+strip_prefix(prefix: Text) -> Option[Substring]
+strip_suffix(suffix: Text) -> Option[Substring]
+to_lower_ascii() -> String
+to_upper_ascii() -> String
+replace(needle: Text, replacement: Text) -> String
+parse_int(radix: Int) -> Result[Int,ParseIntError]
 __eq__(other: Text) -> Bool
 __ne__(other: Text) -> Bool
 __lt__(other: Text) -> Bool
@@ -2725,6 +2737,16 @@ __ge__(other: Text) -> Bool
 `slice_bytes` reports `Utf8Error.OutOfBounds` for an invalid range. It reports `Utf8Error.InvalidBoundary` when a boundary splits one scalar.
 
 `find_bytes` supports byte-oriented parsers. It avoids the scalar-position conversion that `find` requires.
+
+One rule sets the result type of every extraction method. A method that narrows its receiver gives a `Substring` and copies nothing. A method that builds new content gives a `String`. So `split`, `lines`, `trim`, and the two `strip_` methods give views, and `to_lower_ascii`, `to_upper_ascii`, and `replace` give durable values.
+
+Every method above is total, under the rule of section 12.1. `split` with an empty separator matches at every scalar boundary and gives one empty piece at each end. `replace` with an empty needle inserts at every scalar boundary. `parse_int` reports `ParseIntError.BadRadix` for a radix outside 2 to 36, because a radix reaches a program from data.
+
+`lines` accepts a line feed with or without a leading carriage return. A final line feed ends the last line and adds no empty piece.
+
+`split_once`, `strip_prefix`, and `strip_suffix` give a valid piece by construction, so they report absence through `Option` and never report a boundary error. A parser that uses them handles no failure that its own input cannot cause.
+
+Interpolation accepts any `Text`. A `Substring` appends to the builder without a copy.
 
 The implementation uses one lazy sparse scalar index for each text root. It records every 64th scalar position.
 

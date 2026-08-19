@@ -164,29 +164,27 @@ class Text
   # Each one gives a valid piece, so a caller never handles a
   # boundary error that cannot happen.
 
+  # Each body names the raw slice intrinsic and not `slice_bytes`.
+  # A match offset already sits on a scalar boundary, so the checked
+  # wrapper would build a `Result` that no caller can observe and no
+  # input can make fail.
+
   def split_once(self, separator: Text): Option[(Substring, Substring)]
-    case self.find_bytes(separator)
-    in Some(at)
+    at = intrinsic("text.find_byte_index", self, separator)
+    if at < 0
+      None
+    else
       rest = at + separator.byte_len()
-      case self.slice_bytes(0, at)
-      in Ok(head)
-        case self.slice_bytes(rest, self.byte_len() - rest)
-        in Ok(tail) then Some((head, tail))
-        in Err(_) then None
-        end
-      in Err(_) then None
-      end
-    in None then None
+      head = intrinsic("text.slice_bytes", self, 0, at)
+      tail = intrinsic("text.slice_bytes", self, rest, self.byte_len() - rest)
+      Some((head, tail))
     end
   end
 
   def strip_prefix(self, prefix: Text): Option[Substring]
     if self.starts_with(prefix)
       start = prefix.byte_len()
-      case self.slice_bytes(start, self.byte_len() - start)
-      in Ok(rest) then Some(rest)
-      in Err(_) then None
-      end
+      Some(intrinsic("text.slice_bytes", self, start, self.byte_len() - start))
     else
       None
     end
@@ -194,10 +192,7 @@ class Text
 
   def strip_suffix(self, suffix: Text): Option[Substring]
     if self.ends_with(suffix)
-      case self.slice_bytes(0, self.byte_len() - suffix.byte_len())
-      in Ok(rest) then Some(rest)
-      in Err(_) then None
-      end
+      Some(intrinsic("text.slice_bytes", self, 0, self.byte_len() - suffix.byte_len()))
     else
       None
     end

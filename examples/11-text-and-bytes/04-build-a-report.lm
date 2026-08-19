@@ -1,0 +1,36 @@
+# Build text with a builder, and hand the buffer over once.
+#
+# `append` takes any Text, so a Substring goes in without a copy.
+# `finish` transfers the buffer and invalidates the builder, so the
+# result costs no final copy. `build` copies and leaves the builder
+# usable.
+
+rows = "alpha,3\nbeta,11\ngamma,7\n"
+
+report = StringBuilder()
+report.append("name       count\n")
+
+total = 0
+lines = rows.lines()
+i = 0
+while i < lines.len()
+  case lines.at(i).split_once(",")
+  in Some((name, count))
+    report.append(name.to_upper_ascii())
+    report.append("      ")
+    report.append(count)
+    report.append("\n")
+    total = total + case count.parse_int(10)
+    in Ok(number) then number
+    in Err(_)     then 0
+    end
+  in None then ()
+  end
+  i = i + 1
+end
+
+report.append("total      ")
+report.append("{total}")
+
+# `finish` transfers the buffer. The builder reports its own end.
+report.finish()

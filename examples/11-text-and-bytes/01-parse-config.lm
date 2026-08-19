@@ -1,0 +1,37 @@
+# Parse a key-and-value configuration.
+#
+# Every piece is a Substring over the one document allocation. The
+# program copies nothing until it stores a durable value.
+
+document = "# the service\nname = loom\nport = 8080\n\nmode = fast\n"
+
+settings = Map[Text, String]()
+rows = document.lines()
+row = 0
+while row < rows.len()
+  line = rows.at(row).trim()
+  if not line.is_empty() and not line.starts_with("#")
+    case line.split_once("=")
+    in Some((key, value))
+      # `to_string` takes the String retention bound, so a stored
+      # value never pins the whole document.
+      settings.put(key.trim().to_string(), value.trim().to_string())
+    in None then ()
+    end
+  end
+  row = row + 1
+end
+
+# A Substring reads a String key, because both are Text.
+port = case settings.get("port")
+in Some(text)
+  case text.parse_int(10)
+  in Ok(number)  then number
+  in Err(_)      then 0
+  end
+in None then 0
+end
+
+name = case settings.get("name") in Some(text) then text in None then "unnamed" end
+
+"{name} on {port} with {settings.len()} settings"

@@ -1,0 +1,26 @@
+# Decode bytes that a program does not trust.
+#
+# `utf8_view` validates once and shares the byte allocation, so the
+# text costs no copy. `utf8` gives a durable String instead.
+
+good = ByteBuffer()
+good.append(104).append(105)
+
+# 0xff never starts a UTF-8 scalar.
+bad = ByteBuffer()
+bad.append(104).append(255)
+
+def describe(raw: Bytes): String
+  case raw.utf8_view()
+  in Ok(text)  then "text[{text}]"
+  in Err(_)    then "not utf8, {raw.len()} bytes"
+  end
+end
+
+# A view shares storage. A durable value takes the retention bound.
+durable = case good.build().utf8()
+in Ok(text)  then text
+in Err(_)    then "undecodable"
+end
+
+"{describe(good.build())} {describe(bad.build())} durable[{durable}]"
