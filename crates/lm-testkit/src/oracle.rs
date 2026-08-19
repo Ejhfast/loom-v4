@@ -238,9 +238,14 @@ impl<'m> Oracle<'m> {
                 return Ok(self.alloc(OKind::Sb(Some(String::new()))))
             }
             Some(NativeRepr::ByteBuffer) => return Ok(self.alloc(OKind::Bb(Some(Vec::new())))),
-            Some(NativeRepr::Text | NativeRepr::Substring | NativeRepr::Char) => {
-                return Err(Stop::Limit("a text view or Char has no direct constructor"))
-            }
+            Some(
+                NativeRepr::Text
+                | NativeRepr::Substring
+                | NativeRepr::Char
+                | NativeRepr::TcpResource
+                | NativeRepr::TcpStream
+                | NativeRepr::TcpListener,
+            ) => return Err(Stop::Limit("this native class has no direct constructor")),
             None => {}
         }
         match c.ctor_kind {

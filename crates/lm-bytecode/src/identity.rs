@@ -57,7 +57,7 @@
 use crate::hash::sha256;
 use crate::{BcClassKind, BcRow, BcType, Instr, Module, NativeInstr, NO_PARENT, VERSION};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// The compiler ABI version. It covers the canonical bytecode
 /// semantics, the identity encoding, and the lowering conventions.
@@ -1048,21 +1048,38 @@ impl<'a> Resolver<'a> {
         self.state.body_final[f as usize].expect("body digest scheduled")
     }
 
-    /// The canonical row bytes: operation names inline, variables by
-    /// index.
+    /// The canonical row bytes use exact operations and variables.
     fn row_bytes(&self, out: &mut Vec<u8>, row: &[BcRow]) {
-        out.extend_from_slice(&(row.len() as u32).to_le_bytes());
+        let mut operations = BTreeSet::new();
+        let mut variables = BTreeSet::new();
         for elem in row {
             match elem {
                 BcRow::Op(idx) => {
-                    out.push(0x00);
-                    write_str(out, &self.module.strings[*idx as usize]);
+                    let name = &self.module.strings[*idx as usize];
+                    match lm_abi::row_name_operations(name) {
+                        Some(expanded) if !expanded.is_empty() => {
+                            for operation in expanded {
+                                operations.insert(lm_abi::op_name(operation));
+                            }
+                        }
+                        _ => {
+                            operations.insert(name.clone());
+                        }
+                    }
                 }
                 BcRow::Var(v) => {
-                    out.push(0x01);
-                    out.extend_from_slice(&v.to_le_bytes());
+                    variables.insert(*v);
                 }
             }
+        }
+        out.extend_from_slice(&((operations.len() + variables.len()) as u32).to_le_bytes());
+        for operation in operations {
+            out.push(0x00);
+            write_str(out, &operation);
+        }
+        for variable in variables {
+            out.push(0x01);
+            out.extend_from_slice(&variable.to_le_bytes());
         }
     }
 

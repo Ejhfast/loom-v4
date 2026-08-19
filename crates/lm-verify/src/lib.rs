@@ -212,11 +212,7 @@ impl<'m> Ctx<'m> {
                 sup.iter().any(|s| match s {
                     BcRow::Op(m) => {
                         let sup_name = &self.module.strings[*m as usize];
-                        sup_name == name
-                            || name
-                                .split_once('.')
-                                .map(|(group, _)| group == sup_name)
-                                .unwrap_or(false)
+                        lm_abi::row_name_included(name, sup_name)
                     }
                     BcRow::Var(_) => false,
                 })
@@ -635,13 +631,12 @@ impl<'m> Ctx<'m> {
     }
 
     /// True when a claimed row covers one exact operation name: the
-    /// row holds the exact name or its group.
+    /// row holds the exact name or one containing effect set.
     fn row_has_name(&self, row: &[BcRow], name: &str) -> bool {
-        let group = name.split_once('.').map(|(g, _)| g);
         row.iter().any(|elem| match elem {
             BcRow::Op(idx) => {
                 let text = &self.module.strings[*idx as usize];
-                text == name || group.map(|g| text == g).unwrap_or(false)
+                lm_abi::row_name_included(name, text)
             }
             BcRow::Var(_) => false,
         })
@@ -651,59 +646,78 @@ impl<'m> Ctx<'m> {
     /// enums must be present when a signature names them.
     fn abi_ty(&self, t: lm_abi::AbiType) -> Result<u32, String> {
         match t {
-            lm_abi::AbiType::Unit => Ok(TY_UNIT),
-            lm_abi::AbiType::Bool => Ok(TY_BOOL),
-            lm_abi::AbiType::Int => Ok(TY_INT),
-            lm_abi::AbiType::Text => self.plain_inst(self.core.text, "Text"),
-            lm_abi::AbiType::Str => Ok(TY_STR),
-            lm_abi::AbiType::Substring => self.plain_inst(self.core.substring, "Substring"),
-            lm_abi::AbiType::Char => self.plain_inst(self.core.char_value, "Char"),
-            lm_abi::AbiType::Bytes => Ok(self.intern(BcType::Bytes)),
-            lm_abi::AbiType::StringBuilder => {
-                self.plain_inst(self.core.string_builder, "StringBuilder")
-            }
-            lm_abi::AbiType::ByteBuffer => self.plain_inst(self.core.byte_buffer, "ByteBuffer"),
-            lm_abi::AbiType::FileHandle => Ok(self.intern(BcType::FileHandle)),
-            lm_abi::AbiType::OpenOptions => self.plain_inst(self.core.open_options, "OpenOptions"),
-            lm_abi::AbiType::SeekFrom => self.plain_inst(self.core.seek_from, "SeekFrom"),
-            lm_abi::AbiType::ListSubstring => {
-                let piece = self.plain_inst(self.core.substring, "Substring")?;
-                Ok(self.intern(BcType::List(piece)))
-            }
-            lm_abi::AbiType::ResultOptionStrIoError => {
-                let (Some(option), Some(result), Some(io_error)) =
-                    (self.core.option, self.core.result, self.core.io_error)
-                else {
-                    return Err("the module does not carry the pinned core Option, Result, \
-                         and IoError definitions"
-                        .to_string());
+            lm_abi::AbiType::Primitive(primitive) => match primitive {
+                lm_abi::AbiPrimitive::Unit => Ok(TY_UNIT),
+                lm_abi::AbiPrimitive::Bool => Ok(TY_BOOL),
+                lm_abi::AbiPrimitive::Int => Ok(TY_INT),
+                lm_abi::AbiPrimitive::String => Ok(TY_STR),
+                lm_abi::AbiPrimitive::Bytes => Ok(self.intern(BcType::Bytes)),
+                lm_abi::AbiPrimitive::SnapshotImage => Ok(self.intern(BcType::SnapshotImage)),
+            },
+            lm_abi::AbiType::Core(core) => {
+                let (slot, name) = match core {
+                    lm_abi::AbiCore::Text => (self.core.text, "Text"),
+                    lm_abi::AbiCore::Substring => (self.core.substring, "Substring"),
+                    lm_abi::AbiCore::Char => (self.core.char_value, "Char"),
+                    lm_abi::AbiCore::StringBuilder => (self.core.string_builder, "StringBuilder"),
+                    lm_abi::AbiCore::ByteBuffer => (self.core.byte_buffer, "ByteBuffer"),
+                    lm_abi::AbiCore::OpenOptions => (self.core.open_options, "OpenOptions"),
+                    lm_abi::AbiCore::SeekFrom => (self.core.seek_from, "SeekFrom"),
+                    lm_abi::AbiCore::IoError => (self.core.io_error, "IoError"),
+                    lm_abi::AbiCore::FsError => (self.core.fs_error, "FsError"),
+                    lm_abi::AbiCore::SnapshotError => (self.core.snapshot_error, "SnapshotError"),
+                    lm_abi::AbiCore::IpAddress => (self.core.ip_address, "IpAddress"),
+                    lm_abi::AbiCore::SocketAddress => (self.core.socket_address, "SocketAddress"),
+                    lm_abi::AbiCore::NetError => (self.core.net_error, "NetError"),
+                    lm_abi::AbiCore::TcpRead => (self.core.tcp_read, "TcpRead"),
+                    lm_abi::AbiCore::Shutdown => (self.core.shutdown, "Shutdown"),
                 };
-                let opt_str = self.intern(BcType::Inst(option, vec![TY_STR]));
-                let err = self.intern(BcType::Class(io_error));
-                Ok(self.intern(BcType::Inst(result, vec![opt_str, err])))
+                self.plain_inst(slot, name)
             }
-            lm_abi::AbiType::ResultSnapshotImageError => {
-                let image = self.intern(BcType::SnapshotImage);
-                let error = self.plain_inst(self.core.snapshot_error, "SnapshotError")?;
-                self.result_inst(image, error)
+            lm_abi::AbiType::Native(native) => match native {
+                lm_abi::AbiNative::FileHandle => Ok(self.intern(BcType::FileHandle)),
+                lm_abi::AbiNative::TcpResource => {
+                    self.plain_inst(self.core.tcp_resource, "TcpResource")
+                }
+                lm_abi::AbiNative::TcpStream => self.plain_inst(self.core.tcp_stream, "TcpStream"),
+                lm_abi::AbiNative::TcpListener => {
+                    self.plain_inst(self.core.tcp_listener, "TcpListener")
+                }
+            },
+            lm_abi::AbiType::List(element) => {
+                let element = self.abi_ty(*element)?;
+                Ok(self.intern(BcType::List(element)))
             }
-            lm_abi::AbiType::ResultFileHandleFsError => {
-                let ok = self.intern(BcType::FileHandle);
-                let error = self.plain_inst(self.core.fs_error, "FsError")?;
-                self.result_inst(ok, error)
+            lm_abi::AbiType::Tuple(elements) => {
+                let mut types = Vec::with_capacity(elements.len());
+                for element in elements {
+                    types.push(self.abi_ty(*element)?);
+                }
+                Ok(self.intern(BcType::Tuple(types)))
             }
-            lm_abi::AbiType::ResultBytesFsError => {
-                let ok = self.intern(BcType::Bytes);
-                let error = self.plain_inst(self.core.fs_error, "FsError")?;
-                self.result_inst(ok, error)
-            }
-            lm_abi::AbiType::ResultIntFsError => {
-                let error = self.plain_inst(self.core.fs_error, "FsError")?;
-                self.result_inst(TY_INT, error)
-            }
-            lm_abi::AbiType::ResultUnitFsError => {
-                let error = self.plain_inst(self.core.fs_error, "FsError")?;
-                self.result_inst(TY_UNIT, error)
+            lm_abi::AbiType::Apply(constructor, arguments) => {
+                if arguments.len() != constructor.arity() {
+                    return Err(format!(
+                        "the ABI type {} has the wrong generic arity",
+                        t.text()
+                    ));
+                }
+                let class = match constructor {
+                    lm_abi::AbiConstructor::Option => self.core.option,
+                    lm_abi::AbiConstructor::Result => self.core.result,
+                    lm_abi::AbiConstructor::Pair => self.core.pair,
+                }
+                .ok_or_else(|| {
+                    format!(
+                        "the module does not carry the pinned core {} definition",
+                        constructor.text()
+                    )
+                })?;
+                let mut types = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    types.push(self.abi_ty(*argument)?);
+                }
+                Ok(self.intern(BcType::Inst(class, types)))
             }
         }
     }
@@ -905,6 +919,35 @@ const ROLE_SEEK_FROM: usize = 52;
 const ROLE_SEEK_START: usize = 53;
 const ROLE_SEEK_CURRENT: usize = 54;
 const ROLE_SEEK_END: usize = 55;
+const ROLE_PAIR: usize = 68;
+const ROLE_IP_ADDRESS: usize = 69;
+const ROLE_IP_V4: usize = 70;
+const ROLE_IP_V6: usize = 71;
+const ROLE_SOCKET_ADDRESS: usize = 72;
+const ROLE_NET_ERROR: usize = 73;
+const ROLE_NET_INVALID_INPUT: usize = 74;
+const ROLE_NET_NAME_NOT_FOUND: usize = 75;
+const ROLE_NET_UNAVAILABLE: usize = 76;
+const ROLE_NET_PERMISSION_DENIED: usize = 77;
+const ROLE_NET_ADDRESS_IN_USE: usize = 78;
+const ROLE_NET_CONNECTION_REFUSED: usize = 79;
+const ROLE_NET_CONNECTION_RESET: usize = 80;
+const ROLE_NET_NOT_CONNECTED: usize = 81;
+const ROLE_NET_TIMED_OUT: usize = 82;
+const ROLE_NET_CLOSED: usize = 83;
+const ROLE_NET_LIMIT_EXCEEDED: usize = 84;
+const ROLE_NET_UNSUPPORTED: usize = 85;
+const ROLE_NET_FAILED: usize = 86;
+const ROLE_TCP_READ: usize = 87;
+const ROLE_TCP_READ_DATA: usize = 88;
+const ROLE_TCP_READ_END: usize = 89;
+const ROLE_SHUTDOWN: usize = 90;
+const ROLE_SHUTDOWN_READ: usize = 91;
+const ROLE_SHUTDOWN_WRITE: usize = 92;
+const ROLE_SHUTDOWN_BOTH: usize = 93;
+const ROLE_TCP_RESOURCE: usize = 94;
+const ROLE_TCP_STREAM: usize = 95;
+const ROLE_TCP_LISTENER: usize = 96;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -913,6 +956,7 @@ enum FieldShape {
     Var(u32),
     Str,
     Int,
+    Bytes,
     Fault,
     Request,
     /// A list of integers, for example the bounded machine path of
@@ -922,7 +966,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 15] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 19] = [
     (
         ROLE_OPTION,
         1,
@@ -1019,10 +1063,43 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 15] = [
         &[ROLE_SEEK_START, ROLE_SEEK_CURRENT, ROLE_SEEK_END],
         "SeekFrom",
     ),
+    (ROLE_IP_ADDRESS, 0, &[ROLE_IP_V4, ROLE_IP_V6], "IpAddress"),
+    (
+        ROLE_NET_ERROR,
+        0,
+        &[
+            ROLE_NET_INVALID_INPUT,
+            ROLE_NET_NAME_NOT_FOUND,
+            ROLE_NET_UNAVAILABLE,
+            ROLE_NET_PERMISSION_DENIED,
+            ROLE_NET_ADDRESS_IN_USE,
+            ROLE_NET_CONNECTION_REFUSED,
+            ROLE_NET_CONNECTION_RESET,
+            ROLE_NET_NOT_CONNECTED,
+            ROLE_NET_TIMED_OUT,
+            ROLE_NET_CLOSED,
+            ROLE_NET_LIMIT_EXCEEDED,
+            ROLE_NET_UNSUPPORTED,
+            ROLE_NET_FAILED,
+        ],
+        "NetError",
+    ),
+    (
+        ROLE_TCP_READ,
+        0,
+        &[ROLE_TCP_READ_DATA, ROLE_TCP_READ_END],
+        "TcpRead",
+    ),
+    (
+        ROLE_SHUTDOWN,
+        0,
+        &[ROLE_SHUTDOWN_READ, ROLE_SHUTDOWN_WRITE, ROLE_SHUTDOWN_BOTH],
+        "Shutdown",
+    ),
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 40] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 60] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -1066,6 +1143,26 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 40] = [
     (ROLE_SEEK_START, &[FieldShape::Int]),
     (ROLE_SEEK_CURRENT, &[FieldShape::Int]),
     (ROLE_SEEK_END, &[FieldShape::Int]),
+    (ROLE_IP_V4, &[FieldShape::Bytes]),
+    (ROLE_IP_V6, &[FieldShape::Bytes]),
+    (ROLE_NET_INVALID_INPUT, &[FieldShape::Str]),
+    (ROLE_NET_NAME_NOT_FOUND, &[FieldShape::Str]),
+    (ROLE_NET_UNAVAILABLE, &[FieldShape::Str]),
+    (ROLE_NET_PERMISSION_DENIED, &[FieldShape::Str]),
+    (ROLE_NET_ADDRESS_IN_USE, &[FieldShape::Str]),
+    (ROLE_NET_CONNECTION_REFUSED, &[FieldShape::Str]),
+    (ROLE_NET_CONNECTION_RESET, &[FieldShape::Str]),
+    (ROLE_NET_NOT_CONNECTED, &[FieldShape::Str]),
+    (ROLE_NET_TIMED_OUT, &[FieldShape::Str]),
+    (ROLE_NET_CLOSED, &[]),
+    (ROLE_NET_LIMIT_EXCEEDED, &[FieldShape::Str]),
+    (ROLE_NET_UNSUPPORTED, &[FieldShape::Str]),
+    (ROLE_NET_FAILED, &[FieldShape::Str]),
+    (ROLE_TCP_READ_DATA, &[FieldShape::Bytes]),
+    (ROLE_TCP_READ_END, &[]),
+    (ROLE_SHUTDOWN_READ, &[]),
+    (ROLE_SHUTDOWN_WRITE, &[]),
+    (ROLE_SHUTDOWN_BOTH, &[]),
 ];
 
 /// Prove the shape of every declared core role slot.
@@ -1163,6 +1260,7 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
                     FieldShape::Var(i) => found == &BcType::Var(*i),
                     FieldShape::Str => found == &BcType::Str,
                     FieldShape::Int => found == &BcType::Int,
+                    FieldShape::Bytes => found == &BcType::Bytes,
                     FieldShape::Fault => found == &BcType::Fault,
                     FieldShape::Request => found == &BcType::Request,
                     // The element index is read through `get`, because
@@ -1198,6 +1296,100 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             return Err(terr(
                 "the core class `Proc` names a class that is not the proc parent".to_string(),
             ));
+        }
+    }
+    if let Some(idx) = slot(ROLE_PAIR) {
+        let class = &module.classes[idx as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        if class.kind != BcClassKind::Normal
+            || class.is_final
+            || class.type_params != 2
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || fields.len() != 2
+            || fields[0] != &BcType::Var(0)
+            || fields[1] != &BcType::Var(1)
+        {
+            return Err(terr(
+                "the core role `Pair` does not name its two-field generic class".to_string(),
+            ));
+        }
+    }
+    if let Some(idx) = slot(ROLE_SOCKET_ADDRESS) {
+        let Some(ip) = slot(ROLE_IP_ADDRESS) else {
+            return Err(terr(
+                "the SocketAddress role requires the IpAddress role".to_string(),
+            ));
+        };
+        let class = &module.classes[idx as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || fields.len() != 4
+            || fields[0] != &BcType::Class(ip)
+            || fields[1] != &BcType::Int
+            || fields[2] != &BcType::Int
+            || fields[3] != &BcType::Int
+        {
+            return Err(terr(
+                "the SocketAddress role does not name its final value class".to_string(),
+            ));
+        }
+    }
+    let tcp_roles = [
+        slot(ROLE_TCP_RESOURCE),
+        slot(ROLE_TCP_STREAM),
+        slot(ROLE_TCP_LISTENER),
+    ];
+    if tcp_roles.iter().any(Option::is_some) && tcp_roles.iter().any(Option::is_none) {
+        return Err(terr(
+            "the TCP resource family resolves without every class".to_string(),
+        ));
+    }
+    if let [Some(resource), Some(stream), Some(listener)] = tcp_roles {
+        let base = &module.classes[resource as usize];
+        if base.kind != BcClassKind::Normal
+            || base.is_final
+            || base.type_params != 0
+            || base.parent().is_some()
+            || !base.parent_args.is_empty()
+            || !base.fields.is_empty()
+        {
+            return Err(terr(
+                "the TcpResource role does not name its stateless base class".to_string(),
+            ));
+        }
+        for (idx, name) in [(stream, "TcpStream"), (listener, "TcpListener")] {
+            let class = &module.classes[idx as usize];
+            if class.kind != BcClassKind::Normal
+                || !class.is_final
+                || class.type_params != 0
+                || class.parent() != Some(resource)
+                || !class.parent_args.is_empty()
+                || !class.fields.is_empty()
+            {
+                return Err(terr(format!(
+                    "the {name} role does not name its final resource class"
+                )));
+            }
+        }
+        for (idx, class) in module.classes.iter().enumerate() {
+            if class.parent() == Some(resource) && idx as u32 != stream && idx as u32 != listener {
+                return Err(terr(
+                    "a class other than TcpStream or TcpListener extends TcpResource".to_string(),
+                ));
+            }
         }
     }
     let native_roles = [
@@ -1916,7 +2108,10 @@ fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_RESOURCE_CLOSE
             | lm_abi::OP_VM_RESOURCE_KIND => 1,
             lm_abi::OP_VM_DISPATCH => 2,
-            lm_abi::OP_VM_FROM_FN | lm_abi::OP_VM_ANSWER | lm_abi::OP_VM_REJECT => 3,
+            lm_abi::OP_VM_FROM_FN
+            | lm_abi::OP_VM_ANSWER
+            | lm_abi::OP_VM_REJECT
+            | lm_abi::OP_VM_SERVE_TCP_STREAM => 3,
             lm_abi::OP_PROC_RUN
             | lm_abi::OP_PROC_CLOSE
             | lm_abi::OP_PROC_DONE
@@ -1933,6 +2128,7 @@ fn perform_argc(op: u32) -> u32 {
             lm_abi::OP_VM_RESTORE
             | lm_abi::OP_VM_RESOURCE
             | lm_abi::OP_VM_SERVE_FILE
+            | lm_abi::OP_VM_SERVE_TCP_LISTENER
             | lm_abi::OP_VM_DRIVE_FOR
             | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
             | lm_abi::OP_PROC_SNAPSHOT_WAIT
@@ -3432,8 +3628,16 @@ fn step(
                         lm_abi::OP_VM_RESOURCE => {
                             let handle = pop(state)?;
                             pop_vm(state)?;
-                            if ctx.ty(handle) != BcType::FileHandle {
-                                return Err(fail("`Vm.Resource` needs a FileHandle".to_string()));
+                            let tcp = ctx
+                                .core
+                                .tcp_resource
+                                .map(|class| ctx.intern(BcType::Class(class)));
+                            if ctx.ty(handle) != BcType::FileHandle
+                                && tcp.is_none_or(|tcp| !ctx.is_subtype(handle, tcp))
+                            {
+                                return Err(fail(
+                                    "`Vm.Resource` needs FileHandle or TcpResource".to_string(),
+                                ));
                             }
                             let control = ctx.intern(BcType::ResourceHandle);
                             push(state, control)?;
@@ -3448,6 +3652,54 @@ fn step(
                             if ctx.ty(call) != BcType::PendingCall(args, reply) {
                                 return Err(fail(
                                     "`Vm.ServeFile` needs an Fs.Open call".to_string(),
+                                ));
+                            }
+                            let control = ctx.intern(BcType::ResourceHandle);
+                            push(state, control)?;
+                        }
+                        lm_abi::OP_VM_SERVE_TCP_STREAM => {
+                            let peer = pop(state)?;
+                            let call = pop(state)?;
+                            pop_vm(state)?;
+                            let address =
+                                ctx.abi_ty(lm_abi::AbiType::SOCKET_ADDRESS).map_err(&fail)?;
+                            if !ctx.is_subtype(peer, address) {
+                                return Err(fail(
+                                    "`Vm.ServeTcpStream` needs a SocketAddress".to_string(),
+                                ));
+                            }
+                            let connect_args =
+                                ctx.op_args_view(lm_abi::OP_TCP_CONNECT).map_err(&fail)?;
+                            let connect_reply = ctx
+                                .abi_ty(lm_abi::op(lm_abi::OP_TCP_CONNECT).reply)
+                                .map_err(&fail)?;
+                            let accept_args =
+                                ctx.op_args_view(lm_abi::OP_TCP_ACCEPT).map_err(&fail)?;
+                            let accept_reply = ctx
+                                .abi_ty(lm_abi::op(lm_abi::OP_TCP_ACCEPT).reply)
+                                .map_err(&fail)?;
+                            let valid = ctx.ty(call)
+                                == BcType::PendingCall(connect_args, connect_reply)
+                                || ctx.ty(call) == BcType::PendingCall(accept_args, accept_reply);
+                            if !valid {
+                                return Err(fail(
+                                    "`Vm.ServeTcpStream` needs a Tcp.Connect or Tcp.Accept call"
+                                        .to_string(),
+                                ));
+                            }
+                            let control = ctx.intern(BcType::ResourceHandle);
+                            push(state, control)?;
+                        }
+                        lm_abi::OP_VM_SERVE_TCP_LISTENER => {
+                            let call = pop(state)?;
+                            pop_vm(state)?;
+                            let args = ctx.op_args_view(lm_abi::OP_TCP_LISTEN).map_err(&fail)?;
+                            let reply = ctx
+                                .abi_ty(lm_abi::op(lm_abi::OP_TCP_LISTEN).reply)
+                                .map_err(&fail)?;
+                            if ctx.ty(call) != BcType::PendingCall(args, reply) {
+                                return Err(fail(
+                                    "`Vm.ServeTcpListener` needs a Tcp.Listen call".to_string(),
                                 ));
                             }
                             let control = ctx.intern(BcType::ResourceHandle);

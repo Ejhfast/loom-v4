@@ -9,9 +9,14 @@
 //! service. `start` submits work and returns `Waiting`.
 
 mod io_service;
+mod network_service;
 
 use io_service::{FileRequest, IoService, StreamRequest};
-use lm_vm::{CompletionKey, Host, HostArg, HostCompletion, HostStart, HostValue};
+use lm_vm::{
+    CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostStart, HostTcpKind,
+    HostTcpResource, HostValue,
+};
+use network_service::{NetworkService, TcpRequest};
 use std::collections::HashMap;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -23,7 +28,9 @@ pub struct CliHost {
     sleeps: HashMap<u64, (CompletionKey, Instant)>,
     next_token: u64,
     next_file: u64,
+    next_tcp: u64,
     io: IoService,
+    network: NetworkService,
 }
 
 impl CliHost {
@@ -35,7 +42,9 @@ impl CliHost {
             sleeps: HashMap::new(),
             next_token: 1,
             next_file: 1,
+            next_tcp: 1,
             io: IoService::new(),
+            network: NetworkService::new(),
         }
     }
 
@@ -76,6 +85,40 @@ impl CliHost {
         self.next_token = token.checked_add(1)?;
         Some(token)
     }
+
+    fn take_tcp(&mut self) -> Option<u64> {
+        let token = self.next_tcp;
+        self.next_tcp = token.checked_add(1)?;
+        Some(token)
+    }
+
+    fn start_dns(&mut self, key: CompletionKey, name: String, port: u16) -> HostStart {
+        let Some(token) = self.take_token() else {
+            return HostStart::Failed("the completion token space is exhausted".to_string());
+        };
+        if self.network.submit_dns(key, token, name, port) {
+            HostStart::Waiting(token)
+        } else {
+            HostStart::Completed(net_error(
+                CoreCtor::NetLimitExceeded,
+                "the DNS queue is full",
+            ))
+        }
+    }
+
+    fn start_tcp(&mut self, key: CompletionKey, request: TcpRequest) -> HostStart {
+        let Some(token) = self.take_token() else {
+            return HostStart::Failed("the completion token space is exhausted".to_string());
+        };
+        if self.network.submit_tcp(key, token, request) {
+            HostStart::Waiting(token)
+        } else {
+            HostStart::Completed(net_error(
+                CoreCtor::NetLimitExceeded,
+                "the network queue is full",
+            ))
+        }
+    }
 }
 
 fn fs_error(message: String) -> HostValue {
@@ -88,7 +131,18 @@ fn fs_error(message: String) -> HostValue {
     )
 }
 
+fn net_error(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(
+            ctor,
+            vec![HostValue::Str(message.into().into())],
+        )],
+    )
+}
+
 const MAX_FILE_IO_BYTES: usize = 16 << 20;
+const MAX_NETWORK_IO_BYTES: usize = 16 << 20;
 
 impl Host for CliHost {
     fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
@@ -226,6 +280,175 @@ impl Host for CliHost {
                 };
                 self.start_file(key, FileRequest::Close { file: *token })
             }
+            lm_abi::OP_DNS_RESOLVE => {
+                let (Some(HostArg::Str(name)), Some(HostArg::Int(port))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Dns.Resolve needs a name and port".to_string());
+                };
+                let Ok(port) = u16::try_from(*port) else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the port is outside 0 through 65535",
+                    ));
+                };
+                self.start_dns(key, name.to_string(), port)
+            }
+            lm_abi::OP_TCP_CONNECT => {
+                let Some(HostArg::SocketAddress(address)) = args.first() else {
+                    return HostStart::Failed("Tcp.Connect needs an address".to_string());
+                };
+                let Some(stream) = self.take_tcp() else {
+                    return HostStart::Failed("the TCP token space is exhausted".to_string());
+                };
+                self.start_tcp(
+                    key,
+                    TcpRequest::Connect {
+                        stream,
+                        address: *address,
+                    },
+                )
+            }
+            lm_abi::OP_TCP_LISTEN => {
+                let (Some(HostArg::SocketAddress(address)), Some(HostArg::Int(backlog))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed(
+                        "Tcp.Listen needs an address and backlog".to_string(),
+                    );
+                };
+                if !(1..=65_535).contains(backlog) {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the backlog is outside 1 through 65535",
+                    ));
+                }
+                let Some(listener) = self.take_tcp() else {
+                    return HostStart::Failed("the TCP token space is exhausted".to_string());
+                };
+                self.start_tcp(
+                    key,
+                    TcpRequest::Listen {
+                        listener,
+                        address: *address,
+                    },
+                )
+            }
+            lm_abi::OP_TCP_ACCEPT => {
+                let Some(HostArg::Tcp(resource)) = args.first() else {
+                    return HostStart::Failed("Tcp.Accept needs a listener".to_string());
+                };
+                if resource.kind != HostTcpKind::Listener {
+                    return HostStart::Failed("Tcp.Accept needs a listener".to_string());
+                }
+                let Some(stream) = self.take_tcp() else {
+                    return HostStart::Failed("the TCP token space is exhausted".to_string());
+                };
+                self.start_tcp(
+                    key,
+                    TcpRequest::Accept {
+                        listener: resource.token,
+                        stream,
+                    },
+                )
+            }
+            lm_abi::OP_TCP_READ => {
+                let (Some(HostArg::Tcp(resource)), Some(HostArg::Int(count))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tcp.Read needs a stream and count".to_string());
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tcp.Read needs a stream".to_string());
+                }
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the read count is not positive",
+                    ));
+                };
+                if count == 0 {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetInvalidInput,
+                        "the read count is not positive",
+                    ));
+                }
+                if count > MAX_NETWORK_IO_BYTES {
+                    return HostStart::Completed(net_error(
+                        CoreCtor::NetLimitExceeded,
+                        "the read count is too large",
+                    ));
+                }
+                self.start_tcp(
+                    key,
+                    TcpRequest::Read {
+                        stream: resource.token,
+                        count,
+                    },
+                )
+            }
+            lm_abi::OP_TCP_WRITE => {
+                let (Some(HostArg::Tcp(resource)), Some(HostArg::Bytes(bytes))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed("Tcp.Write needs a stream and bytes".to_string());
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tcp.Write needs a stream".to_string());
+                }
+                self.start_tcp(
+                    key,
+                    TcpRequest::Write {
+                        stream: resource.token,
+                        bytes: bytes.clone(),
+                    },
+                )
+            }
+            lm_abi::OP_TCP_SHUTDOWN => {
+                let (Some(HostArg::Tcp(resource)), Some(HostArg::Shutdown(direction))) =
+                    (args.first(), args.get(1))
+                else {
+                    return HostStart::Failed(
+                        "Tcp.Shutdown needs a stream and direction".to_string(),
+                    );
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tcp.Shutdown needs a stream".to_string());
+                }
+                self.start_tcp(
+                    key,
+                    TcpRequest::Shutdown {
+                        stream: resource.token,
+                        direction: *direction,
+                    },
+                )
+            }
+            lm_abi::OP_TCP_LOCAL_ADDRESS => {
+                let Some(HostArg::Tcp(resource)) = args.first() else {
+                    return HostStart::Failed("Tcp.LocalAddress needs a resource".to_string());
+                };
+                self.start_tcp(key, TcpRequest::LocalAddress(*resource))
+            }
+            lm_abi::OP_TCP_PEER_ADDRESS => {
+                let Some(HostArg::Tcp(resource)) = args.first() else {
+                    return HostStart::Failed("Tcp.PeerAddress needs a stream".to_string());
+                };
+                if resource.kind != HostTcpKind::Stream {
+                    return HostStart::Failed("Tcp.PeerAddress needs a stream".to_string());
+                }
+                self.start_tcp(
+                    key,
+                    TcpRequest::PeerAddress {
+                        stream: resource.token,
+                    },
+                )
+            }
+            lm_abi::OP_TCP_CLOSE => {
+                let Some(HostArg::Tcp(resource)) = args.first() else {
+                    return HostStart::Failed("Tcp.Close needs a resource".to_string());
+                };
+                self.start_tcp(key, TcpRequest::Close(*resource))
+            }
             _ => HostStart::Failed(format!(
                 "the command-line host does not implement {}",
                 lm_abi::op_name(op)
@@ -235,6 +458,9 @@ impl Host for CliHost {
 
     fn poll(&mut self) -> Option<HostCompletion> {
         if let Some(completion) = self.io.poll() {
+            return Some(completion);
+        }
+        if let Some(completion) = self.network.poll() {
             return Some(completion);
         }
         let now = Instant::now();
@@ -253,34 +479,37 @@ impl Host for CliHost {
     }
 
     fn wait(&mut self) -> Option<HostCompletion> {
-        if let Some(completion) = self.poll() {
-            return Some(completion);
-        }
-        let token = self
-            .sleeps
-            .iter()
-            .min_by_key(|(token, (_, deadline))| (*deadline, **token))
-            .map(|(token, (_, deadline))| (*token, *deadline));
-        let Some((sleep_token, deadline)) = token else {
-            return self.io.wait();
-        };
-        let duration = deadline.saturating_duration_since(Instant::now());
-        match self.io.wait_timeout(duration) {
-            Ok(completion) => Some(completion),
-            Err(RecvTimeoutError::Timeout) => {
-                let (key, _) = self.sleeps.remove(&sleep_token)?;
-                Some(HostCompletion {
-                    key,
-                    token: sleep_token,
-                    result: Ok(HostValue::Unit),
-                })
+        loop {
+            if let Some(completion) = self.poll() {
+                return Some(completion);
             }
-            Err(RecvTimeoutError::Disconnected) => None,
+            let deadline = self.sleeps.values().map(|(_, deadline)| *deadline).min();
+            let quantum = Duration::from_millis(10);
+            let duration = deadline
+                .map(|deadline| {
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(quantum)
+                })
+                .unwrap_or(quantum);
+            match self.network.wait_timeout(duration) {
+                Ok(completion) => return Some(completion),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return self.io.wait(),
+            }
         }
     }
 
     fn close_file(&mut self, token: u64) -> bool {
         self.io.force_close(token)
+    }
+
+    fn cancel(&mut self, token: u64) -> bool {
+        self.sleeps.remove(&token).is_some() || self.network.cancel(token)
+    }
+
+    fn close_tcp(&mut self, resource: HostTcpResource) -> bool {
+        self.network.force_close(resource)
     }
 }
 
@@ -325,6 +554,76 @@ mod tests {
             }
             other => panic!("expected one filesystem success, found {other:?}"),
         }
+    }
+
+    fn net_ok_value(value: HostValue) -> HostValue {
+        match value {
+            HostValue::Ctor(CoreCtor::Ok, mut values) if values.len() == 1 => {
+                values.pop().expect("the success value exists")
+            }
+            other => panic!("expected one network success, found {other:?}"),
+        }
+    }
+
+    fn loopback(port: u16) -> lm_vm::HostSocketAddress {
+        lm_vm::HostSocketAddress {
+            ip: lm_vm::HostIpAddress::V4([127, 0, 0, 1]),
+            port,
+            flow_info: 0,
+            scope_id: 0,
+        }
+    }
+
+    fn tcp(kind: HostTcpKind, token: u64) -> HostArg {
+        HostArg::Tcp(HostTcpResource { kind, token })
+    }
+
+    fn start_token(host: &mut CliHost, op: u32, args: Vec<HostArg>) -> u64 {
+        match host.start(completion(), op, args) {
+            HostStart::Waiting(token) => token,
+            other => panic!("expected a pending host operation, found {other:?}"),
+        }
+    }
+
+    fn connected_pair(host: &mut CliHost) -> (u64, u64, u64) {
+        let listener = match net_ok_value(run_host(
+            host,
+            lm_abi::OP_TCP_LISTEN,
+            vec![HostArg::SocketAddress(loopback(0)), HostArg::Int(16)],
+        )) {
+            HostValue::TcpListener(token) => token,
+            other => panic!("expected a listener, found {other:?}"),
+        };
+        let address = match net_ok_value(run_host(
+            host,
+            lm_abi::OP_TCP_LOCAL_ADDRESS,
+            vec![tcp(HostTcpKind::Listener, listener)],
+        )) {
+            HostValue::SocketAddress(address) => address,
+            other => panic!("expected a socket address, found {other:?}"),
+        };
+        let client = match net_ok_value(run_host(
+            host,
+            lm_abi::OP_TCP_CONNECT,
+            vec![HostArg::SocketAddress(address)],
+        )) {
+            HostValue::TcpStream(token) => token,
+            other => panic!("expected a client stream, found {other:?}"),
+        };
+        let server = match net_ok_value(run_host(
+            host,
+            lm_abi::OP_TCP_ACCEPT,
+            vec![tcp(HostTcpKind::Listener, listener)],
+        )) {
+            HostValue::Ctor(CoreCtor::Pair, mut values) if values.len() == 2 => {
+                match values.remove(0) {
+                    HostValue::TcpStream(token) => token,
+                    other => panic!("expected a server stream, found {other:?}"),
+                }
+            }
+            other => panic!("expected an accepted pair, found {other:?}"),
+        };
+        (listener, client, server)
     }
 
     #[test]
@@ -437,5 +736,169 @@ mod tests {
             HostValue::Unit
         );
         assert_eq!(std::fs::read(&path.0).expect("the file reads"), b"hello");
+    }
+
+    #[test]
+    fn dns_resolves_localhost_without_external_network_access() {
+        let mut host = CliHost::new(1);
+        let value = net_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_DNS_RESOLVE,
+            vec![HostArg::Str("localhost".into()), HostArg::Int(80)],
+        ));
+        let HostValue::List(addresses) = value else {
+            panic!("expected a DNS address list");
+        };
+        assert!(!addresses.is_empty());
+        assert!(addresses.into_iter().all(|value| {
+            matches!(value, HostValue::SocketAddress(address) if address.port == 80)
+        }));
+    }
+
+    #[test]
+    fn tcp_loopback_reports_data_and_orderly_end() {
+        let mut host = CliHost::new(1);
+        let (listener, client, server) = connected_pair(&mut host);
+
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TCP_WRITE,
+                vec![
+                    tcp(HostTcpKind::Stream, client),
+                    HostArg::Bytes(b"hello".into()),
+                ],
+            )),
+            HostValue::Int(5)
+        );
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TCP_READ,
+                vec![tcp(HostTcpKind::Stream, server), HostArg::Int(16)],
+            )),
+            HostValue::Ctor(
+                CoreCtor::TcpReadData,
+                vec![HostValue::Bytes(b"hello".into())]
+            )
+        );
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TCP_SHUTDOWN,
+                vec![
+                    tcp(HostTcpKind::Stream, client),
+                    HostArg::Shutdown(lm_vm::HostShutdown::Write),
+                ],
+            )),
+            HostValue::Unit
+        );
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TCP_READ,
+                vec![tcp(HostTcpKind::Stream, server), HostArg::Int(16)],
+            )),
+            HostValue::Ctor(CoreCtor::TcpReadEnd, vec![])
+        );
+
+        for resource in [
+            HostTcpResource {
+                kind: HostTcpKind::Stream,
+                token: client,
+            },
+            HostTcpResource {
+                kind: HostTcpKind::Stream,
+                token: server,
+            },
+            HostTcpResource {
+                kind: HostTcpKind::Listener,
+                token: listener,
+            },
+        ] {
+            assert_eq!(
+                net_ok_value(run_host(
+                    &mut host,
+                    lm_abi::OP_TCP_CLOSE,
+                    vec![HostArg::Tcp(resource)],
+                )),
+                HostValue::Unit
+            );
+        }
+    }
+
+    #[test]
+    fn a_blocked_read_does_not_delay_a_write_or_consume_canceled_data() {
+        let mut host = CliHost::new(1);
+        let (listener, client, server) = connected_pair(&mut host);
+        let read = start_token(
+            &mut host,
+            lm_abi::OP_TCP_READ,
+            vec![tcp(HostTcpKind::Stream, server), HostArg::Int(32)],
+        );
+        let write = start_token(
+            &mut host,
+            lm_abi::OP_TCP_WRITE,
+            vec![
+                tcp(HostTcpKind::Stream, server),
+                HostArg::Bytes(b"response".into()),
+            ],
+        );
+        let completion = host.wait().expect("the write completes");
+        assert_eq!(completion.token, write);
+        assert_eq!(
+            net_ok_value(completion.result.expect("the host write succeeds")),
+            HostValue::Int(8)
+        );
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TCP_READ,
+                vec![tcp(HostTcpKind::Stream, client), HostArg::Int(32)],
+            )),
+            HostValue::Ctor(
+                CoreCtor::TcpReadData,
+                vec![HostValue::Bytes(b"response".into())]
+            )
+        );
+        assert!(host.cancel(read));
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TCP_WRITE,
+                vec![
+                    tcp(HostTcpKind::Stream, client),
+                    HostArg::Bytes(b"retained".into()),
+                ],
+            )),
+            HostValue::Int(8)
+        );
+        assert_eq!(
+            net_ok_value(run_host(
+                &mut host,
+                lm_abi::OP_TCP_READ,
+                vec![tcp(HostTcpKind::Stream, server), HostArg::Int(32)],
+            )),
+            HostValue::Ctor(
+                CoreCtor::TcpReadData,
+                vec![HostValue::Bytes(b"retained".into())]
+            )
+        );
+        for resource in [
+            HostTcpResource {
+                kind: HostTcpKind::Stream,
+                token: client,
+            },
+            HostTcpResource {
+                kind: HostTcpKind::Stream,
+                token: server,
+            },
+            HostTcpResource {
+                kind: HostTcpKind::Listener,
+                token: listener,
+            },
+        ] {
+            assert!(host.close_tcp(resource));
+        }
     }
 }

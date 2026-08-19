@@ -525,6 +525,9 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.leb(*owner as u64);
             out.u64(*token);
         }
+        Object::NativeTcpStream { resource } | Object::NativeTcpListener { resource } => {
+            out.u64(*resource);
+        }
     }
 }
 
@@ -1612,6 +1615,12 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             token: cur.u64()?,
         },
         20 => Object::Substring(cur.str(limits.max_string_bytes)?.into()),
+        21 => Object::NativeTcpStream {
+            resource: cur.u64()?,
+        },
+        22 => Object::NativeTcpListener {
+            resource: cur.u64()?,
+        },
         other => {
             return err(
                 ImageReason::Layout,

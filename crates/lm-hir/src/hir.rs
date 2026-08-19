@@ -104,6 +104,9 @@ pub enum NativeRepr {
     Bytes,
     StringBuilder,
     ByteBuffer,
+    TcpResource,
+    TcpStream,
+    TcpListener,
 }
 
 /// One checked class with its full field layout.

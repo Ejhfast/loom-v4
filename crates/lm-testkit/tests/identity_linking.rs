@@ -42,6 +42,28 @@ fn class_hash(
     identity.class_hashes[idx]
 }
 
+#[test]
+fn an_effect_set_and_its_exact_closure_share_one_function_hash() {
+    let concise = r#"
+def network_capability(): () with Tcp.Client
+  ()
+end
+()
+"#;
+    let exact = r#"
+def network_capability(): () with Tcp.Connect, Tcp.Read, Tcp.Write, Tcp.Shutdown, Tcp.LocalAddress, Tcp.PeerAddress, Tcp.Close
+  ()
+end
+()
+"#;
+    let (concise_module, concise_identity) = identity_of(concise);
+    let (exact_module, exact_identity) = identity_of(exact);
+    assert_eq!(
+        func_hash(&concise_module, &concise_identity, "network_capability"),
+        func_hash(&exact_module, &exact_identity, "network_capability")
+    );
+}
+
 // ---------------------------------------------------------------
 // Section 4: the referenced nominal identity.
 // ---------------------------------------------------------------
@@ -1366,8 +1388,8 @@ fn every_field_of_one_operation_definition_moves_its_identity() {
     let name = op_name(OP_VM_SNAPSHOT_SELF);
     let mut edited = *op(OP_VM_SNAPSHOT_SELF);
     assert_eq!(edited.kind, OpKind::VmControl);
-    assert_ne!(edited.reply, AbiType::Unit);
-    edited.reply = AbiType::Unit;
+    assert_ne!(edited.reply, AbiType::UNIT);
+    edited.reply = AbiType::UNIT;
     assert_ne!(
         identity_of(&name, &edited),
         op_identity(OP_VM_SNAPSHOT_SELF),
@@ -1375,7 +1397,7 @@ fn every_field_of_one_operation_definition_moves_its_identity() {
     );
     // The parameters of one `VmControl` entry.
     let mut edited = *op(OP_VM_SNAPSHOT_SELF);
-    edited.params = &[AbiType::Int];
+    edited.params = &[AbiType::INT];
     assert_ne!(
         identity_of(&name, &edited),
         op_identity(OP_VM_SNAPSHOT_SELF),
@@ -1398,10 +1420,10 @@ fn every_field_of_one_operation_definition_moves_its_identity() {
     with_member.member = "Later";
     edits.push(("member", with_member));
     let mut with_params = base;
-    with_params.params = &[AbiType::Str];
+    with_params.params = &[AbiType::STR];
     edits.push(("params", with_params));
     let mut with_reply = base;
-    with_reply.reply = AbiType::Str;
+    with_reply.reply = AbiType::STR;
     edits.push(("reply", with_reply));
     let mut with_snapshot = base;
     with_snapshot.snapshot = SnapshotClass::HostAttachment;

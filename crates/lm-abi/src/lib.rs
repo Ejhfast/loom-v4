@@ -26,8 +26,9 @@ pub use sha::{sha256, sha256_hex};
 /// identity. Version 5 adds immutable bytes, file handles, and the
 /// first six filesystem operations. Version 6 adds holder resource
 /// controls and fuel-bounded snapshot waiting. Version 7 adds typed
-/// waits and selectable drive and receive sources.
-pub const ABI_VERSION: u32 = 7;
+/// waits and selectable drive and receive sources. Version 8 adds
+/// transparent effect sets and the DNS and TCP operations.
+pub const ABI_VERSION: u32 = 8;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -35,67 +36,301 @@ pub type GroupSlot = u32;
 /// A dense operation slot: the index in `OPS`.
 pub type OpSlot = u32;
 
-/// The effect groups, in canonical order. Groups without week-4
-/// operations exist for rows and policy targets only.
-pub const GROUPS: [&str; 10] = [
-    "Io", "Fs", "Clock", "Rand", "Net", "Proc", "Vm", "Compiler", "Reflect", "Wait",
+/// The effect groups and effect sets, in canonical slot order.
+///
+/// The first ten entries keep their existing slots. An empty member
+/// list makes a namespace group. Its members are the operations whose
+/// `group` field names that group. A nonempty list can name exact
+/// operations or other groups.
+pub const GROUPS: [&str; 17] = [
+    "Io",
+    "Fs",
+    "Clock",
+    "Rand",
+    "Net",
+    "Proc",
+    "Vm",
+    "Compiler",
+    "Reflect",
+    "Wait",
+    "Dns",
+    "Tcp",
+    "Tcp.Stream",
+    "Tcp.Listener",
+    "Tcp.Client",
+    "Tcp.Server",
+    "Http.CleartextClient",
 ];
 
-/// One manifest type. The set is closed: it covers every parameter
-/// and reply position of the week-4 operations.
+const TCP_STREAM_MEMBERS: &[&str] = &[
+    "Tcp.Read",
+    "Tcp.Write",
+    "Tcp.Shutdown",
+    "Tcp.LocalAddress",
+    "Tcp.PeerAddress",
+    "Tcp.Close",
+];
+const TCP_LISTENER_MEMBERS: &[&str] =
+    &["Tcp.Listen", "Tcp.Accept", "Tcp.LocalAddress", "Tcp.Close"];
+const TCP_CLIENT_MEMBERS: &[&str] = &["Tcp.Connect", "Tcp.Stream"];
+const TCP_SERVER_MEMBERS: &[&str] = &["Tcp.Listener", "Tcp.Stream"];
+const HTTP_CLEARTEXT_MEMBERS: &[&str] = &["Dns.Resolve", "Tcp.Client"];
+
+/// The explicit members of each group slot.
+pub const GROUP_MEMBERS: [&[&str]; 17] = [
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    TCP_STREAM_MEMBERS,
+    TCP_LISTENER_MEMBERS,
+    TCP_CLIENT_MEMBERS,
+    TCP_SERVER_MEMBERS,
+    HTTP_CLEARTEXT_MEMBERS,
+];
+
+/// One primitive manifest type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AbiType {
+pub enum AbiPrimitive {
     Unit,
     Bool,
     Int,
+    String,
+    Bytes,
+    SnapshotImage,
+}
+
+impl AbiPrimitive {
+    fn text(self) -> &'static str {
+        match self {
+            AbiPrimitive::Unit => "()",
+            AbiPrimitive::Bool => "Bool",
+            AbiPrimitive::Int => "Int",
+            AbiPrimitive::String => "String",
+            AbiPrimitive::Bytes => "Bytes",
+            AbiPrimitive::SnapshotImage => "SnapshotImage",
+        }
+    }
+}
+
+/// One core-image class used by a manifest type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiCore {
     Text,
-    Str,
     Substring,
     Char,
-    Bytes,
     StringBuilder,
     ByteBuffer,
-    FileHandle,
     OpenOptions,
     SeekFrom,
-    /// `List[Substring]`, the reply of a text splitting intrinsic.
-    ListSubstring,
-    /// `Result[Option[String], IoError]`, the `Io.ReadLine` reply.
-    ResultOptionStrIoError,
-    /// `Result[SnapshotImage, SnapshotError]`, the `Vm.SnapshotSelf`
-    /// reply. A restored self snapshot is answered through the
-    /// ordinary typed call path, so the reply type has a name here.
-    ResultSnapshotImageError,
-    ResultFileHandleFsError,
-    ResultBytesFsError,
-    ResultIntFsError,
-    ResultUnitFsError,
+    IoError,
+    FsError,
+    SnapshotError,
+    IpAddress,
+    SocketAddress,
+    NetError,
+    TcpRead,
+    Shutdown,
+}
+
+impl AbiCore {
+    fn text(self) -> &'static str {
+        match self {
+            AbiCore::Text => "Text",
+            AbiCore::Substring => "Substring",
+            AbiCore::Char => "Char",
+            AbiCore::StringBuilder => "StringBuilder",
+            AbiCore::ByteBuffer => "ByteBuffer",
+            AbiCore::OpenOptions => "OpenOptions",
+            AbiCore::SeekFrom => "SeekFrom",
+            AbiCore::IoError => "IoError",
+            AbiCore::FsError => "FsError",
+            AbiCore::SnapshotError => "SnapshotError",
+            AbiCore::IpAddress => "IpAddress",
+            AbiCore::SocketAddress => "SocketAddress",
+            AbiCore::NetError => "NetError",
+            AbiCore::TcpRead => "TcpRead",
+            AbiCore::Shutdown => "Shutdown",
+        }
+    }
+}
+
+/// One native resource type used by the operation manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiNative {
+    FileHandle,
+    TcpResource,
+    TcpStream,
+    TcpListener,
+}
+
+impl AbiNative {
+    fn text(self) -> &'static str {
+        match self {
+            AbiNative::FileHandle => "FileHandle",
+            AbiNative::TcpResource => "TcpResource",
+            AbiNative::TcpStream => "TcpStream",
+            AbiNative::TcpListener => "TcpListener",
+        }
+    }
+}
+
+/// One generic core family used by a manifest type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiConstructor {
+    Option,
+    Result,
+    Pair,
+}
+
+impl AbiConstructor {
+    pub fn text(self) -> &'static str {
+        match self {
+            AbiConstructor::Option => "Option",
+            AbiConstructor::Result => "Result",
+            AbiConstructor::Pair => "Pair",
+        }
+    }
+
+    pub fn arity(self) -> usize {
+        match self {
+            AbiConstructor::Option => 1,
+            AbiConstructor::Result => 2,
+            AbiConstructor::Pair => 2,
+        }
+    }
+}
+
+/// One normalized manifest type expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiType {
+    Primitive(AbiPrimitive),
+    Core(AbiCore),
+    Native(AbiNative),
+    List(&'static AbiType),
+    Tuple(&'static [AbiType]),
+    Apply(AbiConstructor, &'static [AbiType]),
 }
 
 impl AbiType {
-    /// The canonical text of the type, for identity hashing.
-    pub fn text(&self) -> &'static str {
+    pub const UNIT: AbiType = AbiType::Primitive(AbiPrimitive::Unit);
+    pub const BOOL: AbiType = AbiType::Primitive(AbiPrimitive::Bool);
+    pub const INT: AbiType = AbiType::Primitive(AbiPrimitive::Int);
+    pub const STR: AbiType = AbiType::Primitive(AbiPrimitive::String);
+    pub const BYTES: AbiType = AbiType::Primitive(AbiPrimitive::Bytes);
+    pub const SNAPSHOT_IMAGE: AbiType = AbiType::Primitive(AbiPrimitive::SnapshotImage);
+    pub const TEXT: AbiType = AbiType::Core(AbiCore::Text);
+    pub const SUBSTRING: AbiType = AbiType::Core(AbiCore::Substring);
+    pub const CHAR: AbiType = AbiType::Core(AbiCore::Char);
+    pub const STRING_BUILDER: AbiType = AbiType::Core(AbiCore::StringBuilder);
+    pub const BYTE_BUFFER: AbiType = AbiType::Core(AbiCore::ByteBuffer);
+    pub const OPEN_OPTIONS: AbiType = AbiType::Core(AbiCore::OpenOptions);
+    pub const SEEK_FROM: AbiType = AbiType::Core(AbiCore::SeekFrom);
+    pub const IO_ERROR: AbiType = AbiType::Core(AbiCore::IoError);
+    pub const FS_ERROR: AbiType = AbiType::Core(AbiCore::FsError);
+    pub const SNAPSHOT_ERROR: AbiType = AbiType::Core(AbiCore::SnapshotError);
+    pub const IP_ADDRESS: AbiType = AbiType::Core(AbiCore::IpAddress);
+    pub const SOCKET_ADDRESS: AbiType = AbiType::Core(AbiCore::SocketAddress);
+    pub const NET_ERROR: AbiType = AbiType::Core(AbiCore::NetError);
+    pub const TCP_READ: AbiType = AbiType::Core(AbiCore::TcpRead);
+    pub const SHUTDOWN: AbiType = AbiType::Core(AbiCore::Shutdown);
+    pub const FILE_HANDLE: AbiType = AbiType::Native(AbiNative::FileHandle);
+    pub const TCP_RESOURCE: AbiType = AbiType::Native(AbiNative::TcpResource);
+    pub const TCP_STREAM: AbiType = AbiType::Native(AbiNative::TcpStream);
+    pub const TCP_LISTENER: AbiType = AbiType::Native(AbiNative::TcpListener);
+
+    pub const LIST_SUBSTRING: AbiType = AbiType::List(&AbiType::SUBSTRING);
+    pub const RESULT_OPTION_STR_IO_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[
+            AbiType::Apply(AbiConstructor::Option, &[AbiType::STR]),
+            AbiType::IO_ERROR,
+        ],
+    );
+    pub const RESULT_SNAPSHOT_IMAGE_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::SNAPSHOT_IMAGE, AbiType::SNAPSHOT_ERROR],
+    );
+    pub const RESULT_FILE_HANDLE_FS_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::FILE_HANDLE, AbiType::FS_ERROR],
+    );
+    pub const RESULT_BYTES_FS_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::BYTES, AbiType::FS_ERROR]);
+    pub const RESULT_INT_FS_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::INT, AbiType::FS_ERROR]);
+    pub const RESULT_UNIT_FS_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::UNIT, AbiType::FS_ERROR]);
+    pub const LIST_SOCKET_ADDRESS: AbiType = AbiType::List(&AbiType::SOCKET_ADDRESS);
+    pub const RESULT_LIST_SOCKET_ADDRESS_NET_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::LIST_SOCKET_ADDRESS, AbiType::NET_ERROR],
+    );
+    pub const RESULT_TCP_STREAM_NET_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::TCP_STREAM, AbiType::NET_ERROR],
+    );
+    pub const RESULT_TCP_LISTENER_NET_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::TCP_LISTENER, AbiType::NET_ERROR],
+    );
+    pub const PAIR_TCP_STREAM_SOCKET_ADDRESS: AbiType = AbiType::Apply(
+        AbiConstructor::Pair,
+        &[AbiType::TCP_STREAM, AbiType::SOCKET_ADDRESS],
+    );
+    pub const RESULT_ACCEPT_NET_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::PAIR_TCP_STREAM_SOCKET_ADDRESS, AbiType::NET_ERROR],
+    );
+    pub const RESULT_TCP_READ_NET_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::TCP_READ, AbiType::NET_ERROR],
+    );
+    pub const RESULT_INT_NET_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::INT, AbiType::NET_ERROR]);
+    pub const RESULT_UNIT_NET_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::UNIT, AbiType::NET_ERROR]);
+    pub const RESULT_SOCKET_ADDRESS_NET_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::SOCKET_ADDRESS, AbiType::NET_ERROR],
+    );
+
+    /// The canonical text of this complete type expression.
+    pub fn text(self) -> String {
         match self {
-            AbiType::Unit => "()",
-            AbiType::Bool => "Bool",
-            AbiType::Int => "Int",
-            AbiType::Text => "Text",
-            AbiType::Str => "String",
-            AbiType::Substring => "Substring",
-            AbiType::Char => "Char",
-            AbiType::Bytes => "Bytes",
-            AbiType::StringBuilder => "StringBuilder",
-            AbiType::ByteBuffer => "ByteBuffer",
-            AbiType::FileHandle => "FileHandle",
-            AbiType::OpenOptions => "OpenOptions",
-            AbiType::SeekFrom => "SeekFrom",
-            AbiType::ListSubstring => "List[Substring]",
-            AbiType::ResultOptionStrIoError => "Result[Option[String], IoError]",
-            AbiType::ResultSnapshotImageError => "Result[SnapshotImage, SnapshotError]",
-            AbiType::ResultFileHandleFsError => "Result[FileHandle, FsError]",
-            AbiType::ResultBytesFsError => "Result[Bytes, FsError]",
-            AbiType::ResultIntFsError => "Result[Int, FsError]",
-            AbiType::ResultUnitFsError => "Result[(), FsError]",
+            AbiType::Primitive(primitive) => primitive.text().to_string(),
+            AbiType::Core(core) => core.text().to_string(),
+            AbiType::Native(native) => native.text().to_string(),
+            AbiType::List(element) => format!("List[{}]", element.text()),
+            AbiType::Tuple(elements) => {
+                let parts: Vec<String> = elements.iter().map(|element| element.text()).collect();
+                format!("({})", parts.join(", "))
+            }
+            AbiType::Apply(constructor, arguments) => {
+                let parts: Vec<String> = arguments.iter().map(|argument| argument.text()).collect();
+                format!("{}[{}]", constructor.text(), parts.join(", "))
+            }
+        }
+    }
+
+    /// True when every generic constructor has its required arity.
+    pub fn valid(self) -> bool {
+        match self {
+            AbiType::Primitive(_) | AbiType::Core(_) | AbiType::Native(_) => true,
+            AbiType::List(element) => element.valid(),
+            AbiType::Tuple(elements) => elements.iter().all(|element| element.valid()),
+            AbiType::Apply(constructor, arguments) => {
+                arguments.len() == constructor.arity()
+                    && arguments.iter().all(|argument| argument.valid())
+            }
         }
     }
 }
@@ -213,536 +448,536 @@ pub const INTRINSIC_TEXT_LINES: IntrinsicSlot = 88;
 pub const INTRINSICS: [IntrinsicDef; 89] = [
     IntrinsicDef {
         name: "int.abs",
-        params: &[AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.neg",
-        params: &[AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.add",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.sub",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.mul",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.div",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.rem",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.eq",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Bool,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.ne",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Bool,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.lt",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Bool,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.le",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Bool,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.gt",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Bool,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "int.ge",
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Bool,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bool.not",
-        params: &[AbiType::Bool],
-        reply: AbiType::Bool,
+        params: &[AbiType::BOOL],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bool.eq",
-        params: &[AbiType::Bool, AbiType::Bool],
-        reply: AbiType::Bool,
+        params: &[AbiType::BOOL, AbiType::BOOL],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bool.ne",
-        params: &[AbiType::Bool, AbiType::Bool],
-        reply: AbiType::Bool,
+        params: &[AbiType::BOOL, AbiType::BOOL],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.byte_len",
-        params: &[AbiType::Text],
-        reply: AbiType::Int,
+        params: &[AbiType::TEXT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.len",
-        params: &[AbiType::Text],
-        reply: AbiType::Int,
+        params: &[AbiType::TEXT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.concat",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Str,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.starts_with",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.ends_with",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.contains",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.find_index",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Int,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.eq",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.ne",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.len",
-        params: &[AbiType::Bytes],
-        reply: AbiType::Int,
+        params: &[AbiType::BYTES],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.at",
-        params: &[AbiType::Bytes, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::BYTES, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.get",
-        params: &[AbiType::Bytes, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::BYTES, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.slice",
-        params: &[AbiType::Bytes, AbiType::Int, AbiType::Int],
-        reply: AbiType::Bytes,
+        params: &[AbiType::BYTES, AbiType::INT, AbiType::INT],
+        reply: AbiType::BYTES,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.concat",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bytes,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BYTES,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.starts_with",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.find_index",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Int,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.hex",
-        params: &[AbiType::Bytes],
-        reply: AbiType::Str,
+        params: &[AbiType::BYTES],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.is_utf8",
-        params: &[AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.text",
-        params: &[AbiType::Bytes],
-        reply: AbiType::Str,
+        params: &[AbiType::BYTES],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.eq",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.ne",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "string_builder.append",
-        params: &[AbiType::StringBuilder, AbiType::Text],
-        reply: AbiType::StringBuilder,
+        params: &[AbiType::STRING_BUILDER, AbiType::TEXT],
+        reply: AbiType::STRING_BUILDER,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "string_builder.len",
-        params: &[AbiType::StringBuilder],
-        reply: AbiType::Int,
+        params: &[AbiType::STRING_BUILDER],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "string_builder.clear",
-        params: &[AbiType::StringBuilder],
-        reply: AbiType::StringBuilder,
+        params: &[AbiType::STRING_BUILDER],
+        reply: AbiType::STRING_BUILDER,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "string_builder.build",
-        params: &[AbiType::StringBuilder],
-        reply: AbiType::Str,
+        params: &[AbiType::STRING_BUILDER],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "byte_buffer.append",
-        params: &[AbiType::ByteBuffer, AbiType::Int],
-        reply: AbiType::ByteBuffer,
+        params: &[AbiType::BYTE_BUFFER, AbiType::INT],
+        reply: AbiType::BYTE_BUFFER,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "byte_buffer.extend",
-        params: &[AbiType::ByteBuffer, AbiType::Bytes],
-        reply: AbiType::ByteBuffer,
+        params: &[AbiType::BYTE_BUFFER, AbiType::BYTES],
+        reply: AbiType::BYTE_BUFFER,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "byte_buffer.reserve",
-        params: &[AbiType::ByteBuffer, AbiType::Int],
-        reply: AbiType::ByteBuffer,
+        params: &[AbiType::BYTE_BUFFER, AbiType::INT],
+        reply: AbiType::BYTE_BUFFER,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "byte_buffer.clear",
-        params: &[AbiType::ByteBuffer],
-        reply: AbiType::ByteBuffer,
+        params: &[AbiType::BYTE_BUFFER],
+        reply: AbiType::BYTE_BUFFER,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "byte_buffer.len",
-        params: &[AbiType::ByteBuffer],
-        reply: AbiType::Int,
+        params: &[AbiType::BYTE_BUFFER],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "byte_buffer.build",
-        params: &[AbiType::ByteBuffer],
-        reply: AbiType::Bytes,
+        params: &[AbiType::BYTE_BUFFER],
+        reply: AbiType::BYTES,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.at",
-        params: &[AbiType::Text, AbiType::Int],
-        reply: AbiType::Char,
+        params: &[AbiType::TEXT, AbiType::INT],
+        reply: AbiType::CHAR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.slice",
-        params: &[AbiType::Text, AbiType::Int, AbiType::Int],
-        reply: AbiType::Substring,
+        params: &[AbiType::TEXT, AbiType::INT, AbiType::INT],
+        reply: AbiType::SUBSTRING,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.is_boundary",
-        params: &[AbiType::Text, AbiType::Int],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::INT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.slice_bytes",
-        params: &[AbiType::Text, AbiType::Int, AbiType::Int],
-        reply: AbiType::Substring,
+        params: &[AbiType::TEXT, AbiType::INT, AbiType::INT],
+        reply: AbiType::SUBSTRING,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.bytes",
-        params: &[AbiType::Text],
-        reply: AbiType::Bytes,
+        params: &[AbiType::TEXT],
+        reply: AbiType::BYTES,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.lt",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.le",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.gt",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.ge",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Bool,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "substring.to_string",
-        params: &[AbiType::Substring],
-        reply: AbiType::Str,
+        params: &[AbiType::SUBSTRING],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "char.codepoint",
-        params: &[AbiType::Char],
-        reply: AbiType::Int,
+        params: &[AbiType::CHAR],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "char.utf8_len",
-        params: &[AbiType::Char],
-        reply: AbiType::Int,
+        params: &[AbiType::CHAR],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "char.eq",
-        params: &[AbiType::Char, AbiType::Char],
-        reply: AbiType::Bool,
+        params: &[AbiType::CHAR, AbiType::CHAR],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "char.ne",
-        params: &[AbiType::Char, AbiType::Char],
-        reply: AbiType::Bool,
+        params: &[AbiType::CHAR, AbiType::CHAR],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "char.lt",
-        params: &[AbiType::Char, AbiType::Char],
-        reply: AbiType::Bool,
+        params: &[AbiType::CHAR, AbiType::CHAR],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "char.le",
-        params: &[AbiType::Char, AbiType::Char],
-        reply: AbiType::Bool,
+        params: &[AbiType::CHAR, AbiType::CHAR],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "char.gt",
-        params: &[AbiType::Char, AbiType::Char],
-        reply: AbiType::Bool,
+        params: &[AbiType::CHAR, AbiType::CHAR],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "char.ge",
-        params: &[AbiType::Char, AbiType::Char],
-        reply: AbiType::Bool,
+        params: &[AbiType::CHAR, AbiType::CHAR],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.compact",
-        params: &[AbiType::Bytes],
-        reply: AbiType::Bytes,
+        params: &[AbiType::BYTES],
+        reply: AbiType::BYTES,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.text_view",
-        params: &[AbiType::Bytes],
-        reply: AbiType::Substring,
+        params: &[AbiType::BYTES],
+        reply: AbiType::SUBSTRING,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.lt",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.le",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.gt",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.ge",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "string_builder.push_char",
-        params: &[AbiType::StringBuilder, AbiType::Char],
-        reply: AbiType::StringBuilder,
+        params: &[AbiType::STRING_BUILDER, AbiType::CHAR],
+        reply: AbiType::STRING_BUILDER,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "string_builder.byte_len",
-        params: &[AbiType::StringBuilder],
-        reply: AbiType::Int,
+        params: &[AbiType::STRING_BUILDER],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "string_builder.finish",
-        params: &[AbiType::StringBuilder],
-        reply: AbiType::Str,
+        params: &[AbiType::STRING_BUILDER],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "byte_buffer.finish",
-        params: &[AbiType::ByteBuffer],
-        reply: AbiType::Bytes,
+        params: &[AbiType::BYTE_BUFFER],
+        reply: AbiType::BYTES,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.find_byte_index",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::Int,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.at_byte",
-        params: &[AbiType::Text, AbiType::Int],
-        reply: AbiType::Char,
+        params: &[AbiType::TEXT, AbiType::INT],
+        reply: AbiType::CHAR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.trim",
-        params: &[AbiType::Text],
-        reply: AbiType::Substring,
+        params: &[AbiType::TEXT],
+        reply: AbiType::SUBSTRING,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.trim_start",
-        params: &[AbiType::Text],
-        reply: AbiType::Substring,
+        params: &[AbiType::TEXT],
+        reply: AbiType::SUBSTRING,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.trim_end",
-        params: &[AbiType::Text],
-        reply: AbiType::Substring,
+        params: &[AbiType::TEXT],
+        reply: AbiType::SUBSTRING,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.to_lower_ascii",
-        params: &[AbiType::Text],
-        reply: AbiType::Str,
+        params: &[AbiType::TEXT],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.to_upper_ascii",
-        params: &[AbiType::Text],
-        reply: AbiType::Str,
+        params: &[AbiType::TEXT],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.replace",
-        params: &[AbiType::Text, AbiType::Text, AbiType::Text],
-        reply: AbiType::Str,
+        params: &[AbiType::TEXT, AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::STR,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.parse_int_status",
-        params: &[AbiType::Text, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::TEXT, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.parse_int_value",
-        params: &[AbiType::Text, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::TEXT, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.ends_with",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "bytes.contains",
-        params: &[AbiType::Bytes, AbiType::Bytes],
-        reply: AbiType::Bool,
+        params: &[AbiType::BYTES, AbiType::BYTES],
+        reply: AbiType::BOOL,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.split",
-        params: &[AbiType::Text, AbiType::Text],
-        reply: AbiType::ListSubstring,
+        params: &[AbiType::TEXT, AbiType::TEXT],
+        reply: AbiType::LIST_SUBSTRING,
         semantic_revision: 1,
     },
     IntrinsicDef {
         name: "text.lines",
-        params: &[AbiType::Text],
-        reply: AbiType::ListSubstring,
+        params: &[AbiType::TEXT],
+        reply: AbiType::LIST_SUBSTRING,
         semantic_revision: 1,
     },
 ];
@@ -900,15 +1135,27 @@ pub const OP_WAIT_CHOOSE: OpSlot = 45;
 pub const OP_WAIT_CANCEL: OpSlot = 46;
 pub const OP_VM_DRIVE_FOR: OpSlot = 47;
 pub const OP_VM_SNAPSHOT_WAIT_HELD: OpSlot = 48;
+pub const OP_DNS_RESOLVE: OpSlot = 49;
+pub const OP_TCP_CONNECT: OpSlot = 50;
+pub const OP_TCP_LISTEN: OpSlot = 51;
+pub const OP_TCP_ACCEPT: OpSlot = 52;
+pub const OP_TCP_READ: OpSlot = 53;
+pub const OP_TCP_WRITE: OpSlot = 54;
+pub const OP_TCP_SHUTDOWN: OpSlot = 55;
+pub const OP_TCP_LOCAL_ADDRESS: OpSlot = 56;
+pub const OP_TCP_PEER_ADDRESS: OpSlot = 57;
+pub const OP_TCP_CLOSE: OpSlot = 58;
+pub const OP_VM_SERVE_TCP_STREAM: OpSlot = 59;
+pub const OP_VM_SERVE_TCP_LISTENER: OpSlot = 60;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 49] = [
+pub const OPS: [OpDef; 61] = [
     OpDef {
         group: "Io",
         member: "Print",
         kind: OpKind::Fixed,
-        params: &[AbiType::Str],
-        reply: AbiType::Unit,
+        params: &[AbiType::STR],
+        reply: AbiType::UNIT,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -916,8 +1163,8 @@ pub const OPS: [OpDef; 49] = [
         group: "Io",
         member: "Error",
         kind: OpKind::Fixed,
-        params: &[AbiType::Str],
-        reply: AbiType::Unit,
+        params: &[AbiType::STR],
+        reply: AbiType::UNIT,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -926,7 +1173,7 @@ pub const OPS: [OpDef; 49] = [
         member: "ReadLine",
         kind: OpKind::Fixed,
         params: &[],
-        reply: AbiType::ResultOptionStrIoError,
+        reply: AbiType::RESULT_OPTION_STR_IO_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -935,7 +1182,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Now",
         kind: OpKind::Fixed,
         params: &[],
-        reply: AbiType::Int,
+        reply: AbiType::INT,
         schema: "",
         snapshot: SnapshotClass::MachineState,
     },
@@ -944,7 +1191,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Monotonic",
         kind: OpKind::Fixed,
         params: &[],
-        reply: AbiType::Int,
+        reply: AbiType::INT,
         schema: "",
         snapshot: SnapshotClass::MachineState,
     },
@@ -952,8 +1199,8 @@ pub const OPS: [OpDef; 49] = [
         group: "Clock",
         member: "Sleep",
         kind: OpKind::Fixed,
-        params: &[AbiType::Int],
-        reply: AbiType::Unit,
+        params: &[AbiType::INT],
+        reply: AbiType::UNIT,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -961,8 +1208,8 @@ pub const OPS: [OpDef; 49] = [
         group: "Rand",
         member: "Int",
         kind: OpKind::Fixed,
-        params: &[AbiType::Int, AbiType::Int],
-        reply: AbiType::Int,
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
         schema: "",
         snapshot: SnapshotClass::MachineState,
     },
@@ -971,7 +1218,7 @@ pub const OPS: [OpDef; 49] = [
         member: "New",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "() -> EmptyVm",
         snapshot: SnapshotClass::MachineState,
     },
@@ -980,7 +1227,7 @@ pub const OPS: [OpDef; 49] = [
         member: "FromFn",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[A,T,e](EmptyVm, Fn[A,T,e], control A) -> Vm[T]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -989,7 +1236,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Run",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T]) -> RunResult[T]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -998,7 +1245,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Step",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T]) -> StepEvent[T]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1007,7 +1254,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Drive",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T]) -> DriveEvent[T]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1016,7 +1263,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Answer",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T,A,R](Vm[T], PendingCall[A,R], R) -> ()",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1025,7 +1272,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Reject",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T], Request, Fault) -> ()",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1034,7 +1281,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Dispatch",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T], Request) -> ()",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1043,7 +1290,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Table",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T]) -> PolicyTable",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1057,7 +1304,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Run",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M,R](Vm[R], Type[M]) -> Handle[M,R]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1066,7 +1313,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Spawn",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M,R,A](Class[Proc[M]], control A) -> Handle[M,R]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1075,7 +1322,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Send",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M,R](Handle[M,R], M) -> SendResult",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1084,7 +1331,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Close",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M,R](Handle[M,R]) -> SendResult",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1093,7 +1340,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Recv",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M](proc self) -> Recv[M]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1102,7 +1349,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Done",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M,R](Handle[M,R]) -> ProcResult[R]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1111,7 +1358,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Pause",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M,R](Handle[M,R]) -> Result[Vm[R], ProcError]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1120,7 +1367,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Resume",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M,R](Handle[M,R]) -> Result[(), ProcError]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1132,7 +1379,7 @@ pub const OPS: [OpDef; 49] = [
         member: "SnapshotHeld",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T]) -> Result[Snapshot[T], SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1141,7 +1388,7 @@ pub const OPS: [OpDef; 49] = [
         member: "SnapshotSelf",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::ResultSnapshotImageError,
+        reply: AbiType::RESULT_SNAPSHOT_IMAGE_ERROR,
         schema: "() -> Result[SnapshotImage, SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1150,7 +1397,7 @@ pub const OPS: [OpDef; 49] = [
         member: "LoadSnapshot",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "(Bytes) -> Result[SnapshotImage, SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1159,7 +1406,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Restore",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](EmptyVm, Snapshot[T]) -> Result[Vm[T], RestoreError]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1167,8 +1414,8 @@ pub const OPS: [OpDef; 49] = [
         group: "Fs",
         member: "Open",
         kind: OpKind::Fixed,
-        params: &[AbiType::Str, AbiType::OpenOptions],
-        reply: AbiType::ResultFileHandleFsError,
+        params: &[AbiType::STR, AbiType::OPEN_OPTIONS],
+        reply: AbiType::RESULT_FILE_HANDLE_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -1176,8 +1423,8 @@ pub const OPS: [OpDef; 49] = [
         group: "Fs",
         member: "Read",
         kind: OpKind::Fixed,
-        params: &[AbiType::FileHandle, AbiType::Int],
-        reply: AbiType::ResultBytesFsError,
+        params: &[AbiType::FILE_HANDLE, AbiType::INT],
+        reply: AbiType::RESULT_BYTES_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -1185,8 +1432,8 @@ pub const OPS: [OpDef; 49] = [
         group: "Fs",
         member: "Write",
         kind: OpKind::Fixed,
-        params: &[AbiType::FileHandle, AbiType::Bytes],
-        reply: AbiType::ResultIntFsError,
+        params: &[AbiType::FILE_HANDLE, AbiType::BYTES],
+        reply: AbiType::RESULT_INT_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -1194,8 +1441,8 @@ pub const OPS: [OpDef; 49] = [
         group: "Fs",
         member: "Seek",
         kind: OpKind::Fixed,
-        params: &[AbiType::FileHandle, AbiType::SeekFrom],
-        reply: AbiType::ResultIntFsError,
+        params: &[AbiType::FILE_HANDLE, AbiType::SEEK_FROM],
+        reply: AbiType::RESULT_INT_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -1203,8 +1450,8 @@ pub const OPS: [OpDef; 49] = [
         group: "Fs",
         member: "Flush",
         kind: OpKind::Fixed,
-        params: &[AbiType::FileHandle],
-        reply: AbiType::ResultUnitFsError,
+        params: &[AbiType::FILE_HANDLE],
+        reply: AbiType::RESULT_UNIT_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -1212,8 +1459,8 @@ pub const OPS: [OpDef; 49] = [
         group: "Fs",
         member: "Close",
         kind: OpKind::Fixed,
-        params: &[AbiType::FileHandle],
-        reply: AbiType::ResultUnitFsError,
+        params: &[AbiType::FILE_HANDLE],
+        reply: AbiType::RESULT_UNIT_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
     },
@@ -1222,7 +1469,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Handles",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T]) -> List[ResourceHandle]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1231,8 +1478,8 @@ pub const OPS: [OpDef; 49] = [
         member: "Resource",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
-        schema: "[T](Vm[T], FileHandle) -> ResourceHandle",
+        reply: AbiType::UNIT,
+        schema: "[T,R: FileHandle | TcpResource](Vm[T], R) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1240,7 +1487,7 @@ pub const OPS: [OpDef; 49] = [
         member: "ServeFile",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T], PendingCall[(String, OpenOptions), Result[FileHandle, FsError]]) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1249,7 +1496,7 @@ pub const OPS: [OpDef; 49] = [
         member: "ResourceIsOpen",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "(ResourceHandle) -> Bool",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1258,7 +1505,7 @@ pub const OPS: [OpDef; 49] = [
         member: "ResourceClose",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "(ResourceHandle) -> Bool",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1267,7 +1514,7 @@ pub const OPS: [OpDef; 49] = [
         member: "ResourceKind",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "(ResourceHandle) -> String",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1276,7 +1523,7 @@ pub const OPS: [OpDef; 49] = [
         member: "SnapshotWait",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M,R](Handle[M,R], Int) -> Result[Snapshot[R], SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1285,7 +1532,7 @@ pub const OPS: [OpDef; 49] = [
         member: "ResourceSame",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "(ResourceHandle, ResourceHandle) -> Bool",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1294,7 +1541,7 @@ pub const OPS: [OpDef; 49] = [
         member: "DriveWait",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T]) -> Wait[DriveEvent[T]]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1303,7 +1550,7 @@ pub const OPS: [OpDef; 49] = [
         member: "RecvWait",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[M](proc self) -> Wait[Recv[M]]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1312,7 +1559,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Wait",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Wait[T]) -> T",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1321,7 +1568,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Choose",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[A,B](Wait[A], Wait[B]) -> Wait[Choice[A,B]]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1330,7 +1577,7 @@ pub const OPS: [OpDef; 49] = [
         member: "Cancel",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Wait[T]) -> Bool",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1339,7 +1586,7 @@ pub const OPS: [OpDef; 49] = [
         member: "DriveFor",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T], Int) -> Option[DriveEvent[T]]",
         snapshot: SnapshotClass::MachineState,
     },
@@ -1348,8 +1595,116 @@ pub const OPS: [OpDef; 49] = [
         member: "SnapshotWaitHeld",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::Unit,
+        reply: AbiType::UNIT,
         schema: "[T](Vm[T], Int) -> Result[Snapshot[T], SnapshotError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Dns",
+        member: "Resolve",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR, AbiType::INT],
+        reply: AbiType::RESULT_LIST_SOCKET_ADDRESS_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tcp",
+        member: "Connect",
+        kind: OpKind::Fixed,
+        params: &[AbiType::SOCKET_ADDRESS],
+        reply: AbiType::RESULT_TCP_STREAM_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tcp",
+        member: "Listen",
+        kind: OpKind::Fixed,
+        params: &[AbiType::SOCKET_ADDRESS, AbiType::INT],
+        reply: AbiType::RESULT_TCP_LISTENER_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tcp",
+        member: "Accept",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TCP_LISTENER],
+        reply: AbiType::RESULT_ACCEPT_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tcp",
+        member: "Read",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TCP_STREAM, AbiType::INT],
+        reply: AbiType::RESULT_TCP_READ_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tcp",
+        member: "Write",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TCP_STREAM, AbiType::BYTES],
+        reply: AbiType::RESULT_INT_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tcp",
+        member: "Shutdown",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TCP_STREAM, AbiType::SHUTDOWN],
+        reply: AbiType::RESULT_UNIT_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tcp",
+        member: "LocalAddress",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TCP_RESOURCE],
+        reply: AbiType::RESULT_SOCKET_ADDRESS_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tcp",
+        member: "PeerAddress",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TCP_STREAM],
+        reply: AbiType::RESULT_SOCKET_ADDRESS_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Tcp",
+        member: "Close",
+        kind: OpKind::Fixed,
+        params: &[AbiType::TCP_RESOURCE],
+        reply: AbiType::RESULT_UNIT_NET_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ServeTcpStream",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T](Vm[T], PendingCall, SocketAddress) -> ResourceHandle",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ServeTcpListener",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T](Vm[T], PendingCall[SocketAddress, Result[TcpListener, NetError]]) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
 ];
@@ -1383,12 +1738,152 @@ pub fn group_by_name(name: &str) -> Option<GroupSlot> {
     GROUPS.iter().position(|g| *g == name).map(|i| i as u32)
 }
 
+/// Return the direct manifest members of one effect-set slot.
+pub fn group_members(slot: GroupSlot) -> &'static [&'static str] {
+    GROUP_MEMBERS[slot as usize]
+}
+
+/// True when one group or effect set contains an exact operation.
+pub fn group_contains_op(group: GroupSlot, operation: OpSlot) -> bool {
+    fn contains(group: GroupSlot, operation: OpSlot, seen: &mut [bool]) -> bool {
+        let at = group as usize;
+        if seen[at] {
+            return false;
+        }
+        seen[at] = true;
+        let name = GROUPS[at];
+        if op(operation).group == name {
+            return true;
+        }
+        let exact = op_name(operation);
+        for member in GROUP_MEMBERS[at] {
+            if *member == exact {
+                return true;
+            }
+            if let Some(child) = group_by_name(member) {
+                if contains(child, operation, seen) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    let mut seen = vec![false; GROUP_COUNT as usize];
+    contains(group, operation, &mut seen)
+}
+
+/// Return the exact operation closure of one group or effect set.
+pub fn group_operations(group: GroupSlot) -> Vec<OpSlot> {
+    (0..OP_COUNT)
+        .filter(|operation| group_contains_op(group, *operation))
+        .collect()
+}
+
+/// Return the exact operation closure of one valid row name.
+pub fn row_name_operations(name: &str) -> Option<Vec<OpSlot>> {
+    if let Some(operation) = op_by_name(name) {
+        return Some(vec![operation]);
+    }
+    group_by_name(name).map(group_operations)
+}
+
+/// True when one row name is included in another row name.
+pub fn row_name_included(name: &str, expected: &str) -> bool {
+    if name == expected {
+        return true;
+    }
+    let Some(actual) = row_name_operations(name) else {
+        return false;
+    };
+    let Some(required) = row_name_operations(expected) else {
+        return false;
+    };
+    if actual.is_empty() || required.is_empty() {
+        return false;
+    }
+    actual.iter().all(|operation| required.contains(operation))
+}
+
 /// Find an operation slot by its canonical qualified name.
 pub fn op_by_name(name: &str) -> Option<OpSlot> {
-    let (group, member) = name.split_once('.')?;
     OPS.iter()
-        .position(|def| def.group == group && def.member == member)
+        .position(|def| {
+            name.len() == def.group.len() + def.member.len() + 1
+                && name.starts_with(def.group)
+                && name.as_bytes().get(def.group.len()) == Some(&b'.')
+                && name.ends_with(def.member)
+        })
         .map(|i| i as u32)
+}
+
+/// Validate every name, member, type, and dependency in the manifest.
+pub fn validate_manifest() -> Result<(), String> {
+    if GROUPS.len() != GROUP_MEMBERS.len() {
+        return Err("the group and member tables have different lengths".to_string());
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for group in GROUPS {
+        if !names.insert(group) {
+            return Err(format!("the manifest has duplicate group `{group}`"));
+        }
+    }
+    let mut operations = std::collections::BTreeSet::new();
+    for (slot, def) in OPS.iter().enumerate() {
+        if group_by_name(def.group).is_none() {
+            return Err(format!(
+                "operation {slot} names unknown group `{}`",
+                def.group
+            ));
+        }
+        if !def.reply.valid() || def.params.iter().any(|param| !param.valid()) {
+            return Err(format!("operation {slot} has an invalid type expression"));
+        }
+        let name = op_name(slot as OpSlot);
+        if !operations.insert(name.clone()) {
+            return Err(format!("the manifest has duplicate operation `{name}`"));
+        }
+        if group_by_name(&name).is_some() {
+            return Err(format!("operation `{name}` collides with an effect set"));
+        }
+    }
+    for (group, members) in GROUPS.iter().zip(GROUP_MEMBERS.iter()) {
+        let mut direct = std::collections::BTreeSet::new();
+        for member in *members {
+            if !direct.insert(*member) {
+                return Err(format!("effect set `{group}` repeats member `{member}`"));
+            }
+            if op_by_name(member).is_none() && group_by_name(member).is_none() {
+                return Err(format!(
+                    "effect set `{group}` names unknown member `{member}`"
+                ));
+            }
+        }
+    }
+
+    fn visit(group: GroupSlot, state: &mut [u8]) -> Result<(), String> {
+        let at = group as usize;
+        if state[at] == 1 {
+            return Err(format!("effect set `{}` is part of a cycle", GROUPS[at]));
+        }
+        if state[at] == 2 {
+            return Ok(());
+        }
+        state[at] = 1;
+        for member in GROUP_MEMBERS[at] {
+            if let Some(child) = group_by_name(member) {
+                visit(child, state)?;
+            }
+        }
+        state[at] = 2;
+        Ok(())
+    }
+
+    let mut state = vec![0; GROUP_COUNT as usize];
+    for group in 0..GROUP_COUNT {
+        visit(group, &mut state)?;
+    }
+    Ok(())
 }
 
 /// Find a `Fixed` operation inside a group by its member name. This
@@ -1402,11 +1897,7 @@ pub fn fixed_member(group: &str, member: &str) -> Option<OpSlot> {
 /// True when a row name is valid: an exact operation name or a group
 /// name.
 pub fn row_name_valid(name: &str) -> bool {
-    if name.contains('.') {
-        op_by_name(name).is_some()
-    } else {
-        group_by_name(name).is_some()
-    }
+    op_by_name(name).is_some() || group_by_name(name).is_some()
 }
 
 /// The stable identity hash of one operation: the domain-separated
@@ -1467,6 +1958,7 @@ pub fn identity_of(name: &str, def: &OpDef) -> [u8; 32] {
 /// The digest of the full manifest: version, groups, and every
 /// operation identity in slot order.
 pub fn manifest_digest() -> [u8; 32] {
+    validate_manifest().expect("the compiled operation manifest is valid");
     let identities: Vec<[u8; 32]> = (0..OP_COUNT).map(op_identity).collect();
     manifest_digest_of(&identities)
 }
@@ -1479,9 +1971,12 @@ pub fn manifest_digest_of(identities: &[[u8; 32]]) -> [u8; 32] {
     let mut input = Vec::new();
     input.extend_from_slice(b"lm-operations-manifest-v1\0");
     input.extend_from_slice(&ABI_VERSION.to_le_bytes());
-    for group in GROUPS {
-        input.extend_from_slice(group.as_bytes());
-        input.push(0);
+    for (group, members) in GROUPS.iter().zip(GROUP_MEMBERS.iter()) {
+        id_field(&mut input, group.as_bytes());
+        id_field(&mut input, &(members.len() as u64).to_le_bytes());
+        for member in *members {
+            id_field(&mut input, member.as_bytes());
+        }
     }
     for id in identities {
         input.extend_from_slice(id);
@@ -1524,6 +2019,13 @@ mod tests {
         assert_eq!(op_by_name("Wait.Wait"), Some(OP_WAIT_WAIT));
         assert_eq!(op_by_name("Wait.Choose"), Some(OP_WAIT_CHOOSE));
         assert_eq!(op_by_name("Wait.Cancel"), Some(OP_WAIT_CANCEL));
+        assert_eq!(op_by_name("Dns.Resolve"), Some(OP_DNS_RESOLVE));
+        assert_eq!(op_by_name("Tcp.Connect"), Some(OP_TCP_CONNECT));
+        assert_eq!(op_by_name("Tcp.Close"), Some(OP_TCP_CLOSE));
+        assert_eq!(
+            op_by_name("Vm.ServeTcpStream"),
+            Some(OP_VM_SERVE_TCP_STREAM)
+        );
     }
 
     #[test]
@@ -1531,7 +2033,7 @@ mod tests {
         assert_eq!(intrinsic_by_name("int.abs"), Some(INTRINSIC_INT_ABS));
         assert_eq!(intrinsic_by_name("int.add"), Some(INTRINSIC_INT_ADD));
         assert_eq!(intrinsic_by_name("bool.not"), Some(INTRINSIC_BOOL_NOT));
-        assert_eq!(intrinsic(INTRINSIC_INT_ABS).reply, AbiType::Int);
+        assert_eq!(intrinsic(INTRINSIC_INT_ABS).reply, AbiType::INT);
     }
 
     #[test]
@@ -1556,6 +2058,46 @@ mod tests {
         assert_eq!(group_by_name("Vm"), Some(6));
         assert_eq!(group_by_name("Nope"), None);
         assert_eq!(op_group(OP_CLOCK_NOW), group_by_name("Clock").unwrap());
+        assert_eq!(group_by_name("Tcp.Stream"), Some(12));
+        assert_eq!(group_by_name("Http.CleartextClient"), Some(16));
+    }
+
+    #[test]
+    fn the_network_effect_sets_expand_transitively() {
+        let stream = group_by_name("Tcp.Stream").unwrap();
+        assert!(group_contains_op(stream, OP_TCP_READ));
+        assert!(group_contains_op(stream, OP_TCP_CLOSE));
+        assert!(!group_contains_op(stream, OP_TCP_CONNECT));
+        assert!(!group_contains_op(stream, OP_TCP_LISTEN));
+
+        let client = group_by_name("Tcp.Client").unwrap();
+        assert!(group_contains_op(client, OP_TCP_CONNECT));
+        assert!(group_contains_op(client, OP_TCP_READ));
+        assert!(!group_contains_op(client, OP_TCP_LISTEN));
+
+        let http = group_by_name("Http.CleartextClient").unwrap();
+        assert!(group_contains_op(http, OP_DNS_RESOLVE));
+        assert!(group_contains_op(http, OP_TCP_WRITE));
+        assert!(!group_contains_op(http, OP_TCP_ACCEPT));
+    }
+
+    #[test]
+    fn normalized_rows_compare_exact_operation_closures() {
+        assert!(row_name_included("Tcp.Stream", "Tcp.Client"));
+        assert!(row_name_included("Tcp.Connect", "Tcp.Client"));
+        assert!(!row_name_included("Tcp.Client", "Tcp.Stream"));
+        assert!(!row_name_included("Tcp.Listen", "Tcp.Client"));
+    }
+
+    #[test]
+    fn manifest_types_and_members_are_valid() {
+        assert_eq!(validate_manifest(), Ok(()));
+        assert_eq!(
+            AbiType::RESULT_ACCEPT_NET_ERROR.text(),
+            "Result[Pair[TcpStream, SocketAddress], NetError]"
+        );
+        assert!(AbiType::RESULT_ACCEPT_NET_ERROR.valid());
+        assert!(!AbiType::Apply(AbiConstructor::Option, &[]).valid());
     }
 
     #[test]
@@ -1635,6 +2177,16 @@ mod tests {
                 "Fs.Seek",
                 "Fs.Flush",
                 "Fs.Close",
+                "Dns.Resolve",
+                "Tcp.Connect",
+                "Tcp.Listen",
+                "Tcp.Accept",
+                "Tcp.Read",
+                "Tcp.Write",
+                "Tcp.Shutdown",
+                "Tcp.LocalAddress",
+                "Tcp.PeerAddress",
+                "Tcp.Close",
             ]
         );
         // A VM control operation runs inside the driver loop, so it

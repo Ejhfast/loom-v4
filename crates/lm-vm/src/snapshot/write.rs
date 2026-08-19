@@ -627,6 +627,8 @@ impl World<'_> {
                     generation,
                 },
                 Object::NativeFileHandle { .. } => Object::NativeFileHandle { resource: 0 },
+                Object::NativeTcpStream { .. } => Object::NativeTcpStream { resource: 0 },
+                Object::NativeTcpListener { .. } => Object::NativeTcpListener { resource: 0 },
                 Object::NativeResourceHandle { surface, .. } => Object::NativeResourceHandle {
                     surface: self.require_ordinal(surface, ordinal_of)?,
                     resource: 0,

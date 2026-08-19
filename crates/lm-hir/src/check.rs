@@ -32,6 +32,8 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/fs.lm"),
     "\n",
+    include_str!("../../../core/network.lm"),
+    "\n",
     include_str!("../../../core/vm.lm"),
     "\n",
     include_str!("../../../core/proc.lm"),
@@ -49,7 +51,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 29] = [
+pub const PRELUDE_TYPES: [&str; 38] = [
     "Option",
     "Result",
     "Ordering",
@@ -69,6 +71,15 @@ pub const PRELUDE_TYPES: [&str; 29] = [
     "FsError",
     "OpenOptions",
     "SeekFrom",
+    "IpAddress",
+    "SocketAddress",
+    "NetError",
+    "TcpRead",
+    "Shutdown",
+    "TcpResource",
+    "TcpStream",
+    "TcpListener",
+    "Tcp",
     "Text",
     "String",
     "Substring",
@@ -246,6 +257,9 @@ pub(crate) fn sys_group_name(name: &str) -> Option<&'static str> {
         "vm" => Some("Vm"),
         "compiler" => Some("Compiler"),
         "reflect" => Some("Reflect"),
+        "wait" => Some("Wait"),
+        "dns" => Some("Dns"),
+        "tcp" => Some("Tcp"),
         _ => None,
     }
 }
@@ -1683,6 +1697,16 @@ fn link_class_parents(
                     *pspan,
                 ));
             }
+            if !is_core
+                && pname == "TcpResource"
+                && ctx.core_types.get("TcpResource") == Some(&parent)
+            {
+                return Err(Diagnostic::new(
+                    "E1040",
+                    "`TcpResource` is sealed and permits only core TCP classes",
+                    *pspan,
+                ));
+            }
             if parent_meta.is_final {
                 return Err(Diagnostic::new(
                     "E1040",
@@ -1914,12 +1938,20 @@ fn resolve_class(
         (true, "Bytes") => Some(NativeRepr::Bytes),
         (true, "StringBuilder") => Some(NativeRepr::StringBuilder),
         (true, "ByteBuffer") => Some(NativeRepr::ByteBuffer),
+        (true, "TcpResource") => Some(NativeRepr::TcpResource),
+        (true, "TcpStream") => Some(NativeRepr::TcpStream),
+        (true, "TcpListener") => Some(NativeRepr::TcpListener),
         _ => None,
     };
     let text_parent = ctx.core_types.get("Text").copied();
+    let tcp_parent = ctx.core_types.get("TcpResource").copied();
     let valid_native_layout = match native_repr {
         Some(NativeRepr::Text) => !class.is_final && parent.is_none(),
         Some(NativeRepr::String | NativeRepr::Substring) => class.is_final && parent == text_parent,
+        Some(NativeRepr::TcpResource) => !class.is_final && parent.is_none(),
+        Some(NativeRepr::TcpStream | NativeRepr::TcpListener) => {
+            class.is_final && parent == tcp_parent
+        }
         Some(_) => class.is_final && parent.is_none(),
         None => true,
     };
@@ -1948,7 +1980,10 @@ fn resolve_class(
             | NativeRepr::Substring
             | NativeRepr::Char
             | NativeRepr::StringBuilder
-            | NativeRepr::ByteBuffer,
+            | NativeRepr::ByteBuffer
+            | NativeRepr::TcpResource
+            | NativeRepr::TcpStream
+            | NativeRepr::TcpListener,
         ) => ctx.store.intern(Type::Class(ClassId(idx))),
         None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
         None => {

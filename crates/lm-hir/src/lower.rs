@@ -1761,6 +1761,24 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             blocks: vec![vec![Instr::ConstUnit, Instr::Return]],
         };
     }
+    if matches!(
+        class.native_repr,
+        Some(NativeRepr::TcpResource | NativeRepr::TcpStream | NativeRepr::TcpListener)
+    ) {
+        let ret = m.intern_type(BcType::Class(cidx));
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::Unreachable]],
+        };
+    }
     if class.native_repr == Some(NativeRepr::Int) {
         let int = m.intern_type(BcType::Int);
         return Func {

@@ -5,7 +5,7 @@
 //! machine, the scope identity, the pending operation ordinal, and the
 //! cleanup state (specification 25.5).
 //!
-//! The registry tracks pending operations and open file resources.
+//! The registry tracks pending operations and open external resources.
 //! Guest code cannot forge a record.
 //!
 //! Snapshot preflight reads this registry beside the guest graph. A
@@ -66,6 +66,10 @@ pub enum ResourceKind {
     PendingOperation,
     /// One open file resource.
     File,
+    /// One open TCP stream.
+    TcpStream,
+    /// One open TCP listener.
+    TcpListener,
 }
 
 impl ResourceKind {
@@ -75,6 +79,7 @@ impl ResourceKind {
             // A live completion callback has no bytes to copy.
             ResourceKind::PendingOperation => SnapshotClass::HostAttachment,
             ResourceKind::File => SnapshotClass::HostAttachment,
+            ResourceKind::TcpStream | ResourceKind::TcpListener => SnapshotClass::HostAttachment,
         }
     }
 }
@@ -285,6 +290,14 @@ impl ResourceRegistry {
         self.records
             .iter()
             .filter(|r| r.state == ResourceState::Live)
+    }
+
+    /// Return every host completion token retained by this registry.
+    pub fn pending_scopes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.records
+            .iter()
+            .filter(|record| record.kind == ResourceKind::PendingOperation)
+            .map(|record| record.scope)
     }
 
     /// The number of live records.

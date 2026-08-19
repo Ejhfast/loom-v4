@@ -136,6 +136,9 @@ enum Kind {
     Map,
     Tuple,
     Instance,
+    TcpResource,
+    TcpStream,
+    TcpListener,
 }
 
 enum Node {
@@ -171,7 +174,13 @@ fn check_one(
             let object = heap.get(reference);
             let found = kind_of(object);
             let text_match = kind == Kind::Text && matches!(found, Kind::Str | Kind::Substring);
-            if found != kind && !text_match && !(found == Kind::Vm && kind == Kind::EmptyVm) {
+            let tcp_match =
+                kind == Kind::TcpResource && matches!(found, Kind::TcpStream | Kind::TcpListener);
+            if found != kind
+                && !text_match
+                && !tcp_match
+                && !(found == Kind::Vm && kind == Kind::EmptyVm)
+            {
                 return Err(FaultCode::TypeMismatch);
             }
 
@@ -225,6 +234,12 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::Text)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_SUBSTRING] == *class {
                 Node::Heap(Kind::Substring)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_TCP_RESOURCE] == *class {
+                Node::Heap(Kind::TcpResource)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_TCP_STREAM] == *class {
+                Node::Heap(Kind::TcpStream)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_TCP_LISTENER] == *class {
+                Node::Heap(Kind::TcpListener)
             } else {
                 Node::Heap(Kind::Instance)
             }
@@ -256,6 +271,8 @@ fn kind_of(object: &Object) -> Kind {
         Object::Map { .. } => Kind::Map,
         Object::Tuple { .. } => Kind::Tuple,
         Object::Instance { .. } => Kind::Instance,
+        Object::NativeTcpStream { .. } => Kind::TcpStream,
+        Object::NativeTcpListener { .. } => Kind::TcpListener,
     }
 }
 
@@ -436,11 +453,7 @@ fn row_included(module: &Module, sub: &ClosedRow, sup: &ClosedRow) -> bool {
             let Some(candidate_name) = module.strings.get(*candidate as usize) else {
                 return false;
             };
-            candidate_name == name
-                || name
-                    .split_once('.')
-                    .map(|(group, _)| group == candidate_name)
-                    .unwrap_or(false)
+            lm_abi::row_name_included(name, candidate_name)
         })
     })
 }

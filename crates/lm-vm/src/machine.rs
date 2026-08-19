@@ -253,10 +253,28 @@ impl Default for PolicyTable {
 }
 
 impl PolicyTable {
-    /// The action for one exact operation: exact entry, then group
-    /// entry. `None` is the default block.
+    /// Find the action for one exact operation.
+    ///
+    /// An exact entry has precedence. A block from any containing
+    /// effect set has precedence over set passes. `None` is the
+    /// default block.
     pub fn lookup(&self, op: u32) -> Option<Action> {
-        self.exact[op as usize].or(self.group[lm_abi::op_group(op) as usize])
+        if let Some(action) = self.exact[op as usize] {
+            return Some(action);
+        }
+        let mut passed = false;
+        for group in 0..lm_abi::GROUP_COUNT {
+            if !lm_abi::group_contains_op(group, op) {
+                continue;
+            }
+            match self.group[group as usize] {
+                Some(Action::Block) => return Some(Action::Block),
+                Some(Action::Pass) => passed = true,
+                Some(Action::Mock(closure)) => return Some(Action::Mock(closure)),
+                None => {}
+            }
+        }
+        passed.then_some(Action::Pass)
     }
 }
 
@@ -484,6 +502,22 @@ impl Machine {
                 }
                 Object::ByteBuf(_) => {
                     let class = module.core_roles[lm_bytecode::corepin::ROLE_BYTE_BUFFER];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::NativeTcpStream { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_TCP_STREAM];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::NativeTcpListener { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_TCP_LISTENER];
                     if class == lm_bytecode::NO_ROLE {
                         Err(BAD_TYPE)
                     } else {
@@ -2665,10 +2699,7 @@ impl Machine {
             lm_bytecode::BcType::Class(c) | lm_bytecode::BcType::Inst(c, _) => *c,
             _ => return Err(BAD_STATE),
         };
-        let mut class = match self.vm.heap.get(r) {
-            Object::Instance { class, .. } => *class,
-            _ => return Err(BAD_TYPE),
-        };
+        let mut class = self.virtual_class(module, Value::Obj(r))?;
         // The class chain of a verified module is acyclic, and the
         // step bound holds whatever built the state, so the walk never
         // spins on a hand-built table.
@@ -2992,6 +3023,35 @@ fn integer_text_len(value: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_set_overlap_has_stable_precedence() {
+        let mut table = PolicyTable::default();
+        let client = lm_abi::group_by_name("Tcp.Client").unwrap() as usize;
+        let stream = lm_abi::group_by_name("Tcp.Stream").unwrap() as usize;
+        table.group[client] = Some(Action::Pass);
+        assert!(matches!(
+            table.lookup(lm_abi::OP_TCP_READ),
+            Some(Action::Pass)
+        ));
+        assert!(table.lookup(lm_abi::OP_TCP_LISTEN).is_none());
+
+        table.group[stream] = Some(Action::Block);
+        assert!(matches!(
+            table.lookup(lm_abi::OP_TCP_READ),
+            Some(Action::Block)
+        ));
+        assert!(matches!(
+            table.lookup(lm_abi::OP_TCP_CONNECT),
+            Some(Action::Pass)
+        ));
+
+        table.exact[lm_abi::OP_TCP_READ as usize] = Some(Action::Pass);
+        assert!(matches!(
+            table.lookup(lm_abi::OP_TCP_READ),
+            Some(Action::Pass)
+        ));
+    }
 
     /// The memory cost of one type environment witness.
     ///
