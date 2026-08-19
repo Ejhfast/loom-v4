@@ -1471,6 +1471,50 @@ impl Machine {
         Ok(())
     }
 
+    /// Execute one ByteBuffer scan instruction outside the builder dispatcher.
+    #[inline(never)]
+    fn exec_byte_buffer_scan_instr(&mut self, instr: Instr) -> Result<(), FaultCode> {
+        match instr {
+            Instr::Native(lm_bytecode::NativeInstr::BbAt) => {
+                let index = self.pop_int()?;
+                let buffer = self.pop_obj()?;
+                let bytes = match self.vm.heap.get(buffer) {
+                    Object::ByteBuf(bytes) if bytes.buffer().is_some() => bytes,
+                    Object::ByteBuf(_) => return Err(FaultCode::InvalidVmState),
+                    _ => return Err(BAD_TYPE),
+                };
+                let value = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| bytes.at(index))
+                    .map(i64::from)
+                    .unwrap_or(-1);
+                self.push(Value::Int(value))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => {
+                let start = self.pop_int()?;
+                let needle = self.pop_obj()?;
+                let buffer = self.pop_obj()?;
+                let needle = match self.vm.heap.get(needle) {
+                    Object::Bytes(bytes) => bytes.clone(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let bytes = match self.vm.heap.get(buffer) {
+                    Object::ByteBuf(bytes) if bytes.buffer().is_some() => bytes,
+                    Object::ByteBuf(_) => return Err(FaultCode::InvalidVmState),
+                    _ => return Err(BAD_TYPE),
+                };
+                let found = usize::try_from(start)
+                    .ok()
+                    .and_then(|start| bytes.find_from(&needle, start))
+                    .and_then(|index| i64::try_from(index).ok())
+                    .unwrap_or(-1);
+                self.push(Value::Int(found))?;
+            }
+            _ => unreachable!("the ByteBuffer scan dispatcher receives one scan instruction"),
+        }
+        Ok(())
+    }
+
     /// Execute one Bytes or builder instruction outside the hot dispatch body.
     #[inline(never)]
     fn exec_bytes_builder_instr(&mut self, instr: Instr) -> Result<(), FaultCode> {
@@ -1779,41 +1823,6 @@ impl Machine {
                 self.vm.heap.recharge_local(buffer);
                 let value = self.alloc(Object::Bytes(SharedBytes::from(bytes)))?;
                 self.push(value)?;
-            }
-            Instr::Native(lm_bytecode::NativeInstr::BbAt) => {
-                let index = self.pop_int()?;
-                let buffer = self.pop_obj()?;
-                let bytes = match self.vm.heap.get(buffer) {
-                    Object::ByteBuf(bytes) if bytes.buffer().is_some() => bytes,
-                    Object::ByteBuf(_) => return Err(FaultCode::InvalidVmState),
-                    _ => return Err(BAD_TYPE),
-                };
-                let value = usize::try_from(index)
-                    .ok()
-                    .and_then(|index| bytes.at(index))
-                    .map(i64::from)
-                    .unwrap_or(-1);
-                self.push(Value::Int(value))?;
-            }
-            Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => {
-                let start = self.pop_int()?;
-                let needle = self.pop_obj()?;
-                let buffer = self.pop_obj()?;
-                let needle = match self.vm.heap.get(needle) {
-                    Object::Bytes(bytes) => bytes.clone(),
-                    _ => return Err(BAD_TYPE),
-                };
-                let bytes = match self.vm.heap.get(buffer) {
-                    Object::ByteBuf(bytes) if bytes.buffer().is_some() => bytes,
-                    Object::ByteBuf(_) => return Err(FaultCode::InvalidVmState),
-                    _ => return Err(BAD_TYPE),
-                };
-                let found = usize::try_from(start)
-                    .ok()
-                    .and_then(|start| bytes.find_from(&needle, start))
-                    .and_then(|index| i64::try_from(index).ok())
-                    .unwrap_or(-1);
-                self.push(Value::Int(found))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BytesNew) => {
                 let string = self.pop_obj()?;
@@ -2158,8 +2167,15 @@ impl Machine {
         envs: &mut TypeEnvs,
         instr: Instr,
     ) -> Result<ExecOutcome, FaultCode> {
-        if matches!(instr, Instr::Native(_)) {
-            self.exec_native_instr(instr)?;
+        if let Instr::Native(native) = instr {
+            // Keep scans outside the established builder match.
+            // Extra arms change LLVM's jump table for all builder operations.
+            match native {
+                lm_bytecode::NativeInstr::BbAt | lm_bytecode::NativeInstr::BbFindFrom => {
+                    self.exec_byte_buffer_scan_instr(instr)?;
+                }
+                _ => self.exec_native_instr(instr)?,
+            }
             return Ok(ExecOutcome::Continue);
         }
         match instr {
