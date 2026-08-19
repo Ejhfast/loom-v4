@@ -24,6 +24,7 @@ pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
 };
 use std::cell::Cell;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 
 /// Object-table slots per page.
@@ -44,6 +45,37 @@ struct SharedCharge {
     capacity: usize,
     references: usize,
 }
+
+/// Hash trusted allocation addresses for the shared-storage ledger.
+#[derive(Default)]
+struct AllocationHasher(u64);
+
+impl Hasher for AllocationHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = hash;
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        let mut hash = value as u64;
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+        self.0 = hash ^ (hash >> 31);
+    }
+}
+
+type SharedAllocations =
+    std::collections::HashMap<usize, SharedCharge, BuildHasherDefault<AllocationHasher>>;
 
 /// One object-table entry.
 struct Entry {
@@ -250,7 +282,7 @@ pub struct Heap {
     /// The aggregate ledger of the owning world.
     budget: Option<HeapBudget>,
     /// Shared immutable allocations referenced by this heap.
-    shared_allocations: std::collections::HashMap<usize, SharedCharge>,
+    shared_allocations: SharedAllocations,
 }
 
 impl Heap {
@@ -276,7 +308,7 @@ impl Heap {
             scratch: GraphScratch::default(),
             digests: std::collections::HashMap::new(),
             budget,
-            shared_allocations: std::collections::HashMap::new(),
+            shared_allocations: SharedAllocations::default(),
         }
     }
 
@@ -335,7 +367,10 @@ impl Heap {
         object.heap_base_cost()
             + object
                 .shared_allocation()
-                .filter(|(key, _)| !self.shared_allocations.contains_key(key))
+                .filter(|(key, _)| {
+                    object.shared_allocation_is_unique()
+                        || !self.shared_allocations.contains_key(key)
+                })
                 .map(|(_, capacity)| capacity)
                 .unwrap_or(0)
     }
@@ -631,6 +666,29 @@ impl Heap {
                 budget.charge(new_total - old_total, 0);
             } else {
                 budget.release(old_total - new_total, 0);
+            }
+        }
+    }
+
+    /// Update one object that has no shared allocation.
+    pub fn recharge_local(&mut self, r: ObjRef) {
+        let (old_cost, new_cost) = {
+            let entry = self.entry_mut(r.slot);
+            assert_eq!(entry.generation, r.generation, "stale object reference");
+            let (header, object) = entry.live.as_mut().expect("live object");
+            debug_assert!(header.shared.is_none());
+            debug_assert!(object.shared_allocation().is_none());
+            let old_cost = header.bytes;
+            let new_cost = object.heap_base_cost();
+            header.bytes = new_cost;
+            (old_cost, new_cost)
+        };
+        self.used_bytes = self.used_bytes - old_cost + new_cost;
+        if let Some(budget) = &self.budget {
+            if new_cost >= old_cost {
+                budget.charge(new_cost - old_cost, 0);
+            } else {
+                budget.release(old_cost - new_cost, 0);
             }
         }
     }
@@ -963,6 +1021,31 @@ mod tests {
     }
 
     #[test]
+    fn text_views_from_bytes_charge_one_backing_allocation() {
+        let mut heap = Heap::new(1 << 20);
+        let bytes = SharedBytes::from("aé猫z".as_bytes());
+        let text = bytes.utf8_view().expect("the bytes contain UTF-8");
+        let view = text.scalar_slice(1, 2).expect("the scalar range is valid");
+        let text_base = Object::Str(text.clone()).heap_base_cost();
+        let view_base = Object::Substring(view.clone()).heap_base_cost();
+        let capacity = text.retained_capacity();
+
+        let string = heap.alloc(Object::Str(text));
+        assert_eq!(heap.used_bytes(), text_base + capacity);
+        assert_eq!(
+            heap.allocation_cost(&Object::Substring(view.clone())),
+            view_base
+        );
+        let substring = heap.alloc(Object::Substring(view));
+        assert_eq!(heap.used_bytes(), text_base + view_base + capacity);
+
+        heap.free(string);
+        assert_eq!(heap.used_bytes(), view_base + capacity);
+        heap.free(substring);
+        assert_eq!(heap.used_bytes(), 0);
+    }
+
+    #[test]
     fn a_builder_appends_a_string_without_changing_the_source() {
         let mut heap = Heap::new(1 << 20);
         let builder = heap.alloc(Object::StrBuilder(NativeStringBuilder::from_string(
@@ -971,7 +1054,7 @@ mod tests {
         let source = heap.alloc(str_obj("bc"));
 
         assert!(heap.append_string(builder, source));
-        heap.recharge(builder);
+        heap.recharge_local(builder);
         assert_eq!(
             heap.get(builder),
             &Object::StrBuilder(NativeStringBuilder::from_string("abc".to_string()))

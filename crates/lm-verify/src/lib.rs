@@ -396,6 +396,22 @@ impl<'m> Ctx<'m> {
         true
     }
 
+    /// Test one key for a map query.
+    fn accepts_map_query_key(&self, found: u32, expected: u32) -> bool {
+        if self.is_subtype(found, expected) {
+            return true;
+        }
+        let Some(text) = self.core.text else {
+            return false;
+        };
+        let is_text = |ty| {
+            self.as_instance(ty).is_some_and(|(class, args)| {
+                self.ancestor_args(class, &args, text) == Some(Vec::new())
+            })
+        };
+        is_text(found) && is_text(expected)
+    }
+
     /// Join two types at a control-flow merge. Classes join at their
     /// nearest common ancestor. Unrelated types have no join.
     ///
@@ -2954,7 +2970,7 @@ fn step(
             let key = pop(state)?;
             let m = pop(state)?;
             let (k, _) = as_map(m)?;
-            if !ctx.is_subtype(key, k) {
+            if !ctx.accepts_map_query_key(key, k) {
                 return Err(fail(format!("map key expects type {k}, found type {key}")));
             }
             push(state, TY_BOOL)?;
@@ -2963,7 +2979,7 @@ fn step(
             let key = pop(state)?;
             let m = pop(state)?;
             let (k, v) = as_map(m)?;
-            if !ctx.is_subtype(key, k) {
+            if !ctx.accepts_map_query_key(key, k) {
                 return Err(fail(format!("map key expects type {k}, found type {key}")));
             }
             push(state, v)?;

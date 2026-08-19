@@ -92,6 +92,20 @@ fn string_intrinsics_inline_to_canonical_instructions() {
 }
 
 #[test]
+fn interpolation_finishes_its_private_builder() {
+    let module =
+        compile_text("interpolation_finish.lm", "\"value={1}\"\n").expect("the program compiles");
+    let instructions: Vec<Instr> = module.funcs[module.entry as usize]
+        .blocks
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    assert!(instructions.contains(&Instr::Native(lm_bytecode::NativeInstr::SbFinish)));
+    assert!(!instructions.contains(&Instr::Native(lm_bytecode::NativeInstr::SbBuild)));
+}
+
+#[test]
 fn a_string_tag_supports_verified_virtual_dispatch() {
     let mut module =
         compile_text("string_virtual.lm", "\"é\".byte_len()\n").expect("the program compiles");
@@ -217,6 +231,28 @@ end
     assert_eq!(
         run_text("text_map_keys.lm", source, VmConfig::default()).unwrap(),
         "Done((true, \"[é猫]\", 1, 2, 2))"
+    );
+}
+
+#[test]
+fn substring_concatenation_and_string_map_queries_use_text_content() {
+    let source = r#"
+values: {String: Int} = {"é猫": 7}
+case "xé猫z".slice(1, 2)
+in Ok(view) then (
+    view + "!",
+    view.concat("?"),
+    values.has(view),
+    values.get(view).value_or(0),
+    values.at(view),
+    values[view]
+  )
+in Err(_) then ("bad", "bad", false, 0, 0, 0)
+end
+"#;
+    assert_eq!(
+        run_text("text_query_keys.lm", source, VmConfig::default()).unwrap(),
+        "Done((\"é猫!\", \"é猫?\", true, 7, 7, 7))"
     );
 }
 

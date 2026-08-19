@@ -108,6 +108,14 @@ class Text
     intrinsic("text.bytes", self)
   end
 
+  def concat(self, other: Text): String
+    intrinsic("text.concat", self, other)
+  end
+
+  def __add__(self, other: Text): String
+    intrinsic("text.concat", self, other)
+  end
+
   def __eq__(self, other: Text): Bool
     intrinsic("text.eq", self, other)
   end
@@ -134,13 +142,6 @@ class Text
 end
 
 final class String < Text
-  def concat(self, other: Text): String
-    intrinsic("text.concat", self, other)
-  end
-
-  def __add__(self, other: Text): String
-    intrinsic("text.concat", self, other)
-  end
 end
 
 final class Substring < Text

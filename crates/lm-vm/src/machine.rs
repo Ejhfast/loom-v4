@@ -1314,29 +1314,35 @@ impl Machine {
                 let string = self.pop_obj()?;
                 let builder = self.pop_obj()?;
                 self.frozen_guard(builder)?;
-                let text = match self.vm.heap.get(string) {
-                    Object::Str(text) | Object::Substring(text) => text.clone(),
+                let text_len = match self.vm.heap.get(string) {
+                    Object::Str(text) | Object::Substring(text) => text.len(),
                     _ => return Err(BAD_TYPE),
                 };
                 let growth = match self.vm.heap.get(builder) {
-                    Object::StrBuilder(builder) => builder.reserve_growth(text.len()),
+                    Object::StrBuilder(builder) => builder.reserve_growth(text_len),
                     _ => return Err(BAD_TYPE),
                 }
                 .ok_or(FaultCode::InvalidVmState)?;
-                self.reserve(growth, &[Value::Obj(builder), Value::Obj(string)])?;
-                match self.vm.heap.get_mut(builder) {
-                    Object::StrBuilder(builder) => {
-                        if !builder
-                            .try_reserve(text.len())
-                            .map_err(|_| FaultCode::HeapLimit)?
-                            || !builder.append(&text)
-                        {
-                            return Err(FaultCode::InvalidVmState);
+                if growth != 0 {
+                    self.reserve(growth, &[Value::Obj(builder), Value::Obj(string)])?;
+                    match self.vm.heap.get_mut(builder) {
+                        Object::StrBuilder(builder) => {
+                            if !builder
+                                .try_reserve(text_len)
+                                .map_err(|_| FaultCode::HeapLimit)?
+                            {
+                                return Err(FaultCode::InvalidVmState);
+                            }
                         }
+                        _ => return Err(BAD_TYPE),
                     }
-                    _ => return Err(BAD_TYPE),
                 }
-                self.vm.heap.recharge(builder);
+                if !self.vm.heap.append_string(builder, string) {
+                    return Err(FaultCode::InvalidVmState);
+                }
+                if growth != 0 {
+                    self.vm.heap.recharge_local(builder);
+                }
                 self.push(Value::Obj(builder))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::SbAppendInt) => {
@@ -1405,18 +1411,25 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 }
                 .ok_or(FaultCode::InvalidVmState)?;
-                self.reserve(growth, &[Value::Obj(builder)])?;
+                if growth != 0 {
+                    self.reserve(growth, &[Value::Obj(builder)])?;
+                }
                 match self.vm.heap.get_mut(builder) {
                     Object::StrBuilder(target) => {
-                        if !target.try_reserve(len).map_err(|_| FaultCode::HeapLimit)?
-                            || !target.push(value)
+                        if growth != 0
+                            && !target.try_reserve(len).map_err(|_| FaultCode::HeapLimit)?
                         {
+                            return Err(FaultCode::InvalidVmState);
+                        }
+                        if !target.push(value) {
                             return Err(FaultCode::InvalidVmState);
                         }
                     }
                     _ => return Err(BAD_TYPE),
                 }
-                self.vm.heap.recharge(builder);
+                if growth != 0 {
+                    self.vm.heap.recharge_local(builder);
+                }
                 self.push(Value::Obj(builder))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::SbFinish) => {
@@ -1428,8 +1441,7 @@ impl Machine {
                     }
                     _ => return Err(BAD_TYPE),
                 };
-                self.vm.heap.recharge(builder);
-                self.reserve(text.len(), &[])?;
+                self.vm.heap.recharge_local(builder);
                 let text = SharedText::try_from_string_parts(text, scalar_count, ascii)
                     .map_err(|_| FaultCode::HeapLimit)?;
                 let value = self.alloc(Object::Str(text))?;
@@ -1445,7 +1457,6 @@ impl Machine {
                 if !cleared {
                     return Err(FaultCode::InvalidVmState);
                 }
-                self.vm.heap.recharge(builder);
                 self.push(Value::Obj(builder))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BbNew) => {
@@ -1462,18 +1473,23 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 }
                 .ok_or(FaultCode::InvalidVmState)?;
-                self.reserve(growth, &[Value::Obj(buffer)])?;
+                if growth != 0 {
+                    self.reserve(growth, &[Value::Obj(buffer)])?;
+                }
                 match self.vm.heap.get_mut(buffer) {
                     Object::ByteBuf(bytes) => {
-                        if !bytes.try_reserve(1).map_err(|_| FaultCode::HeapLimit)?
-                            || !bytes.push(byte)
-                        {
+                        if growth != 0 && !bytes.try_reserve(1).map_err(|_| FaultCode::HeapLimit)? {
+                            return Err(FaultCode::InvalidVmState);
+                        }
+                        if !bytes.push(byte) {
                             return Err(FaultCode::InvalidVmState);
                         }
                     }
                     _ => return Err(BAD_TYPE),
                 }
-                self.vm.heap.recharge(buffer);
+                if growth != 0 {
+                    self.vm.heap.recharge_local(buffer);
+                }
                 self.push(Value::Obj(buffer))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BbLen) => {
@@ -1518,20 +1534,27 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 }
                 .ok_or(FaultCode::InvalidVmState)?;
-                self.reserve(growth, &[Value::Obj(buffer), Value::Obj(source)])?;
+                if growth != 0 {
+                    self.reserve(growth, &[Value::Obj(buffer), Value::Obj(source)])?;
+                }
                 match self.vm.heap.get_mut(buffer) {
                     Object::ByteBuf(target) => {
-                        if !target
-                            .try_reserve(bytes.len())
-                            .map_err(|_| FaultCode::HeapLimit)?
-                            || !target.extend(&bytes)
+                        if growth != 0
+                            && !target
+                                .try_reserve(bytes.len())
+                                .map_err(|_| FaultCode::HeapLimit)?
                         {
+                            return Err(FaultCode::InvalidVmState);
+                        }
+                        if !target.extend(&bytes) {
                             return Err(FaultCode::InvalidVmState);
                         }
                     }
                     _ => return Err(BAD_TYPE),
                 }
-                self.vm.heap.recharge(buffer);
+                if growth != 0 {
+                    self.vm.heap.recharge_local(buffer);
+                }
                 self.push(Value::Obj(buffer))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BbReserve) => {
@@ -1545,19 +1568,24 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 }
                 .ok_or(FaultCode::InvalidVmState)?;
-                self.reserve(growth, &[Value::Obj(buffer)])?;
+                if growth != 0 {
+                    self.reserve(growth, &[Value::Obj(buffer)])?;
+                }
                 match self.vm.heap.get_mut(buffer) {
                     Object::ByteBuf(bytes) => {
-                        if !bytes
-                            .try_reserve(additional)
-                            .map_err(|_| FaultCode::HeapLimit)?
+                        if growth != 0
+                            && !bytes
+                                .try_reserve(additional)
+                                .map_err(|_| FaultCode::HeapLimit)?
                         {
                             return Err(FaultCode::InvalidVmState);
                         }
                     }
                     _ => return Err(BAD_TYPE),
                 }
-                self.vm.heap.recharge(buffer);
+                if growth != 0 {
+                    self.vm.heap.recharge_local(buffer);
+                }
                 self.push(Value::Obj(buffer))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BbClear) => {
@@ -1570,7 +1598,6 @@ impl Machine {
                 if !cleared {
                     return Err(FaultCode::InvalidVmState);
                 }
-                self.vm.heap.recharge(buffer);
                 self.push(Value::Obj(buffer))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BbFinish) => {
@@ -1580,7 +1607,7 @@ impl Machine {
                     Object::ByteBuf(buffer) => buffer.finish().ok_or(FaultCode::InvalidVmState)?,
                     _ => return Err(BAD_TYPE),
                 };
-                self.vm.heap.recharge(buffer);
+                self.vm.heap.recharge_local(buffer);
                 let value = self.alloc(Object::Bytes(SharedBytes::from(bytes)))?;
                 self.push(value)?;
             }
@@ -2419,20 +2446,27 @@ impl Machine {
             _ => return Err(BAD_TYPE),
         }
         .ok_or(FaultCode::InvalidVmState)?;
-        self.reserve(growth, &[Value::Obj(sb)])?;
+        if growth != 0 {
+            self.reserve(growth, &[Value::Obj(sb)])?;
+        }
         match self.vm.heap.get_mut(sb) {
             Object::StrBuilder(buf) => {
-                if !buf
-                    .try_reserve(text.len())
-                    .map_err(|_| FaultCode::HeapLimit)?
-                    || !buf.append_str(text)
+                if growth != 0
+                    && !buf
+                        .try_reserve(text.len())
+                        .map_err(|_| FaultCode::HeapLimit)?
                 {
+                    return Err(FaultCode::InvalidVmState);
+                }
+                if !buf.append_str(text) {
                     return Err(FaultCode::InvalidVmState);
                 }
             }
             _ => return Err(BAD_TYPE),
         }
-        self.vm.heap.recharge(sb);
+        if growth != 0 {
+            self.vm.heap.recharge_local(sb);
+        }
         self.push(Value::Obj(sb))
     }
 
@@ -2444,18 +2478,23 @@ impl Machine {
             _ => return Err(BAD_TYPE),
         }
         .ok_or(FaultCode::InvalidVmState)?;
-        self.reserve(growth, &[Value::Obj(sb)])?;
+        if growth != 0 {
+            self.reserve(growth, &[Value::Obj(sb)])?;
+        }
         match self.vm.heap.get_mut(sb) {
             Object::StrBuilder(buf) => {
-                if !buf.try_reserve(length).map_err(|_| FaultCode::HeapLimit)?
-                    || !buf.append_int(value)
-                {
+                if growth != 0 && !buf.try_reserve(length).map_err(|_| FaultCode::HeapLimit)? {
+                    return Err(FaultCode::InvalidVmState);
+                }
+                if !buf.append_int(value) {
                     return Err(FaultCode::InvalidVmState);
                 }
             }
             _ => return Err(BAD_TYPE),
         }
-        self.vm.heap.recharge(sb);
+        if growth != 0 {
+            self.vm.heap.recharge_local(sb);
+        }
         self.push(Value::Obj(sb))
     }
 

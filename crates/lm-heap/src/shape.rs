@@ -693,6 +693,15 @@ impl Object {
         }
     }
 
+    /// Test whether no other value holds the shared allocation.
+    pub(crate) fn shared_allocation_is_unique(&self) -> bool {
+        match self {
+            Object::Str(text) | Object::Substring(text) => text.allocation_is_unique(),
+            Object::Bytes(bytes) => bytes.allocation_is_unique(),
+            _ => false,
+        }
+    }
+
     /// Push every object reference inside this object onto `out`, in
     /// the canonical child order of its shape.
     ///

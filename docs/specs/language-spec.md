@@ -778,7 +778,7 @@ a >= b  -> a.__ge__(b)
 
 Each core method body names one pure intrinsic manifest entry. Static resolution and trivial-body inlining emit the canonical instruction.
 
-`String + Text` uses `String.__add__`.
+`Text + Text` uses `Text.__add__` and produces String.
 
 Any class may declare these hooks. The operator reads the hook from the class of the left operand, and the call takes the ordinary method path:
 
@@ -810,6 +810,8 @@ Version 0.2 states no rule about the meaning of a hook. `__eq__` need not be sym
 `__eq__` governs `==` and `!=` alone. `Map` keys, `digest`, and `std.value.deep_equal` never call a hook.
 
 Text map keys use their visible UTF-8 content. A `String` key and a `Substring` key match when their visible content matches.
+
+`has`, `get`, `at`, and map indexing accept Text for any text-keyed map. `put` still requires the declared key type.
 
 Other classes use structural identity for map keys. A class hook can therefore disagree with map lookup and deep equality.
 
@@ -2662,6 +2664,8 @@ retain[e](mut self, f: (K,V) -> Bool with e) -> () with e
 freeze(self) -> Map[K,V]
 ```
 
+For a text key type, `has`, `get`, `at`, and indexing accept Text. Insertion still requires K.
+
 `std/set` defines `Set[T]` as an ordinary sealed class over `Map[T,()]`, with `add`, `remove`, `has`, `union`, `intersection`, `difference`, `is_subset`, and ordered `values`. A deque is not core; `std/deque` may be added as a package without affecting language semantics.
 
 ### 24.6 Strings, bytes, builders, and formatting
@@ -2723,14 +2727,14 @@ Text ordering compares Unicode scalar values lexicographically. Text equality co
 
 Loom performs no automatic Unicode normalization. A library can provide normalization and grapheme-cluster operations.
 
-String adds these methods.
+Text adds these methods.
 
 ```text
 concat(other: Text) -> String
 __add__(other: Text) -> String
 ```
 
-`String + Text` produces a bounded String. Concatenation creates new storage.
+`Text + Text` produces a bounded String. Concatenation creates new storage.
 
 Substring adds these methods.
 

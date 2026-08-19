@@ -852,7 +852,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                         }
                     }
                 }
-                self.emit(Instr::Native(lm_bytecode::NativeInstr::SbBuild));
+                self.emit(Instr::Native(lm_bytecode::NativeInstr::SbFinish));
             }
             HExprKind::If { arms, else_body } => {
                 let join_b = self.new_block();

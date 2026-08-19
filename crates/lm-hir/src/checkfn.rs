@@ -233,6 +233,19 @@ fn class_of(ctx: &Ctx, ty: TypeId) -> Option<(u32, Vec<TypeId>)> {
         .map(|(class, args)| (class.0, args))
 }
 
+/// Return Text for a query on any text-keyed map.
+fn map_query_key_type(ctx: &Ctx, key: TypeId) -> TypeId {
+    let Some(text_class) = ctx.core_types.get("Text").copied() else {
+        return key;
+    };
+    let text = ctx.classes[text_class as usize].self_ty;
+    if ctx.store.compatible(text, key) {
+        text
+    } else {
+        key
+    }
+}
+
 /// Collect the type-variable indices inside one type.
 fn collect_vars(ctx: &Ctx, ty: TypeId, out: &mut HashSet<u32>) {
     match ctx.store.get(ty) {
@@ -2583,8 +2596,20 @@ impl<'o> FnChecker<'o> {
                 native(NativeOp::ListGet, vec![INT], &["index"], ret, false)
             }
             (Type::Map(_, _), "len") => native(NativeOp::MapLen, vec![], NO_NAMES, INT, false),
-            (Type::Map(k, _), "has") => native(NativeOp::MapHas, vec![*k], &["key"], BOOL, false),
-            (Type::Map(k, v), "at") => native(NativeOp::MapAt, vec![*k], &["key"], *v, false),
+            (Type::Map(k, _), "has") => native(
+                NativeOp::MapHas,
+                vec![map_query_key_type(ctx, *k)],
+                &["key"],
+                BOOL,
+                false,
+            ),
+            (Type::Map(k, v), "at") => native(
+                NativeOp::MapAt,
+                vec![map_query_key_type(ctx, *k)],
+                &["key"],
+                *v,
+                false,
+            ),
             (Type::Map(k, v), "put") => native(
                 NativeOp::MapPut,
                 vec![*k, *v],
@@ -2594,7 +2619,13 @@ impl<'o> FnChecker<'o> {
             ),
             (Type::Map(k, v), "get") => {
                 let ret = ctx.option_of(*v);
-                native(NativeOp::MapGet, vec![*k], &["key"], ret, false)
+                native(
+                    NativeOp::MapGet,
+                    vec![map_query_key_type(ctx, *k)],
+                    &["key"],
+                    ret,
+                    false,
+                )
             }
             _ if name == "freeze" && ctx.store.is_heap(recv_ty) && args.is_empty() => {
                 return Ok(freeze_expr(recv_h));
@@ -2961,7 +2992,7 @@ impl<'o> FnChecker<'o> {
                 })
             }
             Type::Map(k, v) => {
-                let key = self.check_expr(ctx, index, k)?;
+                let key = self.check_expr(ctx, index, map_query_key_type(ctx, k))?;
                 let mutable = recv_h.mutable;
                 Ok(HExpr {
                     ty: v,

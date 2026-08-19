@@ -32,26 +32,141 @@ fn amortized_growth(length: usize, capacity: usize, additional: usize) -> usize 
         .saturating_sub(capacity)
 }
 
-/// One immutable byte allocation shared by text and binary spans.
+/// One immutable binary allocation.
 #[derive(Debug)]
-struct ByteAllocation {
+struct BinaryAllocation {
     data: Vec<u8>,
 }
 
-impl ByteAllocation {
-    fn new(data: Vec<u8>) -> ByteAllocation {
-        ByteAllocation { data }
+impl BinaryAllocation {
+    fn new(data: Vec<u8>) -> BinaryAllocation {
+        BinaryAllocation { data }
+    }
+}
+
+/// UTF-8 metadata shared by all views of one text root.
+#[derive(Debug)]
+struct TextMetadata {
+    scalar_count: usize,
+    ascii: bool,
+    /// Byte positions for scalar 0, 64, 128, and later positions.
+    scalar_index: OnceLock<Vec<usize>>,
+}
+
+impl TextMetadata {
+    fn new(scalar_count: usize, ascii: bool) -> TextMetadata {
+        TextMetadata {
+            scalar_count,
+            ascii,
+            scalar_index: OnceLock::new(),
+        }
+    }
+
+    fn index<'a>(&'a self, text: &str) -> &'a [usize] {
+        self.scalar_index.get_or_init(|| {
+            let mut index = Vec::new();
+            index.push(0);
+            if self.ascii {
+                return index;
+            }
+            for (scalar, (byte, _)) in text.char_indices().enumerate() {
+                if scalar != 0 && scalar % SCALAR_INDEX_STRIDE == 0 {
+                    index.push(byte);
+                }
+            }
+            index
+        })
+    }
+
+    fn byte_of_scalar(&self, text: &str, scalar: usize) -> Option<usize> {
+        if scalar > self.scalar_count {
+            return None;
+        }
+        if scalar == self.scalar_count {
+            return Some(text.len());
+        }
+        if self.ascii {
+            return Some(scalar);
+        }
+        let block = scalar / SCALAR_INDEX_STRIDE;
+        let block_scalar = block * SCALAR_INDEX_STRIDE;
+        let block_byte = *self.index(text).get(block)?;
+        if block_scalar == scalar {
+            return Some(block_byte);
+        }
+        text[block_byte..]
+            .char_indices()
+            .nth(scalar - block_scalar)
+            .map(|(byte, _)| block_byte + byte)
+    }
+
+    fn scalar_of_byte(&self, text: &str, byte: usize) -> Option<usize> {
+        if byte > text.len() || !text.is_char_boundary(byte) {
+            return None;
+        }
+        if self.ascii {
+            return Some(byte);
+        }
+        let index = self.index(text);
+        let block = match index.binary_search(&byte) {
+            Ok(block) => return Some(block * SCALAR_INDEX_STRIDE),
+            Err(next) => next.saturating_sub(1),
+        };
+        let block_byte = *index.get(block)?;
+        let within = text[block_byte..byte].chars().count();
+        Some(block * SCALAR_INDEX_STRIDE + within)
+    }
+}
+
+/// One storage kind shared by immutable byte spans.
+#[derive(Debug, Clone)]
+enum ByteStorage {
+    Binary(Arc<BinaryAllocation>),
+    Text(Arc<TextRoot>),
+}
+
+impl ByteStorage {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            ByteStorage::Binary(storage) => &storage.data,
+            ByteStorage::Text(storage) => storage.as_bytes(),
+        }
     }
 
     fn retained_capacity(&self) -> usize {
-        self.data.capacity()
+        match self {
+            ByteStorage::Binary(storage) => storage.data.capacity(),
+            ByteStorage::Text(storage) => storage.retained_capacity(),
+        }
+    }
+
+    fn allocation_key(&self) -> usize {
+        match self {
+            ByteStorage::Binary(storage) => Arc::as_ptr(storage) as usize,
+            ByteStorage::Text(storage) => Arc::as_ptr(storage) as usize,
+        }
+    }
+
+    fn shares_storage(&self, other: &ByteStorage) -> bool {
+        match (self, other) {
+            (ByteStorage::Binary(left), ByteStorage::Binary(right)) => Arc::ptr_eq(left, right),
+            (ByteStorage::Text(left), ByteStorage::Text(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+
+    fn is_unique(&self) -> bool {
+        match self {
+            ByteStorage::Binary(storage) => Arc::strong_count(storage) == 1,
+            ByteStorage::Text(storage) => Arc::strong_count(storage) == 1,
+        }
     }
 }
 
 /// One visible range inside a shared byte allocation.
 #[derive(Debug, Clone)]
 struct ByteSpan {
-    storage: Arc<ByteAllocation>,
+    storage: ByteStorage,
     start: usize,
     len: usize,
 }
@@ -60,14 +175,14 @@ impl ByteSpan {
     fn from_vec(data: Vec<u8>) -> ByteSpan {
         let len = data.len();
         ByteSpan {
-            storage: Arc::new(ByteAllocation::new(data)),
+            storage: ByteStorage::Binary(Arc::new(BinaryAllocation::new(data))),
             start: 0,
             len,
         }
     }
 
     fn as_slice(&self) -> &[u8] {
-        &self.storage.data[self.start..self.start + self.len]
+        &self.storage.as_slice()[self.start..self.start + self.len]
     }
 
     fn slice(&self, start: usize, end: usize) -> Option<ByteSpan> {
@@ -86,21 +201,32 @@ impl ByteSpan {
     }
 
     fn shares_storage(&self, other: &ByteSpan) -> bool {
-        Arc::ptr_eq(&self.storage, &other.storage)
+        self.storage.shares_storage(&other.storage)
     }
 }
 
-/// UTF-8 metadata for one validated span.
+/// One storage form for a UTF-8 root.
+#[derive(Debug)]
+enum TextRootStorage {
+    Owned(Vec<u8>),
+    Shared(ByteSpan),
+}
+
+/// One UTF-8 root with metadata for all derived text views.
 #[derive(Debug)]
 struct TextRoot {
-    span: ByteSpan,
-    scalar_count: usize,
-    ascii: bool,
-    /// Byte positions for scalar 0, 64, 128, and later positions.
-    scalar_index: OnceLock<Vec<usize>>,
+    storage: TextRootStorage,
+    metadata: TextMetadata,
 }
 
 impl TextRoot {
+    fn from_valid_parts(data: Vec<u8>, scalar_count: usize, ascii: bool) -> TextRoot {
+        TextRoot {
+            storage: TextRootStorage::Owned(data),
+            metadata: TextMetadata::new(scalar_count, ascii),
+        }
+    }
+
     fn from_valid_span(span: ByteSpan) -> TextRoot {
         // The caller validated this complete span.
         let text = unsafe { std::str::from_utf8_unchecked(span.as_slice()) };
@@ -110,76 +236,75 @@ impl TextRoot {
         } else {
             text.chars().count()
         };
-        TextRoot::from_valid_parts(span, scalar_count, ascii)
+        TextRoot {
+            storage: TextRootStorage::Shared(span),
+            metadata: TextMetadata::new(scalar_count, ascii),
+        }
     }
 
-    fn from_valid_parts(span: ByteSpan, scalar_count: usize, ascii: bool) -> TextRoot {
-        TextRoot {
-            span,
-            scalar_count,
-            ascii,
-            scalar_index: OnceLock::new(),
+    fn as_bytes(&self) -> &[u8] {
+        match &self.storage {
+            TextRootStorage::Owned(data) => data,
+            TextRootStorage::Shared(span) => span.as_slice(),
         }
     }
 
     fn as_str(&self) -> &str {
-        // Construction validates this complete span.
-        unsafe { std::str::from_utf8_unchecked(self.span.as_slice()) }
-    }
-
-    fn index(&self) -> &[usize] {
-        self.scalar_index.get_or_init(|| {
-            let mut index = Vec::new();
-            index.push(0);
-            if self.ascii {
-                return index;
-            }
-            for (scalar, (byte, _)) in self.as_str().char_indices().enumerate() {
-                if scalar != 0 && scalar % SCALAR_INDEX_STRIDE == 0 {
-                    index.push(byte);
-                }
-            }
-            index
-        })
+        // Construction validates this complete root.
+        unsafe { std::str::from_utf8_unchecked(self.as_bytes()) }
     }
 
     fn byte_of_scalar(&self, scalar: usize) -> Option<usize> {
-        if scalar > self.scalar_count {
-            return None;
-        }
-        if scalar == self.scalar_count {
-            return Some(self.span.len);
-        }
-        if self.ascii {
-            return Some(scalar);
-        }
-        let block = scalar / SCALAR_INDEX_STRIDE;
-        let block_scalar = block * SCALAR_INDEX_STRIDE;
-        let block_byte = *self.index().get(block)?;
-        if block_scalar == scalar {
-            return Some(block_byte);
-        }
-        self.as_str()[block_byte..]
-            .char_indices()
-            .nth(scalar - block_scalar)
-            .map(|(byte, _)| block_byte + byte)
+        self.metadata.byte_of_scalar(self.as_str(), scalar)
     }
 
     fn scalar_of_byte(&self, byte: usize) -> Option<usize> {
-        if byte > self.span.len || !self.as_str().is_char_boundary(byte) {
+        self.metadata.scalar_of_byte(self.as_str(), byte)
+    }
+
+    fn retained_capacity(&self) -> usize {
+        match &self.storage {
+            TextRootStorage::Owned(data) => data.capacity(),
+            TextRootStorage::Shared(span) => span.retained_capacity(),
+        }
+    }
+
+    fn allocation_key(self: &Arc<TextRoot>) -> usize {
+        match &self.storage {
+            TextRootStorage::Owned(_) => Arc::as_ptr(self) as usize,
+            TextRootStorage::Shared(span) => span.storage.allocation_key(),
+        }
+    }
+
+    fn byte_span(self: &Arc<TextRoot>, start: usize, end: usize) -> Option<ByteSpan> {
+        if start > end || end > self.as_str().len() {
             return None;
         }
-        if self.ascii {
-            return Some(byte);
+        match &self.storage {
+            TextRootStorage::Owned(_) => Some(ByteSpan {
+                storage: ByteStorage::Text(self.clone()),
+                start,
+                len: end - start,
+            }),
+            TextRootStorage::Shared(span) => span.slice(start, end),
         }
-        let index = self.index();
-        let block = match index.binary_search(&byte) {
-            Ok(block) => return Some(block * SCALAR_INDEX_STRIDE),
-            Err(next) => next.saturating_sub(1),
-        };
-        let block_byte = *index.get(block)?;
-        let within = self.as_str()[block_byte..byte].chars().count();
-        Some(block * SCALAR_INDEX_STRIDE + within)
+    }
+
+    fn shares_storage(self: &Arc<TextRoot>, other: &Arc<TextRoot>) -> bool {
+        self.allocation_key() == other.allocation_key()
+    }
+
+    fn shares_span(self: &Arc<TextRoot>, other: &ByteSpan) -> bool {
+        self.allocation_key() == other.storage.allocation_key()
+    }
+
+    fn storage_is_unique(self: &Arc<TextRoot>) -> bool {
+        match &self.storage {
+            TextRootStorage::Owned(_) => Arc::strong_count(self) == 1,
+            TextRootStorage::Shared(span) => {
+                Arc::strong_count(self) == 1 && span.storage.is_unique()
+            }
+        }
     }
 }
 
@@ -200,15 +325,36 @@ impl SharedText {
     }
 
     fn from_valid_span(span: ByteSpan) -> SharedText {
+        if let ByteStorage::Text(root) = &span.storage {
+            let text = root.as_str();
+            let scalar_start = root
+                .metadata
+                .scalar_of_byte(text, span.start)
+                .expect("a valid text span starts at a scalar boundary");
+            let scalar_end = root
+                .metadata
+                .scalar_of_byte(text, span.start + span.len)
+                .expect("a valid text span ends at a scalar boundary");
+            return SharedText {
+                root: root.clone(),
+                byte_start: span.start,
+                byte_len: span.len,
+                scalar_start,
+                scalar_len: scalar_end - scalar_start,
+                lookup_hash: AtomicU64::new(0),
+            };
+        }
         SharedText::from_root(Arc::new(TextRoot::from_valid_span(span)))
     }
 
     fn from_root(root: Arc<TextRoot>) -> SharedText {
+        let byte_len = root.as_str().len();
+        let scalar_len = root.metadata.scalar_count;
         SharedText {
             byte_start: 0,
-            byte_len: root.span.len,
+            byte_len,
             scalar_start: 0,
-            scalar_len: root.scalar_count,
+            scalar_len,
             root,
             lookup_hash: AtomicU64::new(0),
         }
@@ -245,7 +391,7 @@ impl SharedText {
             compact.extend_from_slice(&bytes);
             bytes = compact;
         }
-        let root = TextRoot::from_valid_parts(ByteSpan::from_vec(bytes), scalar_count, ascii);
+        let root = TextRoot::from_valid_parts(bytes, scalar_count, ascii);
         Ok(SharedText::from_root(Arc::new(root)))
     }
 
@@ -300,16 +446,20 @@ impl SharedText {
 
     /// Test whether all visible text bytes are ASCII.
     pub fn is_ascii(&self) -> bool {
-        self.root.ascii || self.as_str().is_ascii()
+        self.root.metadata.ascii || self.as_str().is_ascii()
     }
 
     /// Get the retained byte allocation capacity.
     pub fn retained_capacity(&self) -> usize {
-        self.root.span.retained_capacity()
+        self.root.retained_capacity()
     }
 
     pub(crate) fn allocation_key(&self) -> usize {
-        Arc::as_ptr(&self.root.span.storage) as usize
+        self.root.allocation_key()
+    }
+
+    pub(crate) fn allocation_is_unique(&self) -> bool {
+        self.root.storage_is_unique()
     }
 
     /// Test the durable String backing limit.
@@ -367,7 +517,7 @@ impl SharedText {
         if index >= self.scalar_len {
             return None;
         }
-        if self.root.ascii {
+        if self.root.metadata.ascii {
             return Some(char::from(self.as_str().as_bytes()[index]));
         }
         let root_index = self.scalar_start.checked_add(index)?;
@@ -443,8 +593,7 @@ impl SharedText {
     pub fn bytes(&self) -> SharedBytes {
         let span = self
             .root
-            .span
-            .slice(self.byte_start, self.byte_start + self.byte_len)
+            .byte_span(self.byte_start, self.byte_start + self.byte_len)
             .expect("a text view stays inside its root");
         SharedBytes {
             span,
@@ -468,12 +617,12 @@ impl SharedText {
 
     /// Test whether this value shares its backing allocation.
     pub fn shares_storage(&self, other: &SharedText) -> bool {
-        self.root.span.shares_storage(&other.root.span)
+        self.root.shares_storage(&other.root)
     }
 
     /// Test whether this text shares storage with binary data.
     pub fn shares_bytes_storage(&self, other: &SharedBytes) -> bool {
-        self.root.span.shares_storage(&other.span)
+        self.root.shares_span(&other.span)
     }
 
     /// Test whether this value has computed its lookup hash.
@@ -587,7 +736,11 @@ impl SharedBytes {
     }
 
     pub(crate) fn allocation_key(&self) -> usize {
-        Arc::as_ptr(&self.span.storage) as usize
+        self.span.storage.allocation_key()
+    }
+
+    pub(crate) fn allocation_is_unique(&self) -> bool {
+        self.span.storage.is_unique()
     }
 
     /// Make a shared byte range.
