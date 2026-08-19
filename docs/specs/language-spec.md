@@ -2612,9 +2612,13 @@ class Range
 end
 ```
 
-It also contains VM, proc, snapshot, filesystem, network, TLS, and HTTP values.
+It also contains VM, proc, snapshot, filesystem, and network boundary values.
 
-These values include portable errors, addresses, configuration records, and native resource classes.
+These values include portable errors, addresses, TCP helpers, and native TCP and TLS resource classes.
+
+`std.tls` contains TLS configuration values and client helpers.
+
+`std.http` contains bounded HTTP/1.1 values, codecs, and client helpers.
 
 `List`, `Map`, `Text`, its concrete classes, `Char`, and `Bytes` are native core classes in the pinned image.
 
@@ -2633,8 +2637,7 @@ RunResult, StepEvent, DriveEvent, Proc, Recv, SendResult, ProcResult, ProcError
 Choice, SnapshotError, RestoreError, FsError, OpenOptions, SeekFrom
 IpAddress, SocketAddress, NetError, TcpRead, Shutdown
 TcpResource, TcpStream, TcpListener, Tcp
-TlsError, TlsRoots, TlsVersion, TlsClientConfig, TlsStream, Tls
-HttpError, HttpHeader, HttpLimits, HttpRequest, HttpResponse, Http
+TlsError, TlsStream
 Text, String, Substring, Char, Utf8Error, IndexError, ParseIntError, Bytes
 StringBuilder, ByteBuffer
 identity, assert, assert_message
@@ -3019,7 +3022,11 @@ There are no finalizers. Scoped cleanup is host-managed. Raw handle ownership re
 
 `std/time` defines frozen `Duration` and `Instant`, checked conversion helpers, `now`, `monotonic`, and `sleep`. `std/random` provides `bytes`, half-open integer ranges, Boolean selection, list `choose`, and Fisher-Yates `shuffle`, with exact `Rand` rows.
 
-Core network code wraps DNS, TCP, TLS clients, and bounded HTTP/1.1 messages.
+Core network code defines DNS, TCP, and native TLS stream operations.
+
+`std.tls` wraps TLS configuration and client operations.
+
+`std.http` implements bounded HTTP/1.1 messages and direct clients.
 
 A live TCP or TLS handle is a host attachment and blocks snapshot creation.
 

@@ -3,12 +3,40 @@
 use lm_testkit::{compile_to_bytes, run_text};
 use lm_vm::{load_bytes, RecordingHost, VmConfig, World};
 
+const HTTP_USES: &str = r#"use std.http.Http
+use std.http.HttpError
+use std.http.HttpHeader
+use std.http.HttpLimits
+use std.http.HttpRequest
+use std.http.HttpResponse
+
+"#;
+
+const TLS_USES: &str = r#"use std.tls.TlsClientConfig
+use std.tls.TlsRoots
+use std.tls.TlsVersion
+
+"#;
+
+fn with_http(source: &str) -> String {
+    format!("{HTTP_USES}{source}")
+}
+
+fn with_https(source: &str) -> String {
+    format!("{HTTP_USES}{TLS_USES}{source}")
+}
+
 fn run(source: &str) -> String {
-    run_text("http.lm", source, VmConfig::default()).expect("the HTTP program runs")
+    run_text("http.lm", &with_http(source), VmConfig::default()).expect("the HTTP program runs")
+}
+
+fn run_https(source: &str) -> String {
+    run_text("https.lm", &with_https(source), VmConfig::default()).expect("the HTTPS program runs")
 }
 
 fn run_network(source: &str) -> (String, usize) {
-    let bytes = compile_to_bytes("http_network.lm", source).expect("the HTTP program compiles");
+    let bytes =
+        compile_to_bytes("http_network.lm", &with_http(source)).expect("the HTTP program compiles");
     let loaded = load_bytes(&bytes).expect("the HTTP program loads");
     let mut world = World::new(
         &loaded,
@@ -323,7 +351,7 @@ end
 
 0
 "#;
-    compile_to_bytes("http_effect_set.lm", source).expect("the HTTP effect set checks");
+    compile_to_bytes("http_effect_set.lm", &with_http(source)).expect("the HTTP effect set checks");
 }
 
 #[test]
@@ -336,7 +364,8 @@ end
 
 0
 "#;
-    compile_to_bytes("https_effect_set.lm", source).expect("the HTTPS effect set checks");
+    compile_to_bytes("https_effect_set.lm", &with_https(source))
+        .expect("the HTTPS effect set checks");
 }
 
 #[test]
@@ -356,7 +385,7 @@ in Err(error) then error.message()
 end
 "#;
     assert_eq!(
-        run(source),
+        run_https(source),
         "Done(\"the HTTP client can offer only HTTP/1.1 with ALPN\")"
     );
 }

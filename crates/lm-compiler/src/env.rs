@@ -95,6 +95,14 @@ impl CompileEnv {
         Ok(())
     }
 
+    /// Bind the fixed toolchain standard-library root.
+    ///
+    /// Only the bundled module catalog uses this path. Package
+    /// manifests cannot replace the reserved `std` root.
+    pub(crate) fn bind_standard_root(&mut self) {
+        self.env.roots.insert("std".to_string(), "std".to_string());
+    }
+
     /// The root names, for a diagnostic.
     pub fn roots(&self) -> Vec<&str> {
         self.env.roots.keys().map(|k| k.as_str()).collect()

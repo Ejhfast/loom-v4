@@ -662,6 +662,72 @@ fn an_import_grants_no_authority() {
     );
 }
 
+/// A package links only the standard closure that its source names.
+#[test]
+fn a_package_links_a_requested_standard_module() {
+    let tree = TempTree::new("standard");
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        "use std.http.Http\n\nHttp().default_limits().max_headers\n",
+    );
+    let report = tree.build("app").expect("the package builds");
+    assert_eq!(report.modules.len(), 1);
+    let bytes = std::fs::read(report.program.expect("the program exists")).expect("it reads");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the program loads");
+    assert!(loaded.module().imports.is_empty());
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let outcome = world.run_root();
+    assert_eq!(world.show_outcome(&outcome), "Done(128)");
+    let second = tree.build("app").expect("the cached package builds");
+    assert_eq!(second.compiled(), 0);
+    assert!(second.program_cached);
+}
+
+/// A public interface can expose a standard type to its caller.
+#[test]
+fn a_standard_type_crosses_a_package_interface() {
+    let tree = TempTree::new("standard-interface");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/config.lm",
+        "use std.tls.Tls\n\
+         use std.tls.TlsClientConfig\n\n\
+         def default_config(): TlsClientConfig\n\
+         \x20 Tls().default_config(\"localhost\")\n\
+         end\n",
+    );
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        "use lib.config\n\nconfig.default_config().max_buffer_bytes\n",
+    );
+    let report = tree.build("app").expect("the package graph builds");
+    let bytes = std::fs::read(report.program.expect("the program exists")).expect("it reads");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let outcome = world.run_root();
+    assert_eq!(world.show_outcome(&outcome), "Done(65536)");
+}
+
 // ---------------------------------------------------------------
 // The package layout and the manifest.
 // ---------------------------------------------------------------

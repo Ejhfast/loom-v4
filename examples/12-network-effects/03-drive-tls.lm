@@ -1,5 +1,10 @@
 # A holder observes TCP and TLS requests behind their effect sets.
 
+use std.tls.Tls
+use std.tls.TlsClientConfig
+use std.tls.TlsRoots
+use std.tls.TlsVersion
+
 def loopback(port: Int): Result[SocketAddress, NetError]
   bytes = ByteBuffer()
   bytes.append(127).append(0).append(0).append(1)

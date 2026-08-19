@@ -105,6 +105,22 @@ names still enter a module only through explicit `use` lines. There
 are no ambient standard-library names. The core prelude (`Option`,
 `Result`, `List`, ...) is unchanged and stays separate from `std`.
 
+The current catalog contains `std.tls` and `std.http`.
+
+Each entry is a literal module with an interface and artifact.
+
+The compiler selects the transitive standard closure from explicit imports.
+
+The bootstrap catalog compiles each selected module once per process.
+
+`StandardCatalog.bind` adds selected interfaces to an explicit `CompileEnv`.
+
+This API also supports future runtime compiler operations.
+
+The runtime compiler receives a catalog explicitly. It performs no ambient module lookup.
+
+A standard import grants no operation or policy authority.
+
 ## 6. Commands
 
 - `lm new NAME` — scaffold the layout above.
@@ -151,8 +167,7 @@ module form is the stated fix.
 
 ## 9. What stays open
 
-- `std` does not ship with this toolchain yet. `use std.*` rejects
-  with that message. The library is not implemented yet.
+- Only `std.tls` and `std.http` ship now. Other `std` module paths reject.
 - A fully qualified reference without a `use` line
   (`mathlib.matrix.Matrix`) is not accepted yet. Name the module or
   the definition with a `use` line first.

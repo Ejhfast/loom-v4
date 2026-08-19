@@ -4,6 +4,11 @@ use lm_testkit::compile_to_bytes;
 use lm_vm::{load_bytes, Object, RecordingHost, VmConfig, World};
 
 const LOOPBACK: &str = r#"
+use std.tls.Tls
+use std.tls.TlsClientConfig
+use std.tls.TlsRoots
+use std.tls.TlsVersion
+
 def loopback(port: Int): Result[SocketAddress, NetError]
   bytes = ByteBuffer()
   bytes.append(127).append(0).append(0).append(1)
@@ -19,6 +24,11 @@ def test_tls_config(): TlsClientConfig
     65536
   ).freeze()
 end
+"#;
+
+const HTTP_USES: &str = r#"use std.http.Http
+use std.http.HttpLimits
+
 "#;
 
 fn run(source: &str, grants: &[&str]) -> (String, usize) {
@@ -106,7 +116,7 @@ exchange()
 #[test]
 fn tls_response_reading_uses_the_shared_http_parser() {
     let source = format!(
-        r#"{LOOPBACK}
+        r#"{HTTP_USES}{LOOPBACK}
 def exchange(): String with Tcp, Tls
   address = case loopback(0)
   in Ok(value) then value

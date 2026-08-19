@@ -1,4 +1,7 @@
-# Core: bounded HTTP/1.1 messages over explicit TCP streams.
+# Standard library: bounded HTTP/1.1 messages over explicit TCP streams.
+
+use std.tls.Tls
+use std.tls.TlsClientConfig
 
 enum HttpError
   InvalidRequest(message: String)
@@ -945,17 +948,12 @@ final class Http
     if buffer.len() - cursor < 2
       return Ok(0 - 1)
     end
-    first = intrinsic("byte_buffer.at", buffer, cursor)
-    second = intrinsic("byte_buffer.at", buffer, cursor + 1)
+    first = buffer.at_or(cursor, 0 - 1)
+    second = buffer.at_or(cursor + 1, 0 - 1)
     if first == 13 and second == 10
       return Ok(cursor + 2)
     end
-    trailer_end = intrinsic(
-      "byte_buffer.find_from",
-      buffer,
-      marker_bytes,
-      scan.trailer_scan
-    )
+    trailer_end = buffer.find_from_or(marker_bytes, scan.trailer_scan, 0 - 1)
     if trailer_end < 0
       if buffer.len() - cursor > limits.max_header_bytes - header_bytes
         return Err(HttpError.LimitExceeded("the HTTP trailers are too large"))
@@ -989,7 +987,7 @@ final class Http
     chunks = scan.chunks
     crlf = Bytes("\r\n")
     while cursor <= buffer.len()
-      line_end = intrinsic("byte_buffer.find_from", buffer, crlf, cursor)
+      line_end = buffer.find_from_or(crlf, cursor, 0 - 1)
       if line_end < 0
         if buffer.len() - cursor > 1024
           return Err(self.invalid(response, "a chunk size line is too large"))
@@ -1002,7 +1000,7 @@ final class Http
       size_end = line_end
       index = cursor
       while index < line_end
-        byte = intrinsic("byte_buffer.at", buffer, index)
+        byte = buffer.at_or(index, 0 - 1)
         if byte == 59
           size_end = index
           index = line_end
@@ -1019,7 +1017,7 @@ final class Http
         end
         index = size_end + 1
         while index < line_end
-          byte = intrinsic("byte_buffer.at", buffer, index)
+          byte = buffer.at_or(index, 0 - 1)
           if (byte < 32 and byte != 9) or byte == 127
             return Err(self.invalid(response, "the chunk extension is invalid"))
           end
@@ -1029,7 +1027,7 @@ final class Http
       size = 0
       index = cursor
       while index < size_end
-        byte = intrinsic("byte_buffer.at", buffer, index)
+        byte = buffer.at_or(index, 0 - 1)
         digit = if byte >= 48 and byte <= 57
           byte - 48
         elsif byte >= 97 and byte <= 102
@@ -1064,8 +1062,8 @@ final class Http
       if buffer.len() - cursor - size < 2
         return Ok(0 - 1)
       end
-      first = intrinsic("byte_buffer.at", buffer, cursor + size)
-      second = intrinsic("byte_buffer.at", buffer, cursor + size + 1)
+      first = buffer.at_or(cursor + size, 0 - 1)
+      second = buffer.at_or(cursor + size + 1, 0 - 1)
       if first != 13 or second != 10
         return Err(self.invalid(response, "the chunk data has no terminator"))
       end
@@ -1093,7 +1091,7 @@ final class Http
     scan = 0
     delimiter = Bytes("\r\n\r\n")
     while marker < 0
-      marker = intrinsic("byte_buffer.find_from", buffer, delimiter, scan)
+      marker = buffer.find_from_or(delimiter, scan, 0 - 1)
       if marker < 0
         if buffer.len() >= limits.max_header_bytes
           return Err(HttpError.LimitExceeded("the HTTP request headers are too large"))
@@ -1209,7 +1207,7 @@ final class Http
     scan = 0
     delimiter = Bytes("\r\n\r\n")
     while marker < 0
-      marker = intrinsic("byte_buffer.find_from", buffer, delimiter, scan)
+      marker = buffer.find_from_or(delimiter, scan, 0 - 1)
       if marker < 0
         if buffer.len() >= limits.max_header_bytes
           return Err(HttpError.LimitExceeded("the HTTP response headers are too large"))

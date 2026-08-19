@@ -831,10 +831,10 @@ operations, and TCP.
 - Keep sockets and TLS state outside `lm-vm`.
 - Add `TcpStream`, `TcpListener`, and `TlsStream` native resources.
 - Let a typed driver create each network resource for a current call.
-- Add explicit TLS roots, server names, versions, ALPN, and buffers.
+- Add explicit TLS roots, server names, versions, ALPN, and buffers in `std.tls`.
 - Consume the TCP resource after each submitted TLS handshake.
 - Use pinned rustls only inside `lm-host`.
-- Add bounded HTTP/1.1 parsing and serialization in core Loom code.
+- Add bounded HTTP/1.1 parsing and serialization in `std.http` Loom code.
 - Use one response parser for TCP and TLS readers.
 - Keep cleartext and secure HTTP effect sets separate.
 - Defer checkpointable file and connection types with explicit

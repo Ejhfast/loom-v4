@@ -23,6 +23,9 @@ The network foundation uses these decisions:
 - TCP reads report data and end-of-stream as different values.
 - TCP writes can report partial progress.
 - Loom code implements bounded loops and protocol state machines.
+- `std.tls` and `std.http` are literal modules.
+- Source imports select standard modules and their dependency closure.
+- A standard-module import grants no effect.
 - Effect sets give higher layers short public rows.
 - Effect sets do not create new runtime operations.
 - Direct HTTP uses lower DNS and TCP operations.
@@ -36,22 +39,48 @@ The network foundation uses these decisions:
 
 ## 3. Layer boundaries
 
-### 3.1 Core Loom code
+### 3.1 Pinned core Loom code
 
-Core Loom code defines these items:
+Pinned core Loom code defines these items:
 
 - portable address and error values;
 - handle classes and their ordinary methods;
 - bounded read and write loops;
-- address parsing and formatting;
-- HTTP message values;
-- HTTP/1.1 serialization and parsing;
-- explicit connection and server helpers;
+- the checked `SocketAddress` factory;
+- direct DNS and TCP entry helpers;
 - effect-set names in public signatures.
+
+The pinned core contains values that operation signatures require.
 
 Core Loom code has no direct access to operating-system sockets.
 
-### 3.2 Exact host operations
+### 3.2 Standard Loom modules
+
+`std.tls` defines TLS configuration values and client helpers.
+
+`std.http` defines bounded HTTP values, codecs, and client helpers.
+
+Each standard module has one source path, interface, artifact, and module identity.
+
+A `use` path under `std.tls` selects `std.tls`.
+
+A `use` path under `std.http` selects `std.tls` and `std.http` in link order.
+
+The linker includes only modules reachable from the program imports.
+
+The bootstrap catalog compiles each selected module once per process.
+
+A release bundle can replace source compilation with verified decoded artifacts.
+
+The public catalog can bind selected interfaces into an explicit `CompileEnv`.
+
+A runtime compiler must receive that catalog through its compile environment.
+
+The runtime never searches a filesystem or loads a module by an ambient name.
+
+An import changes name resolution and linking only. It grants no effect.
+
+### 3.3 Exact host operations
 
 Exact operations define the boundary between a machine and its service.
 
@@ -59,7 +88,7 @@ The VM validates each argument before it calls the host.
 
 The host returns plain boundary values or one pending completion token.
 
-### 3.3 Generic VM resource kernel
+### 3.4 Generic VM resource kernel
 
 The VM tracks resource identity, ownership, state, and service location.
 
@@ -67,7 +96,7 @@ The resource kernel contains no socket implementation.
 
 `lm-vm` must not depend on an operating-system network crate.
 
-### 3.4 Root host
+### 3.5 Root host
 
 `lm-host` owns DNS workers and the socket reactor.
 
@@ -75,7 +104,7 @@ The reactor owns every root-host socket.
 
 The scheduler thread submits commands and consumes completions.
 
-### 3.5 Pure intrinsics
+### 3.6 Pure intrinsics
 
 A pure intrinsic can accelerate byte scanning or cryptography.
 
@@ -751,9 +780,9 @@ The first layer does not implement HTTP/2 or HTTP/3.
 
 TCP listening remains an exact lower operation.
 
-Core Loom code parses one bounded request from an accepted stream.
+`std.http` parses one bounded request from an accepted stream.
 
-Core Loom code writes one bounded response to that stream.
+`std.http` writes one bounded response to that stream.
 
 A server loop accepts connections and starts explicit worker procs.
 
@@ -789,7 +818,7 @@ An isolated machine remains available for an untrusted service boundary.
 
 TLS is a separate transport layer above TCP.
 
-Core Loom code defines this explicit client configuration:
+`std.tls` defines this explicit client configuration:
 
 ```text
 TlsRoots = WebPki | Custom(List[Bytes])
@@ -818,7 +847,7 @@ The ALPN list preserves caller order.
 
 The buffer limit controls retained plaintext and TLS records.
 
-Core validation applies these limits:
+`std.tls` validation applies these limits:
 
 - A server name contains from 1 through 253 printable ASCII bytes.
 - A custom root list contains from 1 through 128 certificates.
@@ -831,7 +860,11 @@ Core validation applies these limits:
 
 The host repeats all validation before certificate parsing or allocation.
 
-Core Loom code defines these entry points:
+`std.tls` defines `Tls.handshake` and `Tls.connect_host`.
+
+The pinned core defines the `TlsStream` methods.
+
+These entry points have the following rows:
 
 ```text
 Tls.handshake(stream, config) with Tls.Handshake
@@ -1034,6 +1067,10 @@ Resource cleanup remains linear in the live resource count.
 
 Network benchmarks run separately from interpreter dispatch benchmarks.
 
+A source that imports no standard module does not compile or link a standard module.
+
+The bootstrap compiler caches each selected standard module for the process lifetime.
+
 ## 27. Implementation stages
 
 ### Stage 1: Specification and manifests
@@ -1075,6 +1112,17 @@ Network benchmarks run separately from interpreter dispatch benchmarks.
 - Add explicit TLS configuration and resource operations.
 - Add `Http.Client` without changing `Http.CleartextClient`.
 - Add local certificate tests with no external network access.
+
+### Stage 7: Selective standard modules
+
+- Keep operation boundary types and native resources in the pinned core.
+- Move TLS configuration and client helpers into `std.tls`.
+- Move HTTP values, codecs, and clients into `std.http`.
+- Add a bundled module catalog with explicit compile-environment binding.
+- Select the transitive standard closure from source imports.
+- Cache each selected standard compilation once per process.
+- Link only the standard modules reachable from the program.
+- Keep TCP-only tests on the core-only compile path.
 
 ## 28. Conformance gates
 

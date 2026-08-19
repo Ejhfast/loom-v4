@@ -22,6 +22,7 @@ pub mod link;
 pub mod manifest;
 pub mod module;
 pub mod scaffold;
+pub mod standard;
 
 pub use build::{build_package, BuildReport, ModuleReport};
 pub use cache::{
@@ -31,3 +32,4 @@ pub use env::{CompileEnv, LinkEnv, LinkUnit};
 pub use link::{link, LinkedProgram};
 pub use manifest::{parse_manifest, Manifest};
 pub use module::{compile_module, CompiledModule};
+pub use standard::{compile_program, compile_source, CompiledSource, StandardCatalog};

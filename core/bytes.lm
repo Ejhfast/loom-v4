@@ -177,12 +177,30 @@ final class ByteBuffer
     end
   end
 
+  def at_or(self, index: Int, default: Int): Int
+    value = intrinsic("byte_buffer.at", self, index)
+    if value < 0
+      default
+    else
+      value
+    end
+  end
+
   def find_from(self, needle: Bytes, start: Int): Option[Int]
     value = intrinsic("byte_buffer.find_from", self, needle, start)
     if value < 0
       None
     else
       Some(value)
+    end
+  end
+
+  def find_from_or(self, needle: Bytes, start: Int, default: Int): Int
+    value = intrinsic("byte_buffer.find_from", self, needle, start)
+    if value < 0
+      default
+    else
+      value
     end
   end
 

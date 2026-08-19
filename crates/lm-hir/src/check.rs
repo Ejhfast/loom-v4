@@ -36,8 +36,6 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/tls.lm"),
     "\n",
-    include_str!("../../../core/http.lm"),
-    "\n",
     include_str!("../../../core/vm.lm"),
     "\n",
     include_str!("../../../core/proc.lm"),
@@ -55,7 +53,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 50] = [
+pub const PRELUDE_TYPES: [&str; 40] = [
     "Option",
     "Result",
     "Ordering",
@@ -85,17 +83,7 @@ pub const PRELUDE_TYPES: [&str; 50] = [
     "TcpListener",
     "Tcp",
     "TlsError",
-    "TlsRoots",
-    "TlsVersion",
-    "TlsClientConfig",
     "TlsStream",
-    "Tls",
-    "HttpError",
-    "HttpHeader",
-    "HttpLimits",
-    "HttpRequest",
-    "HttpResponse",
-    "Http",
     "Text",
     "String",
     "Substring",
@@ -324,14 +312,6 @@ fn resolve_module_use(
 ) -> Result<(String, UseBinding), Diagnostic> {
     let text = decl.path.join(".");
     let root = &decl.path[0];
-    if root == "std" {
-        return Err(Diagnostic::new(
-            "E1052",
-            "the standard library does not ship with this toolchain yet; \
-             use a path dependency or the `sys` operations",
-            decl.span,
-        ));
-    }
     let Some(prefix) = env.roots.get(root) else {
         let mut known: Vec<&str> = env.roots.keys().map(|k| k.as_str()).collect();
         known.push("sys");

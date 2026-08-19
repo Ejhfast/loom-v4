@@ -1,4 +1,4 @@
-# Core: explicit TLS client configuration and stream resources.
+# Core: TLS stream resources and operation boundary values.
 
 enum TlsError
   InvalidConfig(message: String)
@@ -19,39 +19,6 @@ enum TlsError
     in Closed               then "TLS stream is closed"
     in LimitExceeded(value) then value
     end
-  end
-end
-
-enum TlsRoots
-  WebPki
-  Custom(certificates: [Bytes])
-end
-
-enum TlsVersion
-  Tls12
-  Tls13
-end
-
-final class TlsClientConfig
-  server_name: String
-  roots: TlsRoots
-  alpn: [Bytes]
-  minimum_version: TlsVersion
-  max_buffer_bytes: Int
-
-  def init(
-    mut self,
-    server_name: String,
-    roots: TlsRoots,
-    alpn: [Bytes],
-    minimum_version: TlsVersion,
-    max_buffer_bytes: Int
-  )
-    self.server_name = server_name
-    self.roots = roots
-    self.alpn = alpn
-    self.minimum_version = minimum_version
-    self.max_buffer_bytes = max_buffer_bytes
   end
 end
 
@@ -155,129 +122,5 @@ final class TlsStream
         return Err(error)
       end
     end
-  end
-end
-
-final class Tls
-  def default_config(self, server_name: String): TlsClientConfig
-    TlsClientConfig(
-      server_name,
-      TlsRoots.WebPki,
-      [Bytes("http/1.1")],
-      TlsVersion.Tls12,
-      65536
-    ).freeze()
-  end
-
-  def validate_config(self, config: TlsClientConfig): Result[(), TlsError]
-    name = config.server_name.bytes()
-    if name.len() == 0 or name.len() > 253
-      return Err(TlsError.InvalidConfig("the TLS server name length is invalid"))
-    end
-    index = 0
-    while index < name.len()
-      byte = name.at(index)
-      if byte <= 32 or byte >= 127
-        return Err(TlsError.InvalidConfig("the TLS server name is invalid"))
-      end
-      index = index + 1
-    end
-    if config.max_buffer_bytes <= 0 or config.max_buffer_bytes > 1048576
-      return Err(TlsError.InvalidConfig("the TLS buffer limit is invalid"))
-    end
-    if config.alpn.len() > 32
-      return Err(TlsError.InvalidConfig("the TLS ALPN list is too large"))
-    end
-    total = 0
-    index = 0
-    while index < config.alpn.len()
-      protocol = config.alpn.at(index)
-      if protocol.len() == 0 or protocol.len() > 255
-        return Err(TlsError.InvalidConfig("a TLS ALPN value has an invalid length"))
-      end
-      total = total + protocol.len()
-      if total > 4096
-        return Err(TlsError.InvalidConfig("the TLS ALPN data is too large"))
-      end
-      index = index + 1
-    end
-    case config.roots
-    in TlsRoots.WebPki then ()
-    in TlsRoots.Custom(certificates)
-      if certificates.len() == 0 or certificates.len() > 128
-        return Err(TlsError.InvalidConfig("the TLS root list size is invalid"))
-      end
-      total = 0
-      index = 0
-      while index < certificates.len()
-        certificate = certificates.at(index)
-        if certificate.len() == 0 or certificate.len() > 1048576
-          return Err(TlsError.InvalidConfig("a TLS root certificate size is invalid"))
-        end
-        total = total + certificate.len()
-        if total > 4194304
-          return Err(TlsError.InvalidConfig("the TLS root data is too large"))
-        end
-        index = index + 1
-      end
-    end
-    Ok(())
-  end
-
-  def handshake(
-    self,
-    stream: TcpStream,
-    config: TlsClientConfig
-  ): Result[TlsStream, TlsError] with Tls.Handshake
-    case self.validate_config(config)
-    in Err(error)
-      return Err(error)
-    in Ok(_) then ()
-    end
-    minimum = case config.minimum_version
-    in TlsVersion.Tls12 then 12
-    in TlsVersion.Tls13 then 13
-    end
-    case config.roots
-    in TlsRoots.WebPki
-      sys.tls.handshake(
-        stream,
-        config.server_name,
-        0,
-        [],
-        config.alpn,
-        minimum,
-        config.max_buffer_bytes
-      )
-    in TlsRoots.Custom(certificates)
-      sys.tls.handshake(
-        stream,
-        config.server_name,
-        1,
-        certificates,
-        config.alpn,
-        minimum,
-        config.max_buffer_bytes
-      )
-    end
-  end
-
-  def connect_host(
-    self,
-    host: String,
-    port: Int,
-    config: TlsClientConfig
-  ): Result[TlsStream, TlsError] with Dns.Resolve, Tcp.Client, Tls.Client
-    case self.validate_config(config)
-    in Err(error)
-      return Err(error)
-    in Ok(_) then ()
-    end
-    stream = case Tcp().connect_host(host, port)
-    in Ok(value) then value
-    in Err(error)
-      return Err(TlsError.Network(error))
-    end
-    self.handshake(stream, config)
   end
 end

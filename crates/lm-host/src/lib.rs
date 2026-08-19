@@ -1323,6 +1323,12 @@ mod tests {
             .collect();
         let source = format!(
             r#"
+use std.tls.TlsClientConfig
+use std.tls.TlsRoots
+use std.tls.TlsVersion
+use std.http.Http
+use std.http.HttpRequest
+
 root = ByteBuffer()
 {root_bytes}
 config = TlsClientConfig(

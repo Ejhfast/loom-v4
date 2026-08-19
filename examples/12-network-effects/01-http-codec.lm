@@ -1,5 +1,9 @@
 # Build and parse bounded HTTP/1.1 values without network authority.
 
+use std.http.Http
+use std.http.HttpHeader
+use std.http.HttpRequest
+
 http = Http()
 limits = http.default_limits()
 request = HttpRequest(
