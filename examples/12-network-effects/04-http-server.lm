@@ -1,0 +1,143 @@
+# Run an HTTP server and a client at the same time.
+#
+# The root binds the listener and hands it to a server proc. A handle
+# travels through a mailbox like any other value. The root then acts as
+# the client, so both machines make progress together.
+#
+# The server routes on the method and the target. It answers three
+# requests and then stops.
+
+use std.http.Http
+use std.http.HttpHeader
+use std.http.HttpRequest
+use std.http.HttpResponse
+use std.http.HttpLimits
+
+def loopback(port: Int): SocketAddress
+  bytes = ByteBuffer()
+  bytes.append(127).append(0).append(0).append(1)
+  case Tcp().address(IpAddress.V4(bytes.finish()), port, 0, 0)
+  in Ok(value) then value
+  in Err(_)    then loopback(0)
+  end
+end
+
+# The route table. Each arm returns one status and one body.
+def route(request: HttpRequest): HttpResponse
+  plain = [HttpHeader("Content-Type", Bytes("text/plain"))]
+  if request.method == "GET" and request.target == "/health"
+    return HttpResponse(200, plain, Bytes("ok"))
+  end
+  if request.method == "POST" and request.target == "/echo"
+    return HttpResponse(200, plain, request.body)
+  end
+  HttpResponse(404, plain, Bytes("no route for {request.method} {request.target}"))
+end
+
+class Server < Proc[TcpListener]
+  def on_spawn(self): String with Proc, Tcp.Server
+    http = Http()
+    limits = http.default_limits()
+    listener = case self.receive()
+    in Msg(value) then value
+    in Closed
+      return "the server received no listener"
+    end
+    served = 0
+    while served < 3
+      stream = case listener.accept()
+      in Ok(value) then value.first
+      in Err(error)
+        return "accept: {error.message()}"
+      end
+      # A malformed request closes one connection. It does not stop
+      # the server.
+      case http.read_request(stream, limits)
+      in Ok(request)
+        response = route(request)
+        case http.write_response(stream, response, "OK", limits)
+        in Ok(_) then ()
+        in Err(error)
+          return "write: {error.message()}"
+        end
+      in Err(_) then ()
+      end
+      stream.close()
+      served = served + 1
+    end
+    listener.close()
+    "the server answered {served} requests"
+  end
+end
+
+# One client request over one new connection.
+def call(
+  http: Http,
+  limits: HttpLimits,
+  port: Int,
+  request: HttpRequest
+): String with Tcp.Connect, Tcp.Stream
+  wire = case http.serialize_request("127.0.0.1", port, request, limits)
+  in Ok(value) then value
+  in Err(error)
+    return "serialize: {error.message()}"
+  end
+  stream = case Tcp().connect(loopback(port))
+  in Ok(value) then value
+  in Err(error)
+    return "connect: {error.message()}"
+  end
+  case stream.write_all(wire)
+  in Ok(_) then ()
+  in Err(error)
+    stream.close()
+    return "write: {error.message()}"
+  end
+  answer = case http.read_response(stream, request.method, limits)
+  in Ok(response) then "{response.status} {response.body.text()}"
+  in Err(error)   then "read: {error.message()}"
+  end
+  stream.close()
+  answer
+end
+
+def main(): String with Proc, Tcp.Server, Tcp.Connect
+  http = Http()
+  limits = http.default_limits()
+  listener = case Tcp().listen(loopback(0), 8)
+  in Ok(value) then value
+  in Err(error)
+    return "listen: {error.message()}"
+  end
+  # Port zero asks the host for a free port. Read the real port back.
+  port = case listener.local_address()
+  in Ok(value) then value.port
+  in Err(error)
+    return "address: {error.message()}"
+  end
+
+  server = Server.spawn()
+  server.send(listener)
+
+  health = call(http, limits, port, HttpRequest("GET", "/health", [], Bytes("")))
+  echo = call(
+    http,
+    limits,
+    port,
+    HttpRequest(
+      "POST",
+      "/echo",
+      [HttpHeader("Content-Type", Bytes("text/plain"))],
+      Bytes("Loom")
+    )
+  )
+  missing = call(http, limits, port, HttpRequest("GET", "/nowhere", [], Bytes("")))
+
+  report = case server.done()
+  in Done(text) then text
+  in Fault(_)   then "the server proc faulted"
+  end
+  "{health} | {echo} | {missing} | {report}"
+end
+
+main()

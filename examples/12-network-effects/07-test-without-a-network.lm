@@ -1,0 +1,121 @@
+# Test a network client with no network.
+#
+# Run with `--allow Vm`. This example opens no socket.
+#
+# `fetch_status` is ordinary client code. It resolves a name, opens a
+# connection, writes a request, and reads a response. This program
+# never grants it DNS or TCP authority.
+#
+# Instead the root drives a child machine. Every request the child
+# performs arrives here as a value. The root answers each one from
+# memory, so the test is fast and it never leaves the process.
+#
+# The child cannot tell the difference. That is the point: the same
+# code runs in the test and in production.
+
+use std.http.Http
+use std.http.HttpRequest
+
+# ---- the code under test -------------------------------------------
+
+def fetch_status(): String with Http.CleartextClient
+  http = Http()
+  request = HttpRequest("GET", "/status", [], Bytes(""))
+  case http.send("api.test", 80, request, http.default_limits())
+  in Err(error) then "failed: {error.message()}"
+  in Ok(response)
+    kind = case response.header("content-type")
+    in Some(value) then value.text()
+    in None        then "(none)"
+    end
+    "{response.status} {kind} {response.body.text()}"
+  end
+end
+
+# ---- the test harness ----------------------------------------------
+
+def loopback(port: Int): SocketAddress
+  bytes = ByteBuffer()
+  bytes.append(127).append(0).append(0).append(1)
+  case Tcp().address(IpAddress.V4(bytes.finish()), port, 0, 0)
+  in Ok(value) then value
+  in Err(_)    then loopback(0)
+  end
+end
+
+# Answer the byte-level traffic on the served stream.
+#
+# The first read delivers the whole canned response. The second read
+# reports the end of the stream. A real peer can split a response
+# across several reads, and the client must handle both shapes.
+def serve(child: Vm[String], canned: Bytes): String with Vm
+  sent = false
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request
+      in Call(Tcp.Write, call, (_, bytes))
+        # Accept the request bytes and report full progress.
+        child.answer(call, Ok(bytes.len()))
+      in Call(Tcp.Read, call, (_, _))
+        if sent
+          child.answer(call, Ok(TcpRead.End))
+        else
+          sent = true
+          child.answer(call, Ok(TcpRead.Data(canned)))
+        end
+      in Call(Tcp.Close, call, (_,))
+        child.answer(call, Ok(()))
+      in _
+        # Nothing else is expected. Let the policy refuse it.
+        child.dispatch(request)
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return "the child faulted"
+    end
+  end
+end
+
+# Answer the name lookup and the connection, then serve the bytes.
+def run_case(canned: Bytes): String with Vm
+  child = sys.vm.Vm().from_fn(fetch_status, args: ())
+  case child.drive()
+  in Asked(lookup)
+    case lookup
+    in Call(Dns.Resolve, call, (_, port))
+      # No resolver runs. The address is a value this test chose.
+      child.answer(call, Ok([loopback(port)]))
+      case child.drive()
+      in Asked(open)
+        case open
+        in Call(Tcp.Connect, call, (peer,))
+          # `serve_tcp_stream` answers the connect with a new stream
+          # that this machine backs. No socket exists behind it.
+          child.serve_tcp_stream(call, peer)
+          serve(child, canned)
+        in _ then "the child did not connect"
+        end
+      in Done(_)  then "the child stopped before it connected"
+      in Fault(_) then "the child faulted"
+      end
+    in _ then "the child did not resolve a name"
+    end
+  in Done(_)  then "the child stopped before it resolved a name"
+  in Fault(_) then "the child faulted"
+  end
+end
+
+def main(): (String, String) with Vm
+  healthy = run_case(Bytes(
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nready"
+  ))
+  # The same client code, and a server that reports an outage.
+  broken = run_case(Bytes(
+    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\ndown"
+  ))
+  (healthy, broken)
+end
+
+main()

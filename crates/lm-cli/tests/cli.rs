@@ -389,6 +389,99 @@ fn run_tls_driver_example_exposes_lower_requests() {
 }
 
 #[test]
+fn run_http_server_example_routes_three_requests() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Proc,Tcp",
+        "examples/12-network-effects/04-http-server.lm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "Done(\"200 ok | 200 Loom | 404 no route for GET /nowhere | \
+         the server answered 3 requests\")\n"
+    );
+}
+
+#[test]
+fn run_fake_origin_example_needs_no_socket() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Vm",
+        "examples/12-network-effects/07-test-without-a-network.lm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "Done((\"200 text/plain ready\", \"503 text/plain down\"))\n"
+    );
+}
+
+#[test]
+fn run_egress_allowlist_example_refuses_two_hosts() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Vm",
+        "examples/12-network-effects/08-egress-allowlist.lm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "Done(\"api.internal: 200 ok | \
+         data.example.com: data.example.com is not on the egress list | \
+         metrics.vendor.net: metrics.vendor.net is not on the egress list\")\n"
+    );
+}
+
+// The two cases below reach the public internet. They are `#[ignore]`
+// so an offline build stays green. Run them with
+// `cargo test -p lm-cli -- --ignored`.
+
+#[test]
+#[ignore]
+fn run_fetch_https_example_reads_a_real_page() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Http.Client",
+        "examples/12-network-effects/05-fetch-https.lm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // The page length can change, so the check pins the stable parts.
+    let text = stdout(&out);
+    assert!(
+        text.starts_with("Done((\"example.com/ -> 200 text/html "),
+        "{text}"
+    );
+    assert!(text.ends_with(" bytes\", true))\n"), "{text}");
+}
+
+#[test]
+#[ignore]
+fn run_certificate_rules_example_refuses_four_hosts() {
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Http.Client",
+        "examples/12-network-effects/06-certificate-rules.lm",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let refused = "\"refused: the certificate failed the check\"";
+    assert_eq!(
+        stdout(&out),
+        format!("Done(({refused}, {refused}, {refused}, {refused}, \"accepted, status 200\"))\n")
+    );
+}
+
+#[test]
 fn snapshot_verify_reports_the_checkpoint_world() {
     let out = lm(&["snapshot", "verify", "checkpoints/asked-tree.lms"]);
     assert!(out.status.success(), "{}", stderr(&out));

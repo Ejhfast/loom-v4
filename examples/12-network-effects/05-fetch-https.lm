@@ -1,0 +1,57 @@
+# Fetch a real page over HTTPS.
+#
+# Run with `--allow Http.Client`. This example needs the internet.
+#
+# `send_secure` performs the whole exchange. It resolves the name and
+# opens the TCP stream. It completes the TLS handshake, writes the
+# request, and reads one bounded response.
+#
+# `Http.Client` is an effect set. It expands to the exact DNS, TCP, and
+# TLS operations. The row stays short, and the policy still sees every
+# operation.
+
+use std.http.Http
+use std.http.HttpError
+use std.http.HttpHeader
+use std.http.HttpRequest
+use std.http.HttpResponse
+use std.tls.Tls
+
+# One reusable helper. Copy this into your own program.
+def get(host: String, path: String): Result[HttpResponse, HttpError] with Http.Client
+  http = Http()
+  # The default configuration trusts the WebPKI roots, offers HTTP/1.1
+  # through ALPN, and accepts TLS 1.2 or later.
+  config = Tls().default_config(host)
+  request = HttpRequest(
+    "GET",
+    path,
+    [HttpHeader("User-Agent", Bytes("loom-example/1"))],
+    Bytes("")
+  )
+  http.send_secure(host, 443, request, config, http.default_limits())
+end
+
+def describe(host: String, path: String): String with Http.Client
+  case get(host, path)
+  in Err(error) then "{host}{path} failed: {error.message()}"
+  in Ok(response)
+    kind = case response.header("content-type")
+    in Some(value) then value.text()
+    in None        then "(no content type)"
+    end
+    "{host}{path} -> {response.status} {kind} {response.body.len()} bytes"
+  end
+end
+
+def main(): (String, Bool) with Http.Client
+  page = describe("example.com", "/")
+  # The body is ordinary Bytes. Decode it and search it like any text.
+  found = case get("example.com", "/")
+  in Ok(response) then response.body.text().contains("Example Domain")
+  in Err(_)       then false
+  end
+  (page, found)
+end
+
+main()

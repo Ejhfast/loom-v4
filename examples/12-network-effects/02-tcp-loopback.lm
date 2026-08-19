@@ -1,3 +1,5 @@
+# Move bytes over one loopback TCP connection.
+#
 # Run with `--allow Tcp`.
 
 def loopback(port: Int): Result[SocketAddress, NetError]

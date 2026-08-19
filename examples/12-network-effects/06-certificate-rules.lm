@@ -1,0 +1,50 @@
+# The TLS client checks the certificate before it sends a byte.
+#
+# Run with `--allow Http.Client`. This example needs the internet.
+#
+# Each host below presents one broken certificate. The client refuses
+# all of them and accepts only the valid host. A refusal arrives as an
+# ordinary `Err` value, so the program stays in control.
+#
+# The classifier below reports the error kind, not the raw text. A
+# library message can change between versions. The kind does not.
+
+use std.http.Http
+use std.http.HttpError
+use std.http.HttpRequest
+use std.tls.Tls
+
+def probe(host: String): String with Http.Client
+  http = Http()
+  request = HttpRequest("GET", "/", [], Bytes(""))
+  case http.send_secure(
+    host,
+    443,
+    request,
+    Tls().default_config(host),
+    http.default_limits()
+  )
+  in Ok(response) then "accepted, status {response.status}"
+  in Err(HttpError.Tls(TlsError.Certificate(_))) then "refused: the certificate failed the check"
+  in Err(HttpError.Tls(TlsError.Handshake(_)))   then "refused: the handshake failed"
+  in Err(HttpError.Network(_))                   then "no answer: the host is unreachable"
+  in Err(error)                                  then "refused: {error.message()}"
+  end
+end
+
+def main(): (String, String, String, String, String) with Http.Client
+  (
+    # The certificate expired years ago.
+    probe("expired.badssl.com"),
+    # The certificate names a different host.
+    probe("wrong.host.badssl.com"),
+    # Nobody signed the certificate except its own key.
+    probe("self-signed.badssl.com"),
+    # A real chain, but no trusted root ends it.
+    probe("untrusted-root.badssl.com"),
+    # A correct certificate from a trusted root.
+    probe("sha256.badssl.com")
+  )
+end
+
+main()

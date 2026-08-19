@@ -1,4 +1,6 @@
 # Build and parse bounded HTTP/1.1 values without network authority.
+#
+# This example needs no grant. The codec is ordinary verified code.
 
 use std.http.Http
 use std.http.HttpHeader

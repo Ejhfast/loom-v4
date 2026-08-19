@@ -1,4 +1,6 @@
 # A holder observes TCP and TLS requests behind their effect sets.
+#
+# Run with `--allow Vm`. This example opens no socket.
 
 use std.tls.Tls
 use std.tls.TlsClientConfig

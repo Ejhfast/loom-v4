@@ -1,0 +1,106 @@
+# Permit one host and refuse every other host.
+#
+# Run with `--allow Vm`. This example opens no socket.
+#
+# A grant of `Tcp.Connect` is all or nothing. It cannot name one host.
+# A supervisor can. It reads each name lookup before the host sees it.
+# It then refuses every name that its list does not hold.
+#
+# The child receives an ordinary `NetError.PermissionDenied`. It is not
+# a fault. The child handles the refusal like any other network error,
+# so one blocked call does not stop the program.
+
+use std.http.Http
+use std.http.HttpRequest
+
+# ---- the untrusted worker ------------------------------------------
+
+def call_out(host: String): String with Http.CleartextClient
+  http = Http()
+  request = HttpRequest("GET", "/data", [], Bytes(""))
+  case http.send(host, 80, request, http.default_limits())
+  in Ok(response) then "{host}: {response.status} {response.body.text()}"
+  in Err(error)   then "{host}: {error.message()}"
+  end
+end
+
+def worker(): String with Http.CleartextClient
+  first = call_out("api.internal")
+  second = call_out("data.example.com")
+  third = call_out("metrics.vendor.net")
+  "{first} | {second} | {third}"
+end
+
+# ---- the supervisor ------------------------------------------------
+
+def loopback(port: Int): SocketAddress
+  bytes = ByteBuffer()
+  bytes.append(127).append(0).append(0).append(1)
+  case Tcp().address(IpAddress.V4(bytes.finish()), port, 0, 0)
+  in Ok(value) then value
+  in Err(_)    then loopback(0)
+  end
+end
+
+def permitted(list: [String], host: String): Bool
+  index = 0
+  while index < list.len()
+    if list.at(index) == host
+      return true
+    end
+    index = index + 1
+  end
+  false
+end
+
+def guard(child: Vm[String], list: [String], canned: Bytes): String with Vm
+  sent = false
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request
+      in Call(Dns.Resolve, call, (host, port))
+        if permitted(list, host)
+          child.answer(call, Ok([loopback(port)]))
+        else
+          # The refusal names no address, so the child never learns
+          # one. The message travels back as a plain value.
+          child.answer(call, Err(NetError.PermissionDenied(
+            "{host} is not on the egress list"
+          )))
+        end
+      in Call(Tcp.Connect, call, (peer,))
+        # Only a permitted name reaches this point.
+        child.serve_tcp_stream(call, peer)
+        sent = false
+      in Call(Tcp.Write, call, (_, bytes))
+        child.answer(call, Ok(bytes.len()))
+      in Call(Tcp.Read, call, (_, _))
+        if sent
+          child.answer(call, Ok(TcpRead.End))
+        else
+          sent = true
+          child.answer(call, Ok(TcpRead.Data(canned)))
+        end
+      in Call(Tcp.Close, call, (_,))
+        child.answer(call, Ok(()))
+      in _
+        child.dispatch(request)
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return "the child faulted"
+    end
+  end
+end
+
+def main(): String with Vm
+  child = sys.vm.Vm().from_fn(worker, args: ())
+  canned = Bytes(
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"
+  )
+  guard(child, ["api.internal"], canned)
+end
+
+main()
