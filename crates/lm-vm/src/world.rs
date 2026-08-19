@@ -239,6 +239,11 @@ pub struct World<'m> {
     /// takes the same slot. Without the list, a loop of mocked
     /// performs grows the machine table without any bound.
     mock_free: Vec<VmId>,
+    /// Reclaimed machine slots, ready for the next child record.
+    ///
+    /// `collect_machines` fills this list. A slot here holds an empty
+    /// record whose generation already moved past the freed machine.
+    vm_free: Vec<VmId>,
     /// Suspended activation stacks, keyed by the machine the stack
     /// started from.
     ///
@@ -450,6 +455,7 @@ impl<'m> World<'m> {
             core: loaded.core_layout(),
             machines: vec![root],
             mock_free: Vec::new(),
+            vm_free: Vec::new(),
             suspended: std::collections::BTreeMap::new(),
             scheduler_procs: ActiveProcs::new(1),
             schedule_events: ScheduleEvents::default(),
@@ -802,10 +808,28 @@ impl<'m> World<'m> {
     /// charges it for guest code.
     pub fn new_child(&mut self, parent: VmId) -> Option<VmId> {
         let config = self.reserve_child(parent)?;
-        let id = self.machines.len() as VmId;
-        let machine = self.empty_machine(config, Some(parent), 0);
-        self.machines.push(machine);
-        Some(id)
+        Some(self.install_child(config, parent))
+    }
+
+    /// Install one new child record, in a free slot when one exists.
+    ///
+    /// A reclaimed slot keeps the generation the collector left, so a
+    /// key minted for the freed record names a dead machine and never
+    /// the new one.
+    pub(crate) fn install_child(&mut self, config: VmConfig, parent: VmId) -> VmId {
+        match self.vm_free.pop() {
+            Some(id) => {
+                let generation = self.machines[id as usize].generation;
+                self.machines[id as usize] = self.empty_machine(config, Some(parent), generation);
+                id
+            }
+            None => {
+                let id = self.machines.len() as VmId;
+                let machine = self.empty_machine(config, Some(parent), 0);
+                self.machines.push(machine);
+                id
+            }
+        }
     }
 
     /// The table grants that the declared row of one function names.
@@ -3521,14 +3545,16 @@ impl<'m> World<'m> {
         if !self.share_heap_budget() {
             return None;
         }
-        if !self.has_machine_room(1) || self.machines.try_reserve(1).is_err() {
+        if !self.can_reserve_child(parent) {
+            // A dead record still holds a slot and a budget unit. Free
+            // the dead records once, then answer the request again.
+            self.collect_machines();
+        }
+        if !self.can_reserve_child(parent) {
             return None;
         }
         let m = &mut self.machines[parent as usize];
         let budget = m.config.max_children;
-        if m.children >= budget {
-            return None;
-        }
         m.children += 1;
         let remaining = budget - m.children;
         Some(VmConfig {
@@ -3537,12 +3563,150 @@ impl<'m> World<'m> {
         })
     }
 
+    /// True when the parent can charge one more child right now.
+    fn can_reserve_child(&mut self, parent: VmId) -> bool {
+        if !self.has_machine_room(1) {
+            return false;
+        }
+        if self.vm_free.is_empty() && self.machines.try_reserve(1).is_err() {
+            return false;
+        }
+        let m = &self.machines[parent as usize];
+        m.children < m.config.max_children
+    }
+
     /// True when the machine table can add `count` records.
+    ///
+    /// A free slot takes a new record, so the count of live records
+    /// decides the limit, not the length of the table.
     pub(crate) fn has_machine_room(&self, count: usize) -> bool {
         self.machines
             .len()
+            .saturating_sub(self.vm_free.len())
+            .saturating_sub(self.mock_free.len())
             .checked_add(count)
             .is_some_and(|total| total <= self.budget.limits.max_machines as usize)
+    }
+
+    /// Reclaim every machine record that no live machine names.
+    ///
+    /// A machine is data (specification 1). A record that no live
+    /// machine names can never run again and can never be inspected,
+    /// so the world frees the record, returns the slot, and returns
+    /// the child budget to the parent. A driver that restores one
+    /// world for each branch of a search therefore pays for the
+    /// branches it still holds, not for every branch it ever built.
+    ///
+    /// The reachability walk is the walk a snapshot cut uses
+    /// (`machine_references`), so the live set here is the set a
+    /// capture would close over.
+    ///
+    /// The pass is conservative. It keeps every machine it cannot
+    /// prove dead: a machine on a live activation stack, a machine the
+    /// scheduler owns, a paused machine, a machine one barrier holds,
+    /// a machine that owns a host resource, and a machine that waits
+    /// on the host. A walk that fails frees nothing.
+    pub(crate) fn collect_machines(&mut self) -> usize {
+        let count = self.machines.len();
+        let mut free_slot = vec![false; count];
+        for id in self.vm_free.iter().chain(self.mock_free.iter()) {
+            free_slot[*id as usize] = true;
+        }
+        let mut live = vec![false; count];
+        let mut queue: Vec<VmId> = Vec::new();
+        let mut root = |live: &mut Vec<bool>, queue: &mut Vec<VmId>, vm: VmId| {
+            if (vm as usize) < count && !live[vm as usize] {
+                live[vm as usize] = true;
+                queue.push(vm);
+            }
+        };
+        for id in 0..count as VmId {
+            if free_slot[id as usize] {
+                continue;
+            }
+            let m = &self.machines[id as usize];
+            // A machine with no parent is the world root or one mock
+            // record. Neither takes part in the child budget.
+            //
+            // An empty record is a machine that no handle names yet.
+            // `Vm.New` allocates the record before it allocates the
+            // handle, and the embedding API hands one back before any
+            // guest value holds it. The pass keeps every such record,
+            // because it cannot tell a new one from an abandoned one.
+            if m.vm.parent.is_none()
+                || m.vm.state == MachineState::Empty
+                || m.active > 0
+                || m.owner != Ownership::Holder
+                || m.paused
+                || m.barrier.is_some()
+            {
+                root(&mut live, &mut queue, id);
+            }
+        }
+        for (holder, stack) in &self.suspended {
+            root(&mut live, &mut queue, *holder);
+            for act in &stack.activations {
+                root(&mut live, &mut queue, act.vm);
+                if let Some(reply) = act.reply_to {
+                    root(&mut live, &mut queue, reply);
+                }
+            }
+        }
+        for group in &self.gate_groups {
+            for member in &group.members {
+                root(&mut live, &mut queue, *member);
+            }
+        }
+        for bound in self.bound_resources.values() {
+            root(&mut live, &mut queue, bound.owner);
+        }
+        let mut head = 0;
+        while head < queue.len() {
+            let vm = queue[head];
+            head += 1;
+            if !self.is_live_machine(vm) {
+                continue;
+            }
+            let Ok(found) = self.machine_references(vm) else {
+                // The walk proved nothing, so the pass frees nothing.
+                return 0;
+            };
+            for target in found {
+                if (target as usize) < count && !live[target as usize] {
+                    live[target as usize] = true;
+                    queue.push(target);
+                }
+            }
+        }
+        let mut freed = 0;
+        for id in 0..count as VmId {
+            if live[id as usize] || free_slot[id as usize] {
+                continue;
+            }
+            let m = &self.machines[id as usize];
+            if m.active > 0
+                || m.owner != Ownership::Holder
+                || m.paused
+                || m.barrier.is_some()
+                || m.resources.live_count() > 0
+                || matches!(
+                    m.vm.state,
+                    MachineState::Running | MachineState::Waiting | MachineState::Blocked
+                )
+            {
+                continue;
+            }
+            let parent = m.vm.parent;
+            let generation = m.generation.wrapping_add(1);
+            self.machines[id as usize] = self.empty_machine(self.config, None, generation);
+            if let Some(up) = parent {
+                let record = &mut self.machines[up as usize];
+                record.children = record.children.saturating_sub(1);
+            }
+            self.vm_free.push(id);
+            freed += 1;
+        }
+        freed
     }
 
     /// Attach the aggregate heap ledger before a second machine exists.
@@ -3676,16 +3840,17 @@ impl<'m> World<'m> {
                         return;
                     }
                 };
-                let child = self.machines.len() as VmId;
-                let machine = self.empty_machine(child_config, Some(vm), 0);
-                self.machines.push(machine);
+                let child = self.install_child(child_config, vm);
                 match self.machines[vm as usize].alloc(Object::NativeVm { vm: child }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
                     Err(code) => {
                         // No handle names the child, so the whole call
-                        // rolls back: the record goes and the parent
-                        // gets its reservation back.
-                        self.machines.pop();
+                        // rolls back: the record returns to the free
+                        // list and the parent gets its reservation back.
+                        let generation = self.machines[child as usize].generation;
+                        self.machines[child as usize] =
+                            self.empty_machine(self.config, None, generation);
+                        self.vm_free.push(child);
                         self.machines[vm as usize].children -= 1;
                         self.machines[vm as usize].set_fault(code, "", Some(op));
                     }
