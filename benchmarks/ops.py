@@ -471,5 +471,120 @@ CASES.extend(
 )
 
 
+
+
+# ---------------------------------------------------------------
+# The filesystem cases.
+#
+# Every case runs the same workload as the Loom case of the same name
+# in `bench_filesystem_operations`. A Loom file operation crosses an
+# effect boundary and completes on a worker thread; CPython calls the
+# system call directly, so the ratio measures the boundary.
+#
+# The read cases run twice. The unbuffered pair matches Loom call for
+# call: one system call per read. The buffered pair is what a CPython
+# program writes by default, where a small read is a copy out of an
+# internal buffer and no system call happens at all.
+# ---------------------------------------------------------------
+
+import os
+import tempfile
+
+FS_DIR = os.path.join(tempfile.gettempdir(), f"lm-fs-bench-cpy-{os.getpid()}")
+FS_DATA = os.path.join(FS_DIR, "data.bin")
+FS_SMALL = os.path.join(FS_DIR, "small.txt")
+FS_OUT = os.path.join(FS_DIR, "out.bin")
+
+
+def fs_setup():
+    os.makedirs(FS_DIR, exist_ok=True)
+    with open(FS_DATA, "wb") as f:
+        f.write(b"x" * (8 * 1024 * 1024))
+    with open(FS_SMALL, "wb") as f:
+        f.write(b"x" * 4096)
+
+
+def fs_open_close():
+    total = 0
+    for _ in range(2000):
+        f = open(FS_DATA, "rb", buffering=0)
+        f.close()
+        total = total + 1
+    return total
+
+
+def fs_read_1k():
+    with open(FS_DATA, "rb", buffering=0) as f:
+        total = 0
+        for _ in range(2000):
+            total = total + len(f.read(1024))
+    return total
+
+
+def fs_read_1k_buffered():
+    with open(FS_DATA, "rb") as f:
+        total = 0
+        for _ in range(2000):
+            total = total + len(f.read(1024))
+    return total
+
+
+def fs_read_64k():
+    with open(FS_DATA, "rb", buffering=0) as f:
+        total = 0
+        for _ in range(100):
+            total = total + len(f.read(65536))
+    return total
+
+
+def fs_read_file():
+    total = 0
+    for _ in range(1000):
+        f = open(FS_SMALL, "rb", buffering=0)
+        total = total + len(f.read(8192))
+        f.close()
+    return total
+
+
+def fs_write_1k():
+    chunk = b"y" * 1024
+    with open(FS_OUT, "wb", buffering=0) as f:
+        total = 0
+        for _ in range(2000):
+            total = total + f.write(chunk)
+    return total
+
+
+FS_CASES = [
+    ("fs_open_close", fs_open_close, 2000),
+    ("fs_read_1k", fs_read_1k, 2000),
+    ("fs_read_1k_buffered", fs_read_1k_buffered, 2000),
+    ("fs_read_64k", fs_read_64k, 100),
+    ("fs_read_file", fs_read_file, 1000),
+    ("fs_write_1k", fs_write_1k, 2000),
+]
+
+
+def fs_main():
+    """Run the filesystem cases. Setup stays outside the timer."""
+    import shutil
+    import sys
+
+    fs_setup()
+    try:
+        print(f"# CPython {sys.version.split()[0]} filesystem")
+        print("CPY\tcase\titers\tns_per_op\ttotal_ms")
+        for name, fn, iterations in FS_CASES:
+            per_op, total_ms = measure(fn, iterations)
+            print(f"CPY\t{name}\t{iterations}\t{per_op:.0f}\t{total_ms:.3f}")
+    finally:
+        shutil.rmtree(FS_DIR, ignore_errors=True)
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "fs":
+        fs_main()
+    else:
+        main()

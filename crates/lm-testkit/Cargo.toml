@@ -17,3 +17,6 @@ lm-graph = { path = "../lm-graph" }
 lm-heap = { path = "../lm-heap" }
 lm-vm = { path = "../lm-vm" }
 lm-proc = { path = "../lm-proc" }
+
+[dev-dependencies]
+lm-host = { path = "../lm-host" }
