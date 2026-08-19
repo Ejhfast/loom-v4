@@ -574,17 +574,27 @@ end
 
 // ---------------------------------------------------------------
 // Finding 6: nested exact-arm exhaustiveness.
+//
+// This finding is reversed. A constructor now builds a value of the
+// enum and not of the arm it names, so no expression carries an arm
+// type and the recursive injection has nothing to narrow. A nested
+// case covers every arm or uses a wildcard, like every other case.
+// `docs/notes/week4-fixes.md` records the reversal.
 // ---------------------------------------------------------------
 
 #[test]
-fn nested_exact_arm_scrutinee_is_exhaustive() {
+fn nested_constructor_scrutinee_covers_every_arm() {
     let source = "s = Some(Some(3))\ncase s\nin Some(Some(v)) then v\nend\n";
-    assert_eq!(run(source), "Done(3)");
+    expect_error(source, "does not cover every value");
+    let covered = "s = Some(Some(3))\ncase s\n\
+                   in Some(Some(v)) then v\nin Some(None) then 0\nin None then 0 - 1\nend\n";
+    assert_eq!(run(covered), "Done(3)");
 }
 
 #[test]
-fn deeper_exact_arm_scrutinee_is_exhaustive() {
-    let source = "s = Some(Some(Some(4)))\ncase s\nin Some(Some(Some(v))) then v\nend\n";
+fn deeper_constructor_scrutinee_takes_a_wildcard() {
+    let source =
+        "s = Some(Some(Some(4)))\ncase s\nin Some(Some(Some(v))) then v\nin _ then 0\nend\n";
     assert_eq!(run(source), "Done(4)");
 }
 

@@ -89,7 +89,7 @@ enum has a same-named arm, the one `E1004` diagnostic gains a note:
 "the enum `Pairing` has an arm named `Pair`; write
 `Pairing.Pair(...)` to select it".
 
-## 6. Nested exact-arm exhaustiveness (fixed)
+## 6. Nested exact-arm exhaustiveness (reversed in week 10)
 
 Status on master: reproduced. `s = Some(Some(3)); case s in
 Some(Some(v))` reported `E1042`.
@@ -99,6 +99,30 @@ arm-typed position excludes its sibling arms at the top level and
 inside every arm-typed field position. The injected rows cover only
 values outside the static scrutinee type, so family-typed positions
 still need full coverage.
+
+**Reversed in week 10.** This finding treated the symptom. The cause
+was that a constructor expression carried the arm type rather than the
+enum type, and that produced a worse defect than the one it fixed: a
+program could not match a sibling arm at all.
+
+```
+c = Red
+case c in Red then 1 in Green then 2 in Blue(s) then s end
+  error[E1041]: the pattern `Green` can never match a value of `Colour.Red`
+```
+
+Every enum carried it, not the core ones alone. `Ordering`, each error
+enum, each machine event enum, `Option`, `Result`, and each user enum
+rejected a case over their own arms.
+
+An arm type is also not writable. `Option.Some` fails every annotation
+position with `unknown type name`, so the precision this finding bought
+could arrive by accident alone, and no program could ask for it or
+annotate its way out of it.
+
+A constructor now builds a value of the enum. No expression carries an
+arm type, so the recursive injection has nothing left to narrow, and a
+nested case covers every arm or takes a wildcard.
 
 ## 7. Map hash index (fixed)
 

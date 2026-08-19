@@ -117,7 +117,7 @@ fn oracle_agrees_on_the_feature_corpus() {
         // A mutable closure parameter with a mutable argument.
         "xs: [Int] = [1]\nf = do |mut ys: [Int]|: () ys.push(2) end\nf(xs)\nxs.len()\n",
         // A nested exact-arm scrutinee is exhaustive.
-        "s = Some(Some(3))\ncase s\nin Some(Some(v)) then v\nend\n",
+        "s = Some(Some(3))\ncase s\nin Some(Some(v)) then v\nin Some(None) then 0\nin None then 0 - 1\nend\n",
         // A `use` alias line in a pure program: the binding resolves
         // and stays unused, and both engines agree.
         "use sys.io.print\nuse sys.vm\n\ndef double(n: Int): Int\n  n * 2\nend\ndouble(21)\n",

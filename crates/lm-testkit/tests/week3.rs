@@ -272,9 +272,33 @@ fn exhaustiveness_rules() {
         "E1043"
     );
     assert_eq!(code_of("case 1\nin _ then 1\nin 2 then 2\nend\n"), "E1043");
-    // An arm-typed scrutinee is exhausted by its own arm.
+    // A constructor builds a value of the enum and not of the one arm
+    // it names, so every arm stays reachable and a case must cover all
+    // of them. This holds for any enum, not for the core ones alone.
+    let colour = "enum Colour\n  Red\n  Green\n  Blue(shade: Int)\nend\n";
     assert_eq!(
-        runs("x = Some(3)\ncase x\nin Some(v) then v\nend\n"),
+        code_of(&format!("{colour}c = Red\ncase c\nin Red then 1\nend\n")),
+        "E1042"
+    );
+    assert_eq!(
+        runs(&format!(
+            "{colour}c = Red\ncase c\nin Red then 1\nin Green then 2\nin Blue(s) then s\nend\n"
+        )),
+        "Done(1)"
+    );
+    // A wildcard covers the arms a program does not name.
+    assert_eq!(
+        runs(&format!(
+            "{colour}c = Red\ncase c\nin Red then 1\nin _ then 0\nend\n"
+        )),
+        "Done(1)"
+    );
+    assert_eq!(
+        code_of("x = Some(3)\ncase x\nin Some(v) then v\nend\n"),
+        "E1042"
+    );
+    assert_eq!(
+        runs("x = Some(3)\ncase x\nin Some(v) then v\nin None then 0\nend\n"),
         "Done(3)"
     );
     // Other scrutinee types need an irrefutable arm.
@@ -431,8 +455,8 @@ fn row_rules() {
 
 #[test]
 fn qualified_constructors_and_shadowing() {
-    // A constructor expression has the arm type; widen it to match
-    // the whole family.
+    // A qualified constructor builds a value of the enum, so an
+    // annotation adds nothing and every arm stays reachable.
     assert_eq!(
         runs(
             "x: Option[Int] = Option.Some(3)\n\
@@ -440,9 +464,8 @@ fn qualified_constructors_and_shadowing() {
         ),
         "Done(3)"
     );
-    // An arm-typed scrutinee is matched by its own arm alone.
     assert_eq!(
-        runs("x = Option.Some(3)\ncase x\nin Some(v) then v\nend\n"),
+        runs("x = Option.Some(3)\ncase x\nin Some(v) then v\nin None then 0\nend\n"),
         "Done(3)"
     );
     assert_eq!(runs("Ordering.Equal.is_equal()\n"), "Done(true)");

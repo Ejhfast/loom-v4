@@ -1543,8 +1543,25 @@ impl<'o> FnChecker<'o> {
             args,
             expected,
         )?;
+        // A constructor builds a value of the enum, not of the one arm
+        // it names. Narrowing to an arm is what a `case` does, so a
+        // local that holds a constructor result still matches every
+        // arm. An expected type already fixed the result, so only the
+        // free position widens.
+        let family = ctx.classes[arm as usize].family;
+        let ty = match family {
+            Some(parent) if expected.is_none() => {
+                if out.targs.is_empty() {
+                    ctx.store.intern(Type::Class(lm_types::ClassId(parent)))
+                } else {
+                    ctx.store
+                        .intern(Type::Inst(lm_types::ClassId(parent), out.targs.clone()))
+                }
+            }
+            _ => out.ret,
+        };
         Ok(HExpr {
-            ty: out.ret,
+            ty,
             mutable: true,
             kind: HExprKind::Construct {
                 class: arm,
