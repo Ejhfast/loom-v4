@@ -1187,6 +1187,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BYTES_CONTAINS => {
                 Instr::Native(lm_bytecode::NativeInstr::BytesContains)
             }
+            lm_abi::INTRINSIC_TEXT_SPLIT => Instr::Native(lm_bytecode::NativeInstr::TextSplit),
+            lm_abi::INTRINSIC_TEXT_LINES => Instr::Native(lm_bytecode::NativeInstr::TextLines),
             _ => unreachable!("the checker accepts only manifest intrinsics"),
         };
         self.emit(instr);
@@ -2033,6 +2035,8 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue)
         | Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith)
         | Instr::Native(lm_bytecode::NativeInstr::BytesContains)
+        | Instr::Native(lm_bytecode::NativeInstr::TextSplit)
+        | Instr::Native(lm_bytecode::NativeInstr::TextLines)
         | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
         | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
         | Instr::Native(lm_bytecode::NativeInstr::BytesConcat)
@@ -2204,6 +2208,8 @@ fn instr_text(instr: &Instr) -> String {
         }
         Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith) => "BytesEndsWith".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesContains) => "BytesContains".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextSplit) => "TextSplit".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextLines) => "TextLines".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextAt) => "TextAt".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextSlice) => "TextSlice".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextIsBoundary) => "TextIsBoundary".to_string(),

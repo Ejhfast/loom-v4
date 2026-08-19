@@ -666,6 +666,10 @@ impl<'m> Ctx<'m> {
             lm_abi::AbiType::FileHandle => Ok(self.intern(BcType::FileHandle)),
             lm_abi::AbiType::OpenOptions => self.plain_inst(self.core.open_options, "OpenOptions"),
             lm_abi::AbiType::SeekFrom => self.plain_inst(self.core.seek_from, "SeekFrom"),
+            lm_abi::AbiType::ListSubstring => {
+                let piece = self.plain_inst(self.core.substring, "Substring")?;
+                Ok(self.intern(BcType::List(piece)))
+            }
             lm_abi::AbiType::ResultOptionStrIoError => {
                 let (Some(option), Some(result), Some(io_error)) =
                     (self.core.option, self.core.result, self.core.io_error)
@@ -2628,6 +2632,25 @@ fn step(
             let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
             pop_expect(state, text)?;
             push(state, TY_INT)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::TextSplit) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            pop_expect(state, text)?;
+            pop_expect(state, text)?;
+            let piece = ctx
+                .plain_inst(ctx.core.substring, "Substring")
+                .map_err(&fail)?;
+            let list = ctx.intern(BcType::List(piece));
+            push(state, list)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::TextLines) => {
+            let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
+            pop_expect(state, text)?;
+            let piece = ctx
+                .plain_inst(ctx.core.substring, "Substring")
+                .map_err(&fail)?;
+            let list = ctx.intern(BcType::List(piece));
+            push(state, list)?;
         }
         Instr::Native(
             lm_bytecode::NativeInstr::BytesEndsWith | lm_bytecode::NativeInstr::BytesContains,

@@ -58,6 +58,8 @@ pub enum AbiType {
     FileHandle,
     OpenOptions,
     SeekFrom,
+    /// `List[Substring]`, the reply of a text splitting intrinsic.
+    ListSubstring,
     /// `Result[Option[String], IoError]`, the `Io.ReadLine` reply.
     ResultOptionStrIoError,
     /// `Result[SnapshotImage, SnapshotError]`, the `Vm.SnapshotSelf`
@@ -87,6 +89,7 @@ impl AbiType {
             AbiType::FileHandle => "FileHandle",
             AbiType::OpenOptions => "OpenOptions",
             AbiType::SeekFrom => "SeekFrom",
+            AbiType::ListSubstring => "List[Substring]",
             AbiType::ResultOptionStrIoError => "Result[Option[String], IoError]",
             AbiType::ResultSnapshotImageError => "Result[SnapshotImage, SnapshotError]",
             AbiType::ResultFileHandleFsError => "Result[FileHandle, FsError]",
@@ -203,9 +206,11 @@ pub const INTRINSIC_TEXT_PARSE_INT_STATUS: IntrinsicSlot = 83;
 pub const INTRINSIC_TEXT_PARSE_INT_VALUE: IntrinsicSlot = 84;
 pub const INTRINSIC_BYTES_ENDS_WITH: IntrinsicSlot = 85;
 pub const INTRINSIC_BYTES_CONTAINS: IntrinsicSlot = 86;
+pub const INTRINSIC_TEXT_SPLIT: IntrinsicSlot = 87;
+pub const INTRINSIC_TEXT_LINES: IntrinsicSlot = 88;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 87] = [
+pub const INTRINSICS: [IntrinsicDef; 89] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::Int],
@@ -726,6 +731,18 @@ pub const INTRINSICS: [IntrinsicDef; 87] = [
         name: "bytes.contains",
         params: &[AbiType::Bytes, AbiType::Bytes],
         reply: AbiType::Bool,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.split",
+        params: &[AbiType::Text, AbiType::Text],
+        reply: AbiType::ListSubstring,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.lines",
+        params: &[AbiType::Text],
+        reply: AbiType::ListSubstring,
         semantic_revision: 1,
     },
 ];

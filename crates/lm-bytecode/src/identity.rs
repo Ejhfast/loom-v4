@@ -479,6 +479,8 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::TextParseIntValue)
         | Instr::Native(NativeInstr::BytesEndsWith)
         | Instr::Native(NativeInstr::BytesContains)
+        | Instr::Native(NativeInstr::TextSplit)
+        | Instr::Native(NativeInstr::TextLines)
         | Instr::Native(NativeInstr::TextAt)
         | Instr::Native(NativeInstr::TextSlice)
         | Instr::Native(NativeInstr::TextIsBoundary)
@@ -1338,6 +1340,8 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::TextParseIntValue) => out.push(0xaf),
             Instr::Native(NativeInstr::BytesEndsWith) => out.push(0xb0),
             Instr::Native(NativeInstr::BytesContains) => out.push(0xb1),
+            Instr::Native(NativeInstr::TextSplit) => out.push(0xb2),
+            Instr::Native(NativeInstr::TextLines) => out.push(0xb3),
             Instr::Native(NativeInstr::TextAt) => out.push(0x8a),
             Instr::Native(NativeInstr::TextSlice) => out.push(0x8b),
             Instr::Native(NativeInstr::TextIsBoundary) => out.push(0x8c),

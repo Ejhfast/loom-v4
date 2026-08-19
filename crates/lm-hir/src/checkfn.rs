@@ -3313,6 +3313,10 @@ impl<'o> FnChecker<'o> {
             lm_abi::AbiType::FileHandle => lm_types::FILE_HANDLE,
             lm_abi::AbiType::OpenOptions => Self::core_class(ctx, "OpenOptions"),
             lm_abi::AbiType::SeekFrom => Self::core_class(ctx, "SeekFrom"),
+            lm_abi::AbiType::ListSubstring => {
+                let elem = Self::core_class(ctx, "Substring");
+                ctx.store.intern(Type::List(elem))
+            }
             lm_abi::AbiType::ResultOptionStrIoError => {
                 let option = ctx.core_types["Option"];
                 let result = ctx.core_types["Result"];

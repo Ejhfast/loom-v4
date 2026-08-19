@@ -1835,6 +1835,86 @@ impl Machine {
                 };
                 self.push(Value::Bool(found))?;
             }
+            Instr::Native(
+                lm_bytecode::NativeInstr::TextSplit | lm_bytecode::NativeInstr::TextLines,
+            ) => {
+                let split = matches!(instr, Instr::Native(lm_bytecode::NativeInstr::TextSplit));
+                let separator = if split { Some(self.pop_obj()?) } else { None };
+                let text = self.pop_obj()?;
+                // Collect the byte ranges first. Each piece shares the
+                // source allocation, so the walk sizes the result
+                // before it allocates anything.
+                let ranges: Vec<(usize, usize)> = {
+                    let source = self.text_value(text)?;
+                    let visible = source.as_str();
+                    match separator {
+                        Some(reference) => {
+                            let needle = self.text_value(reference)?.as_str();
+                            if needle.is_empty() {
+                                return Err(FaultCode::BadCast);
+                            }
+                            let mut ranges = Vec::new();
+                            let mut start = 0;
+                            while let Some(at) = visible[start..].find(needle) {
+                                let at = start + at;
+                                ranges.push((start, at));
+                                start = at + needle.len();
+                            }
+                            ranges.push((start, visible.len()));
+                            ranges
+                        }
+                        None => {
+                            let mut ranges = Vec::new();
+                            let mut start = 0;
+                            while start < visible.len() {
+                                let end = visible[start..]
+                                    .find('\n')
+                                    .map(|at| start + at)
+                                    .unwrap_or(visible.len());
+                                // A carriage return before the newline
+                                // belongs to the separator.
+                                let stop = if visible[start..end].ends_with('\r') {
+                                    end - 1
+                                } else {
+                                    end
+                                };
+                                ranges.push((start, stop));
+                                start = end + 1;
+                            }
+                            ranges
+                        }
+                    }
+                };
+                // One Substring object and one list slot per piece.
+                // `alloc` charges the exact cost; this bound only
+                // keeps the walk from starting work it cannot finish.
+                let cost = ranges
+                    .len()
+                    .checked_mul(2 * lm_heap::MIN_OBJECT_COST)
+                    .ok_or(FaultCode::HeapLimit)?;
+                let mut roots = vec![Value::Obj(text)];
+                if let Some(reference) = separator {
+                    roots.push(Value::Obj(reference));
+                }
+                self.reserve(cost, &roots)?;
+                let mut items = Vec::with_capacity(ranges.len());
+                for (start, end) in ranges {
+                    let piece = self
+                        .text_value(text)?
+                        .slice(start, end)
+                        .ok_or(FaultCode::IndexOutOfBounds)?;
+                    let value = self.alloc(Object::Substring(piece))?;
+                    items.push(value);
+                    // Every piece stays reachable through the operand
+                    // stack until the list owns it.
+                    self.push(value)?;
+                }
+                for _ in 0..items.len() {
+                    self.vm.operands.pop();
+                }
+                let value = self.alloc(Object::List { items })?;
+                self.push(value)?;
+            }
             Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith) => {
                 let suffix = self.pop_obj()?;
                 let bytes = self.pop_obj()?;

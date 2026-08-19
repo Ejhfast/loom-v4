@@ -1127,6 +1127,8 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue)
         | Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith)
         | Instr::Native(lm_bytecode::NativeInstr::BytesContains)
+        | Instr::Native(lm_bytecode::NativeInstr::TextSplit)
+        | Instr::Native(lm_bytecode::NativeInstr::TextLines)
         | Instr::Native(lm_bytecode::NativeInstr::TextAt)
         | Instr::Native(lm_bytecode::NativeInstr::TextSlice)
         | Instr::Native(lm_bytecode::NativeInstr::TextIsBoundary)

@@ -1015,6 +1015,26 @@ impl<'m> Oracle<'m> {
                 };
                 Ok(OV::Bool(found))
             }
+            lm_abi::INTRINSIC_TEXT_SPLIT => {
+                let text = self.as_text(&values[0])?;
+                let needle = self.as_text(&values[1])?;
+                if needle.is_empty() {
+                    return Err(Stop::Fault("BadCast"));
+                }
+                let pieces: Vec<OV> = text
+                    .split(needle)
+                    .map(|piece| OV::Substring(Rc::new(piece.to_string())))
+                    .collect();
+                Ok(self.alloc(OKind::List(pieces)))
+            }
+            lm_abi::INTRINSIC_TEXT_LINES => {
+                let text = self.as_text(&values[0])?;
+                let pieces: Vec<OV> = text
+                    .lines()
+                    .map(|piece| OV::Substring(Rc::new(piece.to_string())))
+                    .collect();
+                Ok(self.alloc(OKind::List(pieces)))
+            }
             lm_abi::INTRINSIC_BYTES_ENDS_WITH => {
                 let bytes = self.as_obj(&values[0])?;
                 let suffix = self.as_obj(&values[1])?;

@@ -1,0 +1,25 @@
+# `split` and `lines` give Substring pieces over the source storage.
+
+doc = "name = loom\nversion = 2\n\nmode = fast\n"
+
+out = StringBuilder()
+pairs = 0
+rows = doc.lines()
+row = 0
+while row < rows.len()
+  line = rows.at(row)
+  if not line.trim().is_empty()
+    case line.split_once(" = ")
+    in Some((key, value))
+      out.append(key.trim()).append(":").append(value.trim()).append(" ")
+      pairs = pairs + 1
+    in None then ()
+    end
+  end
+  row = row + 1
+end
+
+# An empty piece between two separators stays in the result.
+fields = "a,b,,c".split(",")
+
+"{out.finish()}| rows={rows.len()} pairs={pairs} fields={fields.len()} third=[{fields.at(2)}]"

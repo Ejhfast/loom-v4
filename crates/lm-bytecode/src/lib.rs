@@ -418,6 +418,10 @@ pub enum NativeInstr {
     BytesEndsWith,
     /// Pop a needle and Bytes, then push whether it contains it.
     BytesContains,
+    /// Pop a separator and Text, then push a List of Substring pieces.
+    TextSplit,
+    /// Pop a Text, then push a List of its Substring lines.
+    TextLines,
     /// Pop a scalar index and Text, then push one Char.
     TextAt,
     /// Pop a scalar range and Text, then push one shared Substring.
@@ -949,6 +953,8 @@ const OP_TEXT_PARSE_INT_STATUS: u8 = 0xae;
 const OP_TEXT_PARSE_INT_VALUE: u8 = 0xaf;
 const OP_BYTES_ENDS_WITH: u8 = 0xb0;
 const OP_BYTES_CONTAINS: u8 = 0xb1;
+const OP_TEXT_SPLIT: u8 = 0xb2;
+const OP_TEXT_LINES: u8 = 0xb3;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1331,6 +1337,8 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::TextParseIntValue) => out.push(OP_TEXT_PARSE_INT_VALUE),
         Instr::Native(NativeInstr::BytesEndsWith) => out.push(OP_BYTES_ENDS_WITH),
         Instr::Native(NativeInstr::BytesContains) => out.push(OP_BYTES_CONTAINS),
+        Instr::Native(NativeInstr::TextSplit) => out.push(OP_TEXT_SPLIT),
+        Instr::Native(NativeInstr::TextLines) => out.push(OP_TEXT_LINES),
         Instr::Native(NativeInstr::TextAt) => out.push(OP_TEXT_AT),
         Instr::Native(NativeInstr::TextSlice) => out.push(OP_TEXT_SLICE),
         Instr::Native(NativeInstr::TextIsBoundary) => out.push(OP_TEXT_IS_BOUNDARY),
@@ -2127,6 +2135,8 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_TEXT_PARSE_INT_VALUE => Instr::Native(NativeInstr::TextParseIntValue),
         OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),
         OP_BYTES_CONTAINS => Instr::Native(NativeInstr::BytesContains),
+        OP_TEXT_SPLIT => Instr::Native(NativeInstr::TextSplit),
+        OP_TEXT_LINES => Instr::Native(NativeInstr::TextLines),
         OP_TEXT_AT => Instr::Native(NativeInstr::TextAt),
         OP_TEXT_SLICE => Instr::Native(NativeInstr::TextSlice),
         OP_TEXT_IS_BOUNDARY => Instr::Native(NativeInstr::TextIsBoundary),
@@ -2430,6 +2440,8 @@ mod tests {
             Instr::Native(NativeInstr::TextParseIntValue),
             Instr::Native(NativeInstr::BytesEndsWith),
             Instr::Native(NativeInstr::BytesContains),
+            Instr::Native(NativeInstr::TextSplit),
+            Instr::Native(NativeInstr::TextLines),
             Instr::EqRef,
             Instr::NeRef,
             Instr::Call(0),

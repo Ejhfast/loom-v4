@@ -108,6 +108,18 @@ class Text
     intrinsic("text.bytes", self)
   end
 
+  # `split` faults on an empty separator. A split at every boundary
+  # has no use, and the empty case hides a caller mistake.
+  def split(self, separator: Text): List[Substring]
+    intrinsic("text.split", self, separator)
+  end
+
+  # `lines` accepts a line feed with or without a carriage return.
+  # A final line feed ends the last line and adds no empty piece.
+  def lines(self): List[Substring]
+    intrinsic("text.lines", self)
+  end
+
   def trim(self): Substring
     intrinsic("text.trim", self)
   end
