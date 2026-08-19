@@ -821,72 +821,12 @@ impl Graph {
     }
 }
 
-/// Iterative Tarjan with an explicit work stack. Roots run in
-/// ascending node index; successors run in ascending reference
-/// order. Components pop callees-first, and that emission order is
-/// the hash schedule. Returns the components and the component index
-/// per node.
+/// The components of the definition graph, and the component index
+/// per node. `lm-scc` pins the emission order: roots ascend by node
+/// index, successors follow reference order, and components emit
+/// callees-first. That order is the hash schedule.
 fn tarjan(graph: &Graph) -> (Vec<Vec<u32>>, Vec<u32>) {
-    let n = graph.space.total();
-    const UNSET: u32 = u32::MAX;
-    let mut index = vec![UNSET; n];
-    let mut low = vec![0u32; n];
-    let mut on_stack = vec![false; n];
-    let mut stack: Vec<u32> = Vec::new();
-    let mut next = 0u32;
-    let mut comps: Vec<Vec<u32>> = Vec::new();
-    let mut comp_of = vec![UNSET; n];
-    // The explicit DFS work stack: (node, next successor position).
-    let mut work: Vec<(u32, usize)> = Vec::new();
-    for root in 0..n as u32 {
-        if index[root as usize] != UNSET {
-            continue;
-        }
-        work.push((root, 0));
-        index[root as usize] = next;
-        low[root as usize] = next;
-        next += 1;
-        stack.push(root);
-        on_stack[root as usize] = true;
-        while let Some((node, pos)) = work.last().copied() {
-            let succs = &graph.succ[node as usize];
-            if pos < succs.len() {
-                work.last_mut().expect("frame").1 += 1;
-                let child = succs[pos];
-                if index[child as usize] == UNSET {
-                    index[child as usize] = next;
-                    low[child as usize] = next;
-                    next += 1;
-                    stack.push(child);
-                    on_stack[child as usize] = true;
-                    work.push((child, 0));
-                } else if on_stack[child as usize] {
-                    let li = low[node as usize].min(index[child as usize]);
-                    low[node as usize] = li;
-                }
-            } else {
-                work.pop();
-                if let Some((parent, _)) = work.last() {
-                    let li = low[*parent as usize].min(low[node as usize]);
-                    low[*parent as usize] = li;
-                }
-                if low[node as usize] == index[node as usize] {
-                    let mut comp = Vec::new();
-                    loop {
-                        let member = stack.pop().expect("tarjan stack");
-                        on_stack[member as usize] = false;
-                        comp_of[member as usize] = comps.len() as u32;
-                        comp.push(member);
-                        if member == node {
-                            break;
-                        }
-                    }
-                    comps.push(comp);
-                }
-            }
-        }
-    }
-    (comps, comp_of)
+    lm_scc::components(graph.space.total(), &graph.succ)
 }
 
 // ----------------------------------------------------------------

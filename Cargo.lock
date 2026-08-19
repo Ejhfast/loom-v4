@@ -80,6 +80,7 @@ name = "lm-bytecode"
 version = "0.1.0"
 dependencies = [
  "lm-abi",
+ "lm-scc",
  "lm-value",
 ]
 
@@ -155,6 +156,10 @@ dependencies = [
  "lm-abi",
  "lm-vm",
 ]
+
+[[package]]
+name = "lm-scc"
+version = "0.1.0"
 
 [[package]]
 name = "lm-source"
