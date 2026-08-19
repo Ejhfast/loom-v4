@@ -265,10 +265,25 @@ iterator trait hierarchy.
   `examples/06-graphs/cycle-digest.lm`, whose own comment says the
   output never moves. If a graph digest is meant to be stable across
   toolchain versions, that coupling is wrong.
-- **Nothing tests that the identity opcode bytes are distinct.**
-  Merging two branches that each added instructions produced a silent
-  duplicate: it compiled, and two instructions hashed alike. A
-  duplicate-byte assertion over the identity encoding is cheap.
+- **Adding an instruction has two invisible costs.** Neither a test,
+  nor clippy, nor a pinned hash reports them. Both cost real time on
+  the enum work of this week, and a benchmark against the merge target
+  found them.
+
+  A new `Instr` variant belongs at the end of the enum. A variant
+  inserted in the middle moves the discriminant of every later variant
+  and rearranges the dispatch table of the machine. One such insertion
+  cost `bytes_decode_large` twenty-five percent.
+
+  A helper the dispatch loop calls belongs behind `inline(never)`.
+  The machine marks eight cold paths that way to keep the loop small.
+  One unmarked helper cost `int_loop`, `recursion`, `direct_call`, and
+  `option_case` two to nine percent each.
+
+  Measure a change that touches `Instr` or `machine.rs` against the
+  merge target before the merge. Read `int_loop` first: it shares no
+  code with any new instruction, so a move there names a cost that
+  reaches every program.
 - **`while true` with a dead tail has no spelling.** A mock that must
   match an exact non-`Never` signature and never returns cannot be
   written directly. One week-4 mock uses `0 == 0` for its condition.

@@ -1207,6 +1207,162 @@ impl<'a> Resolver<'a> {
         out
     }
 
+    /// The leading identity byte of one instruction.
+    ///
+    /// The tag alone names the instruction kind. Two kinds must
+    /// never share one tag: a duplicate makes two instructions hash
+    /// alike, and no other check reads this encoding.
+    fn instr_tag(instr: &Instr) -> u8 {
+        match instr {
+            Instr::ConstUnit => 0x00,
+            Instr::ConstBool(..) => 0x01,
+            Instr::ConstInt(..) => 0x02,
+            Instr::ConstStr(..) => 0x03,
+            Instr::LoadLocal(..) => 0x04,
+            Instr::StoreLocal(..) => 0x05,
+            Instr::Pop => 0x06,
+            Instr::Add => 0x10,
+            Instr::Sub => 0x11,
+            Instr::Mul => 0x12,
+            Instr::Div => 0x13,
+            Instr::Rem => 0x14,
+            Instr::Neg => 0x15,
+            Instr::Not => 0x16,
+            Instr::LtInt => 0x20,
+            Instr::LeInt => 0x21,
+            Instr::GtInt => 0x22,
+            Instr::GeInt => 0x23,
+            Instr::EqInt => 0x24,
+            Instr::NeInt => 0x25,
+            Instr::EqBool => 0x26,
+            Instr::NeBool => 0x27,
+            Instr::Native(NativeInstr::EqStr) => 0x28,
+            Instr::Native(NativeInstr::NeStr) => 0x29,
+            Instr::Native(NativeInstr::StrByteLen) => 0x67,
+            Instr::Native(NativeInstr::StrCharCount) => 0x68,
+            Instr::Native(NativeInstr::StrConcat) => 0x69,
+            Instr::Native(NativeInstr::StrStartsWith) => 0x6a,
+            Instr::Native(NativeInstr::StrEndsWith) => 0x6b,
+            Instr::Native(NativeInstr::StrContains) => 0x6c,
+            Instr::Native(NativeInstr::StrFindIndex) => 0x6d,
+            Instr::Native(NativeInstr::TextFindByteIndex) => 0xa6,
+            Instr::Native(NativeInstr::TextAtByte) => 0xa7,
+            Instr::Native(NativeInstr::TextTrim) => 0xa8,
+            Instr::Native(NativeInstr::TextTrimStart) => 0xa9,
+            Instr::Native(NativeInstr::TextTrimEnd) => 0xaa,
+            Instr::Native(NativeInstr::TextToLowerAscii) => 0xab,
+            Instr::Native(NativeInstr::TextToUpperAscii) => 0xac,
+            Instr::Native(NativeInstr::TextReplace) => 0xad,
+            Instr::Native(NativeInstr::TextParseIntStatus) => 0xae,
+            Instr::Native(NativeInstr::TextParseIntValue) => 0xaf,
+            Instr::Native(NativeInstr::BytesEndsWith) => 0xb0,
+            Instr::Native(NativeInstr::BytesContains) => 0xb1,
+            Instr::Native(NativeInstr::TextSplit) => 0xb2,
+            Instr::Native(NativeInstr::TextLines) => 0xb3,
+            Instr::Native(NativeInstr::TextAt) => 0x8a,
+            Instr::Native(NativeInstr::TextSlice) => 0x8b,
+            Instr::Native(NativeInstr::TextIsBoundary) => 0x8c,
+            Instr::Native(NativeInstr::TextSliceBytes) => 0x8d,
+            Instr::Native(NativeInstr::TextBytes) => 0x8e,
+            Instr::Native(NativeInstr::TextLt) => 0x8f,
+            Instr::Native(NativeInstr::TextLe) => 0x90,
+            Instr::Native(NativeInstr::TextGt) => 0x91,
+            Instr::Native(NativeInstr::TextGe) => 0x92,
+            Instr::Native(NativeInstr::SubstringToString) => 0x93,
+            Instr::Native(NativeInstr::CharCodepoint) => 0x94,
+            Instr::Native(NativeInstr::CharUtf8Len) => 0x95,
+            Instr::Native(NativeInstr::EqChar) => 0x96,
+            Instr::Native(NativeInstr::NeChar) => 0x97,
+            Instr::Native(NativeInstr::LtChar) => 0x98,
+            Instr::Native(NativeInstr::LeChar) => 0x99,
+            Instr::Native(NativeInstr::GtChar) => 0x9a,
+            Instr::Native(NativeInstr::GeChar) => 0x9b,
+            Instr::EqRef => 0x2a,
+            Instr::NeRef => 0x2b,
+            Instr::EqValue => 0xb4,
+            Instr::NeValue => 0xb5,
+            Instr::Call(..) => 0x30,
+            Instr::CallG { .. } => 0x60,
+            Instr::CallVirtual { .. } => 0x40,
+            Instr::CallVirtualG { .. } => 0x61,
+            Instr::CallValue { .. } => 0x41,
+            Instr::MakeClosure { .. } => 0x42,
+            Instr::LoadCapture(..) => 0x43,
+            Instr::New(..) => 0x44,
+            Instr::NewG { .. } => 0x62,
+            Instr::LoadField(..) => 0x45,
+            Instr::StoreField(..) => 0x46,
+            Instr::TupleNew { .. } => 0x63,
+            Instr::TupleGet(..) => 0x64,
+            Instr::IsType(..) => 0x65,
+            Instr::CastType(..) => 0x66,
+            Instr::ListNew { .. } => 0x47,
+            Instr::ListLen => 0x48,
+            Instr::ListAt => 0x49,
+            Instr::ListPush => 0x4a,
+            Instr::MapNew { .. } => 0x4b,
+            Instr::MapLen => 0x4c,
+            Instr::MapHas => 0x4d,
+            Instr::MapAt => 0x4e,
+            Instr::MapPut => 0x4f,
+            Instr::Native(NativeInstr::SbNew) => 0x50,
+            Instr::Native(NativeInstr::SbAppendStr) => 0x51,
+            Instr::Native(NativeInstr::SbAppendInt) => 0x52,
+            Instr::Native(NativeInstr::SbAppendBool) => 0x53,
+            Instr::Native(NativeInstr::SbBuild) => 0x54,
+            Instr::Native(NativeInstr::SbLen) => 0x83,
+            Instr::Native(NativeInstr::SbClear) => 0x84,
+            Instr::Native(NativeInstr::BbNew) => 0x55,
+            Instr::Native(NativeInstr::BbAppend) => 0x56,
+            Instr::Native(NativeInstr::BbLen) => 0x57,
+            Instr::Native(NativeInstr::BbBuild) => 0x58,
+            Instr::Native(NativeInstr::BbExtend) => 0x85,
+            Instr::Native(NativeInstr::BbReserve) => 0x86,
+            Instr::Native(NativeInstr::BbClear) => 0x87,
+            Instr::Freeze => 0x59,
+            Instr::Native(NativeInstr::BytesNew) => 0x5a,
+            Instr::Native(NativeInstr::BytesLen) => 0x5b,
+            Instr::Native(NativeInstr::BytesText) => 0x5c,
+            Instr::Native(NativeInstr::BytesAt) => 0x6e,
+            Instr::Native(NativeInstr::BytesGet) => 0x6f,
+            Instr::Native(NativeInstr::BytesSlice) => 0x7b,
+            Instr::Native(NativeInstr::BytesConcat) => 0x7c,
+            Instr::Native(NativeInstr::BytesStartsWith) => 0x7d,
+            Instr::Native(NativeInstr::BytesFindIndex) => 0x7e,
+            Instr::Native(NativeInstr::BytesHex) => 0x7f,
+            Instr::Native(NativeInstr::BytesIsUtf8) => 0x80,
+            Instr::Native(NativeInstr::EqBytes) => 0x81,
+            Instr::Native(NativeInstr::NeBytes) => 0x82,
+            Instr::Native(NativeInstr::BytesCompact) => 0x9c,
+            Instr::Native(NativeInstr::BytesTextView) => 0x9d,
+            Instr::Native(NativeInstr::LtBytes) => 0x9e,
+            Instr::Native(NativeInstr::LeBytes) => 0x9f,
+            Instr::Native(NativeInstr::GtBytes) => 0xa0,
+            Instr::Native(NativeInstr::GeBytes) => 0xa1,
+            Instr::Native(NativeInstr::SbAppendChar) => 0xa2,
+            Instr::Native(NativeInstr::SbByteLen) => 0xa3,
+            Instr::Native(NativeInstr::SbFinish) => 0xa4,
+            Instr::Native(NativeInstr::BbFinish) => 0xa5,
+            Instr::Jump(..) => 0x31,
+            Instr::JumpIfFalse(..) => 0x32,
+            Instr::JumpIfTrue(..) => 0x33,
+            Instr::Return => 0x34,
+            Instr::Perform { .. } => 0x70,
+            Instr::PerformValue { .. } => 0x71,
+            Instr::OpConst(..) => 0x72,
+            Instr::TableEdit { .. } => 0x73,
+            Instr::AsCall(..) => 0x74,
+            Instr::CallArgs => 0x75,
+            Instr::FaultCode => 0x76,
+            Instr::Unreachable => 0x77,
+            Instr::Digest => 0x78,
+            Instr::EqDigest => 0x79,
+            Instr::NeDigest => 0x7a,
+            Instr::FaultDenied => 0x88,
+            Instr::RequestOp => 0x89,
+        }
+    }
+
     /// The canonical encoding of one instruction. The match is
     /// exhaustive without a wildcard arm, so a future instruction
     /// with a new index operand fails to compile until its canonical
@@ -1225,100 +1381,31 @@ impl<'a> Resolver<'a> {
     ///   order-stable).
     fn instr_bytes(&self, out: &mut Vec<u8>, instr: &Instr) {
         let u = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
+        out.push(Self::instr_tag(instr));
         match instr {
-            Instr::ConstUnit => out.push(0x00),
             Instr::ConstBool(v) => {
-                out.push(0x01);
                 out.push(u8::from(*v));
             }
             Instr::ConstInt(v) => {
-                out.push(0x02);
                 out.extend_from_slice(&v.to_le_bytes());
             }
             Instr::ConstStr(idx) => {
-                out.push(0x03);
                 write_str(out, &self.module.strings[*idx as usize]);
             }
             Instr::LoadLocal(slot) => {
-                out.push(0x04);
                 u(out, *slot);
             }
             Instr::StoreLocal(slot) => {
-                out.push(0x05);
                 u(out, *slot);
             }
-            Instr::Pop => out.push(0x06),
-            Instr::Add => out.push(0x10),
-            Instr::Sub => out.push(0x11),
-            Instr::Mul => out.push(0x12),
-            Instr::Div => out.push(0x13),
-            Instr::Rem => out.push(0x14),
-            Instr::Neg => out.push(0x15),
-            Instr::Not => out.push(0x16),
-            Instr::LtInt => out.push(0x20),
-            Instr::LeInt => out.push(0x21),
-            Instr::GtInt => out.push(0x22),
-            Instr::GeInt => out.push(0x23),
-            Instr::EqInt => out.push(0x24),
-            Instr::NeInt => out.push(0x25),
-            Instr::EqBool => out.push(0x26),
-            Instr::NeBool => out.push(0x27),
-            Instr::Native(NativeInstr::EqStr) => out.push(0x28),
-            Instr::Native(NativeInstr::NeStr) => out.push(0x29),
-            Instr::Native(NativeInstr::StrByteLen) => out.push(0x67),
-            Instr::Native(NativeInstr::StrCharCount) => out.push(0x68),
-            Instr::Native(NativeInstr::StrConcat) => out.push(0x69),
-            Instr::Native(NativeInstr::StrStartsWith) => out.push(0x6a),
-            Instr::Native(NativeInstr::StrEndsWith) => out.push(0x6b),
-            Instr::Native(NativeInstr::StrContains) => out.push(0x6c),
-            Instr::Native(NativeInstr::StrFindIndex) => out.push(0x6d),
-            Instr::Native(NativeInstr::TextFindByteIndex) => out.push(0xa6),
-            Instr::Native(NativeInstr::TextAtByte) => out.push(0xa7),
-            Instr::Native(NativeInstr::TextTrim) => out.push(0xa8),
-            Instr::Native(NativeInstr::TextTrimStart) => out.push(0xa9),
-            Instr::Native(NativeInstr::TextTrimEnd) => out.push(0xaa),
-            Instr::Native(NativeInstr::TextToLowerAscii) => out.push(0xab),
-            Instr::Native(NativeInstr::TextToUpperAscii) => out.push(0xac),
-            Instr::Native(NativeInstr::TextReplace) => out.push(0xad),
-            Instr::Native(NativeInstr::TextParseIntStatus) => out.push(0xae),
-            Instr::Native(NativeInstr::TextParseIntValue) => out.push(0xaf),
-            Instr::Native(NativeInstr::BytesEndsWith) => out.push(0xb0),
-            Instr::Native(NativeInstr::BytesContains) => out.push(0xb1),
-            Instr::Native(NativeInstr::TextSplit) => out.push(0xb2),
-            Instr::Native(NativeInstr::TextLines) => out.push(0xb3),
-            Instr::Native(NativeInstr::TextAt) => out.push(0x8a),
-            Instr::Native(NativeInstr::TextSlice) => out.push(0x8b),
-            Instr::Native(NativeInstr::TextIsBoundary) => out.push(0x8c),
-            Instr::Native(NativeInstr::TextSliceBytes) => out.push(0x8d),
-            Instr::Native(NativeInstr::TextBytes) => out.push(0x8e),
-            Instr::Native(NativeInstr::TextLt) => out.push(0x8f),
-            Instr::Native(NativeInstr::TextLe) => out.push(0x90),
-            Instr::Native(NativeInstr::TextGt) => out.push(0x91),
-            Instr::Native(NativeInstr::TextGe) => out.push(0x92),
-            Instr::Native(NativeInstr::SubstringToString) => out.push(0x93),
-            Instr::Native(NativeInstr::CharCodepoint) => out.push(0x94),
-            Instr::Native(NativeInstr::CharUtf8Len) => out.push(0x95),
-            Instr::Native(NativeInstr::EqChar) => out.push(0x96),
-            Instr::Native(NativeInstr::NeChar) => out.push(0x97),
-            Instr::Native(NativeInstr::LtChar) => out.push(0x98),
-            Instr::Native(NativeInstr::LeChar) => out.push(0x99),
-            Instr::Native(NativeInstr::GtChar) => out.push(0x9a),
-            Instr::Native(NativeInstr::GeChar) => out.push(0x9b),
-            Instr::EqRef => out.push(0x2a),
-            Instr::NeRef => out.push(0x2b),
-            Instr::EqValue => out.push(0xb4),
-            Instr::NeValue => out.push(0xb5),
             Instr::Call(f) => {
-                out.push(0x30);
                 write_ident(out, &self.func_ident(*f));
             }
             Instr::CallG { func, app } => {
-                out.push(0x60);
                 write_ident(out, &self.func_ident(*func));
                 out.extend_from_slice(&self.app_digest(*app));
             }
             Instr::CallVirtual { selector, argc } => {
-                out.push(0x40);
                 write_str(out, &self.module.selectors[*selector as usize]);
                 u(out, *argc);
             }
@@ -1327,17 +1414,14 @@ impl<'a> Resolver<'a> {
                 argc,
                 app,
             } => {
-                out.push(0x61);
                 write_str(out, &self.module.selectors[*selector as usize]);
                 u(out, *argc);
                 out.extend_from_slice(&self.app_digest(*app));
             }
             Instr::CallValue { argc } => {
-                out.push(0x41);
                 u(out, *argc);
             }
             Instr::MakeClosure { func, captures } => {
-                out.push(0x42);
                 let node = self.graph.space.func_node(*func);
                 if self.graph.closure_body[*func as usize] && !self.in_comp(node) {
                     if self.on_path.contains(func) {
@@ -1363,144 +1447,187 @@ impl<'a> Resolver<'a> {
                 u(out, *captures);
             }
             Instr::LoadCapture(idx) => {
-                out.push(0x43);
                 u(out, *idx);
             }
             Instr::New(class) => {
-                out.push(0x44);
                 write_str(out, self.class_key(*class));
             }
             Instr::NewG { class, app } => {
-                out.push(0x62);
                 write_str(out, self.class_key(*class));
                 out.extend_from_slice(&self.app_digest(*app));
             }
             Instr::LoadField(field) => {
-                out.push(0x45);
                 u(out, *field);
             }
             Instr::StoreField(field) => {
-                out.push(0x46);
                 u(out, *field);
             }
             Instr::TupleNew { ty, count } => {
-                out.push(0x63);
                 out.extend_from_slice(&self.type_digest(*ty));
                 u(out, *count);
             }
             Instr::TupleGet(index) => {
-                out.push(0x64);
                 u(out, *index);
             }
             Instr::IsType(ty) => {
-                out.push(0x65);
                 out.extend_from_slice(&self.type_digest(*ty));
             }
             Instr::CastType(ty) => {
-                out.push(0x66);
                 out.extend_from_slice(&self.type_digest(*ty));
             }
             Instr::ListNew { ty, count } => {
-                out.push(0x47);
                 out.extend_from_slice(&self.type_digest(*ty));
                 u(out, *count);
             }
-            Instr::ListLen => out.push(0x48),
-            Instr::ListAt => out.push(0x49),
-            Instr::ListPush => out.push(0x4a),
             Instr::MapNew { ty, count } => {
-                out.push(0x4b);
                 out.extend_from_slice(&self.type_digest(*ty));
                 u(out, *count);
             }
-            Instr::MapLen => out.push(0x4c),
-            Instr::MapHas => out.push(0x4d),
-            Instr::MapAt => out.push(0x4e),
-            Instr::MapPut => out.push(0x4f),
-            Instr::Native(NativeInstr::SbNew) => out.push(0x50),
-            Instr::Native(NativeInstr::SbAppendStr) => out.push(0x51),
-            Instr::Native(NativeInstr::SbAppendInt) => out.push(0x52),
-            Instr::Native(NativeInstr::SbAppendBool) => out.push(0x53),
-            Instr::Native(NativeInstr::SbBuild) => out.push(0x54),
-            Instr::Native(NativeInstr::SbLen) => out.push(0x83),
-            Instr::Native(NativeInstr::SbClear) => out.push(0x84),
-            Instr::Native(NativeInstr::BbNew) => out.push(0x55),
-            Instr::Native(NativeInstr::BbAppend) => out.push(0x56),
-            Instr::Native(NativeInstr::BbLen) => out.push(0x57),
-            Instr::Native(NativeInstr::BbBuild) => out.push(0x58),
-            Instr::Native(NativeInstr::BbExtend) => out.push(0x85),
-            Instr::Native(NativeInstr::BbReserve) => out.push(0x86),
-            Instr::Native(NativeInstr::BbClear) => out.push(0x87),
-            Instr::Freeze => out.push(0x59),
-            Instr::Native(NativeInstr::BytesNew) => out.push(0x5a),
-            Instr::Native(NativeInstr::BytesLen) => out.push(0x5b),
-            Instr::Native(NativeInstr::BytesText) => out.push(0x5c),
-            Instr::Native(NativeInstr::BytesAt) => out.push(0x6e),
-            Instr::Native(NativeInstr::BytesGet) => out.push(0x6f),
-            Instr::Native(NativeInstr::BytesSlice) => out.push(0x7b),
-            Instr::Native(NativeInstr::BytesConcat) => out.push(0x7c),
-            Instr::Native(NativeInstr::BytesStartsWith) => out.push(0x7d),
-            Instr::Native(NativeInstr::BytesFindIndex) => out.push(0x7e),
-            Instr::Native(NativeInstr::BytesHex) => out.push(0x7f),
-            Instr::Native(NativeInstr::BytesIsUtf8) => out.push(0x80),
-            Instr::Native(NativeInstr::EqBytes) => out.push(0x81),
-            Instr::Native(NativeInstr::NeBytes) => out.push(0x82),
-            Instr::Native(NativeInstr::BytesCompact) => out.push(0x9c),
-            Instr::Native(NativeInstr::BytesTextView) => out.push(0x9d),
-            Instr::Native(NativeInstr::LtBytes) => out.push(0x9e),
-            Instr::Native(NativeInstr::LeBytes) => out.push(0x9f),
-            Instr::Native(NativeInstr::GtBytes) => out.push(0xa0),
-            Instr::Native(NativeInstr::GeBytes) => out.push(0xa1),
-            Instr::Native(NativeInstr::SbAppendChar) => out.push(0xa2),
-            Instr::Native(NativeInstr::SbByteLen) => out.push(0xa3),
-            Instr::Native(NativeInstr::SbFinish) => out.push(0xa4),
-            Instr::Native(NativeInstr::BbFinish) => out.push(0xa5),
             Instr::Jump(b) => {
-                out.push(0x31);
                 u(out, *b);
             }
             Instr::JumpIfFalse(b) => {
-                out.push(0x32);
                 u(out, *b);
             }
             Instr::JumpIfTrue(b) => {
-                out.push(0x33);
                 u(out, *b);
             }
-            Instr::Return => out.push(0x34),
             Instr::Perform { op, argc, reply_ty } => {
-                out.push(0x70);
                 u(out, *op);
                 u(out, *argc);
                 out.extend_from_slice(&self.type_digest(*reply_ty));
             }
             Instr::PerformValue { argc, reply_ty } => {
-                out.push(0x71);
                 u(out, *argc);
                 out.extend_from_slice(&self.type_digest(*reply_ty));
             }
             Instr::OpConst(op) => {
-                out.push(0x72);
                 u(out, *op);
             }
             Instr::TableEdit { action, kind, slot } => {
-                out.push(0x73);
                 u(out, *action);
                 u(out, *kind);
                 u(out, *slot);
             }
             Instr::AsCall(op) => {
-                out.push(0x74);
                 u(out, *op);
             }
-            Instr::CallArgs => out.push(0x75),
-            Instr::FaultCode => out.push(0x76),
-            Instr::Unreachable => out.push(0x77),
-            Instr::Digest => out.push(0x78),
-            Instr::EqDigest => out.push(0x79),
-            Instr::NeDigest => out.push(0x7a),
-            Instr::FaultDenied => out.push(0x88),
-            Instr::RequestOp => out.push(0x89),
+            Instr::ConstUnit
+            | Instr::Pop
+            | Instr::Add
+            | Instr::Sub
+            | Instr::Mul
+            | Instr::Div
+            | Instr::Rem
+            | Instr::Neg
+            | Instr::Not
+            | Instr::LtInt
+            | Instr::LeInt
+            | Instr::GtInt
+            | Instr::GeInt
+            | Instr::EqInt
+            | Instr::NeInt
+            | Instr::EqBool
+            | Instr::NeBool
+            | Instr::Native(NativeInstr::EqStr)
+            | Instr::Native(NativeInstr::NeStr)
+            | Instr::Native(NativeInstr::StrByteLen)
+            | Instr::Native(NativeInstr::StrCharCount)
+            | Instr::Native(NativeInstr::StrConcat)
+            | Instr::Native(NativeInstr::StrStartsWith)
+            | Instr::Native(NativeInstr::StrEndsWith)
+            | Instr::Native(NativeInstr::StrContains)
+            | Instr::Native(NativeInstr::StrFindIndex)
+            | Instr::Native(NativeInstr::TextFindByteIndex)
+            | Instr::Native(NativeInstr::TextAtByte)
+            | Instr::Native(NativeInstr::TextTrim)
+            | Instr::Native(NativeInstr::TextTrimStart)
+            | Instr::Native(NativeInstr::TextTrimEnd)
+            | Instr::Native(NativeInstr::TextToLowerAscii)
+            | Instr::Native(NativeInstr::TextToUpperAscii)
+            | Instr::Native(NativeInstr::TextReplace)
+            | Instr::Native(NativeInstr::TextParseIntStatus)
+            | Instr::Native(NativeInstr::TextParseIntValue)
+            | Instr::Native(NativeInstr::BytesEndsWith)
+            | Instr::Native(NativeInstr::BytesContains)
+            | Instr::Native(NativeInstr::TextSplit)
+            | Instr::Native(NativeInstr::TextLines)
+            | Instr::Native(NativeInstr::TextAt)
+            | Instr::Native(NativeInstr::TextSlice)
+            | Instr::Native(NativeInstr::TextIsBoundary)
+            | Instr::Native(NativeInstr::TextSliceBytes)
+            | Instr::Native(NativeInstr::TextBytes)
+            | Instr::Native(NativeInstr::TextLt)
+            | Instr::Native(NativeInstr::TextLe)
+            | Instr::Native(NativeInstr::TextGt)
+            | Instr::Native(NativeInstr::TextGe)
+            | Instr::Native(NativeInstr::SubstringToString)
+            | Instr::Native(NativeInstr::CharCodepoint)
+            | Instr::Native(NativeInstr::CharUtf8Len)
+            | Instr::Native(NativeInstr::EqChar)
+            | Instr::Native(NativeInstr::NeChar)
+            | Instr::Native(NativeInstr::LtChar)
+            | Instr::Native(NativeInstr::LeChar)
+            | Instr::Native(NativeInstr::GtChar)
+            | Instr::Native(NativeInstr::GeChar)
+            | Instr::EqRef
+            | Instr::NeRef
+            | Instr::EqValue
+            | Instr::NeValue
+            | Instr::ListLen
+            | Instr::ListAt
+            | Instr::ListPush
+            | Instr::MapLen
+            | Instr::MapHas
+            | Instr::MapAt
+            | Instr::MapPut
+            | Instr::Native(NativeInstr::SbNew)
+            | Instr::Native(NativeInstr::SbAppendStr)
+            | Instr::Native(NativeInstr::SbAppendInt)
+            | Instr::Native(NativeInstr::SbAppendBool)
+            | Instr::Native(NativeInstr::SbBuild)
+            | Instr::Native(NativeInstr::SbLen)
+            | Instr::Native(NativeInstr::SbClear)
+            | Instr::Native(NativeInstr::BbNew)
+            | Instr::Native(NativeInstr::BbAppend)
+            | Instr::Native(NativeInstr::BbLen)
+            | Instr::Native(NativeInstr::BbBuild)
+            | Instr::Native(NativeInstr::BbExtend)
+            | Instr::Native(NativeInstr::BbReserve)
+            | Instr::Native(NativeInstr::BbClear)
+            | Instr::Freeze
+            | Instr::Native(NativeInstr::BytesNew)
+            | Instr::Native(NativeInstr::BytesLen)
+            | Instr::Native(NativeInstr::BytesText)
+            | Instr::Native(NativeInstr::BytesAt)
+            | Instr::Native(NativeInstr::BytesGet)
+            | Instr::Native(NativeInstr::BytesSlice)
+            | Instr::Native(NativeInstr::BytesConcat)
+            | Instr::Native(NativeInstr::BytesStartsWith)
+            | Instr::Native(NativeInstr::BytesFindIndex)
+            | Instr::Native(NativeInstr::BytesHex)
+            | Instr::Native(NativeInstr::BytesIsUtf8)
+            | Instr::Native(NativeInstr::EqBytes)
+            | Instr::Native(NativeInstr::NeBytes)
+            | Instr::Native(NativeInstr::BytesCompact)
+            | Instr::Native(NativeInstr::BytesTextView)
+            | Instr::Native(NativeInstr::LtBytes)
+            | Instr::Native(NativeInstr::LeBytes)
+            | Instr::Native(NativeInstr::GtBytes)
+            | Instr::Native(NativeInstr::GeBytes)
+            | Instr::Native(NativeInstr::SbAppendChar)
+            | Instr::Native(NativeInstr::SbByteLen)
+            | Instr::Native(NativeInstr::SbFinish)
+            | Instr::Native(NativeInstr::BbFinish)
+            | Instr::Return
+            | Instr::CallArgs
+            | Instr::FaultCode
+            | Instr::Unreachable
+            | Instr::Digest
+            | Instr::EqDigest
+            | Instr::NeDigest
+            | Instr::FaultDenied
+            | Instr::RequestOp => {}
         }
     }
 }
@@ -2150,5 +2277,48 @@ fn fill_closure_hashes(module: &Module, graph: &Graph, state: &mut HashState) {
             bytes.extend_from_slice(&(f as u32).to_le_bytes());
             state.func_hash[f] = Some(sha256(&bytes));
         }
+    }
+}
+
+#[cfg(test)]
+mod tag_tests {
+    /// Every instruction kind must carry its own identity tag.
+    ///
+    /// A duplicate makes two instructions encode alike, so two
+    /// definitions that differ only in that instruction share one
+    /// structural hash. Nothing else catches it: the opcode table is a
+    /// separate namespace, the verifier reads neither, and a merged
+    /// branch that adds an instruction on each side hits it directly.
+    ///
+    /// `instr_tag` is one flat table, so the check reads that table
+    /// from the source of this file.
+    #[test]
+    fn every_instruction_tag_is_distinct() {
+        let source = include_str!("identity.rs");
+        let start = source
+            .find("fn instr_tag(instr: &Instr) -> u8 {")
+            .expect("the tag table exists");
+        let body = &source[start..];
+        let end = body.find("\n    }\n").expect("the tag table ends");
+        let mut seen: std::collections::HashMap<u8, &str> = std::collections::HashMap::new();
+        let mut count = 0;
+        for line in body[..end].lines() {
+            let Some((pattern, tail)) = line.split_once(" => 0x") else {
+                continue;
+            };
+            let hex = tail.trim_end_matches(',').trim();
+            let tag = u8::from_str_radix(hex, 16).expect("the tag is one hexadecimal byte");
+            count += 1;
+            if let Some(first) = seen.insert(tag, pattern.trim()) {
+                panic!(
+                    "the tag 0x{hex} serves both `{first}` and `{}`",
+                    pattern.trim()
+                );
+            }
+        }
+        // The floor guards the reader itself: a table this test cannot
+        // parse must fail, not pass by finding nothing.
+        assert!(count > 100, "the tag table did not parse: {count} entries");
+        assert_eq!(count, seen.len(), "a tag repeats");
     }
 }
