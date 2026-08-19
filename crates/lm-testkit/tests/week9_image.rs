@@ -34,6 +34,7 @@ fn asked_tree() -> (LoadedModule, Vec<u8>) {
             .last_snapshot()
             .expect("the program captured a world")
             .bytes()
+            .expect("the image encodes")
             .to_vec()
     };
     (loaded, bytes)
@@ -492,6 +493,7 @@ go()
         .last_snapshot()
         .expect("the program captured a world")
         .bytes()
+        .expect("the image encodes")
         .to_vec();
     let image = accept(&loaded, &bytes);
     // Only run the rule when the capture reached the literal.
@@ -611,8 +613,12 @@ go()
                 .last_snapshot()
                 .expect("the program captured a world")
                 .clone();
-            let admitted = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
-                .expect("the container loads and admits");
+            let admitted = codec::load_external(
+                image.bytes().expect("the image encodes"),
+                &loaded,
+                LoadLimits::default(),
+            )
+            .expect("the container loads and admits");
             assert_eq!(admitted.world().machine_count(), 1);
             let target = world.new_child(0).expect("the budget holds a child");
             world
@@ -696,6 +702,7 @@ go()
         .last_snapshot()
         .expect("the program captured a world")
         .bytes()
+        .expect("the image encodes")
         .to_vec();
     let image = accept(&loaded, &bytes);
     let mut broken = image.clone();
@@ -749,6 +756,7 @@ go()
         .last_snapshot()
         .expect("the program captured a world")
         .bytes()
+        .expect("the image encodes")
         .to_vec();
     let image = accept(&loaded, &bytes);
     // Two integer constants sit on the operand stack.
@@ -827,6 +835,7 @@ go()
         .last_snapshot()
         .expect("the program captured a world")
         .bytes()
+        .expect("the image encodes")
         .to_vec();
     let image = accept(&loaded, &bytes);
     assert!(image.machines[0].frames.is_empty());
@@ -888,6 +897,7 @@ go()
         .last_snapshot()
         .expect("the program captured a world")
         .bytes()
+        .expect("the image encodes")
         .to_vec();
     let image = accept(&loaded, &bytes);
     assert!(matches!(
@@ -968,6 +978,7 @@ go()
         .last_snapshot()
         .expect("the program captured a world")
         .bytes()
+        .expect("the image encodes")
         .to_vec();
     let image = accept(&loaded, &bytes);
     let held = image
@@ -1097,6 +1108,7 @@ go()
         .last_snapshot()
         .expect("the program captured a world")
         .bytes()
+        .expect("the image encodes")
         .to_vec();
     let image = accept(&loaded, &bytes);
     // The captured machine is done, frameless, with empty arenas.

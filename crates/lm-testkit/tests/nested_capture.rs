@@ -65,7 +65,10 @@ fn a_nested_suspended_stack_captures_and_restores() {
     let barrier = world.next_gate();
     let image = match world.capture_snapshot(barrier, 0, false) {
         Ok(image) => {
-            println!("CAPTURED: {} bytes", image.bytes().len());
+            println!(
+                "CAPTURED: {} bytes",
+                image.bytes().expect("the image encodes").len()
+            );
             image
         }
         Err(fail) => panic!("REFUSED: {fail:?}"),

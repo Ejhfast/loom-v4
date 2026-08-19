@@ -466,21 +466,44 @@ pub struct AdmissionIdentity {
 /// specification 17.8 asks for.
 #[derive(Debug, Clone)]
 pub struct SnapshotImage {
-    bytes: std::sync::Arc<Vec<u8>>,
+    /// The canonical container bytes.
+    ///
+    /// The external path decodes bytes, so it holds them from the
+    /// start. An in-process capture holds the admitted world alone
+    /// and writes the container only when a caller asks for it. A
+    /// restore reads the world, so a search that captures and
+    /// restores inside one process encodes nothing.
+    bytes: std::sync::OnceLock<std::sync::Arc<Vec<u8>>>,
     world: std::sync::Arc<Image>,
-    /// The container hash of the bytes.
-    hash: [u8; 32],
+    /// The container hash of the bytes. It follows the bytes.
+    hash: std::sync::OnceLock<[u8; 32]>,
     /// The program and ABI identity this image passed admission
     /// against.
     identity: AdmissionIdentity,
     /// Where the bytes came from. This is provenance, not trust.
     origin: Origin,
+    /// The container byte limit this image was captured under.
+    byte_limit: usize,
 }
 
 impl SnapshotImage {
     /// The canonical container bytes.
-    pub fn bytes(&self) -> &std::sync::Arc<Vec<u8>> {
-        &self.bytes
+    ///
+    /// The first call of an in-process capture writes the container.
+    /// A container past the byte limit of the capture returns
+    /// `LimitExceeded`, exactly as an eager write would.
+    pub fn bytes(&self) -> Result<&std::sync::Arc<Vec<u8>>, SnapshotFail> {
+        if let Some(bytes) = self.bytes.get() {
+            return Ok(bytes);
+        }
+        let written = codec::encode(&self.world, self.byte_limit)?;
+        let hash = codec::stored_container_hash(&written);
+        let _ = self.bytes.set(std::sync::Arc::new(written));
+        let _ = self.hash.set(hash);
+        Ok(self
+            .bytes
+            .get()
+            .expect("the container is written by the line above"))
     }
 
     /// The admitted machine world.
@@ -498,8 +521,15 @@ impl SnapshotImage {
     }
 
     /// The container hash.
-    pub fn hash(&self) -> [u8; 32] {
-        self.hash
+    ///
+    /// The hash names the bytes, so the first call writes the
+    /// container. A container the byte limit rejects has no hash.
+    pub fn hash(&self) -> Result<[u8; 32], SnapshotFail> {
+        if let Some(hash) = self.hash.get() {
+            return Ok(*hash);
+        }
+        self.bytes()?;
+        Ok(*self.hash.get().expect("the bytes above set the hash"))
     }
 
     /// The program and ABI identity this image passed admission
@@ -519,8 +549,15 @@ impl SnapshotImage {
     }
 
     /// The estimated storage retained by this admitted image.
+    ///
+    /// An image that has not written its container charges the world
+    /// alone, because no container exists yet.
     pub fn resident_bytes(&self) -> usize {
-        self.bytes.len().saturating_add(self.world.resident_bytes())
+        self.bytes
+            .get()
+            .map(|bytes| bytes.len())
+            .unwrap_or(0)
+            .saturating_add(self.world.resident_bytes())
     }
 
     /// Check the result type of this image against an expected type

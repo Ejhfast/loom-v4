@@ -185,6 +185,7 @@ fn snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
             .last_snapshot()
             .expect("the program captured a world")
             .bytes()
+            .expect("the image encodes")
             .to_vec()
     };
     (loaded, container)
@@ -554,7 +555,7 @@ go()
             let gate = world.next_gate();
             if let Ok(image) = world.capture_snapshot(gate, 0, false) {
                 if image.world().machines[0].objects.len() >= 4 {
-                    best = Some(image.bytes().to_vec());
+                    best = Some(image.bytes().expect("the image encodes").to_vec());
                     break;
                 }
             }

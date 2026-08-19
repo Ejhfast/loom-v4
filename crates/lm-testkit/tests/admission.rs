@@ -2209,7 +2209,7 @@ fn gate_sweep(label: &str, source: &str) -> Vec<String> {
         if let Ok(image) = world.capture_snapshot(gate, 0, false) {
             captures += 1;
             if let Err(e) = codec::load_external(
-                image.bytes(),
+                image.bytes().expect("the image encodes"),
                 &loaded,
                 lm_vm::snapshot::LoadLimits::default(),
             ) {

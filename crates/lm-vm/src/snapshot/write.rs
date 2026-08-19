@@ -638,6 +638,20 @@ impl World<'_> {
                     owner: self.require_ordinal(owner, ordinal_of)?,
                     token,
                 },
+                // A captured world states the container of a nested
+                // image, because the world leaves this process. The
+                // live handle names an image of this world alone, so
+                // the writer resolves it here. This is the one call
+                // that writes the container of an in-process capture.
+                Object::NativeSnapshotRef { image: slot } => {
+                    let Some(held) = self.image_at(slot) else {
+                        return Err(SnapshotFail::Fault(
+                            FaultCode::MalformedState,
+                            "a snapshot value names no admitted image".to_string(),
+                        ));
+                    };
+                    Object::NativeSnapshot(held.bytes()?.clone())
+                }
                 other => other.remap(map).unwrap_or(other),
             };
             objects.push(ImageObject { frozen, object });

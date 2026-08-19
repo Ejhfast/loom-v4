@@ -33,8 +33,8 @@ pub fn dump(image: &SnapshotImage) -> String {
     let _ = writeln!(
         out,
         "container {} bytes hash {}",
-        image.bytes().len(),
-        hex(&image.hash())
+        image.bytes().map(|b| b.len()).unwrap_or(0),
+        image.hash().map(|h| hex(&h)).unwrap_or_default()
     );
     out.push_str(&dump_image(image.world()));
     out
@@ -264,6 +264,7 @@ fn payload(object: &Object) -> String {
         Object::NativeFault { code, message, .. } => format!("{code} {message:?}"),
         Object::NativeDigest(bytes) => hex(bytes),
         Object::NativeSnapshot(image) => format!("nested image {} bytes", image.len()),
+        Object::NativeSnapshotRef { image } => format!("image handle {image}"),
         Object::NativeFileHandle { resource } => format!("file resource {resource}"),
         Object::NativeResourceHandle { surface, resource } => {
             format!("resource {resource} of machine {surface}")

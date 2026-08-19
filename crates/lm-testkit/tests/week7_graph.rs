@@ -447,7 +447,7 @@ end
 #[test]
 fn the_shape_table_declares_every_column() {
     let dump = lm_vm::dump_shapes();
-    assert_eq!(dump.lines().count(), 24);
+    assert_eq!(dump.lines().count(), 25);
     for line in dump.lines() {
         assert!(line.contains("boundary="), "{line}");
         assert!(line.contains("digestible="), "{line}");

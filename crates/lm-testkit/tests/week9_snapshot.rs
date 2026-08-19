@@ -145,12 +145,16 @@ fn a_snapshot_round_trips_at_every_boundary_of_the_example_corpus() {
                 .unwrap_or_else(|e| panic!("{path} boundary {boundary}: capture failed: {e:?}"));
             // The bytes decode, and the decoded image encodes back to
             // exactly the same bytes.
-            let admitted = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
-                .unwrap_or_else(|e| panic!("{path} boundary {boundary}: {e}"));
+            let admitted = codec::load_external(
+                image.bytes().expect("the image encodes"),
+                &loaded,
+                LoadLimits::default(),
+            )
+            .unwrap_or_else(|e| panic!("{path} boundary {boundary}: {e}"));
             let again = codec::encode(admitted.world(), usize::MAX).expect("the image encodes");
             assert_eq!(
                 &again,
-                image.bytes().as_ref(),
+                image.bytes().expect("the image encodes").as_ref(),
                 "{path} boundary {boundary}: the round trip moved the bytes"
             );
             // The restored world finishes with the same result.
@@ -187,10 +191,14 @@ bytes = byte_builder.append(195).append(169).finish()
     let image = world
         .capture_snapshot(gate, 0, false)
         .expect("the terminal capture succeeds");
-    let admitted = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
-        .expect("the text snapshot loads");
+    let admitted = codec::load_external(
+        image.bytes().expect("the image encodes"),
+        &loaded,
+        LoadLimits::default(),
+    )
+    .expect("the text snapshot loads");
     let again = codec::encode(admitted.world(), usize::MAX).expect("the image encodes");
-    assert_eq!(&again, image.bytes().as_ref());
+    assert_eq!(&again, image.bytes().expect("the image encodes").as_ref());
     let (mut restored, root) = restore_into(&loaded, &image);
     assert_eq!(run_restored(&mut restored, root), expected);
 }
@@ -254,8 +262,14 @@ fn one_world_shape_produces_one_byte_string() {
     let loaded = program(&asked_tree_source());
     let first = asked_tree_image(&loaded);
     let second = asked_tree_image(&loaded);
-    assert_eq!(first.bytes(), second.bytes());
-    assert_eq!(first.hash(), second.hash());
+    assert_eq!(
+        first.bytes().expect("the image encodes"),
+        second.bytes().expect("the image encodes")
+    );
+    assert_eq!(
+        first.hash().expect("the image encodes"),
+        second.hash().expect("the image encodes")
+    );
 }
 
 // ---------------------------------------------------------------
@@ -625,7 +639,7 @@ fn external_bytes_run_admission_once_and_trusted_capture_skips_it() {
     assert_eq!(world.snapshot_checks(), 0);
     // The external byte path runs the whole checklist once.
     let checked = world
-        .load_snapshot_bytes(image.bytes())
+        .load_snapshot_bytes(image.bytes().expect("the image encodes"))
         .expect("the container loads");
     assert_eq!(world.snapshot_checks(), 1);
     assert_eq!(checked.origin(), lm_vm::snapshot::Origin::ExternalContainer);

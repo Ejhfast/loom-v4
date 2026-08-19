@@ -524,7 +524,7 @@ fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, r
         .last_snapshot()
         .expect("the program captured a world")
         .clone();
-    let size = image.bytes().len();
+    let size = image.bytes().expect("the image encodes").len();
     // The write time of one more capture of the same world.
     let capture_start = Instant::now();
     let gate = world.next_gate();
@@ -532,11 +532,15 @@ fn snapshot_shape(name: &str, source: &str, allow: &[&str], root: lm_vm::VmId, r
         .capture_snapshot(gate, root, false)
         .expect("the second capture succeeds");
     let write = capture_start.elapsed();
-    assert_eq!(again.bytes().len(), size);
+    assert_eq!(again.bytes().expect("the image encodes").len(), size);
     // The load time of the external byte path.
     let load_start = Instant::now();
-    let checked = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
-        .expect("the container loads and admits");
+    let checked = codec::load_external(
+        image.bytes().expect("the image encodes"),
+        &loaded,
+        LoadLimits::default(),
+    )
+    .expect("the container loads and admits");
     let load = load_start.elapsed();
     // The restore time, averaged over the requested count.
     let restore_start = Instant::now();

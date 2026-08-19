@@ -336,6 +336,14 @@ pub struct World<'m> {
     trusted_index: std::collections::HashMap<[u8; 32], crate::snapshot::SnapshotImage>,
     /// The canonical byte size charged by the trusted image cache.
     trusted_bytes: usize,
+    /// The admitted images this world holds, by slot.
+    ///
+    /// A guest snapshot value names a slot. A capture stores its
+    /// admitted world here and writes no container, so a restore of
+    /// that value copies no bytes.
+    images: Vec<Option<crate::snapshot::SnapshotImage>>,
+    /// Reclaimed image slots.
+    image_free: Vec<u32>,
     /// The last image a guest capture produced in this world.
     ///
     /// `lm snapshot save` writes it, so a program states in its own
@@ -476,6 +484,8 @@ impl<'m> World<'m> {
             trusted: std::collections::VecDeque::new(),
             trusted_index: std::collections::HashMap::new(),
             trusted_bytes: 0,
+            images: Vec::new(),
+            image_free: Vec::new(),
             last_image: None,
             check: crate::typecheck::BoundaryScratch::default(),
         }
@@ -3706,7 +3716,45 @@ impl<'m> World<'m> {
             self.vm_free.push(id);
             freed += 1;
         }
+        self.collect_images();
         freed
+    }
+
+    /// Free every admitted image that no surviving machine names.
+    ///
+    /// A guest snapshot value names one slot of the image table. The
+    /// pass reads the surviving machines, so it runs after the
+    /// machine sweep and never frees an image a freed machine held.
+    fn collect_images(&mut self) {
+        if self.images.is_empty() {
+            return;
+        }
+        let mut used = vec![false; self.images.len()];
+        let mut free_slot = vec![false; self.machines.len()];
+        for id in self.vm_free.iter().chain(self.mock_free.iter()) {
+            free_slot[*id as usize] = true;
+        }
+        for id in 0..self.machines.len() as VmId {
+            if free_slot[id as usize] || !self.is_live_machine(id) {
+                continue;
+            }
+            let Ok(found) = self.image_references(id) else {
+                // The walk proved nothing, so the pass frees nothing.
+                return;
+            };
+            for slot in found {
+                if let Some(seen) = used.get_mut(slot as usize) {
+                    *seen = true;
+                }
+            }
+        }
+        for slot in 0..self.images.len() as u32 {
+            if used[slot as usize] || self.images[slot as usize].is_none() {
+                continue;
+            }
+            self.images[slot as usize] = None;
+            self.image_free.push(slot);
+        }
     }
 
     /// Attach the aggregate heap ledger before a second machine exists.
@@ -5175,10 +5223,14 @@ impl<'m> World<'m> {
     ) {
         let built = match result {
             Ok(image) => {
-                self.trust_image(&image);
+                // The guest value names the admitted world of this
+                // process. The capture therefore writes no container
+                // and hashes nothing, and a restore reads the world
+                // back with no decode and no lookup.
                 self.last_image = Some(image.clone());
+                let slot = self.intern_image(image);
                 self.machines[vm as usize]
-                    .alloc(Object::NativeSnapshot(image.bytes().clone()))
+                    .alloc(Object::NativeSnapshotRef { image: slot })
                     .and_then(|value| self.make_instance(vm, self.core.result_ok, vec![value]))
             }
             Err(crate::snapshot::SnapshotFail::Fault(code, message)) => {
@@ -5239,14 +5291,25 @@ impl<'m> World<'m> {
             self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is loaded");
             return;
         }
+        // A snapshot value takes one of two shapes. A capture of this
+        // process names an admitted image of this world, so the
+        // restore reads the world back with no decode, no hash, and
+        // no lookup. A restored world states an opaque container
+        // instead, because a nested image stays opaque until its own
+        // restore admits it (specification 17.8).
+        enum Held {
+            Admitted(u32),
+            Container(std::sync::Arc<Vec<u8>>),
+        }
         let found =
             args[1]
                 .as_obj()
                 .and_then(|r| match self.machines[vm as usize].vm.heap.get(r) {
-                    Object::NativeSnapshot(image) => Some(image.clone()),
+                    Object::NativeSnapshotRef { image } => Some(Held::Admitted(*image)),
+                    Object::NativeSnapshot(bytes) => Some(Held::Container(bytes.clone())),
                     _ => None,
                 });
-        let Some(bytes) = found else {
+        let Some(held) = found else {
             self.fault_caller(
                 vm,
                 op,
@@ -5255,30 +5318,46 @@ impl<'m> World<'m> {
             );
             return;
         };
-        if bytes.len() < 32 {
-            self.fault_caller(
-                vm,
-                op,
-                FaultCode::BoundaryViolation,
-                "the snapshot container is shorter than its frame",
-            );
-            return;
-        }
-        let hash = crate::snapshot::codec::container_hash(&bytes[..bytes.len() - 32]);
-        let image = match self.trusted_image(&hash) {
-            Some(image) => image,
-            None => match self.load_snapshot_bytes(&bytes) {
-                Ok(image) => image,
-                Err(error) => {
+        let image = match held {
+            Held::Admitted(slot) => match self.image_at(slot) {
+                Some(image) => image,
+                None => {
                     self.fault_caller(
                         vm,
                         op,
-                        FaultCode::BoundaryViolation,
-                        &format!("the snapshot image did not load: {error}"),
+                        FaultCode::MalformedState,
+                        "the snapshot value names no admitted image",
                     );
                     return;
                 }
             },
+            Held::Container(bytes) => {
+                if bytes.len() < 32 {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::BoundaryViolation,
+                        "the snapshot container is shorter than its frame",
+                    );
+                    return;
+                }
+                let hash = crate::snapshot::codec::container_hash(&bytes[..bytes.len() - 32]);
+                match self.trusted_image(&hash) {
+                    Some(image) => image,
+                    None => match self.load_snapshot_bytes(&bytes) {
+                        Ok(image) => image,
+                        Err(error) => {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::BoundaryViolation,
+                                &format!("the snapshot image did not load: {error}"),
+                            );
+                            return;
+                        }
+                    },
+                }
+            }
         };
         // The admitted state names the program it passed against. This
         // world runs one program, so a mismatch is a local fault, not
@@ -7632,8 +7711,12 @@ impl<'m> World<'m> {
     }
 
     /// Remember one admitted image of this world.
+    /// The cache answers the external byte path alone. An in-process
+    /// capture names its image by slot, so it never reaches this.
     pub fn trust_image(&mut self, image: &crate::snapshot::SnapshotImage) {
-        let hash = image.hash();
+        let Ok(hash) = image.hash() else {
+            return;
+        };
         if self.trusted_index.contains_key(&hash) {
             return;
         }
@@ -7767,6 +7850,31 @@ impl<'m> World<'m> {
         Ok(out)
     }
 
+    /// Every admitted image slot one machine names in its reachable
+    /// state.
+    ///
+    /// A live heap names an image through one shape. The walk is the
+    /// walk `machine_references` uses, so the two report the same
+    /// reachable object set.
+    pub(crate) fn image_references(&mut self, vm: VmId) -> Result<Vec<u32>, FaultCode> {
+        let roots = self.machines[vm as usize].snapshot_roots();
+        let limits = self.machines[vm as usize].config.graph;
+        let order = {
+            let m = &mut self.machines[vm as usize];
+            lm_graph::snapshot_ordinals(&mut m.vm.heap, &roots, &limits)?
+        };
+        let heap = &self.machines[vm as usize].vm.heap;
+        let mut out: Vec<u32> = Vec::new();
+        for r in order {
+            if let Object::NativeSnapshotRef { image } = heap.get(r) {
+                if !out.contains(image) {
+                    out.push(*image);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// The slot generation of one machine.
     pub fn generation_of(&self, vm: VmId) -> u32 {
         self.machines[vm as usize].generation
@@ -7887,6 +7995,29 @@ impl<'m> World<'m> {
     /// The verified semantic identity of the loaded program.
     pub fn identity(&self) -> Result<&lm_bytecode::identity::ModuleIdentity, FaultCode> {
         self.loaded.identity()
+    }
+
+    /// Store one admitted image in the world table and name its slot.
+    ///
+    /// A guest snapshot value names a slot here. The table therefore
+    /// holds the admitted world of every snapshot a guest still names,
+    /// and nothing else.
+    pub(crate) fn intern_image(&mut self, image: crate::snapshot::SnapshotImage) -> u32 {
+        match self.image_free.pop() {
+            Some(slot) => {
+                self.images[slot as usize] = Some(image);
+                slot
+            }
+            None => {
+                self.images.push(Some(image));
+                (self.images.len() - 1) as u32
+            }
+        }
+    }
+
+    /// The admitted image one slot names.
+    pub(crate) fn image_at(&self, slot: u32) -> Option<crate::snapshot::SnapshotImage> {
+        self.images.get(slot as usize).and_then(|e| e.clone())
     }
 
     /// The verification hash of the loaded program.
@@ -8198,6 +8329,9 @@ impl<'m> World<'m> {
                     }
                     Object::NativeSnapshot(image) => {
                         format!("<snapshot {} bytes>", image.len())
+                    }
+                    Object::NativeSnapshotRef { image } => {
+                        format!("<snapshot {image}>")
                     }
                     Object::NativeWait { owner, token } => {
                         format!("<wait {token} of machine {owner}>")

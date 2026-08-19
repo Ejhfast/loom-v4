@@ -246,7 +246,12 @@ fn snapshot_save(args: &[String]) -> Result<ExitCode, String> {
             world.show_outcome(&outcome)
         ));
     };
-    let bytes = image.bytes().to_vec();
+    // The capture holds the admitted world. The container appears
+    // here, because this command writes it to a file.
+    let bytes = image
+        .bytes()
+        .map_err(|error| format!("error: the snapshot did not encode: {error:?}\n"))?
+        .to_vec();
     let verdict = lm_vm::snapshot::dump::verdict(image.world());
     write_atomic(Path::new(&out), &bytes)?;
     println!("wrote {out}");
