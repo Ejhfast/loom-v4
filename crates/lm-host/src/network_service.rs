@@ -615,6 +615,17 @@ fn handle_command(
                 }
                 match TcpStream::connect(socket_address(address)) {
                     Ok(mut socket) => {
+                        // Nagle holds a small second write until the
+                        // peer acknowledges the first. A TLS record
+                        // needs more than one write, so the delayed
+                        // acknowledgement adds 40 ms to each exchange.
+                        //
+                        // The option tunes speed alone. A platform
+                        // that refuses it still moves every byte, so
+                        // this code drops the error on purpose. A
+                        // refused connection would be the worse
+                        // answer.
+                        let _ = socket.set_nodelay(true);
                         if poll
                             .registry()
                             .register(
@@ -1218,7 +1229,13 @@ fn drive_listener(
                 return;
             };
             match state.socket.accept() {
-                Ok((socket, address)) => Ok((pending, stream, socket, address)),
+                Ok((socket, address)) => {
+                    // An accepted stream needs the same treatment as
+                    // a connected one. The error drops for the same
+                    // reason.
+                    let _ = socket.set_nodelay(true);
+                    Ok((pending, stream, socket, address))
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     state.accepts.push_front((pending, stream));
                     return;
