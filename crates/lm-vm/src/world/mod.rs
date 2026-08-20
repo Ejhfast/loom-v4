@@ -190,6 +190,8 @@ pub(crate) struct VmImageRecord {
     pub(crate) config: VmConfig,
     /// The current targets of the image's late-bound slots.
     pub(crate) slots: Vec<ImageSlotTarget>,
+    /// Frozen values owned by value slots in this image.
+    pub(crate) heap: Heap,
 }
 
 /// One successful restore reply held before restore commit.
@@ -687,8 +689,8 @@ mod tests {
     use crate::machine::Pending;
     use crate::{load, VmConfig, WorldLimits};
     use lm_bytecode::{
-        BcCallableContract, BcType, ExtendedInstr, Func, Instr, Module, SlotContract, SlotSpec,
-        SlotTarget,
+        BcCallableContract, BcClass, BcClassKind, BcType, ExtendedInstr, Func, Instr, Module,
+        SlotContract, SlotSpec, SlotTarget, NO_PARENT,
     };
 
     fn trivial_loaded() -> crate::LoadedModule {
@@ -814,6 +816,409 @@ mod tests {
         );
 
         assert_eq!(world.run_root(), Outcome::Done(Value::Int(3)));
+    }
+
+    #[test]
+    fn a_value_slot_owns_a_frozen_copy_and_snapshots_it() {
+        let loaded = load(Module {
+            strings: vec![],
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
+            selectors: vec![],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
+            classes: vec![],
+            funcs: vec![Func {
+                name: "main".to_string(),
+                type_params: 0,
+                effect_params: 0,
+                params: vec![],
+                param_muts: vec![],
+                ret: 3,
+                row: vec![],
+                captures: vec![],
+                local_types: vec![],
+                blocks: vec![vec![
+                    Instr::Extended(ExtendedInstr::LoadSlot { slot: 0 }),
+                    Instr::Return,
+                ]],
+            }],
+            imports: vec![],
+            slots: vec![SlotSpec {
+                key: [8; 32],
+                contract: SlotContract::Value { ty: 3 },
+                initial: None,
+            }],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+        })
+        .expect("the value-slot module verifies");
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let image = world.new_vm_image(0).expect("the image fits");
+        world.machines[0].image = Some(image);
+        let source = world.machines[0]
+            .alloc(Object::Str("stored".into()))
+            .expect("the source string allocates");
+        world
+            .replace_value_slot(image, 0, 0, source)
+            .expect("the value matches");
+        let old = world.vm_images[image.image as usize].slots[0];
+        assert_eq!(
+            world.replace_value_slot(image, 0, 0, Value::Bool(true)),
+            Err(FaultCode::TypeMismatch)
+        );
+        assert_eq!(world.vm_images[image.image as usize].slots[0], old);
+
+        let snapshot = world
+            .capture_snapshot(1, 0, false)
+            .expect("the stopped run captures");
+        assert_eq!(snapshot.world().vm_images[0].objects.len(), 1);
+        assert!(matches!(
+            snapshot.world().vm_images[0].slots[0],
+            crate::snapshot::ImageSlotTarget::Value(Value::Obj(_))
+        ));
+
+        let value = match world.run_root() {
+            Outcome::Done(value) => value,
+            other => panic!("expected a value, got {other:?}"),
+        };
+        let reference = value.as_obj().expect("the result is a string");
+        assert!(matches!(
+            world.heap_of(0).get(reference),
+            Object::Str(text) if text.as_str() == "stored"
+        ));
+    }
+
+    #[test]
+    fn a_method_slot_accepts_only_exact_class_methods() {
+        let method = |name: &str, value: i64| Func {
+            name: name.to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![4],
+            param_muts: vec![false],
+            ret: 2,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![4],
+            blocks: vec![vec![Instr::ConstInt(value), Instr::Return]],
+        };
+        let loaded = load(Module {
+            strings: vec![],
+            types: vec![
+                BcType::Unit,
+                BcType::Bool,
+                BcType::Int,
+                BcType::Str,
+                BcType::Class(0),
+            ],
+            selectors: vec!["first".to_string(), "second".to_string()],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![]],
+            func_bounds: vec![vec![], vec![], vec![], vec![]],
+            classes: vec![BcClass {
+                name: "Box".to_string(),
+                key: "test.Box".to_string(),
+                is_final: true,
+                parent: NO_PARENT,
+                parent_args: vec![],
+                type_params: 0,
+                kind: BcClassKind::Normal,
+                fields: vec![],
+                methods: vec![(0, 1), (1, 2)],
+            }],
+            funcs: vec![
+                Func {
+                    name: "main".to_string(),
+                    type_params: 0,
+                    effect_params: 0,
+                    params: vec![],
+                    param_muts: vec![],
+                    ret: 2,
+                    row: vec![],
+                    captures: vec![],
+                    local_types: vec![],
+                    blocks: vec![vec![
+                        Instr::New(0),
+                        Instr::Extended(ExtendedInstr::CallSlot {
+                            slot: 0,
+                            app: lm_bytecode::NO_APP,
+                        }),
+                        Instr::Return,
+                    ]],
+                },
+                method("old", 1),
+                method("new", 2),
+                Func {
+                    name: "plain".to_string(),
+                    type_params: 0,
+                    effect_params: 0,
+                    params: vec![4],
+                    param_muts: vec![false],
+                    ret: 2,
+                    row: vec![],
+                    captures: vec![],
+                    local_types: vec![4],
+                    blocks: vec![vec![Instr::ConstInt(3), Instr::Return]],
+                },
+            ],
+            imports: vec![],
+            slots: vec![SlotSpec {
+                key: [9; 32],
+                contract: SlotContract::Method(BcCallableContract {
+                    type_params: 0,
+                    effect_params: 0,
+                    type_bounds: vec![],
+                    params: vec![4],
+                    param_muts: vec![false],
+                    ret: 2,
+                    row: vec![],
+                }),
+                initial: Some(SlotTarget::Function(1)),
+            }],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+        })
+        .expect("the method-slot module verifies");
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let image = world.new_vm_image(0).expect("the image fits");
+        world.machines[0].image = Some(image);
+        world
+            .replace_function_slot(image, 0, 2)
+            .expect("the second method matches");
+        assert_eq!(
+            world.replace_function_slot(image, 0, 3),
+            Err(FaultCode::TypeMismatch)
+        );
+        assert_eq!(world.run_root(), Outcome::Done(Value::Int(2)));
+    }
+
+    #[test]
+    fn a_class_slot_checks_its_exact_runtime_contract() {
+        let mut module = Module {
+            strings: vec![],
+            types: vec![
+                BcType::Unit,
+                BcType::Bool,
+                BcType::Int,
+                BcType::Str,
+                BcType::Class(0),
+            ],
+            selectors: vec![],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![]],
+            func_bounds: vec![vec![]],
+            classes: vec![BcClass {
+                name: "Cell".to_string(),
+                key: "test.Cell".to_string(),
+                is_final: true,
+                parent: NO_PARENT,
+                parent_args: vec![],
+                type_params: 0,
+                kind: BcClassKind::Normal,
+                fields: vec![],
+                methods: vec![],
+            }],
+            funcs: vec![Func {
+                name: "main".to_string(),
+                type_params: 0,
+                effect_params: 0,
+                params: vec![],
+                param_muts: vec![],
+                ret: 4,
+                row: vec![],
+                captures: vec![],
+                local_types: vec![],
+                blocks: vec![vec![
+                    Instr::Extended(ExtendedInstr::NewSlot {
+                        slot: 0,
+                        app: lm_bytecode::NO_APP,
+                    }),
+                    Instr::Return,
+                ]],
+            }],
+            imports: vec![],
+            slots: vec![SlotSpec {
+                key: [10; 32],
+                contract: SlotContract::Class {
+                    type_params: 0,
+                    abi: [0; 32],
+                    ty: 4,
+                },
+                initial: None,
+            }],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+        };
+        let abi = lm_bytecode::identity::module_identity(&module)
+            .expect("the provisional identity resolves")
+            .class_hashes[0];
+        module.slots[0] = SlotSpec {
+            key: [10; 32],
+            contract: SlotContract::Class {
+                type_params: 0,
+                abi,
+                ty: 4,
+            },
+            initial: Some(SlotTarget::Class(0)),
+        };
+        let loaded = load(module).expect("the class-slot module verifies");
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let image = world.new_vm_image(0).expect("the image fits");
+        world.machines[0].image = Some(image);
+        world
+            .replace_class_slot(image, 0, 0)
+            .expect("the same class contract matches");
+        let old = world.vm_images[image.image as usize].slots[0];
+        assert_eq!(
+            world.replace_class_slot(image, 0, 1),
+            Err(FaultCode::TypeMismatch)
+        );
+        assert_eq!(world.vm_images[image.image as usize].slots[0], old);
+        let value = match world.run_root() {
+            Outcome::Done(value) => value,
+            other => panic!("expected an instance, got {other:?}"),
+        };
+        assert!(matches!(
+            world
+                .heap_of(0)
+                .get(value.as_obj().expect("the result is an object")),
+            Object::Instance { class: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn a_process_slot_checks_mailbox_and_terminal_types() {
+        let body = |name: &str, ret: u32, value: Instr| Func {
+            name: name.to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![5],
+            param_muts: vec![false],
+            ret,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![5],
+            blocks: vec![vec![value, Instr::Return]],
+        };
+        let loaded = load(Module {
+            strings: vec![],
+            types: vec![
+                BcType::Unit,
+                BcType::Bool,
+                BcType::Int,
+                BcType::Str,
+                BcType::Var(0),
+                BcType::Class(1),
+            ],
+            selectors: vec![],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![vec![]], vec![]],
+            func_bounds: vec![vec![], vec![], vec![]],
+            classes: vec![
+                BcClass {
+                    name: "Proc".to_string(),
+                    key: "core.Proc".to_string(),
+                    is_final: false,
+                    parent: NO_PARENT,
+                    parent_args: vec![],
+                    type_params: 1,
+                    kind: BcClassKind::Normal,
+                    fields: vec![],
+                    methods: vec![],
+                },
+                BcClass {
+                    name: "Worker".to_string(),
+                    key: "test.Worker".to_string(),
+                    is_final: true,
+                    parent: 0,
+                    parent_args: vec![2],
+                    type_params: 0,
+                    kind: BcClassKind::Normal,
+                    fields: vec![],
+                    methods: vec![],
+                },
+            ],
+            funcs: vec![
+                Func {
+                    name: "main".to_string(),
+                    type_params: 0,
+                    effect_params: 0,
+                    params: vec![],
+                    param_muts: vec![],
+                    ret: 2,
+                    row: vec![],
+                    captures: vec![],
+                    local_types: vec![],
+                    blocks: vec![vec![Instr::ConstInt(0), Instr::Return]],
+                },
+                body("good", 2, Instr::ConstInt(1)),
+                body("bad", 1, Instr::ConstBool(true)),
+            ],
+            imports: vec![],
+            slots: vec![SlotSpec {
+                key: [11; 32],
+                contract: SlotContract::Process {
+                    message: 2,
+                    result: 2,
+                },
+                initial: None,
+            }],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+        })
+        .expect("the process-slot module verifies");
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        world.core.proc_class = Some(0);
+        let image = world.new_vm_image(0).expect("the image fits");
+        world.machines[0].image = Some(image);
+        let mut good = world.empty_machine(VmConfig::default(), Some(0), 0);
+        good.is_proc = true;
+        good.body_func = Some(1);
+        good.vm.state = MachineState::Ready;
+        world.machines.push(good);
+        let mut bad = world.empty_machine(VmConfig::default(), Some(0), 0);
+        bad.is_proc = true;
+        bad.body_func = Some(2);
+        bad.vm.state = MachineState::Ready;
+        world.machines.push(bad);
+        let good_handle = world.machines[0]
+            .alloc(Object::NativeHandle {
+                proc: 1,
+                generation: 0,
+            })
+            .expect("the first handle allocates");
+        let bad_handle = world.machines[0]
+            .alloc(Object::NativeHandle {
+                proc: 2,
+                generation: 0,
+            })
+            .expect("the second handle allocates");
+        world
+            .replace_process_slot(image, 0, 0, good_handle)
+            .expect("the process contract matches");
+        let old = world.vm_images[image.image as usize].slots[0];
+        assert_eq!(
+            world.replace_process_slot(image, 0, 0, bad_handle),
+            Err(FaultCode::TypeMismatch)
+        );
+        assert_eq!(world.vm_images[image.image as usize].slots[0], old);
     }
 
     /// Give machine 0 a pending VM-control perform over a handle to

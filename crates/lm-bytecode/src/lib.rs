@@ -257,7 +257,6 @@ pub enum SlotContract {
 pub enum SlotTarget {
     Function(u32),
     Class(u32),
-    Process(u32),
 }
 
 /// One portable late-binding declaration.
@@ -1032,8 +1031,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 30 adds the static receiver type to `Digest`. Version 31
 /// splits persistent VM images from typed runs. Version 32 renames the
 /// two guest snapshot types. Version 33 adds late-bound slot tables
-/// and four specialized slot instructions.
-pub const VERSION: u16 = 33;
+/// and four specialized slot instructions. Version 34 removes the
+/// invalid portable process target form.
+pub const VERSION: u16 = 34;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1402,10 +1402,6 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
             Some(SlotTarget::Class(class)) => {
                 out.push(2);
                 write_u32(&mut out, class);
-            }
-            Some(SlotTarget::Process(func)) => {
-                out.push(3);
-                write_u32(&mut out, func);
             }
         }
     }
@@ -2626,7 +2622,6 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             0 => None,
             1 => Some(SlotTarget::Function(cur.u32()?)),
             2 => Some(SlotTarget::Class(cur.u32()?)),
-            3 => Some(SlotTarget::Process(cur.u32()?)),
             _ => return Err(DecodeError::BadSlot),
         };
         slots.push(SlotSpec {

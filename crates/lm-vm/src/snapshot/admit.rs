@@ -181,6 +181,10 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
     add(image.vm_images.len())?;
     for image in &image.vm_images {
         add(image.slots.len())?;
+        for entry in &image.objects {
+            let edges = object_edges(&entry.object);
+            add(2usize.saturating_add(edges.saturating_mul(2)))?;
+        }
     }
     for node in &image.types {
         add(1 + closed_type_parts(node))?;
@@ -242,6 +246,22 @@ fn object_edges(object: &Object) -> usize {
         Object::Map { entries, .. } => entries.len().saturating_mul(2),
         Object::Closure { captures, .. } => captures.len(),
         _ => 0,
+    }
+}
+
+fn image_object_values(object: &Object, out: &mut Vec<Value>) {
+    match object {
+        Object::Instance { fields, .. }
+        | Object::List { items: fields, .. }
+        | Object::Tuple { items: fields } => out.extend(fields.iter().copied()),
+        Object::Map { entries, .. } => {
+            for (key, value) in entries {
+                out.push(*key);
+                out.push(*value);
+            }
+        }
+        Object::Closure { captures, .. } => out.extend(captures.iter().copied()),
+        _ => {}
     }
 }
 
@@ -508,6 +528,9 @@ impl Admit<'_> {
         }
         self.check_code_manifest()?;
         self.check_slot_state()?;
+        for image in 0..self.image.vm_images.len() {
+            self.check_vm_image_heap(image as u32)?;
+        }
         for vm in 0..self.image.machines.len() {
             self.check_references(vm as u32)?;
             self.check_state(vm as u32)?;
@@ -636,6 +659,11 @@ impl Admit<'_> {
                             && contract_class == Some(*class)
                             && self.identity.class_hashes.get(*class as usize) == Some(abi)
                     }
+                    (SlotContract::Value { .. }, ImageSlotTarget::Value(_)) => true,
+                    (
+                        SlotContract::Process { message, result },
+                        ImageSlotTarget::Process { proc, generation },
+                    ) => self.process_slot_matches(*proc, *generation, *message, *result),
                     _ => false,
                 };
                 if !valid {
@@ -645,6 +673,200 @@ impl Admit<'_> {
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Test one portable process target against its slot contract.
+    fn process_slot_matches(&self, proc: u32, generation: u32, message: u32, result: u32) -> bool {
+        let Some(machine) = self.image.machines.get(proc as usize) else {
+            return false;
+        };
+        if machine.generation != generation || !machine.is_proc {
+            return false;
+        }
+        let Some(body_index) = machine.body_func else {
+            return false;
+        };
+        let Some(body) = self.module.funcs.get(body_index as usize) else {
+            return false;
+        };
+        let Some(receiver) = body.params.first() else {
+            return false;
+        };
+        let mut types = self.witness.canonical.borrow_mut();
+        let Ok(expected_message) = types.close(self.module, message, lm_value::TypeEnvId::EMPTY)
+        else {
+            return false;
+        };
+        let Ok(expected_result) = types.close(self.module, result, lm_value::TypeEnvId::EMPTY)
+        else {
+            return false;
+        };
+        let env = lm_value::TypeEnvId(machine.witness);
+        let Ok(actual_result) = types.close(self.module, body.ret, env) else {
+            return false;
+        };
+        if actual_result != expected_result {
+            return false;
+        }
+        let Ok(receiver) = types.close(self.module, *receiver, env) else {
+            return false;
+        };
+        let Some((class, args)) = types.as_instance(receiver) else {
+            return false;
+        };
+        let Some(proc_class) = lm_bytecode::corepin::declared_layout(self.module).proc_class else {
+            return false;
+        };
+        types
+            .ancestor_args(self.module, class, &args, proc_class)
+            .is_some_and(|args| args.as_slice() == [expected_message])
+    }
+
+    /// Prove one frozen value-slot heap and its canonical order.
+    fn check_vm_image_heap(&self, image: u32) -> Result<(), ImageError> {
+        let record = &self.image.vm_images[image as usize];
+        let objects = record.objects.len() as u32;
+        let machines = self.image.machines.len() as u32;
+        let at = |what: &str| format!("VM image {image}: {what}");
+        let check_value = |value: Value, what: &str| -> Result<(), ImageError> {
+            match value {
+                Value::Obj(reference) if reference.generation != 0 => fail(
+                    ImageReason::Reference,
+                    at(&format!("{what} holds a nonzero object generation")),
+                ),
+                Value::Obj(reference) if reference.slot >= objects => fail(
+                    ImageReason::Reference,
+                    at(&format!("{what} names no value-slot object")),
+                ),
+                Value::Callback(_) => fail(
+                    ImageReason::State,
+                    at(&format!("{what} holds a nonescaping callback")),
+                ),
+                Value::EmptyCase { ty, arm }
+                    if arm != 1 || ty as usize >= self.image.types.len() =>
+                {
+                    fail(
+                        ImageReason::Reference,
+                        at(&format!("{what} holds an invalid empty case")),
+                    )
+                }
+                _ => Ok(()),
+            }
+        };
+        let mut roots = Vec::new();
+        for (slot, target) in record.slots.iter().enumerate() {
+            if let ImageSlotTarget::Value(value) = target {
+                check_value(*value, &format!("slot {slot}"))?;
+                if let Value::Obj(reference) = value {
+                    roots.push(reference.slot);
+                }
+            }
+        }
+        let mut children = Vec::new();
+        for (ordinal, entry) in record.objects.iter().enumerate() {
+            if !entry.frozen {
+                return fail(
+                    ImageReason::State,
+                    at(&format!("object {ordinal} is not frozen")),
+                );
+            }
+            if entry.object.shape().boundary == lm_heap::BoundaryPolicy::HolderLocal {
+                return fail(
+                    ImageReason::State,
+                    at(&format!("object {ordinal} is holder-local")),
+                );
+            }
+            children.clear();
+            entry.object.children(&mut children);
+            for child in &children {
+                check_value(Value::Obj(*child), &format!("object {ordinal}"))?;
+            }
+            let mut values = Vec::new();
+            image_object_values(&entry.object, &mut values);
+            for value in values {
+                check_value(value, &format!("object {ordinal}"))?;
+            }
+            match &entry.object {
+                Object::NativeHandle { proc, generation } => {
+                    let Some(target) = self.image.machines.get(*proc as usize) else {
+                        return fail(
+                            ImageReason::Reference,
+                            at(&format!("object {ordinal} names no process")),
+                        );
+                    };
+                    if *proc >= machines || target.generation != *generation {
+                        return fail(
+                            ImageReason::Reference,
+                            at(&format!("object {ordinal} holds a stale process handle")),
+                        );
+                    }
+                }
+                Object::Instance { class, fields, env } => {
+                    if !self.class_named(*class)
+                        || self
+                            .module
+                            .classes
+                            .get(*class as usize)
+                            .is_none_or(|class| class.fields.len() != fields.len())
+                    {
+                        return fail(
+                            ImageReason::Code,
+                            at(&format!("object {ordinal} has an invalid class layout")),
+                        );
+                    }
+                    self.env_of(env.env().0)?;
+                }
+                Object::Closure {
+                    func,
+                    captures,
+                    env,
+                } => {
+                    if !self.func_named(*func)
+                        || self
+                            .module
+                            .funcs
+                            .get(*func as usize)
+                            .is_none_or(|body| body.captures.len() != captures.len())
+                    {
+                        return fail(
+                            ImageReason::Code,
+                            at(&format!("object {ordinal} has an invalid closure layout")),
+                        );
+                    }
+                    self.env_of(env.env().0)?;
+                }
+                _ => {}
+            }
+        }
+        let mut seen = work_vec(record.objects.len())?;
+        seen.resize(record.objects.len(), false);
+        let mut stack = work_vec(roots.len())?;
+        stack.extend(roots.iter().rev().copied());
+        let mut next = 0usize;
+        while let Some(ordinal) = stack.pop() {
+            let ordinal = ordinal as usize;
+            if seen[ordinal] {
+                continue;
+            }
+            if ordinal != next {
+                return fail(
+                    ImageReason::Order,
+                    at(&format!("object {ordinal} appears before object {next}")),
+                );
+            }
+            seen[ordinal] = true;
+            next += 1;
+            children.clear();
+            record.objects[ordinal].object.children(&mut children);
+            stack.extend(children.iter().rev().map(|child| child.slot));
+        }
+        if next != record.objects.len() {
+            return fail(
+                ImageReason::Order,
+                at("the value-slot heap holds an unreachable object"),
+            );
         }
         Ok(())
     }

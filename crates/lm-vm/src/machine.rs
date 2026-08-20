@@ -75,6 +75,8 @@ pub(crate) enum ImageSlotTarget {
     Empty,
     Function(FunctionVersionId),
     Class(u32),
+    Value(Value),
+    Process { proc: VmId, generation: u32 },
 }
 
 /// The lifecycle state of one machine.
@@ -401,6 +403,8 @@ pub enum ExecOutcome {
     /// A perform: the arguments are recorded in `Pending` by the
     /// driver.
     Perform { op: u32, args: Vec<Value> },
+    /// Copy one image-owned value into this run.
+    LoadSlot { slot: u32 },
     /// A policy-table edit through a table handle.
     TableEdit {
         table: ObjRef,
@@ -2868,7 +2872,7 @@ impl Machine {
         envs: &mut TypeEnvs,
         slots: Option<&[ImageSlotTarget]>,
         instr: ExtendedInstr,
-    ) -> Result<(), FaultCode> {
+    ) -> Result<ExecOutcome, FaultCode> {
         match instr {
             ExtendedInstr::MakeCallback { func, captures } => {
                 self.exec_make_callback(func, captures)?;
@@ -2995,11 +2999,28 @@ impl Machine {
                 };
                 self.push(value)?;
             }
-            ExtendedInstr::LoadSlot { .. } | ExtendedInstr::SendSlot { .. } => {
-                return Err(FaultCode::InvalidVmState);
+            ExtendedInstr::LoadSlot { slot } => {
+                match slots.and_then(|slots| slots.get(slot as usize)) {
+                    Some(ImageSlotTarget::Value(_)) => return Ok(ExecOutcome::LoadSlot { slot }),
+                    Some(ImageSlotTarget::Empty) => return Err(FaultCode::InvalidVmState),
+                    _ => return Err(BAD_STATE),
+                }
+            }
+            ExtendedInstr::SendSlot { slot } => {
+                let (proc, generation) = match slots.and_then(|slots| slots.get(slot as usize)) {
+                    Some(ImageSlotTarget::Process { proc, generation }) => (*proc, *generation),
+                    Some(ImageSlotTarget::Empty) => return Err(FaultCode::InvalidVmState),
+                    _ => return Err(BAD_STATE),
+                };
+                let message = self.pop()?;
+                let handle = self.alloc(Object::NativeHandle { proc, generation })?;
+                return Ok(ExecOutcome::Perform {
+                    op: lm_abi::OP_PROC_SEND,
+                    args: vec![handle, message],
+                });
             }
         }
-        Ok(())
+        Ok(ExecOutcome::Continue)
     }
 
     /// Execute one fetched instruction of the current frame.
@@ -3145,7 +3166,10 @@ impl Machine {
                 self.exec_interface_call(module, dispatch, envs, interface, method, recv_ty)?;
             }
             Instr::Extended(instr) => {
-                self.exec_extended(module, envs, slots, instr)?;
+                let outcome = self.exec_extended(module, envs, slots, instr)?;
+                if !matches!(outcome, ExecOutcome::Continue) {
+                    return Ok(outcome);
+                }
             }
             Instr::EqRef => {
                 let b = self.pop_obj()?;

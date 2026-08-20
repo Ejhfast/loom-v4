@@ -906,6 +906,11 @@ impl World {
                                 return event;
                             }
                         }
+                        Ok(Some(ExecOutcome::LoadSlot { slot })) => {
+                            if let Err(code) = self.load_value_slot(act.vm, slot) {
+                                self.machines[act.vm as usize].set_fault(code, "", None);
+                            }
+                        }
                         Ok(Some(ExecOutcome::TableEdit {
                             table,
                             action,

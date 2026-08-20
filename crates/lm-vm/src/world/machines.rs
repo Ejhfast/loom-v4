@@ -235,6 +235,7 @@ impl World {
             }
             record.live = false;
             record.generation = record.generation.wrapping_add(1);
+            record.heap = Heap::with_budget(record.config.heap_bytes, self.budget.heap.clone());
             self.vm_image_free.push(image);
         }
     }
@@ -265,13 +266,16 @@ impl World {
             return None;
         }
         let config = self.machines.get(holder as usize)?.config;
+        if !self.share_heap_budget() {
+            return None;
+        }
         let mut slots = Vec::new();
         slots.try_reserve_exact(self.module.slots.len()).ok()?;
         for slot in &self.module.slots {
             slots.push(match slot.initial {
                 Some(lm_bytecode::SlotTarget::Function(func)) => ImageSlotTarget::Function(func),
                 Some(lm_bytecode::SlotTarget::Class(class)) => ImageSlotTarget::Class(class),
-                Some(lm_bytecode::SlotTarget::Process(_)) | None => ImageSlotTarget::Empty,
+                None => ImageSlotTarget::Empty,
             });
         }
         if let Some(image) = self.vm_image_free.pop() {
@@ -279,6 +283,7 @@ impl World {
             record.live = true;
             record.config = config;
             record.slots = slots;
+            record.heap = Heap::with_budget(config.heap_bytes, self.budget.heap.clone());
             return Some(VmImageKey {
                 image,
                 generation: record.generation,
@@ -291,6 +296,7 @@ impl World {
             live: true,
             config,
             slots,
+            heap: Heap::with_budget(config.heap_bytes, self.budget.heap.clone()),
         });
         Some(VmImageKey {
             image,
@@ -308,6 +314,7 @@ impl World {
         }
         record.live = false;
         record.generation = record.generation.wrapping_add(1);
+        record.heap = Heap::with_budget(record.config.heap_bytes, self.budget.heap.clone());
         self.vm_image_free.push(key.image);
     }
 
@@ -373,6 +380,252 @@ impl World {
         }
         self.vm_images[key.image as usize].slots[slot as usize] = ImageSlotTarget::Function(target);
         Ok(())
+    }
+
+    /// Replace one class slot at an image safepoint.
+    #[allow(dead_code)]
+    pub(crate) fn replace_class_slot(
+        &mut self,
+        key: VmImageKey,
+        slot: u32,
+        target: u32,
+    ) -> Result<(), FaultCode> {
+        self.check_slot_safepoint(key)?;
+        let spec = self
+            .module
+            .slots
+            .get(slot as usize)
+            .ok_or(FaultCode::TypeMismatch)?;
+        let lm_bytecode::SlotContract::Class {
+            type_params,
+            abi,
+            ty,
+        } = &spec.contract
+        else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let class = self
+            .module
+            .classes
+            .get(target as usize)
+            .ok_or(FaultCode::TypeMismatch)?;
+        let contract_class = match self.module.types.get(*ty as usize) {
+            Some(lm_bytecode::BcType::Class(class)) | Some(lm_bytecode::BcType::Inst(class, _)) => {
+                *class
+            }
+            _ => return Err(FaultCode::TypeMismatch),
+        };
+        let identity = self.identity()?;
+        if class.type_params != *type_params
+            || target != contract_class
+            || identity.class_hashes.get(target as usize) != Some(abi)
+        {
+            return Err(FaultCode::TypeMismatch);
+        }
+        self.vm_images[key.image as usize].slots[slot as usize] = ImageSlotTarget::Class(target);
+        Ok(())
+    }
+
+    /// Replace one value slot with a frozen image-owned copy.
+    #[allow(dead_code)]
+    pub(crate) fn replace_value_slot(
+        &mut self,
+        key: VmImageKey,
+        slot: u32,
+        source: VmId,
+        value: Value,
+    ) -> Result<(), FaultCode> {
+        self.check_slot_safepoint(key)?;
+        let ty = match self.module.slots.get(slot as usize) {
+            Some(lm_bytecode::SlotSpec {
+                contract: lm_bytecode::SlotContract::Value { ty },
+                ..
+            }) => *ty,
+            _ => return Err(FaultCode::TypeMismatch),
+        };
+        let source_heap = &self
+            .machines
+            .get(source as usize)
+            .ok_or(FaultCode::InvalidVmState)?
+            .vm
+            .heap;
+        crate::typecheck::check_boundary_value(
+            &self.module,
+            source_heap,
+            &mut self.envs,
+            &mut self.check,
+            value,
+            ty,
+            lm_value::TypeEnvId::EMPTY,
+        )?;
+        let roots: Vec<lm_value::ObjRef> = self.vm_images[key.image as usize]
+            .slots
+            .iter()
+            .filter_map(|target| match target {
+                ImageSlotTarget::Value(Value::Obj(reference)) => Some(*reference),
+                _ => None,
+            })
+            .collect();
+        let limits = self.vm_images[key.image as usize].config.graph;
+        let moved = lm_graph::detach(
+            &mut self.machines[source as usize].vm.heap,
+            &mut self.vm_images[key.image as usize].heap,
+            &roots,
+            value,
+            &limits,
+        )?;
+        self.vm_images[key.image as usize].slots[slot as usize] = ImageSlotTarget::Value(moved);
+        Ok(())
+    }
+
+    /// Replace one process slot with a compatible live handle.
+    #[allow(dead_code)]
+    pub(crate) fn replace_process_slot(
+        &mut self,
+        key: VmImageKey,
+        slot: u32,
+        holder: VmId,
+        handle: Value,
+    ) -> Result<(), FaultCode> {
+        self.check_slot_safepoint(key)?;
+        let (message, result) = match self.module.slots.get(slot as usize) {
+            Some(lm_bytecode::SlotSpec {
+                contract: lm_bytecode::SlotContract::Process { message, result },
+                ..
+            }) => (*message, *result),
+            _ => return Err(FaultCode::TypeMismatch),
+        };
+        let (proc, generation) = self
+            .handle_proc(holder, handle)
+            .ok_or(FaultCode::TypeMismatch)?;
+        if !self.process_matches_contract(proc, generation, message, result)? {
+            return Err(FaultCode::TypeMismatch);
+        }
+        self.vm_images[key.image as usize].slots[slot as usize] =
+            ImageSlotTarget::Process { proc, generation };
+        Ok(())
+    }
+
+    /// Copy one value slot target into a run heap.
+    pub(super) fn load_value_slot(&mut self, vm: VmId, slot: u32) -> Result<(), FaultCode> {
+        let key = self.machines[vm as usize]
+            .image
+            .ok_or(FaultCode::InvalidVmState)?;
+        let value = match self
+            .vm_images
+            .get(key.image as usize)
+            .filter(|record| record.live && record.generation == key.generation)
+            .and_then(|record| record.slots.get(slot as usize))
+        {
+            Some(ImageSlotTarget::Value(value)) => *value,
+            Some(ImageSlotTarget::Empty) => return Err(FaultCode::InvalidVmState),
+            _ => return Err(FaultCode::MalformedState),
+        };
+        let ty = match self.module.slots.get(slot as usize) {
+            Some(lm_bytecode::SlotSpec {
+                contract: lm_bytecode::SlotContract::Value { ty },
+                ..
+            }) => *ty,
+            _ => return Err(FaultCode::MalformedState),
+        };
+        crate::typecheck::check_boundary_value(
+            &self.module,
+            &self.vm_images[key.image as usize].heap,
+            &mut self.envs,
+            &mut self.check,
+            value,
+            ty,
+            lm_value::TypeEnvId::EMPTY,
+        )?;
+        let moved = match value {
+            Value::Obj(_) => {
+                let roots = self.machines[vm as usize].gc_roots(&[]);
+                let limits = self.machines[vm as usize].config.graph;
+                lm_graph::transfer(
+                    &mut self.vm_images[key.image as usize].heap,
+                    &mut self.machines[vm as usize].vm.heap,
+                    &roots,
+                    value,
+                    &limits,
+                )?
+            }
+            scalar => scalar,
+        };
+        self.machines[vm as usize].push(moved)
+    }
+
+    /// Prove that an image exists and no owned run executes.
+    fn check_slot_safepoint(&self, key: VmImageKey) -> Result<(), FaultCode> {
+        let live = self
+            .vm_images
+            .get(key.image as usize)
+            .is_some_and(|image| image.live && image.generation == key.generation);
+        if !live
+            || self
+                .machines
+                .iter()
+                .any(|machine| machine.image == Some(key) && machine.active > 0)
+        {
+            return Err(FaultCode::InvalidVmState);
+        }
+        Ok(())
+    }
+
+    /// Test one process target against one closed slot contract.
+    fn process_matches_contract(
+        &mut self,
+        proc: VmId,
+        generation: u32,
+        message: u32,
+        result: u32,
+    ) -> Result<bool, FaultCode> {
+        let Some(machine) = self.machines.get(proc as usize) else {
+            return Ok(false);
+        };
+        if machine.generation != generation || !machine.is_proc {
+            return Ok(false);
+        }
+        let Some(body_index) = machine.body_func else {
+            return Ok(false);
+        };
+        let body = self
+            .module
+            .funcs
+            .get(body_index as usize)
+            .ok_or(FaultCode::MalformedState)?;
+        let Some(receiver) = body.params.first() else {
+            return Ok(false);
+        };
+        let witness = machine.witness;
+        let expected_message = self
+            .envs
+            .close(&self.module, message, lm_value::TypeEnvId::EMPTY)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        let expected_result = self
+            .envs
+            .close(&self.module, result, lm_value::TypeEnvId::EMPTY)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        let actual_result = self
+            .envs
+            .close(&self.module, body.ret, witness)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        if actual_result != expected_result {
+            return Ok(false);
+        }
+        let receiver = self
+            .envs
+            .close(&self.module, *receiver, witness)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        let Some((class, args)) = self.envs.as_instance(receiver) else {
+            return Ok(false);
+        };
+        let Some(proc_class) = self.core.proc_class else {
+            return Err(FaultCode::MalformedState);
+        };
+        Ok(self
+            .envs
+            .ancestor_args(&self.module, class, &args, proc_class)
+            .is_some_and(|args| args.as_slice() == [expected_message]))
     }
 
     /// Free every admitted image that no surviving machine names.
@@ -446,6 +699,12 @@ impl World {
             self.budget.heap.clone(),
             self.budget.resources.clone(),
         )
+    }
+
+    /// Create one image-owned heap with the world ledger.
+    pub(crate) fn empty_image_heap(&self, config: VmConfig) -> Heap {
+        debug_assert!(self.heap_shared);
+        Heap::with_budget(config.heap_bytes, self.budget.heap.clone())
     }
 
     /// Enter the proc body after the constructor frame returned.

@@ -392,28 +392,10 @@ impl World {
                 .position(|candidate| *candidate == key)
                 .map(|index| index as u32)
         };
-        let vm_images: Vec<ImageVm> = image_order
-            .iter()
-            .map(|key| {
-                let record = &self.vm_images[key.image as usize];
-                ImageVm {
-                    limits: image_limits(record.config),
-                    slots: record
-                        .slots
-                        .iter()
-                        .map(|target| match target {
-                            crate::machine::ImageSlotTarget::Empty => ImageSlotTarget::Empty,
-                            crate::machine::ImageSlotTarget::Function(func) => {
-                                ImageSlotTarget::Function(*func)
-                            }
-                            crate::machine::ImageSlotTarget::Class(class) => {
-                                ImageSlotTarget::Class(*class)
-                            }
-                        })
-                        .collect(),
-                }
-            })
-            .collect();
+        let mut vm_images: Vec<ImageVm> = Vec::with_capacity(image_order.len());
+        for key in &image_order {
+            vm_images.push(self.build_vm_image(*key, &ordinal_of)?);
+        }
         let mut funcs: Vec<u32> = Vec::new();
         let mut classes: Vec<u32> = Vec::new();
         for image in &vm_images {
@@ -423,6 +405,15 @@ impl World {
                     ImageSlotTarget::Class(class) if !classes.contains(class) => {
                         classes.push(*class);
                     }
+                    _ => {}
+                }
+            }
+            for entry in &image.objects {
+                match &entry.object {
+                    Object::Instance { class, .. } if !classes.contains(class) => {
+                        classes.push(*class);
+                    }
+                    Object::Closure { func, .. } if !funcs.contains(func) => funcs.push(*func),
                     _ => {}
                 }
             }
@@ -468,7 +459,7 @@ impl World {
         }
         // Every class the closed type table names joins the manifest,
         // so admission resolves it and proves its definition hash.
-        let (types, envs) = self.build_type_tables(&mut machines);
+        let (types, envs) = self.build_type_tables(&mut vm_images, &mut machines);
         for node in &types {
             if let ClosedType::Class(class) | ClosedType::Inst(class, _) = node {
                 if !classes.contains(class) {
@@ -534,6 +525,89 @@ impl World {
         Ok(())
     }
 
+    /// Build one portable image record and its frozen value heap.
+    fn build_vm_image(
+        &mut self,
+        key: VmImageKey,
+        ordinal_of: &impl Fn(VmId) -> Option<u32>,
+    ) -> Result<ImageVm, SnapshotFail> {
+        let roots: Vec<ObjRef> = self.vm_images[key.image as usize]
+            .slots
+            .iter()
+            .filter_map(|target| match target {
+                crate::machine::ImageSlotTarget::Value(Value::Obj(reference)) => Some(*reference),
+                _ => None,
+            })
+            .collect();
+        let limits = self.vm_images[key.image as usize].config.graph;
+        let order = lm_graph::snapshot_ordinals(
+            &mut self.vm_images[key.image as usize].heap,
+            &roots,
+            &limits,
+        )
+        .map_err(|code| {
+            SnapshotFail::Fault(code, "a VM value-slot graph passed a limit".to_string())
+        })?;
+        let mut ordinals = vec![u32::MAX; self.vm_images[key.image as usize].heap.slot_count()];
+        for (ordinal, reference) in order.iter().enumerate() {
+            ordinals[reference.slot as usize] = ordinal as u32;
+        }
+        let map = |reference: ObjRef| ObjRef {
+            slot: ordinals[reference.slot as usize],
+            generation: 0,
+        };
+        let map_value = |value: Value| match value {
+            Value::Obj(reference) => Value::Obj(map(reference)),
+            other => other,
+        };
+        let record = &self.vm_images[key.image as usize];
+        let mut objects = Vec::with_capacity(order.len());
+        for reference in &order {
+            let source = record.heap.get(*reference);
+            if source.shape().boundary == lm_heap::BoundaryPolicy::HolderLocal {
+                return Err(SnapshotFail::Fault(
+                    FaultCode::BoundaryViolation,
+                    "a VM value slot holds a holder-local object".to_string(),
+                ));
+            }
+            let object = match source {
+                Object::NativeHandle { proc, generation } => Object::NativeHandle {
+                    proc: self.require_ordinal(*proc, ordinal_of)?,
+                    generation: *generation,
+                },
+                other => other
+                    .try_clone_remapped(map)
+                    .map_err(|_| SnapshotFail::LimitExceeded)?,
+            };
+            objects.push(ImageObject {
+                frozen: record.heap.is_frozen(*reference),
+                object,
+            });
+        }
+        let mut slots = Vec::with_capacity(record.slots.len());
+        for target in &record.slots {
+            slots.push(match target {
+                crate::machine::ImageSlotTarget::Empty => ImageSlotTarget::Empty,
+                crate::machine::ImageSlotTarget::Function(func) => ImageSlotTarget::Function(*func),
+                crate::machine::ImageSlotTarget::Class(class) => ImageSlotTarget::Class(*class),
+                crate::machine::ImageSlotTarget::Value(value) => {
+                    ImageSlotTarget::Value(map_value(*value))
+                }
+                crate::machine::ImageSlotTarget::Process { proc, generation } => {
+                    ImageSlotTarget::Process {
+                        proc: self.require_ordinal(*proc, ordinal_of)?,
+                        generation: *generation,
+                    }
+                }
+            });
+        }
+        Ok(ImageVm {
+            limits: image_limits(record.config),
+            slots,
+            objects,
+        })
+    }
+
     /// The canonical digest of the closed result type of one machine.
     ///
     /// A machine that never loaded a body function records zeros.
@@ -566,11 +640,22 @@ impl World {
     /// canonical walk: machine witness, frames, then objects, for each
     /// machine in ordinal order. A closed type takes its ordinal in
     /// post-order, so every child precedes its parent.
-    fn build_type_tables(&self, machines: &mut [ImageMachine]) -> (Vec<ClosedType>, Vec<TypeEnv>) {
+    fn build_type_tables(
+        &self,
+        vm_images: &mut [ImageVm],
+        machines: &mut [ImageMachine],
+    ) -> (Vec<ClosedType>, Vec<TypeEnv>) {
         let mut env_map: HashMap<u32, u32> = HashMap::new();
         env_map.insert(0, 0);
         let mut world_envs: Vec<TypeEnvId> = vec![TypeEnvId::EMPTY];
         let mut order: Vec<u32> = Vec::new();
+        for image in vm_images.iter() {
+            for entry in &image.objects {
+                if let Object::Instance { env, .. } | Object::Closure { env, .. } = &entry.object {
+                    order.push(env.env().0);
+                }
+            }
+        }
         for machine in machines.iter() {
             order.push(machine.witness);
             for frame in &machine.frames {
@@ -605,6 +690,9 @@ impl World {
             }
         }
         let mut direct_types = Vec::new();
+        for image in vm_images.iter() {
+            collect_vm_image_empty_types(image, &mut direct_types);
+        }
         for machine in machines.iter() {
             collect_machine_empty_types(machine, &mut direct_types);
         }
@@ -638,6 +726,22 @@ impl World {
                 .copied()
                 .expect("a captured environment has an image ordinal")
         };
+        for image in vm_images.iter_mut() {
+            for entry in &mut image.objects {
+                match &mut entry.object {
+                    Object::Instance { env, .. } | Object::Closure { env, .. } => {
+                        *env = Witness(TypeEnvId(map_env(env.env().0)));
+                    }
+                    _ => {}
+                }
+                remap_object_empty_types(&mut entry.object, &type_map);
+            }
+            for target in &mut image.slots {
+                if let ImageSlotTarget::Value(value) = target {
+                    remap_empty_type(value, &type_map);
+                }
+            }
+        }
         for machine in machines.iter_mut() {
             machine.witness = map_env(machine.witness);
             for frame in &mut machine.frames {
@@ -1059,6 +1163,17 @@ fn for_object_values(object: &Object, out: &mut Vec<u32>) {
             }
         }
         _ => {}
+    }
+}
+
+fn collect_vm_image_empty_types(image: &ImageVm, out: &mut Vec<u32>) {
+    for entry in &image.objects {
+        for_object_values(&entry.object, out);
+    }
+    for target in &image.slots {
+        if let ImageSlotTarget::Value(value) = target {
+            collect_empty_type(*value, out);
+        }
     }
 }
 

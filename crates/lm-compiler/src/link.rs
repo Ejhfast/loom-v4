@@ -1240,7 +1240,6 @@ fn reloc_slot_target(source: SlotTarget, reloc: &Reloc) -> SlotTarget {
     match source {
         SlotTarget::Function(func) => SlotTarget::Function(reloc.funcs[func as usize]),
         SlotTarget::Class(class) => SlotTarget::Class(reloc.classes[class as usize]),
-        SlotTarget::Process(func) => SlotTarget::Process(reloc.funcs[func as usize]),
     }
 }
 

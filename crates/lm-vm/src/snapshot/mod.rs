@@ -70,7 +70,7 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 12 preserves spare list and map capacity.
 /// Version 15 stores VM images apart from run machine records.
 /// Version 16 stores current late-bound slot targets in VM images.
-pub const FORMAT_VERSION: u32 = 16;
+pub const FORMAT_VERSION: u32 = 17;
 
 /// The section kinds, in canonical order.
 ///
@@ -270,12 +270,14 @@ pub struct ImageLimits {
 }
 
 /// One persistent VM image in a portable snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImageVm {
     /// The resource ceiling for runs that this image activates.
     pub limits: ImageLimits,
     /// The current target of each immutable module slot contract.
     pub slots: Vec<ImageSlotTarget>,
+    /// The canonical frozen heap owned by value slots.
+    pub objects: Vec<ImageObject>,
 }
 
 /// One portable target in a VM image slot table.
@@ -284,6 +286,8 @@ pub enum ImageSlotTarget {
     Empty,
     Function(u32),
     Class(u32),
+    Value(Value),
+    Process { proc: u32, generation: u32 },
 }
 
 /// One captured machine.
@@ -441,6 +445,10 @@ impl Image {
         for image in &self.vm_images {
             bytes =
                 bytes.saturating_add(image.slots.len() * std::mem::size_of::<ImageSlotTarget>());
+            bytes = bytes.saturating_add(image.objects.len() * std::mem::size_of::<ImageObject>());
+            for object in &image.objects {
+                bytes = bytes.saturating_add(object.object.cost());
+            }
         }
         for machine in &self.machines {
             bytes =

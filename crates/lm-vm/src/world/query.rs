@@ -199,8 +199,19 @@ impl World {
         };
         let heap = &self.machines[vm as usize].vm.heap;
         let mut out: Vec<VmId> = Vec::new();
+        let mut images: Vec<VmImageKey> = self.machines[vm as usize].image.into_iter().collect();
         for r in order {
-            let target = match heap.get(r) {
+            let object = heap.get(r);
+            if let Object::NativeVm { image, generation } = object {
+                let key = VmImageKey {
+                    image: *image,
+                    generation: *generation,
+                };
+                if !images.contains(&key) {
+                    images.push(key);
+                }
+            }
+            let target = match object {
                 Object::NativeRun { vm }
                 | Object::NativeTable { vm }
                 | Object::NativeRequest { vm, .. }
@@ -212,6 +223,44 @@ impl World {
             if let Some(target) = target {
                 if !out.contains(&target) {
                     out.push(target);
+                }
+            }
+        }
+        for key in images {
+            let Some(image) = self.vm_images.get(key.image as usize) else {
+                continue;
+            };
+            if !image.live || image.generation != key.generation {
+                continue;
+            }
+            for target in &image.slots {
+                if let crate::machine::ImageSlotTarget::Process { proc, .. } = target {
+                    if !out.contains(proc) {
+                        out.push(*proc);
+                    }
+                }
+            }
+            let roots: Vec<ObjRef> = image
+                .slots
+                .iter()
+                .filter_map(|target| match target {
+                    crate::machine::ImageSlotTarget::Value(Value::Obj(reference)) => {
+                        Some(*reference)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let limits = image.config.graph;
+            let order = {
+                let image = &mut self.vm_images[key.image as usize];
+                lm_graph::snapshot_ordinals(&mut image.heap, &roots, &limits)?
+            };
+            let image = &self.vm_images[key.image as usize];
+            for reference in order {
+                if let Object::NativeHandle { proc, .. } = image.heap.get(reference) {
+                    if !out.contains(proc) {
+                        out.push(*proc);
+                    }
                 }
             }
         }

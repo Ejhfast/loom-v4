@@ -437,9 +437,14 @@ fn section_heaps(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
         limit,
         bad_op: None,
     };
-    for machine in &image.machines {
-        out.leb(machine.objects.len() as u64);
-        for entry in &machine.objects {
+    for objects in image
+        .vm_images
+        .iter()
+        .map(|image| &image.objects)
+        .chain(image.machines.iter().map(|machine| &machine.objects))
+    {
+        out.leb(objects.len() as u64);
+        for entry in objects {
             out.u8(u8::from(entry.frozen));
             encode_object(&mut out, &entry.object);
             if out.over_limit() {
@@ -581,6 +586,15 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
                 ImageSlotTarget::Class(class) => {
                     out.u8(2);
                     out.leb(*class as u64);
+                }
+                ImageSlotTarget::Value(value) => {
+                    out.u8(3);
+                    out.value(*value);
+                }
+                ImageSlotTarget::Process { proc, generation } => {
+                    out.u8(4);
+                    out.leb(*proc as u64);
+                    out.u32(*generation);
                 }
             }
         }
@@ -1300,8 +1314,20 @@ fn decode_inner(
         image_count: image_count as u32,
         env_count: envs.len() as u32,
     };
-    // Section 4: the heaps, one per machine, in ordinal order.
+    // Section 4: image heaps first, then machine heaps.
     let mut heaps = section(3);
+    let mut all_image_objects: Vec<Vec<ImageObject>> =
+        heaps.vector(image_count, "VM image heap table")?;
+    for _ in 0..image_count {
+        let count = heaps.count(ctx.limits.max_objects as u64, "VM image object")?;
+        let mut objects: Vec<ImageObject> = heaps.vector(count, "VM image object table")?;
+        for _ in 0..count {
+            let frozen = heaps.flag()?;
+            let object = decode_object(&mut heaps, &ctx, count as u32)?;
+            objects.push(ImageObject { frozen, object });
+        }
+        all_image_objects.push(objects);
+    }
     let mut all_objects: Vec<Vec<ImageObject>> =
         heaps.vector(machine_count, "machine heap table")?;
     for _ in 0..machine_count {
@@ -1320,7 +1346,7 @@ fn decode_inner(
     // Section 5: the machine records.
     let mut records = section(4);
     let mut vm_images: Vec<ImageVm> = records.vector(image_count, "VM image table")?;
-    for _ in 0..image_count {
+    for objects in all_image_objects {
         let limits = decode_limits(&mut records)?;
         let slot_count = records.count(ctx.limits.max_code_slots as u64, "VM slot")?;
         let mut slots = records.vector(slot_count, "VM slot table")?;
@@ -1339,6 +1365,11 @@ fn decode_inner(
                         "a class slot target does not fit in 32 bits",
                     )
                 })?),
+                3 => ImageSlotTarget::Value(decode_value(&mut records, objects.len() as u32, 0)?),
+                4 => ImageSlotTarget::Process {
+                    proc: machine_ref(&mut records, &ctx)?,
+                    generation: records.u32()?,
+                },
                 tag => {
                     return err(
                         ImageReason::Layout,
@@ -1348,7 +1379,11 @@ fn decode_inner(
             };
             slots.push(target);
         }
-        vm_images.push(ImageVm { limits, slots });
+        vm_images.push(ImageVm {
+            limits,
+            slots,
+            objects,
+        });
     }
     let mut machines: Vec<ImageMachine> = records.vector(machine_count, "machine table")?;
     for objects in all_objects {

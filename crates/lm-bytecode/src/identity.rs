@@ -88,8 +88,9 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 23 adds the receiver type to semantic digest instructions.
 /// Version 24 makes direct function parameters nonescaping by default.
 /// Version 25 renames the two guest snapshot types. Version 26 adds
-/// stable slot contracts and specialized slot instructions.
-pub const COMPILER_ABI_VERSION: u32 = 26;
+/// stable slot contracts and specialized slot instructions. Version
+/// 27 removes portable process targets from slot metadata.
+pub const COMPILER_ABI_VERSION: u32 = 27;
 
 /// The refinement work budget of one component.
 ///
@@ -500,7 +501,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
         }
         match spec.initial {
             None => {}
-            Some(crate::SlotTarget::Function(func)) | Some(crate::SlotTarget::Process(func)) => {
+            Some(crate::SlotTarget::Function(func)) => {
                 if func as usize >= s.funcs {
                     return Err(fail(format!("slot {slot}: function target out of range")));
                 }
@@ -2845,10 +2846,6 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             Some(crate::SlotTarget::Class(class)) => {
                 bytes.push(2);
                 write_str(&mut bytes, &module.classes[class as usize].key);
-            }
-            Some(crate::SlotTarget::Process(func)) => {
-                bytes.push(3);
-                bytes.extend_from_slice(&func_hashes[func as usize]);
             }
         }
         slots.push(bytes);

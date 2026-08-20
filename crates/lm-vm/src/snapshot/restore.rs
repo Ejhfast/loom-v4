@@ -15,7 +15,7 @@ use crate::machine::{
 use crate::world::{VmImageRecord, World};
 use crate::VmConfig;
 use lm_bytecode::closed::TypeImportPlan;
-use lm_heap::Object;
+use lm_heap::{Heap, Object};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 
 /// One complete restore that is ready for commit.
@@ -119,8 +119,6 @@ impl World {
         self.prepare_gate_group()
             .map_err(|_| RestoreFail::LimitExceeded)?;
 
-        let prepared_images = self.prepare_image_import(target, image)?;
-
         let types = self
             .envs
             .prepare_import(&image.types, &image.envs)
@@ -138,6 +136,8 @@ impl World {
                 .ok_or(RestoreFail::LimitExceeded)?;
             ids.push(u32::try_from(raw).map_err(|_| RestoreFail::LimitExceeded)?);
         }
+
+        let prepared_images = self.prepare_image_import(target, image, &ids, env_map, type_map)?;
 
         let ceiling = self.config_of(target);
         let mut configs = try_vec(count)?;
@@ -215,6 +215,9 @@ impl World {
         &mut self,
         target: VmId,
         image: &crate::snapshot::Image,
+        ids: &[VmId],
+        env_map: &[TypeEnvId],
+        type_map: &[u32],
     ) -> Result<PreparedImages, RestoreFail> {
         let target_key = self.machines[target as usize].image;
         let reused_source = target_key.and_then(|_| image.machines[0].image);
@@ -238,11 +241,9 @@ impl World {
             .try_reserve_exact(appended)
             .map_err(|_| RestoreFail::LimitExceeded)?;
         let mut keys = try_vec(image.vm_images.len())?;
-        let mut records = try_vec(new_count)?;
         let mut free = self.vm_image_free.iter().rev().copied();
         let mut next = self.vm_images.len();
-        let ceiling = self.config_of(target);
-        for (ordinal, source) in image.vm_images.iter().enumerate() {
+        for ordinal in 0..image.vm_images.len() {
             if Some(ordinal as u32) == reused_source {
                 keys.push(target_key.ok_or(RestoreFail::LimitExceeded)?);
                 continue;
@@ -260,21 +261,42 @@ impl World {
                 generation,
             };
             keys.push(key);
+        }
+        let mut records = try_vec(new_count)?;
+        let ceiling = self.config_of(target);
+        for (ordinal, source) in image.vm_images.iter().enumerate() {
+            if Some(ordinal as u32) == reused_source {
+                continue;
+            }
+            let key = keys[ordinal];
+            let config = clamp_image(&source.limits, ceiling);
+            let mut heap = self.empty_image_heap(config);
+            let refs = restore_objects(&mut heap, &source.objects, ids, &keys, env_map, type_map)?;
             let mut slots = try_vec(source.slots.len())?;
             for target in &source.slots {
                 slots.push(match target {
                     super::ImageSlotTarget::Empty => RuntimeSlotTarget::Empty,
                     super::ImageSlotTarget::Function(func) => RuntimeSlotTarget::Function(*func),
                     super::ImageSlotTarget::Class(class) => RuntimeSlotTarget::Class(*class),
+                    super::ImageSlotTarget::Value(value) => {
+                        RuntimeSlotTarget::Value(relocate_value(*value, &refs, type_map))
+                    }
+                    super::ImageSlotTarget::Process { proc, generation } => {
+                        RuntimeSlotTarget::Process {
+                            proc: ids[*proc as usize],
+                            generation: *generation,
+                        }
+                    }
                 });
             }
             records.push((
-                slot,
+                key.image,
                 VmImageRecord {
-                    generation,
+                    generation: key.generation,
                     live: true,
-                    config: clamp_image(&source.limits, ceiling),
+                    config,
                     slots,
+                    heap,
                 },
             ));
         }
@@ -373,46 +395,70 @@ fn restore_heap(
     env_map: &[TypeEnvId],
     type_map: &[u32],
 ) -> Result<Vec<ObjRef>, RestoreFail> {
+    restore_objects(
+        &mut machine.vm.heap,
+        &source.objects,
+        ids,
+        image_keys,
+        env_map,
+        type_map,
+    )
+}
+
+/// Restore one canonical object table into one empty heap.
+fn restore_objects(
+    heap: &mut Heap,
+    objects: &[super::ImageObject],
+    ids: &[VmId],
+    image_keys: &[VmImageKey],
+    env_map: &[TypeEnvId],
+    type_map: &[u32],
+) -> Result<Vec<ObjRef>, RestoreFail> {
     let mut bytes = 0usize;
-    for entry in &source.objects {
+    for entry in objects {
         bytes = bytes
             .checked_add(entry.object.cost())
             .ok_or(RestoreFail::LimitExceeded)?;
     }
-    if machine
-        .vm
-        .heap
-        .would_exceed_batch(bytes, source.objects.len())
-    {
+    if heap.would_exceed_batch(bytes, objects.len()) {
         return Err(RestoreFail::LimitExceeded);
     }
 
-    let mut refs = try_vec(source.objects.len())?;
-    for ordinal in 0..source.objects.len() {
+    let mut refs = try_vec(objects.len())?;
+    for ordinal in 0..objects.len() {
         refs.push(ObjRef {
             slot: u32::try_from(ordinal).map_err(|_| RestoreFail::LimitExceeded)?,
             generation: 0,
         });
     }
-    for (ordinal, entry) in source.objects.iter().enumerate() {
+    for (ordinal, entry) in objects.iter().enumerate() {
         let mut object = entry
             .object
             .try_clone_remapped(|child| refs[child.slot as usize])
             .map_err(|_| RestoreFail::LimitExceeded)?;
         relocate_metadata(&mut object, ids, image_keys, env_map, type_map);
-        let reference = machine
-            .vm
-            .heap
+        let reference = heap
             .try_alloc(object)
             .map_err(|_| RestoreFail::LimitExceeded)?;
         if reference != refs[ordinal] {
             return Err(RestoreFail::LimitExceeded);
         }
         if entry.frozen {
-            machine.vm.heap.set_frozen(reference);
+            heap.set_frozen(reference);
         }
     }
     Ok(refs)
+}
+
+fn relocate_value(value: Value, refs: &[ObjRef], type_map: &[u32]) -> Value {
+    match value {
+        Value::Obj(reference) => Value::Obj(refs[reference.slot as usize]),
+        Value::EmptyCase { ty, arm } => Value::EmptyCase {
+            ty: type_map[ty as usize],
+            arm,
+        },
+        other => other,
+    }
 }
 
 /// Install the non-heap state of one detached machine.

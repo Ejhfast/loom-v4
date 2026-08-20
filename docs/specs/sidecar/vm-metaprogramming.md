@@ -307,6 +307,10 @@ Replacing a value affects future loads only. Existing copied values remain uncha
 
 A process slot contains mailbox and terminal contracts.
 
+A portable artifact cannot contain a live process target.
+
+`LinkEnv` or a later replacement supplies the first process target.
+
 Replacing a process target affects future slot operations only.
 
 It does not migrate a mailbox, heap, frame, or resource.
