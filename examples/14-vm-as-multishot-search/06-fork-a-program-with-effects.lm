@@ -39,7 +39,7 @@ def rollout(): Int with Choose, Io.Print
 end
 
 # Answer the pending choice with `index`, then keep searching.
-def take(branch: Vm[Int], index: Int, log: String): (Int, String) with Vm
+def take(branch: Run[Int], index: Int, log: String): (Int, String) with Vm
   case branch.drive()
   in Asked(request)
     case request
@@ -55,7 +55,7 @@ end
 
 # The cheapest valid plan below this machine, with its transcript.
 # Zero means no valid plan in this subtree.
-def cheapest(child: Vm[Int], log: String): (Int, String) with Vm
+def cheapest(child: Run[Int], log: String): (Int, String) with Vm
   case child.drive()
   in Done(value) then (value, log)
   in Fault(_)    then (0, log)
@@ -97,4 +97,4 @@ end
 
 # Three waves of two cost 4 + 4 + 4. Any other split of six costs
 # more, so the search reports 12 and the transcript that produced it.
-cheapest(sys.vm.Vm().from_fn(rollout, args: ()), "")
+cheapest(sys.vm.Vm().activate(rollout, args: ()), "")

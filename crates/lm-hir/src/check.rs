@@ -1142,7 +1142,7 @@ pub(crate) fn resolve_type(
                 }
                 return Ok(ctx.store.intern(Type::Class(ClassId(class))));
             }
-            if name == "List" || name == "Map" {
+            if matches!(name.as_str(), "List" | "Map" | "Run" | "Wait" | "Snapshot") {
                 return Err(Diagnostic::new(
                     "E1024",
                     format!("the generic type `{name}` needs type arguments"),
@@ -1156,16 +1156,21 @@ pub(crate) fn resolve_type(
             ))
         }
         ast::TypeExprKind::Apply(name, args) => match name.as_str() {
-            "Vm" => {
+            "Vm" => Err(Diagnostic::new(
+                "E1024",
+                "`Vm` takes no type arguments; use `Run[T]` for an active invocation",
+                ty.span,
+            )),
+            "Run" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1024",
-                        format!("`Vm` takes 1 type argument, found {}", args.len()),
+                        format!("`Run` takes 1 type argument, found {}", args.len()),
                         ty.span,
                     ));
                 }
                 let result = resolve_type(ctx, env, &args[0])?;
-                Ok(ctx.store.intern(Type::Vm(result)))
+                Ok(ctx.store.intern(Type::Run(result)))
             }
             "Wait" => {
                 if args.len() != 1 {

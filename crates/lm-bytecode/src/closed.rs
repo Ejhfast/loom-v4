@@ -47,7 +47,7 @@ pub enum ClosedType {
     Fault,
     Request,
     PolicyTable,
-    EmptyVm,
+    Vm,
     Digest,
     SnapshotImage,
     Bytes,
@@ -65,7 +65,7 @@ pub enum ClosedType {
     Fn(Vec<ClosedTypeId>, Vec<bool>, ClosedTypeId, ClosedRow),
     /// A function value that cannot escape the active call chain.
     Callback(Vec<ClosedTypeId>, Vec<bool>, ClosedTypeId, ClosedRow),
-    Vm(ClosedTypeId),
+    Run(ClosedTypeId),
     Wait(ClosedTypeId),
     PendingCall(ClosedTypeId, ClosedTypeId),
     Handle(ClosedTypeId, ClosedTypeId),
@@ -81,7 +81,7 @@ impl ClosedType {
         match self {
             ClosedType::Inst(_, args) | ClosedType::Tuple(args) => args.len(),
             ClosedType::List(_)
-            | ClosedType::Vm(_)
+            | ClosedType::Run(_)
             | ClosedType::Wait(_)
             | ClosedType::Snapshot(_)
             | ClosedType::Op(_, _) => 1,
@@ -99,7 +99,7 @@ impl ClosedType {
             ClosedType::Class(_) => Vec::new(),
             ClosedType::Inst(_, args) | ClosedType::Tuple(args) => args.clone(),
             ClosedType::List(e)
-            | ClosedType::Vm(e)
+            | ClosedType::Run(e)
             | ClosedType::Wait(e)
             | ClosedType::Snapshot(e) => vec![*e],
             ClosedType::Op(_, e) => vec![*e],
@@ -126,7 +126,7 @@ impl ClosedType {
             }
             ClosedType::Tuple(elems) => ClosedType::Tuple(elems.iter().map(|e| map(*e)).collect()),
             ClosedType::List(e) => ClosedType::List(map(*e)),
-            ClosedType::Vm(e) => ClosedType::Vm(map(*e)),
+            ClosedType::Run(e) => ClosedType::Run(map(*e)),
             ClosedType::Wait(e) => ClosedType::Wait(map(*e)),
             ClosedType::Snapshot(e) => ClosedType::Snapshot(map(*e)),
             ClosedType::Op(op, e) => ClosedType::Op(*op, map(*e)),
@@ -660,7 +660,7 @@ impl TypeEnvs {
             BcType::Fault => ClosedType::Fault,
             BcType::Request => ClosedType::Request,
             BcType::PolicyTable => ClosedType::PolicyTable,
-            BcType::EmptyVm => ClosedType::EmptyVm,
+            BcType::Vm => ClosedType::Vm,
             BcType::Digest => ClosedType::Digest,
             BcType::SnapshotImage => ClosedType::SnapshotImage,
             BcType::Bytes => ClosedType::Bytes,
@@ -746,7 +746,7 @@ impl TypeEnvs {
                 child(self, *ret),
                 self.close_row(module, row, env),
             ),
-            BcType::Vm(t) => ClosedType::Vm(child(self, *t)),
+            BcType::Run(t) => ClosedType::Run(child(self, *t)),
             BcType::Wait(t) => ClosedType::Wait(child(self, *t)),
             BcType::Snapshot(t) => ClosedType::Snapshot(child(self, *t)),
             BcType::PendingCall(a, r) => ClosedType::PendingCall(child(self, *a), child(self, *r)),
@@ -1159,7 +1159,7 @@ impl TypeEnvs {
                     child(self, &mut out, *arg);
                 }
             }
-            ClosedType::List(e) | ClosedType::Vm(e) | ClosedType::Snapshot(e) => {
+            ClosedType::List(e) | ClosedType::Run(e) | ClosedType::Snapshot(e) => {
                 child(self, &mut out, *e);
             }
             ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
@@ -1224,7 +1224,7 @@ pub fn bc_children(node: &BcType, out: &mut Vec<u32>) {
         BcType::Inst(_, args) | BcType::Tuple(args) => out.extend(args),
         BcType::List(e)
         | BcType::Projection { base: e, .. }
-        | BcType::Vm(e)
+        | BcType::Run(e)
         | BcType::Wait(e)
         | BcType::Snapshot(e)
         | BcType::Op(_, e) => out.push(*e),
@@ -1258,7 +1258,7 @@ pub fn tag_of(node: &ClosedType) -> u8 {
         ClosedType::Fault => 6,
         ClosedType::Request => 7,
         ClosedType::PolicyTable => 8,
-        ClosedType::EmptyVm => 9,
+        ClosedType::Vm => 9,
         ClosedType::Digest => 10,
         ClosedType::SnapshotImage => 11,
         ClosedType::Class(_) => 12,
@@ -1267,7 +1267,7 @@ pub fn tag_of(node: &ClosedType) -> u8 {
         ClosedType::Map(_, _) => 15,
         ClosedType::Tuple(_) => 16,
         ClosedType::Fn(_, _, _, _) => 17,
-        ClosedType::Vm(_) => 18,
+        ClosedType::Run(_) => 18,
         ClosedType::PendingCall(_, _) => 19,
         ClosedType::Handle(_, _) => 20,
         ClosedType::Op(_, _) => 21,

@@ -9,7 +9,7 @@ use lm_testkit::compile_to_bytes;
 use lm_vm::{load_bytes, RecordingHost, TaskKey, VmConfig, World};
 
 const SRC: &str = r#"
-w = sys.vm.Vm().from_fn(do ||: Int
+w = sys.vm.Vm().activate(do ||: Int
   i = 0
   while i < 100000
     i = i + 1
@@ -17,7 +17,7 @@ w = sys.vm.Vm().from_fn(do ||: Int
   i
 end, args: ())
 h = sys.proc.run(w)
-c = sys.vm.Vm().from_fn(do |hh: Handle[Never, Int]|: Int with Proc
+c = sys.vm.Vm().activate(do |hh: Handle[Never, Int]|: Int with Proc
   case hh.done()
   in Done(v)  then v
   in Fault(_) then 0 - 1

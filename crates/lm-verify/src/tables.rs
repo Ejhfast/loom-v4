@@ -149,9 +149,9 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
             BcType::Fault
             | BcType::Request
             | BcType::PolicyTable
-            | BcType::EmptyVm
+            | BcType::Vm
             | BcType::SnapshotImage => {}
-            BcType::Vm(t) | BcType::Wait(t) | BcType::Snapshot(t) => check_ref(*t)?,
+            BcType::Run(t) | BcType::Wait(t) | BcType::Snapshot(t) => check_ref(*t)?,
             BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 check_ref(*a)?;
                 check_ref(*r)?;

@@ -2,7 +2,7 @@
 #
 # A proc is one machine with one private heap, one bounded mailbox,
 # and one terminal result. The supervisory values are ordinary core
-# enums (specification 18.4 and 18.5). `Handle[M, R]` and `Vm[T]` are
+# enums (specification 18.4 and 18.5). `Handle[M, R]` and `Run[T]` are
 # native holder types declared by the ABI.
 
 enum Recv[M]

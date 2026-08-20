@@ -52,7 +52,7 @@ fn a_capture_writes_its_container_only_when_a_caller_asks() {
 #[test]
 fn a_guest_snapshot_value_names_an_admitted_image() {
     let loaded = program(
-        "vm = sys.vm.Vm().from_fn(do ||: Int
+        "vm = sys.vm.Vm().activate(do ||: Int
   20 + 22
 end, args: ())
 vm.step()
@@ -87,7 +87,7 @@ vm.snapshot()
 #[test]
 fn a_captured_world_states_the_container_of_a_nested_image() {
     let loaded = program(
-        "vm = sys.vm.Vm().from_fn(do ||: Int
+        "vm = sys.vm.Vm().activate(do ||: Int
   20 + 22
 end, args: ())
 vm.step()

@@ -20,7 +20,7 @@ def read_clock(): String with Clock.Now, Io.Print
   "the child read {t}"
 end
 
-def print_only(child: Vm[String]): String with Vm, Io.Print
+def print_only(child: Run[String]): String with Vm, Io.Print
   loop do
     case child.drive()
     in Asked(request)
@@ -42,5 +42,5 @@ def print_only(child: Vm[String]): String with Vm, Io.Print
   end
 end
 
-child = sys.vm.Vm().from_fn(read_clock, args: ())
+child = sys.vm.Vm().activate(read_clock, args: ())
 print_only(child)

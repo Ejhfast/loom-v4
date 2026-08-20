@@ -490,7 +490,7 @@ impl<'m> World<'m> {
     /// Every argument of one entry frame carries the parameter type
     /// its function declares.
     ///
-    /// A spawn and a `Vm.FromFn` both copy values into another
+    /// A spawn and a `Vm.Activate` both copy values into another
     /// machine and load them as the first local slots of a frame. The
     /// declared parameter types come from verified code, and the
     /// closure states the environment its creator frame held.

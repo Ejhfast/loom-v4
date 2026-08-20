@@ -39,8 +39,8 @@ pub const FAULT: TypeId = TypeId(5);
 pub const REQUEST: TypeId = TypeId(6);
 /// The holder-local policy-table handle type.
 pub const POLICY_TABLE: TypeId = TypeId(7);
-/// The unloaded virtual machine handle type.
-pub const EMPTY_VM: TypeId = TypeId(8);
+/// The persistent virtual machine image type.
+pub const VM: TypeId = TypeId(8);
 /// The frozen canonical graph digest type.
 pub const DIGEST: TypeId = TypeId(9);
 /// One verified snapshot image whose result type is not yet checked.
@@ -119,10 +119,10 @@ pub enum Type {
     Request,
     /// The holder-local policy-table handle type.
     PolicyTable,
-    /// The unloaded virtual machine handle type.
-    EmptyVm,
-    /// A loaded virtual machine typed by its terminal result.
-    Vm(TypeId),
+    /// The persistent virtual machine image type.
+    Vm,
+    /// One active invocation typed by its terminal result.
+    Run(TypeId),
     /// A holder-local one-shot wait typed by its result.
     Wait(TypeId),
     /// A typed pending-call token: the argument view type and the
@@ -212,7 +212,7 @@ impl TypeStore {
         store.intern(Type::Fault);
         store.intern(Type::Request);
         store.intern(Type::PolicyTable);
-        store.intern(Type::EmptyVm);
+        store.intern(Type::Vm);
         store.intern(Type::Digest);
         store.intern(Type::SnapshotImage);
         store.intern(Type::Bytes);
@@ -528,7 +528,7 @@ impl TypeStore {
             "Fault" => Some(FAULT),
             "Request" => Some(REQUEST),
             "PolicyTable" => Some(POLICY_TABLE),
-            "EmptyVm" => Some(EMPTY_VM),
+            "Vm" => Some(VM),
             "Digest" => Some(DIGEST),
             "SnapshotImage" => Some(SNAPSHOT_IMAGE),
             "Bytes" => Some(BYTES),
@@ -703,8 +703,8 @@ impl TypeStore {
                 | Type::Fault
                 | Type::Request
                 | Type::PolicyTable
-                | Type::EmptyVm
-                | Type::Vm(_)
+                | Type::Vm
+                | Type::Run(_)
                 | Type::Wait(_)
                 | Type::PendingCall(_, _)
                 | Type::Handle(_, _)
@@ -730,7 +730,7 @@ impl TypeStore {
                 Type::Inst(_, args) | Type::Tuple(args) => stack.extend(args.iter().copied()),
                 Type::List(element)
                 | Type::Projection { base: element, .. }
-                | Type::Vm(element)
+                | Type::Run(element)
                 | Type::Wait(element)
                 | Type::Snapshot(element)
                 | Type::Op(_, element) => stack.push(*element),
@@ -761,8 +761,8 @@ impl TypeStore {
             self.get(id),
             Type::Request
                 | Type::PolicyTable
-                | Type::EmptyVm
-                | Type::Vm(_)
+                | Type::Vm
+                | Type::Run(_)
                 | Type::Wait(_)
                 | Type::PendingCall(_, _)
                 | Type::ResourceHandle
@@ -827,9 +827,9 @@ impl TypeStore {
                 let row = self.substitute_row(&row, rowargs);
                 self.intern(Type::Callback(params, muts, ret, row))
             }
-            Type::Vm(t) => {
+            Type::Run(t) => {
                 let t = self.substitute(t, targs, rowargs);
-                self.intern(Type::Vm(t))
+                self.intern(Type::Run(t))
             }
             Type::Wait(t) => {
                 let t = self.substitute(t, targs, rowargs);
@@ -883,7 +883,7 @@ impl TypeStore {
             Type::Callback(params, _, ret, _) => {
                 params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
             }
-            Type::Vm(t) | Type::Wait(t) | Type::Snapshot(t) => self.contains_var(*t),
+            Type::Run(t) | Type::Wait(t) | Type::Snapshot(t) => self.contains_var(*t),
             Type::PendingCall(a, r) => self.contains_var(*a) || self.contains_var(*r),
             Type::Handle(m, r) => self.contains_var(*m) || self.contains_var(*r),
             _ => false,
@@ -909,7 +909,7 @@ impl TypeStore {
                     || params.iter().any(|p| self.contains_effect_var(*p))
                     || self.contains_effect_var(*ret)
             }
-            Type::Vm(t) | Type::Wait(t) | Type::Snapshot(t) => self.contains_effect_var(*t),
+            Type::Run(t) | Type::Wait(t) | Type::Snapshot(t) => self.contains_effect_var(*t),
             Type::PendingCall(a, r) => self.contains_effect_var(*a) || self.contains_effect_var(*r),
             Type::Handle(m, r) => self.contains_effect_var(*m) || self.contains_effect_var(*r),
             _ => false,
@@ -1037,9 +1037,9 @@ impl TypeStore {
             Type::Fault => "Fault".to_string(),
             Type::Request => "Request".to_string(),
             Type::PolicyTable => "PolicyTable".to_string(),
-            Type::EmptyVm => "EmptyVm".to_string(),
-            Type::Vm(t) => format!(
-                "Vm[{}]",
+            Type::Vm => "Vm".to_string(),
+            Type::Run(t) => format!(
+                "Run[{}]",
                 self.display_inner(*t, variable_name, associated_name)
             ),
             Type::Wait(t) => format!(

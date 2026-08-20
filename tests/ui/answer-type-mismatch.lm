@@ -1,4 +1,4 @@
-def bad(vm: Vm[Int]) with Vm
+def bad(vm: Run[Int]) with Vm
   case vm.drive()
   in Asked(q)
     case q

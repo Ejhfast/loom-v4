@@ -23,7 +23,7 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_RESOURCE_CLOSE
             | lm_abi::OP_VM_RESOURCE_KIND => 1,
             lm_abi::OP_VM_DISPATCH => 2,
-            lm_abi::OP_VM_FROM_FN
+            lm_abi::OP_VM_ACTIVATE
             | lm_abi::OP_VM_ANSWER
             | lm_abi::OP_VM_REJECT
             | lm_abi::OP_VM_SERVE_TCP_STREAM => 3,

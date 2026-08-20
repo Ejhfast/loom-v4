@@ -2,7 +2,7 @@
 # clock access.
 
 def run_mocked(): Int with Vm
-  vm = sys.vm.Vm().from_fn(do || with Clock.Now
+  vm = sys.vm.Vm().activate(do || with Clock.Now
     sys.clock.now() + 1
   end, args: ())
   vm.table().mock(Clock.Now, do ||: Int 122 end)

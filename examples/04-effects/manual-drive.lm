@@ -1,7 +1,7 @@
 # Manual driving: the holder intercepts every perform before policy,
 # captures prints, mocks the clock, and dispatches the rest.
 
-def drive_loop(vm: Vm[Int], mut captured: [String]): ([String], Int) with Vm
+def drive_loop(vm: Run[Int], mut captured: [String]): ([String], Int) with Vm
   loop do
     case vm.drive()
     in Asked(q)
@@ -22,7 +22,7 @@ def drive_loop(vm: Vm[Int], mut captured: [String]): ([String], Int) with Vm
   end
 end
 
-vm = sys.vm.Vm().from_fn(do || with Io.Print, Clock.Now
+vm = sys.vm.Vm().activate(do || with Io.Print, Clock.Now
   sys.io.print("tick\n")
   sys.clock.now()
 end, args: ())

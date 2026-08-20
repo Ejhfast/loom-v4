@@ -34,7 +34,7 @@ end
 // ---------------------------------------------------------------
 
 /// A two-node cycle crosses the boundary as an argument of
-/// `from_fn` and keeps its cycle in the destination heap.
+/// `activate` and keeps its cycle in the destination heap.
 #[test]
 fn a_frozen_two_node_cycle_crosses_as_a_program_argument() {
     let source = format!(
@@ -45,7 +45,7 @@ def go(): Int with Vm
   a.next = Some(b)
   b.next = Some(a)
   a.freeze()
-  vm = sys.vm.Vm().from_fn(do |n: Node|: Int
+  vm = sys.vm.Vm().activate(do |n: Node|: Int
     case n.next
     in Some(m)
       case m.next
@@ -79,7 +79,7 @@ def go(): Bool with Vm
   a.next = Some(b)
   b.next = Some(a)
   a.freeze()
-  vm = sys.vm.Vm().from_fn(do |n: Node|: Bool
+  vm = sys.vm.Vm().activate(do |n: Node|: Bool
     case n.next
     in Some(m)
       case m.next
@@ -108,7 +108,7 @@ fn a_cycle_crosses_back_through_the_terminal_result() {
     let source = format!(
         "{NODE}
 def go(): Int with Vm
-  vm = sys.vm.Vm().from_fn(do ||: Node
+  vm = sys.vm.Vm().activate(do ||: Node
     a = Node(7)
     b = Node(5)
     a.next = Some(b)
@@ -147,7 +147,7 @@ def go(): Int with Vm
   b = Node(2)
   a.next = Some(b)
   b.next = Some(a)
-  vm = sys.vm.Vm().from_fn(do |n: Node|: Int
+  vm = sys.vm.Vm().activate(do |n: Node|: Int
     case n.next
     in Some(m)
       case m.next
@@ -215,7 +215,7 @@ def go(): Bool with Vm
   bottom = Pair(leaf, leaf)
   d = Diamond(top, bottom)
   d.freeze()
-  vm = sys.vm.Vm().from_fn(do |g: Diamond|: Bool
+  vm = sys.vm.Vm().activate(do |g: Diamond|: Bool
     g.a.left == g.a.right and g.a.left == g.b.right and g.a.left.tag == 3
   end, args: (d,))
   case vm.run()
@@ -243,7 +243,7 @@ class Leaf
 end
 
 def go(): Bool with Vm
-  vm = sys.vm.Vm().from_fn(do ||: (Leaf, Leaf)
+  vm = sys.vm.Vm().activate(do ||: (Leaf, Leaf)
     leaf = Leaf(9)
     pair = (leaf, leaf)
     pair.freeze()
@@ -350,7 +350,7 @@ fn week7_examples_have_checked_output() {
             "cycle-digest.lm",
             &read("examples/06-graphs/cycle-digest.lm")
         ),
-        "Done(a814ece71063f053fd32f4ed4e8644f3799527c276ebadb9e05c99d641067254)"
+        "Done(e5160464f686134da11f103759638a5147812802b307eb92ea943d0d76259e75)"
     );
     assert_eq!(
         run(
@@ -467,7 +467,7 @@ def go(): Bool with Vm
   a.freeze()
   pair = (a, a)
   pair.freeze()
-  vm = sys.vm.Vm().from_fn(do |p: ([Int], [Int])|: Bool
+  vm = sys.vm.Vm().activate(do |p: ([Int], [Int])|: Bool
     p[0] == p[1]
   end, args: (pair,))
   case vm.run()
@@ -483,7 +483,7 @@ go()
 def go(): Bool with Vm
   a = [1, 2]
   a.freeze()
-  vm = sys.vm.Vm().from_fn(do |p: [Int], q: [Int]|: Bool
+  vm = sys.vm.Vm().activate(do |p: [Int], q: [Int]|: Bool
     p == q
   end, args: (a, a))
   case vm.run()

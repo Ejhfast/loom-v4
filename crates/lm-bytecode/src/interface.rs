@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 11;
+const VERSION: u16 = 12;
 
 /// The domain tag of the interface hash.
 const TAG_IFACE: &[u8] = b"lm-iface-v1\0";
@@ -88,7 +88,7 @@ pub enum IfaceType {
     Fault,
     Request,
     PolicyTable,
-    EmptyVm,
+    Vm,
     /// The frozen canonical graph digest type.
     Digest,
     /// One type parameter of the enclosing signature.
@@ -119,7 +119,7 @@ pub enum IfaceType {
         ret: Box<IfaceType>,
         row: Vec<IfaceRow>,
     },
-    Vm(Box<IfaceType>),
+    Run(Box<IfaceType>),
     Wait(Box<IfaceType>),
     PendingCall(Box<IfaceType>, Box<IfaceType>),
     Handle(Box<IfaceType>, Box<IfaceType>),
@@ -410,7 +410,7 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
         IfaceType::Fault => out.push(6),
         IfaceType::Request => out.push(7),
         IfaceType::PolicyTable => out.push(8),
-        IfaceType::EmptyVm => out.push(9),
+        IfaceType::Vm => out.push(9),
         IfaceType::Digest => out.push(19),
         IfaceType::Var(i) => {
             out.push(10);
@@ -484,7 +484,7 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
             encode_type(out, ret);
             encode_row(out, row);
         }
-        IfaceType::Vm(t) => {
+        IfaceType::Run(t) => {
             out.push(16);
             encode_type(out, t);
         }
@@ -737,7 +737,7 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
         6 => IfaceType::Fault,
         7 => IfaceType::Request,
         8 => IfaceType::PolicyTable,
-        9 => IfaceType::EmptyVm,
+        9 => IfaceType::Vm,
         19 => IfaceType::Digest,
         10 => IfaceType::Var(cur.u32()?),
         27 => IfaceType::Projection {
@@ -806,7 +806,7 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
                 row,
             }
         }
-        16 => IfaceType::Vm(Box::new(decode_type(cur, depth + 1)?)),
+        16 => IfaceType::Run(Box::new(decode_type(cur, depth + 1)?)),
         26 => IfaceType::Wait(Box::new(decode_type(cur, depth + 1)?)),
         17 => {
             let a = decode_type(cur, depth + 1)?;
@@ -1121,7 +1121,7 @@ pub fn type_text(ty: &IfaceType) -> String {
         IfaceType::Fault => "Fault".to_string(),
         IfaceType::Request => "Request".to_string(),
         IfaceType::PolicyTable => "PolicyTable".to_string(),
-        IfaceType::EmptyVm => "EmptyVm".to_string(),
+        IfaceType::Vm => "Vm".to_string(),
         IfaceType::Digest => "Digest".to_string(),
         IfaceType::Var(i) => format!("${i}"),
         IfaceType::Projection { base, assoc, .. } => {
@@ -1193,7 +1193,7 @@ pub fn type_text(ty: &IfaceType) -> String {
             }
             out
         }
-        IfaceType::Vm(t) => format!("Vm[{}]", type_text(t)),
+        IfaceType::Run(t) => format!("Run[{}]", type_text(t)),
         IfaceType::Wait(t) => format!("Wait[{}]", type_text(t)),
         IfaceType::PendingCall(a, r) => {
             format!("PendingCall[{}, {}]", type_text(a), type_text(r))

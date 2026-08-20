@@ -353,7 +353,7 @@ def client(address: SocketAddress): Int with Tcp.Connect, Tls.Handshake, Tls.Wri
   written
 end
 
-def finish(child: Vm[Int], mine: ResourceHandle): Int with Vm
+def finish(child: Run[Int], mine: ResourceHandle): Int with Vm
   loop do
     case child.drive()
     in Asked(request)
@@ -384,7 +384,7 @@ def finish(child: Vm[Int], mine: ResourceHandle): Int with Vm
   end
 end
 
-def upgrade(child: Vm[Int], tcp: ResourceHandle): Int with Vm
+def upgrade(child: Run[Int], tcp: ResourceHandle): Int with Vm
   case child.drive()
   in Asked(request)
     case request
@@ -407,7 +407,7 @@ end
 case loopback(8443)
 in Err(_) then 0 - 11
 in Ok(address)
-  child = sys.vm.Vm().from_fn(client, args: (address,))
+  child = sys.vm.Vm().activate(client, args: (address,))
   case child.drive()
   in Asked(request)
     case request

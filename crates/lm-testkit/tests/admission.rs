@@ -950,10 +950,10 @@ fn a_generic_instance_field_of_the_wrong_shape_rejects() {
 
 const TWO_MACHINES_SOURCE: &str = "\
 def go(): Int with Vm
-  a = sys.vm.Vm().from_fn(do ||: Int
+  a = sys.vm.Vm().activate(do ||: Int
     41
   end, args: ())
-  b = sys.vm.Vm().from_fn(do ||: String
+  b = sys.vm.Vm().activate(do ||: String
     \"answer\"
   end, args: ())
   case a.run()
@@ -1027,10 +1027,10 @@ fn a_machine_handle_that_names_another_result_type_faults() {
     assert_eq!(faults(&loaded, &broken, &["Vm"]), FaultCode::TypeMismatch);
 }
 
-const EMPTY_VM_SOURCE: &str = "\
+const VM_IMAGE_SOURCE: &str = "\
 def go(): Int with Vm
   empty = sys.vm.Vm()
-  loaded = sys.vm.Vm().from_fn(do ||: Int
+  loaded = sys.vm.Vm().activate(do ||: Int
     41
   end, args: ())
   case loaded.run()
@@ -1046,7 +1046,7 @@ go()
 /// The type states the lifecycle state, so admission reads the target.
 #[test]
 fn an_empty_machine_handle_that_names_a_loaded_machine_stays_contained() {
-    let loaded = program(EMPTY_VM_SOURCE);
+    let loaded = program(VM_IMAGE_SOURCE);
     let images = boundaries(&loaded, &["Vm"], 60);
     let image = pick(&images, "one empty and one loaded machine", |image| {
         image
@@ -1097,7 +1097,7 @@ fn an_empty_machine_handle_that_names_a_loaded_machine_stays_contained() {
 
 const TERMINAL_SOURCE: &str = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().from_fn(do ||: String
+  vm = sys.vm.Vm().activate(do ||: String
     \"answer\"
   end, args: ())
   case vm.run()
@@ -1239,7 +1239,7 @@ fn a_proc_handle_that_names_another_mailbox_faults() {
 
 const CALL_TOKEN_SOURCE: &str = "\
 def go(): Int with Vm, Rand
-  held = sys.vm.Vm().from_fn(do ||: Int with Rand.Int
+  held = sys.vm.Vm().activate(do ||: Int with Rand.Int
     sys.rand.int(0, 10)
   end, args: ())
   case held.drive()
@@ -1431,7 +1431,7 @@ fn a_pending_request_with_another_argument_count_rejects() {
 
 const FAULTED_SOURCE: &str = "\
 def go(): String with Vm
-  vm = sys.vm.Vm().from_fn(do || with Io.Print
+  vm = sys.vm.Vm().activate(do || with Io.Print
     sys.io.print(\"hi\\n\")
   end, args: ())
   case vm.run()
@@ -1498,7 +1498,7 @@ fn a_done_machine_that_holds_a_frame_rejects() {
 
 const ASKED_SOURCE: &str = "\
 def go(): Int with Vm, Io
-  vm = sys.vm.Vm().from_fn(do ||: Int with Io.Print
+  vm = sys.vm.Vm().activate(do ||: Int with Io.Print
     sys.io.print(\"hi\\n\")
     41
   end, args: ())
@@ -1549,10 +1549,10 @@ fn an_asked_machine_on_a_host_operation_admits() {
 
 const NESTED_SOURCE: &str = "\
 def go(): Int with Vm
-  a = sys.vm.Vm().from_fn(do ||: Int
+  a = sys.vm.Vm().activate(do ||: Int
     41
   end, args: ())
-  b = sys.vm.Vm().from_fn(do ||: String
+  b = sys.vm.Vm().activate(do ||: String
     \"answer\"
   end, args: ())
   first = a.snapshot()
@@ -1767,7 +1767,7 @@ fn a_sealed_image_past_the_byte_limit_reports_the_limit_rule() {
 
 const TABLE_SOURCE: &str = "\
 def go(): Int with Vm, Io
-  held = sys.vm.Vm().from_fn(do ||: Int
+  held = sys.vm.Vm().activate(do ||: Int
     41
   end, args: ())
   held.table().pass(Io)
@@ -1985,7 +1985,7 @@ fn every_captured_world_of_the_corpus_admits() {
         (SHARED_SOURCE, &[][..]),
         (BOX_SOURCE, &[][..]),
         (TWO_MACHINES_SOURCE, &["Vm"][..]),
-        (EMPTY_VM_SOURCE, &["Vm"][..]),
+        (VM_IMAGE_SOURCE, &["Vm"][..]),
         (TERMINAL_SOURCE, &["Vm"][..]),
     ] {
         let loaded = program(source);
@@ -2051,8 +2051,8 @@ hold(41)
 /// A machine whose entry function is generic: the frame of the held
 /// machine carries a substitution no call site of the image states.
 const GENERIC_ENTRY: &str = "\
-def hold[T](v: T): Vm[T] with Vm
-  sys.vm.Vm().from_fn(do |x: T|: T x end, args: (v,))
+def hold[T](v: T): Run[T] with Vm
+  sys.vm.Vm().activate(do |x: T|: T x end, args: (v,))
 end
 
 def go(): Int with Vm
@@ -2106,7 +2106,7 @@ go()
 /// and no proc class stands behind it.
 const PROC_RUN_HANDLE: &str = "\
 def go(): Int with Proc, Vm
-  vm = sys.vm.Vm().from_fn(do ||: Int 41 + 1 end, args: ())
+  vm = sys.vm.Vm().activate(do ||: Int 41 + 1 end, args: ())
   h = sys.proc.run(vm)
   case h.done()
   in Done(v)  then v
@@ -2204,7 +2204,7 @@ fn gate_corpus() -> Vec<(String, String)> {
         ("shared-source", SHARED_SOURCE),
         ("box-source", BOX_SOURCE),
         ("two-machines-source", TWO_MACHINES_SOURCE),
-        ("empty-vm-source", EMPTY_VM_SOURCE),
+        ("vm-image-source", VM_IMAGE_SOURCE),
         ("terminal-source", TERMINAL_SOURCE),
         ("nested-source", NESTED_SOURCE),
         ("proc-source", PROC_SOURCE),

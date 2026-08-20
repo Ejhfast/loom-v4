@@ -32,7 +32,7 @@ def read_with_recovery(): String with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def close_every_handle(child: Vm[String]): Int with Vm
+def close_every_handle(child: Run[String]): Int with Vm
   live = child.handles()
   closed = 0
   i = 0
@@ -58,7 +58,7 @@ def resume(image: Snapshot[String]): String with Vm, Fs
   end
 end
 
-def checkpoint_now(child: Vm[String]): String with Vm, Fs
+def checkpoint_now(child: Run[String]): String with Vm, Fs
   # Let the open through. The host serves it asynchronously, so the
   # file appears only when the child reaches its next request.
   case child.drive()
@@ -89,6 +89,6 @@ def checkpoint_now(child: Vm[String]): String with Vm, Fs
   end
 end
 
-child = sys.vm.Vm().from_fn(read_with_recovery, args: ())
+child = sys.vm.Vm().activate(read_with_recovery, args: ())
 child.table().pass(Fs)
 checkpoint_now(child)

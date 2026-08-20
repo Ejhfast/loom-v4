@@ -31,7 +31,7 @@ A wait type stores no effect row. Source creation delegates an authorized action
 The first surface has these operations:
 
 ```text
-Vm[T].drive_wait()             -> Wait[DriveEvent[T]]
+Run[T].drive_wait()             -> Wait[DriveEvent[T]]
 Proc[M].receive_wait()         -> Wait[Recv[M]]
 Wait[T].wait()                 -> T
 Wait[A].choose(Wait[B])        -> Wait[Choice[A, B]]

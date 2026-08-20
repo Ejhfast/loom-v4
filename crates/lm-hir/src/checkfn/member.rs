@@ -173,8 +173,8 @@ impl<'o> FnChecker<'o> {
         // Native control methods on the VM surface types.
         if matches!(
             ctx.store.get(recv_ty),
-            Type::EmptyVm
-                | Type::Vm(_)
+            Type::Vm
+                | Type::Run(_)
                 | Type::Wait(_)
                 | Type::PolicyTable
                 | Type::Request

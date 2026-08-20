@@ -12,7 +12,7 @@ def read_secret(): String with Fs.Open, Fs.Close
   end
 end
 
-def allow_only(child: Vm[String], permitted: String): String with Vm
+def allow_only(child: Run[String], permitted: String): String with Vm
   loop do
     case child.drive()
     in Asked(request)
@@ -34,6 +34,6 @@ def allow_only(child: Vm[String], permitted: String): String with Vm
   end
 end
 
-child = sys.vm.Vm().from_fn(read_secret, args: ())
+child = sys.vm.Vm().activate(read_secret, args: ())
 child.table().pass(Fs)
 allow_only(child, "message.txt")

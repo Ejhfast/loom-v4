@@ -96,7 +96,7 @@ impl Naming<'_> {
             Type::Fault => IfaceType::Fault,
             Type::Request => IfaceType::Request,
             Type::PolicyTable => IfaceType::PolicyTable,
-            Type::EmptyVm => IfaceType::EmptyVm,
+            Type::Vm => IfaceType::Vm,
             Type::SnapshotImage => IfaceType::SnapshotImage,
             Type::Class(c) => IfaceType::Named {
                 class: self.qual(c.0),
@@ -138,7 +138,7 @@ impl Naming<'_> {
                     assoc: name,
                 }
             }
-            Type::Vm(t) => IfaceType::Vm(Box::new(self.ty(t))),
+            Type::Run(t) => IfaceType::Run(Box::new(self.ty(t))),
             Type::Wait(t) => IfaceType::Wait(Box::new(self.ty(t))),
             Type::Snapshot(t) => IfaceType::Snapshot(Box::new(self.ty(t))),
             Type::PendingCall(a, r) => {

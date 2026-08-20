@@ -158,7 +158,7 @@ impl<'m> World<'m> {
             | (BcType::Fault, ClosedType::Fault)
             | (BcType::Request, ClosedType::Request)
             | (BcType::PolicyTable, ClosedType::PolicyTable)
-            | (BcType::EmptyVm, ClosedType::EmptyVm)
+            | (BcType::Vm, ClosedType::Vm)
             | (BcType::Digest, ClosedType::Digest)
             | (BcType::SnapshotImage, ClosedType::SnapshotImage)
             | (BcType::Bytes, ClosedType::Bytes)
@@ -174,7 +174,7 @@ impl<'m> World<'m> {
                         .all(|(source, target)| child(self, *source, *target))
             }
             (BcType::List(source), ClosedType::List(target))
-            | (BcType::Vm(source), ClosedType::Vm(target))
+            | (BcType::Run(source), ClosedType::Run(target))
             | (BcType::Wait(source), ClosedType::Wait(target))
             | (BcType::Snapshot(source), ClosedType::Snapshot(target)) => {
                 child(self, *source, *target)

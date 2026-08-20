@@ -113,10 +113,10 @@ pub enum BcType {
     Request,
     /// The holder-local policy-table handle type.
     PolicyTable,
-    /// The unloaded virtual machine handle type.
-    EmptyVm,
-    /// A loaded virtual machine typed by its terminal result index.
-    Vm(u32),
+    /// The persistent virtual machine image type.
+    Vm,
+    /// One active invocation typed by its terminal result index.
+    Run(u32),
     /// A holder-local one-shot wait typed by its result index.
     Wait(u32),
     /// A typed pending call: argument-view type index and reply type
@@ -972,7 +972,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// class representation. Both landed on separate branches, so version
 /// 24 is the first that carries them together.
 /// Version 30 adds the static receiver type to `Digest`.
-pub const VERSION: u16 = 30;
+pub const VERSION: u16 = 31;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1170,8 +1170,8 @@ const TY_VAR: u8 = 12;
 const TY_FAULT: u8 = 13;
 const TY_REQUEST: u8 = 14;
 const TY_POLICY_TABLE: u8 = 15;
-const TY_EMPTY_VM: u8 = 16;
-const TY_VM: u8 = 17;
+const TY_VM: u8 = 16;
+const TY_RUN: u8 = 17;
 const TY_PENDING_CALL: u8 = 18;
 const TY_OP: u8 = 19;
 const TY_DIGEST: u8 = 20;
@@ -1537,9 +1537,9 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
         BcType::Fault => out.push(TY_FAULT),
         BcType::Request => out.push(TY_REQUEST),
         BcType::PolicyTable => out.push(TY_POLICY_TABLE),
-        BcType::EmptyVm => out.push(TY_EMPTY_VM),
-        BcType::Vm(t) => {
-            out.push(TY_VM);
+        BcType::Vm => out.push(TY_VM),
+        BcType::Run(t) => {
+            out.push(TY_RUN);
             write_u32(out, *t);
         }
         BcType::Wait(t) => {
@@ -2626,8 +2626,8 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_FAULT => BcType::Fault,
         TY_REQUEST => BcType::Request,
         TY_POLICY_TABLE => BcType::PolicyTable,
-        TY_EMPTY_VM => BcType::EmptyVm,
-        TY_VM => BcType::Vm(cur.u32()?),
+        TY_VM => BcType::Vm,
+        TY_RUN => BcType::Run(cur.u32()?),
         TY_WAIT => BcType::Wait(cur.u32()?),
         TY_PENDING_CALL => BcType::PendingCall(cur.u32()?, cur.u32()?),
         TY_HANDLE => BcType::Handle(cur.u32()?, cur.u32()?),

@@ -29,7 +29,7 @@ def read_twice(): String with Fs.Open, Fs.Read, Fs.Close
 end
 
 def tee(
-  child: Vm[String],
+  child: Run[String],
   mine: ResourceHandle,
   backing: FileHandle,
   mut sizes: [Int]
@@ -71,7 +71,7 @@ end
 
 case sys.fs.open("message.txt", ReadOnly)
 in Ok(backing)
-  child = sys.vm.Vm().from_fn(read_twice, args: ())
+  child = sys.vm.Vm().activate(read_twice, args: ())
   case child.drive()
   in Asked(request)
     case request

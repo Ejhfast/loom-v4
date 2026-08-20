@@ -354,14 +354,14 @@ fn restore_relocates_every_vm_and_mailbox_root() {
 #[test]
 fn multi_shot_restore_creates_independent_worlds() {
     let source = "\
-def restore_list(snap: Snapshot[List[Int]]): Vm[List[Int]] with Vm
+def restore_list(snap: Snapshot[List[Int]]): Run[List[Int]] with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(vm)  then vm
-  in Err(_)  then sys.vm.Vm().from_fn(do ||: List[Int] [] end, args: ())
+  in Err(_)  then sys.vm.Vm().activate(do ||: List[Int] [] end, args: ())
   end
 end
 
-vm = sys.vm.Vm().from_fn(do ||: List[Int]
+vm = sys.vm.Vm().activate(do ||: List[Int]
   xs = [1]
   xs.push(2)
   xs
@@ -461,7 +461,7 @@ def go(): Int with Vm, Proc, Clock
   # pair and reads the other element, so the policy table of `outer`
   # is the only thing that names the worker from `outer`.
   pair = (worker, 7)
-  outer = sys.vm.Vm().from_fn(do ||: Int 1 end, args: ())
+  outer = sys.vm.Vm().activate(do ||: Int 1 end, args: ())
   outer.table().mock(Clock.Now, do ||: Int
     pair[1]
   end)
@@ -599,7 +599,7 @@ fn restore_rejects_a_queue_past_the_effective_mailbox_limit() {
 fn a_live_attachment_blocks_the_capture_and_resumes_the_world() {
     let source = "\
 def go(): Int with Vm, Clock
-  inner = sys.vm.Vm().from_fn(do ||: Int with Clock.Sleep
+  inner = sys.vm.Vm().activate(do ||: Int with Clock.Sleep
     sys.clock.sleep(5)
     9
   end, args: ())
@@ -718,7 +718,7 @@ fn an_asked_capture_restores_in_asked_and_drive_mints_a_fresh_token() {
 /// A program that captures and restores one routed request.
 fn routed_snapshot_source() -> &'static str {
     r#"
-def dispatch_to_end(vm: Vm[Int]): Int with Vm
+def dispatch_to_end(vm: Run[Int]): Int with Vm
   loop do
     case vm.drive()
     in Asked(q) then vm.dispatch(q)
@@ -732,7 +732,7 @@ end
 
 def go(): Int with Vm, Io.Print
   inner = do ||: Int with Vm, Io.Print
-    b = sys.vm.Vm().from_fn(do ||: Int with Io.Print
+    b = sys.vm.Vm().activate(do ||: Int with Io.Print
       sys.io.print("from B")
       7
     end, args: ())
@@ -743,7 +743,7 @@ def go(): Int with Vm, Io.Print
     end
   end
 
-  a = sys.vm.Vm().from_fn(inner, args: ())
+  a = sys.vm.Vm().activate(inner, args: ())
   a.table().pass(Vm)
   a.table().pass(Io.Print)
   loop do
@@ -883,7 +883,7 @@ fn a_zero_request_ordinal_rejects() {
 fn a_terminal_capture_restores_with_its_result() {
     let source = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().from_fn(do ||: Int 41 + 1 end, args: ())
+  vm = sys.vm.Vm().activate(do ||: Int 41 + 1 end, args: ())
   case vm.run()
   in Done(_)  then 0
   in Fault(_) then 0 - 1
@@ -943,7 +943,7 @@ def go(): Int with Proc, Vm
   h = Worker.spawn()
   # A `Vm` handle is holder-local, so the held machine names the
   # paused proc through its sendable proc handle instead.
-  held = sys.vm.Vm().from_fn(do |w: Handle[Int, Int]|: Int 1 end, args: (h,))
+  held = sys.vm.Vm().activate(do |w: Handle[Int, Int]|: Int 1 end, args: (h,))
   case h.pause()
   in Ok(_)
     case held.snapshot()
@@ -989,7 +989,7 @@ fn a_waiting_machine_names_its_attachment() {
 
 const WAITING_SOURCE: &str = "\
 def go(): Int with Vm, Clock
-  inner = sys.vm.Vm().from_fn(do ||: Int with Clock.Sleep
+  inner = sys.vm.Vm().activate(do ||: Int with Clock.Sleep
     sys.clock.sleep(5)
     9
   end, args: ())

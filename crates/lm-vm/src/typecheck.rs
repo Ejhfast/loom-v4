@@ -125,7 +125,6 @@ enum Kind {
     Fault,
     Request,
     PolicyTable,
-    EmptyVm,
     Digest,
     Snapshot,
     Vm,
@@ -182,8 +181,7 @@ fn check_one(
             let text_match = kind == Kind::Text && matches!(found, Kind::Str | Kind::Substring);
             let tcp_match =
                 kind == Kind::TcpResource && matches!(found, Kind::TcpStream | Kind::TcpListener);
-            let empty_vm_match = found == Kind::Vm && kind == Kind::EmptyVm;
-            if !(found == kind || text_match || tcp_match || empty_vm_match) {
+            if !(found == kind || text_match || tcp_match) {
                 return Err(FaultCode::TypeMismatch);
             }
 
@@ -245,10 +243,10 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
         ClosedType::Fault => Node::Heap(Kind::Fault),
         ClosedType::Request => Node::Heap(Kind::Request),
         ClosedType::PolicyTable => Node::Heap(Kind::PolicyTable),
-        ClosedType::EmptyVm => Node::Heap(Kind::EmptyVm),
+        ClosedType::Vm => Node::Heap(Kind::Vm),
         ClosedType::Digest => Node::Heap(Kind::Digest),
         ClosedType::SnapshotImage | ClosedType::Snapshot(_) => Node::Heap(Kind::Snapshot),
-        ClosedType::Vm(_) => Node::Heap(Kind::Vm),
+        ClosedType::Run(_) => Node::Heap(Kind::Vm),
         ClosedType::Wait(_) => Node::Heap(Kind::Wait),
         ClosedType::PendingCall(_, _) => Node::Heap(Kind::PendingCall),
         ClosedType::Handle(_, _) => Node::Heap(Kind::Handle),

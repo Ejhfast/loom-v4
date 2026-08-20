@@ -53,7 +53,7 @@ def permitted(list: [String], host: String): Bool
   false
 end
 
-def guard(child: Vm[String], list: [String], canned: Bytes): String with Vm
+def guard(child: Run[String], list: [String], canned: Bytes): String with Vm
   sent = false
   loop do
     case child.drive()
@@ -96,7 +96,7 @@ def guard(child: Vm[String], list: [String], canned: Bytes): String with Vm
 end
 
 def main(): String with Vm
-  child = sys.vm.Vm().from_fn(worker, args: ())
+  child = sys.vm.Vm().activate(worker, args: ())
   canned = Bytes(
     "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"
   )

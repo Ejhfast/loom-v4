@@ -288,14 +288,14 @@ xs.at(index: 0) + m.at(key: \"a\") + extra
 /// spelling of specification 6.1 line 704 keeps working, the other
 /// name works, and both orders work.
 #[test]
-fn from_fn_labels_follow_the_general_rule() {
+fn activate_labels_follow_the_general_rule() {
     let program = "def child(a: Int, b: Int): Int\n  a + b\nend\n";
     let tail = "case vm.run()\nin Done(v) then v\nin Fault(_) then 0 - 1\nend\n";
     for call in [
-        "sys.vm.Vm().from_fn(child, args: (3, 4))",
-        "sys.vm.Vm().from_fn(child, (3, 4))",
-        "sys.vm.Vm().from_fn(program: child, args: (3, 4))",
-        "sys.vm.Vm().from_fn(args: (3, 4), program: child)",
+        "sys.vm.Vm().activate(child, args: (3, 4))",
+        "sys.vm.Vm().activate(child, (3, 4))",
+        "sys.vm.Vm().activate(program: child, args: (3, 4))",
+        "sys.vm.Vm().activate(args: (3, 4), program: child)",
     ] {
         let source = format!("{program}vm = {call}\n{tail}");
         assert_eq!(allowed(&source, &["Vm"]), "Done(7)", "call: {call}");
@@ -303,13 +303,30 @@ fn from_fn_labels_follow_the_general_rule() {
 }
 
 #[test]
-fn an_unknown_from_fn_label_reports_the_general_diagnostic() {
+fn an_unknown_activate_label_reports_the_general_diagnostic() {
     let source = "def child(): Int\n  1\nend\n\
-        vm = sys.vm.Vm().from_fn(child, tuple: ())\n";
+        vm = sys.vm.Vm().activate(child, tuple: ())\n";
     expect_error(
         source,
-        "`from_fn` does not declare a parameter named `tuple`",
+        "`activate` does not declare a parameter named `tuple`",
     );
+}
+
+#[test]
+fn vm_and_run_have_distinct_type_forms() {
+    expect_error(
+        "def bad(image: Vm[Int]): Int\n  1\nend\n1\n",
+        "`Vm` takes no type arguments; use `Run[T]` for an active invocation",
+    );
+    let source = "def finish(run: Run[Int]): Int with Vm\n\
+        \x20 case run.run()\n\
+        \x20 in Done(value) then value\n\
+        \x20 in Fault(_) then 0 - 1\n\
+        \x20 end\n\
+        end\n\
+        image: Vm = sys.vm.Vm()\n\
+        finish(image.activate(do ||: Int 42 end, args: ()))\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done(42)");
 }
 
 #[test]
@@ -328,7 +345,7 @@ fn a_positional_argument_cannot_follow_a_native_label() {
 #[test]
 fn labels_work_on_the_continuation_methods() {
     let source = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
-        vm = sys.vm.Vm().from_fn(child, args: ())\n\
+        vm = sys.vm.Vm().activate(child, args: ())\n\
         case vm.drive()\n\
         in Asked(request)\n  \
         case request\n  \

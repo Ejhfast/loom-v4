@@ -272,7 +272,7 @@ pub enum Object {
     /// Immutable binary data. Born frozen.
     Bytes(SharedBytes),
     /// A holder-local handle to one machine in the world registry.
-    /// The static type separates `EmptyVm` and `Vm[T]` views.
+    /// The static type separates `Vm` and `Run[T]` views.
     NativeVm { vm: u32 },
     /// A holder-local handle to the policy table of one machine.
     NativeTable { vm: u32 },

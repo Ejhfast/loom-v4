@@ -16,7 +16,7 @@ def read_message(): String with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def audit(child: Vm[String], mut opened: [String]): String with Vm
+def audit(child: Run[String], mut opened: [String]): String with Vm
   loop do
     # `drive` stops the child before its policy runs. The supervisor
     # reads the request first.
@@ -37,7 +37,7 @@ def audit(child: Vm[String], mut opened: [String]): String with Vm
   end
 end
 
-child = sys.vm.Vm().from_fn(read_message, args: ())
+child = sys.vm.Vm().activate(read_message, args: ())
 child.table().pass(Fs)
 
 opened: [String] = []

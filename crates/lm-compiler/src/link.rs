@@ -1109,7 +1109,7 @@ fn reloc_type(
             interface: interfaces[*interface as usize],
             assoc: *assoc,
         },
-        BcType::Vm(t) => BcType::Vm(types[*t as usize]),
+        BcType::Run(t) => BcType::Run(types[*t as usize]),
         BcType::Wait(t) => BcType::Wait(types[*t as usize]),
         BcType::Snapshot(t) => BcType::Snapshot(types[*t as usize]),
         BcType::PendingCall(a, r) => BcType::PendingCall(types[*a as usize], types[*r as usize]),

@@ -291,7 +291,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             | BcType::Fault
             | BcType::Request
             | BcType::PolicyTable
-            | BcType::EmptyVm
+            | BcType::Vm
             | BcType::Digest
             | BcType::SnapshotImage
             | BcType::Bytes
@@ -340,7 +340,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
                 earlier(*ret)?;
                 check_row(&format!("type {idx}"), row)?;
             }
-            BcType::Vm(t) | BcType::Wait(t) | BcType::Snapshot(t) => earlier(*t)?,
+            BcType::Run(t) | BcType::Wait(t) | BcType::Snapshot(t) => earlier(*t)?,
             BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 earlier(*a)?;
                 earlier(*r)?;
@@ -1042,7 +1042,9 @@ impl Graph {
                     }
                     list.push(s.type_node(*ret));
                 }
-                BcType::Vm(t) | BcType::Wait(t) | BcType::Snapshot(t) => list.push(s.type_node(*t)),
+                BcType::Run(t) | BcType::Wait(t) | BcType::Snapshot(t) => {
+                    list.push(s.type_node(*t))
+                }
                 BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                     list.push(s.type_node(*a));
                     list.push(s.type_node(*r));
@@ -1432,9 +1434,9 @@ impl<'a> Resolver<'a> {
             BcType::Fault => out.push(13),
             BcType::Request => out.push(14),
             BcType::PolicyTable => out.push(15),
-            BcType::EmptyVm => out.push(16),
+            BcType::Vm => out.push(16),
             BcType::Digest => out.push(20),
-            BcType::Vm(t) => {
+            BcType::Run(t) => {
                 out.push(17);
                 out.extend_from_slice(&self.type_digest(*t));
             }

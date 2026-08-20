@@ -1341,31 +1341,31 @@ pub(crate) fn step(
                     push(state, reply)?;
                 }
                 lm_abi::OpKind::VmControl => {
-                    let pop_vm = |state: &mut State| -> Result<u32, VerifyError> {
+                    let pop_run = |state: &mut State| -> Result<u32, VerifyError> {
                         let v = pop(state)?;
                         match ctx.ty(v) {
-                            BcType::Vm(t) => Ok(t),
+                            BcType::Run(t) => Ok(t),
                             _ => Err(fail(format!(
-                                "`{name}` needs a loaded Vm receiver, found type {v}"
+                                "`{name}` needs an active Run receiver, found type {v}"
                             ))),
                         }
                     };
                     match op {
                         lm_abi::OP_VM_NEW => {
-                            let empty = ctx.intern(BcType::EmptyVm);
-                            push(state, empty)?;
+                            let vm = ctx.intern(BcType::Vm);
+                            push(state, vm)?;
                         }
-                        lm_abi::OP_VM_FROM_FN => {
+                        lm_abi::OP_VM_ACTIVATE => {
                             let args_ty = pop(state)?;
                             let fn_ty = pop(state)?;
                             let recv = pop(state)?;
-                            if ctx.ty(recv) != BcType::EmptyVm {
-                                return Err(fail(
-                                    "`Vm.FromFn` needs an EmptyVm receiver".to_string(),
-                                ));
+                            if ctx.ty(recv) != BcType::Vm {
+                                return Err(fail("`Vm.Activate` needs a Vm receiver".to_string()));
                             }
                             let BcType::Fn(params, _, ret, _) = ctx.ty(fn_ty) else {
-                                return Err(fail("`Vm.FromFn` needs a function value".to_string()));
+                                return Err(fail(
+                                    "`Vm.Activate` needs a function value".to_string(),
+                                ));
                             };
                             let want = if params.is_empty() {
                                 TY_UNIT
@@ -1374,16 +1374,16 @@ pub(crate) fn step(
                             };
                             if !ctx.is_subtype(args_ty, want) {
                                 return Err(fail(
-                                    "`Vm.FromFn` arguments do not match the \
+                                    "`Vm.Activate` arguments do not match the \
                                      program parameters"
                                         .to_string(),
                                 ));
                             }
-                            let vm = ctx.intern(BcType::Vm(ret));
-                            push(state, vm)?;
+                            let run = ctx.intern(BcType::Run(ret));
+                            push(state, run)?;
                         }
                         lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE => {
-                            let t = pop_vm(state)?;
+                            let t = pop_run(state)?;
                             let (parent, what) = match op {
                                 lm_abi::OP_VM_RUN => (ctx.core.run_result, "RunResult"),
                                 lm_abi::OP_VM_STEP => (ctx.core.step_event, "StepEvent"),
@@ -1393,7 +1393,7 @@ pub(crate) fn step(
                             push(state, event)?;
                         }
                         lm_abi::OP_VM_DRIVE_WAIT => {
-                            let t = pop_vm(state)?;
+                            let t = pop_run(state)?;
                             let event = ctx
                                 .event_inst(ctx.core.drive_event, "DriveEvent", t)
                                 .map_err(&fail)?;
@@ -1401,19 +1401,19 @@ pub(crate) fn step(
                             push(state, wait)?;
                         }
                         lm_abi::OP_VM_TABLE => {
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             let table = ctx.intern(BcType::PolicyTable);
                             push(state, table)?;
                         }
                         lm_abi::OP_VM_HANDLES => {
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             let control = ctx.intern(BcType::ResourceHandle);
                             let list = ctx.intern(BcType::List(control));
                             push(state, list)?;
                         }
                         lm_abi::OP_VM_RESOURCE => {
                             let handle = pop(state)?;
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             let tcp = ctx
                                 .core
                                 .tcp_resource
@@ -1435,7 +1435,7 @@ pub(crate) fn step(
                         }
                         lm_abi::OP_VM_SERVE_FILE => {
                             let call = pop(state)?;
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             let args = ctx.op_args_view(lm_abi::OP_FS_OPEN).map_err(&fail)?;
                             let reply = ctx
                                 .abi_ty(lm_abi::op(lm_abi::OP_FS_OPEN).reply)
@@ -1451,7 +1451,7 @@ pub(crate) fn step(
                         lm_abi::OP_VM_SERVE_TCP_STREAM => {
                             let peer = pop(state)?;
                             let call = pop(state)?;
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             let address =
                                 ctx.abi_ty(lm_abi::AbiType::SOCKET_ADDRESS).map_err(&fail)?;
                             if !ctx.is_subtype(peer, address) {
@@ -1483,7 +1483,7 @@ pub(crate) fn step(
                         }
                         lm_abi::OP_VM_SERVE_TCP_LISTENER => {
                             let call = pop(state)?;
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             let args = ctx.op_args_view(lm_abi::OP_TCP_LISTEN).map_err(&fail)?;
                             let reply = ctx
                                 .abi_ty(lm_abi::op(lm_abi::OP_TCP_LISTEN).reply)
@@ -1498,7 +1498,7 @@ pub(crate) fn step(
                         }
                         lm_abi::OP_VM_SERVE_TLS_STREAM => {
                             let call = pop(state)?;
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             let args = ctx.op_args_view(lm_abi::OP_TLS_HANDSHAKE).map_err(&fail)?;
                             let reply = ctx
                                 .abi_ty(lm_abi::op(lm_abi::OP_TLS_HANDSHAKE).reply)
@@ -1542,7 +1542,7 @@ pub(crate) fn step(
                         lm_abi::OP_VM_ANSWER => {
                             let value = pop(state)?;
                             let call = pop(state)?;
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             let BcType::PendingCall(_, reply) = ctx.ty(call) else {
                                 return Err(fail(
                                     "`Vm.Answer` needs a PendingCall token".to_string(),
@@ -1559,7 +1559,7 @@ pub(crate) fn step(
                         lm_abi::OP_VM_REJECT => {
                             let fault = pop(state)?;
                             let request = pop(state)?;
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             if ctx.ty(fault) != BcType::Fault || ctx.ty(request) != BcType::Request
                             {
                                 return Err(fail(
@@ -1570,14 +1570,14 @@ pub(crate) fn step(
                         }
                         lm_abi::OP_VM_DISPATCH => {
                             let request = pop(state)?;
-                            pop_vm(state)?;
+                            pop_run(state)?;
                             if ctx.ty(request) != BcType::Request {
                                 return Err(fail("`Vm.Dispatch` needs a Request".to_string()));
                             }
                             push(state, TY_UNIT)?;
                         }
                         lm_abi::OP_PROC_RUN => {
-                            let t = pop_vm(state)?;
+                            let t = pop_run(state)?;
                             // The mailbox-bearing launch is
                             // `Proc.Spawn`. This form takes no message,
                             // so `M` is the bottom type, which the
@@ -1674,7 +1674,7 @@ pub(crate) fn step(
                                 return Err(fail(format!("`{name}` needs a proc handle")));
                             };
                             let ok = if op == lm_abi::OP_PROC_PAUSE {
-                                ctx.intern(BcType::Vm(result))
+                                ctx.intern(BcType::Run(result))
                             } else {
                                 TY_UNIT
                             };
@@ -1747,7 +1747,7 @@ pub(crate) fn step(
                             push(state, TY_BOOL)?;
                         }
                         lm_abi::OP_VM_SNAPSHOT_HELD => {
-                            let t = pop_vm(state)?;
+                            let t = pop_run(state)?;
                             let snapshot = ctx.intern(BcType::Snapshot(t));
                             let error = ctx
                                 .plain_inst(ctx.core.snapshot_error, "SnapshotError")
@@ -1762,7 +1762,7 @@ pub(crate) fn step(
                                     "`Vm.DriveFor` needs an instruction count".to_string(),
                                 ));
                             }
-                            let t = pop_vm(state)?;
+                            let t = pop_run(state)?;
                             let event = ctx
                                 .event_inst(ctx.core.drive_event, "DriveEvent", t)
                                 .map_err(&fail)?;
@@ -1778,7 +1778,7 @@ pub(crate) fn step(
                                     "`Vm.SnapshotWaitHeld` needs a fuel count".to_string(),
                                 ));
                             }
-                            let t = pop_vm(state)?;
+                            let t = pop_run(state)?;
                             let snapshot = ctx.intern(BcType::Snapshot(t));
                             let error = ctx
                                 .plain_inst(ctx.core.snapshot_error, "SnapshotError")
@@ -1812,21 +1812,19 @@ pub(crate) fn step(
                         lm_abi::OP_VM_RESTORE => {
                             let snapshot = pop(state)?;
                             let recv = pop(state)?;
-                            if ctx.ty(recv) != BcType::EmptyVm {
-                                return Err(fail(
-                                    "`Vm.Restore` needs an EmptyVm receiver".to_string(),
-                                ));
+                            if ctx.ty(recv) != BcType::Vm {
+                                return Err(fail("`Vm.Restore` needs a Vm receiver".to_string()));
                             }
                             let BcType::Snapshot(t) = ctx.ty(snapshot) else {
                                 return Err(fail(
                                     "`Vm.Restore` needs a typed snapshot".to_string(),
                                 ));
                             };
-                            let vm = ctx.intern(BcType::Vm(t));
+                            let run = ctx.intern(BcType::Run(t));
                             let error = ctx
                                 .plain_inst(ctx.core.restore_error, "RestoreError")
                                 .map_err(&fail)?;
-                            let out = ctx.result_inst(vm, error).map_err(&fail)?;
+                            let out = ctx.result_inst(run, error).map_err(&fail)?;
                             push(state, out)?;
                         }
                         lm_abi::OP_VM_LOAD_SNAPSHOT => {

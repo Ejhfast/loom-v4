@@ -21,7 +21,7 @@ const CHILD: &str = "do ||: String with Fs.Open, Fs.Read, Fs.Close\n\
 
 fn serve(body: &str) -> String {
     let source = format!(
-        "def serve(vm: Vm[String], contents: Bytes, mut seen: [Int]): String with Vm\n\
+        "def serve(vm: Run[String], contents: Bytes, mut seen: [Int]): String with Vm\n\
          \x20 loop do\n\
          \x20   case vm.drive()\n\
          \x20   in Asked(request)\n\
@@ -34,7 +34,7 @@ fn serve(body: &str) -> String {
          \x20 end\n\
          end\n\
          seen: [Int] = []\n\
-         serve(sys.vm.Vm().from_fn({CHILD}, args: ()), Bytes(\"abcdef\"), seen)\n"
+         serve(sys.vm.Vm().activate({CHILD}, args: ()), Bytes(\"abcdef\"), seen)\n"
     );
     run_allowed("request.lm", &source, &["Vm"]).expect("the program compiles")
 }
@@ -64,7 +64,7 @@ fn one_case_serves_several_operations() {
 /// A minimal driver body, so a negative case reads its own error.
 fn drive_body(arms: &str) -> String {
     format!(
-        "def serve(vm: Vm[String]): String with Vm\n\
+        "def serve(vm: Run[String]): String with Vm\n\
          \x20 case vm.drive()\n\
          \x20 in Asked(request)\n\
          \x20   case request\n\
@@ -74,7 +74,7 @@ fn drive_body(arms: &str) -> String {
          \x20 in Fault(_) then \"f\"\n\
          \x20 end\n\
          end\n\
-         serve(sys.vm.Vm().from_fn({CHILD}, args: ()))\n"
+         serve(sys.vm.Vm().activate({CHILD}, args: ()))\n"
     )
 }
 
@@ -108,7 +108,7 @@ fn a_call_pattern_names_a_manifest_operation() {
         "in Call(Fs.Nope, call, (_, _))",
     );
     let source = format!(
-        "def serve(vm: Vm[String], contents: Bytes, mut seen: [Int]): String with Vm\n\
+        "def serve(vm: Run[String], contents: Bytes, mut seen: [Int]): String with Vm\n\
          \x20 case vm.drive()\n\
          \x20 in Asked(request)\n\
          {body}\
@@ -118,7 +118,7 @@ fn a_call_pattern_names_a_manifest_operation() {
          \x20 end\n\
          end\n\
          seen: [Int] = []\n\
-         serve(sys.vm.Vm().from_fn({CHILD}, args: ()), Bytes(\"ab\"), seen)\n"
+         serve(sys.vm.Vm().activate({CHILD}, args: ()), Bytes(\"ab\"), seen)\n"
     );
     let error = run_allowed("request.lm", &source, &["Vm"]).expect_err("no such operation");
     assert!(error.contains("E1051"), "{error}");
@@ -131,7 +131,7 @@ fn a_call_pattern_checks_its_argument_arity() {
         "in Call(Fs.Read, call, (_,))",
     );
     let source = format!(
-        "def serve(vm: Vm[String], contents: Bytes, mut seen: [Int]): String with Vm\n\
+        "def serve(vm: Run[String], contents: Bytes, mut seen: [Int]): String with Vm\n\
          \x20 case vm.drive()\n\
          \x20 in Asked(request)\n\
          {body}\
@@ -141,7 +141,7 @@ fn a_call_pattern_checks_its_argument_arity() {
          \x20 end\n\
          end\n\
          seen: [Int] = []\n\
-         serve(sys.vm.Vm().from_fn({CHILD}, args: ()), Bytes(\"ab\"), seen)\n"
+         serve(sys.vm.Vm().activate({CHILD}, args: ()), Bytes(\"ab\"), seen)\n"
     );
     let error = run_allowed("request.lm", &source, &["Vm"]).expect_err("wrong arity");
     assert!(error.contains("E1041"), "{error}");

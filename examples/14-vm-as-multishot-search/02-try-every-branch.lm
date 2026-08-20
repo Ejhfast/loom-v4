@@ -18,7 +18,7 @@ end
 
 # Answer the pending choice with `first`, then every later choice
 # with zero, and report the result.
-def finish(child: Vm[Int], first: Int): Int with Vm
+def finish(child: Run[Int], first: Int): Int with Vm
   answered = false
   loop do
     case child.drive()
@@ -61,7 +61,7 @@ def explore(image: Snapshot[Int], count: Int): [Int] with Vm
   out
 end
 
-child = sys.vm.Vm().from_fn(program, args: ())
+child = sys.vm.Vm().activate(program, args: ())
 
 # Run the prefix, then stop on the first question.
 case child.drive()

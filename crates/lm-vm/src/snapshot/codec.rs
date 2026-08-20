@@ -403,9 +403,10 @@ fn encode_closed_type(out: &mut Out, node: &ClosedType) {
             out.leb(*c as u64);
             list(out, args);
         }
-        ClosedType::List(e) | ClosedType::Vm(e) | ClosedType::Wait(e) | ClosedType::Snapshot(e) => {
-            out.leb(*e as u64)
-        }
+        ClosedType::List(e)
+        | ClosedType::Run(e)
+        | ClosedType::Wait(e)
+        | ClosedType::Snapshot(e) => out.leb(*e as u64),
         ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
             out.leb(*a as u64);
             out.leb(*b as u64);
@@ -1402,7 +1403,7 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
         6 => ClosedType::Fault,
         7 => ClosedType::Request,
         8 => ClosedType::PolicyTable,
-        9 => ClosedType::EmptyVm,
+        9 => ClosedType::Vm,
         10 => ClosedType::Digest,
         11 => ClosedType::SnapshotImage,
         12 => ClosedType::Class(class_slot(cur)?),
@@ -1429,7 +1430,7 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
             let row = decode_row(cur, limits)?;
             ClosedType::Fn(params, muts, ret, row)
         }
-        18 => ClosedType::Vm(closed_ref(cur, at)?),
+        18 => ClosedType::Run(closed_ref(cur, at)?),
         19 => {
             let a = closed_ref(cur, at)?;
             let b = closed_ref(cur, at)?;

@@ -44,7 +44,7 @@ B. Both A and B perform `Io.Print`.
 Save the program below as `nested-drive.lm` to repeat the runs.
 
 ```lm
-def drive_loop(vm: Vm[Int], mut seen: [String]): ([String], Int) with Vm
+def drive_loop(vm: Run[Int], mut seen: [String]): ([String], Int) with Vm
   loop do
     case vm.drive()
     in Asked(q)
@@ -66,7 +66,7 @@ end
 
 inner = do || : Int with Vm, Io.Print
   sys.io.print("from A\n")
-  b = sys.vm.Vm().from_fn(do || : Int with Io.Print
+  b = sys.vm.Vm().activate(do || : Int with Io.Print
     sys.io.print("from B\n")
     7
   end, args: ())
@@ -77,7 +77,7 @@ inner = do || : Int with Vm, Io.Print
   end
 end
 
-a = sys.vm.Vm().from_fn(inner, args: ())
+a = sys.vm.Vm().activate(inner, args: ())
 a.table().pass(Vm)
 a.table().pass(Io.Print)
 

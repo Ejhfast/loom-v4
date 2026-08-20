@@ -16,7 +16,7 @@ def program(): Int with Choose
 end
 
 # Answer every choice point with one fixed index.
-def always(child: Vm[Int], index: Int): Int with Vm
+def always(child: Run[Int], index: Int): Int with Vm
   loop do
     case child.drive()
     in Asked(request)
@@ -38,7 +38,7 @@ def always(child: Vm[Int], index: Int): Int with Vm
 end
 
 def run_with(index: Int): Int with Vm
-  always(sys.vm.Vm().from_fn(program, args: ()), index)
+  always(sys.vm.Vm().activate(program, args: ()), index)
 end
 
 # The driver reads the count, so it can also refuse a candidate it

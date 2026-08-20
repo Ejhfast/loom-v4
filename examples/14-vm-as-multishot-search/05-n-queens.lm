@@ -38,7 +38,7 @@ def place(n: Int): Int with Choose
   1
 end
 
-def take(branch: Vm[Int], index: Int): Int with Vm
+def take(branch: Run[Int], index: Int): Int with Vm
   case branch.drive()
   in Asked(request)
     case request
@@ -53,7 +53,7 @@ def take(branch: Vm[Int], index: Int): Int with Vm
 end
 
 # Total the legal boards below this machine.
-def count(child: Vm[Int]): Int with Vm
+def count(child: Run[Int]): Int with Vm
   case child.drive()
   in Done(value) then value
   in Fault(_)    then 0
@@ -81,7 +81,7 @@ def count(child: Vm[Int]): Int with Vm
 end
 
 def solutions(n: Int): Int with Vm
-  count(sys.vm.Vm().from_fn(place, args: (n,)))
+  count(sys.vm.Vm().activate(place, args: (n,)))
 end
 
 # Boards four through eight hold 2, 10, 4, 40, and 92 solutions.

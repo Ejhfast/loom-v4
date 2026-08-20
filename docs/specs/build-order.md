@@ -298,7 +298,7 @@ Negative UI examples show non-exhaustive enums, escaping uninitialized `self`, i
 
 - Canonical operation/group manifest; generated `sys` object; identity-indexed `Op`; `PERFORM`; row checking against direct/callee/higher-order effects; independent verifier row reconstruction.
 - Dense exact/group policy arrays with default block, transitive `pass`, pure `mock`, and live table editing.
-- Public native `EmptyVm`/`Vm[T]`, typed load/restore transitions, `step`, terminal `run`, `drive`, states, wait completions, stack views, fuel/limits, reentrancy checks, and one internal stop-mode interpreter loop.
+- Public native `Vm`/`Run[T]`, typed load/restore transitions, `step`, terminal `run`, `drive`, states, wait completions, stack views, fuel/limits, reentrancy checks, and one internal stop-mode interpreter loop.
 - The typed request pattern `Call(op, call, args)`; typed `answer`; token-checked `reject`/`dispatch`; no `Answer(Any)` path.
 - Initial host operations: `Io.Print`, `Io.Error`, `Io.ReadLine`, `Clock.Now`, `Clock.Monotonic`, `Clock.Sleep`, and deterministic `Rand.Bytes`/`Rand.Int` adapters.
 - Async completion channel with no Rust reference into guest memory.
@@ -319,7 +319,7 @@ Hello Ada!
 ```
 
 ```lm
-vm = sys.vm.Vm().from_fn(do || with Io.Print, Clock.Now
+vm = sys.vm.Vm().activate(do || with Io.Print, Clock.Now
   sys.io.print("tick\n")
   sys.clock.now()
 end, args: ())
@@ -544,7 +544,7 @@ This week consolidates those paths. It does not replace them.
 - Add parent resource reservation for nested VM creation.
 - Add brace closures and trailing closure arguments. Lower both
   closure spellings to one typed HIR node and one bytecode form.
-- Keep `Vm.from_fn`, terminal publication, and nested VM examples
+- Keep `Vm.activate`, terminal publication, and nested VM examples
   on the production path throughout the migration.
 
 ### Runnable outputs
@@ -729,7 +729,7 @@ def restore_run(snap: Snapshot[Int]): Int with Vm
   end
 end
 
-vm = sys.vm.Vm().from_fn({ || 20 + 22 }, args: ())
+vm = sys.vm.Vm().activate({ || 20 + 22 }, args: ())
 vm.step()
 case vm.snapshot()
 in Ok(snap) then (restore_run(snap), restore_run(snap))

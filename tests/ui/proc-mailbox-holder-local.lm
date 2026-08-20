@@ -1,4 +1,4 @@
-class Bad < Proc[Vm[Int]]
+class Bad < Proc[Run[Int]]
   def on_spawn(self): Int with Proc
     1
   end

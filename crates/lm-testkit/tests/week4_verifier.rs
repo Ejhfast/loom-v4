@@ -135,7 +135,7 @@ fn an_op_const_of_a_vm_control_slot_is_rejected() {
     assert_rejected(&module, "not fixed");
 }
 
-const MOCKER: &str = "def f(vm: Vm[Int]) with Vm\n  \
+const MOCKER: &str = "def f(vm: Run[Int]) with Vm\n  \
     vm.table().mock(Clock.Now, do ||: Int 1 end)\nend\n1\n";
 
 #[test]
@@ -178,7 +178,7 @@ fn table_edit_forgeries_are_rejected() {
 
 #[test]
 fn as_call_of_a_vm_control_slot_is_rejected() {
-    let source = "def f(vm: Vm[Int]): Int with Vm\n  case vm.drive()\n  in Asked(q)\n    \
+    let source = "def f(vm: Run[Int]): Int with Vm\n  case vm.drive()\n  in Asked(q)\n    \
         case q\n    in Call(Clock.Now, call, ()) then 1\n    in _ then 2\n    end\n  \
         in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\n1\n";
     let mut module = compile(source);
@@ -217,7 +217,7 @@ fn compiled_cases_carry_the_unreachable_backstop() {
 #[test]
 fn new_type_entries_check_their_references() {
     let mut module = compile("1\n");
-    module.types.push(BcType::Vm(9999));
+    module.types.push(BcType::Run(9999));
     assert_rejected(&module, "not an earlier entry");
     let mut module = compile("1\n");
     module.types.push(BcType::PendingCall(0, 9999));
@@ -228,10 +228,10 @@ fn new_type_entries_check_their_references() {
 }
 
 #[test]
-fn from_fn_argument_forgery_is_rejected() {
+fn activate_argument_forgery_is_rejected() {
     // The argument view must match the program parameters.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().from_fn(do |a: Int|: Int\n    a\n  end, args: (1,))\n  1\nend\ngo()\n";
+        vm = sys.vm.Vm().activate(do |a: Int|: Int\n    a\n  end, args: (1,))\n  1\nend\ngo()\n";
     let mut module = compile(source);
     let go = func_index(&module, "go");
     // Retarget the tuple: replace the args-view TupleNew with a plain
@@ -246,5 +246,5 @@ fn from_fn_argument_forgery_is_rejected() {
         }
     }
     assert!(hit, "the seed builds an argument tuple");
-    assert_rejected(&module, "Vm.FromFn");
+    assert_rejected(&module, "Vm.Activate");
 }

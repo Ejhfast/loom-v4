@@ -449,7 +449,7 @@ The minimum set includes `Option`, `Result`, `Choice`, `Ordering`, `Pair`, `Rang
 
 It also includes portable operation errors and typed VM request tokens.
 
-**Host and holder types** include `Vm[T]`, `Wait[T]`, snapshots, proc handles, policy tables, file handles, and socket handles.
+**Host and holder types** include `Vm`, `Run[T]`, waits, snapshots, proc handles, policy tables, and resource handles.
 
 Each native holder type has explicit boundary rules.
 
@@ -566,7 +566,7 @@ A function type includes parameters, result, and row:
 (T) -> U with e
 ```
 
-The checker normalizes source function syntax to the structural form `Fn[A,R,e]`, where `A` is the fixed argument tuple, `R` the result, and `e` the row. `Fn` is ABI/type-checker metanotation rather than an additional source type name; it lets native APIs such as `EmptyVm.from_fn` use ordinary first-order generics instead of a variadic or dependent typing rule. Function parameters are contravariant, results covariant, and effects covariant by set inclusion.
+The checker normalizes source function syntax to the structural form `Fn[A,R,e]`, where `A` is the fixed argument tuple, `R` the result, and `e` the row. `Fn` is ABI/type-checker metanotation rather than an additional source type name; it lets native APIs such as `Vm.activate` use ordinary first-order generics instead of a variadic or dependent typing rule. Function parameters are contravariant, results covariant, and effects covariant by set inclusion.
 
 An operation object has an identity-indexed callable type:
 
@@ -716,7 +716,7 @@ Calls use parentheses. Arguments evaluate left to right; the receiver evaluates 
 ```lm
 f(1, 2)
 obj.method(1)
-vm.from_fn(program, args: ("Ada",))
+vm.activate(program, args: ("Ada",))
 ```
 
 A label names one declared parameter. Labels can appear in any order after the positional arguments. A call rejects an unknown name, a repeated name, a name that a positional argument already fills, and a positional argument after a label. A label changes nothing in the call ABI.
@@ -1410,15 +1410,21 @@ For a routed request, `dispatch()` continues after the pass that reached the dri
 
 ## 14. Virtual machine object
 
-### 14.1 Native class and result parameter
+### 14.1 VM images and typed runs
 
-`Vm` is native. Its instances are ordinary holder values; control methods are operations in group `Vm`. Every nested machine executes on the same native interpreter rather than recursively interpreting an interpreter.
+`Vm` is a native persistent execution image. It owns installed code, live slots, policies, runs, and processes.
+
+`Run[T]` names one active invocation. Its terminal result has type `T`.
+
+Both types are holder-local. Their control methods use operations in group `Vm`.
+
+Every nested run uses the same native interpreter. Loom never implements nesting through recursive interpretation.
 
 The public families preserve the final result type:
 
 ```text
-EmptyVm
-Vm[T]
+Vm
+Run[T]
 StepEvent[T]
 RunResult[T]
 DriveEvent[T]
@@ -1426,24 +1432,32 @@ Snapshot[T]
 SnapshotImage
 ```
 
-There is no execute-an-unknown-signature shortcut. `from_artifact` requires a `LinkedEntry[A,R]` obtained by matching the artifact entry against a concrete `Type[Fn[A,R,e]]` witness. A machine has type `Vm[DynValue]` only when the admitted program itself explicitly returns `DynValue`.
+There is no execute-an-unknown-signature shortcut.
+
+`Vm.activate` requires a function with a known signature. It returns `Run[DynValue]` only for a declared `DynValue` result.
 
 ### 14.2 Construction and loading
 
 ```lm
-empty = sys.vm.Vm()
-vm = empty.from_fn(program, args: ("Ada",))
+vm = sys.vm.Vm()
+run = vm.activate(program, args: ("Ada",))
 ```
 
-`Vm.New` creates an `EmptyVm` with a fresh heap, frames, limits, and default-deny table. `from_fn[A,R,e](self, program: Fn[A,R,e], args: A) -> Vm[R]` is an ordinary generic native declaration over the normalized structural function form: it checks the supplied tuple, transfers code/captures/arguments through the boundary codec, creates the initial frame without executing, transitions the native receiver out of the empty state, and returns `Vm[R]`. An aliased stale `EmptyVm` handle is harmless: any second load attempt is rejected by the runtime state check.
+`Vm.New` creates an empty execution image with default-deny policy.
 
-`from_artifact` accepts only a typed `LinkedEntry[A,R]`. Tooling may inspect an entry through `TypeView`, but it must check a concrete function descriptor before obtaining a loadable entry; version 0.2 has no identity-erased dynamic invocation.
+`activate[A,R,e](program: Fn[A,R,e], args: A) -> Run[R]` checks and transfers the arguments.
+
+Activation creates the initial frame but executes no guest instruction.
+
+The VM remains available after activation. It can create later runs with different terminal types.
+
+Installed entries use the same activation rule. A caller must obtain an entry through an exact `Type[Fn[A,R,e]]` witness.
 
 ### 14.3 States
 
 | State | Meaning |
 |---|---|
-| `empty` | no entry loaded; public handle type is `EmptyVm` |
+| `image` | persistent installed code and holder policy; public type is `Vm` |
 | `ready` | paused and holder-controlled |
 | `running` | executing on a host thread |
 | `asked` | `drive` stopped before dispatch |
@@ -1452,7 +1466,7 @@ vm = empty.from_fn(program, args: ("Ada",))
 | `done` | terminal value stored |
 | `faulted` | terminal fault stored |
 
-There is at most one pending perform record.
+Each run has at most one pending perform record.
 
 A ready machine can hold one nested control edge. The edge links a pending `run`, `step`, or `drive` operation to its direct child.
 
@@ -1608,13 +1622,17 @@ Tokens need not be linear in the source type system. The VM validates single use
 
 These methods are invalid in other states. Calling `step` or `run` with a live request faults the caller with `InvalidVmState`.
 
-Loading a nonempty VM also faults the caller without changing the controlled machine. Repeating `drive` performs the token recovery described above.
+Repeating `drive` performs the token recovery described above.
 
 Terminal execution calls return the stored terminal event idempotently.
 
 ### 14.10 Reentrancy, inspection, and ownership
 
-A control method on a currently `running` VM, or from guest code executing inside that same VM, faults. Execution and inspection methods also fault while `proc_owned`. `table()` and edits through an already obtained table handle are the explicit synchronized exception, permitting live revocation.
+A control method on a currently running `Run` faults.
+
+Guest code also cannot control its current run. Execution and inspection fault during process ownership.
+
+An existing policy-table handle permits synchronized live revocation.
 
 A routed request parks its descendant activation chain. Only the holder of the driven surface can consume that route.
 
@@ -1663,7 +1681,7 @@ Nesting is ordinary composition of functions that use `Vm`:
 
 ```lm
 def f2(): Int with Vm
-  case sys.vm.Vm().from_fn(do || 21 end, args: ()).run()
+  case sys.vm.Vm().activate(do || 21 end, args: ()).run()
   in Done(v)  then v
   in Fault(_) then 0
   end
@@ -1675,7 +1693,7 @@ def f1(e: () -> Int with Vm): Int with Vm
     x + x
   end
 
-  vm = sys.vm.Vm().from_fn(expr, args: ())
+  vm = sys.vm.Vm().activate(expr, args: ())
   vm.table().pass(Vm)
   case vm.run()
   in Done(v)  then v
@@ -1764,7 +1782,7 @@ in Err(error)
 end
 ```
 
-A held snapshot names one paused `Vm[T]` as its root. A receiverless self snapshot names the performing machine as its root.
+A held snapshot names one paused `Run[T]` as its root. A receiverless self snapshot names the performing machine as its root.
 
 The snapshot world contains the root and every reachable machine. Handles, nested control edges, and routed requests establish reachability.
 
@@ -1833,7 +1851,9 @@ SnapshotLimitExceeded
 
 ### 17.5 Restore and fresh authority
 
-`restore(snap: Snapshot[T])` is valid only on an `EmptyVm`. It builds the complete world and returns `Result[Vm[T],RestoreError]`. `RestoreError` includes at least `RestoreLimitExceeded`. A failed restore exposes no partial world.
+`restore(snap: Snapshot[T])` installs the captured world into a `Vm`.
+
+It returns `Result[Run[T],RestoreError]`. A failed restore exposes no partial world.
 
 Policy tables are never serialized. Each restored machine receives a fresh default-deny table. Internal pass chains refer to the new parent tables. Restore creates no authority.
 
@@ -1841,7 +1861,9 @@ A routed cursor outside the captured world binds to the restoring holder. Dispat
 
 The cursor restores no old table grant.
 
-The returned root VM is holder-controlled. Restored procs are scheduler-owned but stopped behind one world gate. The first root `run`, `step`, or `drive` opens that gate.
+The returned root run is holder-controlled.
+
+Restored procs stay behind one world gate. The first root control operation opens that gate.
 
 ### 17.6 Paused, pending, and self snapshots
 
@@ -1926,7 +1948,7 @@ The proc instance is constructed inside its VM. The spawner receives only a type
 ### 18.2 General launch
 
 ```lm
-vm = sys.vm.Vm().from_fn(program, args: ("Ada",))
+vm = sys.vm.Vm().activate(program, args: ("Ada",))
 vm.table().pass(Io.Print)
 vm.table().mock(Clock.Now, do || 0 end)
 
@@ -1966,14 +1988,18 @@ A `Handle[M,R]` supports:
 
 ```lm
 h.done(): ProcResult[R] with Proc.Done
-h.pause(): Result[Vm[R], ProcError] with Proc.Pause
+h.pause(): Result[Run[R], ProcError] with Proc.Pause
 h.resume(): Result[(), ProcError] with Proc.Resume
 h.close(): SendResult with Proc.Close
 h.snapshot_wait(fuel: Int): Result[Snapshot[R], SnapshotError]
   with Proc.SnapshotWait
 ```
 
-When `M` is not `Never`, it also supports `h.send(message: M): SendResult with Proc.Send`. No `send(Any)` escape exists. `done()` blocks the holder operation until terminal and returns `Done(value)` or `Fault(fault)`. The value is transfer-checked. Pause requests synchronize at a guest instruction/operation boundary and return the underlying paused VM; resume moves it back to scheduler ownership.
+When `M` is not `Never`, the handle also supports typed `send`. No `send(Any)` escape exists.
+
+`done()` waits for termination and returns the typed result or fault. The boundary checks its value.
+
+Pause stops at a guest boundary and returns the paused `Run[R]`. Resume returns it to scheduler ownership.
 
 `snapshot_wait` parks its caller. The scheduler continues the target world within the fuel budget.
 
@@ -2508,40 +2534,40 @@ The network sidecar defines limits, ownership, errors, and HTTP/TLS layers.
 Generic signatures below are manifest-level schemas instantiated by the compiler. `A` is an argument-tuple type, `T` is the machine's terminal result, `R` is one pending operation's reply type, and `Fn[A,T,e]` is manifest metanotation for a callable with argument tuple `A`, result `T`, and row `e`.
 
 ```text
-Vm.New                   () -> EmptyVm
-Vm.FromFn[A,T,e]     (EmptyVm, Fn[A,T,e], control A) -> Vm[T]
-Vm.FromArtifact[A,T]     (EmptyVm, LinkedEntry[A,T], control A) -> Vm[T]
-Vm.Step[T]               (Vm[T]) -> StepEvent[T]
-Vm.Run[T]                (Vm[T]) -> RunResult[T]
-Vm.Drive[T]              (Vm[T]) -> DriveEvent[T]
-Vm.DriveWait[T]          (Vm[T]) -> Wait[DriveEvent[T]]
-Vm.Answer[T,A,R]         (Vm[T], PendingCall[A,R], R) -> ()
-Vm.Reject[T]             (Vm[T], Request, Fault) -> ()
-Vm.Dispatch[T]           (Vm[T], Request) -> ()
-Vm.Stack[T]              (Vm[T]) -> [FrameView]
-Vm.Table[T]              (Vm[T]) -> PolicyTable
-Vm.Handles[T]            (Vm[T]) -> [ResourceHandle]
-Vm.Resource[T,R]         (Vm[T], R) -> ResourceHandle
-Vm.ServeFile[T]           (Vm[T], PendingCall[(String, OpenOptions),
+Vm.New                   () -> Vm
+Vm.Activate[A,T,e]     (Vm, Fn[A,T,e], control A) -> Run[T]
+Vm.FromArtifact[A,T]     (Vm, LinkedEntry[A,T], control A) -> Run[T]
+Vm.Step[T]               (Run[T]) -> StepEvent[T]
+Vm.Run[T]                (Run[T]) -> RunResult[T]
+Vm.Drive[T]              (Run[T]) -> DriveEvent[T]
+Vm.DriveWait[T]          (Run[T]) -> Wait[DriveEvent[T]]
+Vm.Answer[T,A,R]         (Run[T], PendingCall[A,R], R) -> ()
+Vm.Reject[T]             (Run[T], Request, Fault) -> ()
+Vm.Dispatch[T]           (Run[T], Request) -> ()
+Vm.Stack[T]              (Run[T]) -> [FrameView]
+Vm.Table[T]              (Run[T]) -> PolicyTable
+Vm.Handles[T]            (Run[T]) -> [ResourceHandle]
+Vm.Resource[T,R]         (Run[T], R) -> ResourceHandle
+Vm.ServeFile[T]           (Run[T], PendingCall[(String, OpenOptions),
                            Result[FileHandle, FsError]]) -> ResourceHandle
-Vm.ServeTcpStream[T]      (Vm[T], PendingCall, SocketAddress)
+Vm.ServeTcpStream[T]      (Run[T], PendingCall, SocketAddress)
                            -> ResourceHandle
-Vm.ServeTcpListener[T]    (Vm[T], PendingCall) -> ResourceHandle
-Vm.ServeTlsStream[T]      (Vm[T], PendingCall) -> ResourceHandle
+Vm.ServeTcpListener[T]    (Run[T], PendingCall) -> ResourceHandle
+Vm.ServeTlsStream[T]      (Run[T], PendingCall) -> ResourceHandle
 Vm.ResourceIsOpen        (ResourceHandle) -> Bool
 Vm.ResourceClose         (ResourceHandle) -> Bool
 Vm.ResourceKind          (ResourceHandle) -> String
 Vm.ResourceSame          (ResourceHandle, ResourceHandle) -> Bool
-Vm.SetLimits[T]          (Vm[T], Limits) -> ()
-Vm.AddFuel[T]            (Vm[T], Int) -> ()
-Vm.SnapshotHeld[T]       (Vm[T])
+Vm.SetLimits[T]          (Run[T], Limits) -> ()
+Vm.AddFuel[T]            (Run[T], Int) -> ()
+Vm.SnapshotHeld[T]       (Run[T])
                           -> Result[Snapshot[T], SnapshotError]
 Vm.SnapshotSelf          ()
                           -> Result[SnapshotImage, SnapshotError]
 Vm.LoadSnapshot          (Bytes)
                           -> Result[SnapshotImage, SnapshotError]
-Vm.Restore[T]            (EmptyVm, Snapshot[T])
-                          -> Result[Vm[T], RestoreError]
+Vm.Restore[T]            (Vm, Snapshot[T])
+                          -> Result[Run[T], RestoreError]
 ```
 
 The held and receiverless forms use separate exact operation identities because their honest result types differ, while sharing one serializer/host implementation family. `SnapshotImage.cast_result(type_descriptor[T]())` checks the hidden result `TypeId` and returns `Result[Snapshot[T],SnapshotTypeError]`; typed restore accepts only the checked view.
@@ -2561,14 +2587,14 @@ is live. A closed control never matches.
 A proc handle carries both mailbox and terminal result types:
 
 ```text
-Proc.Run[R]         (Vm[R]) -> Handle[Never,R]
+Proc.Run[R]         (Run[R]) -> Handle[Never,R]
 Proc.Spawn[M,R,A]   (Class[Proc[M]], control A) -> Handle[M,R]
 Proc.Send[M,R]      (Handle[M,R], M) -> SendResult
 Proc.Close[M,R]     (Handle[M,R]) -> SendResult
 Proc.Recv[M]        (proc self) -> Recv[M]
 Proc.RecvWait[M]    (proc self) -> Wait[Recv[M]]
 Proc.Done[M,R]      (Handle[M,R]) -> ProcResult[R]
-Proc.Pause[M,R]     (Handle[M,R]) -> Result[Vm[R], ProcError]
+Proc.Pause[M,R]     (Handle[M,R]) -> Result[Run[R], ProcError]
 Proc.Resume[M,R]    (Handle[M,R]) -> Result[(), ProcError]
 Proc.SnapshotWait[M,R] (Handle[M,R], Int)
                        -> Result[Snapshot[R], SnapshotError]
@@ -3104,7 +3130,7 @@ The standard library does not reintroduce an `Answer(Any)` decision enum or a va
 
 ```lm
 def answer_print[T](
-  vm: Vm[T],
+  vm: Run[T],
   request: Request,
   mut captured: [String]
 ): Bool with Vm.Answer
@@ -3510,7 +3536,7 @@ Canonical artifact rows expand groups to exact ABI operation identities and sort
 def supervise(
   program: () -> String with Io.Print, Clock.Now
 ): RunResult[String] with Vm, Io.Print
-  vm = sys.vm.Vm().from_fn(program, args: ())
+  vm = sys.vm.Vm().activate(program, args: ())
   captured: [String] = []
 
   loop do

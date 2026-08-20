@@ -26,7 +26,7 @@ def sides(): Int with Choose
   end
 end
 
-def take(branch: Vm[Int], index: Int): Int with Vm
+def take(branch: Run[Int], index: Int): Int with Vm
   case branch.drive()
   in Asked(request)
     case request
@@ -42,7 +42,7 @@ end
 
 # Visit every leaf and total the answers. Nothing stops early, so the
 # walk builds one machine for each node of the tree.
-def walk(child: Vm[Int]): Int with Vm
+def walk(child: Run[Int]): Int with Vm
   case child.drive()
   in Done(value) then value
   in Fault(_)    then 0
@@ -71,4 +71,4 @@ end
 
 # 11 * 11 * 11 leaves, plus the nodes above them. That is well past
 # 1024 machines, and the default budget is 1024.
-walk(sys.vm.Vm().from_fn(sides, args: ()))
+walk(sys.vm.Vm().activate(sides, args: ()))

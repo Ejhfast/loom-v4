@@ -369,7 +369,7 @@ impl<'m> World<'m> {
                     }
                 }
             }
-            lm_abi::OP_VM_FROM_FN => {
+            lm_abi::OP_VM_ACTIVATE => {
                 let Some(target) = self.vm_arg(vm, op, args[0]) else {
                     return;
                 };

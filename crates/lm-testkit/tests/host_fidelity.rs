@@ -25,7 +25,7 @@ def worker(): String with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def supervise(child: Vm[String]): String with Vm
+def supervise(child: Run[String]): String with Vm
   case child.drive()
   in Asked(open_request)
     child.dispatch(open_request)
@@ -42,7 +42,7 @@ def supervise(child: Vm[String]): String with Vm
   end
 end
 
-child = sys.vm.Vm().from_fn(worker, args: ())
+child = sys.vm.Vm().activate(worker, args: ())
 child.table().pass(Fs)
 supervise(child)
 "#;

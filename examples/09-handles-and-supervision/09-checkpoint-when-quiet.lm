@@ -22,7 +22,7 @@ def read_message(): String with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def capture_when_quiet(child: Vm[String], budget: Int): String with Vm
+def capture_when_quiet(child: Run[String], budget: Int): String with Vm
   steps = 0
   while steps < budget
     steps = steps + 1
@@ -41,7 +41,7 @@ def capture_when_quiet(child: Vm[String], budget: Int): String with Vm
   "no quiet point within {budget} steps"
 end
 
-def supervise(child: Vm[String]): String with Vm
+def supervise(child: Run[String]): String with Vm
   # Let the open through, so the child truly holds a file.
   case child.drive()
   in Asked(request)
@@ -55,6 +55,6 @@ def supervise(child: Vm[String]): String with Vm
   end
 end
 
-child = sys.vm.Vm().from_fn(read_message, args: ())
+child = sys.vm.Vm().activate(read_message, args: ())
 child.table().pass(Fs)
 supervise(child)

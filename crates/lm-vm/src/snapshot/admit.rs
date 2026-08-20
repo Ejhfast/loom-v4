@@ -223,7 +223,7 @@ fn closed_type_parts(node: &ClosedType) -> usize {
                 .saturating_add(1)
         }
         ClosedType::List(_)
-        | ClosedType::Vm(_)
+        | ClosedType::Run(_)
         | ClosedType::Op(_, _)
         | ClosedType::Snapshot(_) => 1,
         ClosedType::Map(_, _) | ClosedType::PendingCall(_, _) | ClosedType::Handle(_, _) => 2,

@@ -48,7 +48,7 @@ end
 # The first read delivers the whole canned response. The second read
 # reports the end of the stream. A real peer can split a response
 # across several reads, and the client must handle both shapes.
-def serve(child: Vm[String], canned: Bytes): String with Vm
+def serve(child: Run[String], canned: Bytes): String with Vm
   sent = false
   loop do
     case child.drive()
@@ -80,7 +80,7 @@ end
 
 # Answer the name lookup and the connection, then serve the bytes.
 def run_case(canned: Bytes): String with Vm
-  child = sys.vm.Vm().from_fn(fetch_status, args: ())
+  child = sys.vm.Vm().activate(fetch_status, args: ())
   case child.drive()
   in Asked(lookup)
     case lookup

@@ -159,9 +159,10 @@ fn type_facts(ty: &BcType, known: &[TypeFacts]) -> TypeFacts {
                 include_type_facts(&mut facts, known, *child);
             }
         }
-        BcType::List(child) | BcType::Vm(child) | BcType::Wait(child) | BcType::Snapshot(child) => {
-            include_type_facts(&mut facts, known, *child)
-        }
+        BcType::List(child)
+        | BcType::Run(child)
+        | BcType::Wait(child)
+        | BcType::Snapshot(child) => include_type_facts(&mut facts, known, *child),
         BcType::Projection { base, .. } => {
             facts.contains_projection = true;
             include_type_facts(&mut facts, known, *base);
@@ -228,7 +229,8 @@ use tables::verify_tables;
 /// that accepts both.
 /// Version 19 verifies interfaces, callbacks, native `Option`, and collection operations.
 /// Version 20 verifies the declared receiver type of each digest.
-pub const VERIFIER_VERSION: u32 = 20;
+/// Version 21 separates persistent VMs from typed runs.
+pub const VERIFIER_VERSION: u32 = 21;
 
 /// Verify a full module. Every table and every function must pass.
 ///

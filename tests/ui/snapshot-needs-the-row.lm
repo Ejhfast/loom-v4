@@ -1,4 +1,4 @@
-def go(vm: Vm[Int]): Int
+def go(vm: Run[Int]): Int
   case vm.snapshot()
   in Ok(_)  then 1
   in Err(_) then 0

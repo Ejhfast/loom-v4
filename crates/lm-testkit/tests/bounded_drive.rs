@@ -40,7 +40,7 @@ def spin(): Int
   i
 end
 
-def supervise(vm: Vm[Int]): Int with Vm
+def supervise(vm: Run[Int]): Int with Vm
   turns = 0
   loop do
     case vm.drive_for(100)
@@ -56,7 +56,7 @@ def supervise(vm: Vm[Int]): Int with Vm
   end
 end
 
-supervise(sys.vm.Vm().from_fn(spin, args: ()))
+supervise(sys.vm.Vm().activate(spin, args: ()))
 "#;
     let out = run(src);
     println!("bounded turns: {out}");
@@ -83,7 +83,7 @@ def spin(): Int
   i
 end
 
-def supervise(vm: Vm[Int]): Int with Vm
+def supervise(vm: Run[Int]): Int with Vm
   case vm.drive()
   in Asked(_)  then 0 - 1
   in Done(v)   then v
@@ -91,7 +91,7 @@ def supervise(vm: Vm[Int]): Int with Vm
   end
 end
 
-supervise(sys.vm.Vm().from_fn(spin, args: ()))
+supervise(sys.vm.Vm().activate(spin, args: ()))
 "#;
     let out = run(src);
     println!("unbounded: {out}");

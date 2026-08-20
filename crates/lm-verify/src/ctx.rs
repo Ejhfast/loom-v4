@@ -184,7 +184,7 @@ impl<'m> Ctx<'m> {
             BcType::Inst(_, args) | BcType::Tuple(args) => out.extend(args),
             BcType::List(e)
             | BcType::Projection { base: e, .. }
-            | BcType::Vm(e)
+            | BcType::Run(e)
             | BcType::Wait(e)
             | BcType::Snapshot(e)
             | BcType::Op(_, e) => out.push(e),
@@ -265,7 +265,7 @@ impl<'m> Ctx<'m> {
                     child(ret),
                     self.row_subst(&row, rows),
                 )),
-                BcType::Vm(t) => self.intern(BcType::Vm(child(t))),
+                BcType::Run(t) => self.intern(BcType::Run(child(t))),
                 BcType::Wait(t) => self.intern(BcType::Wait(child(t))),
                 BcType::Snapshot(t) => self.intern(BcType::Snapshot(child(t))),
                 BcType::PendingCall(a, r) => self.intern(BcType::PendingCall(child(a), child(r))),
@@ -817,8 +817,8 @@ impl<'m> Ctx<'m> {
                 | BcType::Fault
                 | BcType::Request
                 | BcType::PolicyTable
-                | BcType::EmptyVm
-                | BcType::Vm(_)
+                | BcType::Vm
+                | BcType::Run(_)
                 | BcType::Wait(_)
                 | BcType::PendingCall(_, _)
                 | BcType::Handle(_, _)

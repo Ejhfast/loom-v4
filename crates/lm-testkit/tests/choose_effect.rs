@@ -13,7 +13,7 @@ use lm_testkit::run_allowed;
 /// A driver reads the candidate count and answers an index.
 #[test]
 fn a_driver_answers_a_choice_point_with_an_index() {
-    let source = "def take(vm: Vm[Int], choice: Int): Int with Vm
+    let source = "def take(vm: Run[Int], choice: Int): Int with Vm
   loop do
     case vm.drive()
     in Asked(q)
@@ -39,8 +39,8 @@ def program(): Int with Choose
   10 * sys.choose.pick(4) + sys.choose.pick(4)
 end
 
-first = take(sys.vm.Vm().from_fn(program, args: ()), 0)
-third = take(sys.vm.Vm().from_fn(program, args: ()), 2)
+first = take(sys.vm.Vm().activate(program, args: ()), 0)
+third = take(sys.vm.Vm().activate(program, args: ()), 2)
 (first, third)
 ";
     assert_eq!(
@@ -54,7 +54,7 @@ third = take(sys.vm.Vm().from_fn(program, args: ()), 2)
 /// candidate type never reaches the driver.
 #[test]
 fn the_candidates_stay_in_the_searched_machine() {
-    let source = "def take(vm: Vm[String], choice: Int): String with Vm
+    let source = "def take(vm: Run[String], choice: Int): String with Vm
   loop do
     case vm.drive()
     in Asked(q)
@@ -81,7 +81,7 @@ def program(): String with Choose
   pick[String](names)
 end
 
-take(sys.vm.Vm().from_fn(program, args: ()), 1)
+take(sys.vm.Vm().activate(program, args: ()), 1)
 ";
     assert_eq!(
         run_allowed("choose-values.lm", source, &["Vm"]).unwrap(),
@@ -105,7 +105,7 @@ fn a_choice_point_with_no_driver_is_denied() {
 /// for each candidate.
 #[test]
 fn a_pending_choice_point_never_blocks_a_capture() {
-    let source = "def branch(vm: Vm[Int]): Int with Vm
+    let source = "def branch(vm: Run[Int]): Int with Vm
   case vm.drive()
   in Asked(_)
     case vm.snapshot()
@@ -147,7 +147,7 @@ def program(): Int with Choose
   sys.choose.pick(2) + 5
 end
 
-branch(sys.vm.Vm().from_fn(program, args: ()))
+branch(sys.vm.Vm().activate(program, args: ()))
 ";
     // Candidate 0 answers 5 and candidate 1 answers 6.
     assert_eq!(

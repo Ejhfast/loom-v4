@@ -246,7 +246,7 @@ impl<'o> FnChecker<'o> {
                 name_span,
             ));
         }
-        // `sys.vm.Vm()` creates an EmptyVm through `Vm.New`.
+        // `sys.vm.Vm()` creates a persistent VM through `Vm.New`.
         if group == "Vm" && member == "Vm" {
             if !args.is_empty() {
                 return Err(Diagnostic::new(
@@ -257,7 +257,7 @@ impl<'o> FnChecker<'o> {
             }
             self.charge_op(ctx, lm_abi::OP_VM_NEW, span)?;
             return Ok(HExpr {
-                ty: lm_types::EMPTY_VM,
+                ty: lm_types::VM,
                 mutable: true,
                 kind: HExprKind::Perform {
                     op: lm_abi::OP_VM_NEW,
@@ -338,7 +338,7 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
-        // `sys.proc.run(vm)` transfers one loaded machine to the
+        // `sys.proc.run(run)` transfers one active run to the
         // scheduler. The mailbox-bearing form comes from proc-class
         // lowering, so this surface chooses `M = Never`.
         if group == "Proc" && member == "run" {
@@ -349,13 +349,13 @@ impl<'o> FnChecker<'o> {
                     span,
                 ));
             }
-            let vm = self.synth_expr(ctx, &args[0])?;
-            let Type::Vm(result) = ctx.store.get(vm.ty).clone() else {
+            let run = self.synth_expr(ctx, &args[0])?;
+            let Type::Run(result) = ctx.store.get(run.ty).clone() else {
                 return Err(Diagnostic::new(
                     "E1004",
                     format!(
-                        "`sys.proc.run` needs a loaded machine, found {}",
-                        ctx.display_type(&self.env, vm.ty)
+                        "`sys.proc.run` needs an active run, found {}",
+                        ctx.display_type(&self.env, run.ty)
                     ),
                     args[0].span,
                 ));
@@ -367,7 +367,7 @@ impl<'o> FnChecker<'o> {
                 mutable: true,
                 kind: HExprKind::Perform {
                     op: lm_abi::OP_PROC_RUN,
-                    args: vec![vm],
+                    args: vec![run],
                 },
             });
         }
@@ -581,8 +581,8 @@ impl<'o> FnChecker<'o> {
         })
     }
 
-    /// Check the native methods of the VM control surface: EmptyVm,
-    /// Vm[T], resource controls, and the other VM control receivers.
+    /// Check the native methods of the VM control surface.
+    /// This surface includes VM images, runs, and resource controls.
     /// Return `None` when the receiver type has no such method.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn check_control_method(
@@ -598,8 +598,8 @@ impl<'o> FnChecker<'o> {
         let recv_ty = ctx.store.get(recv_h.ty).clone();
         if !matches!(
             recv_ty,
-            Type::EmptyVm
-                | Type::Vm(_)
+            Type::Vm
+                | Type::Run(_)
                 | Type::Wait(_)
                 | Type::PolicyTable
                 | Type::Request
@@ -618,7 +618,7 @@ impl<'o> FnChecker<'o> {
             ));
         }
         let out = match recv_ty {
-            Type::EmptyVm | Type::Vm(_) => {
+            Type::Vm | Type::Run(_) => {
                 self.check_machine_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
             }
             Type::Wait(_) => {
@@ -656,7 +656,7 @@ impl<'o> FnChecker<'o> {
         )
     }
 
-    /// One method of an empty machine or a running machine.
+    /// One method of a VM image or an active run.
     #[allow(clippy::too_many_arguments)]
     fn check_machine_method(
         &mut self,
@@ -669,24 +669,24 @@ impl<'o> FnChecker<'o> {
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
         Ok(match (recv_ty, name) {
-            (Type::EmptyVm, "from_fn") => {
+            (Type::Vm, "activate") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(
                         "E1006",
-                        format!("`from_fn` expects 2 argument(s), found {}", args.len()),
+                        format!("`activate` expects 2 argument(s), found {}", args.len()),
                         span,
                     ));
                 }
                 // The type of the second parameter comes from the
                 // first, so this method arranges the labels itself
                 // instead of calling `check_args_simple`.
-                let args = arrange_args(args, &["program", "args"], "from_fn")?;
+                let args = arrange_args(args, &["program", "args"], "activate")?;
                 let program = self.synth_expr(ctx, args[0])?;
                 let Type::Fn(params, _, ret, _) = ctx.store.get(program.ty).clone() else {
                     return Err(Diagnostic::new(
                         "E1004",
                         format!(
-                            "`from_fn` needs a function value, found {}",
+                            "`activate` needs a function value, found {}",
                             ctx.display_type(&self.env, program.ty)
                         ),
                         args[0].span,
@@ -698,18 +698,18 @@ impl<'o> FnChecker<'o> {
                     ctx.store.intern(Type::Tuple(params))
                 };
                 let tuple = self.check_expr(ctx, args[1], want)?;
-                self.charge_op(ctx, lm_abi::OP_VM_FROM_FN, span)?;
-                let vm_ty = ctx.store.intern(Type::Vm(ret));
+                self.charge_op(ctx, lm_abi::OP_VM_ACTIVATE, span)?;
+                let run_ty = ctx.store.intern(Type::Run(ret));
                 HExpr {
-                    ty: vm_ty,
+                    ty: run_ty,
                     mutable: true,
                     kind: HExprKind::Perform {
-                        op: lm_abi::OP_VM_FROM_FN,
+                        op: lm_abi::OP_VM_ACTIVATE,
                         args: vec![recv_h, program, tuple],
                     },
                 }
             }
-            (Type::Vm(t), "snapshot_wait") => {
+            (Type::Run(t), "snapshot_wait") => {
                 // The held form. `Handle[M,R].snapshot_wait` waits on a
                 // scheduler proc; this one advances a machine the
                 // caller holds.
@@ -734,7 +734,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(t), "drive_for") => {
+            (Type::Run(t), "drive_for") => {
                 // A bounded drive turn. `None` reports that the turn
                 // spent its instructions and the machine can run again.
                 if args.len() != 1 {
@@ -757,7 +757,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(t), "run") | (Type::Vm(t), "step") | (Type::Vm(t), "drive") => {
+            (Type::Run(t), "run") | (Type::Run(t), "step") | (Type::Run(t), "drive") => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -781,7 +781,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(t), "drive_wait") => {
+            (Type::Run(t), "drive_wait") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_VM_DRIVE_WAIT, span)?;
                 let event = Self::core_inst(ctx, "DriveEvent", vec![t]);
@@ -795,7 +795,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(t), "snapshot") => {
+            (Type::Run(t), "snapshot") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_HELD, span)?;
                 let snapshot = ctx.store.intern(Type::Snapshot(t));
@@ -810,7 +810,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::EmptyVm, "restore") => {
+            (Type::Vm, "restore") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -830,9 +830,9 @@ impl<'o> FnChecker<'o> {
                     ));
                 };
                 self.charge_op(ctx, lm_abi::OP_VM_RESTORE, span)?;
-                let vm = ctx.store.intern(Type::Vm(t));
+                let run = ctx.store.intern(Type::Run(t));
                 let error = Self::core_class(ctx, "RestoreError");
-                let ty = Self::core_inst(ctx, "Result", vec![vm, error]);
+                let ty = Self::core_inst(ctx, "Result", vec![run, error]);
                 HExpr {
                     ty,
                     mutable: true,
@@ -842,7 +842,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "table") => {
+            (Type::Run(_), "table") => {
                 if !args.is_empty() {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -860,7 +860,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "handles") => {
+            (Type::Run(_), "handles") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_VM_HANDLES, span)?;
                 let ty = ctx.store.intern(Type::List(lm_types::RESOURCE_HANDLE));
@@ -873,7 +873,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "resource") => {
+            (Type::Run(_), "resource") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -907,7 +907,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "serve_file") => {
+            (Type::Run(_), "serve_file") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -935,7 +935,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "serve_tcp_stream") => {
+            (Type::Run(_), "serve_tcp_stream") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -974,7 +974,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "serve_tcp_listener") => {
+            (Type::Run(_), "serve_tcp_listener") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -1005,7 +1005,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "serve_tls_stream") => {
+            (Type::Run(_), "serve_tls_stream") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -1036,7 +1036,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "answer") => {
+            (Type::Run(_), "answer") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -1069,7 +1069,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "reject") => {
+            (Type::Run(_), "reject") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -1090,7 +1090,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::Vm(_), "dispatch") => {
+            (Type::Run(_), "dispatch") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -1276,7 +1276,7 @@ impl<'o> FnChecker<'o> {
             (Type::Handle(_, r), "pause") | (Type::Handle(_, r), "resume") => {
                 Self::expect_no_args(name, args, span)?;
                 let (op, ok) = if name == "pause" {
-                    (lm_abi::OP_PROC_PAUSE, ctx.store.intern(Type::Vm(r)))
+                    (lm_abi::OP_PROC_PAUSE, ctx.store.intern(Type::Run(r)))
                 } else {
                     (lm_abi::OP_PROC_RESUME, UNIT)
                 };

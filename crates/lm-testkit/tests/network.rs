@@ -256,7 +256,7 @@ def client(address: SocketAddress): Int with Tcp.Connect, Tcp.Write, Tcp.Close
   end
 end
 
-def service(child: Vm[Int], mine: ResourceHandle): Int with Vm
+def service(child: Run[Int], mine: ResourceHandle): Int with Vm
   loop do
     case child.drive()
     in Asked(request)
@@ -290,7 +290,7 @@ end
 case loopback(8080)
 in Err(_) then 0 - 5
 in Ok(address)
-  child = sys.vm.Vm().from_fn(client, args: (address,))
+  child = sys.vm.Vm().activate(client, args: (address,))
   case child.drive()
   in Asked(request)
     case request
@@ -320,7 +320,7 @@ def server(address: SocketAddress): Bool with Tcp.Listen, Tcp.Close
   end
 end
 
-def finish(child: Vm[Bool], mine: ResourceHandle): Bool with Vm
+def finish(child: Run[Bool], mine: ResourceHandle): Bool with Vm
   loop do
     case child.drive()
     in Asked(request)
@@ -345,7 +345,7 @@ end
 case loopback(8081)
 in Err(_) then false
 in Ok(address)
-  child = sys.vm.Vm().from_fn(server, args: (address,))
+  child = sys.vm.Vm().activate(server, args: (address,))
   case child.drive()
   in Asked(request)
     case request

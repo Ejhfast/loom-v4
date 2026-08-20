@@ -127,8 +127,8 @@ leaves no resource entry.
 The holder-facing surface is:
 
 ```text
-Vm[T].handles() -> List[ResourceHandle]
-Vm[T].resource(FileHandle) -> ResourceHandle
+Run[T].handles() -> List[ResourceHandle]
+Run[T].resource(FileHandle) -> ResourceHandle
 ResourceHandle.is_open() -> Bool
 ResourceHandle.close() -> Bool
 ResourceHandle.kind() -> String

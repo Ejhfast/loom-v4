@@ -228,7 +228,7 @@ proves at that program point, so both inputs come from verified code.
 
 The boundaries are the terminal result read, the mailbox receive, the
 pending call reply, the spawn argument, the mock reply, and the restore
-that returns `Vm[T]` or `Snapshot[T]`.
+that returns `Run[T]` or `Snapshot[T]`.
 
 The check descends every element and every field. It compares a closure
 with the verified closed signature of its function. That comparison

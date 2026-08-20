@@ -1395,7 +1395,7 @@ pub const OP_CLOCK_MONOTONIC: OpSlot = 4;
 pub const OP_CLOCK_SLEEP: OpSlot = 5;
 pub const OP_RAND_INT: OpSlot = 6;
 pub const OP_VM_NEW: OpSlot = 7;
-pub const OP_VM_FROM_FN: OpSlot = 8;
+pub const OP_VM_ACTIVATE: OpSlot = 8;
 pub const OP_VM_RUN: OpSlot = 9;
 pub const OP_VM_STEP: OpSlot = 10;
 pub const OP_VM_DRIVE: OpSlot = 11;
@@ -1528,16 +1528,16 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "() -> EmptyVm",
+        schema: "() -> Vm",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
         group: "Vm",
-        member: "FromFn",
+        member: "Activate",
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T,e](EmptyVm, Fn[A,T,e], control A) -> Vm[T]",
+        schema: "[A,T,e](Vm, Fn[A,T,e], control A) -> Run[T]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1546,7 +1546,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T]) -> RunResult[T]",
+        schema: "[T](Run[T]) -> RunResult[T]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1555,7 +1555,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T]) -> StepEvent[T]",
+        schema: "[T](Run[T]) -> StepEvent[T]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1564,7 +1564,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T]) -> DriveEvent[T]",
+        schema: "[T](Run[T]) -> DriveEvent[T]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1573,7 +1573,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T,A,R](Vm[T], PendingCall[A,R], R) -> ()",
+        schema: "[T,A,R](Run[T], PendingCall[A,R], R) -> ()",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1582,7 +1582,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T], Request, Fault) -> ()",
+        schema: "[T](Run[T], Request, Fault) -> ()",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1591,7 +1591,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T], Request) -> ()",
+        schema: "[T](Run[T], Request) -> ()",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1600,7 +1600,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T]) -> PolicyTable",
+        schema: "[T](Run[T]) -> PolicyTable",
         snapshot: SnapshotClass::MachineState,
     },
     // The proc operations of specification 23.6. Every one of them is
@@ -1614,7 +1614,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[M,R](Vm[R], Type[M]) -> Handle[M,R]",
+        schema: "[M,R](Run[R], Type[M]) -> Handle[M,R]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1668,7 +1668,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[M,R](Handle[M,R]) -> Result[Vm[R], ProcError]",
+        schema: "[M,R](Handle[M,R]) -> Result[Run[R], ProcError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1689,7 +1689,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T]) -> Result[Snapshot[T], SnapshotError]",
+        schema: "[T](Run[T]) -> Result[Snapshot[T], SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1716,7 +1716,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](EmptyVm, Snapshot[T]) -> Result[Vm[T], RestoreError]",
+        schema: "[T](Vm, Snapshot[T]) -> Result[Run[T], RestoreError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1779,7 +1779,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T]) -> List[ResourceHandle]",
+        schema: "[T](Run[T]) -> List[ResourceHandle]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1788,7 +1788,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T,R: FileHandle | TcpResource](Vm[T], R) -> ResourceHandle",
+        schema: "[T,R: FileHandle | TcpResource](Run[T], R) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1797,7 +1797,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T], PendingCall[(String, OpenOptions), Result[FileHandle, FsError]]) -> ResourceHandle",
+        schema: "[T](Run[T], PendingCall[(String, OpenOptions), Result[FileHandle, FsError]]) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1851,7 +1851,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T]) -> Wait[DriveEvent[T]]",
+        schema: "[T](Run[T]) -> Wait[DriveEvent[T]]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1896,7 +1896,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T], Int) -> Option[DriveEvent[T]]",
+        schema: "[T](Run[T], Int) -> Option[DriveEvent[T]]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1905,7 +1905,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T], Int) -> Result[Snapshot[T], SnapshotError]",
+        schema: "[T](Run[T], Int) -> Result[Snapshot[T], SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2004,7 +2004,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T], PendingCall, SocketAddress) -> ResourceHandle",
+        schema: "[T](Run[T], PendingCall, SocketAddress) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2013,7 +2013,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T], PendingCall[SocketAddress, Result[TcpListener, NetError]]) -> ResourceHandle",
+        schema: "[T](Run[T], PendingCall[SocketAddress, Result[TcpListener, NetError]]) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2093,7 +2093,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm[T], PendingCall) -> ResourceHandle",
+        schema: "[T](Run[T], PendingCall) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
     // The search choice point of a driver. The operation has no host

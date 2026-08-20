@@ -20,7 +20,7 @@ def read_config(): String with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def redirect(child: Vm[String], approved: FileHandle): String with Vm
+def redirect(child: Run[String], approved: FileHandle): String with Vm
   loop do
     case child.drive()
     in Asked(request)
@@ -40,7 +40,7 @@ end
 
 case sys.fs.open("message.txt", ReadOnly)
 in Ok(approved)
-  child = sys.vm.Vm().from_fn(read_config, args: ())
+  child = sys.vm.Vm().activate(read_config, args: ())
   # Reads and closes on the shared entry reach the host.
   child.table().pass(Fs.Read)
   child.table().pass(Fs.Close)
