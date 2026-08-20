@@ -1,0 +1,61 @@
+# Read part of a collection without copying it.
+#
+# This example needs no grant.
+#
+# A view borrows its source. It stores the source, a range, and the
+# epoch it saw. It copies no element, so a view over a large list
+# costs the same as a view over a small one.
+#
+# A view keeps its source alive. Take the eager copy when the source
+# is large and the part you keep is small.
+
+def window_sum(values: [Int], start: Int, length: Int): Int
+  total = 0
+  # `slice_view` copies nothing. `slice` returns a new list.
+  for value in values.slice_view(start, length)
+    total = total + value
+  end
+  total
+end
+
+def go(): (Int, Int, Int, [Int], [String], [Int], Int)
+  values = [10, 20, 30, 40, 50]
+
+  # Both read the same three elements. Only `slice` allocates a list.
+  view = values.slice_view(1, 3)
+  copy = values.slice(1, 3)
+
+  scores = {"ada": 90, "bob": 72, "cy": 84}
+
+  # `keys`, `values`, and `entries` are views in insertion order.
+  names = scores.keys()
+  marks = scores.values()
+
+  best = 0
+  for mark in marks
+    if mark > best
+      best = mark
+    end
+  end
+
+  # A view conforms to `Counted` and `Iterable`, so `len` and `for`
+  # both work, and a generic function accepts it.
+  pairs = 0
+  for _, _ in scores.entries()
+    pairs = pairs + 1
+  end
+
+  (
+    window_sum(values, 1, 3),
+    view.len(),
+    view.at(0),
+    # `copy` is a real list. Change it and the source stays the same.
+    copy,
+    # The eager forms materialize when you need to keep the result.
+    scores.keys_list(),
+    scores.values_list(),
+    best
+  )
+end
+
+go()

@@ -1,0 +1,76 @@
+# Change a collection that you are reading.
+#
+# This example needs no grant.
+#
+# A `for` loop treats its source as read-only. The checker rejects a
+# direct change inside the body with `E1065`, so this mistake never
+# reaches a running program:
+#
+#     for value in totals        # E1065 on the next line
+#       totals.push(value)
+#     end
+#
+# An alias can hide the source from the checker. Each collection also
+# counts its structural changes, so a hidden change stops the
+# traversal with a `CollectionModified` fault instead.
+#
+# Three patterns below change a collection safely.
+
+# 1. Read first, then change. The loop ends before the change starts.
+def double_every(values: [Int]): [Int]
+  doubled: [Int] = []
+  for value in values
+    doubled.push(value * 2)
+  end
+  doubled
+end
+
+# 2. Collect the decisions, then apply them.
+def drop_short(words: [String], least: Int): [String]
+  keep: [String] = []
+  for word in words
+    if word.len() >= least
+      keep.push(word)
+    end
+  end
+  keep
+end
+
+# 3. Ask the collection to do it. `retain` walks and removes in one
+# step, so no traversal of yours is open while it works.
+#
+# `copy` first, so the caller keeps its own map.
+def keep_passing(scores: Map[String, Int], least: Int): Map[String, Int]
+  result = scores.copy()
+  result.retain() { |name: String, score: Int| score >= least }
+  result
+end
+
+# A `while` loop over an index reads no iterator, so it can write back
+# into the same list.
+def square_in_place(values: [Int]): [Int]
+  result = values.copy()
+  index = 0
+  while index < result.len()
+    result.set(index, result.at(index) * result.at(index))
+    index = index + 1
+  end
+  result
+end
+
+def go(): ([Int], [String], [Int], Int, [Int])
+  numbers = [1, 2, 3]
+  words = ["a", "loom", "hi", "atlas"]
+  scores = {"ada": 90, "bob": 40, "cy": 75}
+  passing = keep_passing(scores, 70)
+  (
+    double_every(numbers),
+    drop_short(words, 3),
+    square_in_place(numbers),
+    passing.len(),
+    # Neither source changed.
+    numbers
+  )
+end
+
+go()

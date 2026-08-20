@@ -1,0 +1,70 @@
+# Make `for` read a type you wrote.
+#
+# This example needs no grant.
+#
+# `Iterable` gives a type an iterator. `Iterator` returns the next
+# item, or `None` once it ends. Conform to both and `for` reads your
+# type exactly like a list.
+#
+# A generic function over `Iterable` then accepts your type and every
+# core collection without a change.
+
+final class Countdown implements Iterable
+  type Item = Int
+  type Iter = CountdownSteps
+  first: Int
+
+  def init(mut self, first: Int)
+    self.first = first
+  end
+
+  def iterator(self): CountdownSteps
+    CountdownSteps(self.first)
+  end
+end
+
+final class CountdownSteps implements Iterator
+  type Item = Int
+  remaining: Int
+
+  def init(mut self, remaining: Int)
+    self.remaining = remaining
+  end
+
+  # `mut self` because one step moves the position.
+  def next(mut self): Option[Int]
+    if self.remaining <= 0
+      None
+    else
+      value = self.remaining
+      self.remaining = self.remaining - 1
+      Some(value)
+    end
+  end
+end
+
+# This function never names a concrete collection. It reads a list, a
+# map, a range, and `Countdown` with the same body.
+def count_items[T: Iterable](values: T): Int
+  total = 0
+  for _ in values
+    total = total + 1
+  end
+  total
+end
+
+def sum_countdown(source: Countdown): Int
+  total = 0
+  for value in source
+    total = total + value
+  end
+  total
+end
+
+(
+  sum_countdown(Countdown(4)),
+  count_items(Countdown(3)),
+  count_items([10, 20]),
+  count_items(Range(0, 5)),
+  count_items({"a": 1})
+)

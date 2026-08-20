@@ -1,0 +1,72 @@
+# One loop form reads every collection.
+#
+# This example needs no grant.
+#
+# `for` reads a list, a map, a text value, and a range. The compiler
+# specializes each of these sources, so a loop over them allocates no
+# iterator and no `Option` for each step.
+
+def sum_list(values: [Int]): Int
+  total = 0
+  for value in values
+    total = total + value
+  end
+  total
+end
+
+# A map loop binds the key and the value together.
+def longest_key(table: Map[String, Int]): String
+  best = ""
+  for key, value in table
+    if key.len() > best.len()
+      best = "{key}"
+    end
+  end
+  best
+end
+
+# A text loop advances one Unicode scalar at a time. It does not count
+# bytes, so an accented letter counts once.
+def count_scalars(text: Text): Int
+  total = 0
+  for _ in text
+    total = total + 1
+  end
+  total
+end
+
+# A range loop advances an integer directly.
+def triangle(stop: Int): Int
+  total = 0
+  for n in Range(0, stop)
+    total = total + n
+  end
+  total
+end
+
+# `iterator` gives the same steps by hand. `next` returns `None` once,
+# and the loop stops there.
+def first_two(values: [Int]): (String, String, String)
+  steps = values.iterator()
+  one = case steps.next()
+  in Some(value) then "{value}"
+  in None        then "end"
+  end
+  two = case steps.next()
+  in Some(value) then "{value}"
+  in None        then "end"
+  end
+  three = case steps.next()
+  in Some(value) then "{value}"
+  in None        then "end"
+  end
+  (one, two, three)
+end
+
+(
+  sum_list([1, 2, 3, 4]),
+  longest_key({"a": 1, "bbb": 2, "cc": 3}),
+  count_scalars("héllo"),
+  triangle(5),
+  first_two([7, 8])
+)

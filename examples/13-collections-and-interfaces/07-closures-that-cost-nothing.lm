@@ -1,0 +1,63 @@
+# Pass a closure without paying for one.
+#
+# This example needs no grant.
+#
+# A function parameter with a function type is nonescaping. The
+# closure lives for the call and no longer, so the compiler needs no
+# heap object for it. Collection methods rely on this, and you get the
+# same treatment in your own code for free.
+#
+# Write `escaping` when a parameter must outlive the call. That marker
+# is the only place the cost appears, so a reader sees it in the
+# signature.
+
+# Nonescaping. The body calls `f` and never keeps it.
+def twice(value: Int, f: (Int) -> Int): Int
+  f(f(value))
+end
+
+# A nonescaping parameter can pass to another nonescaping parameter.
+def four_times(value: Int, f: (Int) -> Int): Int
+  twice(twice(value, f), f)
+end
+
+# Escaping. This parameter is stored, so it says so.
+final class Rule
+  test: (Int) -> Bool
+
+  def init(mut self, escaping test: (Int) -> Bool)
+    self.test = test
+  end
+
+  def allows(self, value: Int): Bool
+    check = self.test
+    check(value)
+  end
+end
+
+# A closure parameter can carry an effect row. The row travels with
+# the closure, so a caller with effects and a caller without both use
+# one definition.
+def apply_all[effect e](values: [Int], f: (Int) -> Int with e): [Int] with e
+  out: [Int] = []
+  for value in values
+    out.push(f(value))
+  end
+  out
+end
+
+def go(): (Int, Int, [Int], Bool, Bool)
+  # A brace closure reads well as the final argument.
+  bumped = twice(10) { |x: Int| x + 1 }
+  scaled = four_times(1) { |x: Int| x * 3 }
+
+  # The same call site works with a captured value.
+  step = 5
+  stepped = apply_all([1, 2, 3]) { |x: Int| x + step }
+
+  # The stored closure outlives its call, so `Rule` marks it.
+  small = Rule({ |x: Int| x < 10 })
+  (bumped, scaled, stepped, small.allows(4), small.allows(40))
+end
+
+go()

@@ -1,0 +1,70 @@
+# Turn a list of records into a report.
+#
+# This example needs no grant. Collections are ordinary values.
+#
+# The pipeline reads from the top down. Each step returns a new list,
+# so no step changes the source. `fold` collects one value from many.
+
+class Sale
+  region: String
+  amount: Int
+
+  def init(mut self, region: String, amount: Int)
+    self.region = region
+    self.amount = amount
+  end
+end
+
+def total_of(sales: [Sale]): Int
+  sales.fold(0) { |sum: Int, sale: Sale| sum + sale.amount }
+end
+
+# Group the sales by region. A map keeps its insertion order, so the
+# report lists each region in the order it first appears.
+def by_region(sales: [Sale]): Map[String, Int]
+  totals = Map[String, Int]()
+  for sale in sales
+    running = case totals.get(sale.region)
+    in Some(value) then value
+    in None        then 0
+    end
+    totals.put(sale.region, running + sale.amount)
+  end
+  totals
+end
+
+sales = [
+  Sale("north", 120),
+  Sale("south", 45),
+  Sale("north", 80),
+  Sale("east", 200),
+  Sale("south", 15)
+]
+
+# A closure needs no annotation. A function parameter cannot escape
+# unless it says `escaping`, so the compiler needs no heap closure.
+large = sales.filter() { |sale: Sale| sale.amount >= 80 }
+regions = large.map() { |sale: Sale| sale.region }
+
+# Sort a copy. `sort_by` changes the list it receives.
+ranked = sales.copy()
+ranked.sort_by() { |a: Sale, b: Sale|
+  if a.amount > b.amount
+    Ordering.Less
+  else
+    if a.amount < b.amount
+      Ordering.Greater
+    else
+      Ordering.Equal
+    end
+  end
+}
+
+totals = by_region(sales)
+(
+  total_of(sales),
+  regions,
+  ranked.at(0).amount,
+  totals.at("north"),
+  totals.keys_list()
+)

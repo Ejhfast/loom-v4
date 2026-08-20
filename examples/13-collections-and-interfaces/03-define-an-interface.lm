@@ -1,0 +1,97 @@
+# Declare a contract, then write one function against it.
+#
+# This example needs no grant.
+#
+# An interface names the methods a conformer must have. A class states
+# its conformance in the header. A matching method name is not enough,
+# so a class that never says `implements` never conforms.
+#
+# An interface names a bound. It is not a type, so it cannot appear as
+# a field, a parameter, a result, or a list element. Use a sealed enum
+# when one value must hold several shapes.
+#
+# `04-your-own-iterator.lm` adds associated types.
+
+interface Priced
+  def price(self): Int
+  def label(self): String
+end
+
+interface Discountable
+  def discount(self): Int
+end
+
+final class Book implements Priced
+  title: String
+
+  def init(mut self, title: String)
+    self.title = title
+  end
+
+  def price(self): Int
+    12
+  end
+
+  def label(self): String
+    "book {self.title}"
+  end
+end
+
+# One class can conform to several interfaces.
+final class Ticket implements Priced, Discountable
+  seat: Int
+
+  def init(mut self, seat: Int)
+    self.seat = seat
+  end
+
+  def price(self): Int
+    40
+  end
+
+  def label(self): String
+    "seat {self.seat}"
+  end
+
+  def discount(self): Int
+    5
+  end
+end
+
+# One bound. The body calls every method the bound promises, and it
+# names no concrete class.
+def describe[P: Priced](item: P): String
+  "{item.label()} costs {item.price()}"
+end
+
+# Two bounds join with `+`. This function needs both contracts, so it
+# accepts a Ticket and rejects a Book.
+def final_price[P: Priced + Discountable](item: P): Int
+  item.price() - item.discount()
+end
+
+# A class can bound its own type parameter.
+final class Cart[P: Priced]
+  item: P
+
+  def init(mut self, item: P)
+    self.item = item
+  end
+
+  def receipt(self): String
+    describe(self.item)
+  end
+end
+
+# A bound also reaches a total over a list of one conforming class.
+def cart_total[P: Priced](items: [P]): Int
+  items.fold(0) { |sum: Int, item: P| sum + item.price() }
+end
+
+(
+  describe(Book("loom")),
+  describe(Ticket(14)),
+  final_price(Ticket(14)),
+  Cart(Book("atlas")).receipt(),
+  cart_total([Book("a"), Book("b")])
+)

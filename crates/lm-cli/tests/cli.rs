@@ -388,6 +388,74 @@ fn run_tls_driver_example_exposes_lower_requests() {
     assert_eq!(stdout(&out), "Done(5)\n");
 }
 
+/// Run one `examples/13-collections-and-interfaces` program and
+/// return its result line. None of these examples needs a grant.
+fn collections_example(name: &str) -> String {
+    let path = format!("examples/13-collections-and-interfaces/{name}");
+    let out = lm(&["run", "--show-result", &path]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    stdout(&out)
+}
+
+#[test]
+fn run_report_example_folds_and_groups() {
+    assert_eq!(
+        collections_example("01-build-a-report.lm"),
+        "Done((460, [\"north\", \"north\", \"east\"], 200, 200, \
+         [\"north\", \"south\", \"east\"]))\n"
+    );
+}
+
+#[test]
+fn run_iteration_example_reads_every_source() {
+    assert_eq!(
+        collections_example("02-iterate-anything.lm"),
+        "Done((10, \"bbb\", 5, 10, (\"7\", \"8\", \"end\")))\n"
+    );
+}
+
+#[test]
+fn run_interface_example_uses_one_and_two_bounds() {
+    assert_eq!(
+        collections_example("03-define-an-interface.lm"),
+        "Done((\"book loom costs 12\", \"seat 14 costs 40\", 35, \
+         \"book atlas costs 12\", 24))\n"
+    );
+}
+
+#[test]
+fn run_custom_iterator_example_drives_a_user_type() {
+    assert_eq!(
+        collections_example("04-your-own-iterator.lm"),
+        "Done((10, 3, 2, 5, 1))\n"
+    );
+}
+
+#[test]
+fn run_views_example_reads_without_copying() {
+    assert_eq!(
+        collections_example("05-views-without-copies.lm"),
+        "Done((90, 3, 20, [20, 30, 40], [\"ada\", \"bob\", \"cy\"], \
+         [90, 72, 84], 90))\n"
+    );
+}
+
+#[test]
+fn run_mutation_example_changes_a_collection_safely() {
+    assert_eq!(
+        collections_example("06-change-while-you-read.lm"),
+        "Done(([2, 4, 6], [\"loom\", \"atlas\"], [1, 4, 9], 2, [1, 2, 3]))\n"
+    );
+}
+
+#[test]
+fn run_closure_example_needs_no_annotation() {
+    assert_eq!(
+        collections_example("07-closures-that-cost-nothing.lm"),
+        "Done((12, 81, [6, 7, 8], true, false))\n"
+    );
+}
+
 #[test]
 fn run_http_server_example_routes_three_requests() {
     let out = lm(&[
