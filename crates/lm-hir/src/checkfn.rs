@@ -3167,6 +3167,27 @@ impl<'o> FnChecker<'o> {
             {
                 return Ok(digest_expr(recv_h));
             }
+            // A field can hold a function. `holder.step(1)` then reads
+            // the field and calls that value. A class rejects a field
+            // and a method of one name, so this name resolves once.
+            if type_args.is_empty() {
+                if let Some(fidx) = ctx.find_field(class, name) {
+                    let declared = ctx.classes[class as usize].field_tys[fidx];
+                    let field_ty = ctx.store.substitute(declared, &class_args, &[]);
+                    if matches!(ctx.store.get(field_ty), Type::Fn(..) | Type::Callback(..)) {
+                        let mutable = recv_h.mutable;
+                        let callee = HExpr {
+                            ty: field_ty,
+                            mutable,
+                            kind: HExprKind::FieldGet {
+                                recv: Box::new(recv_h),
+                                field: fidx as u32,
+                            },
+                        };
+                        return self.synth_call_value(ctx, callee, args, name_span, span);
+                    }
+                }
+            }
             return Err(Diagnostic::new(
                 "E1026",
                 format!(

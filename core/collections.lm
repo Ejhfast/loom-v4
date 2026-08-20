@@ -353,6 +353,17 @@ final class Map[K, V] implements Counted, Iterable
     intrinsic("map.reserve", self, additional)
   end
 
+  # A new map with the same entries in the same order. The copy shares
+  # no storage, so a later change to one map leaves the other alone.
+  def copy(self): Map[K, V]
+    result = Map[K, V]()
+    result.reserve(self.len())
+    for key, value in self
+      result.put(key, value)
+    end
+    result
+  end
+
   def keys(self): MapKeys[K, V]
     MapKeys[K, V](self)
   end

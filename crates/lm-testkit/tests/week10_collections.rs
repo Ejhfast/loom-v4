@@ -1235,3 +1235,64 @@ fn the_verifier_rejects_forged_view_operations() {
     let failure = lm_verify::verify_module(&map).expect_err("the forged map view verifies");
     assert!(failure.message.contains("list"));
 }
+
+/// `Map.copy` returns an independent map with the same order.
+#[test]
+fn a_map_copy_shares_no_storage_with_its_source() {
+    let source = r#"
+original = {"a": 1, "b": 2}
+duplicate = original.copy()
+duplicate.put("c", 3)
+original.put("a", 9)
+(
+  original.len(),
+  duplicate.len(),
+  duplicate.at("a"),
+  original.has("c"),
+  duplicate.keys_list()
+)
+"#;
+    assert_eq!(
+        outcome(source),
+        "Done((2, 3, 1, false, [\"a\", \"b\", \"c\"]))"
+    );
+}
+
+/// A field can hold a function, and both call spellings reach it. A
+/// class rejects a field and a method of one name, so the name
+/// resolves exactly once.
+#[test]
+fn a_function_field_answers_a_call_on_its_owner() {
+    let source = r#"
+final class Rule
+  test: (Int) -> Bool
+  def init(mut self, escaping test: (Int) -> Bool)
+    self.test = test
+  end
+  def parenthesized(self, value: Int): Bool
+    (self.test)(value)
+  end
+  def bare(self, value: Int): Bool
+    self.test(value)
+  end
+end
+small = Rule({ |x: Int| x < 10 })
+(small.parenthesized(4), small.bare(4), small.bare(40))
+"#;
+    assert_eq!(outcome(source), "Done((true, true, false))");
+}
+
+/// A call still fails when the field holds no function.
+#[test]
+fn a_plain_field_does_not_answer_a_call() {
+    let source = r#"
+final class Holder
+  count: Int
+  def init(mut self, count: Int)
+    self.count = count
+  end
+end
+Holder(1).count()
+"#;
+    assert!(error(source).contains("has no method named `count`"));
+}
