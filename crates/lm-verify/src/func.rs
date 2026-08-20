@@ -1,0 +1,583 @@
+//! Per-function verification and the dataflow fixpoint.
+//!
+//! One part of the bytecode verifier. `lib.rs` holds the shared
+//! context, the error type, and the entry points.
+
+use super::*;
+
+/// The expected operand count of one perform instruction. VM control
+/// operations count their receiver.
+pub(crate) fn perform_argc(op: u32) -> u32 {
+    let def = lm_abi::op(op);
+    match def.kind {
+        lm_abi::OpKind::Fixed => def.params.len() as u32,
+        lm_abi::OpKind::VmControl => match op {
+            lm_abi::OP_VM_NEW => 0,
+            lm_abi::OP_VM_RUN
+            | lm_abi::OP_VM_STEP
+            | lm_abi::OP_VM_DRIVE
+            | lm_abi::OP_VM_DRIVE_WAIT
+            | lm_abi::OP_VM_TABLE
+            | lm_abi::OP_VM_HANDLES
+            | lm_abi::OP_VM_RESOURCE_IS_OPEN
+            | lm_abi::OP_VM_RESOURCE_CLOSE
+            | lm_abi::OP_VM_RESOURCE_KIND => 1,
+            lm_abi::OP_VM_DISPATCH => 2,
+            lm_abi::OP_VM_FROM_FN
+            | lm_abi::OP_VM_ANSWER
+            | lm_abi::OP_VM_REJECT
+            | lm_abi::OP_VM_SERVE_TCP_STREAM => 3,
+            lm_abi::OP_PROC_RUN
+            | lm_abi::OP_PROC_CLOSE
+            | lm_abi::OP_PROC_DONE
+            | lm_abi::OP_PROC_PAUSE
+            | lm_abi::OP_PROC_RESUME
+            | lm_abi::OP_PROC_RECV
+            | lm_abi::OP_PROC_RECV_WAIT
+            | lm_abi::OP_WAIT_WAIT
+            | lm_abi::OP_WAIT_CANCEL => 1,
+            lm_abi::OP_PROC_SEND => 2,
+            lm_abi::OP_PROC_SPAWN => 3,
+            lm_abi::OP_VM_SNAPSHOT_SELF => 0,
+            lm_abi::OP_VM_SNAPSHOT_HELD | lm_abi::OP_VM_LOAD_SNAPSHOT => 1,
+            lm_abi::OP_VM_RESTORE
+            | lm_abi::OP_VM_RESOURCE
+            | lm_abi::OP_VM_SERVE_FILE
+            | lm_abi::OP_VM_SERVE_TCP_LISTENER
+            | lm_abi::OP_VM_SERVE_TLS_STREAM
+            | lm_abi::OP_VM_DRIVE_FOR
+            | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
+            | lm_abi::OP_PROC_SNAPSHOT_WAIT
+            | lm_abi::OP_VM_RESOURCE_SAME
+            | lm_abi::OP_WAIT_CHOOSE => 2,
+            _ => unreachable!("every VmControl slot has an arity"),
+        },
+    }
+}
+
+/// Validate one type application against a callee's generic arity and
+/// the caller's variable scope.
+pub(crate) fn check_app(
+    ctx: &Ctx<'_>,
+    caller: &Func,
+    fidx: u32,
+    at: &dyn Fn(&str) -> String,
+    app_idx: u32,
+    want_types: u32,
+    want_rows: u32,
+) -> Result<(), VerifyError> {
+    let app = ctx
+        .module
+        .apps
+        .get(app_idx as usize)
+        .ok_or_else(|| err(fidx, at("type application index out of range")))?;
+    if app.types.len() != want_types as usize {
+        return Err(err(fidx, at("type application arity mismatch")));
+    }
+    if app.rows.len() != want_rows as usize {
+        return Err(err(fidx, at("type application row arity mismatch")));
+    }
+    for t in &app.types {
+        if !ctx.vars_bounded(*t, caller.type_params, caller.effect_params) {
+            return Err(err(
+                fidx,
+                at("type application uses a variable outside the caller scope"),
+            ));
+        }
+        if !ctx.projections_proven(*t, &ctx.module.func_bounds[fidx as usize]) {
+            return Err(err(
+                fidx,
+                at("type application uses an unproven associated type"),
+            ));
+        }
+    }
+    for row in &app.rows {
+        if !ctx.row_vars_bounded(row, caller.effect_params) {
+            return Err(err(
+                fidx,
+                at("type application row uses a variable outside the caller scope"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError> {
+    let module = ctx.module;
+    // Reject a forged slot count before any allocation is sized from
+    // it. The dataflow pass allocates one state cell per block and
+    // local, so both bounds run first.
+    if func.local_count() > MAX_LOCAL_SLOTS {
+        return Err(err(
+            fidx,
+            format!(
+                "the local slot count {} exceeds the portable limit {MAX_LOCAL_SLOTS}",
+                func.local_count()
+            ),
+        ));
+    }
+    if (func.blocks.len() as u64) * (func.local_count() as u64 + 1) > MAX_DATAFLOW_CELLS {
+        return Err(err(
+            fidx,
+            "the function exceeds the verifier state budget; split it",
+        ));
+    }
+    if func.blocks.is_empty() {
+        return Err(err(fidx, "the function has no blocks"));
+    }
+    // Structural pass: every block ends with a terminator and every
+    // operand index is inside its table.
+    for (bidx, block) in func.blocks.iter().enumerate() {
+        match block.last() {
+            Some(last) if last.is_terminator() => {}
+            _ => {
+                return Err(err(
+                    fidx,
+                    format!("block {bidx} does not end with a terminator"),
+                ));
+            }
+        }
+        for (iidx, instr) in block.iter().enumerate() {
+            if instr.is_terminator() && iidx + 1 != block.len() {
+                return Err(err(
+                    fidx,
+                    format!("block {bidx} has a terminator before its end"),
+                ));
+            }
+            let at = |what: &str| format!("block {bidx}, instruction {iidx}: {what}");
+            let at_dyn: &dyn Fn(&str) -> String = &at;
+            match instr {
+                Instr::ConstStr(idx) => {
+                    if *idx as usize >= module.strings.len() {
+                        return Err(err(fidx, at("string index out of range")));
+                    }
+                }
+                Instr::LoadLocal(slot) => {
+                    if *slot >= func.local_count() {
+                        return Err(err(fidx, at("local slot out of range")));
+                    }
+                }
+                Instr::StoreLocal(slot) => {
+                    if *slot >= func.local_count() {
+                        return Err(err(fidx, at("local slot out of range")));
+                    }
+                    if matches!(
+                        ctx.ty(func.local_types[*slot as usize]),
+                        BcType::Callback(..)
+                    ) {
+                        return Err(err(fidx, at("a callback cannot be stored in a local")));
+                    }
+                }
+                Instr::Call(callee) => {
+                    let Some(target) = module.funcs.get(*callee as usize) else {
+                        return Err(err(fidx, at("call target out of range")));
+                    };
+                    if !target.captures.is_empty() {
+                        return Err(err(fidx, at("direct call to a function with captures")));
+                    }
+                    if target.type_params != 0 || target.effect_params != 0 {
+                        return Err(err(fidx, at("a generic callee needs a type application")));
+                    }
+                }
+                Instr::CallG { func: callee, app } => {
+                    let Some(target) = module.funcs.get(*callee as usize) else {
+                        return Err(err(fidx, at("call target out of range")));
+                    };
+                    if !target.captures.is_empty() {
+                        return Err(err(fidx, at("direct call to a function with captures")));
+                    }
+                    if target.type_params == 0 && target.effect_params == 0 {
+                        return Err(err(fidx, at("a type application on a non-generic callee")));
+                    }
+                    check_app(
+                        ctx,
+                        func,
+                        fidx,
+                        at_dyn,
+                        *app,
+                        target.type_params,
+                        target.effect_params,
+                    )?;
+                    let application = &module.apps[*app as usize];
+                    if !ctx.type_arguments_meet_bounds(
+                        &application.types,
+                        &application.rows,
+                        &module.func_bounds[*callee as usize],
+                        &module.func_bounds[fidx as usize],
+                    ) {
+                        return Err(err(
+                            fidx,
+                            at("a call type argument does not meet its interface bounds"),
+                        ));
+                    }
+                }
+                Instr::CallVirtual { selector, .. } => {
+                    if *selector as usize >= module.selectors.len() {
+                        return Err(err(fidx, at("selector index out of range")));
+                    }
+                }
+                Instr::CallVirtualG { selector, app, .. } => {
+                    if *selector as usize >= module.selectors.len() {
+                        return Err(err(fidx, at("selector index out of range")));
+                    }
+                    // The full arity check needs the receiver type and
+                    // runs in the dataflow pass. The structural pass
+                    // bounds the index and the variable scopes, so the
+                    // dataflow pass can index the table safely.
+                    let Some(a) = module.apps.get(*app as usize) else {
+                        return Err(err(fidx, at("type application index out of range")));
+                    };
+                    for t in &a.types {
+                        if !ctx.vars_bounded(*t, func.type_params, func.effect_params) {
+                            return Err(err(
+                                fidx,
+                                at("type application uses a variable outside the caller scope"),
+                            ));
+                        }
+                    }
+                    for row in &a.rows {
+                        if !ctx.row_vars_bounded(row, func.effect_params) {
+                            return Err(err(
+                                fidx,
+                                at("type application row uses a variable outside the caller scope"),
+                            ));
+                        }
+                    }
+                }
+                Instr::MakeClosure { func: f, captures } => {
+                    let Some(target) = module.funcs.get(*f as usize) else {
+                        return Err(err(fidx, at("closure function out of range")));
+                    };
+                    if target.captures.len() != *captures as usize {
+                        return Err(err(fidx, at("closure capture count mismatch")));
+                    }
+                    // A closure body shares the generic scope of the
+                    // function that creates it, so it must keep the
+                    // same arity. A target that declares no generic
+                    // parameter at all has no free variable to bind:
+                    // its signature is closed, so any scope may close
+                    // over it. The `spawn` sugar takes that path.
+                    let closed = target.type_params == 0 && target.effect_params == 0;
+                    if !closed
+                        && (target.type_params != func.type_params
+                            || target.effect_params != func.effect_params)
+                    {
+                        return Err(err(
+                            fidx,
+                            at("a closure body must keep the enclosing generic arity"),
+                        ));
+                    }
+                }
+                Instr::LoadCapture(idx) => {
+                    if *idx as usize >= func.captures.len() {
+                        return Err(err(fidx, at("capture index out of range")));
+                    }
+                }
+                Instr::New(class) => {
+                    let Some(c) = module.classes.get(*class as usize) else {
+                        return Err(err(fidx, at("class index out of range")));
+                    };
+                    if c.kind == BcClassKind::Abstract {
+                        return Err(err(fidx, at("cannot allocate an abstract enum parent")));
+                    }
+                    let native = [
+                        ctx.core.int,
+                        ctx.core.boolean,
+                        ctx.core.string,
+                        ctx.core.substring,
+                        ctx.core.char_value,
+                        ctx.core.bytes,
+                        ctx.core.string_builder,
+                        ctx.core.byte_buffer,
+                        ctx.core.list,
+                        ctx.core.map,
+                    ];
+                    if native.contains(&Some(*class)) {
+                        return Err(err(fidx, at("New cannot allocate a native core class")));
+                    }
+                    if c.type_params != 0 {
+                        return Err(err(fidx, at("a generic class needs a type application")));
+                    }
+                }
+                Instr::NewG { class, app } => {
+                    let Some(c) = module.classes.get(*class as usize) else {
+                        return Err(err(fidx, at("class index out of range")));
+                    };
+                    if c.kind == BcClassKind::Abstract {
+                        return Err(err(fidx, at("cannot allocate an abstract enum parent")));
+                    }
+                    let native = [
+                        ctx.core.int,
+                        ctx.core.boolean,
+                        ctx.core.string,
+                        ctx.core.substring,
+                        ctx.core.char_value,
+                        ctx.core.bytes,
+                        ctx.core.string_builder,
+                        ctx.core.byte_buffer,
+                        ctx.core.list,
+                        ctx.core.map,
+                    ];
+                    if native.contains(&Some(*class)) {
+                        return Err(err(fidx, at("NewG cannot allocate a native core class")));
+                    }
+                    if c.type_params == 0 {
+                        return Err(err(fidx, at("a type application on a non-generic class")));
+                    }
+                    check_app(ctx, func, fidx, at_dyn, *app, c.type_params, 0)?;
+                    let application = &module.apps[*app as usize];
+                    if !ctx.type_arguments_meet_bounds(
+                        &application.types,
+                        &[],
+                        &module.class_bounds[*class as usize],
+                        &module.func_bounds[fidx as usize],
+                    ) {
+                        return Err(err(
+                            fidx,
+                            at("a class type argument does not meet its interface bounds"),
+                        ));
+                    }
+                }
+                Instr::ListNew { ty, .. }
+                | Instr::MapNew { ty, .. }
+                | Instr::TupleNew { ty, .. }
+                | Instr::IsType(ty)
+                | Instr::CastType(ty)
+                | Instr::MapPut { ty, .. } => {
+                    if *ty as usize >= module.types.len() {
+                        return Err(err(fidx, at("type index out of range")));
+                    }
+                }
+                Instr::Jump(target) | Instr::JumpIfFalse(target) | Instr::JumpIfTrue(target) => {
+                    if *target as usize >= func.blocks.len() {
+                        return Err(err(fidx, at("jump target is not a block")));
+                    }
+                }
+                Instr::Perform { op, argc, reply_ty } => {
+                    if *op >= lm_abi::OP_COUNT {
+                        return Err(err(fidx, at("perform operation slot out of range")));
+                    }
+                    let want = perform_argc(*op);
+                    if *argc != want {
+                        return Err(err(fidx, at("perform argument count mismatch")));
+                    }
+                    if *reply_ty as usize >= module.types.len() {
+                        return Err(err(fidx, at("perform reply type index out of range")));
+                    }
+                }
+                Instr::PerformValue { reply_ty, .. } => {
+                    if *reply_ty as usize >= module.types.len() {
+                        return Err(err(fidx, at("perform reply type index out of range")));
+                    }
+                }
+                Instr::OpConst(op) => {
+                    if *op >= lm_abi::OP_COUNT || lm_abi::op(*op).kind != lm_abi::OpKind::Fixed {
+                        return Err(err(
+                            fidx,
+                            at("first-class operation slot is out of range or not fixed"),
+                        ));
+                    }
+                }
+                Instr::CallInterface {
+                    interface,
+                    method,
+                    recv_ty,
+                } => {
+                    let Some(contract) = module.interfaces.get(*interface as usize) else {
+                        return Err(err(fidx, at("interface index out of range")));
+                    };
+                    if contract.methods.get(*method as usize).is_none() {
+                        return Err(err(fidx, at("interface method index out of range")));
+                    }
+                    if !ctx.vars_bounded(*recv_ty, func.type_params, func.effect_params) {
+                        return Err(err(
+                            fidx,
+                            at("interface receiver type uses a variable outside the caller scope"),
+                        ));
+                    }
+                    if !ctx.projections_proven(*recv_ty, &module.func_bounds[fidx as usize]) {
+                        return Err(err(
+                            fidx,
+                            at("interface receiver type uses an unproven associated type"),
+                        ));
+                    }
+                }
+                Instr::Extended(instr) => match instr {
+                    ExtendedInstr::MakeCallback { func: f, captures } => {
+                        let Some(target) = module.funcs.get(*f as usize) else {
+                            return Err(err(fidx, at("closure function out of range")));
+                        };
+                        if target.captures.len() != *captures as usize {
+                            return Err(err(fidx, at("closure capture count mismatch")));
+                        }
+                        let closed = target.type_params == 0 && target.effect_params == 0;
+                        if !closed
+                            && (target.type_params != func.type_params
+                                || target.effect_params != func.effect_params)
+                        {
+                            return Err(err(
+                                fidx,
+                                at("a closure body must keep the enclosing generic arity"),
+                            ));
+                        }
+                    }
+                    ExtendedInstr::OptionSome { ty }
+                    | ExtendedInstr::OptionNone { ty }
+                    | ExtendedInstr::OptionPayload { ty }
+                    | ExtendedInstr::ListGet { ty }
+                    | ExtendedInstr::MapGet { ty }
+                    | ExtendedInstr::ListPop { ty }
+                    | ExtendedInstr::MapRemove { ty } => {
+                        if *ty as usize >= module.types.len() {
+                            return Err(err(fidx, at("type index out of range")));
+                        }
+                    }
+                    _ => {}
+                },
+                // A typed call token names a fixed host operation, or
+                // the receiverless self snapshot. A restored self
+                // snapshot holds that request pending, and the
+                // restorer answers it through the ordinary typed call
+                // path (specification 17.6).
+                Instr::AsCall { op, ty } => {
+                    let answerable = *op < lm_abi::OP_COUNT
+                        && (lm_abi::op(*op).kind == lm_abi::OpKind::Fixed
+                            || *op == lm_abi::OP_VM_SNAPSHOT_SELF);
+                    if !answerable {
+                        return Err(err(
+                            fidx,
+                            at("as_call operation slot is out of range or not answerable"),
+                        ));
+                    }
+                    if *ty as usize >= module.types.len() {
+                        return Err(err(fidx, at("as_call type index out of range")));
+                    }
+                }
+                Instr::TableEdit { action, kind, slot } => {
+                    if *action > 3 || *kind > 1 {
+                        return Err(err(fidx, at("invalid table edit encoding")));
+                    }
+                    let bound = if *kind == 0 {
+                        lm_abi::OP_COUNT
+                    } else {
+                        lm_abi::GROUP_COUNT
+                    };
+                    if *slot >= bound {
+                        return Err(err(fidx, at("table edit target out of range")));
+                    }
+                    if *action == 2
+                        && (*kind != 0 || lm_abi::op(*slot).kind != lm_abi::OpKind::Fixed)
+                    {
+                        return Err(err(
+                            fidx,
+                            at("a mock target must be an exact fixed operation"),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    dataflow(ctx, func, fidx)?;
+    Ok(())
+}
+
+/// Reconstruct the abstract state at every reachable block entry.
+///
+/// The pass is the type proof of one function body. It also serves the
+/// snapshot loader, which reads the operand types of a stopped frame
+/// from exactly this state, so the loader and the verifier can never
+/// disagree about what a program point holds.
+pub(crate) fn dataflow(
+    ctx: &Ctx<'_>,
+    func: &Func,
+    fidx: u32,
+) -> Result<Vec<Option<State>>, VerifyError> {
+    let mut states: Vec<Option<State>> = vec![None; func.blocks.len()];
+    let mut locals = vec![None; func.local_count() as usize];
+    for (i, p) in func.params.iter().enumerate() {
+        locals[i] = Some(*p);
+    }
+    states[0] = Some(State {
+        locals,
+        stack: Vec::new(),
+    });
+    let mut worklist = VecDeque::new();
+    worklist.push_back(0usize);
+    while let Some(bidx) = worklist.pop_front() {
+        let mut state = states[bidx].clone().expect("queued block has a state");
+        for (iidx, instr) in func.blocks[bidx].iter().enumerate() {
+            step(
+                ctx,
+                func,
+                fidx,
+                bidx,
+                iidx,
+                instr,
+                &mut state,
+                |target, edge_state| {
+                    merge(ctx, fidx, target, edge_state, &mut states, &mut worklist)
+                },
+            )?;
+        }
+    }
+    Ok(states)
+}
+pub(crate) fn merge(
+    ctx: &Ctx<'_>,
+    fidx: u32,
+    target: usize,
+    edge: State,
+    states: &mut [Option<State>],
+    worklist: &mut VecDeque<usize>,
+) -> Result<(), VerifyError> {
+    match &mut states[target] {
+        slot @ None => {
+            *slot = Some(edge);
+            worklist.push_back(target);
+        }
+        Some(existing) => {
+            if existing.stack.len() != edge.stack.len() {
+                return Err(err(
+                    fidx,
+                    format!("block {target} entry stack shapes do not agree"),
+                ));
+            }
+            let mut changed = false;
+            for (have, new) in existing.stack.iter_mut().zip(edge.stack.iter()) {
+                if *have != *new {
+                    let joined = ctx.join(*have, *new).ok_or_else(|| {
+                        err(
+                            fidx,
+                            format!("block {target} entry stack types have no common type"),
+                        )
+                    })?;
+                    if joined != *have {
+                        *have = joined;
+                        changed = true;
+                    }
+                }
+            }
+            for (have, new) in existing.locals.iter_mut().zip(edge.locals.iter()) {
+                let merged = match (*have, *new) {
+                    (Some(a), Some(b)) => {
+                        if a == b {
+                            Some(a)
+                        } else {
+                            ctx.join(a, b)
+                        }
+                    }
+                    _ => None,
+                };
+                if merged != *have {
+                    *have = merged;
+                    changed = true;
+                }
+            }
+            if changed {
+                worklist.push_back(target);
+            }
+        }
+    }
+    Ok(())
+}
