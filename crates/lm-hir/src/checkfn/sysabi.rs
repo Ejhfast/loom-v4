@@ -617,7 +617,58 @@ impl<'o> FnChecker<'o> {
                 name_span,
             ));
         }
-        let out = match (recv_ty, name) {
+        let out = match recv_ty {
+            Type::EmptyVm | Type::Vm(_) => {
+                self.check_machine_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
+            }
+            Type::Wait(_) => {
+                self.check_wait_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
+            }
+            Type::Handle(_, _) => {
+                self.check_proc_handle_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
+            }
+            Type::ResourceHandle => self
+                .check_resource_handle_method(ctx, recv_h, recv_ty, name, name_span, args, span)?,
+            _ => {
+                self.check_value_control_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
+            }
+        };
+        Ok(Some(out))
+    }
+
+    /// The one diagnostic every control receiver states for a name it
+    /// does not answer.
+    fn no_control_method(
+        &self,
+        ctx: &mut Ctx,
+        recv_ty: Type,
+        name: &str,
+        name_span: Span,
+    ) -> Diagnostic {
+        let id = ctx.store.intern(recv_ty);
+        Diagnostic::new(
+            "E1026",
+            format!(
+                "the type {} has no method named `{name}`",
+                ctx.display_type(&self.env, id)
+            ),
+            name_span,
+        )
+    }
+
+    /// One method of an empty machine or a running machine.
+    #[allow(clippy::too_many_arguments)]
+    fn check_machine_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        recv_ty: Type,
+        name: &str,
+        name_span: Span,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        Ok(match (recv_ty, name) {
             (Type::EmptyVm, "from_fn") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(
@@ -1058,27 +1109,23 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (Type::PolicyTable, _) => {
-                return self
-                    .check_table_edit(ctx, recv_h, name, name_span, args, span)
-                    .map(Some);
-            }
-            (Type::PendingCall(a, _), "args") => {
-                if !args.is_empty() {
-                    return Err(Diagnostic::new(
-                        "E1006",
-                        format!("`args` expects 0 argument(s), found {}", args.len()),
-                        span,
-                    ));
-                }
-                HExpr {
-                    ty: a,
-                    mutable: true,
-                    kind: HExprKind::CallArgs {
-                        call: Box::new(recv_h),
-                    },
-                }
-            }
+            (recv_ty, _) => return Err(self.no_control_method(ctx, recv_ty, name, name_span)),
+        })
+    }
+
+    /// One method of a selectable wait.
+    #[allow(clippy::too_many_arguments)]
+    fn check_wait_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        recv_ty: Type,
+        name: &str,
+        name_span: Span,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        Ok(match (recv_ty, name) {
             (Type::Wait(t), "wait") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_WAIT_WAIT, span)?;
@@ -1134,6 +1181,23 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (recv_ty, _) => return Err(self.no_control_method(ctx, recv_ty, name, name_span)),
+        })
+    }
+
+    /// One method of a proc handle.
+    #[allow(clippy::too_many_arguments)]
+    fn check_proc_handle_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        recv_ty: Type,
+        name: &str,
+        name_span: Span,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        Ok(match (recv_ty, name) {
             (Type::Handle(m, _), "send") => {
                 if m == NEVER {
                     return Err(Diagnostic::new(
@@ -1228,6 +1292,23 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (recv_ty, _) => return Err(self.no_control_method(ctx, recv_ty, name, name_span)),
+        })
+    }
+
+    /// One method of a resource control.
+    #[allow(clippy::too_many_arguments)]
+    fn check_resource_handle_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        recv_ty: Type,
+        name: &str,
+        name_span: Span,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        Ok(match (recv_ty, name) {
             (Type::ResourceHandle, "is_open") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_IS_OPEN, span)?;
@@ -1290,6 +1371,42 @@ impl<'o> FnChecker<'o> {
             // arm holds no operation identity, so this names the
             // operation as text for a report or a denial message. The
             // request must still be live: a continuation spends it.
+            (recv_ty, _) => return Err(self.no_control_method(ctx, recv_ty, name, name_span)),
+        })
+    }
+
+    /// One method of a policy table, a call token, a request, or a fault.
+    #[allow(clippy::too_many_arguments)]
+    fn check_value_control_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        recv_ty: Type,
+        name: &str,
+        name_span: Span,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        Ok(match (recv_ty, name) {
+            (Type::PolicyTable, _) => {
+                return self.check_table_edit(ctx, recv_h, name, name_span, args, span);
+            }
+            (Type::PendingCall(a, _), "args") => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`args` expects 0 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                HExpr {
+                    ty: a,
+                    mutable: true,
+                    kind: HExprKind::CallArgs {
+                        call: Box::new(recv_h),
+                    },
+                }
+            }
             (Type::Request, "op_name") => {
                 Self::expect_no_args(name, args, span)?;
                 HExpr {
@@ -1316,17 +1433,7 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
-            (recv_ty, _) => {
-                return Err(Diagnostic::new(
-                    "E1026",
-                    format!("the type {} has no method named `{name}`", {
-                        let id = ctx.store.intern(recv_ty);
-                        ctx.display_type(&self.env, id)
-                    }),
-                    name_span,
-                ));
-            }
-        };
-        Ok(Some(out))
+            (recv_ty, _) => return Err(self.no_control_method(ctx, recv_ty, name, name_span)),
+        })
     }
 }
