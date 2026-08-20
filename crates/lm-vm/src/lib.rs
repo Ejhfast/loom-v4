@@ -129,6 +129,8 @@ impl Default for VmConfig {
 pub struct WorldLimits {
     /// The largest machine record table.
     pub max_machines: u32,
+    /// The largest live VM image record count.
+    pub max_vm_images: u32,
     /// The largest logical byte cost of all live heaps.
     pub max_heap_bytes: usize,
     /// The largest live object count of all heaps.
@@ -153,6 +155,7 @@ impl Default for WorldLimits {
     fn default() -> WorldLimits {
         WorldLimits {
             max_machines: 4096,
+            max_vm_images: 4096,
             max_heap_bytes: 1 << 30,
             max_heap_objects: 1 << 24,
             max_resources: 1 << 16,

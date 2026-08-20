@@ -2,7 +2,7 @@
 //! preflight, and the parent child-machine reservation.
 
 use lm_testkit::{compile_to_bytes, repo_root};
-use lm_vm::{load_bytes, MachineState, RecordingHost, RootEvent, VmConfig, World};
+use lm_vm::{load_bytes, MachineState, RecordingHost, RootEvent, VmConfig, World, WorldLimits};
 
 /// A machine that waits on a suspending operation holds one live host
 /// attachment, and the completion closes it.
@@ -89,10 +89,9 @@ fn a_host_that_suspends_a_machine_state_operation_faults() {
     assert_eq!(world.resource_count(world.root()), 0);
 }
 
-/// A parent reserves each child from its own budget. The reservation
-/// is fail-atomic: the refused call creates no machine.
+/// The world bounds VM images apart from child machines.
 #[test]
-fn the_parent_child_budget_is_fail_atomic() {
+fn the_vm_image_budget_is_fail_atomic() {
     let source = "\
 def go(): Int with Vm
   a = sys.vm.Vm()
@@ -105,17 +104,21 @@ go()
 ";
     let bytes = compile_to_bytes("t.lm", source).expect("the program compiles");
     let loaded = load_bytes(&bytes).expect("the program loads");
-    let config = VmConfig {
-        max_children: 2,
-        ..VmConfig::default()
+    let limits = WorldLimits {
+        max_vm_images: 2,
+        ..WorldLimits::default()
     };
-    let mut world = World::new(&loaded, config, Box::new(lm_vm::NullHost));
+    let mut world = World::new_with_limits(
+        &loaded,
+        VmConfig::default(),
+        limits,
+        Box::new(lm_vm::NullHost),
+    );
     world.allow("Vm").expect("the grant names a group");
     let outcome = world.run_root();
     assert_eq!(world.show_outcome(&outcome), "Fault(InvalidVmState)");
-    // Two children exist; the third call created nothing.
-    assert_eq!(world.child_count(world.root()), 2);
-    assert_eq!(world.machine_count(), 3);
+    assert_eq!(world.child_count(world.root()), 0);
+    assert_eq!(world.machine_count(), 1);
 }
 
 /// The child receives the rest of the parent budget, so a machine

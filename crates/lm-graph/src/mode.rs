@@ -649,7 +649,10 @@ mod tests {
     #[test]
     fn the_sendable_check_rejects_what_the_frozen_check_admits() {
         let mut heap = Heap::new(1 << 20);
-        let handle = heap.alloc(Object::NativeVm { vm: 1 });
+        let handle = heap.alloc(Object::NativeVm {
+            image: 1,
+            generation: 0,
+        });
         assert!(heap.is_frozen(handle));
         assert!(verify_frozen(&mut heap, handle, &limits()).is_ok());
         assert_eq!(
@@ -746,7 +749,10 @@ mod tests {
             Object::List { items, .. } => assert_eq!(items, &vec![Value::Int(1)]),
             other => panic!("expected a list, got {other:?}"),
         }
-        let handle = src.alloc(Object::NativeVm { vm: 3 });
+        let handle = src.alloc(Object::NativeVm {
+            image: 3,
+            generation: 0,
+        });
         assert_eq!(
             transfer(&mut src, &mut dst, &[], Value::Obj(handle), &limits()),
             Err(FaultCode::UnsendableValue)
@@ -821,7 +827,10 @@ mod tests {
             other => panic!("expected a list, got {other:?}"),
         }
         // The one-heap path keeps the shape rule of the copy.
-        let handle = heap.alloc(Object::NativeVm { vm: 1 });
+        let handle = heap.alloc(Object::NativeVm {
+            image: 1,
+            generation: 0,
+        });
         assert_eq!(
             copy_within(&mut heap, &[], Value::Obj(handle), &limits()),
             Err(FaultCode::UnsendableValue)
@@ -1012,7 +1021,10 @@ mod tests {
             digest_value(&mut heap, Value::Obj(mutable), &mut Slots, &limits()),
             Err(FaultCode::UnsendableValue)
         );
-        let handle = heap.alloc(Object::NativeVm { vm: 1 });
+        let handle = heap.alloc(Object::NativeVm {
+            image: 1,
+            generation: 0,
+        });
         assert_eq!(
             digest_value(&mut heap, Value::Obj(handle), &mut Slots, &limits()),
             Err(FaultCode::BoundaryViolation)

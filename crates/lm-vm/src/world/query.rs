@@ -171,8 +171,8 @@ impl World {
 
     /// Every machine one machine names in its reachable state.
     ///
-    /// Five native object shapes name a machine. The walk reports all
-    /// five shapes.
+    /// Native run and control shapes name machines. VM image handles
+    /// name the separate image registry.
     ///
     /// A nested edge and a routed request also name machines. The walk
     /// reports both records.
@@ -201,8 +201,7 @@ impl World {
         let mut out: Vec<VmId> = Vec::new();
         for r in order {
             let target = match heap.get(r) {
-                Object::NativeVm { vm }
-                | Object::NativeRun { vm }
+                Object::NativeRun { vm }
                 | Object::NativeTable { vm }
                 | Object::NativeRequest { vm, .. }
                 | Object::NativeCall { vm, .. } => Some(*vm),

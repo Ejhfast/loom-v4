@@ -178,6 +178,7 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
     };
     add(image.funcs.len())?;
     add(image.classes.len())?;
+    add(image.vm_images.len())?;
     for node in &image.types {
         add(1 + closed_type_parts(node))?;
     }
@@ -508,6 +509,7 @@ impl Admit<'_> {
             self.check_state(vm as u32)?;
             self.check_stop_points(vm as u32)?;
         }
+        self.check_image_order()?;
         self.check_parent_forest()?;
         self.check_world()?;
         self.check_machine_witness()?;
@@ -626,13 +628,63 @@ impl Admit<'_> {
         table.digest(self.module, &self.identity.class_hashes, closed)
     }
 
+    /// Prove the canonical first-reference order of VM images.
+    fn check_image_order(&self) -> Result<(), ImageError> {
+        let mut next = 0u32;
+        let mut seen = vec![false; self.image.vm_images.len()];
+        let mut visit = |image: u32| -> Result<(), ImageError> {
+            let Some(slot) = seen.get_mut(image as usize) else {
+                return fail(
+                    ImageReason::Reference,
+                    format!("VM image ordinal {image} names no captured image"),
+                );
+            };
+            if *slot {
+                return Ok(());
+            }
+            if image != next {
+                return fail(
+                    ImageReason::Layout,
+                    format!("VM image ordinal {image} appears before ordinal {next}"),
+                );
+            }
+            *slot = true;
+            next += 1;
+            Ok(())
+        };
+        for machine in &self.image.machines {
+            if let Some(image) = machine.image {
+                visit(image)?;
+            }
+            for entry in &machine.objects {
+                if let Object::NativeVm { image, .. } = entry.object {
+                    visit(image)?;
+                }
+            }
+        }
+        if next as usize != self.image.vm_images.len() {
+            return fail(
+                ImageReason::Layout,
+                "the VM image table holds an unreferenced entry",
+            );
+        }
+        Ok(())
+    }
+
     /// later rule follows a reference.
     fn check_references(&self, vm: u32) -> Result<(), ImageError> {
         let m = self.machine(vm);
         let objects = m.objects.len() as u32;
         let callbacks = m.callbacks.len() as u32;
         let machines = self.image.machines.len() as u32;
+        let images = self.image.vm_images.len() as u32;
         let at = |what: &str| format!("machine {vm}: {what}");
+        if m.image.is_some_and(|image| image >= images) {
+            return fail(
+                ImageReason::Reference,
+                at("the owning VM image ordinal names no captured image"),
+            );
+        }
         let object_ref = |value: &Value, what: &str| -> Result<(), ImageError> {
             match value {
                 Value::Obj(r) if r.generation != 0 => fail(
@@ -743,10 +795,26 @@ impl Admit<'_> {
                     );
                 }
             }
-            let target = match entry.object {
-                Object::NativeVm { vm } | Object::NativeRun { vm } | Object::NativeTable { vm } => {
-                    Some(vm)
+            if let Object::NativeVm { image, generation } = entry.object {
+                if generation != 0 {
+                    return fail(
+                        ImageReason::Reference,
+                        at(&format!(
+                            "object {ordinal} holds VM image generation {generation}, and a portable image requires zero"
+                        )),
+                    );
                 }
+                if image >= images {
+                    return fail(
+                        ImageReason::Reference,
+                        at(&format!(
+                            "object {ordinal} names VM image ordinal {image} of {images}"
+                        )),
+                    );
+                }
+            }
+            let target = match entry.object {
+                Object::NativeRun { vm } | Object::NativeTable { vm } => Some(vm),
                 Object::NativeRequest { vm, .. } | Object::NativeCall { vm, .. } => Some(vm),
                 Object::NativeHandle { proc, .. } => Some(proc),
                 Object::NativeResourceHandle { surface, .. } => Some(surface),
@@ -774,20 +842,6 @@ impl Admit<'_> {
                     ImageReason::Reference,
                     at(&format!(
                         "object {ordinal} is a policy table handle to its own machine"
-                    )),
-                );
-            }
-            // A machine handle is holder local, so it never crosses a
-            // boundary, and `Vm.New` is the one operation that mints
-            // one. It gives the handle to the parent and names the
-            // child, so no machine ever holds a handle to itself. The
-            // restored world faults on such a handle, and the rule
-            // states the property instead of relying on that.
-            if matches!(entry.object, Object::NativeVm { vm: target } if target == vm) {
-                return fail(
-                    ImageReason::Reference,
-                    at(&format!(
-                        "object {ordinal} is a machine handle to its own machine"
                     )),
                 );
             }

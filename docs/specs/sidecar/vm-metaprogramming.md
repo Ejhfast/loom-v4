@@ -64,8 +64,11 @@ The new split uses these roles:
 
 One VM can hold several stopped runs. The scheduler can also run several processes inside that VM.
 
-The implementation can store the first run in the image record. The
-public `Vm` and `Run[T]` handles remain distinct.
+The runtime stores VM images and runs in separate registries.
+
+Each activation creates one run record. No activation receives a special storage path.
+
+Image records consume the image limit. Run records consume machine and child limits.
 
 A typed run snapshot selects one run inside an untyped captured image.
 

@@ -88,10 +88,6 @@ impl World {
         let Some(image_vm) = self.image_arg(vm, op, args[0]) else {
             return;
         };
-        if image_vm == vm || self.machines[image_vm as usize].active > 0 {
-            self.fault_caller(vm, op, FaultCode::InvalidVmState, "the VM image is in use");
-            return;
-        }
         // A snapshot value takes one of two shapes. A capture of this
         // process names an admitted image of this world, so the
         // restore reads the world back with no decode, no hash, and
@@ -173,7 +169,7 @@ impl World {
             );
             return;
         }
-        let (target, reused) = match self.prepare_run_target(vm, image_vm) {
+        let target = match self.prepare_run_target(vm, image_vm) {
             Some(target) => target,
             None => {
                 self.fault_caller(
@@ -188,14 +184,14 @@ impl World {
         let reply = match self.prepare_restore_reply(vm, target) {
             Ok(reply) => reply,
             Err(code) => {
-                self.rollback_run_target(vm, target, reused);
+                self.rollback_run_target(vm, target);
                 self.machines[vm as usize].set_fault(code, "", Some(op));
                 return;
             }
         };
         if let Err(code) = self.check_reply(vm, reply.value) {
             self.discard_restore_reply(vm, reply);
-            self.rollback_run_target(vm, target, reused);
+            self.rollback_run_target(vm, target);
             self.machines[vm as usize].set_fault(
                 code,
                 "the reply does not carry the type of its perform",
@@ -205,22 +201,19 @@ impl World {
         }
         if let Err(code) = self.reserve_restore_reply_slot(vm) {
             self.discard_restore_reply(vm, reply);
-            self.rollback_run_target(vm, target, reused);
+            self.rollback_run_target(vm, target);
             self.machines[vm as usize].set_fault(code, "", Some(op));
             return;
         }
         let built = match self.prepare_restore(vm, target, &image) {
             Ok(plan) => {
                 self.commit_restore(plan);
-                if reused {
-                    self.machines[target as usize].is_image = true;
-                }
                 self.install_prepared_restore_reply(vm, reply);
                 return;
             }
             Err(crate::snapshot::RestoreFail::LimitExceeded) => {
                 self.discard_restore_reply(vm, reply);
-                self.rollback_run_target(vm, target, reused);
+                self.rollback_run_target(vm, target);
                 self.make_instance(vm, self.core.restore_limit_exceeded, vec![])
                     .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]))
             }
@@ -229,7 +222,7 @@ impl World {
             // every caller, and a mismatch here is a boundary fault.
             Err(crate::snapshot::RestoreFail::OtherProgram) => {
                 self.discard_restore_reply(vm, reply);
-                self.rollback_run_target(vm, target, reused);
+                self.rollback_run_target(vm, target);
                 self.fault_caller(
                     vm,
                     op,

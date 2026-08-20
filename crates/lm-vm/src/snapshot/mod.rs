@@ -68,7 +68,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 10 adds collection epochs.
 /// Version 11 adds active callback descriptors.
 /// Version 12 preserves spare list and map capacity.
-pub const FORMAT_VERSION: u32 = 14;
+/// Version 15 stores VM images apart from run machine records.
+pub const FORMAT_VERSION: u32 = 15;
 
 /// The section kinds, in canonical order.
 ///
@@ -267,6 +268,13 @@ pub struct ImageLimits {
     pub mailbox_limit: u32,
 }
 
+/// One persistent VM image in a portable snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageVm {
+    /// The resource ceiling for runs that this image activates.
+    pub limits: ImageLimits,
+}
+
 /// One captured machine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageMachine {
@@ -274,6 +282,8 @@ pub struct ImageMachine {
     /// parent is outside the world; restore re-roots such a machine
     /// on the restoring machine (specification 17.5).
     pub parent: Option<u32>,
+    /// The persistent VM image that owns this run.
+    pub image: Option<u32>,
     pub state: ImageState,
     /// True when the scheduler owns the execution of this machine.
     pub scheduler_owned: bool,
@@ -365,6 +375,8 @@ pub struct Image {
     /// The type environment table of this image. Ordinal zero is the
     /// empty environment.
     pub envs: Vec<lm_bytecode::closed::TypeEnv>,
+    /// Persistent VM images in canonical reference order.
+    pub vm_images: Vec<ImageVm>,
     pub machines: Vec<ImageMachine>,
 }
 
@@ -414,6 +426,7 @@ impl Image {
             }
         }
         bytes = bytes.saturating_add(self.machines.len() * std::mem::size_of::<ImageMachine>());
+        bytes = bytes.saturating_add(self.vm_images.len() * std::mem::size_of::<ImageVm>());
         for machine in &self.machines {
             bytes =
                 bytes.saturating_add(machine.objects.len() * std::mem::size_of::<ImageObject>());
@@ -774,6 +787,7 @@ pub struct LoadLimits {
     /// The largest decoded allocation cost of one container.
     pub max_alloc_bytes: usize,
     pub max_machines: u32,
+    pub max_vm_images: u32,
     pub max_objects: u32,
     pub max_frames: u32,
     pub max_stack_values: u32,
@@ -795,6 +809,7 @@ impl Default for LoadLimits {
             max_bytes: 256 << 20,
             max_alloc_bytes: 1 << 30,
             max_machines: 4096,
+            max_vm_images: 4096,
             max_objects: 1 << 22,
             max_frames: 1 << 20,
             max_stack_values: 1 << 24,

@@ -223,11 +223,11 @@ fn the_header_rules_reject_precisely() {
     // The root ordinal is zero in a canonical image. One image has one
     // byte string, so the decoder owns that rule.
     let mut bad = bytes.clone();
-    bad[header + 1] = 1;
+    bad[header + 2] = 1;
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::SectionBounds);
     // The module semantic hash names this program.
     let mut bad = bytes.clone();
-    bad[header + 2] ^= 1;
+    bad[header + 3] ^= 1;
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Code);
 }
 

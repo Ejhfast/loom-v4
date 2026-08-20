@@ -48,6 +48,8 @@ impl World {
             dispatch: loaded.dispatch_store(),
             core: loaded.core_layout(),
             machines: vec![root],
+            vm_images: Vec::new(),
+            vm_image_free: Vec::new(),
             mock_free: Vec::new(),
             vm_free: Vec::new(),
             suspended: std::collections::BTreeMap::new(),

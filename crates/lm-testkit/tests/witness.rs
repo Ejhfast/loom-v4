@@ -417,13 +417,9 @@ fn a_forged_proc_flag_rejects() {
     assert!(image.machines.iter().any(|m| m.is_proc));
 }
 
-/// A machine handle to its own machine rejects.
-///
-/// `Vm.New` mints the one machine handle, it gives the handle to the
-/// parent, and the handle is holder local, so no machine ever holds a
-/// handle to itself.
+/// A portable VM image handle rejects a live registry generation.
 #[test]
-fn a_machine_handle_to_its_own_machine_rejects() {
+fn a_vm_image_handle_with_a_live_generation_rejects() {
     let loaded = program(CLOSURE_ACROSS_A_BOUNDARY);
     let images = boundaries(&loaded, &["Vm"], 80);
     let image = pick(&images, "a machine handle", |image| {
@@ -434,8 +430,8 @@ fn a_machine_handle_to_its_own_machine_rejects() {
     });
     let mut broken = image.clone();
     for entry in &mut broken.machines[0].objects {
-        if let Object::NativeVm { vm } = &mut entry.object {
-            *vm = 0;
+        if let Object::NativeVm { generation, .. } = &mut entry.object {
+            *generation = 1;
         }
     }
     assert_eq!(admit(&loaded, &broken), Some(ImageReason::Reference));

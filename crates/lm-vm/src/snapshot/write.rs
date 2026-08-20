@@ -15,15 +15,34 @@
 use super::{
     codec, Image, ImageBlock, ImageCallback, ImageFrame, ImageLimits, ImageMachine, ImageMailbox,
     ImageObject, ImagePending, ImagePolicyCursor, ImageRoutedRequest, ImageState, ImageTerminal,
-    ImageWaitEntry, ImageWaitSource, SnapshotFail, SnapshotImage,
+    ImageVm, ImageWaitEntry, ImageWaitSource, SnapshotFail, SnapshotImage,
 };
-use crate::machine::{Block, FrameCapture, MachineState, PolicyCursor, Terminal, VmId, WaitSource};
+use crate::machine::{
+    Block, FrameCapture, MachineState, PolicyCursor, Terminal, VmId, VmImageKey, WaitSource,
+};
 use crate::world::World;
 use crate::FaultCode;
 use lm_bytecode::closed::{ClosedType, TypeEnv};
 use lm_heap::Object;
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::collections::{HashMap, VecDeque};
+
+/// Convert one runtime resource ceiling to its portable form.
+fn image_limits(config: crate::VmConfig) -> ImageLimits {
+    ImageLimits {
+        fuel: config.fuel,
+        max_frames: config.max_frames,
+        max_stack_values: config.max_stack_values,
+        heap_bytes: config.heap_bytes as u64,
+        max_objects: config.graph.max_objects,
+        max_edges: config.graph.max_edges,
+        max_graph_bytes: config.graph.max_bytes,
+        max_work: config.graph.max_work,
+        max_children: config.max_children,
+        max_resources: config.max_resources,
+        mailbox_limit: config.mailbox_limit,
+    }
+}
 
 /// What one finished cut recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,11 +354,59 @@ impl World {
         let ordinal_of = |vm: VmId| -> Option<u32> {
             report.order.iter().position(|m| *m == vm).map(|i| i as u32)
         };
+        let mut image_order: Vec<VmImageKey> = Vec::new();
+        for vm in report.order.iter().copied() {
+            if let Some(key) = self.machines[vm as usize].image {
+                self.append_image_key(key, &mut image_order)?;
+            }
+            let roots = self.machines[vm as usize].snapshot_roots();
+            let limits = self.machines[vm as usize].config.graph;
+            let objects = {
+                let machine = &mut self.machines[vm as usize];
+                lm_graph::snapshot_ordinals(&mut machine.vm.heap, &roots, &limits).map_err(
+                    |code| {
+                        SnapshotFail::Fault(
+                            code,
+                            "the VM image walk passed a graph limit".to_string(),
+                        )
+                    },
+                )?
+            };
+            for reference in objects {
+                if let Object::NativeVm { image, generation } =
+                    self.machines[vm as usize].vm.heap.get(reference)
+                {
+                    self.append_image_key(
+                        VmImageKey {
+                            image: *image,
+                            generation: *generation,
+                        },
+                        &mut image_order,
+                    )?;
+                }
+            }
+        }
+        let image_ordinal = |key: VmImageKey| -> Option<u32> {
+            image_order
+                .iter()
+                .position(|candidate| *candidate == key)
+                .map(|index| index as u32)
+        };
+        let vm_images = image_order
+            .iter()
+            .map(|key| {
+                let config = self.vm_images[key.image as usize].config;
+                ImageVm {
+                    limits: image_limits(config),
+                }
+            })
+            .collect();
         let mut funcs: Vec<u32> = Vec::new();
         let mut classes: Vec<u32> = Vec::new();
         let mut machines: Vec<ImageMachine> = Vec::new();
         for (idx, vm) in report.order.iter().copied().enumerate() {
-            let machine = self.build_machine(vm, idx == 0, self_root, &ordinal_of)?;
+            let machine =
+                self.build_machine(vm, idx == 0, self_root, &ordinal_of, &image_ordinal)?;
             for entry in &machine.objects {
                 match &entry.object {
                     Object::Instance { class, .. } => {
@@ -416,8 +483,31 @@ impl World {
             classes,
             types,
             envs,
+            vm_images,
             machines,
         })
+    }
+
+    /// Add one live VM image to a canonical key order.
+    fn append_image_key(
+        &self,
+        key: VmImageKey,
+        order: &mut Vec<VmImageKey>,
+    ) -> Result<(), SnapshotFail> {
+        let live = self
+            .vm_images
+            .get(key.image as usize)
+            .is_some_and(|record| record.live && record.generation == key.generation);
+        if !live {
+            return Err(SnapshotFail::Fault(
+                FaultCode::BoundaryViolation,
+                "a value names a stale VM image".to_string(),
+            ));
+        }
+        if !order.contains(&key) {
+            order.push(key);
+        }
+        Ok(())
     }
 
     /// The canonical digest of the closed result type of one machine.
@@ -587,6 +677,7 @@ impl World {
         is_root: bool,
         self_root: bool,
         ordinal_of: &impl Fn(VmId) -> Option<u32>,
+        image_ordinal: &impl Fn(VmImageKey) -> Option<u32>,
     ) -> Result<ImageMachine, SnapshotFail> {
         let limits = self.machines[vm as usize].config.graph;
         let roots = self.machines[vm as usize].snapshot_roots();
@@ -631,9 +722,21 @@ impl World {
             let frozen = self.heap_of(vm).is_frozen(*r);
             let source = self.heap_of(vm).get(*r);
             let object = match source {
-                Object::NativeVm { vm: target } => Object::NativeVm {
-                    vm: self.require_ordinal(*target, ordinal_of)?,
-                },
+                Object::NativeVm { image, generation } => {
+                    let key = VmImageKey {
+                        image: *image,
+                        generation: *generation,
+                    };
+                    Object::NativeVm {
+                        image: image_ordinal(key).ok_or_else(|| {
+                            SnapshotFail::Fault(
+                                FaultCode::BoundaryViolation,
+                                "a VM image has no snapshot ordinal".to_string(),
+                            )
+                        })?,
+                        generation: 0,
+                    }
+                }
                 Object::NativeRun { vm: target } => Object::NativeRun {
                     vm: self.require_ordinal(*target, ordinal_of)?,
                 },
@@ -692,7 +795,8 @@ impl World {
             };
             objects.push(ImageObject { frozen, object });
         }
-        let mut record = self.machine_record(vm, &map_value, &callback_order, ordinal_of)?;
+        let mut record =
+            self.machine_record(vm, &map_value, &callback_order, ordinal_of, image_ordinal)?;
         record.objects = objects;
         if is_root {
             // The restored root is holder-controlled (specification
@@ -727,6 +831,7 @@ impl World {
         map_value: &impl Fn(Value) -> Value,
         callback_order: &[CallbackRef],
         ordinal_of: &impl Fn(VmId) -> Option<u32>,
+        image_ordinal: &impl Fn(VmImageKey) -> Option<u32>,
     ) -> Result<ImageMachine, SnapshotFail> {
         let record = &self.machines[vm as usize];
         let m = &record.vm;
@@ -842,6 +947,7 @@ impl World {
             .transpose()?;
         Ok(ImageMachine {
             parent,
+            image: record.image.and_then(image_ordinal),
             state,
             scheduler_owned: record.owner == crate::machine::Ownership::Scheduler,
             paused: record.paused,
@@ -858,19 +964,7 @@ impl World {
             next_wait: m.next_wait,
             waits,
             children: record.children,
-            limits: ImageLimits {
-                fuel: record.config.fuel,
-                max_frames: record.config.max_frames,
-                max_stack_values: record.config.max_stack_values,
-                heap_bytes: record.config.heap_bytes as u64,
-                max_objects: record.config.graph.max_objects,
-                max_edges: record.config.graph.max_edges,
-                max_graph_bytes: record.config.graph.max_bytes,
-                max_work: record.config.graph.max_work,
-                max_children: record.config.max_children,
-                max_resources: record.config.max_resources,
-                mailbox_limit: record.config.mailbox_limit,
-            },
+            limits: image_limits(record.config),
             objects: Vec::new(),
             callbacks,
             frames,

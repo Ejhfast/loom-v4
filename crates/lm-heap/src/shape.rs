@@ -272,7 +272,7 @@ pub enum Object {
     /// Immutable binary data. Born frozen.
     Bytes(SharedBytes),
     /// A holder-local handle to one persistent VM image.
-    NativeVm { vm: u32 },
+    NativeVm { image: u32, generation: u32 },
     /// A holder-local handle to one active or stopped invocation.
     NativeRun { vm: u32 },
     /// A holder-local handle to the policy table of one machine.
@@ -730,7 +730,10 @@ impl Object {
             Object::StrBuilder(text) => Object::StrBuilder(text.try_clone_buffer()?),
             Object::ByteBuf(bytes) => Object::ByteBuf(bytes.try_clone_buffer()?),
             Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
-            Object::NativeVm { vm } => Object::NativeVm { vm: *vm },
+            Object::NativeVm { image, generation } => Object::NativeVm {
+                image: *image,
+                generation: *generation,
+            },
             Object::NativeRun { vm } => Object::NativeRun { vm: *vm },
             Object::NativeTable { vm } => Object::NativeTable { vm: *vm },
             Object::NativeRequest { vm, ordinal } => Object::NativeRequest {
@@ -1156,7 +1159,10 @@ mod tests {
             },
             Object::StrBuilder(NativeStringBuilder::from_string("buffer".to_string())),
             Object::ByteBuf(NativeByteBuffer::from_vec(vec![1, 2, 3])),
-            Object::NativeVm { vm: 1 },
+            Object::NativeVm {
+                image: 1,
+                generation: 0,
+            },
             Object::NativeTable { vm: 1 },
             Object::NativeRequest { vm: 1, ordinal: 2 },
             Object::NativeCall {
@@ -1322,7 +1328,10 @@ mod tests {
             },
             Object::StrBuilder(NativeStringBuilder::new()),
             Object::ByteBuf(NativeByteBuffer::new()),
-            Object::NativeVm { vm: 0 },
+            Object::NativeVm {
+                image: 0,
+                generation: 0,
+            },
             Object::NativeTable { vm: 0 },
             Object::NativeRequest { vm: 0, ordinal: 0 },
             Object::NativeCall {

@@ -25,7 +25,7 @@ use crate::host::{
 };
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, Machine, MachineState, Mailbox, Ownership, Pending,
-    PolicyCursor, RoutedRequest, Terminal, VmId, WaitEntry, WaitSource, MAX_LIVE_WAITS,
+    PolicyCursor, RoutedRequest, Terminal, VmId, VmImageKey, WaitEntry, WaitSource, MAX_LIVE_WAITS,
 };
 use crate::schedule::{
     ActiveProcs, CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,
@@ -177,6 +177,16 @@ struct WorldBudget {
     heap: HeapBudget,
     resources: crate::resource::ResourceBudget,
     fuel: u64,
+}
+
+/// One persistent execution image in the world image registry.
+pub(crate) struct VmImageRecord {
+    /// The generation that validates a holder-local image handle.
+    pub(crate) generation: u32,
+    /// False marks a reclaimed registry entry.
+    pub(crate) live: bool,
+    /// The resource ceiling that image activation applies.
+    pub(crate) config: VmConfig,
 }
 
 /// One successful restore reply held before restore commit.
@@ -411,6 +421,10 @@ pub struct World {
     dispatch: std::sync::Arc<[crate::DispatchRow]>,
     core: CoreLayout,
     pub(crate) machines: Vec<Machine>,
+    /// Persistent VM images, separate from run machine records.
+    pub(crate) vm_images: Vec<VmImageRecord>,
+    /// Reclaimed VM image entries.
+    pub(crate) vm_image_free: Vec<u32>,
     /// Retired mock-handler slots, ready for reuse.
     ///
     /// A mock machine is ephemeral: no guest value names it, it takes
@@ -886,7 +900,10 @@ mod tests {
         let mock = world.empty_machine(VmConfig::default(), None, 0);
         world.machines.push(mock);
         let handle = world.machines[0]
-            .alloc(Object::NativeVm { vm: 1 })
+            .alloc(Object::NativeVm {
+                image: 1,
+                generation: 0,
+            })
             .expect("the handle allocates");
         // The frozen bit is set, so only the shape rule can refuse it.
         let r = handle.as_obj().expect("a handle is a heap object");
@@ -1025,7 +1042,10 @@ mod tests {
         // A machine handle is holder-local, so it never crosses a
         // boundary. It stands in for any unsendable handler here.
         let handle = world.machines[0]
-            .alloc(Object::NativeVm { vm: 0 })
+            .alloc(Object::NativeVm {
+                image: 0,
+                generation: 0,
+            })
             .expect("the handle allocates");
         let unsendable = handle.as_obj().expect("a handle is a heap object");
         let before = world.machine_count();

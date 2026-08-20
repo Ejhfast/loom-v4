@@ -59,6 +59,13 @@ fn method_of(dispatch: &[crate::DispatchRow], class: u32, selector: u32) -> Resu
 /// A dense machine identifier inside one world.
 pub type VmId = u32;
 
+/// One generation-checked reference to a persistent VM image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct VmImageKey {
+    pub image: u32,
+    pub generation: u32,
+}
+
 /// An append-only function slot in one VM code store.
 pub type FunctionVersionId = u32;
 
@@ -512,9 +519,11 @@ pub struct Machine {
     /// It is not derived from the ownership, because `Proc.Run`
     /// transfers a plain machine to the scheduler and mints no grant.
     pub is_proc: bool,
-    /// True when this empty record stores one persistent VM image.
-    /// Reachable `NativeVm` values derive this marker after restore.
-    pub is_image: bool,
+    /// The persistent image that owns this run.
+    ///
+    /// Host root machines and legacy host restore targets have no
+    /// image. Every run that `Vm.activate` creates names one image.
+    pub image: Option<VmImageKey>,
     /// The world gate a restore put this machine behind.
     ///
     /// Restored procs are scheduler-owned but stopped until the
@@ -747,7 +756,7 @@ impl Machine {
             body_func: None,
             witness: TypeEnvId::EMPTY,
             is_proc: false,
-            is_image: false,
+            image: None,
             gate: 0,
             start_body: None,
             callbacks: Vec::new(),

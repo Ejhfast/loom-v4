@@ -450,7 +450,9 @@ impl World {
                     Object::NativeResourceHandle { surface, resource } => {
                         format!("<resource {resource} of machine {surface}>")
                     }
-                    Object::NativeVm { vm } => format!("<vm {vm}>"),
+                    Object::NativeVm { image, generation } => {
+                        format!("<vm {image}:{generation}>")
+                    }
                     Object::NativeRun { vm } => format!("<run {vm}>"),
                     Object::NativeTable { vm } => format!("<table {vm}>"),
                     Object::NativeRequest { .. } => "<request>".to_string(),

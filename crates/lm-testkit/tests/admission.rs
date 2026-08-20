@@ -1042,51 +1042,28 @@ end
 go()
 ";
 
-/// A VM image handle names a machine with no loaded program.
-/// A forged target stays contained by the activation check.
+/// A portable VM image handle always uses generation zero.
 #[test]
-fn an_empty_machine_handle_that_names_a_loaded_machine_stays_contained() {
+fn a_vm_image_handle_with_a_live_generation_rejects() {
     let loaded = program(VM_IMAGE_SOURCE);
     let images = boundaries(&loaded, &["Vm"], 60);
-    let image = pick(&images, "one empty and one loaded machine", |image| {
-        image
-            .machines
-            .iter()
-            .any(|m| m.state == lm_vm::snapshot::ImageState::Empty)
-            && image
-                .machines
-                .iter()
-                .skip(1)
-                .any(|m| m.state != lm_vm::snapshot::ImageState::Empty && m.body_func.is_some())
-            && image.machines[0]
+    let image = pick(&images, "a VM image handle", |image| {
+        image.machines.iter().any(|machine| {
+            machine
                 .objects
                 .iter()
                 .any(|entry| matches!(entry.object, Object::NativeVm { .. }))
-    });
-    let empty = image
-        .machines
-        .iter()
-        .position(|m| m.state == lm_vm::snapshot::ImageState::Empty)
-        .expect("one machine is empty") as u32;
-    // The handle lives in machine 0, and no machine ever holds a
-    // handle to itself, so the loaded target is a child machine.
-    let full = image
-        .machines
-        .iter()
-        .enumerate()
-        .position(|(at, m)| {
-            at > 0 && m.state != lm_vm::snapshot::ImageState::Empty && m.body_func.is_some()
         })
-        .expect("one child machine is loaded") as u32;
+    });
     let mut broken = image.clone();
-    for entry in &mut broken.machines[0].objects {
-        if let Object::NativeVm { vm } = &mut entry.object {
-            if *vm == empty {
-                *vm = full;
+    for machine in &mut broken.machines {
+        for entry in &mut machine.objects {
+            if let Object::NativeVm { generation, .. } = &mut entry.object {
+                *generation = 1;
             }
         }
     }
-    contained_with(&loaded, &broken, &["Vm"]);
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::Reference));
 }
 
 // ---------------------------------------------------------------

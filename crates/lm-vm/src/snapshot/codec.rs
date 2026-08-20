@@ -26,9 +26,9 @@
 use super::{
     AdmissionBudget, Image, ImageBlock, ImageCallback, ImageError, ImageFrame, ImageLimits,
     ImageMachine, ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor, ImageReason,
-    ImageRoutedRequest, ImageState, ImageTerminal, ImageWaitEntry, ImageWaitSource, LoadLimits,
-    Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER,
-    SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
+    ImageRoutedRequest, ImageState, ImageTerminal, ImageVm, ImageWaitEntry, ImageWaitSource,
+    LoadLimits, Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE,
+    SECTION_HEADER, SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
 };
 use crate::LoadedModule;
 use lm_abi::FaultCode;
@@ -317,6 +317,7 @@ fn section_header(image: &Image) -> Vec<u8> {
         bad_op: None,
     };
     out.leb(image.machines.len() as u64);
+    out.leb(image.vm_images.len() as u64);
     // The root ordinal. The traversal starts at the root, so it is
     // always zero; the reader still checks it.
     out.leb(0);
@@ -503,9 +504,11 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.bytes.extend_from_slice(bytes);
         }
         Object::Substring(text) => out.str(text),
-        Object::NativeVm { vm } | Object::NativeRun { vm } | Object::NativeTable { vm } => {
-            out.leb(*vm as u64)
+        Object::NativeVm { image, generation } => {
+            out.leb(*image as u64);
+            out.u32(*generation);
         }
+        Object::NativeRun { vm } | Object::NativeTable { vm } => out.leb(*vm as u64),
         Object::NativeRequest { vm, ordinal } => {
             out.leb(*vm as u64);
             out.u64(*ordinal);
@@ -565,8 +568,12 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
         limit,
         bad_op: None,
     };
+    for image in &image.vm_images {
+        encode_limits(&mut out, &image.limits);
+    }
     for machine in &image.machines {
         out.opt(machine.parent);
+        out.opt(machine.image);
         out.u8(machine.state.tag());
         let mut flags = 0u8;
         if machine.scheduler_owned {
@@ -945,6 +952,7 @@ impl<'b, 'd> Cursor<'b, 'd> {
 struct Ctx {
     limits: LoadLimits,
     machine_count: u32,
+    image_count: u32,
     /// The number of type environment entries the image carries.
     env_count: u32,
 }
@@ -1211,6 +1219,7 @@ fn decode_inner(
     // load limit before any machine vector exists.
     let mut header = section(0);
     let machine_count = header.count(limits.max_machines as u64, "machine")?;
+    let image_count = header.count(limits.max_vm_images as u64, "VM image")?;
     let root = header.leb()?;
     if root != 0 {
         // One image has one byte string, so the canonical root ordinal
@@ -1274,6 +1283,7 @@ fn decode_inner(
     let ctx = Ctx {
         limits,
         machine_count: machine_count as u32,
+        image_count: image_count as u32,
         env_count: envs.len() as u32,
     };
     // Section 4: the heaps, one per machine, in ordinal order.
@@ -1295,6 +1305,12 @@ fn decode_inner(
     }
     // Section 5: the machine records.
     let mut records = section(4);
+    let mut vm_images: Vec<ImageVm> = records.vector(image_count, "VM image table")?;
+    for _ in 0..image_count {
+        vm_images.push(ImageVm {
+            limits: decode_limits(&mut records)?,
+        });
+    }
     let mut machines: Vec<ImageMachine> = records.vector(machine_count, "machine table")?;
     for objects in all_objects {
         let machine = decode_machine(&mut records, &ctx, objects)?;
@@ -1318,6 +1334,7 @@ fn decode_inner(
             classes,
             types,
             envs,
+            vm_images,
             machines,
         },
         stored,
@@ -1708,7 +1725,8 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             }
         },
         8 => Object::NativeVm {
-            vm: machine_ref(cur, ctx)?,
+            image: image_ref(cur, ctx)?,
+            generation: cur.u32()?,
         },
         9 => Object::NativeTable {
             vm: machine_ref(cur, ctx)?,
@@ -1821,6 +1839,20 @@ fn machine_ref(cur: &mut Cursor<'_, '_>, ctx: &Ctx) -> Read<u32> {
     Ok(vm as u32)
 }
 
+fn image_ref(cur: &mut Cursor<'_, '_>, ctx: &Ctx) -> Read<u32> {
+    let image = cur.leb()?;
+    if image >= ctx.image_count as u64 {
+        return err(
+            ImageReason::Reference,
+            format!(
+                "a VM image reference names ordinal {image} of {}",
+                ctx.image_count
+            ),
+        );
+    }
+    Ok(image as u32)
+}
+
 #[allow(clippy::too_many_lines)]
 fn decode_machine(
     cur: &mut Cursor<'_, '_>,
@@ -1830,6 +1862,7 @@ fn decode_machine(
     let count = objects.len() as u32;
     let limits = &ctx.limits;
     let parent = cur.opt(ctx.machine_count as u64, "parent machine")?;
+    let image = cur.opt(ctx.image_count as u64, "VM image")?;
     let state = ImageState::from_tag(cur.u8()?)
         .ok_or_else(|| ImageError::new(ImageReason::State, "a machine state tag is not legal"))?;
     let flags = cur.u8()?;
@@ -2065,6 +2098,7 @@ fn decode_machine(
     };
     Ok(ImageMachine {
         parent,
+        image,
         state,
         scheduler_owned,
         paused,

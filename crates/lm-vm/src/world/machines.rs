@@ -6,6 +6,11 @@
 use super::*;
 
 impl World {
+    /// The largest live VM image count of this world.
+    pub(crate) fn vm_image_limit(&self) -> usize {
+        self.budget.limits.max_vm_images as usize
+    }
+
     /// Reserve one child machine from the budget of `parent`.
     ///
     /// The parent holds a child budget. Each reservation charges one
@@ -104,10 +109,9 @@ impl World {
             // record. Neither takes part in the child budget.
             //
             // The embedding API can hold one empty record before a
-            // guest value names it. A VM image has an explicit marker,
-            // so its handle alone keeps it live.
+            // guest value names it.
             if m.vm.parent.is_none()
-                || (m.vm.state == MachineState::Empty && !m.is_image)
+                || m.vm.state == MachineState::Empty
                 || m.active > 0
                 || m.owner != Ownership::Holder
                 || m.paused
@@ -179,8 +183,121 @@ impl World {
             self.vm_free.push(id);
             freed += 1;
         }
+        self.collect_vm_images();
         self.collect_images();
         freed
+    }
+
+    /// Free every VM image that no surviving value or run names.
+    pub(super) fn collect_vm_images(&mut self) {
+        if self.vm_images.is_empty() {
+            return;
+        }
+        let mut used = vec![false; self.vm_images.len()];
+        let mut free_slot = vec![false; self.machines.len()];
+        for id in self.vm_free.iter().chain(self.mock_free.iter()) {
+            free_slot[*id as usize] = true;
+        }
+        for id in 0..self.machines.len() as VmId {
+            if free_slot[id as usize] || !self.is_live_machine(id) {
+                continue;
+            }
+            if let Some(key) = self.machines[id as usize].image {
+                self.mark_live_image(key, &mut used);
+            }
+            let roots = self.machines[id as usize].snapshot_roots();
+            let limits = self.machines[id as usize].config.graph;
+            let order = {
+                let machine = &mut self.machines[id as usize];
+                match lm_graph::snapshot_ordinals(&mut machine.vm.heap, &roots, &limits) {
+                    Ok(order) => order,
+                    Err(_) => return,
+                }
+            };
+            for reference in order {
+                if let Object::NativeVm { image, generation } =
+                    self.machines[id as usize].vm.heap.get(reference)
+                {
+                    self.mark_live_image(
+                        VmImageKey {
+                            image: *image,
+                            generation: *generation,
+                        },
+                        &mut used,
+                    );
+                }
+            }
+        }
+        for image in 0..self.vm_images.len() as u32 {
+            let record = &mut self.vm_images[image as usize];
+            if !record.live || used[image as usize] {
+                continue;
+            }
+            record.live = false;
+            record.generation = record.generation.wrapping_add(1);
+            self.vm_image_free.push(image);
+        }
+    }
+
+    fn mark_live_image(&self, key: VmImageKey, used: &mut [bool]) {
+        let Some(record) = self.vm_images.get(key.image as usize) else {
+            return;
+        };
+        if record.live && record.generation == key.generation {
+            used[key.image as usize] = true;
+        }
+    }
+
+    /// Reserve one persistent VM image record.
+    fn new_vm_image(&mut self, holder: VmId) -> Option<VmImageKey> {
+        let live = self
+            .vm_images
+            .len()
+            .saturating_sub(self.vm_image_free.len());
+        if live >= self.budget.limits.max_vm_images as usize {
+            self.collect_machines();
+        }
+        let live = self
+            .vm_images
+            .len()
+            .saturating_sub(self.vm_image_free.len());
+        if live >= self.budget.limits.max_vm_images as usize {
+            return None;
+        }
+        let config = self.machines.get(holder as usize)?.config;
+        if let Some(image) = self.vm_image_free.pop() {
+            let record = &mut self.vm_images[image as usize];
+            record.live = true;
+            record.config = config;
+            return Some(VmImageKey {
+                image,
+                generation: record.generation,
+            });
+        }
+        self.vm_images.try_reserve(1).ok()?;
+        let image = u32::try_from(self.vm_images.len()).ok()?;
+        self.vm_images.push(VmImageRecord {
+            generation: 0,
+            live: true,
+            config,
+        });
+        Some(VmImageKey {
+            image,
+            generation: 0,
+        })
+    }
+
+    /// Reclaim one image whose handle allocation failed.
+    fn rollback_vm_image(&mut self, key: VmImageKey) {
+        let Some(record) = self.vm_images.get_mut(key.image as usize) else {
+            return;
+        };
+        if !record.live || record.generation != key.generation {
+            return;
+        }
+        record.live = false;
+        record.generation = record.generation.wrapping_add(1);
+        self.vm_image_free.push(key.image);
     }
 
     /// Free every admitted image that no surviving machine names.
@@ -285,10 +402,13 @@ impl World {
     /// The argument comes from the pending record of the machine, and
     /// a restored machine states that record, so the read tests the
     /// shape. `None` faults the caller at its use site.
-    pub(super) fn handle_vm(&self, holder: VmId, value: Value) -> Option<VmId> {
+    pub(super) fn handle_vm(&self, holder: VmId, value: Value) -> Option<VmImageKey> {
         let r = value.as_obj()?;
         match self.machines[holder as usize].vm.heap.get(r) {
-            Object::NativeVm { vm } => Some(*vm),
+            Object::NativeVm { image, generation } => Some(VmImageKey {
+                image: *image,
+                generation: *generation,
+            }),
             _ => None,
         }
     }
@@ -303,15 +423,15 @@ impl World {
     }
 
     /// The VM image one argument names, or a fault on the caller.
-    pub(super) fn image_arg(&mut self, vm: VmId, op: u32, value: Value) -> Option<VmId> {
+    pub(super) fn image_arg(&mut self, vm: VmId, op: u32, value: Value) -> Option<VmImageKey> {
         match self.handle_vm(vm, value) {
-            Some(target)
+            Some(key)
                 if self
-                    .machines
-                    .get(target as usize)
-                    .is_some_and(|machine| machine.is_image) =>
+                    .vm_images
+                    .get(key.image as usize)
+                    .is_some_and(|image| image.live && image.generation == key.generation) =>
             {
-                Some(target)
+                Some(key)
             }
             None => {
                 self.fault_caller(
@@ -359,32 +479,19 @@ impl World {
             self.machines[parent as usize].children.saturating_sub(1);
     }
 
-    /// Select storage for one new run of an image.
-    ///
-    /// The first run uses the image record. Later runs use normal
-    /// child records. This keeps `Vm()` plus one run equal to one
-    /// child-budget unit.
-    pub(super) fn prepare_run_target(&mut self, parent: VmId, image: VmId) -> Option<(VmId, bool)> {
-        if self.machines[image as usize].vm.state == MachineState::Empty {
-            return Some((image, true));
-        }
-        let config = self.reserve_child(parent)?;
-        Some((self.install_child(config, parent), false))
+    /// Create one normal run record for an image.
+    pub(super) fn prepare_run_target(&mut self, parent: VmId, image: VmImageKey) -> Option<VmId> {
+        let run_config = self.reserve_child(parent)?;
+        let image_config = self.vm_images.get(image.image as usize)?.config;
+        let config = intersect_config(run_config, image_config);
+        let target = self.install_child(config, parent);
+        self.machines[target as usize].image = Some(image);
+        Some(target)
     }
 
     /// Roll back a run target that no handle received.
-    pub(super) fn rollback_run_target(&mut self, parent: VmId, target: VmId, reused: bool) {
-        if !reused {
-            self.rollback_child(parent, target);
-            return;
-        }
-        let old = &self.machines[target as usize];
-        let config = old.config;
-        let parent = old.vm.parent;
-        let generation = old.generation;
-        let mut empty = self.empty_machine(config, parent, generation);
-        empty.is_image = true;
-        self.machines[target as usize] = empty;
+    pub(super) fn rollback_run_target(&mut self, parent: VmId, target: VmId) {
+        self.rollback_child(parent, target);
     }
 
     /// Execute one VM control operation of the machine `vm`.
@@ -414,34 +521,25 @@ impl World {
         let args = Args(&stored);
         match op {
             lm_abi::OP_VM_NEW => {
-                // The parent reserves the child from its own budget
-                // first. The reservation is fail-atomic: a rejected
-                // reservation creates no machine and charges nothing.
-                let child_config = match self.reserve_child(vm) {
-                    Some(config) => config,
+                let image = match self.new_vm_image(vm) {
+                    Some(image) => image,
                     None => {
                         self.fault_caller(
                             vm,
                             op,
                             FaultCode::InvalidVmState,
-                            "the parent has no child budget left",
+                            "the world has no VM image capacity left",
                         );
                         return;
                     }
                 };
-                let child = self.install_child(child_config, vm);
-                self.machines[child as usize].is_image = true;
-                match self.machines[vm as usize].alloc(Object::NativeVm { vm: child }) {
+                match self.machines[vm as usize].alloc(Object::NativeVm {
+                    image: image.image,
+                    generation: image.generation,
+                }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
                     Err(code) => {
-                        // No handle names the child, so the whole call
-                        // rolls back: the record returns to the free
-                        // list and the parent gets its reservation back.
-                        let generation = self.machines[child as usize].generation;
-                        self.machines[child as usize] =
-                            self.empty_machine(self.config, None, generation);
-                        self.vm_free.push(child);
-                        self.machines[vm as usize].children -= 1;
+                        self.rollback_vm_image(image);
                         self.machines[vm as usize].set_fault(code, "", Some(op));
                     }
                 }
@@ -450,11 +548,7 @@ impl World {
                 let Some(image) = self.image_arg(vm, op, args[0]) else {
                     return;
                 };
-                if image == vm || self.machines[image as usize].active > 0 {
-                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the VM image is in use");
-                    return;
-                }
-                let (target, reused) = match self.prepare_run_target(vm, image) {
+                let target = match self.prepare_run_target(vm, image) {
                     Some(target) => target,
                     None => {
                         self.fault_caller(
@@ -469,7 +563,7 @@ impl World {
                 let program = match self.transfer(vm, target, args[1]) {
                     Ok(value) => value,
                     Err(code) => {
-                        self.rollback_run_target(vm, target, reused);
+                        self.rollback_run_target(vm, target);
                         self.fault_caller(vm, op, code, "the program is not sendable");
                         return;
                     }
@@ -477,7 +571,7 @@ impl World {
                 // The argument view: unit, or a tuple whose elements
                 /* become the initial parameter locals. */
                 let Some(closure_ref) = program.as_obj() else {
-                    self.rollback_run_target(vm, target, reused);
+                    self.rollback_run_target(vm, target);
                     self.fault_caller(
                         vm,
                         op,
@@ -491,7 +585,7 @@ impl World {
                     let items = match self.machines[vm as usize].vm.heap.get(r) {
                         Object::Tuple { items } => items.clone(),
                         _ => {
-                            self.rollback_run_target(vm, target, reused);
+                            self.rollback_run_target(vm, target);
                             self.fault_caller(
                                 vm,
                                 op,
@@ -516,7 +610,7 @@ impl World {
                     match moved {
                         Ok(values) => locals = values,
                         Err(code) => {
-                            self.rollback_run_target(vm, target, reused);
+                            self.rollback_run_target(vm, target);
                             self.fault_caller(vm, op, code, "an argument is not sendable");
                             return;
                         }
@@ -529,7 +623,7 @@ impl World {
                 let (func, env) = match self.machines[target as usize].vm.heap.get(closure_ref) {
                     Object::Closure { func, env, .. } => (*func, env.env()),
                     _ => {
-                        self.rollback_run_target(vm, target, reused);
+                        self.rollback_run_target(vm, target);
                         self.fault_caller(
                             vm,
                             op,
@@ -543,7 +637,7 @@ impl World {
                 // the parameter types of the program before the frame
                 // loads them.
                 if let Err(code) = self.check_frame_args(target, func, env, &locals) {
-                    self.rollback_run_target(vm, target, reused);
+                    self.rollback_run_target(vm, target);
                     self.fault_caller(vm, op, code, "an argument does not carry its declared type");
                     return;
                 }
@@ -557,7 +651,7 @@ impl World {
                 match self.machines[vm as usize].alloc(Object::NativeRun { vm: target }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
                     Err(code) => {
-                        self.rollback_run_target(vm, target, reused);
+                        self.rollback_run_target(vm, target);
                         self.machines[vm as usize].set_fault(code, "", Some(op));
                     }
                 }
@@ -1380,4 +1474,26 @@ impl World {
     // ------------------------------------------------------------
     // Typed waits.
     // ------------------------------------------------------------
+}
+
+/// Intersect a run reservation with its persistent image ceiling.
+fn intersect_config(run: VmConfig, image: VmConfig) -> VmConfig {
+    VmConfig {
+        fuel: run.fuel.min(image.fuel),
+        max_frames: run.max_frames.min(image.max_frames),
+        max_stack_values: run.max_stack_values.min(image.max_stack_values),
+        heap_bytes: run.heap_bytes.min(image.heap_bytes),
+        graph: lm_graph::GraphLimits {
+            max_objects: run.graph.max_objects.min(image.graph.max_objects),
+            max_edges: run.graph.max_edges.min(image.graph.max_edges),
+            max_bytes: run.graph.max_bytes.min(image.graph.max_bytes),
+            max_work: run.graph.max_work.min(image.graph.max_work),
+        },
+        max_children: run.max_children.min(image.max_children),
+        max_resources: run.max_resources.min(image.max_resources),
+        mailbox_limit: run.mailbox_limit.min(image.mailbox_limit),
+        snapshot_bytes: run.snapshot_bytes.min(image.snapshot_bytes),
+        max_closed_types: run.max_closed_types.min(image.max_closed_types),
+        max_type_envs: run.max_type_envs.min(image.max_type_envs),
+    }
 }

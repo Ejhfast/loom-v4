@@ -529,13 +529,13 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
         5 => {
             // A native handle names another machine of the world.
             let target = prng.below(machines as usize) as u32;
+            let image_target = prng.below(image.vm_images.len().max(1)) as u32;
             let m = &mut image.machines[vm];
             if !m.objects.is_empty() {
                 let at = prng.below(m.objects.len());
                 match &mut m.objects[at].object {
-                    lm_heap::Object::NativeVm { vm } | lm_heap::Object::NativeTable { vm } => {
-                        *vm = target;
-                    }
+                    lm_heap::Object::NativeVm { image, .. } => *image = image_target,
+                    lm_heap::Object::NativeTable { vm } => *vm = target,
                     lm_heap::Object::NativeHandle { proc, .. } => *proc = target,
                     lm_heap::Object::NativeRequest { vm, .. }
                     | lm_heap::Object::NativeCall { vm, .. } => *vm = target,

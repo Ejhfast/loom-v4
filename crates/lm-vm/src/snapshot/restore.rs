@@ -10,9 +10,9 @@ use super::{
 use crate::machine::{
     Action, Block, CallbackDescriptor, CallbackSlot, FaultRec, Frame, FrameCapture, Machine,
     MachineState, Mailbox, Ownership, Pending, PolicyCursor, RoutedRequest, Terminal, VmId,
-    WaitEntry, WaitSource,
+    VmImageKey, WaitEntry, WaitSource,
 };
-use crate::world::World;
+use crate::world::{VmImageRecord, World};
 use crate::VmConfig;
 use lm_bytecode::closed::TypeImportPlan;
 use lm_heap::Object;
@@ -27,6 +27,8 @@ pub(crate) struct RestorePlan {
     child_charge: u32,
     gate: u32,
     gate_members: Vec<VmId>,
+    image_records: Vec<(u32, VmImageRecord)>,
+    image_appended: usize,
 }
 
 impl World {
@@ -110,6 +112,9 @@ impl World {
         self.prepare_gate_group()
             .map_err(|_| RestoreFail::LimitExceeded)?;
 
+        let (image_keys, image_records, image_appended) =
+            self.prepare_image_import(target, image)?;
+
         let types = self
             .envs
             .prepare_import(&image.types, &image.envs)
@@ -157,7 +162,7 @@ impl World {
         let mut machines = try_vec(count)?;
         for (ordinal, source) in image.machines.iter().enumerate() {
             let mut machine = self.empty_machine(configs[ordinal], None, source.generation);
-            let refs = restore_heap(&mut machine, source, &ids, env_map, type_map)?;
+            let refs = restore_heap(&mut machine, source, &ids, &image_keys, env_map, type_map)?;
             restore_state(
                 &mut machine,
                 source,
@@ -170,14 +175,11 @@ impl World {
                 gate,
                 child_counts[ordinal],
             )?;
+            machine.image = source.image.map(|image| image_keys[image as usize]);
             machines.push(machine);
         }
-        for source in &image.machines {
-            for entry in &source.objects {
-                if let Object::NativeVm { vm } = &entry.object {
-                    machines[*vm as usize].is_image = true;
-                }
-            }
+        if let Some(target_image) = self.machines[target as usize].image {
+            machines[0].image = Some(target_image);
         }
 
         Ok(RestorePlan {
@@ -188,7 +190,71 @@ impl World {
             child_charge,
             gate,
             gate_members: ids,
+            image_records,
+            image_appended,
         })
+    }
+
+    /// Plan portable VM image records without changing the registry.
+    fn prepare_image_import(
+        &mut self,
+        target: VmId,
+        image: &crate::snapshot::Image,
+    ) -> Result<(Vec<VmImageKey>, Vec<(u32, VmImageRecord)>, usize), RestoreFail> {
+        let target_key = self.machines[target as usize].image;
+        let reused_source = target_key.and_then(|_| image.machines[0].image);
+        let new_count = image
+            .vm_images
+            .len()
+            .saturating_sub(usize::from(reused_source.is_some()));
+        let live = self
+            .vm_images
+            .len()
+            .saturating_sub(self.vm_image_free.len());
+        if live
+            .checked_add(new_count)
+            .is_none_or(|total| total > self.vm_image_limit())
+        {
+            return Err(RestoreFail::LimitExceeded);
+        }
+        let reused_slots = new_count.min(self.vm_image_free.len());
+        let appended = new_count - reused_slots;
+        self.vm_images
+            .try_reserve_exact(appended)
+            .map_err(|_| RestoreFail::LimitExceeded)?;
+        let mut keys = try_vec(image.vm_images.len())?;
+        let mut records = try_vec(new_count)?;
+        let mut free = self.vm_image_free.iter().rev().copied();
+        let mut next = self.vm_images.len();
+        let ceiling = self.config_of(target);
+        for (ordinal, source) in image.vm_images.iter().enumerate() {
+            if Some(ordinal as u32) == reused_source {
+                keys.push(target_key.ok_or(RestoreFail::LimitExceeded)?);
+                continue;
+            }
+            let (slot, generation) = match free.next() {
+                Some(slot) => (slot, self.vm_images[slot as usize].generation),
+                None => {
+                    let slot = u32::try_from(next).map_err(|_| RestoreFail::LimitExceeded)?;
+                    next = next.checked_add(1).ok_or(RestoreFail::LimitExceeded)?;
+                    (slot, 0)
+                }
+            };
+            let key = VmImageKey {
+                image: slot,
+                generation,
+            };
+            keys.push(key);
+            records.push((
+                slot,
+                VmImageRecord {
+                    generation,
+                    live: true,
+                    config: clamp_image(&source.limits, ceiling),
+                },
+            ));
+        }
+        Ok((keys, records, appended))
     }
 
     /// Install one prepared restore without an allocation.
@@ -206,7 +272,23 @@ impl World {
             child_charge,
             gate,
             gate_members,
+            image_records,
+            image_appended,
         } = plan;
+        let reused = image_records.len().saturating_sub(image_appended);
+        for (index, (slot, record)) in image_records.into_iter().enumerate() {
+            if index < reused {
+                let free = self
+                    .vm_image_free
+                    .pop()
+                    .expect("a prepared VM image uses one free entry");
+                debug_assert_eq!(free, slot);
+                self.vm_images[slot as usize] = record;
+            } else {
+                debug_assert_eq!(slot as usize, self.vm_images.len());
+                self.vm_images.push(record);
+            }
+        }
         self.envs.commit_import(types);
         self.mark_restored();
         self.set_gate_marker(gate);
@@ -259,6 +341,7 @@ fn restore_heap(
     machine: &mut Machine,
     source: &ImageMachine,
     ids: &[VmId],
+    image_keys: &[VmImageKey],
     env_map: &[TypeEnvId],
     type_map: &[u32],
 ) -> Result<Vec<ObjRef>, RestoreFail> {
@@ -288,7 +371,7 @@ fn restore_heap(
             .object
             .try_clone_remapped(|child| refs[child.slot as usize])
             .map_err(|_| RestoreFail::LimitExceeded)?;
-        relocate_metadata(&mut object, ids, env_map, type_map);
+        relocate_metadata(&mut object, ids, image_keys, env_map, type_map);
         let reference = machine
             .vm
             .heap
@@ -539,8 +622,38 @@ fn clamp(source: &ImageMachine, ceiling: VmConfig) -> VmConfig {
     }
 }
 
+/// Clamp one portable VM image ceiling by its receiving world.
+fn clamp_image(source: &crate::snapshot::ImageLimits, ceiling: VmConfig) -> VmConfig {
+    let graph = lm_graph::GraphLimits {
+        max_objects: source.max_objects.min(ceiling.graph.max_objects),
+        max_edges: source.max_edges.min(ceiling.graph.max_edges),
+        max_bytes: source.max_graph_bytes.min(ceiling.graph.max_bytes),
+        max_work: source.max_work.min(ceiling.graph.max_work),
+    };
+    let heap_bytes = usize::try_from(source.heap_bytes).unwrap_or(usize::MAX);
+    VmConfig {
+        fuel: source.fuel.min(ceiling.fuel),
+        max_frames: source.max_frames.min(ceiling.max_frames),
+        max_stack_values: source.max_stack_values.min(ceiling.max_stack_values),
+        heap_bytes: heap_bytes.min(ceiling.heap_bytes),
+        graph,
+        max_children: source.max_children.min(ceiling.max_children),
+        max_resources: source.max_resources.min(ceiling.max_resources),
+        mailbox_limit: source.mailbox_limit.min(ceiling.mailbox_limit),
+        snapshot_bytes: ceiling.snapshot_bytes,
+        max_closed_types: ceiling.max_closed_types,
+        max_type_envs: ceiling.max_type_envs,
+    }
+}
+
 /// Relocate the world-local metadata of one restored object.
-fn relocate_metadata(object: &mut Object, ids: &[VmId], env_map: &[TypeEnvId], type_map: &[u32]) {
+fn relocate_metadata(
+    object: &mut Object,
+    ids: &[VmId],
+    image_keys: &[VmImageKey],
+    env_map: &[TypeEnvId],
+    type_map: &[u32],
+) {
     let remap = |value: &mut Value| {
         if let Value::EmptyCase { ty, .. } = value {
             *ty = type_map[*ty as usize];
@@ -563,8 +676,12 @@ fn relocate_metadata(object: &mut Object, ids: &[VmId], env_map: &[TypeEnvId], t
         Object::Instance { env, .. } | Object::Closure { env, .. } => {
             *env = Witness(env_map[env.env().0 as usize]);
         }
-        Object::NativeVm { vm }
-        | Object::NativeRun { vm }
+        Object::NativeVm { image, generation } => {
+            let key = image_keys[*image as usize];
+            *image = key.image;
+            *generation = key.generation;
+        }
+        Object::NativeRun { vm }
         | Object::NativeTable { vm }
         | Object::NativeRequest { vm, .. }
         | Object::NativeCall { vm, .. } => {

@@ -285,9 +285,17 @@ fn every_handle_in_the_bytes_targets_a_captured_machine() {
     let mut handles = 0;
     for machine in &world.machines {
         for entry in &machine.objects {
+            if let Object::NativeVm { image, generation } = entry.object {
+                assert_eq!(generation, 0, "a portable image uses generation zero");
+                assert!(
+                    (image as usize) < world.vm_images.len(),
+                    "an ordinal names no captured VM image"
+                );
+                handles += 1;
+                continue;
+            }
             let target = match entry.object {
-                Object::NativeVm { vm }
-                | Object::NativeTable { vm }
+                Object::NativeTable { vm }
                 | Object::NativeRequest { vm, .. }
                 | Object::NativeCall { vm, .. } => Some(vm),
                 Object::NativeHandle { proc, .. } => Some(proc),
@@ -317,9 +325,12 @@ fn restore_relocates_every_vm_and_mailbox_root() {
     for vm in &restored {
         let heap = world.heap_of(*vm);
         heap.for_each_live(|_, _, object| {
+            if matches!(object, Object::NativeVm { .. }) {
+                found += 1;
+                return;
+            }
             let target = match object {
-                Object::NativeVm { vm }
-                | Object::NativeTable { vm }
+                Object::NativeTable { vm }
                 | Object::NativeRequest { vm, .. }
                 | Object::NativeCall { vm, .. } => Some(*vm),
                 Object::NativeHandle { proc, .. } => Some(*proc),
