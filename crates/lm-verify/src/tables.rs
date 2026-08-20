@@ -7,24 +7,16 @@ use super::*;
 
 /// Validate the type, selector, application, class, and function
 /// tables.
-pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyError> {
-    let terr = |message: String| VerifyError {
+/// One shared table error. No table names a function.
+fn terr(message: String) -> VerifyError {
+    VerifyError {
         func: u32::MAX,
         message,
-    };
-    // The selector table must hold no duplicate name. The canonical
-    // identity encoding replaces a selector index with its name, so a
-    // duplicate name lets two different dispatch keys hash alike. The
-    // verified-code cache keys on that hash, so this rule keeps the
-    // index-to-name map injective and belongs in the structural pass.
-    let mut selector_names: HashMap<&str, u32> = HashMap::new();
-    for (idx, name) in module.selectors.iter().enumerate() {
-        if let Some(first) = selector_names.insert(name.as_str(), idx as u32) {
-            return Err(terr(format!(
-                "selector {idx} duplicates the name of selector {first}"
-            )));
-        }
     }
+}
+
+pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyError> {
+    verify_selectors(module)?;
     // The type table must start with the canonical primitive prefix.
     let prefix = [BcType::Unit, BcType::Bool, BcType::Int, BcType::Str];
     if module.types.len() < prefix.len() || module.types[..prefix.len()] != prefix[..] {
@@ -220,6 +212,37 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
         }),
         core,
     };
+    verify_type_placement(&ctx)?;
+    verify_applications(&ctx)?;
+    verify_interfaces(&ctx)?;
+    verify_imports(&ctx)?;
+    verify_classes(&ctx)?;
+    verify_conformances(&ctx)?;
+    verify_signatures(&ctx)?;
+    Ok(ctx)
+}
+
+/// The selector table holds no duplicate name.
+fn verify_selectors(module: &Module) -> Result<(), VerifyError> {
+    // The selector table must hold no duplicate name. The canonical
+    // identity encoding replaces a selector index with its name, so a
+    // duplicate name lets two different dispatch keys hash alike. The
+    // verified-code cache keys on that hash, so this rule keeps the
+    // index-to-name map injective and belongs in the structural pass.
+    let mut selector_names: HashMap<&str, u32> = HashMap::new();
+    for (idx, name) in module.selectors.iter().enumerate() {
+        if let Some(first) = selector_names.insert(name.as_str(), idx as u32) {
+            return Err(terr(format!(
+                "selector {idx} duplicates the name of selector {first}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Callback placement, row canonicality, and operation types.
+fn verify_type_placement(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
     // A callback can occur only as one direct callable parameter.
     // A safe higher-order function type can occur in any value position.
     let mut callback_children = Vec::new();
@@ -265,6 +288,12 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
             }
         }
     }
+    Ok(())
+}
+
+/// The type applications.
+fn verify_applications(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
     // Validate the type applications.
     for (aidx, app) in module.apps.iter().enumerate() {
         for t in &app.types {
@@ -301,6 +330,12 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
             }
         }
     }
+    Ok(())
+}
+
+/// The nominal interface contracts.
+fn verify_interfaces(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
     // Validate nominal interface contracts before any bound uses them.
     let mut interface_keys: HashMap<&str, usize> = HashMap::new();
     for (iidx, contract) in module.interfaces.iter().enumerate() {
@@ -513,12 +548,17 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
             }
         }
     }
+    Ok(())
+}
+
+/// The import slots and the signatures the class checks read.
+fn verify_imports(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
     // Validate the import slots. Each slot names one definition of its
     // own kind, and no definition takes two slots. An imported
     // definition carries a signature and no body: the linker replaces
     // it with the provider definition, and the loader admits a module
     // only when the import table is empty.
-    let extern_classes = module.extern_classes();
     let extern_funcs = module.extern_funcs();
     {
         let mut claimed_classes = vec![false; module.classes.len()];
@@ -566,6 +606,15 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
             }
         }
     }
+    Ok(())
+}
+
+/// The class table.
+fn verify_classes(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
+    let core = ctx.core;
+    let extern_classes = module.extern_classes();
+    let extern_funcs = module.extern_funcs();
     // Validate classes.
     for (cidx, class) in module.classes.iter().enumerate() {
         let cerr = |message: String| terr(format!("class {cidx}: {message}"));
@@ -798,6 +847,12 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
             }
         }
     }
+    Ok(())
+}
+
+/// Conformance references and their method witnesses.
+fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
     // Validate all direct conformance references first. One conformance
     // can resolve another conformance during its semantic checks.
     for (index, conformance) in module.conformances.iter().enumerate() {
@@ -992,6 +1047,13 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
             }
         }
     }
+    Ok(())
+}
+
+/// The core role slots, function signatures, and local types.
+fn verify_signatures(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
+    let extern_funcs = module.extern_funcs();
     // Validate the declared core role slots. The class table is
     // validated above, so every field type index is inside the type
     // table by now.
@@ -1124,5 +1186,5 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
             return Err(err(fidx as u32, "the declared row is not canonical"));
         }
     }
-    Ok(ctx)
+    Ok(())
 }
