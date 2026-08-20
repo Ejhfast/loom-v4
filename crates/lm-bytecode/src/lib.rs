@@ -47,6 +47,13 @@ pub fn qualified_key(module: &str, name: &str) -> String {
     }
 }
 
+/// Derive one stable late-binding slot key from its namespace key.
+pub fn slot_key(binding: &str) -> [u8; 32] {
+    let mut bytes = b"lm-slot-key-v1\0".to_vec();
+    bytes.extend_from_slice(binding.as_bytes());
+    hash::sha256(&bytes)
+}
+
 /// One element of an effect row in the serialized module.
 ///
 /// `Op` names an operation or group through the module string table.

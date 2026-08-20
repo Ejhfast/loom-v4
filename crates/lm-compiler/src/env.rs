@@ -9,10 +9,10 @@
 //! compiled modules that fulfill the import slots. Both freeze before
 //! use, so no build step mutates an environment another step reads.
 
-use lm_bytecode::interface::Interface;
+use lm_bytecode::interface::{IfaceSlotKind, IfaceSlotSpec, Interface};
 use lm_bytecode::Module;
 use lm_hir::import::ImportEnv;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A failure to build a compile environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +25,8 @@ pub enum CompileEnvError {
     InvalidRoot(String),
     /// Two modules claim one module path.
     DuplicateModule(String),
+    /// Two late bindings claim one source name.
+    DuplicateBinding(String),
 }
 
 impl std::fmt::Display for CompileEnvError {
@@ -46,6 +48,9 @@ impl std::fmt::Display for CompileEnvError {
             CompileEnvError::DuplicateModule(path) => {
                 write!(f, "two modules claim the path `{path}`")
             }
+            CompileEnvError::DuplicateBinding(name) => {
+                write!(f, "two late bindings claim `{name}`")
+            }
         }
     }
 }
@@ -54,6 +59,8 @@ impl std::fmt::Display for CompileEnvError {
 #[derive(Debug, Clone, Default)]
 pub struct CompileEnv {
     env: ImportEnv,
+    late: BTreeMap<String, IfaceSlotSpec>,
+    static_bindings: BTreeSet<String>,
 }
 
 impl CompileEnv {
@@ -75,8 +82,46 @@ impl CompileEnv {
             }
             return Ok(());
         }
+        for spec in &interface.slots {
+            if self.static_bindings.contains(&spec.binding) {
+                continue;
+            }
+            self.insert_late(spec.clone())?;
+        }
         self.env.modules.insert(path, interface);
         Ok(())
+    }
+
+    fn insert_late(&mut self, spec: IfaceSlotSpec) -> Result<(), CompileEnvError> {
+        if let Some(old) = self.late.get(&spec.binding) {
+            if old != &spec {
+                return Err(CompileEnvError::DuplicateBinding(spec.binding));
+            }
+            return Ok(());
+        }
+        self.late.insert(spec.binding.clone(), spec);
+        Ok(())
+    }
+
+    /// Bind one source name through a stable late slot.
+    pub fn bind_late(
+        &mut self,
+        name: &str,
+        key: [u8; 32],
+        kind: IfaceSlotKind,
+    ) -> Result<(), CompileEnvError> {
+        self.static_bindings.remove(name);
+        self.insert_late(IfaceSlotSpec {
+            binding: name.to_string(),
+            key,
+            kind,
+        })
+    }
+
+    /// Force one source name to use static linkage.
+    pub fn bind_static(&mut self, name: &str) {
+        self.late.remove(name);
+        self.static_bindings.insert(name.to_string());
     }
 
     /// Bind one root name to a module path prefix. A `use` line may
@@ -111,7 +156,10 @@ impl CompileEnv {
     /// Freeze the environment. A frozen environment is the only form
     /// a compilation accepts.
     pub fn freeze(self) -> FrozenCompileEnv {
-        FrozenCompileEnv { env: self.env }
+        FrozenCompileEnv {
+            env: self.env,
+            late: self.late,
+        }
     }
 }
 
@@ -119,6 +167,7 @@ impl CompileEnv {
 #[derive(Debug, Clone, Default)]
 pub struct FrozenCompileEnv {
     env: ImportEnv,
+    late: BTreeMap<String, IfaceSlotSpec>,
 }
 
 impl FrozenCompileEnv {
@@ -129,6 +178,15 @@ impl FrozenCompileEnv {
     /// The interface of one module path.
     pub fn interface(&self, path: &str) -> Option<&Interface> {
         self.env.modules.get(path)
+    }
+
+    /// The late linkage for one qualified source binding.
+    pub fn late_binding(&self, name: &str) -> Option<&IfaceSlotSpec> {
+        self.late.get(name)
+    }
+
+    pub(crate) fn late_bindings(&self) -> &BTreeMap<String, IfaceSlotSpec> {
+        &self.late
     }
 }
 

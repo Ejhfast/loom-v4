@@ -31,5 +31,5 @@ pub use cache::{
 pub use env::{CompileEnv, LinkEnv, LinkUnit};
 pub use link::{link, LinkedProgram};
 pub use manifest::{parse_manifest, Manifest};
-pub use module::{compile_module, CompiledModule};
+pub use module::{compile_module, compile_module_with_options, CompileOptions, CompiledModule};
 pub use standard::{compile_program, compile_source, CompiledSource, StandardCatalog};

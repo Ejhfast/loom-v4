@@ -10,14 +10,15 @@
 
 use crate::hir::*;
 use lm_bytecode::{
-    BcAssociated, BcClass, BcClassKind, BcConformance, BcInterface, BcInterfaceMethod,
-    BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Instr, Module, TypeApp, NO_PARENT,
+    BcAssociated, BcCallableContract, BcClass, BcClassKind, BcConformance, BcInterface,
+    BcInterfaceMethod, BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Instr, Module,
+    SlotContract, SlotSpec, SlotTarget, TypeApp, NO_APP, NO_PARENT,
 };
 use lm_source::ast::BinOp;
 use lm_types::{
     ClassKind, Row, RowElem, Type, TypeId, TypeStore, BOOL, DIGEST, INT, NEVER, STRING, UNIT,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 fn extended(instr: ExtendedInstr) -> Instr {
@@ -44,6 +45,31 @@ struct ModLowerer<'m> {
     core: CoreIds,
     /// The nominal class of native string builders.
     string_builder_class: u32,
+    /// Dense late-call slot by function index.
+    function_slots: HashMap<u32, u32>,
+    /// Dense late-allocation slot by class index.
+    class_slots: HashMap<u32, u32>,
+}
+
+/// The callable kind of one late function reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LateCallableKind {
+    Function,
+    Method,
+}
+
+/// One late callable selected before bytecode lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LateCallable {
+    pub key: [u8; 32],
+    pub kind: LateCallableKind,
+}
+
+/// Late-linkage choices for one checked module.
+#[derive(Debug, Clone, Default)]
+pub struct LowerLinkage {
+    pub functions: BTreeMap<u32, LateCallable>,
+    pub classes: BTreeMap<u32, [u8; 32]>,
 }
 
 impl<'m> ModLowerer<'m> {
@@ -242,10 +268,37 @@ impl<'m> ModLowerer<'m> {
 
 /// Lower a checked module to decoded bytecode.
 pub fn lower_module(hir: &HirModule) -> Module {
+    lower_module_with_linkage(hir, &LowerLinkage::default())
+        .expect("static lowering has no late-linkage failure")
+}
+
+/// Lower a checked module with explicit late-linkage choices.
+pub fn lower_module_with_linkage(
+    hir: &HirModule,
+    linkage: &LowerLinkage,
+) -> Result<Module, String> {
+    let mut function_slots = HashMap::new();
+    let mut class_slots = HashMap::new();
+    let mut next_slot = 0u32;
+    for function in linkage.functions.keys() {
+        function_slots.insert(*function, next_slot);
+        next_slot += 1;
+    }
+    for class in linkage.classes.keys() {
+        class_slots.insert(*class, next_slot);
+        next_slot += 1;
+    }
+    let mut inline_bodies: Vec<Option<HExpr>> = hir.funcs.iter().map(inline_body).collect();
+    for function in linkage.functions.keys() {
+        let body = inline_bodies
+            .get_mut(*function as usize)
+            .ok_or_else(|| format!("late function {function} does not exist"))?;
+        *body = None;
+    }
     let mut m = ModLowerer {
         store: &hir.store,
         funcs: &hir.funcs,
-        inline_bodies: hir.funcs.iter().map(inline_body).collect(),
+        inline_bodies,
         strings: Vec::new(),
         string_index: HashMap::new(),
         types: Vec::new(),
@@ -257,6 +310,8 @@ pub fn lower_module(hir: &HirModule) -> Module {
         new_base: hir.funcs.len() as u32,
         core: hir.core,
         string_builder_class: hir.core_roles[lm_bytecode::corepin::ROLE_STRING_BUILDER],
+        function_slots,
+        class_slots,
     };
     // The canonical primitive prefix required by the verifier.
     m.intern_type(BcType::Unit);
@@ -422,7 +477,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
             class: cidx as u32,
         });
     }
-    Module {
+    let mut module = Module {
         strings: m.strings,
         types: m.types,
         selectors: m.selectors,
@@ -439,7 +494,76 @@ pub fn lower_module(hir: &HirModule) -> Module {
         entry: hir.entry as u32,
         exports,
         bindings,
+    };
+    for (function, selected) in &linkage.functions {
+        let func = module
+            .funcs
+            .get(*function as usize)
+            .ok_or_else(|| format!("late function {function} does not exist"))?;
+        if !func.captures.is_empty() {
+            return Err(format!("late function {function} has captures"));
+        }
+        let contract = BcCallableContract {
+            type_params: func.type_params,
+            effect_params: func.effect_params,
+            type_bounds: module.func_bounds[*function as usize].clone(),
+            params: func.params.clone(),
+            param_muts: func.param_muts.clone(),
+            ret: func.ret,
+            row: func.row.clone(),
+        };
+        module.slots.push(SlotSpec {
+            key: selected.key,
+            contract: match selected.kind {
+                LateCallableKind::Function => SlotContract::Function(contract),
+                LateCallableKind::Method => SlotContract::Method(contract),
+            },
+            initial: Some(SlotTarget::Function(*function)),
+        });
     }
+    let class_slot_start = module.slots.len();
+    for (class, key) in &linkage.classes {
+        let definition = module
+            .classes
+            .get(*class as usize)
+            .ok_or_else(|| format!("late class {class} does not exist"))?;
+        if definition.kind == BcClassKind::Abstract {
+            return Err(format!("late class {class} is abstract"));
+        }
+        let constructor = module
+            .funcs
+            .get(hir.funcs.len() + *class as usize)
+            .ok_or_else(|| format!("late class {class} has no constructor"))?;
+        let ty = constructor.ret;
+        match module.types.get(ty as usize) {
+            Some(BcType::Class(found)) if found == class => {}
+            Some(BcType::Inst(found, args))
+                if found == class && args.len() == definition.type_params as usize => {}
+            _ => return Err(format!("late class {class} has a native representation")),
+        }
+        module.slots.push(SlotSpec {
+            key: *key,
+            contract: SlotContract::Class {
+                type_params: definition.type_params,
+                abi: [0; 32],
+                ty,
+            },
+            initial: Some(SlotTarget::Class(*class)),
+        });
+    }
+    if !linkage.classes.is_empty() {
+        let identity = lm_bytecode::identity::module_identity(&module)
+            .map_err(|error| format!("late class identity failed: {error}"))?;
+        for (offset, class) in linkage.classes.keys().enumerate() {
+            let SlotContract::Class { abi, .. } =
+                &mut module.slots[class_slot_start + offset].contract
+            else {
+                unreachable!("the class slot range contains class contracts");
+            };
+            *abi = identity.class_hashes[*class as usize];
+        }
+    }
+    Ok(module)
 }
 
 struct Lowerer<'a, 'm> {
@@ -925,6 +1049,15 @@ impl<'a, 'm> Lowerer<'a, 'm> {
 
     /// Emit a direct call, generic when arguments are present.
     fn emit_call(&mut self, func: u32, targs: &[TypeId], rowargs: &[Row]) {
+        if let Some(slot) = self.m.function_slots.get(&func).copied() {
+            let app = if targs.is_empty() && rowargs.is_empty() {
+                NO_APP
+            } else {
+                self.m.app_of(targs, rowargs)
+            };
+            self.emit(extended(ExtendedInstr::CallSlot { slot, app }));
+            return;
+        }
         if targs.is_empty() && rowargs.is_empty() {
             self.emit(Instr::Call(func));
         } else {
@@ -2573,9 +2706,13 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
     let mut base_types = params.clone();
     base_types.push(self_bc);
     let mut lowerer = Lowerer::new(m, base_types);
-    match app {
-        None => lowerer.emit(Instr::New(cidx)),
-        Some(app) => lowerer.emit(Instr::NewG { class: cidx, app }),
+    match (lowerer.m.class_slots.get(&cidx).copied(), app) {
+        (Some(slot), app) => lowerer.emit(extended(ExtendedInstr::NewSlot {
+            slot,
+            app: app.unwrap_or(NO_APP),
+        })),
+        (None, None) => lowerer.emit(Instr::New(cidx)),
+        (None, Some(app)) => lowerer.emit(Instr::NewG { class: cidx, app }),
     }
     lowerer.emit(Instr::StoreLocal(self_slot));
     if class.ctor_kind == CtorKind::CaseFields {

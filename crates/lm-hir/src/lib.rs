@@ -23,8 +23,10 @@ pub use check::{check_module, check_module_with, CheckOptions, CORE_SOURCE};
 pub fn core_source_digest() -> [u8; 32] {
     lm_bytecode::hash::sha256(CORE_SOURCE.as_bytes())
 }
-pub use hir::dump_classes;
-pub use lower::lower_module;
+pub use hir::{dump_classes, HirImportDef, HirModule};
+pub use lower::{
+    lower_module, lower_module_with_linkage, LateCallable, LateCallableKind, LowerLinkage,
+};
 
 /// Render the lowered control-flow graph in a stable readable form.
 pub fn dump_cfg(module: &lm_bytecode::Module) -> String {
