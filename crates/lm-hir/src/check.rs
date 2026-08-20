@@ -351,6 +351,7 @@ pub(crate) fn sys_group_name(name: &str) -> Option<&'static str> {
         "dns" => Some("Dns"),
         "tcp" => Some("Tcp"),
         "tls" => Some("Tls"),
+        "choose" => Some("Choose"),
         _ => None,
     }
 }

@@ -796,10 +796,17 @@ go()
         .expect("the callback creates an image");
     assert_eq!(image.world().machines[0].callbacks.len(), 1);
 
-    let admitted = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
-        .expect("the callback image loads");
+    let admitted = codec::load_external(
+        image.bytes().expect("the image encodes"),
+        &loaded,
+        LoadLimits::default(),
+    )
+    .expect("the callback image loads");
     let encoded = codec::encode(admitted.world(), usize::MAX).expect("the image encodes");
-    assert_eq!(encoded.as_slice(), image.bytes().as_ref());
+    assert_eq!(
+        encoded.as_slice(),
+        image.bytes().expect("the image encodes").as_ref()
+    );
 
     let mut fresh = World::new(
         &loaded,
@@ -837,10 +844,17 @@ table = {"a": 1, "b": 2}
     let image = world
         .capture_snapshot(gate, 0, false)
         .expect("the terminal view snapshot succeeds");
-    let admitted = codec::load_external(image.bytes(), &loaded, LoadLimits::default())
-        .expect("the view snapshot loads");
+    let admitted = codec::load_external(
+        image.bytes().expect("the image encodes"),
+        &loaded,
+        LoadLimits::default(),
+    )
+    .expect("the view snapshot loads");
     let encoded = codec::encode(admitted.world(), usize::MAX).expect("the image encodes");
-    assert_eq!(encoded.as_slice(), image.bytes().as_ref());
+    assert_eq!(
+        encoded.as_slice(),
+        image.bytes().expect("the image encodes").as_ref()
+    );
 
     let mut fresh = World::new(
         &loaded,

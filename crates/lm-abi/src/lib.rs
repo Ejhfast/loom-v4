@@ -29,7 +29,7 @@ pub use sha::{sha256, sha256_hex};
 /// waits and selectable drive and receive sources. Version 8 adds
 /// transparent effect sets and the DNS and TCP operations. Version 9
 /// adds the TLS client resource and its effect sets.
-pub const ABI_VERSION: u32 = 9;
+pub const ABI_VERSION: u32 = 10;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -43,7 +43,7 @@ pub type OpSlot = u32;
 /// list makes a namespace group. Its members are the operations whose
 /// `group` field names that group. A nonempty list can name exact
 /// operations or other groups.
-pub const GROUPS: [&str; 21] = [
+pub const GROUPS: [&str; 22] = [
     "Io",
     "Fs",
     "Clock",
@@ -65,6 +65,7 @@ pub const GROUPS: [&str; 21] = [
     "Tls.Stream",
     "Tls.Client",
     "Http.Client",
+    "Choose",
 ];
 
 const TCP_STREAM_MEMBERS: &[&str] = &[
@@ -92,7 +93,7 @@ const TLS_CLIENT_MEMBERS: &[&str] = &["Tls.Handshake", "Tls.Stream"];
 const HTTP_CLIENT_MEMBERS: &[&str] = &["Dns.Resolve", "Tcp.Client", "Tls.Client"];
 
 /// The explicit members of each group slot.
-pub const GROUP_MEMBERS: [&[&str]; 21] = [
+pub const GROUP_MEMBERS: [&[&str]; 22] = [
     &[],
     &[],
     &[],
@@ -114,6 +115,7 @@ pub const GROUP_MEMBERS: [&[&str]; 21] = [
     TLS_STREAM_MEMBERS,
     TLS_CLIENT_MEMBERS,
     HTTP_CLIENT_MEMBERS,
+    &[],
 ];
 
 /// One primitive manifest type.
@@ -1456,7 +1458,7 @@ pub const OP_TLS_CLOSE: OpSlot = 67;
 pub const OP_VM_SERVE_TLS_STREAM: OpSlot = 68;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 69] = [
+pub const OPS: [OpDef; 70] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -2094,6 +2096,30 @@ pub const OPS: [OpDef; 69] = [
         schema: "[T](Vm[T], PendingCall) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
+    // The search choice point of a driver. The operation has no host
+    // implementation, because no host can answer it: a choice point
+    // means something only to a driver that explores the branches.
+    // A table denies by default, so a program that performs it with no
+    // driver faults with `PolicyDenied`.
+    //
+    // The argument is the number of candidates, and the reply is the
+    // index of one candidate. The driver therefore reads one integer
+    // and writes one integer, and it never reads a guest value. One
+    // driver serves every searched program.
+    //
+    // A pending pick holds no host state, so it never blocks a
+    // capture. This is the property the whole design rests on: a
+    // driver captures the world at the choice point and restores one
+    // world for each candidate.
+    OpDef {
+        group: "Choose",
+        member: "Pick",
+        kind: OpKind::Fixed,
+        params: &[AbiType::INT],
+        reply: AbiType::INT,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -2366,6 +2392,15 @@ pub fn identity_of(name: &str, def: &OpDef) -> [u8; 32] {
 /// The digest of the full manifest: version, groups, and every
 /// operation identity in slot order.
 pub fn manifest_digest() -> [u8; 32] {
+    static CACHE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(manifest_digest_uncached)
+}
+
+/// The digest, computed from the compiled tables.
+///
+/// The manifest is compile-time data, so the digest never changes in
+/// one process. The caller above computes it once.
+fn manifest_digest_uncached() -> [u8; 32] {
     validate_manifest().expect("the compiled operation manifest is valid");
     let identities: Vec<[u8; 32]> = (0..OP_COUNT).map(op_identity).collect();
     manifest_digest_of(&identities)

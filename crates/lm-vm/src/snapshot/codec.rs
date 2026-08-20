@@ -99,7 +99,7 @@ pub fn container_hash(prefix: &[u8]) -> [u8; 32] {
     lm_graph::digest::hash_parts(&[HASH_DOMAIN, prefix])
 }
 
-fn stored_container_hash(bytes: &[u8]) -> [u8; 32] {
+pub(super) fn stored_container_hash(bytes: &[u8]) -> [u8; 32] {
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&bytes[bytes.len() - 32..]);
     hash
@@ -534,6 +534,11 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.leb(image.len() as u64);
             out.bytes.extend_from_slice(image);
         }
+        // A captured world states the bytes of a nested image, so the
+        // writer resolves every live handle before it encodes
+        // (`build_machine`). An encoder that meets one here writes an
+        // empty container, and admission then rejects the image.
+        Object::NativeSnapshotRef { .. } => out.leb(0),
         Object::NativeFileHandle { resource } => out.u64(*resource),
         Object::NativeResourceHandle { surface, resource } => {
             out.leb(*surface as u64);
@@ -978,11 +983,12 @@ pub fn load_external(
     })?;
     owned.extend_from_slice(bytes);
     Ok(SnapshotImage {
-        bytes: std::sync::Arc::new(owned),
+        bytes: std::sync::OnceLock::from(std::sync::Arc::new(owned)),
         world: std::sync::Arc::new(image),
-        hash,
+        hash: std::sync::OnceLock::from(hash),
         identity,
         origin: Origin::ExternalContainer,
+        byte_limit: usize::MAX,
     })
 }
 
@@ -993,19 +999,30 @@ pub fn load_external(
 /// (specification section 7.2). The constructor stays inside the
 /// snapshot module, so no host code can promote an arbitrary image
 /// through it.
+/// The capture writes no container. A restore reads the admitted
+/// world, so an in-process capture and restore copy no bytes. The
+/// container appears at the first call that needs it.
+///
+/// The byte limit still answers at the capture. The check reads the
+/// resident size of the world, which counts the same machines,
+/// objects, frames, and tables the container states. A world past the
+/// limit therefore reports `LimitExceeded` here, and the container
+/// check repeats the limit when the bytes appear.
 pub(super) fn from_trusted_capture(
     image: Image,
     identity: super::AdmissionIdentity,
     limit: usize,
 ) -> Result<SnapshotImage, SnapshotFail> {
-    let bytes = encode(&image, limit)?;
-    let hash = stored_container_hash(&bytes);
+    if image.resident_bytes() > limit {
+        return Err(SnapshotFail::LimitExceeded);
+    }
     Ok(SnapshotImage {
-        bytes: std::sync::Arc::new(bytes),
+        bytes: std::sync::OnceLock::new(),
         world: std::sync::Arc::new(image),
-        hash,
+        hash: std::sync::OnceLock::new(),
         identity,
         origin: Origin::TrustedCapture,
+        byte_limit: limit,
     })
 }
 
@@ -1035,11 +1052,12 @@ pub(super) fn seal_admitted(
     })?;
     let hash = stored_container_hash(&bytes);
     Ok(SnapshotImage {
-        bytes: std::sync::Arc::new(bytes),
+        bytes: std::sync::OnceLock::from(std::sync::Arc::new(bytes)),
         world: std::sync::Arc::new(image),
-        hash,
+        hash: std::sync::OnceLock::from(hash),
         identity,
         origin: Origin::ExternalContainer,
+        byte_limit: limit,
     })
 }
 

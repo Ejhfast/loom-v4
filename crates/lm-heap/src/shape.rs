@@ -300,6 +300,13 @@ pub enum Object {
     /// share the storage. Specification 16.1 permits that, because no
     /// program can observe the difference.
     NativeSnapshot(std::sync::Arc<Vec<u8>>),
+    /// A holder-local handle to one admitted image of this world.
+    ///
+    /// A live heap holds this shape. The image itself lives in the
+    /// world, so a capture and a restore of the same image copy no
+    /// bytes. A captured world holds `NativeSnapshot` instead,
+    /// because a container states its own bytes.
+    NativeSnapshotRef { image: u32 },
     /// A file resource designator. Zero marks a closed handle.
     NativeFileHandle { resource: u64 },
     /// A holder-local control for one file resource.
@@ -507,6 +514,19 @@ const SHAPE_SNAPSHOT: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_SNAPSHOT_REF: ShapeDesc = ShapeDesc {
+    name: "SnapshotRef",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    // The slot names one admitted image of the world that holds the
+    // heap. Every machine of one world reads the same table, so the
+    // value crosses a boundary inside that world.
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 const SHAPE_BYTES: ShapeDesc = ShapeDesc {
     name: "Bytes",
     has_refs: false,
@@ -589,7 +609,7 @@ const SHAPE_TLS_STREAM: ShapeDesc = ShapeDesc {
 
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 24] = [
+pub const SHAPES: [&ShapeDesc; 25] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -614,6 +634,7 @@ pub const SHAPES: [&ShapeDesc; 24] = [
     &SHAPE_TCP_STREAM,
     &SHAPE_TCP_LISTENER,
     &SHAPE_TLS_STREAM,
+    &SHAPE_SNAPSHOT_REF,
 ];
 
 impl Object {
@@ -720,6 +741,7 @@ impl Object {
                 generation: *generation,
             },
             Object::NativeSnapshot(image) => Object::NativeSnapshot(image.clone()),
+            Object::NativeSnapshotRef { image } => Object::NativeSnapshotRef { image: *image },
             Object::NativeFileHandle { resource } => Object::NativeFileHandle {
                 resource: *resource,
             },
@@ -773,6 +795,7 @@ impl Object {
             Object::NativeTcpStream { .. } => 21,
             Object::NativeTcpListener { .. } => 22,
             Object::NativeTlsStream { .. } => 23,
+            Object::NativeSnapshotRef { .. } => 24,
         }
     }
 
@@ -816,6 +839,7 @@ impl Object {
                 Object::NativeFault { message, .. } => message.len(),
                 Object::NativeDigest(bytes) => bytes.len(),
                 Object::NativeSnapshot(image) => image.len(),
+                Object::NativeSnapshotRef { .. } => VALUE_COST,
             }
     }
 
@@ -864,6 +888,7 @@ impl Object {
             | Object::NativeDigest(_)
             | Object::NativeHandle { .. }
             | Object::NativeSnapshot(_)
+            | Object::NativeSnapshotRef { .. }
             | Object::Bytes(_)
             | Object::NativeFileHandle { .. }
             | Object::NativeResourceHandle { .. }
@@ -912,6 +937,7 @@ impl Object {
             },
             // The bytes never change, so the copy shares the storage.
             Object::NativeSnapshot(image) => Object::NativeSnapshot(image.clone()),
+            Object::NativeSnapshotRef { image } => Object::NativeSnapshotRef { image: *image },
             Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
             Object::NativeFileHandle { resource } => Object::NativeFileHandle {
                 resource: *resource,
@@ -979,7 +1005,8 @@ impl Object {
             | Object::NativeFault { .. }
             | Object::NativeDigest(_)
             | Object::NativeHandle { .. }
-            | Object::NativeSnapshot(_) => return None,
+            | Object::NativeSnapshot(_)
+            | Object::NativeSnapshotRef { .. } => return None,
             Object::Bytes(_)
             | Object::NativeFileHandle { .. }
             | Object::NativeTcpStream { .. }
@@ -1144,6 +1171,7 @@ mod tests {
             Object::NativeTcpStream { resource: 5 },
             Object::NativeTcpListener { resource: 6 },
             Object::NativeTlsStream { resource: 7 },
+            Object::NativeSnapshotRef { image: 3 },
         ]
     }
 
@@ -1308,6 +1336,7 @@ mod tests {
             Object::NativeTcpStream { resource: 0 },
             Object::NativeTcpListener { resource: 0 },
             Object::NativeTlsStream { resource: 0 },
+            Object::NativeSnapshotRef { image: 0 },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1434,6 +1463,7 @@ mod tests {
                 "TcpStream",
                 "TcpListener",
                 "TlsStream",
+                "SnapshotRef",
             ]
         );
         // A builder holds a private mutable buffer.

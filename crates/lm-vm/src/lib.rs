@@ -57,6 +57,19 @@ pub enum Outcome {
 #[derive(Debug, Clone, Copy)]
 pub struct VmConfig {
     /// Instruction budget. Each instruction costs one unit.
+    ///
+    /// A program that serves forever is an ordinary program
+    /// (specification 7.2 declares `serve(): Never`), so a root
+    /// program takes no instruction cap it did not ask for. A caller
+    /// that runs code it does not trust states a bound.
+    ///
+    /// The default is the largest value, not the absence of a bound.
+    /// One machine retires about 445 million instructions each second
+    /// on the reference implementation, so the default lasts about
+    /// 1300 years of continuous execution. This is a lifetime budget
+    /// counting down; `Machine::exec_for_quantum` is the separate
+    /// per-call bound, and it is the mechanism a caller must use to
+    /// limit work it does not trust.
     pub fuel: u64,
     /// The largest frame-stack depth.
     pub max_frames: u32,
@@ -94,7 +107,7 @@ pub struct VmConfig {
 impl Default for VmConfig {
     fn default() -> VmConfig {
         VmConfig {
-            fuel: 1_000_000_000,
+            fuel: u64::MAX,
             max_frames: 65_536,
             max_stack_values: 4_194_304,
             heap_bytes: 64 << 20,
@@ -121,6 +134,10 @@ pub struct WorldLimits {
     /// The largest live host resource count.
     pub max_resources: usize,
     /// The instruction budget shared by all machines.
+    ///
+    /// The default is the largest value, for the reason
+    /// `VmConfig::fuel` states. An embedder that bounds one world
+    /// states a value.
     pub fuel: u64,
     /// The largest stored proc trace.
     pub max_trace_events: usize,
@@ -137,7 +154,7 @@ impl Default for WorldLimits {
             max_heap_bytes: 1 << 30,
             max_heap_objects: 1 << 24,
             max_resources: 1 << 16,
-            fuel: 1_000_000_000,
+            fuel: u64::MAX,
             max_trace_events: 1 << 20,
             max_cached_image_bytes: 256 << 20,
         }
@@ -210,7 +227,12 @@ pub struct LoadedModule {
     module: Module,
     dispatch: Vec<DispatchRow>,
     core: lm_bytecode::corepin::CoreLayout,
-    /// The verifier input hash. Loading computes it once for snapshot checks.
+    /// The verifier input hash.
+    ///
+    /// The hash covers the operation manifest and every semantic
+    /// table of the module, so one pass reads the whole program.
+    /// Snapshot capture and restore both read the hash, and a search
+    /// restores many worlds. Loading computes it once.
     verification: [u8; 32],
     /// The definition hash of every class and function.
     ///

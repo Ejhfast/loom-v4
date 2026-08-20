@@ -405,6 +405,11 @@ pub struct World<'m> {
     /// takes the same slot. Without the list, a loop of mocked
     /// performs grows the machine table without any bound.
     mock_free: Vec<VmId>,
+    /// Reclaimed machine slots, ready for the next child record.
+    ///
+    /// `collect_machines` fills this list. A slot here holds an empty
+    /// record whose generation already moved past the freed machine.
+    vm_free: Vec<VmId>,
     /// Suspended activation stacks, keyed by the machine the stack
     /// started from.
     ///
@@ -487,9 +492,24 @@ pub struct World<'m> {
     /// A byte budget bounds retained decoded graphs. It never rejects
     /// an image. An evicted image runs admission again at its next
     /// restore.
-    trusted: Vec<([u8; 32], crate::snapshot::SnapshotImage, usize)>,
+    /// The insertion order of the trusted cache, newest first. It
+    /// decides eviction alone; a lookup reads the index below.
+    trusted: std::collections::VecDeque<([u8; 32], crate::snapshot::SnapshotImage, usize)>,
+    /// The trusted cache by container hash.
+    ///
+    /// A restore of an in-process capture reaches this index once per
+    /// restored world, so the lookup must not scan the cache.
+    trusted_index: std::collections::HashMap<[u8; 32], crate::snapshot::SnapshotImage>,
     /// The canonical byte size charged by the trusted image cache.
     trusted_bytes: usize,
+    /// The admitted images this world holds, by slot.
+    ///
+    /// A guest snapshot value names a slot. A capture stores its
+    /// admitted world here and writes no container, so a restore of
+    /// that value copies no bytes.
+    images: Vec<Option<crate::snapshot::SnapshotImage>>,
+    /// Reclaimed image slots.
+    image_free: Vec<u32>,
     /// The last image a guest capture produced in this world.
     ///
     /// `lm snapshot save` writes it, so a program states in its own
@@ -609,6 +629,7 @@ impl<'m> World<'m> {
             core: loaded.core_layout(),
             machines: vec![root],
             mock_free: Vec::new(),
+            vm_free: Vec::new(),
             suspended: std::collections::BTreeMap::new(),
             scheduler_procs: ActiveProcs::new(1),
             schedule_events: ScheduleEvents::default(),
@@ -626,8 +647,11 @@ impl<'m> World<'m> {
             gate: 0,
             restored_any: false,
             checks: 0,
-            trusted: Vec::new(),
+            trusted: std::collections::VecDeque::new(),
+            trusted_index: std::collections::HashMap::new(),
             trusted_bytes: 0,
+            images: Vec::new(),
+            image_free: Vec::new(),
             last_image: None,
             check: crate::typecheck::BoundaryScratch::default(),
         }
@@ -960,10 +984,28 @@ impl<'m> World<'m> {
     /// charges it for guest code.
     pub fn new_child(&mut self, parent: VmId) -> Option<VmId> {
         let config = self.reserve_child(parent)?;
-        let id = self.machines.len() as VmId;
-        let machine = self.empty_machine(config, Some(parent), 0);
-        self.machines.push(machine);
-        Some(id)
+        Some(self.install_child(config, parent))
+    }
+
+    /// Install one new child record, in a free slot when one exists.
+    ///
+    /// A reclaimed slot keeps the generation the collector left, so a
+    /// key minted for the freed record names a dead machine and never
+    /// the new one.
+    pub(crate) fn install_child(&mut self, config: VmConfig, parent: VmId) -> VmId {
+        match self.vm_free.pop() {
+            Some(id) => {
+                let generation = self.machines[id as usize].generation;
+                self.machines[id as usize] = self.empty_machine(config, Some(parent), generation);
+                id
+            }
+            None => {
+                let id = self.machines.len() as VmId;
+                let machine = self.empty_machine(config, Some(parent), 0);
+                self.machines.push(machine);
+                id
+            }
+        }
     }
 
     /// The table grants that the declared row of one function names.
@@ -3797,14 +3839,16 @@ impl<'m> World<'m> {
         if !self.share_heap_budget() {
             return None;
         }
-        if !self.has_machine_room(1) || self.machines.try_reserve(1).is_err() {
+        if !self.can_reserve_child(parent) {
+            // A dead record still holds a slot and a budget unit. Free
+            // the dead records once, then answer the request again.
+            self.collect_machines();
+        }
+        if !self.can_reserve_child(parent) {
             return None;
         }
         let m = &mut self.machines[parent as usize];
         let budget = m.config.max_children;
-        if m.children >= budget {
-            return None;
-        }
         m.children += 1;
         let remaining = budget - m.children;
         Some(VmConfig {
@@ -3813,12 +3857,188 @@ impl<'m> World<'m> {
         })
     }
 
+    /// True when the parent can charge one more child right now.
+    fn can_reserve_child(&mut self, parent: VmId) -> bool {
+        if !self.has_machine_room(1) {
+            return false;
+        }
+        if self.vm_free.is_empty() && self.machines.try_reserve(1).is_err() {
+            return false;
+        }
+        let m = &self.machines[parent as usize];
+        m.children < m.config.max_children
+    }
+
     /// True when the machine table can add `count` records.
+    ///
+    /// A free slot takes a new record, so the count of live records
+    /// decides the limit, not the length of the table.
     pub(crate) fn has_machine_room(&self, count: usize) -> bool {
         self.machines
             .len()
+            .saturating_sub(self.vm_free.len())
+            .saturating_sub(self.mock_free.len())
             .checked_add(count)
             .is_some_and(|total| total <= self.budget.limits.max_machines as usize)
+    }
+
+    /// Reclaim every machine record that no live machine names.
+    ///
+    /// A machine is data (specification 1). A record that no live
+    /// machine names can never run again and can never be inspected,
+    /// so the world frees the record, returns the slot, and returns
+    /// the child budget to the parent. A driver that restores one
+    /// world for each branch of a search therefore pays for the
+    /// branches it still holds, not for every branch it ever built.
+    ///
+    /// The reachability walk is the walk a snapshot cut uses
+    /// (`machine_references`), so the live set here is the set a
+    /// capture would close over.
+    ///
+    /// The pass is conservative. It keeps every machine it cannot
+    /// prove dead: a machine on a live activation stack, a machine the
+    /// scheduler owns, a paused machine, a machine one barrier holds,
+    /// a machine that owns a host resource, and a machine that waits
+    /// on the host. A walk that fails frees nothing.
+    pub(crate) fn collect_machines(&mut self) -> usize {
+        let count = self.machines.len();
+        let mut free_slot = vec![false; count];
+        for id in self.vm_free.iter().chain(self.mock_free.iter()) {
+            free_slot[*id as usize] = true;
+        }
+        let mut live = vec![false; count];
+        let mut queue: Vec<VmId> = Vec::new();
+        let root = |live: &mut Vec<bool>, queue: &mut Vec<VmId>, vm: VmId| {
+            if (vm as usize) < count && !live[vm as usize] {
+                live[vm as usize] = true;
+                queue.push(vm);
+            }
+        };
+        for id in 0..count as VmId {
+            if free_slot[id as usize] {
+                continue;
+            }
+            let m = &self.machines[id as usize];
+            // A machine with no parent is the world root or one mock
+            // record. Neither takes part in the child budget.
+            //
+            // An empty record is a machine that no handle names yet.
+            // `Vm.New` allocates the record before it allocates the
+            // handle, and the embedding API hands one back before any
+            // guest value holds it. The pass keeps every such record,
+            // because it cannot tell a new one from an abandoned one.
+            if m.vm.parent.is_none()
+                || m.vm.state == MachineState::Empty
+                || m.active > 0
+                || m.owner != Ownership::Holder
+                || m.paused
+                || m.barrier.is_some()
+            {
+                root(&mut live, &mut queue, id);
+            }
+        }
+        for (holder, stack) in &self.suspended {
+            root(&mut live, &mut queue, *holder);
+            for act in &stack.activations {
+                root(&mut live, &mut queue, act.vm);
+                if let Some(reply) = act.reply_to {
+                    root(&mut live, &mut queue, reply);
+                }
+            }
+        }
+        for group in &self.gate_groups {
+            for member in &group.members {
+                root(&mut live, &mut queue, *member);
+            }
+        }
+        for bound in self.bound_resources.values() {
+            root(&mut live, &mut queue, bound.owner);
+        }
+        let mut head = 0;
+        while head < queue.len() {
+            let vm = queue[head];
+            head += 1;
+            if !self.is_live_machine(vm) {
+                continue;
+            }
+            let Ok(found) = self.machine_references(vm) else {
+                // The walk proved nothing, so the pass frees nothing.
+                return 0;
+            };
+            for target in found {
+                if (target as usize) < count && !live[target as usize] {
+                    live[target as usize] = true;
+                    queue.push(target);
+                }
+            }
+        }
+        let mut freed = 0;
+        for id in 0..count as VmId {
+            if live[id as usize] || free_slot[id as usize] {
+                continue;
+            }
+            let m = &self.machines[id as usize];
+            if m.active > 0
+                || m.owner != Ownership::Holder
+                || m.paused
+                || m.barrier.is_some()
+                || m.resources.live_count() > 0
+                || matches!(
+                    m.vm.state,
+                    MachineState::Running | MachineState::Waiting | MachineState::Blocked
+                )
+            {
+                continue;
+            }
+            let parent = m.vm.parent;
+            let generation = m.generation.wrapping_add(1);
+            self.machines[id as usize] = self.empty_machine(self.config, None, generation);
+            if let Some(up) = parent {
+                let record = &mut self.machines[up as usize];
+                record.children = record.children.saturating_sub(1);
+            }
+            self.vm_free.push(id);
+            freed += 1;
+        }
+        self.collect_images();
+        freed
+    }
+
+    /// Free every admitted image that no surviving machine names.
+    ///
+    /// A guest snapshot value names one slot of the image table. The
+    /// pass reads the surviving machines, so it runs after the
+    /// machine sweep and never frees an image a freed machine held.
+    fn collect_images(&mut self) {
+        if self.images.is_empty() {
+            return;
+        }
+        let mut used = vec![false; self.images.len()];
+        let mut free_slot = vec![false; self.machines.len()];
+        for id in self.vm_free.iter().chain(self.mock_free.iter()) {
+            free_slot[*id as usize] = true;
+        }
+        for id in 0..self.machines.len() as VmId {
+            if free_slot[id as usize] || !self.is_live_machine(id) {
+                continue;
+            }
+            let Ok(found) = self.image_references(id) else {
+                // The walk proved nothing, so the pass frees nothing.
+                return;
+            };
+            for slot in found {
+                if let Some(seen) = used.get_mut(slot as usize) {
+                    *seen = true;
+                }
+            }
+        }
+        for slot in 0..self.images.len() as u32 {
+            if used[slot as usize] || self.images[slot as usize].is_none() {
+                continue;
+            }
+            self.images[slot as usize] = None;
+            self.image_free.push(slot);
+        }
     }
 
     /// Attach the aggregate heap ledger before a second machine exists.
@@ -3952,16 +4172,17 @@ impl<'m> World<'m> {
                         return;
                     }
                 };
-                let child = self.machines.len() as VmId;
-                let machine = self.empty_machine(child_config, Some(vm), 0);
-                self.machines.push(machine);
+                let child = self.install_child(child_config, vm);
                 match self.machines[vm as usize].alloc(Object::NativeVm { vm: child }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
                     Err(code) => {
                         // No handle names the child, so the whole call
-                        // rolls back: the record goes and the parent
-                        // gets its reservation back.
-                        self.machines.pop();
+                        // rolls back: the record returns to the free
+                        // list and the parent gets its reservation back.
+                        let generation = self.machines[child as usize].generation;
+                        self.machines[child as usize] =
+                            self.empty_machine(self.config, None, generation);
+                        self.vm_free.push(child);
                         self.machines[vm as usize].children -= 1;
                         self.machines[vm as usize].set_fault(code, "", Some(op));
                     }
@@ -5286,10 +5507,14 @@ impl<'m> World<'m> {
     ) {
         let built = match result {
             Ok(image) => {
-                self.trust_image(&image);
+                // The guest value names the admitted world of this
+                // process. The capture therefore writes no container
+                // and hashes nothing, and a restore reads the world
+                // back with no decode and no lookup.
                 self.last_image = Some(image.clone());
+                let slot = self.intern_image(image);
                 self.machines[vm as usize]
-                    .alloc(Object::NativeSnapshot(image.bytes().clone()))
+                    .alloc(Object::NativeSnapshotRef { image: slot })
                     .and_then(|value| self.make_instance(vm, self.core.result_ok, vec![value]))
             }
             Err(crate::snapshot::SnapshotFail::Fault(code, message)) => {
@@ -5353,14 +5578,25 @@ impl<'m> World<'m> {
             self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is loaded");
             return;
         }
+        // A snapshot value takes one of two shapes. A capture of this
+        // process names an admitted image of this world, so the
+        // restore reads the world back with no decode, no hash, and
+        // no lookup. A restored world states an opaque container
+        // instead, because a nested image stays opaque until its own
+        // restore admits it (specification 17.8).
+        enum Held {
+            Admitted(u32),
+            Container(std::sync::Arc<Vec<u8>>),
+        }
         let found =
             args[1]
                 .as_obj()
                 .and_then(|r| match self.machines[vm as usize].vm.heap.get(r) {
-                    Object::NativeSnapshot(image) => Some(image.clone()),
+                    Object::NativeSnapshotRef { image } => Some(Held::Admitted(*image)),
+                    Object::NativeSnapshot(bytes) => Some(Held::Container(bytes.clone())),
                     _ => None,
                 });
-        let Some(bytes) = found else {
+        let Some(held) = found else {
             self.fault_caller(
                 vm,
                 op,
@@ -5369,30 +5605,46 @@ impl<'m> World<'m> {
             );
             return;
         };
-        if bytes.len() < 32 {
-            self.fault_caller(
-                vm,
-                op,
-                FaultCode::BoundaryViolation,
-                "the snapshot container is shorter than its frame",
-            );
-            return;
-        }
-        let hash = crate::snapshot::codec::container_hash(&bytes[..bytes.len() - 32]);
-        let image = match self.trusted_image(&hash) {
-            Some(image) => image,
-            None => match self.load_snapshot_bytes(&bytes) {
-                Ok(image) => image,
-                Err(error) => {
+        let image = match held {
+            Held::Admitted(slot) => match self.image_at(slot) {
+                Some(image) => image,
+                None => {
                     self.fault_caller(
                         vm,
                         op,
-                        FaultCode::BoundaryViolation,
-                        &format!("the snapshot image did not load: {error}"),
+                        FaultCode::MalformedState,
+                        "the snapshot value names no admitted image",
                     );
                     return;
                 }
             },
+            Held::Container(bytes) => {
+                if bytes.len() < 32 {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::BoundaryViolation,
+                        "the snapshot container is shorter than its frame",
+                    );
+                    return;
+                }
+                let hash = crate::snapshot::codec::container_hash(&bytes[..bytes.len() - 32]);
+                match self.trusted_image(&hash) {
+                    Some(image) => image,
+                    None => match self.load_snapshot_bytes(&bytes) {
+                        Ok(image) => image,
+                        Err(error) => {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::BoundaryViolation,
+                                &format!("the snapshot image did not load: {error}"),
+                            );
+                            return;
+                        }
+                    },
+                }
+            }
         };
         // The admitted state names the program it passed against. This
         // world runs one program, so a mismatch is a local fault, not
@@ -7767,9 +8019,13 @@ impl<'m> World<'m> {
     }
 
     /// Remember one admitted image of this world.
+    /// The cache answers the external byte path alone. An in-process
+    /// capture names its image by slot, so it never reaches this.
     pub fn trust_image(&mut self, image: &crate::snapshot::SnapshotImage) {
-        let hash = image.hash();
-        if self.trusted.iter().any(|(held, _, _)| *held == hash) {
+        let Ok(hash) = image.hash() else {
+            return;
+        };
+        if self.trusted_index.contains_key(&hash) {
             return;
         }
         let bytes = image.resident_bytes();
@@ -7782,21 +8038,20 @@ impl<'m> World<'m> {
             .checked_add(bytes)
             .is_none_or(|total| total > limit)
         {
-            let Some((_, _, removed)) = self.trusted.pop() else {
+            let Some((evicted, _, removed)) = self.trusted.pop_back() else {
                 break;
             };
+            self.trusted_index.remove(&evicted);
             self.trusted_bytes = self.trusted_bytes.saturating_sub(removed);
         }
-        self.trusted.insert(0, (hash, image.clone(), bytes));
+        self.trusted_index.insert(hash, image.clone());
+        self.trusted.push_front((hash, image.clone(), bytes));
         self.trusted_bytes += bytes;
     }
 
     /// The admitted image with this container hash.
     fn trusted_image(&self, hash: &[u8; 32]) -> Option<crate::snapshot::SnapshotImage> {
-        self.trusted
-            .iter()
-            .find(|(held, _, _)| held == hash)
-            .map(|(_, image, _)| image.clone())
+        self.trusted_index.get(hash).cloned()
     }
 
     /// Install one external snapshot container into this world.
@@ -7898,6 +8153,31 @@ impl<'m> World<'m> {
         if let Some(Block::Snapshot { target, .. }) = self.machines[vm as usize].vm.block {
             if !out.contains(&target) {
                 out.push(target);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every admitted image slot one machine names in its reachable
+    /// state.
+    ///
+    /// A live heap names an image through one shape. The walk is the
+    /// walk `machine_references` uses, so the two report the same
+    /// reachable object set.
+    pub(crate) fn image_references(&mut self, vm: VmId) -> Result<Vec<u32>, FaultCode> {
+        let roots = self.machines[vm as usize].snapshot_roots();
+        let limits = self.machines[vm as usize].config.graph;
+        let order = {
+            let m = &mut self.machines[vm as usize];
+            lm_graph::snapshot_ordinals(&mut m.vm.heap, &roots, &limits)?
+        };
+        let heap = &self.machines[vm as usize].vm.heap;
+        let mut out: Vec<u32> = Vec::new();
+        for r in order {
+            if let Object::NativeSnapshotRef { image } = heap.get(r) {
+                if !out.contains(image) {
+                    out.push(*image);
+                }
             }
         }
         Ok(out)
@@ -8025,14 +8305,40 @@ impl<'m> World<'m> {
         self.loaded.identity()
     }
 
+    /// Store one admitted image in the world table and name its slot.
+    ///
+    /// A guest snapshot value names a slot here. The table therefore
+    /// holds the admitted world of every snapshot a guest still names,
+    /// and nothing else.
+    pub(crate) fn intern_image(&mut self, image: crate::snapshot::SnapshotImage) -> u32 {
+        match self.image_free.pop() {
+            Some(slot) => {
+                self.images[slot as usize] = Some(image);
+                slot
+            }
+            None => {
+                self.images.push(Some(image));
+                (self.images.len() - 1) as u32
+            }
+        }
+    }
+
+    /// The admitted image one slot names.
+    pub(crate) fn image_at(&self, slot: u32) -> Option<crate::snapshot::SnapshotImage> {
+        self.images.get(slot as usize).and_then(|e| e.clone())
+    }
+
+    /// The verification hash of the loaded program.
+    ///
+    /// Snapshot capture and restore both name the program by this
+    /// hash. The module computes it once (`LoadedModule`).
+    pub(crate) fn verification_hash(&self) -> [u8; 32] {
+        self.loaded.verification_hash()
+    }
+
     /// The loaded program.
     pub fn module(&self) -> &Module {
         self.module
-    }
-
-    /// The hash of every verified input in the loaded program.
-    pub(crate) fn verification_hash(&self) -> [u8; 32] {
-        self.loaded.verification_hash()
     }
 
     /// The resource limits of one machine.
@@ -8631,6 +8937,9 @@ impl<'m> World<'m> {
                     }
                     Object::NativeSnapshot(image) => {
                         format!("<snapshot {} bytes>", image.len())
+                    }
+                    Object::NativeSnapshotRef { image } => {
+                        format!("<snapshot {image}>")
                     }
                     Object::NativeWait { owner, token } => {
                         format!("<wait {token} of machine {owner}>")

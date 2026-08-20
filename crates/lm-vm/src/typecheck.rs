@@ -327,7 +327,7 @@ fn kind_of(object: &Object) -> Kind {
         Object::NativeTable { .. } => Kind::PolicyTable,
         Object::NativeVm { .. } => Kind::Vm,
         Object::NativeDigest(_) => Kind::Digest,
-        Object::NativeSnapshot(_) => Kind::Snapshot,
+        Object::NativeSnapshot(_) | Object::NativeSnapshotRef { .. } => Kind::Snapshot,
         Object::NativeCall { .. } => Kind::PendingCall,
         Object::NativeHandle { .. } => Kind::Handle,
         Object::Closure { .. } => Kind::Closure,
