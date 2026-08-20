@@ -69,6 +69,14 @@ pub(crate) struct VmImageKey {
 /// An append-only function slot in one VM code store.
 pub type FunctionVersionId = u32;
 
+/// The current target of one late-bound slot in a VM image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageSlotTarget {
+    Empty,
+    Function(FunctionVersionId),
+    Class(u32),
+}
+
 /// The lifecycle state of one machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineState {
@@ -2858,6 +2866,7 @@ impl Machine {
         &mut self,
         module: &Module,
         envs: &mut TypeEnvs,
+        slots: Option<&[ImageSlotTarget]>,
         instr: ExtendedInstr,
     ) -> Result<(), FaultCode> {
         match instr {
@@ -2945,6 +2954,50 @@ impl Machine {
             ExtendedInstr::MapReserve => {
                 self.exec_collection_extension(module, envs, CollectionExtensionOp::MapReserve)?;
             }
+            ExtendedInstr::CallSlot { slot, app } => {
+                let target = match slots.and_then(|slots| slots.get(slot as usize)) {
+                    Some(ImageSlotTarget::Function(target)) => *target,
+                    Some(ImageSlotTarget::Empty) => return Err(FaultCode::InvalidVmState),
+                    _ => return Err(BAD_STATE),
+                };
+                if app == lm_bytecode::NO_APP {
+                    let argc = module
+                        .funcs
+                        .get(target as usize)
+                        .ok_or(BAD_STATE)?
+                        .params
+                        .len();
+                    self.push_frame(module, target, argc, None, TypeEnvId::EMPTY)?;
+                } else {
+                    self.call_generic(module, envs, target, app)?;
+                }
+            }
+            ExtendedInstr::NewSlot { slot, app } => {
+                let class = match slots.and_then(|slots| slots.get(slot as usize)) {
+                    Some(ImageSlotTarget::Class(class)) => *class,
+                    Some(ImageSlotTarget::Empty) => return Err(FaultCode::InvalidVmState),
+                    _ => return Err(BAD_STATE),
+                };
+                let value = if app == lm_bytecode::NO_APP {
+                    let field_count = module
+                        .classes
+                        .get(class as usize)
+                        .ok_or(BAD_STATE)?
+                        .fields
+                        .len();
+                    self.alloc(Object::Instance {
+                        class,
+                        fields: vec![Value::Uninit; field_count],
+                        env: Witness::EMPTY,
+                    })?
+                } else {
+                    self.new_generic(module, envs, class, app)?
+                };
+                self.push(value)?;
+            }
+            ExtendedInstr::LoadSlot { .. } | ExtendedInstr::SendSlot { .. } => {
+                return Err(FaultCode::InvalidVmState);
+            }
         }
         Ok(())
     }
@@ -2960,6 +3013,7 @@ impl Machine {
         module: &Module,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
+        slots: Option<&[ImageSlotTarget]>,
         instr: Instr,
     ) -> Result<ExecOutcome, FaultCode> {
         if matches!(instr, Instr::Native(_)) {
@@ -3091,7 +3145,7 @@ impl Machine {
                 self.exec_interface_call(module, dispatch, envs, interface, method, recv_ty)?;
             }
             Instr::Extended(instr) => {
-                self.exec_extended(module, envs, instr)?;
+                self.exec_extended(module, envs, slots, instr)?;
             }
             Instr::EqRef => {
                 let b = self.pop_obj()?;
@@ -3509,6 +3563,7 @@ impl Machine {
         module: &Module,
         dispatch: &[crate::DispatchRow],
         envs: &mut TypeEnvs,
+        slots: Option<&[ImageSlotTarget]>,
         limit: u32,
     ) -> (Result<Option<ExecOutcome>, FaultCode>, u32) {
         debug_assert!(limit > 0);
@@ -3543,7 +3598,7 @@ impl Machine {
                 break Err(BAD_STATE);
             };
             frame.ip += 1;
-            match self.exec_instr(module, dispatch, envs, instr) {
+            match self.exec_instr(module, dispatch, envs, slots, instr) {
                 Ok(ExecOutcome::Continue) => {}
                 outcome => break outcome,
             }

@@ -249,7 +249,7 @@ impl World {
     }
 
     /// Reserve one persistent VM image record.
-    fn new_vm_image(&mut self, holder: VmId) -> Option<VmImageKey> {
+    pub(super) fn new_vm_image(&mut self, holder: VmId) -> Option<VmImageKey> {
         let live = self
             .vm_images
             .len()
@@ -265,10 +265,20 @@ impl World {
             return None;
         }
         let config = self.machines.get(holder as usize)?.config;
+        let mut slots = Vec::new();
+        slots.try_reserve_exact(self.module.slots.len()).ok()?;
+        for slot in &self.module.slots {
+            slots.push(match slot.initial {
+                Some(lm_bytecode::SlotTarget::Function(func)) => ImageSlotTarget::Function(func),
+                Some(lm_bytecode::SlotTarget::Class(class)) => ImageSlotTarget::Class(class),
+                Some(lm_bytecode::SlotTarget::Process(_)) | None => ImageSlotTarget::Empty,
+            });
+        }
         if let Some(image) = self.vm_image_free.pop() {
             let record = &mut self.vm_images[image as usize];
             record.live = true;
             record.config = config;
+            record.slots = slots;
             return Some(VmImageKey {
                 image,
                 generation: record.generation,
@@ -280,6 +290,7 @@ impl World {
             generation: 0,
             live: true,
             config,
+            slots,
         });
         Some(VmImageKey {
             image,
@@ -298,6 +309,70 @@ impl World {
         record.live = false;
         record.generation = record.generation.wrapping_add(1);
         self.vm_image_free.push(key.image);
+    }
+
+    /// Replace one callable slot at an image safepoint.
+    #[allow(dead_code)]
+    pub(crate) fn replace_function_slot(
+        &mut self,
+        key: VmImageKey,
+        slot: u32,
+        target: u32,
+    ) -> Result<(), FaultCode> {
+        let live = self
+            .vm_images
+            .get(key.image as usize)
+            .is_some_and(|image| image.live && image.generation == key.generation);
+        if !live {
+            return Err(FaultCode::InvalidVmState);
+        }
+        if self
+            .machines
+            .iter()
+            .any(|machine| machine.image == Some(key) && machine.active > 0)
+        {
+            return Err(FaultCode::InvalidVmState);
+        }
+        let spec = self
+            .module
+            .slots
+            .get(slot as usize)
+            .ok_or(FaultCode::TypeMismatch)?;
+        let contract = match &spec.contract {
+            lm_bytecode::SlotContract::Function(contract)
+            | lm_bytecode::SlotContract::Method(contract) => contract,
+            _ => return Err(FaultCode::TypeMismatch),
+        };
+        let func = self
+            .module
+            .funcs
+            .get(target as usize)
+            .ok_or(FaultCode::TypeMismatch)?;
+        let bounds = self
+            .module
+            .func_bounds
+            .get(target as usize)
+            .ok_or(FaultCode::TypeMismatch)?;
+        let method_ok = !matches!(&spec.contract, lm_bytecode::SlotContract::Method(_))
+            || self
+                .module
+                .classes
+                .iter()
+                .any(|class| class.methods.iter().any(|(_, func)| *func == target));
+        if !method_ok
+            || !func.captures.is_empty()
+            || func.type_params != contract.type_params
+            || func.effect_params != contract.effect_params
+            || bounds != &contract.type_bounds
+            || func.params != contract.params
+            || func.param_muts != contract.param_muts
+            || func.ret != contract.ret
+            || func.row != contract.row
+        {
+            return Err(FaultCode::TypeMismatch);
+        }
+        self.vm_images[key.image as usize].slots[slot as usize] = ImageSlotTarget::Function(target);
+        Ok(())
     }
 
     /// Free every admitted image that no surviving machine names.

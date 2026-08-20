@@ -28,6 +28,8 @@ pub const CORE_MODULE: &str = "core";
 
 /// The sentinel for an unfilled core role slot.
 pub const NO_ROLE: u32 = u32::MAX;
+/// The sentinel for a slot instruction without a type application.
+pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
@@ -217,6 +219,53 @@ pub struct BcConformance {
     pub class: u32,
     pub application: BcInterfaceUse,
     pub associated: Vec<u32>,
+}
+
+/// One callable contract used by a late-bound slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BcCallableContract {
+    pub type_params: u32,
+    pub effect_params: u32,
+    pub type_bounds: Vec<Vec<BcInterfaceUse>>,
+    pub params: Vec<u32>,
+    pub param_muts: Vec<bool>,
+    pub ret: u32,
+    pub row: Vec<BcRow>,
+}
+
+/// The immutable contract of one late-bound VM slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotContract {
+    Function(BcCallableContract),
+    Method(BcCallableContract),
+    Class {
+        type_params: u32,
+        abi: [u8; 32],
+        ty: u32,
+    },
+    Value {
+        ty: u32,
+    },
+    Process {
+        message: u32,
+        result: u32,
+    },
+}
+
+/// One portable initial target for a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotTarget {
+    Function(u32),
+    Class(u32),
+    Process(u32),
+}
+
+/// One portable late-binding declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotSpec {
+    pub key: [u8; 32],
+    pub contract: SlotContract,
+    pub initial: Option<SlotTarget>,
 }
 
 impl BcClass {
@@ -509,6 +558,14 @@ pub enum ExtendedInstr {
     MapClear,
     /// Pop an additional capacity and a map. Reserve that capacity.
     MapReserve,
+    /// Call the current function target of one VM slot.
+    CallSlot { slot: u32, app: u32 },
+    /// Allocate the current class target of one VM slot.
+    NewSlot { slot: u32, app: u32 },
+    /// Load the current value target of one VM slot.
+    LoadSlot { slot: u32 },
+    /// Send through the current process target of one VM slot.
+    SendSlot { slot: u32 },
 }
 
 /// One native value instruction.
@@ -892,6 +949,8 @@ pub struct Module {
     /// The import slots, in declaration order. An empty table marks a
     /// linked module, which is the only kind the loader admits.
     pub imports: Vec<Import>,
+    /// Portable late-binding contracts in dense module order.
+    pub slots: Vec<SlotSpec>,
     /// The stable core role slots: one class index per role, or
     /// `NO_ROLE`. The compiler fills the table, the linker relocates
     /// it, and the verifier proves the shape of every filled slot.
@@ -972,8 +1031,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// 24 is the first that carries them together.
 /// Version 30 adds the static receiver type to `Digest`. Version 31
 /// splits persistent VM images from typed runs. Version 32 renames the
-/// two guest snapshot types.
-pub const VERSION: u16 = 32;
+/// two guest snapshot types. Version 33 adds late-bound slot tables
+/// and four specialized slot instructions.
+pub const VERSION: u16 = 33;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1155,6 +1215,10 @@ const OP_MAKE_CALLBACK: u8 = 0xcf;
 const OP_AS_CALLBACK: u8 = 0xd0;
 const OP_OPTION_PAYLOAD: u8 = 0xd1;
 const OP_LIST_REORDER: u8 = 0xd2;
+const OP_CALL_SLOT: u8 = 0xd3;
+const OP_NEW_SLOT: u8 = 0xd4;
+const OP_LOAD_SLOT: u8 = 0xd5;
+const OP_SEND_SLOT: u8 = 0xd6;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1194,6 +1258,12 @@ const ROW_VAR: u8 = 1;
 const KIND_NORMAL: u8 = 0;
 const KIND_ABSTRACT: u8 = 1;
 const KIND_CASE: u8 = 2;
+
+const SLOT_FUNCTION: u8 = 0;
+const SLOT_METHOD: u8 = 1;
+const SLOT_CLASS: u8 = 2;
+const SLOT_VALUE: u8 = 3;
+const SLOT_PROCESS: u8 = 4;
 
 /// Encode a module into the sectioned container form.
 ///
@@ -1319,6 +1389,26 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
         write_u32(&mut out, import.def);
         out.extend_from_slice(&import.hash);
     }
+    write_u32(&mut out, module.slots.len() as u32);
+    for slot in &module.slots {
+        out.extend_from_slice(&slot.key);
+        encode_slot_contract(&mut out, &slot.contract);
+        match slot.initial {
+            None => out.push(0),
+            Some(SlotTarget::Function(func)) => {
+                out.push(1);
+                write_u32(&mut out, func);
+            }
+            Some(SlotTarget::Class(class)) => {
+                out.push(2);
+                write_u32(&mut out, class);
+            }
+            Some(SlotTarget::Process(func)) => {
+                out.push(3);
+                write_u32(&mut out, func);
+            }
+        }
+    }
     // The core role table: one class index per stable role.
     for slot in &module.core_roles {
         write_u32(&mut out, *slot);
@@ -1383,6 +1473,54 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
     }
     write_u32(&mut out, module.entry);
     out
+}
+
+fn encode_callable_contract(out: &mut Vec<u8>, contract: &BcCallableContract) {
+    write_u32(out, contract.type_params);
+    write_u32(out, contract.effect_params);
+    encode_type_bounds(out, &contract.type_bounds);
+    write_u32(out, contract.params.len() as u32);
+    for param in &contract.params {
+        write_u32(out, *param);
+    }
+    write_u32(out, contract.param_muts.len() as u32);
+    for marker in &contract.param_muts {
+        out.push(u8::from(*marker));
+    }
+    write_u32(out, contract.ret);
+    encode_row(out, &contract.row);
+}
+
+fn encode_slot_contract(out: &mut Vec<u8>, contract: &SlotContract) {
+    match contract {
+        SlotContract::Function(callable) => {
+            out.push(SLOT_FUNCTION);
+            encode_callable_contract(out, callable);
+        }
+        SlotContract::Method(callable) => {
+            out.push(SLOT_METHOD);
+            encode_callable_contract(out, callable);
+        }
+        SlotContract::Class {
+            type_params,
+            abi,
+            ty,
+        } => {
+            out.push(SLOT_CLASS);
+            write_u32(out, *type_params);
+            out.extend_from_slice(abi);
+            write_u32(out, *ty);
+        }
+        SlotContract::Value { ty } => {
+            out.push(SLOT_VALUE);
+            write_u32(out, *ty);
+        }
+        SlotContract::Process { message, result } => {
+            out.push(SLOT_PROCESS);
+            write_u32(out, *message);
+            write_u32(out, *result);
+        }
+    }
 }
 
 /// Encode the export section: the definition names and the class
@@ -1915,6 +2053,33 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
         }
         ExtendedInstr::MapClear => out.push(OP_MAP_CLEAR),
         ExtendedInstr::MapReserve => out.push(OP_MAP_RESERVE),
+        ExtendedInstr::CallSlot { slot, app } => {
+            out.push(OP_CALL_SLOT);
+            write_u32(out, slot);
+            encode_optional_index(out, app);
+        }
+        ExtendedInstr::NewSlot { slot, app } => {
+            out.push(OP_NEW_SLOT);
+            write_u32(out, slot);
+            encode_optional_index(out, app);
+        }
+        ExtendedInstr::LoadSlot { slot } => {
+            out.push(OP_LOAD_SLOT);
+            write_u32(out, slot);
+        }
+        ExtendedInstr::SendSlot { slot } => {
+            out.push(OP_SEND_SLOT);
+            write_u32(out, slot);
+        }
+    }
+}
+
+fn encode_optional_index(out: &mut Vec<u8>, value: u32) {
+    if value == NO_APP {
+        out.push(0);
+    } else {
+        out.push(1);
+        write_u32(out, value);
     }
 }
 
@@ -1929,6 +2094,7 @@ pub enum DecodeError {
     BadTypeTag(u8),
     BadRowTag(u8),
     BadClassKind(u8),
+    BadSlot,
     /// A `mut` flag byte is not 0 or 1.
     BadFlag(u8),
     BadUtf8,
@@ -1966,6 +2132,7 @@ impl fmt::Display for DecodeError {
             DecodeError::BadTypeTag(t) => write!(f, "unknown type tag {t}"),
             DecodeError::BadRowTag(t) => write!(f, "unknown row element tag {t}"),
             DecodeError::BadClassKind(t) => write!(f, "unknown class kind tag {t}"),
+            DecodeError::BadSlot => write!(f, "a slot declaration is invalid"),
             DecodeError::BadFlag(v) => write!(f, "invalid flag byte {v}"),
             DecodeError::BadUtf8 => write!(f, "a string is not valid UTF-8"),
             DecodeError::BadLength => write!(f, "a length field exceeds the input size"),
@@ -2072,6 +2239,62 @@ fn decode_row(cur: &mut Cursor<'_>) -> Result<Vec<BcRow>, DecodeError> {
         row.push(elem);
     }
     Ok(row)
+}
+
+fn decode_callable_contract(cur: &mut Cursor<'_>) -> Result<BcCallableContract, DecodeError> {
+    let type_params = cur.u32()?;
+    let effect_params = cur.u32()?;
+    let type_bounds = decode_type_bounds(cur)?;
+    let count = cur.len()?;
+    if count > cur.remaining() / 4 {
+        return Err(DecodeError::BadLength);
+    }
+    let mut params = Vec::with_capacity(count);
+    for _ in 0..count {
+        params.push(cur.u32()?);
+    }
+    let marker_count = cur.len()?;
+    if marker_count != count {
+        return Err(DecodeError::MutMarkerCount);
+    }
+    let mut param_muts = Vec::with_capacity(marker_count);
+    for _ in 0..marker_count {
+        param_muts.push(cur.flag()?);
+    }
+    let ret = cur.u32()?;
+    let row = decode_row(cur)?;
+    Ok(BcCallableContract {
+        type_params,
+        effect_params,
+        type_bounds,
+        params,
+        param_muts,
+        ret,
+        row,
+    })
+}
+
+fn decode_slot_contract(cur: &mut Cursor<'_>) -> Result<SlotContract, DecodeError> {
+    Ok(match cur.u8()? {
+        SLOT_FUNCTION => SlotContract::Function(decode_callable_contract(cur)?),
+        SLOT_METHOD => SlotContract::Method(decode_callable_contract(cur)?),
+        SLOT_CLASS => {
+            let type_params = cur.u32()?;
+            let mut abi = [0u8; 32];
+            abi.copy_from_slice(cur.take(32)?);
+            SlotContract::Class {
+                type_params,
+                abi,
+                ty: cur.u32()?,
+            }
+        }
+        SLOT_VALUE => SlotContract::Value { ty: cur.u32()? },
+        SLOT_PROCESS => SlotContract::Process {
+            message: cur.u32()?,
+            result: cur.u32()?,
+        },
+        _ => return Err(DecodeError::BadSlot),
+    })
 }
 
 fn decode_interface_use(cur: &mut Cursor<'_>) -> Result<BcInterfaceUse, DecodeError> {
@@ -2393,6 +2616,25 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             hash,
         });
     }
+    let slot_count = cur.len()?;
+    let mut slots = Vec::with_capacity(slot_count);
+    for _ in 0..slot_count {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(cur.take(32)?);
+        let contract = decode_slot_contract(&mut cur)?;
+        let initial = match cur.u8()? {
+            0 => None,
+            1 => Some(SlotTarget::Function(cur.u32()?)),
+            2 => Some(SlotTarget::Class(cur.u32()?)),
+            3 => Some(SlotTarget::Process(cur.u32()?)),
+            _ => return Err(DecodeError::BadSlot),
+        };
+        slots.push(SlotSpec {
+            key,
+            contract,
+            initial,
+        });
+    }
     let mut core_roles = [NO_ROLE; CORE_ROLE_COUNT];
     for slot in &mut core_roles {
         *slot = cur.u32()?;
@@ -2545,6 +2787,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         class_bounds,
         func_bounds,
         imports,
+        slots,
         core_roles,
         classes,
         funcs,
@@ -2799,6 +3042,16 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_MAP_REMOVE => Instr::Extended(ExtendedInstr::MapRemove { ty: cur.u32()? }),
         OP_MAP_CLEAR => Instr::Extended(ExtendedInstr::MapClear),
         OP_MAP_RESERVE => Instr::Extended(ExtendedInstr::MapReserve),
+        OP_CALL_SLOT => Instr::Extended(ExtendedInstr::CallSlot {
+            slot: cur.u32()?,
+            app: decode_optional_index(cur)?,
+        }),
+        OP_NEW_SLOT => Instr::Extended(ExtendedInstr::NewSlot {
+            slot: cur.u32()?,
+            app: decode_optional_index(cur)?,
+        }),
+        OP_LOAD_SLOT => Instr::Extended(ExtendedInstr::LoadSlot { slot: cur.u32()? }),
+        OP_SEND_SLOT => Instr::Extended(ExtendedInstr::SendSlot { slot: cur.u32()? }),
         OP_SB_NEW => Instr::Native(NativeInstr::SbNew),
         OP_SB_APPEND_STR => Instr::Native(NativeInstr::SbAppendStr),
         OP_SB_APPEND_INT => Instr::Native(NativeInstr::SbAppendInt),
@@ -2873,6 +3126,14 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         other => return Err(DecodeError::BadOpcode(other)),
     };
     Ok(instr)
+}
+
+fn decode_optional_index(cur: &mut Cursor<'_>) -> Result<u32, DecodeError> {
+    if cur.flag()? {
+        Ok(cur.u32()?)
+    } else {
+        Ok(NO_APP)
+    }
 }
 
 #[cfg(test)]
@@ -2969,6 +3230,7 @@ mod tests {
                 },
             ],
             imports: vec![],
+            slots: vec![],
             core_roles: [NO_ROLE; CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
@@ -3009,6 +3271,55 @@ mod tests {
         let module = sample_module();
         let bytes = encode(&module);
         assert_eq!(decode(&bytes).unwrap(), module);
+    }
+
+    #[test]
+    fn every_slot_contract_round_trips() {
+        let callable = BcCallableContract {
+            type_params: 0,
+            effect_params: 0,
+            type_bounds: vec![],
+            params: vec![1],
+            param_muts: vec![false],
+            ret: 1,
+            row: vec![],
+        };
+        let mut module = sample_module();
+        module.slots = vec![
+            SlotSpec {
+                key: [1; 32],
+                contract: SlotContract::Function(callable.clone()),
+                initial: Some(SlotTarget::Function(0)),
+            },
+            SlotSpec {
+                key: [2; 32],
+                contract: SlotContract::Method(callable),
+                initial: Some(SlotTarget::Function(1)),
+            },
+            SlotSpec {
+                key: [3; 32],
+                contract: SlotContract::Class {
+                    type_params: 0,
+                    abi: [7; 32],
+                    ty: 3,
+                },
+                initial: Some(SlotTarget::Class(0)),
+            },
+            SlotSpec {
+                key: [4; 32],
+                contract: SlotContract::Value { ty: 1 },
+                initial: None,
+            },
+            SlotSpec {
+                key: [5; 32],
+                contract: SlotContract::Process {
+                    message: 2,
+                    result: 1,
+                },
+                initial: None,
+            },
+        ];
+        assert_eq!(decode(&encode(&module)).unwrap(), module);
     }
 
     #[test]
@@ -3123,6 +3434,18 @@ mod tests {
             Instr::Extended(ExtendedInstr::MapRemove { ty: 0 }),
             Instr::Extended(ExtendedInstr::MapClear),
             Instr::Extended(ExtendedInstr::MapReserve),
+            Instr::Extended(ExtendedInstr::CallSlot {
+                slot: 0,
+                app: NO_APP,
+            }),
+            Instr::Extended(ExtendedInstr::CallSlot { slot: 0, app: 0 }),
+            Instr::Extended(ExtendedInstr::NewSlot {
+                slot: 1,
+                app: NO_APP,
+            }),
+            Instr::Extended(ExtendedInstr::NewSlot { slot: 1, app: 0 }),
+            Instr::Extended(ExtendedInstr::LoadSlot { slot: 2 }),
+            Instr::Extended(ExtendedInstr::SendSlot { slot: 3 }),
             Instr::Native(NativeInstr::SbNew),
             Instr::Native(NativeInstr::SbAppendStr),
             Instr::Native(NativeInstr::SbAppendInt),
@@ -3207,6 +3530,7 @@ mod tests {
             classes: vec![],
             funcs: vec![],
             imports: vec![],
+            slots: vec![],
             core_roles: [NO_ROLE; CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],

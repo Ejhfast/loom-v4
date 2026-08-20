@@ -8,9 +8,9 @@ use super::{
     RestoreFail, SnapshotImage,
 };
 use crate::machine::{
-    Action, Block, CallbackDescriptor, CallbackSlot, FaultRec, Frame, FrameCapture, Machine,
-    MachineState, Mailbox, Ownership, Pending, PolicyCursor, RoutedRequest, Terminal, VmId,
-    VmImageKey, WaitEntry, WaitSource,
+    Action, Block, CallbackDescriptor, CallbackSlot, FaultRec, Frame, FrameCapture,
+    ImageSlotTarget as RuntimeSlotTarget, Machine, MachineState, Mailbox, Ownership, Pending,
+    PolicyCursor, RoutedRequest, Terminal, VmId, VmImageKey, WaitEntry, WaitSource,
 };
 use crate::world::{VmImageRecord, World};
 use crate::VmConfig;
@@ -29,6 +29,13 @@ pub(crate) struct RestorePlan {
     gate_members: Vec<VmId>,
     image_records: Vec<(u32, VmImageRecord)>,
     image_appended: usize,
+}
+
+/// Portable image records prepared before restore commit.
+struct PreparedImages {
+    keys: Vec<VmImageKey>,
+    records: Vec<(u32, VmImageRecord)>,
+    appended: usize,
 }
 
 impl World {
@@ -112,8 +119,7 @@ impl World {
         self.prepare_gate_group()
             .map_err(|_| RestoreFail::LimitExceeded)?;
 
-        let (image_keys, image_records, image_appended) =
-            self.prepare_image_import(target, image)?;
+        let prepared_images = self.prepare_image_import(target, image)?;
 
         let types = self
             .envs
@@ -162,7 +168,14 @@ impl World {
         let mut machines = try_vec(count)?;
         for (ordinal, source) in image.machines.iter().enumerate() {
             let mut machine = self.empty_machine(configs[ordinal], None, source.generation);
-            let refs = restore_heap(&mut machine, source, &ids, &image_keys, env_map, type_map)?;
+            let refs = restore_heap(
+                &mut machine,
+                source,
+                &ids,
+                &prepared_images.keys,
+                env_map,
+                type_map,
+            )?;
             restore_state(
                 &mut machine,
                 source,
@@ -175,7 +188,9 @@ impl World {
                 gate,
                 child_counts[ordinal],
             )?;
-            machine.image = source.image.map(|image| image_keys[image as usize]);
+            machine.image = source
+                .image
+                .map(|image| prepared_images.keys[image as usize]);
             machines.push(machine);
         }
         if let Some(target_image) = self.machines[target as usize].image {
@@ -190,8 +205,8 @@ impl World {
             child_charge,
             gate,
             gate_members: ids,
-            image_records,
-            image_appended,
+            image_records: prepared_images.records,
+            image_appended: prepared_images.appended,
         })
     }
 
@@ -200,7 +215,7 @@ impl World {
         &mut self,
         target: VmId,
         image: &crate::snapshot::Image,
-    ) -> Result<(Vec<VmImageKey>, Vec<(u32, VmImageRecord)>, usize), RestoreFail> {
+    ) -> Result<PreparedImages, RestoreFail> {
         let target_key = self.machines[target as usize].image;
         let reused_source = target_key.and_then(|_| image.machines[0].image);
         let new_count = image
@@ -245,16 +260,29 @@ impl World {
                 generation,
             };
             keys.push(key);
+            let mut slots = try_vec(source.slots.len())?;
+            for target in &source.slots {
+                slots.push(match target {
+                    super::ImageSlotTarget::Empty => RuntimeSlotTarget::Empty,
+                    super::ImageSlotTarget::Function(func) => RuntimeSlotTarget::Function(*func),
+                    super::ImageSlotTarget::Class(class) => RuntimeSlotTarget::Class(*class),
+                });
+            }
             records.push((
                 slot,
                 VmImageRecord {
                     generation,
                     live: true,
                     config: clamp_image(&source.limits, ceiling),
+                    slots,
                 },
             ));
         }
-        Ok((keys, records, appended))
+        Ok(PreparedImages {
+            keys,
+            records,
+            appended,
+        })
     }
 
     /// Install one prepared restore without an allocation.

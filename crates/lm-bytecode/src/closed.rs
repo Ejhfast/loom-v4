@@ -1324,6 +1324,7 @@ mod tests {
             class_bounds: vec![vec![]],
             func_bounds: vec![vec![]],
             imports: vec![],
+            slots: vec![],
             core_roles: [crate::NO_ROLE; crate::CORE_ROLE_COUNT],
             classes: vec![BcClass {
                 name: "C".to_string(),

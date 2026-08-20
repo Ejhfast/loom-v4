@@ -26,6 +26,7 @@ fn importing_module(pin: [u8; 32]) -> Module {
             def: 0,
             hash: pin,
         }],
+        slots: vec![],
         classes: vec![],
         funcs: vec![
             Func {

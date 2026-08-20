@@ -432,6 +432,7 @@ pub fn lower_module(hir: &HirModule) -> Module {
         class_bounds,
         func_bounds,
         imports,
+        slots: Vec::new(),
         core_roles: hir.core_roles,
         classes,
         funcs,
@@ -2802,11 +2803,11 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
                 .len();
             (argc + 1, 1)
         }
-        Instr::Extended(instr) => extended_stack_effect(instr),
+        Instr::Extended(instr) => extended_stack_effect(module, instr),
     }
 }
 
-fn extended_stack_effect(instr: &ExtendedInstr) -> (usize, usize) {
+fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usize) {
     match instr {
         ExtendedInstr::OptionNone { .. } => (0, 1),
         ExtendedInstr::OptionSome { .. }
@@ -2833,6 +2834,16 @@ fn extended_stack_effect(instr: &ExtendedInstr) -> (usize, usize) {
         | ExtendedInstr::MapReserve => (2, 1),
         ExtendedInstr::ListSet | ExtendedInstr::ListInsert => (3, 1),
         ExtendedInstr::MakeCallback { captures, .. } => (*captures as usize, 1),
+        ExtendedInstr::CallSlot { slot, .. } => {
+            let count = match &module.slots[*slot as usize].contract {
+                lm_bytecode::SlotContract::Function(contract)
+                | lm_bytecode::SlotContract::Method(contract) => contract.params.len(),
+                _ => 0,
+            };
+            (count, 1)
+        }
+        ExtendedInstr::NewSlot { .. } | ExtendedInstr::LoadSlot { .. } => (0, 1),
+        ExtendedInstr::SendSlot { .. } => (1, 1),
     }
 }
 
@@ -3068,6 +3079,22 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::MapRemove { ty } => format!("MapRemove ty{ty}"),
         ExtendedInstr::MapClear => "MapClear".to_string(),
         ExtendedInstr::MapReserve => "MapReserve".to_string(),
+        ExtendedInstr::CallSlot { slot, app } => {
+            format!("CallSlot slot{slot} {}", optional_app_text(*app))
+        }
+        ExtendedInstr::NewSlot { slot, app } => {
+            format!("NewSlot slot{slot} {}", optional_app_text(*app))
+        }
+        ExtendedInstr::LoadSlot { slot } => format!("LoadSlot slot{slot}"),
+        ExtendedInstr::SendSlot { slot } => format!("SendSlot slot{slot}"),
+    }
+}
+
+fn optional_app_text(app: u32) -> String {
+    if app == lm_bytecode::NO_APP {
+        "plain".to_string()
+    } else {
+        format!("app{app}")
     }
 }
 

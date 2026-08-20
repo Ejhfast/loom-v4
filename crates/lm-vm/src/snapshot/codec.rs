@@ -26,9 +26,9 @@
 use super::{
     AdmissionBudget, Image, ImageBlock, ImageCallback, ImageError, ImageFrame, ImageLimits,
     ImageMachine, ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor, ImageReason,
-    ImageRoutedRequest, ImageState, ImageTerminal, ImageVm, ImageWaitEntry, ImageWaitSource,
-    LoadLimits, Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE,
-    SECTION_HEADER, SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
+    ImageRoutedRequest, ImageSlotTarget, ImageState, ImageTerminal, ImageVm, ImageWaitEntry,
+    ImageWaitSource, LoadLimits, Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION, MAGIC,
+    SECTION_CODE, SECTION_HEADER, SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
 };
 use crate::LoadedModule;
 use lm_abi::FaultCode;
@@ -570,6 +570,20 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
     };
     for image in &image.vm_images {
         encode_limits(&mut out, &image.limits);
+        out.leb(image.slots.len() as u64);
+        for target in &image.slots {
+            match target {
+                ImageSlotTarget::Empty => out.u8(0),
+                ImageSlotTarget::Function(func) => {
+                    out.u8(1);
+                    out.leb(*func as u64);
+                }
+                ImageSlotTarget::Class(class) => {
+                    out.u8(2);
+                    out.leb(*class as u64);
+                }
+            }
+        }
     }
     for machine in &image.machines {
         out.opt(machine.parent);
@@ -1307,9 +1321,34 @@ fn decode_inner(
     let mut records = section(4);
     let mut vm_images: Vec<ImageVm> = records.vector(image_count, "VM image table")?;
     for _ in 0..image_count {
-        vm_images.push(ImageVm {
-            limits: decode_limits(&mut records)?,
-        });
+        let limits = decode_limits(&mut records)?;
+        let slot_count = records.count(ctx.limits.max_code_slots as u64, "VM slot")?;
+        let mut slots = records.vector(slot_count, "VM slot table")?;
+        for _ in 0..slot_count {
+            let target = match records.u8()? {
+                0 => ImageSlotTarget::Empty,
+                1 => ImageSlotTarget::Function(u32::try_from(records.leb()?).map_err(|_| {
+                    ImageError::new(
+                        ImageReason::Reference,
+                        "a function slot target does not fit in 32 bits",
+                    )
+                })?),
+                2 => ImageSlotTarget::Class(u32::try_from(records.leb()?).map_err(|_| {
+                    ImageError::new(
+                        ImageReason::Reference,
+                        "a class slot target does not fit in 32 bits",
+                    )
+                })?),
+                tag => {
+                    return err(
+                        ImageReason::Layout,
+                        format!("a VM slot target has unknown tag {tag}"),
+                    );
+                }
+            };
+            slots.push(target);
+        }
+        vm_images.push(ImageVm { limits, slots });
     }
     let mut machines: Vec<ImageMachine> = records.vector(machine_count, "machine table")?;
     for objects in all_objects {

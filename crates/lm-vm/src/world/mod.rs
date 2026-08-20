@@ -24,8 +24,9 @@ use crate::host::{
     CoreCtor, Host, HostArg, HostCompletion, HostOpenOptions, HostSeekFrom, HostStart, HostValue,
 };
 use crate::machine::{
-    Action, Block, ExecOutcome, FaultRec, Machine, MachineState, Mailbox, Ownership, Pending,
-    PolicyCursor, RoutedRequest, Terminal, VmId, VmImageKey, WaitEntry, WaitSource, MAX_LIVE_WAITS,
+    Action, Block, ExecOutcome, FaultRec, ImageSlotTarget, Machine, MachineState, Mailbox,
+    Ownership, Pending, PolicyCursor, RoutedRequest, Terminal, VmId, VmImageKey, WaitEntry,
+    WaitSource, MAX_LIVE_WAITS,
 };
 use crate::schedule::{
     ActiveProcs, CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey,
@@ -187,6 +188,8 @@ pub(crate) struct VmImageRecord {
     pub(crate) live: bool,
     /// The resource ceiling that image activation applies.
     pub(crate) config: VmConfig,
+    /// The current targets of the image's late-bound slots.
+    pub(crate) slots: Vec<ImageSlotTarget>,
 }
 
 /// One successful restore reply held before restore commit.
@@ -683,7 +686,10 @@ mod tests {
     use crate::host::NullHost;
     use crate::machine::Pending;
     use crate::{load, VmConfig, WorldLimits};
-    use lm_bytecode::{BcType, Func, Instr, Module};
+    use lm_bytecode::{
+        BcCallableContract, BcType, ExtendedInstr, Func, Instr, Module, SlotContract, SlotSpec,
+        SlotTarget,
+    };
 
     fn trivial_loaded() -> crate::LoadedModule {
         load(Module {
@@ -709,12 +715,105 @@ mod tests {
                 blocks: vec![vec![Instr::ConstInt(1), Instr::Return]],
             }],
             imports: vec![],
+            slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
             bindings: vec![],
         })
         .expect("the trivial module verifies")
+    }
+
+    #[test]
+    fn an_active_frame_keeps_its_version_after_slot_replacement() {
+        let callable = BcCallableContract {
+            type_params: 0,
+            effect_params: 0,
+            type_bounds: vec![],
+            params: vec![],
+            param_muts: vec![],
+            ret: 2,
+            row: vec![],
+        };
+        let leaf = |name: &str, value: i64| Func {
+            name: name.to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: 2,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::ConstInt(value), Instr::Return]],
+        };
+        let loaded = load(Module {
+            strings: vec![],
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
+            selectors: vec![],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![], vec![], vec![]],
+            classes: vec![],
+            funcs: vec![
+                Func {
+                    name: "main".to_string(),
+                    type_params: 0,
+                    effect_params: 0,
+                    params: vec![],
+                    param_muts: vec![],
+                    ret: 2,
+                    row: vec![],
+                    captures: vec![],
+                    local_types: vec![],
+                    blocks: vec![vec![
+                        Instr::Extended(ExtendedInstr::CallSlot {
+                            slot: 0,
+                            app: lm_bytecode::NO_APP,
+                        }),
+                        Instr::Extended(ExtendedInstr::CallSlot {
+                            slot: 0,
+                            app: lm_bytecode::NO_APP,
+                        }),
+                        Instr::Add,
+                        Instr::Return,
+                    ]],
+                },
+                leaf("old", 1),
+                leaf("new", 2),
+            ],
+            imports: vec![],
+            slots: vec![SlotSpec {
+                key: [7; 32],
+                contract: SlotContract::Function(callable),
+                initial: Some(SlotTarget::Function(1)),
+            }],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+        })
+        .expect("the slot module verifies");
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let image = world.new_vm_image(0).expect("the image fits");
+        world.machines[0].image = Some(image);
+
+        assert!(matches!(world.step_root(), RootEvent::Ran));
+        world
+            .replace_function_slot(image, 0, 2)
+            .expect("the replacement matches");
+
+        let snapshot = world
+            .capture_snapshot(1, 0, false)
+            .expect("the stopped run captures");
+        assert_eq!(
+            snapshot.world().vm_images[0].slots,
+            vec![crate::snapshot::ImageSlotTarget::Function(2)]
+        );
+
+        assert_eq!(world.run_root(), Outcome::Done(Value::Int(3)));
     }
 
     /// Give machine 0 a pending VM-control perform over a handle to

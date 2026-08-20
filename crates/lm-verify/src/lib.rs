@@ -12,7 +12,10 @@
 //! application. The verifier shares no code with the source checker.
 
 use lm_bytecode::corepin::CoreLayout;
-use lm_bytecode::{BcClassKind, BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Instr, Module};
+use lm_bytecode::{
+    BcCallableContract, BcClassKind, BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Instr,
+    Module, SlotContract, SlotTarget,
+};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -230,7 +233,8 @@ use tables::verify_tables;
 /// Version 19 verifies interfaces, callbacks, native `Option`, and collection operations.
 /// Version 20 verifies the declared receiver type of each digest.
 /// Version 21 separates persistent VMs from typed runs.
-pub const VERIFIER_VERSION: u32 = 22;
+/// Version 23 verifies late-bound slot contracts and instructions.
+pub const VERIFIER_VERSION: u32 = 23;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -357,6 +361,7 @@ mod tests {
             classes: vec![],
             funcs: vec![plain_func("main", vec![], TY_INT, blocks)],
             imports: vec![],
+            slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
@@ -407,6 +412,7 @@ mod tests {
                 ),
             ],
             imports: vec![],
+            slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
@@ -474,6 +480,7 @@ mod tests {
                 },
             ],
             imports: vec![],
+            slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],
@@ -567,6 +574,78 @@ mod tests {
         let m = module_with(vec![vec![ConstInt(1), Add, Return]]);
         let e = verify_module(&m).unwrap_err();
         assert!(e.message.contains("empty stack"), "{e}");
+    }
+
+    #[test]
+    fn accepts_a_call_through_an_exact_function_slot() {
+        let mut module = module_with(vec![vec![
+            Instr::Extended(ExtendedInstr::CallSlot {
+                slot: 0,
+                app: lm_bytecode::NO_APP,
+            }),
+            Instr::Return,
+        ]]);
+        module.funcs.push(plain_func(
+            "slot_target",
+            vec![],
+            TY_INT,
+            vec![vec![Instr::ConstInt(1), Instr::Return]],
+        ));
+        module.func_bounds.push(vec![]);
+        module.slots.push(lm_bytecode::SlotSpec {
+            key: [1; 32],
+            contract: SlotContract::Function(BcCallableContract {
+                type_params: 0,
+                effect_params: 0,
+                type_bounds: vec![],
+                params: vec![],
+                param_muts: vec![],
+                ret: TY_INT,
+                row: vec![],
+            }),
+            initial: Some(SlotTarget::Function(1)),
+        });
+        verify_module(&module).expect("the slot call verifies");
+    }
+
+    #[test]
+    fn rejects_an_incompatible_initial_slot_target() {
+        let mut module = module_with(vec![vec![Instr::ConstInt(0), Instr::Return]]);
+        module.funcs.push(plain_func(
+            "wrong",
+            vec![],
+            TY_BOOL,
+            vec![vec![Instr::ConstBool(true), Instr::Return]],
+        ));
+        module.func_bounds.push(vec![]);
+        module.slots.push(lm_bytecode::SlotSpec {
+            key: [2; 32],
+            contract: SlotContract::Function(BcCallableContract {
+                type_params: 0,
+                effect_params: 0,
+                type_bounds: vec![],
+                params: vec![],
+                param_muts: vec![],
+                ret: TY_INT,
+                row: vec![],
+            }),
+            initial: Some(SlotTarget::Function(1)),
+        });
+        let error = verify_module(&module).unwrap_err();
+        assert!(error.message.contains("does not match the slot contract"));
+    }
+
+    #[test]
+    fn rejects_a_slot_instruction_with_no_contract() {
+        let module = module_with(vec![vec![
+            Instr::Extended(ExtendedInstr::CallSlot {
+                slot: 0,
+                app: lm_bytecode::NO_APP,
+            }),
+            Instr::Return,
+        ]]);
+        let error = verify_module(&module).unwrap_err();
+        assert!(error.message.contains("slot index out of range"));
     }
 
     #[test]
@@ -1182,6 +1261,7 @@ mod tests {
                 ],
             }],
             imports: vec![],
+            slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             entry: 0,
             exports: vec![],

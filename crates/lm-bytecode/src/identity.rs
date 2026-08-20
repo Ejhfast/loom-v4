@@ -87,8 +87,9 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 22 adds interface contracts, callbacks, and native collection lowering.
 /// Version 23 adds the receiver type to semantic digest instructions.
 /// Version 24 makes direct function parameters nonescaping by default.
-/// Version 25 renames the two guest snapshot types.
-pub const COMPILER_ABI_VERSION: u32 = 25;
+/// Version 25 renames the two guest snapshot types. Version 26 adds
+/// stable slot contracts and specialized slot instructions.
+pub const COMPILER_ABI_VERSION: u32 = 26;
 
 /// The refinement work budget of one component.
 ///
@@ -460,6 +461,57 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             }
         }
     }
+    let mut slot_keys = BTreeSet::new();
+    for (slot, spec) in module.slots.iter().enumerate() {
+        if !slot_keys.insert(spec.key) {
+            return Err(fail(format!("slot {slot}: duplicate slot key")));
+        }
+        let check_type = |ty: u32| -> Result<(), IdentityError> {
+            if ty as usize >= s.types {
+                Err(fail(format!("slot {slot}: type index out of range")))
+            } else {
+                Ok(())
+            }
+        };
+        match &spec.contract {
+            crate::SlotContract::Function(callable) | crate::SlotContract::Method(callable) => {
+                if callable.param_muts.len() != callable.params.len() {
+                    return Err(fail(format!("slot {slot}: mut markers do not align")));
+                }
+                if callable.type_bounds.len() != callable.type_params as usize {
+                    return Err(fail(format!("slot {slot}: type-bound count mismatch")));
+                }
+                for parameter in &callable.type_bounds {
+                    for bound in parameter {
+                        check_use(&format!("slot {slot}"), bound)?;
+                    }
+                }
+                for ty in callable.params.iter().chain([&callable.ret]) {
+                    check_type(*ty)?;
+                }
+                check_row(&format!("slot {slot}"), &callable.row)?;
+            }
+            crate::SlotContract::Class { ty, .. } => check_type(*ty)?,
+            crate::SlotContract::Value { ty } => check_type(*ty)?,
+            crate::SlotContract::Process { message, result } => {
+                check_type(*message)?;
+                check_type(*result)?;
+            }
+        }
+        match spec.initial {
+            None => {}
+            Some(crate::SlotTarget::Function(func)) | Some(crate::SlotTarget::Process(func)) => {
+                if func as usize >= s.funcs {
+                    return Err(fail(format!("slot {slot}: function target out of range")));
+                }
+            }
+            Some(crate::SlotTarget::Class(class)) => {
+                if class as usize >= s.classes {
+                    return Err(fail(format!("slot {slot}: class target out of range")));
+                }
+            }
+        }
+    }
     for (fidx, func) in module.funcs.iter().enumerate() {
         if func.param_muts.len() != func.params.len() {
             return Err(fail(format!("function {fidx}: mut markers do not align")));
@@ -776,11 +828,16 @@ fn preflight_instr(
             Ok(())
         }
         Instr::OpConst(_) | Instr::TableEdit { .. } => Ok(()),
-        Instr::Extended(instr) => preflight_extended(s, fidx, instr),
+        Instr::Extended(instr) => preflight_extended(module, s, fidx, instr),
     }
 }
 
-fn preflight_extended(s: &Space, fidx: usize, instr: &ExtendedInstr) -> Result<(), IdentityError> {
+fn preflight_extended(
+    module: &Module,
+    s: &Space,
+    fidx: usize,
+    instr: &ExtendedInstr,
+) -> Result<(), IdentityError> {
     let bad = |what: &str| fail(format!("function {fidx}: {what} out of range"));
     match instr {
         ExtendedInstr::MakeCallback { func, .. } => {
@@ -817,6 +874,19 @@ fn preflight_extended(s: &Space, fidx: usize, instr: &ExtendedInstr) -> Result<(
         | ExtendedInstr::ListReorder
         | ExtendedInstr::MapClear
         | ExtendedInstr::MapReserve => {}
+        ExtendedInstr::CallSlot { slot, app } | ExtendedInstr::NewSlot { slot, app } => {
+            if *slot as usize >= module.slots.len() {
+                return Err(bad("slot index"));
+            }
+            if *app != crate::NO_APP && *app as usize >= s.apps {
+                return Err(bad("slot type application"));
+            }
+        }
+        ExtendedInstr::LoadSlot { slot } | ExtendedInstr::SendSlot { slot } => {
+            if *slot as usize >= module.slots.len() {
+                return Err(bad("slot index"));
+            }
+        }
     }
     Ok(())
 }
@@ -877,6 +947,27 @@ fn push_interface_use_edges(
         out.push(space.type_node(*ty));
     }
     push_interface_type_edges(module, space, application.interface, out);
+}
+
+fn push_slot_contract_edges(module: &Module, space: &Space, slot: u32, out: &mut Vec<u32>) {
+    match &module.slots[slot as usize].contract {
+        crate::SlotContract::Function(callable) | crate::SlotContract::Method(callable) => {
+            for ty in callable.params.iter().chain([&callable.ret]) {
+                out.push(space.type_node(*ty));
+            }
+            for parameter in &callable.type_bounds {
+                for bound in parameter {
+                    push_interface_use_edges(module, space, bound, out);
+                }
+            }
+        }
+        crate::SlotContract::Class { ty, .. } => out.push(space.type_node(*ty)),
+        crate::SlotContract::Value { ty } => out.push(space.type_node(*ty)),
+        crate::SlotContract::Process { message, result } => {
+            out.push(space.type_node(*message));
+            out.push(space.type_node(*result));
+        }
+    }
 }
 
 impl Graph {
@@ -1007,6 +1098,16 @@ impl Graph {
                             | ExtendedInstr::MapGet { ty }
                             | ExtendedInstr::ListPop { ty }
                             | ExtendedInstr::MapRemove { ty } => list.push(s.type_node(*ty)),
+                            ExtendedInstr::CallSlot { slot, app }
+                            | ExtendedInstr::NewSlot { slot, app } => {
+                                push_slot_contract_edges(module, &s, *slot, list);
+                                if *app != crate::NO_APP {
+                                    list.push(s.app_node(*app));
+                                }
+                            }
+                            ExtendedInstr::LoadSlot { slot } | ExtendedInstr::SendSlot { slot } => {
+                                push_slot_contract_edges(module, &s, *slot, list);
+                            }
                             _ => {}
                         },
                         _ => {}
@@ -1783,6 +1884,10 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::MapRemove { .. } => 0xcc,
             ExtendedInstr::MapClear => 0xcd,
             ExtendedInstr::MapReserve => 0xce,
+            ExtendedInstr::CallSlot { .. } => 0xd3,
+            ExtendedInstr::NewSlot { .. } => 0xd4,
+            ExtendedInstr::LoadSlot { .. } => 0xd5,
+            ExtendedInstr::SendSlot { .. } => 0xd6,
         }
     }
 
@@ -2104,7 +2209,67 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::ListReorder
             | ExtendedInstr::MapClear
             | ExtendedInstr::MapReserve => {}
+            ExtendedInstr::CallSlot { slot, app } | ExtendedInstr::NewSlot { slot, app } => {
+                self.slot_contract_bytes(out, *slot);
+                if *app == crate::NO_APP {
+                    out.push(0);
+                } else {
+                    out.push(1);
+                    out.extend_from_slice(&self.app_digest(*app));
+                }
+            }
+            ExtendedInstr::LoadSlot { slot } | ExtendedInstr::SendSlot { slot } => {
+                self.slot_contract_bytes(out, *slot);
+            }
         }
+    }
+
+    /// Write the stable key and immutable contract of one VM slot.
+    fn slot_contract_bytes(&self, out: &mut Vec<u8>, slot: u32) {
+        let spec = &self.module.slots[slot as usize];
+        out.extend_from_slice(&spec.key);
+        match &spec.contract {
+            crate::SlotContract::Function(callable) => {
+                out.push(0);
+                self.callable_contract_bytes(out, callable);
+            }
+            crate::SlotContract::Method(callable) => {
+                out.push(1);
+                self.callable_contract_bytes(out, callable);
+            }
+            crate::SlotContract::Class {
+                type_params,
+                abi,
+                ty,
+            } => {
+                out.push(2);
+                out.extend_from_slice(&type_params.to_le_bytes());
+                out.extend_from_slice(abi);
+                out.extend_from_slice(&self.type_digest(*ty));
+            }
+            crate::SlotContract::Value { ty } => {
+                out.push(3);
+                out.extend_from_slice(&self.type_digest(*ty));
+            }
+            crate::SlotContract::Process { message, result } => {
+                out.push(4);
+                out.extend_from_slice(&self.type_digest(*message));
+                out.extend_from_slice(&self.type_digest(*result));
+            }
+        }
+    }
+
+    fn callable_contract_bytes(&self, out: &mut Vec<u8>, contract: &crate::BcCallableContract) {
+        out.extend_from_slice(&contract.type_params.to_le_bytes());
+        out.extend_from_slice(&contract.effect_params.to_le_bytes());
+        self.bounds_bytes(out, &contract.type_bounds, true);
+        out.extend_from_slice(&(contract.params.len() as u32).to_le_bytes());
+        for (param, marker) in contract.params.iter().zip(&contract.param_muts) {
+            out.push(u8::from(*marker));
+            out.extend_from_slice(&self.type_digest(*param));
+        }
+        out.extend_from_slice(&self.type_digest(contract.ret));
+        self.row_bytes(out, &contract.row);
     }
 }
 
@@ -2667,6 +2832,33 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         out.push(*kind);
         out.extend_from_slice(hash);
     }
+    let mut slots: Vec<Vec<u8>> = Vec::with_capacity(module.slots.len());
+    for (index, spec) in module.slots.iter().enumerate() {
+        let mut bytes = Vec::new();
+        resolver.slot_contract_bytes(&mut bytes, index as u32);
+        match spec.initial {
+            None => bytes.push(0),
+            Some(crate::SlotTarget::Function(func)) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&func_hashes[func as usize]);
+            }
+            Some(crate::SlotTarget::Class(class)) => {
+                bytes.push(2);
+                write_str(&mut bytes, &module.classes[class as usize].key);
+            }
+            Some(crate::SlotTarget::Process(func)) => {
+                bytes.push(3);
+                bytes.extend_from_slice(&func_hashes[func as usize]);
+            }
+        }
+        slots.push(bytes);
+    }
+    slots.sort();
+    out.extend_from_slice(&(slots.len() as u32).to_le_bytes());
+    for slot in slots {
+        out.extend_from_slice(&(slot.len() as u32).to_le_bytes());
+        out.extend_from_slice(&slot);
+    }
     let mut exports: Vec<(u8, &str, [u8; 32])> = Vec::new();
     for (c, class) in module.classes.iter().enumerate() {
         exports.push((0, &class.name, class_hashes[c]));
@@ -2830,5 +3022,104 @@ mod tag_tests {
         // parse must fail, not pass by finding nothing.
         assert!(count > 100, "the tag table did not parse: {count} entries");
         assert_eq!(count, seen.len(), "a tag repeats");
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+    use crate::{
+        BcCallableContract, BcType, ExtendedInstr, Func, Instr, Module, SlotContract, SlotSpec,
+        SlotTarget, NO_APP, NO_ROLE,
+    };
+
+    fn function(name: &str, value: i64) -> Func {
+        Func {
+            name: name.to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: 2,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::ConstInt(value), Instr::Return]],
+        }
+    }
+
+    fn module() -> Module {
+        Module {
+            strings: vec![],
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
+            selectors: vec![],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![], vec![], vec![]],
+            imports: vec![],
+            slots: vec![SlotSpec {
+                key: [9; 32],
+                contract: SlotContract::Function(BcCallableContract {
+                    type_params: 0,
+                    effect_params: 0,
+                    type_bounds: vec![],
+                    params: vec![],
+                    param_muts: vec![],
+                    ret: 2,
+                    row: vec![],
+                }),
+                initial: Some(SlotTarget::Function(1)),
+            }],
+            core_roles: [NO_ROLE; crate::CORE_ROLE_COUNT],
+            classes: vec![],
+            funcs: vec![
+                Func {
+                    name: "caller".to_string(),
+                    type_params: 0,
+                    effect_params: 0,
+                    params: vec![],
+                    param_muts: vec![],
+                    ret: 2,
+                    row: vec![],
+                    captures: vec![],
+                    local_types: vec![],
+                    blocks: vec![vec![
+                        Instr::Extended(ExtendedInstr::CallSlot {
+                            slot: 0,
+                            app: NO_APP,
+                        }),
+                        Instr::Return,
+                    ]],
+                },
+                function("old", 1),
+                function("new", 2),
+            ],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+        }
+    }
+
+    #[test]
+    fn a_late_caller_hash_excludes_the_current_target() {
+        let first = module();
+        let mut second = first.clone();
+        second.slots[0].initial = Some(SlotTarget::Function(2));
+        let first_id = module_identity(&first).expect("the first module hashes");
+        let second_id = module_identity(&second).expect("the second module hashes");
+        assert_eq!(first_id.func_hashes[0], second_id.func_hashes[0]);
+        assert_ne!(first_id.semantic_hash, second_id.semantic_hash);
+    }
+
+    #[test]
+    fn a_late_caller_hash_includes_the_slot_key() {
+        let first = module();
+        let mut second = first.clone();
+        second.slots[0].key = [8; 32];
+        let first_id = module_identity(&first).expect("the first module hashes");
+        let second_id = module_identity(&second).expect("the second module hashes");
+        assert_ne!(first_id.func_hashes[0], second_id.func_hashes[0]);
     }
 }

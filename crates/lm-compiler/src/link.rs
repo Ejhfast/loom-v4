@@ -32,8 +32,9 @@ use crate::env::FrozenLinkEnv;
 use lm_bytecode::identity::{module_identity, ModuleIdentity};
 use lm_bytecode::interface::Interface;
 use lm_bytecode::{
-    BcAssociated, BcClass, BcConformance, BcInterface, BcInterfaceMethod, BcInterfaceUse, BcRow,
-    BcType, ExtendedInstr, Func, Import, ImportKind, Instr, Module, TypeApp, NO_PARENT,
+    BcAssociated, BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceMethod,
+    BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Import, ImportKind, Instr, Module,
+    SlotContract, SlotSpec, SlotTarget, TypeApp, NO_PARENT,
 };
 use std::collections::HashMap;
 
@@ -142,6 +143,9 @@ struct Merged {
     conformances: Vec<BcConformance>,
     funcs: Vec<Func>,
     func_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
+    /// Late-bound slots, merged by their stable key.
+    slots: Vec<SlotSpec>,
+    slot_by_key: HashMap<[u8; 32], u32>,
     /// The merged core role table. Every module carries the same core,
     /// so every module fills the same roles with the same merged
     /// classes.
@@ -195,6 +199,8 @@ impl Default for Merged {
             conformances: Vec::new(),
             funcs: Vec::new(),
             func_bounds: Vec::new(),
+            slots: Vec::new(),
+            slot_by_key: HashMap::new(),
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             class_by_def: HashMap::new(),
             class_version: HashMap::new(),
@@ -262,6 +268,7 @@ struct Reloc {
     classes: Vec<u32>,
     interfaces: Vec<u32>,
     funcs: Vec<u32>,
+    slots: Vec<u32>,
 }
 
 /// Link one program from its root module.
@@ -291,6 +298,7 @@ pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError>
         selectors: merged.selectors,
         apps: merged.apps,
         imports: Vec::new(),
+        slots: merged.slots,
         core_roles: merged.core_roles,
         classes: merged.classes,
         class_bounds: merged.class_bounds,
@@ -536,7 +544,7 @@ fn relocate(
             }
         }
     }
-    let reloc = Reloc {
+    let mut reloc = Reloc {
         strings,
         types,
         selectors,
@@ -544,7 +552,45 @@ fn relocate(
         classes,
         interfaces,
         funcs,
+        slots: Vec::with_capacity(module.slots.len()),
     };
+    for (slot, source) in module.slots.iter().enumerate() {
+        let contract = reloc_slot_contract(&source.contract, &reloc);
+        let initial = source
+            .initial
+            .map(|target| reloc_slot_target(target, &reloc));
+        let merged_slot = match merged.slot_by_key.get(&source.key).copied() {
+            Some(existing) => {
+                let found = &mut merged.slots[existing as usize];
+                if found.contract != contract {
+                    return Err(fail(format!(
+                        "the slot {slot} of `{path}` has a contract that conflicts with its key"
+                    )));
+                }
+                match (found.initial, initial) {
+                    (Some(left), Some(right)) if left != right => {
+                        return Err(fail(format!(
+                            "the slot {slot} of `{path}` has a conflicting initial target"
+                        )));
+                    }
+                    (None, Some(target)) => found.initial = Some(target),
+                    _ => {}
+                }
+                existing
+            }
+            None => {
+                let index = merged.slots.len() as u32;
+                merged.slots.push(SlotSpec {
+                    key: source.key,
+                    contract,
+                    initial,
+                });
+                merged.slot_by_key.insert(source.key, index);
+                index
+            }
+        };
+        reloc.slots.push(merged_slot);
+    }
     // The core role table: every module carries the same core, and the
     // merge keeps one class per core key, so every module must name
     // the same merged class for a role.
@@ -1147,6 +1193,57 @@ fn reloc_bounds(bounds: &[Vec<BcInterfaceUse>], reloc: &Reloc) -> Vec<Vec<BcInte
         .collect()
 }
 
+fn reloc_callable_contract(source: &BcCallableContract, reloc: &Reloc) -> BcCallableContract {
+    BcCallableContract {
+        type_params: source.type_params,
+        effect_params: source.effect_params,
+        type_bounds: reloc_bounds(&source.type_bounds, reloc),
+        params: source
+            .params
+            .iter()
+            .map(|ty| reloc.types[*ty as usize])
+            .collect(),
+        param_muts: source.param_muts.clone(),
+        ret: reloc.types[source.ret as usize],
+        row: reloc_row(&source.row, &reloc.strings),
+    }
+}
+
+fn reloc_slot_contract(source: &SlotContract, reloc: &Reloc) -> SlotContract {
+    match source {
+        SlotContract::Function(contract) => {
+            SlotContract::Function(reloc_callable_contract(contract, reloc))
+        }
+        SlotContract::Method(contract) => {
+            SlotContract::Method(reloc_callable_contract(contract, reloc))
+        }
+        SlotContract::Class {
+            type_params,
+            abi,
+            ty,
+        } => SlotContract::Class {
+            type_params: *type_params,
+            abi: *abi,
+            ty: reloc.types[*ty as usize],
+        },
+        SlotContract::Value { ty } => SlotContract::Value {
+            ty: reloc.types[*ty as usize],
+        },
+        SlotContract::Process { message, result } => SlotContract::Process {
+            message: reloc.types[*message as usize],
+            result: reloc.types[*result as usize],
+        },
+    }
+}
+
+fn reloc_slot_target(source: SlotTarget, reloc: &Reloc) -> SlotTarget {
+    match source {
+        SlotTarget::Function(func) => SlotTarget::Function(reloc.funcs[func as usize]),
+        SlotTarget::Class(class) => SlotTarget::Class(reloc.classes[class as usize]),
+        SlotTarget::Process(func) => SlotTarget::Process(reloc.funcs[func as usize]),
+    }
+}
+
 fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
     BcInterface {
         name: source.name.clone(),
@@ -1467,6 +1564,28 @@ fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
         },
         ExtendedInstr::MapRemove { ty } => ExtendedInstr::MapRemove {
             ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::CallSlot { slot, app } => ExtendedInstr::CallSlot {
+            slot: reloc.slots[*slot as usize],
+            app: if *app == lm_bytecode::NO_APP {
+                lm_bytecode::NO_APP
+            } else {
+                reloc.apps[*app as usize]
+            },
+        },
+        ExtendedInstr::NewSlot { slot, app } => ExtendedInstr::NewSlot {
+            slot: reloc.slots[*slot as usize],
+            app: if *app == lm_bytecode::NO_APP {
+                lm_bytecode::NO_APP
+            } else {
+                reloc.apps[*app as usize]
+            },
+        },
+        ExtendedInstr::LoadSlot { slot } => ExtendedInstr::LoadSlot {
+            slot: reloc.slots[*slot as usize],
+        },
+        ExtendedInstr::SendSlot { slot } => ExtendedInstr::SendSlot {
+            slot: reloc.slots[*slot as usize],
         },
         ExtendedInstr::AsCallback
         | ExtendedInstr::ListEpoch

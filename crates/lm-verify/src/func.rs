@@ -432,6 +432,95 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                             return Err(err(fidx, at("type index out of range")));
                         }
                     }
+                    ExtendedInstr::CallSlot { slot, app } => {
+                        let Some(spec) = module.slots.get(*slot as usize) else {
+                            return Err(err(fidx, at("slot index out of range")));
+                        };
+                        let callable = match &spec.contract {
+                            SlotContract::Function(contract) | SlotContract::Method(contract) => {
+                                contract
+                            }
+                            _ => {
+                                return Err(err(fidx, at("CALL_SLOT needs a callable slot")));
+                            }
+                        };
+                        match (
+                            *app != lm_bytecode::NO_APP,
+                            callable.type_params,
+                            callable.effect_params,
+                        ) {
+                            (false, 0, 0) => {}
+                            (false, _, _) => {
+                                return Err(err(
+                                    fidx,
+                                    at("a generic slot call needs a type application"),
+                                ));
+                            }
+                            (true, 0, 0) => {
+                                return Err(err(
+                                    fidx,
+                                    at("a non-generic slot call has a type application"),
+                                ));
+                            }
+                            (true, types, rows) => {
+                                check_app(ctx, func, fidx, at_dyn, *app, types, rows)?;
+                                let application = &module.apps[*app as usize];
+                                if !ctx.type_arguments_meet_bounds(
+                                    &application.types,
+                                    &application.rows,
+                                    &callable.type_bounds,
+                                    &module.func_bounds[fidx as usize],
+                                ) {
+                                    return Err(err(
+                                        fidx,
+                                        at("a slot type argument does not meet its interface bounds"),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    ExtendedInstr::NewSlot { slot, app } => {
+                        let Some(spec) = module.slots.get(*slot as usize) else {
+                            return Err(err(fidx, at("slot index out of range")));
+                        };
+                        let SlotContract::Class { type_params, .. } = &spec.contract else {
+                            return Err(err(fidx, at("NEW_SLOT needs a class slot")));
+                        };
+                        match (*app != lm_bytecode::NO_APP, *type_params) {
+                            (false, 0) => {}
+                            (false, _) => {
+                                return Err(err(
+                                    fidx,
+                                    at("a generic class slot needs a type application"),
+                                ));
+                            }
+                            (true, 0) => {
+                                return Err(err(
+                                    fidx,
+                                    at("a plain class slot has a type application"),
+                                ));
+                            }
+                            (true, types) => {
+                                check_app(ctx, func, fidx, at_dyn, *app, types, 0)?;
+                            }
+                        }
+                    }
+                    ExtendedInstr::LoadSlot { slot } => {
+                        let Some(spec) = module.slots.get(*slot as usize) else {
+                            return Err(err(fidx, at("slot index out of range")));
+                        };
+                        if !matches!(&spec.contract, SlotContract::Value { .. }) {
+                            return Err(err(fidx, at("LOAD_SLOT needs a value slot")));
+                        }
+                    }
+                    ExtendedInstr::SendSlot { slot } => {
+                        let Some(spec) = module.slots.get(*slot as usize) else {
+                            return Err(err(fidx, at("slot index out of range")));
+                        };
+                        if !matches!(&spec.contract, SlotContract::Process { .. }) {
+                            return Err(err(fidx, at("SEND_SLOT needs a process slot")));
+                        }
+                    }
                     _ => {}
                 },
                 // A typed call token names a fixed host operation, or

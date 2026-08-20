@@ -620,6 +620,7 @@ mod tests {
             class_bounds: vec![Vec::new(); classes.len()],
             func_bounds: vec![Vec::new(); funcs.len()],
             imports: Vec::new(),
+            slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             classes,
             funcs,

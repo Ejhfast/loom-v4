@@ -219,6 +219,7 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
     verify_classes(&ctx)?;
     verify_conformances(&ctx)?;
     verify_signatures(&ctx)?;
+    verify_slots(&ctx)?;
     Ok(ctx)
 }
 
@@ -1187,4 +1188,211 @@ fn verify_signatures(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         }
     }
     Ok(())
+}
+
+/// The immutable contracts and initial targets of late-bound slots.
+fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
+    let mut keys = HashSet::new();
+    let mut class_hashes: Option<Vec<[u8; 32]>> = None;
+    for (slot, spec) in module.slots.iter().enumerate() {
+        let serr = |message: String| terr(format!("slot {slot}: {message}"));
+        if !keys.insert(spec.key) {
+            return Err(serr("the slot key appears twice".to_string()));
+        }
+        match &spec.contract {
+            SlotContract::Function(contract) | SlotContract::Method(contract) => {
+                verify_callable_contract(ctx, slot, contract)?;
+                if let Some(SlotTarget::Function(target)) = spec.initial {
+                    let func = module
+                        .funcs
+                        .get(target as usize)
+                        .ok_or_else(|| serr("the function target does not exist".to_string()))?;
+                    if !func.captures.is_empty() {
+                        return Err(serr("the function target has captures".to_string()));
+                    }
+                    if !callable_matches(module, target, contract) {
+                        return Err(serr(
+                            "the function target does not match the slot contract".to_string(),
+                        ));
+                    }
+                    if matches!(&spec.contract, SlotContract::Method(_))
+                        && !module
+                            .classes
+                            .iter()
+                            .any(|class| class.methods.iter().any(|(_, func)| *func == target))
+                    {
+                        return Err(serr("the method target is not a class method".to_string()));
+                    }
+                } else if spec.initial.is_some() {
+                    return Err(serr("the initial target has the wrong kind".to_string()));
+                }
+            }
+            SlotContract::Class {
+                type_params,
+                abi,
+                ty,
+            } => {
+                verify_slot_type(ctx, slot, *ty, *type_params, 0, &[])?;
+                let Some((contract_class, args)) = ctx.as_instance(*ty) else {
+                    return Err(serr("the class contract type is not a class".to_string()));
+                };
+                if args.len() != *type_params as usize
+                    || !args.iter().enumerate().all(|(index, arg)| {
+                        matches!(ctx.ty(*arg), BcType::Var(found) if found == index as u32)
+                    })
+                {
+                    return Err(serr(
+                        "the class contract type does not bind its parameters".to_string(),
+                    ));
+                }
+                if let Some(SlotTarget::Class(target)) = spec.initial {
+                    let class = module
+                        .classes
+                        .get(target as usize)
+                        .ok_or_else(|| serr("the class target does not exist".to_string()))?;
+                    if class.type_params != *type_params || target != contract_class {
+                        return Err(serr(
+                            "the class target does not match the slot type".to_string(),
+                        ));
+                    }
+                    if class_hashes.is_none() {
+                        let identity = lm_bytecode::identity::module_identity(module)
+                            .map_err(|error| serr(format!("identity failed: {error}")))?;
+                        class_hashes = Some(identity.class_hashes);
+                    }
+                    if class_hashes.as_ref().expect("identity exists")[target as usize] != *abi {
+                        return Err(serr(
+                            "the class target does not match the slot ABI".to_string(),
+                        ));
+                    }
+                } else if spec.initial.is_some() {
+                    return Err(serr("the initial target has the wrong kind".to_string()));
+                }
+            }
+            SlotContract::Value { ty } => {
+                verify_slot_type(ctx, slot, *ty, 0, 0, &[])?;
+                if spec.initial.is_some() {
+                    return Err(serr(
+                        "a value slot cannot have a portable initial value".to_string(),
+                    ));
+                }
+            }
+            SlotContract::Process { message, result } => {
+                verify_slot_type(ctx, slot, *message, 0, 0, &[])?;
+                verify_slot_type(ctx, slot, *result, 0, 0, &[])?;
+                if spec.initial.is_some() {
+                    return Err(serr(
+                        "a process slot cannot have a portable initial process".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_callable_contract(
+    ctx: &Ctx<'_>,
+    slot: usize,
+    contract: &BcCallableContract,
+) -> Result<(), VerifyError> {
+    let serr = |message: String| terr(format!("slot {slot}: {message}"));
+    if contract.param_muts.len() != contract.params.len() {
+        return Err(serr(
+            "the parameter mut markers do not align with the parameters".to_string(),
+        ));
+    }
+    if contract.type_bounds.len() != contract.type_params as usize {
+        return Err(serr(
+            "the type-bound table does not match the type arity".to_string(),
+        ));
+    }
+    for parameter in &contract.type_bounds {
+        let mut seen = HashSet::new();
+        for bound in parameter {
+            ctx.check_interface_use(bound, contract.type_params, contract.effect_params)
+                .map_err(&serr)?;
+            if !seen.insert(bound.interface) {
+                return Err(serr(
+                    "one type parameter repeats an interface bound".to_string(),
+                ));
+            }
+        }
+    }
+    for ty in contract.params.iter().chain([&contract.ret]) {
+        verify_slot_type(
+            ctx,
+            slot,
+            *ty,
+            contract.type_params,
+            contract.effect_params,
+            &contract.type_bounds,
+        )?;
+    }
+    for elem in &contract.row {
+        match elem {
+            BcRow::Op(name) => {
+                let Some(name) = ctx.module.strings.get(*name as usize) else {
+                    return Err(serr("the effect row has an invalid name".to_string()));
+                };
+                if !lm_abi::row_name_valid(name) {
+                    return Err(serr(
+                        "the effect row names an operation outside the manifest".to_string(),
+                    ));
+                }
+            }
+            BcRow::Var(variable) if *variable >= contract.effect_params => {
+                return Err(serr(
+                    "the effect row uses a variable outside the declared arity".to_string(),
+                ));
+            }
+            BcRow::Var(_) => {}
+        }
+    }
+    if !ctx.row_canonical(&contract.row) {
+        return Err(serr("the effect row is not canonical".to_string()));
+    }
+    Ok(())
+}
+
+fn verify_slot_type(
+    ctx: &Ctx<'_>,
+    slot: usize,
+    ty: u32,
+    type_params: u32,
+    effect_params: u32,
+    bounds: &[Vec<BcInterfaceUse>],
+) -> Result<(), VerifyError> {
+    let serr = |message: String| terr(format!("slot {slot}: {message}"));
+    if ty as usize >= ctx.module.types.len() {
+        return Err(serr("the contract has an invalid type index".to_string()));
+    }
+    if !ctx.vars_bounded(ty, type_params, effect_params) {
+        return Err(serr(
+            "the contract uses a variable outside the declared arity".to_string(),
+        ));
+    }
+    if !ctx.projections_proven(ty, bounds) {
+        return Err(serr(
+            "the contract uses an associated type without its interface bound".to_string(),
+        ));
+    }
+    if ctx.stores_callback(ty) {
+        return Err(serr(
+            "the contract stores a nonescaping callback".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn callable_matches(module: &Module, target: u32, contract: &BcCallableContract) -> bool {
+    let func = &module.funcs[target as usize];
+    func.type_params == contract.type_params
+        && func.effect_params == contract.effect_params
+        && module.func_bounds[target as usize] == contract.type_bounds
+        && func.params == contract.params
+        && func.param_muts == contract.param_muts
+        && func.ret == contract.ret
+        && func.row == contract.row
 }

@@ -14,8 +14,8 @@
 
 use super::{
     codec, Image, ImageBlock, ImageCallback, ImageFrame, ImageLimits, ImageMachine, ImageMailbox,
-    ImageObject, ImagePending, ImagePolicyCursor, ImageRoutedRequest, ImageState, ImageTerminal,
-    ImageVm, ImageWaitEntry, ImageWaitSource, SnapshotFail, SnapshotImage,
+    ImageObject, ImagePending, ImagePolicyCursor, ImageRoutedRequest, ImageSlotTarget, ImageState,
+    ImageTerminal, ImageVm, ImageWaitEntry, ImageWaitSource, SnapshotFail, SnapshotImage,
 };
 use crate::machine::{
     Block, FrameCapture, MachineState, PolicyCursor, Terminal, VmId, VmImageKey, WaitSource,
@@ -392,17 +392,41 @@ impl World {
                 .position(|candidate| *candidate == key)
                 .map(|index| index as u32)
         };
-        let vm_images = image_order
+        let vm_images: Vec<ImageVm> = image_order
             .iter()
             .map(|key| {
-                let config = self.vm_images[key.image as usize].config;
+                let record = &self.vm_images[key.image as usize];
                 ImageVm {
-                    limits: image_limits(config),
+                    limits: image_limits(record.config),
+                    slots: record
+                        .slots
+                        .iter()
+                        .map(|target| match target {
+                            crate::machine::ImageSlotTarget::Empty => ImageSlotTarget::Empty,
+                            crate::machine::ImageSlotTarget::Function(func) => {
+                                ImageSlotTarget::Function(*func)
+                            }
+                            crate::machine::ImageSlotTarget::Class(class) => {
+                                ImageSlotTarget::Class(*class)
+                            }
+                        })
+                        .collect(),
                 }
             })
             .collect();
         let mut funcs: Vec<u32> = Vec::new();
         let mut classes: Vec<u32> = Vec::new();
+        for image in &vm_images {
+            for target in &image.slots {
+                match target {
+                    ImageSlotTarget::Function(func) if !funcs.contains(func) => funcs.push(*func),
+                    ImageSlotTarget::Class(class) if !classes.contains(class) => {
+                        classes.push(*class);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let mut machines: Vec<ImageMachine> = Vec::new();
         for (idx, vm) in report.order.iter().copied().enumerate() {
             let machine =

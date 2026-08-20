@@ -1015,6 +1015,62 @@ pub(crate) fn step(
             as_map(map)?;
             push(state, TY_UNIT)?;
         }
+        Instr::Extended(ExtendedInstr::CallSlot { slot, app }) => {
+            let contract = match &module.slots[*slot as usize].contract {
+                SlotContract::Function(contract) | SlotContract::Method(contract) => contract,
+                _ => unreachable!("the structural pass checked the slot kind"),
+            };
+            let (types, rows): (&[u32], &[Vec<BcRow>]) = if *app == lm_bytecode::NO_APP {
+                (&[], &[])
+            } else {
+                let application = &module.apps[*app as usize];
+                (&application.types, &application.rows)
+            };
+            let row = ctx.row_subst(&contract.row, rows);
+            charge_row(&row)?;
+            let params: Vec<u32> = contract
+                .params
+                .iter()
+                .map(|param| ctx.subst(*param, types, rows))
+                .collect();
+            pop_args(state, &params)?;
+            push(state, ctx.subst(contract.ret, types, rows))?;
+        }
+        Instr::Extended(ExtendedInstr::NewSlot { slot, app }) => {
+            let SlotContract::Class { ty, .. } = &module.slots[*slot as usize].contract else {
+                unreachable!("the structural pass checked the slot kind");
+            };
+            let result = if *app == lm_bytecode::NO_APP {
+                *ty
+            } else {
+                let application = &module.apps[*app as usize];
+                ctx.subst(*ty, &application.types, &application.rows)
+            };
+            push(state, result)?;
+        }
+        Instr::Extended(ExtendedInstr::LoadSlot { slot }) => {
+            let SlotContract::Value { ty } = &module.slots[*slot as usize].contract else {
+                unreachable!("the structural pass checked the slot kind");
+            };
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::SendSlot { slot }) => {
+            let SlotContract::Process { message, .. } = &module.slots[*slot as usize].contract
+            else {
+                unreachable!("the structural pass checked the slot kind");
+            };
+            let name = lm_abi::op_name(lm_abi::OP_PROC_SEND);
+            if !ctx.row_has_name(&func.row, &name) {
+                return Err(fail(format!(
+                    "the send through a slot is not inside the claimed `{name}` row"
+                )));
+            }
+            pop_expect(state, *message)?;
+            let result = ctx
+                .plain_inst(ctx.core.send_result, "SendResult")
+                .map_err(&fail)?;
+            push(state, result)?;
+        }
         Instr::Native(lm_bytecode::NativeInstr::SbNew) => {
             let class = ctx
                 .core

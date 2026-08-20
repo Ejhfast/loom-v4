@@ -865,10 +865,17 @@ impl World {
                     let limit = requested.min(available).min(turn);
                     let module = self.module.clone();
                     let dispatch = self.dispatch.clone();
+                    let image = self.machines[act.vm as usize].image;
+                    let slots = image.and_then(|key| {
+                        self.vm_images.get(key.image as usize).and_then(|record| {
+                            (record.live && record.generation == key.generation)
+                                .then_some(record.slots.as_slice())
+                        })
+                    });
                     let envs = &mut self.envs;
                     let machine = &mut self.machines[act.vm as usize];
                     let (outcome, retired) =
-                        machine.exec_for_quantum(&module, &dispatch, envs, limit);
+                        machine.exec_for_quantum(&module, &dispatch, envs, slots, limit);
                     self.budget.fuel -= u64::from(retired);
                     if let Some(remaining) = &mut quantum {
                         *remaining = remaining.saturating_sub(retired);

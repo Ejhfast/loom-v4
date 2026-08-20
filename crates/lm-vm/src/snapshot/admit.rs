@@ -30,13 +30,13 @@
 
 use super::{
     codec, image_roots, AdmissionIdentity, Image, ImageBlock, ImageError, ImageMachine,
-    ImagePolicyCursor, ImageReason, ImageState, ImageTerminal, ImageWaitSource, LoadLimits,
-    SnapshotImage, FORMAT_VERSION,
+    ImagePolicyCursor, ImageReason, ImageSlotTarget, ImageState, ImageTerminal, ImageWaitSource,
+    LoadLimits, SnapshotImage, FORMAT_VERSION,
 };
 use crate::LoadedModule;
 use lm_bytecode::closed::{ClosedType, TypeEnv, TypeEnvs};
 use lm_bytecode::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
-use lm_bytecode::{BcType, Instr};
+use lm_bytecode::{BcType, ExtendedInstr, Instr, SlotContract};
 use lm_heap::Object;
 use lm_value::Value;
 use std::cell::RefCell;
@@ -179,6 +179,9 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
     add(image.funcs.len())?;
     add(image.classes.len())?;
     add(image.vm_images.len())?;
+    for image in &image.vm_images {
+        add(image.slots.len())?;
+    }
     for node in &image.types {
         add(1 + closed_type_parts(node))?;
     }
@@ -504,6 +507,7 @@ impl Admit<'_> {
             return fail(ImageReason::State, "a snapshot world holds no machine");
         }
         self.check_code_manifest()?;
+        self.check_slot_state()?;
         for vm in 0..self.image.machines.len() {
             self.check_references(vm as u32)?;
             self.check_state(vm as u32)?;
@@ -591,6 +595,83 @@ impl Admit<'_> {
             .classes
             .binary_search_by_key(&slot, |(s, _)| *s)
             .is_ok()
+    }
+
+    /// Prove each captured target against its immutable module contract.
+    fn check_slot_state(&self) -> Result<(), ImageError> {
+        for (image, vm) in self.image.vm_images.iter().enumerate() {
+            if vm.slots.len() != self.module.slots.len() {
+                return fail(
+                    ImageReason::Code,
+                    format!("VM image {image} has a different slot-table length"),
+                );
+            }
+            for (slot, target) in vm.slots.iter().enumerate() {
+                let spec = &self.module.slots[slot];
+                let valid = match (&spec.contract, target) {
+                    (_, ImageSlotTarget::Empty) => true,
+                    (SlotContract::Function(contract), ImageSlotTarget::Function(func)) => {
+                        self.func_named(*func) && self.callable_matches(*func, contract, false)
+                    }
+                    (SlotContract::Method(contract), ImageSlotTarget::Function(func)) => {
+                        self.func_named(*func) && self.callable_matches(*func, contract, true)
+                    }
+                    (
+                        SlotContract::Class {
+                            type_params,
+                            abi,
+                            ty,
+                        },
+                        ImageSlotTarget::Class(class),
+                    ) => {
+                        let target = self.module.classes.get(*class as usize);
+                        let contract_class = match self.module.types.get(*ty as usize) {
+                            Some(BcType::Class(class)) | Some(BcType::Inst(class, _)) => {
+                                Some(*class)
+                            }
+                            _ => None,
+                        };
+                        self.class_named(*class)
+                            && target.is_some_and(|target| target.type_params == *type_params)
+                            && contract_class == Some(*class)
+                            && self.identity.class_hashes.get(*class as usize) == Some(abi)
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return fail(
+                        ImageReason::Code,
+                        format!("VM image {image} slot {slot} has an incompatible target"),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn callable_matches(
+        &self,
+        target: u32,
+        contract: &lm_bytecode::BcCallableContract,
+        method: bool,
+    ) -> bool {
+        let Some(func) = self.module.funcs.get(target as usize) else {
+            return false;
+        };
+        let is_method = self
+            .module
+            .classes
+            .iter()
+            .any(|class| class.methods.iter().any(|(_, func)| *func == target));
+        (!method || is_method)
+            && func.captures.is_empty()
+            && func.type_params == contract.type_params
+            && func.effect_params == contract.effect_params
+            && self.module.func_bounds.get(target as usize) == Some(&contract.type_bounds)
+            && func.params == contract.params
+            && func.param_muts == contract.param_muts
+            && func.ret == contract.ret
+            && func.row == contract.row
     }
 
     /// The header names the result type of the root machine, and the
@@ -2154,6 +2235,27 @@ impl Admit<'_> {
                     | Instr::CallValue { .. },
                     None,
                 ) => {}
+                (Instr::Extended(ExtendedInstr::CallSlot { slot, .. }), None) => {
+                    let Some(spec) = self.module.slots.get(slot as usize) else {
+                        return fail(ImageReason::Code, at("names no slot contract"));
+                    };
+                    let upper = machine.frames[idx + 1].func;
+                    let compatible = match &spec.contract {
+                        SlotContract::Function(contract) => {
+                            self.callable_matches(upper, contract, false)
+                        }
+                        SlotContract::Method(contract) => {
+                            self.callable_matches(upper, contract, true)
+                        }
+                        _ => false,
+                    };
+                    if !compatible {
+                        return fail(
+                            ImageReason::Layout,
+                            at("does not sit below a compatible slot target"),
+                        );
+                    }
+                }
                 (Instr::Perform { op, argc, .. }, Some(request)) => {
                     if request.op != op {
                         return fail(
