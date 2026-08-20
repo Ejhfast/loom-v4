@@ -18,7 +18,7 @@ fn program(source: &str) -> LoadedModule {
     load_bytes(&bytes).expect("the program loads")
 }
 
-fn world_of<'m>(loaded: &'m LoadedModule, allow: &[&str]) -> World<'m> {
+fn world_of(loaded: &LoadedModule, allow: &[&str]) -> World {
     let mut world = World::new(loaded, VmConfig::default(), Box::new(RecordingHost::new(1)));
     for grant in allow {
         world.allow(grant).expect("the grant names a target");
@@ -27,13 +27,13 @@ fn world_of<'m>(loaded: &'m LoadedModule, allow: &[&str]) -> World<'m> {
 }
 
 /// Drive one world until its root machine stops making progress.
-fn drive(world: &mut World<'_>) -> Outcome {
+fn drive(world: &mut World) -> Outcome {
     lm_proc::run_world(world)
 }
 
 /// Run one restored world to a terminal result, with the scheduler
 /// driving the restored procs.
-fn run_restored(world: &mut World<'_>, root: VmId) -> String {
+fn run_restored(world: &mut World, root: VmId) -> String {
     loop {
         match world.run_machine(root) {
             RootEvent::Done(value) => {
@@ -58,10 +58,7 @@ fn run_restored(world: &mut World<'_>, root: VmId) -> String {
 }
 
 /// Restore one admitted image into a fresh world of the same program.
-fn restore_into<'m>(
-    loaded: &'m LoadedModule,
-    image: &lm_vm::snapshot::SnapshotImage,
-) -> (World<'m>, VmId) {
+fn restore_into(loaded: &LoadedModule, image: &lm_vm::snapshot::SnapshotImage) -> (World, VmId) {
     let mut world = world_of(loaded, &["Proc", "Vm", "Clock"]);
     let target = world.new_child(0).expect("the budget holds one child");
     let root = world
@@ -235,8 +232,8 @@ fn machine_ordinals_follow_reachability_not_machine_identifiers() {
     let world = image.world();
     assert_eq!(world.machine_count(), 3);
     // The program spawns the helper first, then the worker, and it
-    // builds the held machine last. The identifiers are therefore
-    // helper 1, worker 2, held 3, and the ordinals reverse that order.
+    // builds the held run last. The identifiers are helper 1,
+    // worker 2, and held run 3.
     assert_eq!(world.machines[0].state, ImageState::Asked);
     assert!(!world.machines[0].is_proc, "the held root is no proc");
     assert!(world.machines[1].is_proc, "ordinal 1 is the worker");
@@ -354,7 +351,7 @@ fn restore_relocates_every_vm_and_mailbox_root() {
 #[test]
 fn multi_shot_restore_creates_independent_worlds() {
     let source = "\
-def restore_list(snap: Snapshot[List[Int]]): Run[List[Int]] with Vm
+def restore_list(snap: RunSnapshot[List[Int]]): Run[List[Int]] with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(vm)  then vm
   in Err(_)  then sys.vm.Vm().activate(do ||: List[Int] [] end, args: ())

@@ -405,10 +405,10 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
 }
 
 /// The world: the loaded code plus every machine.
-pub struct World<'m> {
-    loaded: &'m LoadedModule,
-    pub(crate) module: &'m Module,
-    dispatch: &'m [crate::DispatchRow],
+pub struct World {
+    loaded: LoadedModule,
+    pub(crate) module: std::sync::Arc<Module>,
+    dispatch: std::sync::Arc<[crate::DispatchRow]>,
     core: CoreLayout,
     pub(crate) machines: Vec<Machine>,
     /// Retired mock-handler slots, ready for reuse.
@@ -705,9 +705,9 @@ mod tests {
 
     /// Give machine 0 a pending VM-control perform over a handle to
     /// machine `target`.
-    fn arm_pending(world: &mut World<'_>, op: u32, extra: Vec<Value>, target: VmId) {
+    fn arm_pending(world: &mut World, op: u32, extra: Vec<Value>, target: VmId) {
         let handle = world.machines[0]
-            .alloc(Object::NativeVm { vm: target })
+            .alloc(Object::NativeRun { vm: target })
             .expect("the handle allocates");
         let mut args = vec![handle];
         args.extend(extra);
@@ -1147,7 +1147,7 @@ mod tests {
     #[test]
     fn a_failed_restore_reply_leaves_no_handle_object() {
         let loaded = trivial_loaded();
-        let handle_bytes = Object::NativeVm { vm: 1 }.cost();
+        let handle_bytes = Object::NativeRun { vm: 1 }.cost();
         let config = VmConfig {
             heap_bytes: handle_bytes,
             ..VmConfig::default()

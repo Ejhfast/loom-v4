@@ -367,7 +367,7 @@ impl<'a> Materializer<'a> {
             }
             IfaceType::List(e)
             | IfaceType::Run(e)
-            | IfaceType::Snapshot(e)
+            | IfaceType::RunSnapshot(e)
             | IfaceType::Op(_, e) => self.reserve_type(ctx, e, span)?,
             IfaceType::Map(k, v) | IfaceType::PendingCall(k, v) | IfaceType::Handle(k, v) => {
                 self.reserve_type(ctx, k, span)?;
@@ -903,7 +903,7 @@ impl<'a> Materializer<'a> {
             IfaceType::Request => lm_types::REQUEST,
             IfaceType::PolicyTable => lm_types::POLICY_TABLE,
             IfaceType::Vm => lm_types::VM,
-            IfaceType::SnapshotImage => lm_types::SNAPSHOT_IMAGE,
+            IfaceType::VmSnapshot => lm_types::VM_SNAPSHOT,
             IfaceType::Var(i) => ctx.store.intern(Type::Var(*i)),
             IfaceType::Projection {
                 base,
@@ -995,9 +995,9 @@ impl<'a> Materializer<'a> {
                 let t = self.resolve_type(ctx, t, span)?;
                 ctx.store.intern(Type::Wait(t))
             }
-            IfaceType::Snapshot(t) => {
+            IfaceType::RunSnapshot(t) => {
                 let t = self.resolve_type(ctx, t, span)?;
-                ctx.store.intern(Type::Snapshot(t))
+                ctx.store.intern(Type::RunSnapshot(t))
             }
             IfaceType::PendingCall(a, r) => {
                 let a = self.resolve_type(ctx, a, span)?;

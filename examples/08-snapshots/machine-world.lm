@@ -44,7 +44,7 @@ def run_held(vm: Run[Int]): Int with Vm
   end
 end
 
-def restore_run(snap: Snapshot[Int]): Int with Vm, Proc
+def restore_run(snap: RunSnapshot[Int]): Int with Vm, Proc
   case sys.vm.Vm().restore(snap)
   in Ok(world)
     # A restored world starts with no authority at all.

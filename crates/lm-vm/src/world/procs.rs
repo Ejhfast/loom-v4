@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     /// Read one proc reference out of a handle value.
     ///
     /// The argument comes from the pending record, so the read tests
@@ -288,7 +288,7 @@ impl<'m> World<'m> {
             return;
         }
         self.machines[child as usize].load_frame(
-            self.module,
+            &self.module,
             func,
             ctor_args,
             Some(ctor),
@@ -329,7 +329,7 @@ impl<'m> World<'m> {
     /// scheduler. The launch carries no mailbox, so the handle takes
     /// the bottom message type.
     pub(super) fn proc_run(&mut self, vm: VmId, op: u32, args: Args<'_>) {
-        let Some(target) = self.vm_arg(vm, op, args[0]) else {
+        let Some(target) = self.run_arg(vm, op, args[0]) else {
             return;
         };
         if target == vm || self.machines[target as usize].active > 0 {
@@ -695,7 +695,7 @@ impl<'m> World<'m> {
             self.deactivate_scheduler_proc(key);
             self.record(TraceEvent::Pause { proc });
             let built = self.machines[vm as usize]
-                .alloc(Object::NativeVm { vm: proc })
+                .alloc(Object::NativeRun { vm: proc })
                 .and_then(|handle| self.make_instance(vm, self.core.result_ok, vec![handle]));
             self.reply_or_fault(vm, op, built);
             return;
@@ -926,16 +926,17 @@ impl<'m> World<'m> {
     pub(super) fn handle_digest(&mut self, vm: VmId, value: ObjRef, ty: u32, env: TypeEnvId) {
         // The machine that asks for the digest pays for the walk.
         let limits = self.machines[vm as usize].config.graph;
-        let loaded = self.loaded;
+        let loaded = self.loaded.clone();
+        let module = self.module.clone();
         let built = match loaded.identity() {
             Ok(identity) => {
                 let expected = self
                     .envs
-                    .close(self.module, ty, env)
+                    .close(&module, ty, env)
                     .map_err(|_| FaultCode::BoundaryLimit);
                 let mut codes = ModuleCodes {
                     identity,
-                    module: self.module,
+                    module: &module,
                     envs: &mut self.envs,
                     core: self.core,
                 };

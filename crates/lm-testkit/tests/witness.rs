@@ -528,7 +528,7 @@ def hold[T](v: T): Run[T] with Vm
   sys.vm.Vm().activate(do ||: T v end, args: ())
 end
 
-def restore_run(snap: Snapshot[Int]): Int with Vm
+def restore_run(snap: RunSnapshot[Int]): Int with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(restored)
     case restored.run()

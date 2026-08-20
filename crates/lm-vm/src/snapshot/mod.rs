@@ -68,7 +68,7 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 10 adds collection epochs.
 /// Version 11 adds active callback descriptors.
 /// Version 12 preserves spare list and map capacity.
-pub const FORMAT_VERSION: u32 = 13;
+pub const FORMAT_VERSION: u32 = 14;
 
 /// The section kinds, in canonical order.
 ///

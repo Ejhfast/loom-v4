@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     /// The completion key of one waiting machine.
     pub(super) fn completion_key(&self, vm: VmId) -> Option<CompletionKey> {
         let machine = self.machines.get(vm as usize)?;
@@ -397,7 +397,7 @@ impl<'m> World<'m> {
     ) -> Result<ClosedTypeId, FaultCode> {
         let closed = self
             .envs
-            .close(self.module, ty, env)
+            .close(&self.module, ty, env)
             .map_err(|_| FaultCode::BoundaryLimit)?;
         let (class, argument) = match self.envs.ty(closed) {
             Some(ClosedType::Inst(class, args)) if args.len() == 1 => (*class, args[0]),
@@ -474,10 +474,10 @@ impl<'m> World<'m> {
             return Ok(());
         }
         let (reply_ty, env) = self.reply_type(vm)?;
-        let module = self.module;
+        let module = self.module.clone();
         let machine = &self.machines[vm as usize];
         crate::typecheck::check_boundary_value(
-            module,
+            &module,
             &machine.vm.heap,
             &mut self.envs,
             &mut self.check,
@@ -506,7 +506,7 @@ impl<'m> World<'m> {
         if !self.restored_any {
             return Ok(());
         }
-        let module = self.module;
+        let module = self.module.clone();
         let code = module
             .funcs
             .get(func as usize)
@@ -517,7 +517,7 @@ impl<'m> World<'m> {
         let machine = &self.machines[vm as usize];
         for (value, ty) in args.iter().zip(code.params.iter()) {
             crate::typecheck::check_boundary_value(
-                module,
+                &module,
                 &machine.vm.heap,
                 &mut self.envs,
                 &mut self.check,
@@ -613,7 +613,7 @@ impl<'m> World<'m> {
         let built = self.reply_type(vm).and_then(|(ty, env)| {
             let expected = self
                 .envs
-                .close(self.module, ty, env)
+                .close(&self.module, ty, env)
                 .map_err(|_| FaultCode::BoundaryLimit)?;
             self.build_host_value(vm, &reply, expected)
         });

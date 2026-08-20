@@ -18,16 +18,16 @@ The current decoder combines container decoding, structure checks,
 state checks, and type checks. It returns `Image`, although `Image`
 has public fields and can lose every checked property after mutation.
 
-The current `SnapshotImage` already wraps an image with canonical
-bytes. Its documented role says that it contains a verified image.
+The host `SnapshotImage` already wraps an image with canonical bytes.
+Its documented role says that it contains an admitted image.
 
 This document makes that boundary exact:
 
 > **`Image` is editable snapshot data. `SnapshotImage` is its admitted,
 > immutable form.**
 
-Do not add a public type named `VerifiedImage`. `SnapshotImage` already
-has that role in Loom and in the host API.
+Do not add a host type named `VerifiedImage`. `SnapshotImage` already
+has that role in the host API.
 
 ## 2. Terms
 
@@ -57,8 +57,8 @@ snapshot value.
 
 ### 2.3 SnapshotImage
 
-`SnapshotImage` is the admitted host representation. It also backs the
-Loom guest type named `SnapshotImage`.
+`SnapshotImage` is the admitted host representation. It backs the Loom
+guest types `VmSnapshot` and `RunSnapshot[T]`.
 
 A `SnapshotImage` owns these items:
 
@@ -78,15 +78,28 @@ loading produce the same `SnapshotImage` guarantees.
 An origin flag can support diagnostics. It must not grant trust or
 select a weaker restore path.
 
-### 2.4 Snapshot[T]
+### 2.4 VmSnapshot
 
-`Snapshot[T]` is a typed guest view over one `SnapshotImage`. It does
+`VmSnapshot` is the untyped guest view of one admitted complete image.
+
+The image can contain a distinguished run marker. External loading
+preserves this marker without assigning its result type.
+
+`VmSnapshot.cast_result[T]` checks the marker and its result type.
+Success returns `RunSnapshot[T]` without copying the image.
+
+A full snapshot from `Vm.snapshot()` has no distinguished run marker.
+Its `cast_result` operation therefore returns a typed error.
+
+### 2.5 RunSnapshot[T]
+
+`RunSnapshot[T]` is a typed guest view over one `SnapshotImage`. It does
 not own another image and does not add another admission state.
 
-`SnapshotImage.cast_result[T]` compares the admitted root result type
-with `T`. Success creates the typed view without copying the image.
+The view selects one distinguished run. Its terminal result has type
+`T`.
 
-### 2.5 Resolved type
+### 2.6 Resolved type
 
 A resolved type contains every generic substitution. It contains no
 unresolved type variable and no missing type-table entry.
@@ -94,7 +107,7 @@ unresolved type variable and no missing type-table entry.
 Resolved types are internal verifier values. They are not guest
 `TypeView` values and need no serialized proof form.
 
-### 2.6 Admission identity
+### 2.7 Admission identity
 
 The admission identity contains the module `VerifiedKey`, snapshot
 format version, and runtime ABI version.
@@ -117,8 +130,8 @@ verified VM cut ------------ trusted capture ------------> SnapshotImage
 SnapshotImage -> edit copy -> Image -> admit -> SnapshotImage
 ```
 
-`load_external` composes decode and admission. A caller that needs no
-editor receives `SnapshotImage` directly.
+`load_external` composes decode and admission. A host caller that needs
+no editor receives `SnapshotImage` directly.
 
 The lower-level decoder returns `Image`. Editors and corruption tests
 can use that entry point.
@@ -228,7 +241,7 @@ proves at that program point, so both inputs come from verified code.
 
 The boundaries are the terminal result read, the mailbox receive, the
 pending call reply, the spawn argument, the mock reply, and the restore
-that returns `Run[T]` or `Snapshot[T]`.
+that returns `Run[T]` or `RunSnapshot[T]`.
 
 The check descends every element and every field. It compares a closure
 with the verified closed signature of its function. That comparison
@@ -312,7 +325,7 @@ that reaches the object already supplies `Inst(class, args)`. Admission
 checks it because the image carries it, and section 14 states why the
 image carries it.
 
-`Snapshot[T]` carries no witness. The closed type table gives `T` a
+`RunSnapshot[T]` carries no witness. The closed type table gives `T` a
 canonical identity, and admission compares that identity with the
 declared root type of the nested container.
 
@@ -556,8 +569,8 @@ mutable `Image` from acting as trusted state.
 
 ## 12. Specification edits
 
-- Language specification 17.1 must state that guest `SnapshotImage`
-  always has admitted host backing.
+- Language specification 17.1 must state that guest `VmSnapshot` and
+  `RunSnapshot[T]` always have admitted host backing.
 - Language specification 17.8 must separate decoding from admission.
 - Language specification 17.8 must define the exact admission rule.
 - Language specification 17.9 must keep canonical bytes independent
@@ -582,7 +595,7 @@ Build the carrier generously now, and build no solver.
 ### 14.1 Type descriptors and reflection
 
 Language specification 17.1 defers the guest forms of
-`SnapshotImage.cast_result` and `SnapshotImage.result_type`, because
+`VmSnapshot.cast_result` and `VmSnapshot.result_type`, because
 version 0.2 has no `Type[T]` descriptor. Language specification section
 9 already calls `type_descriptor[T]()` a witness.
 

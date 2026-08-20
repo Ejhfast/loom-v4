@@ -1428,8 +1428,8 @@ Run[T]
 StepEvent[T]
 RunResult[T]
 DriveEvent[T]
-Snapshot[T]
-SnapshotImage
+RunSnapshot[T]
+VmSnapshot
 ```
 
 There is no execute-an-unknown-signature shortcut.
@@ -1766,15 +1766,17 @@ Everything read out of another heap—stack frames, mirrors, pending request arg
 
 ## 17. Snapshots
 
-### 17.1 The machine world
+### 17.1 VM snapshots and run snapshots
 
-Machine state is data (section 1). A snapshot copies one machine world at one moment and persists the copy. Restore builds an independent world from the copy, and that world continues the same way. This section defines the world, the moment, and the two conditions that block a copy.
+Machine state is data (section 1). A snapshot copies machine state at one moment.
+
+`RunSnapshot[T]` contains one complete image and selects one `Run[T]`.
 
 ```lm
-case vm.snapshot()
+case run.snapshot()
 in Ok(snap)
   case sys.vm.Vm().restore(snap)
-  in Ok(vm2) then vm2.run()
+  in Ok(restored) then restored.run()
   in Err(error) then report_restore(error)
   end
 in Err(error)
@@ -1782,7 +1784,13 @@ in Err(error)
 end
 ```
 
-A held snapshot names one paused `Run[T]` as its root. A receiverless self snapshot names the performing machine as its root.
+`VmSnapshot` contains one complete image without a typed run selection.
+
+`Vm.snapshot()` captures every stopped run and process in that VM.
+
+A held run snapshot selects one paused `Run[T]` as its root.
+
+A receiverless self snapshot records an untyped distinguished run marker.
 
 The snapshot world contains the root and every reachable machine. Handles, nested control edges, and routed requests establish reachability.
 
@@ -1792,19 +1800,33 @@ Running procs, paused procs, terminal procs, and held nested machines all ride a
 
 The world is closed by construction. Reachability follows the handles, so every handle in the capture targets a captured machine. A reference that leaves the world is not representable. The design therefore needs no ownership records, no external references, and no restore-time resolution. What cannot exist needs no tracking.
 
-The surface spellings lower to distinct exact identities `Vm.SnapshotHeld` and `Vm.SnapshotSelf`. A held call returns `Result[Snapshot[T],SnapshotError]`. A self call returns `Result[SnapshotImage,SnapshotError]`, because the calling function cannot name the enclosing machine result type.
+The held and self forms use distinct operation identities.
 
-External bytes first pass through `sys.vm.load_snapshot(bytes)`. The loader decodes and admits the bytes once and returns `Result[SnapshotImage,SnapshotError]`.
+A held call returns `Result[RunSnapshot[T],SnapshotError]`.
 
-A guest `SnapshotImage` always has admitted host backing. Every path that builds one runs admission (section 17.8) or copies a stopped verified world. Editable snapshot data is a host state with no guest spelling, and it never backs a guest value. `Snapshot[T]` is a typed view over one `SnapshotImage`, so it adds no other state.
+A self call returns `Result[VmSnapshot,SnapshotError]`.
+
+The self call cannot name the enclosing run result type.
+
+External bytes first pass through `sys.vm.load_snapshot(bytes)`. The loader decodes and admits the bytes once and returns `Result[VmSnapshot,SnapshotError]`.
+
+A guest snapshot always has admitted host backing.
+
+Each creation path runs admission or copies a stopped verified image.
+
+Editable snapshot data has no guest spelling. It never backs a guest value.
+
+`RunSnapshot[T]` is a typed view over one `VmSnapshot`. It adds one distinguished run selection.
 
 ```text
-SnapshotImage.result_type(self) -> TypeView
-SnapshotImage.cast_result[T](self, expected: Type[T])
-  -> Result[Snapshot[T], SnapshotTypeError]
-SnapshotImage.to_bytes(self) -> Bytes
-Snapshot[T].to_bytes(self) -> Bytes
+VmSnapshot.result_type(self) -> TypeView
+VmSnapshot.cast_result[T](self, expected: Type[T])
+  -> Result[RunSnapshot[T], SnapshotTypeError]
+VmSnapshot.to_bytes(self) -> Bytes
+RunSnapshot[T].to_bytes(self) -> Bytes
 ```
+
+`cast_result` requires a distinguished run marker. A full VM snapshot has no such marker.
 
 ### 17.2 World contents
 
@@ -1851,11 +1873,21 @@ SnapshotLimitExceeded
 
 ### 17.5 Restore and fresh authority
 
-`restore(snap: Snapshot[T])` installs the captured world into a `Vm`.
+`Vm.restore(snap: RunSnapshot[T])` imports the captured image into that VM.
 
 It returns `Result[Run[T],RestoreError]`. A failed restore exposes no partial world.
 
-Policy tables are never serialized. Each restored machine receives a fresh default-deny table. Internal pass chains refer to the new parent tables. Restore creates no authority.
+`sys.vm.restore_vm(snap: VmSnapshot)` creates one stopped `Vm`.
+
+It returns no distinguished run. A failed restore exposes no partial VM.
+
+Policy tables and VM policy ceilings are never serialized.
+
+Each restored run receives a fresh default-deny table.
+
+Each restored VM receives a fresh default-deny policy ceiling.
+
+Restore creates no authority.
 
 A routed cursor outside the captured world binds to the restoring holder. Dispatch then consults the restoring holder's table.
 
@@ -1897,7 +1929,7 @@ Decoding produces editable snapshot data. That data promises nothing about refer
 
 Admission uses this rule:
 
-> Editable snapshot data becomes a `SnapshotImage` only when its structure resolves and every live declared type is accurate.
+> Editable snapshot data becomes an admitted host image only when its structure resolves and every live declared type is accurate.
 
 "Declared type" includes the type the bytecode verifier proves at a saved program point. It never means only a type label the data carries.
 
@@ -1907,9 +1939,15 @@ Type accuracy checks every initialized local, every operand of each stopped fram
 
 Admission proves no other property. It does not prove termination, useful control state, scheduler fairness, request-token history, external authority, or target-world resources. A strange but structurally valid typed state remains legal.
 
-Restore accepts an admitted `SnapshotImage` alone. Execution, answering, and later snapshotting repeat no structural check and no type check. The write barrier and normal dynamic checks remain active because they enforce runtime semantics, not snapshot trust.
+Restore accepts admitted host image backing alone. It never accepts editable image data.
 
-An in-process snapshot of a stopped verified world holds the same invariant by construction, so its capture path repeats no graph check. Origin grants no other trust: both paths produce the same `SnapshotImage` guarantees.
+Execution and later snapshots repeat no admission check.
+
+The write barrier and dynamic checks still enforce runtime semantics.
+
+An in-process snapshot of a stopped verified world holds the same invariant by construction.
+
+Its capture path repeats no graph check. Origin grants no other trust.
 
 A nested snapshot stays opaque. Admission matches its declared root result type and admits its body at its own restore.
 
@@ -1917,7 +1955,11 @@ A nested snapshot stays opaque. Admission matches its declared root result type 
 
 The canonical snapshot representation uses deterministic section order, little-endian fixed fields where specified, canonical LEB128 counts/integers, object ordinals assigned by root traversal, machine ordinals assigned by deterministic reachability traversal from the root, and BLAKE3-256 domain-separated hashes. Debug/source-map data may be present but does not affect guest semantic identity.
 
-Canonical bytes carry no admission status. The container hash identifies bytes, and the admission status is a fact of one process. Writing a `SnapshotImage` to bytes therefore transfers no trust, and loading those bytes in another process repeats admission (section 17.8).
+Canonical bytes carry no admission status. The container hash identifies bytes.
+
+Admission status belongs to one process. Snapshot bytes transfer no trust.
+
+Loading the bytes in another process repeats admission (section 17.8).
 
 ---
 
@@ -1991,7 +2033,7 @@ h.done(): ProcResult[R] with Proc.Done
 h.pause(): Result[Run[R], ProcError] with Proc.Pause
 h.resume(): Result[(), ProcError] with Proc.Resume
 h.close(): SendResult with Proc.Close
-h.snapshot_wait(fuel: Int): Result[Snapshot[R], SnapshotError]
+h.snapshot_wait(fuel: Int): Result[RunSnapshot[R], SnapshotError]
   with Proc.SnapshotWait
 ```
 
@@ -2561,16 +2603,16 @@ Vm.ResourceSame          (ResourceHandle, ResourceHandle) -> Bool
 Vm.SetLimits[T]          (Run[T], Limits) -> ()
 Vm.AddFuel[T]            (Run[T], Int) -> ()
 Vm.SnapshotHeld[T]       (Run[T])
-                          -> Result[Snapshot[T], SnapshotError]
+                          -> Result[RunSnapshot[T], SnapshotError]
 Vm.SnapshotSelf          ()
-                          -> Result[SnapshotImage, SnapshotError]
+                          -> Result[VmSnapshot, SnapshotError]
 Vm.LoadSnapshot          (Bytes)
-                          -> Result[SnapshotImage, SnapshotError]
-Vm.Restore[T]            (Vm, Snapshot[T])
+                          -> Result[VmSnapshot, SnapshotError]
+Vm.Restore[T]            (Vm, RunSnapshot[T])
                           -> Result[Run[T], RestoreError]
 ```
 
-The held and receiverless forms use separate exact operation identities because their honest result types differ, while sharing one serializer/host implementation family. `SnapshotImage.cast_result(type_descriptor[T]())` checks the hidden result `TypeId` and returns `Result[Snapshot[T],SnapshotTypeError]`; typed restore accepts only the checked view.
+The held and receiverless forms use separate exact operation identities because their honest result types differ, while sharing one serializer/host implementation family. `VmSnapshot.cast_result(type_descriptor[T]())` checks the hidden result `TypeId` and returns `Result[RunSnapshot[T],SnapshotTypeError]`; typed restore accepts only the checked view.
 
 `Vm.Handles` returns controls for the live resources in the controlled
 machine world. A resource control stays with its holder.
@@ -2597,7 +2639,7 @@ Proc.Done[M,R]      (Handle[M,R]) -> ProcResult[R]
 Proc.Pause[M,R]     (Handle[M,R]) -> Result[Run[R], ProcError]
 Proc.Resume[M,R]    (Handle[M,R]) -> Result[(), ProcError]
 Proc.SnapshotWait[M,R] (Handle[M,R], Int)
-                       -> Result[Snapshot[R], SnapshotError]
+                       -> Result[RunSnapshot[R], SnapshotError]
 ```
 
 A proc with no mailbox uses `Never` as `M`; such a handle has no callable `send` method.

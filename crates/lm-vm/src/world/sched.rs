@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     /// True when the block of `vm` can complete now.
     pub(super) fn block_ready(&self, vm: VmId) -> bool {
         let Some(block) = self.machines[vm as usize].vm.block else {

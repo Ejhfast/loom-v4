@@ -225,7 +225,7 @@ fn closed_type_parts(node: &ClosedType) -> usize {
         ClosedType::List(_)
         | ClosedType::Run(_)
         | ClosedType::Op(_, _)
-        | ClosedType::Snapshot(_) => 1,
+        | ClosedType::RunSnapshot(_) => 1,
         ClosedType::Map(_, _) | ClosedType::PendingCall(_, _) | ClosedType::Handle(_, _) => 2,
         _ => 0,
     }
@@ -744,7 +744,9 @@ impl Admit<'_> {
                 }
             }
             let target = match entry.object {
-                Object::NativeVm { vm } | Object::NativeTable { vm } => Some(vm),
+                Object::NativeVm { vm } | Object::NativeRun { vm } | Object::NativeTable { vm } => {
+                    Some(vm)
+                }
                 Object::NativeRequest { vm, .. } | Object::NativeCall { vm, .. } => Some(vm),
                 Object::NativeHandle { proc, .. } => Some(proc),
                 Object::NativeResourceHandle { surface, .. } => Some(surface),
@@ -786,6 +788,14 @@ impl Admit<'_> {
                     ImageReason::Reference,
                     at(&format!(
                         "object {ordinal} is a machine handle to its own machine"
+                    )),
+                );
+            }
+            if matches!(entry.object, Object::NativeRun { vm: target } if target == vm) {
+                return fail(
+                    ImageReason::Reference,
+                    at(&format!(
+                        "object {ordinal} is a run handle to its own machine"
                     )),
                 );
             }
@@ -1347,7 +1357,7 @@ impl Admit<'_> {
             }
             let receiver_matches = match pending.args.first() {
                 Some(Value::Obj(reference)) => m.objects.get(reference.slot as usize).is_some_and(
-                    |entry| matches!(entry.object, Object::NativeVm { vm: held } if held == target),
+                    |entry| matches!(entry.object, Object::NativeRun { vm: held } if held == target),
                 ),
                 _ => false,
             };

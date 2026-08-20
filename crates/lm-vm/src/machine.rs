@@ -59,6 +59,9 @@ fn method_of(dispatch: &[crate::DispatchRow], class: u32, selector: u32) -> Resu
 /// A dense machine identifier inside one world.
 pub type VmId = u32;
 
+/// An append-only function slot in one VM code store.
+pub type FunctionVersionId = u32;
+
 /// The lifecycle state of one machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineState {
@@ -287,7 +290,7 @@ impl PolicyTable {
 
 /// One explicit VM frame.
 pub struct Frame {
-    pub func: u32,
+    pub func: FunctionVersionId,
     pub block: u32,
     pub ip: u32,
     pub base_local: u32,
@@ -361,7 +364,7 @@ enum CollectionExtensionOp {
 /// One live nonescaping callback descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallbackDescriptor {
-    pub func: u32,
+    pub func: FunctionVersionId,
     pub captures: Vec<Value>,
     pub env: TypeEnvId,
     pub owner_depth: u32,
@@ -496,7 +499,7 @@ pub struct Machine {
     /// proc instance of a proc. A machine drops its body closure and
     /// its frames, so the record is the one lasting evidence of both
     /// types. A machine that never loaded a frame records `None`.
-    pub body_func: Option<u32>,
+    pub body_func: Option<FunctionVersionId>,
     /// The type environment of the machine body activation.
     ///
     /// The machine witness. The two types above close through it, so a
@@ -509,6 +512,9 @@ pub struct Machine {
     /// It is not derived from the ownership, because `Proc.Run`
     /// transfers a plain machine to the scheduler and mints no grant.
     pub is_proc: bool,
+    /// True when this empty record stores one persistent VM image.
+    /// Reachable `NativeVm` values derive this marker after restore.
+    pub is_image: bool,
     /// The world gate a restore put this machine behind.
     ///
     /// Restored procs are scheduler-owned but stopped until the
@@ -741,6 +747,7 @@ impl Machine {
             body_func: None,
             witness: TypeEnvId::EMPTY,
             is_proc: false,
+            is_image: false,
             gate: 0,
             start_body: None,
             callbacks: Vec::new(),

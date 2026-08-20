@@ -687,8 +687,8 @@ bindings, because the closed world makes them unnecessary.
 
 - Add a canonical snapshot writer over trusted state and an external
   snapshot loader/verifier.
-- Convert external bytes once to trusted `SnapshotImage`; retain typed
-  `Snapshot[T]` result casting.
+- Convert external bytes once to trusted `VmSnapshot`; retain typed
+  `RunSnapshot[T]` result casting.
 - Capture the root and every reachable machine as one snapshot world,
   using the Week 8 barrier.
 - Serialize each machine heap, code/class/type manifests, frames,
@@ -718,7 +718,7 @@ bindings, because the closed world makes them unnecessary.
 ### Runnable outputs
 
 ```lm
-def restore_run(snap: Snapshot[Int]): Int with Vm
+def restore_run(snap: RunSnapshot[Int]): Int with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(restored)
     case restored.run()
@@ -768,7 +768,7 @@ valid: state=asked machines=3 mailboxes=2
 - A failed restore exposes no partial world.
 - A failed snapshot resumes the original world.
 - The loader checks machine references, limits, and lifecycle records.
-  `SnapshotImage` is the admitted host state, and `Image` is the
+  `VmSnapshot` is the admitted host state, and `Image` is the
   editable decoded state.
 - Whole-image structural verification occurs once on external load.
   Admission proves structure. The interpreter tests each value tag, and

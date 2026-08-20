@@ -265,7 +265,7 @@ fn snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
 /// The budget keeps a mutant that would run forever from hanging the
 /// harness. The rule is the absence of a panic; a fault, a block with
 /// no runnable machine, or the budget all stop the drive cleanly.
-fn drive_restored(world: &mut lm_vm::World<'_>, root: lm_vm::VmId) {
+fn drive_restored(world: &mut lm_vm::World, root: lm_vm::VmId) {
     for _ in 0..10_000 {
         match world.run_machine(root) {
             lm_vm::RootEvent::Done(_) | lm_vm::RootEvent::Fault(_) | lm_vm::RootEvent::Asked(_) => {

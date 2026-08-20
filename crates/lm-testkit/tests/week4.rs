@@ -374,11 +374,14 @@ fn live_table_edits_affect_future_lookups() {
 // ---------------------------------------------------------------
 
 #[test]
-fn a_stage_one_vm_rejects_a_second_activation() {
-    let source = "def go(): Int with Vm\n  e = sys.vm.Vm()\n  \
-        a = e.activate(do || 1 end, args: ())\n  \
-        b = e.activate(do || 2 end, args: ())\n  3\nend\ngo()\n";
-    assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidVmState)");
+fn one_vm_activates_runs_with_two_result_types() {
+    let source = "def go(): (Int, String) with Vm\n  image = sys.vm.Vm()\n  \
+        numbers = image.activate(do || 7 end, args: ())\n  \
+        text = image.activate(do || \"ready\" end, args: ())\n  \
+        n = case numbers.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\n  \
+        s = case text.run()\n  in Done(v) then v\n  in Fault(_) then \"fault\"\n  end\n  \
+        (n, s)\nend\ngo()\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done((7, \"ready\"))");
 }
 
 #[test]
@@ -512,7 +515,7 @@ fn a_denied_fault_carries_its_reason_and_operation() {
     world.allow("Vm").expect("the grant names a group");
     let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
     scheduler.run(&mut world);
-    let fault = world.fault_of(1).expect("the child faulted");
+    let fault = world.fault_of(1).expect("the run faulted");
     assert_eq!(fault.code, lm_abi::FaultCode::PolicyDenied);
     assert_eq!(fault.message, "the clock is not permitted");
     // `reject` discards the operation of the supplied value and

@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     /// Capture one machine world and install the typed result.
     pub(super) fn take_snapshot(&mut self, vm: VmId, op: u32, root: VmId, self_root: bool) {
         // A barrier identifier and a world gate both need one number
@@ -85,15 +85,11 @@ impl<'m> World<'m> {
     /// path; any other bytes run the external loader once first, so no
     /// unchecked image ever builds a world.
     pub(super) fn restore_snapshot(&mut self, vm: VmId, op: u32, args: Args<'_>) {
-        let Some(target) = self.vm_arg(vm, op, args[0]) else {
+        let Some(image_vm) = self.image_arg(vm, op, args[0]) else {
             return;
         };
-        if target == vm || self.machines[target as usize].active > 0 {
-            self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
-            return;
-        }
-        if self.machines[target as usize].vm.state != MachineState::Empty {
-            self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is loaded");
+        if image_vm == vm || self.machines[image_vm as usize].active > 0 {
+            self.fault_caller(vm, op, FaultCode::InvalidVmState, "the VM image is in use");
             return;
         }
         // A snapshot value takes one of two shapes. A capture of this
@@ -177,15 +173,29 @@ impl<'m> World<'m> {
             );
             return;
         }
+        let (target, reused) = match self.prepare_run_target(vm, image_vm) {
+            Some(target) => target,
+            None => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::InvalidVmState,
+                    "the VM image has no run budget left",
+                );
+                return;
+            }
+        };
         let reply = match self.prepare_restore_reply(vm, target) {
             Ok(reply) => reply,
             Err(code) => {
+                self.rollback_run_target(vm, target, reused);
                 self.machines[vm as usize].set_fault(code, "", Some(op));
                 return;
             }
         };
         if let Err(code) = self.check_reply(vm, reply.value) {
             self.discard_restore_reply(vm, reply);
+            self.rollback_run_target(vm, target, reused);
             self.machines[vm as usize].set_fault(
                 code,
                 "the reply does not carry the type of its perform",
@@ -195,17 +205,22 @@ impl<'m> World<'m> {
         }
         if let Err(code) = self.reserve_restore_reply_slot(vm) {
             self.discard_restore_reply(vm, reply);
+            self.rollback_run_target(vm, target, reused);
             self.machines[vm as usize].set_fault(code, "", Some(op));
             return;
         }
         let built = match self.prepare_restore(vm, target, &image) {
             Ok(plan) => {
                 self.commit_restore(plan);
+                if reused {
+                    self.machines[target as usize].is_image = true;
+                }
                 self.install_prepared_restore_reply(vm, reply);
                 return;
             }
             Err(crate::snapshot::RestoreFail::LimitExceeded) => {
                 self.discard_restore_reply(vm, reply);
+                self.rollback_run_target(vm, target, reused);
                 self.make_instance(vm, self.core.restore_limit_exceeded, vec![])
                     .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]))
             }
@@ -214,6 +229,7 @@ impl<'m> World<'m> {
             // every caller, and a mismatch here is a boundary fault.
             Err(crate::snapshot::RestoreFail::OtherProgram) => {
                 self.discard_restore_reply(vm, reply);
+                self.rollback_run_target(vm, target, reused);
                 self.fault_caller(
                     vm,
                     op,
@@ -233,7 +249,7 @@ impl<'m> World<'m> {
         target: VmId,
     ) -> Result<PreparedRestoreReply, FaultCode> {
         let class = self.core.result_ok.ok_or(FaultCode::MalformedState)?;
-        let handle = Object::NativeVm { vm: target };
+        let handle = Object::NativeRun { vm: target };
         let mut fields = Vec::new();
         fields
             .try_reserve_exact(1)

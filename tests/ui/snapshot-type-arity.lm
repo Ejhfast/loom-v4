@@ -1,4 +1,4 @@
-def go(s: Snapshot[Int, Int]): Int
+def go(s: RunSnapshot[Int, Int]): Int
   0
 end
 

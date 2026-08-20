@@ -61,7 +61,7 @@ pub enum CutError {
     TooLarge,
 }
 
-impl World<'_> {
+impl World {
     /// Run one consistent cut from `root`.
     ///
     /// The call encodes nothing. `capture_snapshot` adds the
@@ -434,14 +434,14 @@ impl World<'_> {
         };
         let witness = record.witness;
         let ret = self.module.funcs[func as usize].ret;
-        let module = self.module;
-        let closed = self.envs.close(module, ret, witness).map_err(|_| {
+        let module = self.module.clone();
+        let closed = self.envs.close(&module, ret, witness).map_err(|_| {
             SnapshotFail::Fault(
                 FaultCode::BoundaryLimit,
                 "the result type passed the closed type limit".to_string(),
             )
         })?;
-        Ok(self.envs.digest(module, class_hashes, closed))
+        Ok(self.envs.digest(&module, class_hashes, closed))
     }
 
     /// Build the closed type table and the environment table of one
@@ -632,6 +632,9 @@ impl World<'_> {
             let source = self.heap_of(vm).get(*r);
             let object = match source {
                 Object::NativeVm { vm: target } => Object::NativeVm {
+                    vm: self.require_ordinal(*target, ordinal_of)?,
+                },
+                Object::NativeRun { vm: target } => Object::NativeRun {
                     vm: self.require_ordinal(*target, ordinal_of)?,
                 },
                 Object::NativeTable { vm: target } => Object::NativeTable {

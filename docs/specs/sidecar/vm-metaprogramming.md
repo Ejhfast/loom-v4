@@ -23,6 +23,8 @@ The implementation uses these decisions:
 
 - `Vm` is a persistent execution image without a result type.
 - `Run[T]` is one active invocation with terminal type `T`.
+- `RunSnapshot[T]` captures one distinguished run and its reachable image.
+- `VmSnapshot` captures one complete VM without a distinguished result.
 - An `Artifact` contains portable, untrusted compiler output.
 - Independent verification produces a `VerifiedModule`.
 - `Vm.install` installs one verified module and returns an `Instance`.
@@ -34,7 +36,7 @@ The implementation uses these decisions:
 - One general slot model covers functions, classes, values, and processes.
 - The compiler emits code but never installs or executes it.
 - Compile environments and link environments remain separate.
-- Runtime policy controls every effect from installed code.
+- Image and run policies control every effect from installed code.
 - Public syntax trees are immutable and lossless.
 - The public syntax tree does not expose the compiler's Rust AST.
 
@@ -52,6 +54,8 @@ The new split uses these roles:
 |---|---|
 | `Vm` | Installed code, classes, types, slots, policies, and processes |
 | `Run[T]` | One active root invocation with terminal type `T` |
+| `RunSnapshot[T]` | Reachable VM state with one distinguished `Run[T]` |
+| `VmSnapshot` | Complete stopped VM state without one result type |
 | `Instance` | One installation of one verified module |
 
 `Vm` remains holder-local. A guest cannot transfer its authority through an ordinary value boundary.
@@ -59,6 +63,11 @@ The new split uses these roles:
 `Run[T]` owns execution state for one invocation. Its frames, heap roots, requests, and terminal value remain typed.
 
 One VM can hold several stopped runs. The scheduler can also run several processes inside that VM.
+
+The implementation can store the first run in the image record. The
+public `Vm` and `Run[T]` handles remain distinct.
+
+A typed run snapshot selects one run inside an untyped captured image.
 
 ## 4. Code pipeline
 
@@ -110,13 +119,33 @@ Runtime metaprogramming separates three forms of authority.
 
 `LinkEnv` supplies concrete definitions and holder-local slots during installation.
 
-VM policy controls effects during execution.
+Image and run policies control effects during execution.
 
 Possession of compiler authority grants no file, network, clock, process, or VM-control authority.
 
 Possession of an artifact grants no installation or execution authority.
 
 Possession of a slot grants only the replacement operations allowed by that slot.
+
+### 5.1 Policy layers
+
+`VmPolicy` is a holder-local ceiling for all runs in one VM.
+
+`Run[T]` owns one holder-local `PolicyTable` for routing, mocks, passes, and blocks.
+
+The VM checks its ceiling before it reads the run table. A ceiling denial always wins.
+
+A run-table mock handles an allowed operation without reaching the outer holder.
+
+A run-table pass sends an allowed operation to the VM holder or its next policy layer.
+
+A new `Vm` permits pass-through to its holder. A new `Run` starts with the existing default-deny table.
+
+An image policy cannot grant authority that its holder does not possess.
+
+An image-policy change affects future operations in every run. A run-table change affects only that run.
+
+An active pending operation keeps the decision that routed it.
 
 ## 6. Portable code values
 
@@ -409,7 +438,7 @@ A caller must bind every external interface through `CompileEnv`.
 
 The generated program's effect row does not enter the compiler operation's outer row.
 
-The caller inspects the generated row before activation. VM policy remains the final authority.
+The caller inspects the generated row before activation. Image and run policies remain the final authority.
 
 ## 13. Public syntax model
 
@@ -494,23 +523,62 @@ It must not copy each node during ordinary traversal.
 
 ## 14. Snapshot rules
 
-A VM snapshot records all reachable execution and installation state.
+The snapshot API has two value types.
 
-It includes these items:
+| Type | Captured root | Restore result |
+|---|---|---|
+| `RunSnapshot[T]` | One distinguished `Run[T]` and its reachable machine image | `Run[T]` in a target `Vm` |
+| `VmSnapshot` | One complete stopped `Vm` | One stopped `Vm` |
+
+`Run.snapshot()` returns `Result[RunSnapshot[T], SnapshotError]`.
+
+A run snapshot captures the run, its reachable processes, and all required installation state.
+
+It does not capture an unrelated run in the same VM.
+
+The distinguished run preserves the result type. The surrounding captured image has no result type.
+
+`Vm.restore(snapshot)` imports a run snapshot and returns its distinguished `Run[T]`.
+
+This form preserves the current branching pattern:
+
+```text
+vm = sys.vm.Vm()
+case vm.restore(snapshot)
+in Ok(run) then use(vm, run)
+in Err(error) then report(error)
+end
+```
+
+The pair `(vm, run)` is the restored image and its distinguished run.
+
+`Vm.snapshot()` requires a safe stopped image. It returns `Result[VmSnapshot, SnapshotError]`.
+
+Restoring a VM snapshot creates one stopped VM. It does not select one run.
+
+Both snapshot forms record these items:
 
 - installed module semantic hashes;
 - instance identities and relocation tables;
 - slot keys, contracts, and current targets;
 - active function version identities;
 - class and type identities;
-- runs, frames, heaps, policies, and pending operations;
-- process state and resource blockers.
+- selected runs, frames, heaps, and pending operations;
+- selected process state and resource blockers.
+
+Slot targets are code state. A snapshot records their exact versions.
+
+Portable snapshots grant no effect authority.
+
+They record no live `VmPolicy`, `PolicyTable`, mock closure, or holder capability.
+
+A restored run starts default-deny. Declared birth grants and explicit holder grants apply through existing rules.
+
+A restored VM starts default-deny. Its holder must install its image policy before execution.
 
 Restore admits every referenced verified module before it admits machine state.
 
 Restore rejects a missing code version. It never redirects an active frame through a current slot.
-
-Snapshot bytes contain no live holder capability.
 
 The existing open-resource restrictions remain in force.
 
@@ -643,7 +711,9 @@ Move code, instance, class, and type ownership into `Vm`.
 
 Give frames and closures stable function version identities.
 
-Gate: one VM installs and runs two result types without rebuilding its stores.
+Split snapshots into `RunSnapshot[T]` and `VmSnapshot`.
+
+Gate: one VM runs two result types without rebuilding its stores. Typed run branching remains unchanged.
 
 ### Stage 3: add general slots
 

@@ -50,7 +50,7 @@ total";
 /// covers the restore path too.
 #[test]
 fn a_search_driver_restores_past_its_child_budget() {
-    let source = "def restore_run(snap: Snapshot[Int]): Int with Vm
+    let source = "def restore_run(snap: RunSnapshot[Int]): Int with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(restored)
     case restored.run()

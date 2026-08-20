@@ -70,7 +70,7 @@ use std::collections::{BTreeSet, HashMap};
 ///
 /// Version 6 adds the parent type arguments of a generic parent to
 /// the canonical class identity encoding. Version 7 adds the
-/// `SnapshotImage` and `Snapshot` type tags. Version 8 adds the reply
+/// the two snapshot type tags. Version 8 adds the reply
 /// type of the two perform instructions to the instruction encoding
 /// and to the canonical identity encoding. Version 9 adds the three
 /// resource types. Version 10 adds the three byte instructions.
@@ -87,7 +87,8 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 22 adds interface contracts, callbacks, and native collection lowering.
 /// Version 23 adds the receiver type to semantic digest instructions.
 /// Version 24 makes direct function parameters nonescaping by default.
-pub const COMPILER_ABI_VERSION: u32 = 24;
+/// Version 25 renames the two guest snapshot types.
+pub const COMPILER_ABI_VERSION: u32 = 25;
 
 /// The refinement work budget of one component.
 ///
@@ -293,7 +294,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             | BcType::PolicyTable
             | BcType::Vm
             | BcType::Digest
-            | BcType::SnapshotImage
+            | BcType::VmSnapshot
             | BcType::Bytes
             | BcType::FileHandle
             | BcType::ResourceHandle
@@ -340,7 +341,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
                 earlier(*ret)?;
                 check_row(&format!("type {idx}"), row)?;
             }
-            BcType::Run(t) | BcType::Wait(t) | BcType::Snapshot(t) => earlier(*t)?,
+            BcType::Run(t) | BcType::Wait(t) | BcType::RunSnapshot(t) => earlier(*t)?,
             BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
                 earlier(*a)?;
                 earlier(*r)?;
@@ -1042,7 +1043,7 @@ impl Graph {
                     }
                     list.push(s.type_node(*ret));
                 }
-                BcType::Run(t) | BcType::Wait(t) | BcType::Snapshot(t) => {
+                BcType::Run(t) | BcType::Wait(t) | BcType::RunSnapshot(t) => {
                     list.push(s.type_node(*t))
                 }
                 BcType::PendingCall(a, r) | BcType::Handle(a, r) => {
@@ -1454,8 +1455,8 @@ impl<'a> Resolver<'a> {
                 out.extend_from_slice(&self.type_digest(*m));
                 out.extend_from_slice(&self.type_digest(*r));
             }
-            BcType::SnapshotImage => out.push(22),
-            BcType::Snapshot(t) => {
+            BcType::VmSnapshot => out.push(22),
+            BcType::RunSnapshot(t) => {
                 out.push(23);
                 out.extend_from_slice(&self.type_digest(*t));
             }

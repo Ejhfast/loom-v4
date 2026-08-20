@@ -199,10 +199,10 @@ impl<'m> ModLowerer<'m> {
             Type::Request => self.intern_type(BcType::Request),
             Type::PolicyTable => self.intern_type(BcType::PolicyTable),
             Type::Vm => self.intern_type(BcType::Vm),
-            Type::SnapshotImage => self.intern_type(BcType::SnapshotImage),
-            Type::Snapshot(t) => {
+            Type::VmSnapshot => self.intern_type(BcType::VmSnapshot),
+            Type::RunSnapshot(t) => {
                 let t = self.bc_ty(t);
-                self.intern_type(BcType::Snapshot(t))
+                self.intern_type(BcType::RunSnapshot(t))
             }
             Type::Run(t) => {
                 let t = self.bc_ty(t);
@@ -3177,10 +3177,10 @@ fn type_text(module: &Module, idx: u32) -> String {
         BcType::Request => "Request".to_string(),
         BcType::PolicyTable => "PolicyTable".to_string(),
         BcType::Vm => "Vm".to_string(),
-        BcType::SnapshotImage => "SnapshotImage".to_string(),
+        BcType::VmSnapshot => "VmSnapshot".to_string(),
         BcType::Run(t) => format!("Run[{}]", type_text(module, *t)),
         BcType::Wait(t) => format!("Wait[{}]", type_text(module, *t)),
-        BcType::Snapshot(t) => format!("Snapshot[{}]", type_text(module, *t)),
+        BcType::RunSnapshot(t) => format!("RunSnapshot[{}]", type_text(module, *t)),
         BcType::PendingCall(a, r) => format!(
             "PendingCall[{}, {}]",
             type_text(module, *a),

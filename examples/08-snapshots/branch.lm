@@ -4,7 +4,7 @@
 # the capture twice. Each restore is a complete independent world, so
 # both branches finish the same computation on their own state.
 
-def restore_run(snap: Snapshot[Int]): Int with Vm
+def restore_run(snap: RunSnapshot[Int]): Int with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(restored)
     case restored.run()

@@ -79,7 +79,7 @@ impl<'o> FnChecker<'o> {
                 lm_abi::AbiPrimitive::Int => INT,
                 lm_abi::AbiPrimitive::String => STRING,
                 lm_abi::AbiPrimitive::Bytes => lm_types::BYTES,
-                lm_abi::AbiPrimitive::SnapshotImage => lm_types::SNAPSHOT_IMAGE,
+                lm_abi::AbiPrimitive::VmSnapshot => lm_types::VM_SNAPSHOT,
             },
             lm_abi::AbiType::Core(core) => {
                 let name = match core {
@@ -267,7 +267,7 @@ impl<'o> FnChecker<'o> {
         }
         // `sys.vm.snapshot_self()` performs `Vm.SnapshotSelf`. The
         // calling function cannot name the enclosing machine result
-        // type, so the reply is an untyped `SnapshotImage`
+        // type, so the reply is an untyped `VmSnapshot`.
         // (specification 17.1).
         if group == "Vm" && member == "snapshot_self" {
             if !args.is_empty() {
@@ -282,7 +282,7 @@ impl<'o> FnChecker<'o> {
             }
             self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_SELF, span)?;
             let error = Self::core_class(ctx, "SnapshotError");
-            let ty = Self::core_inst(ctx, "Result", vec![lm_types::SNAPSHOT_IMAGE, error]);
+            let ty = Self::core_inst(ctx, "Result", vec![lm_types::VM_SNAPSHOT, error]);
             return Ok(HExpr {
                 ty,
                 mutable: true,
@@ -722,7 +722,7 @@ impl<'o> FnChecker<'o> {
                 }
                 let fuel = self.check_expr(ctx, &args[0], INT)?;
                 self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_WAIT_HELD, span)?;
-                let snapshot = ctx.store.intern(Type::Snapshot(t));
+                let snapshot = ctx.store.intern(Type::RunSnapshot(t));
                 let error = Self::core_class(ctx, "SnapshotError");
                 let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
                 HExpr {
@@ -798,7 +798,7 @@ impl<'o> FnChecker<'o> {
             (Type::Run(t), "snapshot") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_HELD, span)?;
-                let snapshot = ctx.store.intern(Type::Snapshot(t));
+                let snapshot = ctx.store.intern(Type::RunSnapshot(t));
                 let error = Self::core_class(ctx, "SnapshotError");
                 let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
                 HExpr {
@@ -819,7 +819,7 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 let snapshot = self.synth_expr(ctx, &args[0])?;
-                let Type::Snapshot(t) = ctx.store.get(snapshot.ty).clone() else {
+                let Type::RunSnapshot(t) = ctx.store.get(snapshot.ty).clone() else {
                     return Err(Diagnostic::new(
                         "E1004",
                         format!(
@@ -1261,7 +1261,7 @@ impl<'o> FnChecker<'o> {
                 }
                 let fuel = self.check_expr(ctx, &args[0], INT)?;
                 self.charge_op(ctx, lm_abi::OP_PROC_SNAPSHOT_WAIT, span)?;
-                let snapshot = ctx.store.intern(Type::Snapshot(r));
+                let snapshot = ctx.store.intern(Type::RunSnapshot(r));
                 let error = Self::core_class(ctx, "SnapshotError");
                 let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
                 HExpr {

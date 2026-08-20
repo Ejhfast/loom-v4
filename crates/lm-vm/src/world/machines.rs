@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     /// Reserve one child machine from the budget of `parent`.
     ///
     /// The parent holds a child budget. Each reservation charges one
@@ -103,13 +103,11 @@ impl<'m> World<'m> {
             // A machine with no parent is the world root or one mock
             // record. Neither takes part in the child budget.
             //
-            // An empty record is a machine that no handle names yet.
-            // `Vm.New` allocates the record before it allocates the
-            // handle, and the embedding API hands one back before any
-            // guest value holds it. The pass keeps every such record,
-            // because it cannot tell a new one from an abandoned one.
+            // The embedding API can hold one empty record before a
+            // guest value names it. A VM image has an explicit marker,
+            // so its handle alone keeps it live.
             if m.vm.parent.is_none()
-                || m.vm.state == MachineState::Empty
+                || (m.vm.state == MachineState::Empty && !m.is_image)
                 || m.active > 0
                 || m.owner != Ownership::Holder
                 || m.paused
@@ -279,10 +277,10 @@ impl<'m> World<'m> {
                 return;
             }
         };
-        self.machines[vm as usize].load_frame(self.module, func, vec![instance], Some(body), env);
+        self.machines[vm as usize].load_frame(&self.module, func, vec![instance], Some(body), env);
     }
 
-    /// Read one machine handle out of a holder value.
+    /// Read one VM image handle out of a holder value.
     ///
     /// The argument comes from the pending record of the machine, and
     /// a restored machine states that record, so the read tests the
@@ -295,20 +293,98 @@ impl<'m> World<'m> {
         }
     }
 
-    /// The machine one argument names, or a fault on the caller.
-    pub(super) fn vm_arg(&mut self, vm: VmId, op: u32, value: Value) -> Option<VmId> {
+    /// Read one run handle out of a holder value.
+    pub(super) fn handle_run(&self, holder: VmId, value: Value) -> Option<VmId> {
+        let r = value.as_obj()?;
+        match self.machines[holder as usize].vm.heap.get(r) {
+            Object::NativeRun { vm } => Some(*vm),
+            _ => None,
+        }
+    }
+
+    /// The VM image one argument names, or a fault on the caller.
+    pub(super) fn image_arg(&mut self, vm: VmId, op: u32, value: Value) -> Option<VmId> {
         match self.handle_vm(vm, value) {
+            Some(target)
+                if self
+                    .machines
+                    .get(target as usize)
+                    .is_some_and(|machine| machine.is_image) =>
+            {
+                Some(target)
+            }
+            None => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the receiver is not a VM image handle",
+                );
+                None
+            }
+            Some(_) => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::InvalidVmState,
+                    "the VM image handle is stale",
+                );
+                None
+            }
+        }
+    }
+
+    /// The run one argument names, or a fault on the caller.
+    pub(super) fn run_arg(&mut self, vm: VmId, op: u32, value: Value) -> Option<VmId> {
+        match self.handle_run(vm, value) {
             Some(target) => Some(target),
             None => {
                 self.fault_caller(
                     vm,
                     op,
                     FaultCode::TypeMismatch,
-                    "the receiver is not a machine handle",
+                    "the receiver is not a run handle",
                 );
                 None
             }
         }
+    }
+
+    /// Remove one child whose handle was not returned.
+    pub(super) fn rollback_child(&mut self, parent: VmId, child: VmId) {
+        let generation = self.machines[child as usize].generation;
+        self.machines[child as usize] = self.empty_machine(self.config, None, generation);
+        self.vm_free.push(child);
+        self.machines[parent as usize].children =
+            self.machines[parent as usize].children.saturating_sub(1);
+    }
+
+    /// Select storage for one new run of an image.
+    ///
+    /// The first run uses the image record. Later runs use normal
+    /// child records. This keeps `Vm()` plus one run equal to one
+    /// child-budget unit.
+    pub(super) fn prepare_run_target(&mut self, parent: VmId, image: VmId) -> Option<(VmId, bool)> {
+        if self.machines[image as usize].vm.state == MachineState::Empty {
+            return Some((image, true));
+        }
+        let config = self.reserve_child(parent)?;
+        Some((self.install_child(config, parent), false))
+    }
+
+    /// Roll back a run target that no handle received.
+    pub(super) fn rollback_run_target(&mut self, parent: VmId, target: VmId, reused: bool) {
+        if !reused {
+            self.rollback_child(parent, target);
+            return;
+        }
+        let old = &self.machines[target as usize];
+        let config = old.config;
+        let parent = old.vm.parent;
+        let generation = old.generation;
+        let mut empty = self.empty_machine(config, parent, generation);
+        empty.is_image = true;
+        self.machines[target as usize] = empty;
     }
 
     /// Execute one VM control operation of the machine `vm`.
@@ -354,6 +430,7 @@ impl<'m> World<'m> {
                     }
                 };
                 let child = self.install_child(child_config, vm);
+                self.machines[child as usize].is_image = true;
                 match self.machines[vm as usize].alloc(Object::NativeVm { vm: child }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
                     Err(code) => {
@@ -370,16 +447,29 @@ impl<'m> World<'m> {
                 }
             }
             lm_abi::OP_VM_ACTIVATE => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(image) = self.image_arg(vm, op, args[0]) else {
                     return;
                 };
-                if self.machines[target as usize].vm.state != MachineState::Empty {
-                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is loaded");
+                if image == vm || self.machines[image as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the VM image is in use");
                     return;
                 }
+                let (target, reused) = match self.prepare_run_target(vm, image) {
+                    Some(target) => target,
+                    None => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "the VM image has no run budget left",
+                        );
+                        return;
+                    }
+                };
                 let program = match self.transfer(vm, target, args[1]) {
                     Ok(value) => value,
                     Err(code) => {
+                        self.rollback_run_target(vm, target, reused);
                         self.fault_caller(vm, op, code, "the program is not sendable");
                         return;
                     }
@@ -387,6 +477,7 @@ impl<'m> World<'m> {
                 // The argument view: unit, or a tuple whose elements
                 /* become the initial parameter locals. */
                 let Some(closure_ref) = program.as_obj() else {
+                    self.rollback_run_target(vm, target, reused);
                     self.fault_caller(
                         vm,
                         op,
@@ -400,6 +491,7 @@ impl<'m> World<'m> {
                     let items = match self.machines[vm as usize].vm.heap.get(r) {
                         Object::Tuple { items } => items.clone(),
                         _ => {
+                            self.rollback_run_target(vm, target, reused);
                             self.fault_caller(
                                 vm,
                                 op,
@@ -424,6 +516,7 @@ impl<'m> World<'m> {
                     match moved {
                         Ok(values) => locals = values,
                         Err(code) => {
+                            self.rollback_run_target(vm, target, reused);
                             self.fault_caller(vm, op, code, "an argument is not sendable");
                             return;
                         }
@@ -436,6 +529,7 @@ impl<'m> World<'m> {
                 let (func, env) = match self.machines[target as usize].vm.heap.get(closure_ref) {
                     Object::Closure { func, env, .. } => (*func, env.env()),
                     _ => {
+                        self.rollback_run_target(vm, target, reused);
                         self.fault_caller(
                             vm,
                             op,
@@ -449,26 +543,30 @@ impl<'m> World<'m> {
                 // the parameter types of the program before the frame
                 // loads them.
                 if let Err(code) = self.check_frame_args(target, func, env, &locals) {
+                    self.rollback_run_target(vm, target, reused);
                     self.fault_caller(vm, op, code, "an argument does not carry its declared type");
                     return;
                 }
                 self.machines[target as usize].load_frame(
-                    self.module,
+                    &self.module,
                     func,
                     locals,
                     Some(closure_ref),
                     env,
                 );
-                match self.machines[vm as usize].alloc(Object::NativeVm { vm: target }) {
+                match self.machines[vm as usize].alloc(Object::NativeRun { vm: target }) {
                     Ok(handle) => self.install_value_reply(vm, handle),
-                    Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
+                    Err(code) => {
+                        self.rollback_run_target(vm, target, reused);
+                        self.machines[vm as usize].set_fault(code, "", Some(op));
+                    }
                 }
             }
             lm_abi::OP_VM_RUN
             | lm_abi::OP_VM_STEP
             | lm_abi::OP_VM_DRIVE
             | lm_abi::OP_VM_DRIVE_FOR => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 // `Vm.DriveFor` bounds the turn. A bound below one
@@ -627,7 +725,7 @@ impl<'m> World<'m> {
                 }
             }
             lm_abi::OP_VM_DRIVE_WAIT => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 if target == vm || self.machines[target as usize].active > 0 {
@@ -644,7 +742,7 @@ impl<'m> World<'m> {
                 self.create_wait(vm, op, WaitSource::Drive { target });
             }
             lm_abi::OP_VM_TABLE => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 match self.machines[vm as usize].alloc(Object::NativeTable { vm: target }) {
@@ -653,7 +751,7 @@ impl<'m> World<'m> {
                 }
             }
             lm_abi::OP_VM_HANDLES => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 if target == vm || self.machines[target as usize].active > 0 {
@@ -669,7 +767,7 @@ impl<'m> World<'m> {
                 self.reply_or_fault(vm, op, built);
             }
             lm_abi::OP_VM_RESOURCE => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 if target == vm || self.machines[target as usize].active > 0 {
@@ -692,7 +790,7 @@ impl<'m> World<'m> {
                 self.reply_or_fault(vm, op, built);
             }
             lm_abi::OP_VM_SERVE_FILE => {
-                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                let Some(surface) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 let found = args[1].as_obj().and_then(|reference| {
@@ -762,7 +860,7 @@ impl<'m> World<'m> {
                 self.install_value_reply(vm, control);
             }
             lm_abi::OP_VM_SERVE_TCP_STREAM => {
-                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                let Some(surface) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 let found = args[1].as_obj().and_then(|reference| {
@@ -859,7 +957,7 @@ impl<'m> World<'m> {
                 self.install_value_reply(vm, control);
             }
             lm_abi::OP_VM_SERVE_TCP_LISTENER => {
-                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                let Some(surface) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 let found = args[1].as_obj().and_then(|reference| {
@@ -939,7 +1037,7 @@ impl<'m> World<'m> {
                 self.install_value_reply(vm, control);
             }
             lm_abi::OP_VM_SERVE_TLS_STREAM => {
-                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                let Some(surface) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 let found = args[1].as_obj().and_then(|reference| {
@@ -1105,7 +1203,7 @@ impl<'m> World<'m> {
                 }
             }
             lm_abi::OP_VM_ANSWER => {
-                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                let Some(surface) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 let found = args[1].as_obj().and_then(|r| {
@@ -1139,7 +1237,7 @@ impl<'m> World<'m> {
                 self.install_value_reply(vm, Value::Unit);
             }
             lm_abi::OP_VM_REJECT | lm_abi::OP_VM_DISPATCH => {
-                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                let Some(surface) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 let found = args[1].as_obj().and_then(|r| {
@@ -1202,7 +1300,7 @@ impl<'m> World<'m> {
                 }
             }
             lm_abi::OP_VM_SNAPSHOT_HELD => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 if target == vm || self.machines[target as usize].active > 0 {
@@ -1215,7 +1313,7 @@ impl<'m> World<'m> {
                 self.take_snapshot(vm, op, target, false);
             }
             lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
-                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                let Some(target) = self.run_arg(vm, op, args[0]) else {
                     return;
                 };
                 let Value::Int(fuel) = args[1] else {

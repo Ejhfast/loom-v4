@@ -186,7 +186,7 @@ impl<'m> Ctx<'m> {
             | BcType::Projection { base: e, .. }
             | BcType::Run(e)
             | BcType::Wait(e)
-            | BcType::Snapshot(e)
+            | BcType::RunSnapshot(e)
             | BcType::Op(_, e) => out.push(e),
             BcType::Map(a, b) | BcType::PendingCall(a, b) | BcType::Handle(a, b) => {
                 out.push(a);
@@ -267,7 +267,7 @@ impl<'m> Ctx<'m> {
                 )),
                 BcType::Run(t) => self.intern(BcType::Run(child(t))),
                 BcType::Wait(t) => self.intern(BcType::Wait(child(t))),
-                BcType::Snapshot(t) => self.intern(BcType::Snapshot(child(t))),
+                BcType::RunSnapshot(t) => self.intern(BcType::RunSnapshot(child(t))),
                 BcType::PendingCall(a, r) => self.intern(BcType::PendingCall(child(a), child(r))),
                 BcType::Handle(m, r) => self.intern(BcType::Handle(child(m), child(r))),
                 _ => cur,
@@ -822,8 +822,8 @@ impl<'m> Ctx<'m> {
                 | BcType::Wait(_)
                 | BcType::PendingCall(_, _)
                 | BcType::Handle(_, _)
-                | BcType::SnapshotImage
-                | BcType::Snapshot(_)
+                | BcType::VmSnapshot
+                | BcType::RunSnapshot(_)
                 | BcType::Bytes
                 | BcType::FileHandle
                 | BcType::ResourceHandle
@@ -881,7 +881,7 @@ impl<'m> Ctx<'m> {
                 lm_abi::AbiPrimitive::Int => Ok(TY_INT),
                 lm_abi::AbiPrimitive::String => Ok(TY_STR),
                 lm_abi::AbiPrimitive::Bytes => Ok(self.intern(BcType::Bytes)),
-                lm_abi::AbiPrimitive::SnapshotImage => Ok(self.intern(BcType::SnapshotImage)),
+                lm_abi::AbiPrimitive::VmSnapshot => Ok(self.intern(BcType::VmSnapshot)),
             },
             lm_abi::AbiType::Core(core) => {
                 let (slot, name) = match core {

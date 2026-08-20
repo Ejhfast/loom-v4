@@ -97,7 +97,7 @@ impl Naming<'_> {
             Type::Request => IfaceType::Request,
             Type::PolicyTable => IfaceType::PolicyTable,
             Type::Vm => IfaceType::Vm,
-            Type::SnapshotImage => IfaceType::SnapshotImage,
+            Type::VmSnapshot => IfaceType::VmSnapshot,
             Type::Class(c) => IfaceType::Named {
                 class: self.qual(c.0),
                 args: vec![],
@@ -140,7 +140,7 @@ impl Naming<'_> {
             }
             Type::Run(t) => IfaceType::Run(Box::new(self.ty(t))),
             Type::Wait(t) => IfaceType::Wait(Box::new(self.ty(t))),
-            Type::Snapshot(t) => IfaceType::Snapshot(Box::new(self.ty(t))),
+            Type::RunSnapshot(t) => IfaceType::RunSnapshot(Box::new(self.ty(t))),
             Type::PendingCall(a, r) => {
                 IfaceType::PendingCall(Box::new(self.ty(a)), Box::new(self.ty(r)))
             }

@@ -45,7 +45,7 @@ def close_every_handle(child: Run[String]): Int with Vm
   closed
 end
 
-def resume(image: Snapshot[String]): String with Vm, Fs
+def resume(image: RunSnapshot[String]): String with Vm, Fs
   case sys.vm.Vm().restore(image)
   in Ok(restored)
     # A restored machine starts default-deny. Grant it again.

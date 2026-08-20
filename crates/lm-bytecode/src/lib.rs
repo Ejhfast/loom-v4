@@ -130,11 +130,10 @@ pub enum BcType {
     Op(u32, u32),
     /// The frozen canonical graph digest of one value.
     Digest,
-    /// One verified snapshot image with no checked result type.
-    SnapshotImage,
-    /// One snapshot of a machine world, typed by the terminal result
-    /// type index of its root machine.
-    Snapshot(u32),
+    /// One admitted VM snapshot without a distinguished result type.
+    VmSnapshot,
+    /// One VM snapshot with a distinguished run result type.
+    RunSnapshot(u32),
     /// Immutable binary data.
     Bytes,
     /// A typed file resource designator.
@@ -956,7 +955,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// The container format version.
 ///
 /// Version 11 adds the `Digest` type and the three digest
-/// instructions. Version 13 adds the `SnapshotImage` and `Snapshot`
+/// instructions. Version 13 adds the snapshot image and typed snapshot
 /// types. Version 14 adds the reply type index of the two perform
 /// instructions. Version 15 adds bytes, file handles, resource
 /// controls, and three byte instructions. Every earlier tag keeps its
@@ -971,8 +970,10 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// active byte-buffer scan instructions and the native `TlsStream`
 /// class representation. Both landed on separate branches, so version
 /// 24 is the first that carries them together.
-/// Version 30 adds the static receiver type to `Digest`.
-pub const VERSION: u16 = 31;
+/// Version 30 adds the static receiver type to `Digest`. Version 31
+/// splits persistent VM images from typed runs. Version 32 renames the
+/// two guest snapshot types.
+pub const VERSION: u16 = 32;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1176,8 +1177,8 @@ const TY_PENDING_CALL: u8 = 18;
 const TY_OP: u8 = 19;
 const TY_DIGEST: u8 = 20;
 const TY_HANDLE: u8 = 21;
-const TY_SNAPSHOT_IMAGE: u8 = 22;
-const TY_SNAPSHOT: u8 = 23;
+const TY_VM_SNAPSHOT: u8 = 22;
+const TY_RUN_SNAPSHOT: u8 = 23;
 const TY_BYTES: u8 = 24;
 const TY_FILE_HANDLE: u8 = 25;
 const TY_RESOURCE_HANDLE: u8 = 26;
@@ -1556,9 +1557,9 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
             write_u32(out, *m);
             write_u32(out, *r);
         }
-        BcType::SnapshotImage => out.push(TY_SNAPSHOT_IMAGE),
-        BcType::Snapshot(t) => {
-            out.push(TY_SNAPSHOT);
+        BcType::VmSnapshot => out.push(TY_VM_SNAPSHOT),
+        BcType::RunSnapshot(t) => {
+            out.push(TY_RUN_SNAPSHOT);
             write_u32(out, *t);
         }
         BcType::Bytes => out.push(TY_BYTES),
@@ -2631,8 +2632,8 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_WAIT => BcType::Wait(cur.u32()?),
         TY_PENDING_CALL => BcType::PendingCall(cur.u32()?, cur.u32()?),
         TY_HANDLE => BcType::Handle(cur.u32()?, cur.u32()?),
-        TY_SNAPSHOT_IMAGE => BcType::SnapshotImage,
-        TY_SNAPSHOT => BcType::Snapshot(cur.u32()?),
+        TY_VM_SNAPSHOT => BcType::VmSnapshot,
+        TY_RUN_SNAPSHOT => BcType::RunSnapshot(cur.u32()?),
         TY_BYTES => BcType::Bytes,
         TY_FILE_HANDLE => BcType::FileHandle,
         TY_RESOURCE_HANDLE => BcType::ResourceHandle,

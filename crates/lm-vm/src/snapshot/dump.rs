@@ -255,6 +255,7 @@ fn payload(object: &Object) -> String {
         Object::Bytes(bytes) => format!("bytes len {}", bytes.len()),
         Object::Substring(text) => format!("substring {text:?}"),
         Object::NativeVm { vm } => format!("machine {vm}"),
+        Object::NativeRun { vm } => format!("run {vm}"),
         Object::NativeTable { vm } => format!("table of machine {vm}"),
         Object::NativeRequest { vm, ordinal } => format!("request {ordinal} of machine {vm}"),
         Object::NativeCall { vm, ordinal, op } => {

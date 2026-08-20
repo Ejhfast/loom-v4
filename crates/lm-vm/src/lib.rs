@@ -23,7 +23,9 @@ pub use host::{
     HostShutdown, HostSocketAddress, HostStart, HostTcpKind, HostTcpResource, HostValue, NullHost,
     RecordingHost,
 };
-pub use machine::{Block, FaultRec, MachineState, Mailbox, Ownership, VmId, VmState};
+pub use machine::{
+    Block, FaultRec, FunctionVersionId, MachineState, Mailbox, Ownership, VmId, VmState,
+};
 pub use resource::{ResourceKind, ResourceRecord, ResourceRegistry, ResourceState};
 pub use schedule::{
     CompletionKey, ScheduleEvents, SliceExit, TaskKey, TaskStatus, WaitSetKey, WaitSourceKey,
@@ -222,10 +224,10 @@ impl DispatchRow {
 /// function has passed verification. The dispatch table maps
 /// `(class slot, selector slot)` to a function index with indexed
 /// loads and no name lookup.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LoadedModule {
-    module: Module,
-    dispatch: Vec<DispatchRow>,
+    module: std::sync::Arc<Module>,
+    dispatch: std::sync::Arc<[DispatchRow]>,
     core: lm_bytecode::corepin::CoreLayout,
     /// The verifier input hash.
     ///
@@ -240,12 +242,17 @@ pub struct LoadedModule {
     /// semantic identity, never by a numeric slot of one linked
     /// program. The identity pass is expensive, so it runs once, on
     /// the first digest of the process.
-    identity: std::sync::OnceLock<Result<lm_bytecode::identity::ModuleIdentity, String>>,
+    identity:
+        std::sync::Arc<std::sync::OnceLock<Result<lm_bytecode::identity::ModuleIdentity, String>>>,
 }
 
 impl LoadedModule {
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    pub(crate) fn module_store(&self) -> std::sync::Arc<Module> {
+        self.module.clone()
     }
 
     /// The hash of every verified input in this module.
@@ -263,8 +270,8 @@ impl LoadedModule {
             .map_err(|_| FaultCode::BoundaryViolation)
     }
 
-    pub(crate) fn dispatch(&self) -> &[DispatchRow] {
-        &self.dispatch
+    pub(crate) fn dispatch_store(&self) -> std::sync::Arc<[DispatchRow]> {
+        self.dispatch.clone()
     }
 
     /// The core layout the artifact declares and the verifier proved.
@@ -476,11 +483,11 @@ fn admit(module: Module) -> LoadedModule {
         dispatch.push(row);
     }
     LoadedModule {
-        module,
-        dispatch,
+        module: std::sync::Arc::new(module),
+        dispatch: dispatch.into(),
         core,
         verification,
-        identity: std::sync::OnceLock::new(),
+        identity: std::sync::Arc::new(std::sync::OnceLock::new()),
     }
 }
 
@@ -502,12 +509,12 @@ pub fn load_bytes_cached(
 
 /// A single-machine view over one world with a null host and no
 /// grants. Pure programs and the pre-effect test suites use it.
-pub struct Vm<'m> {
-    world: World<'m>,
+pub struct Vm {
+    world: World,
 }
 
-impl<'m> Vm<'m> {
-    pub fn new(loaded: &'m LoadedModule, config: VmConfig) -> Vm<'m> {
+impl Vm {
+    pub fn new(loaded: &LoadedModule, config: VmConfig) -> Vm {
         Vm {
             world: World::new(loaded, config, Box::new(NullHost)),
         }
@@ -582,6 +589,15 @@ mod tests {
         let loaded = int_module(vec![vec![ConstInt(40), ConstInt(2), Add, Return]]);
         let mut vm = Vm::new(&loaded, VmConfig::default());
         assert_eq!(vm.run(), Outcome::Done(Value::Int(42)));
+    }
+
+    #[test]
+    fn a_world_owns_its_verified_code_store() {
+        let mut world = {
+            let loaded = int_module(vec![vec![ConstInt(40), ConstInt(2), Add, Return]]);
+            World::new(&loaded, VmConfig::default(), Box::new(NullHost))
+        };
+        assert_eq!(world.run_root(), Outcome::Done(Value::Int(42)));
     }
 
     #[test]

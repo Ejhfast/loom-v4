@@ -1142,7 +1142,10 @@ pub(crate) fn resolve_type(
                 }
                 return Ok(ctx.store.intern(Type::Class(ClassId(class))));
             }
-            if matches!(name.as_str(), "List" | "Map" | "Run" | "Wait" | "Snapshot") {
+            if matches!(
+                name.as_str(),
+                "List" | "Map" | "Run" | "Wait" | "RunSnapshot"
+            ) {
                 return Err(Diagnostic::new(
                     "E1024",
                     format!("the generic type `{name}` needs type arguments"),
@@ -1183,16 +1186,16 @@ pub(crate) fn resolve_type(
                 let result = resolve_type(ctx, env, &args[0])?;
                 Ok(ctx.store.intern(Type::Wait(result)))
             }
-            "Snapshot" => {
+            "RunSnapshot" => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1024",
-                        format!("`Snapshot` takes 1 type argument, found {}", args.len()),
+                        format!("`RunSnapshot` takes 1 type argument, found {}", args.len()),
                         ty.span,
                     ));
                 }
                 let result = resolve_type(ctx, env, &args[0])?;
-                Ok(ctx.store.intern(Type::Snapshot(result)))
+                Ok(ctx.store.intern(Type::RunSnapshot(result)))
             }
             "Handle" => {
                 if args.len() != 2 {

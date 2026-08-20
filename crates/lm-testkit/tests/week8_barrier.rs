@@ -15,7 +15,7 @@ fn world_of(source: &str) -> (lm_vm::LoadedModule, ()) {
     (load_bytes(&bytes).expect("the program loads"), ())
 }
 
-fn ready_world<'m>(loaded: &'m lm_vm::LoadedModule, allow: &[&str]) -> World<'m> {
+fn ready_world(loaded: &lm_vm::LoadedModule, allow: &[&str]) -> World {
     let mut world = World::new(loaded, VmConfig::default(), Box::new(RecordingHost::new(1)));
     for grant in allow {
         world.allow(grant).expect("the grant names a target");
@@ -25,7 +25,7 @@ fn ready_world<'m>(loaded: &'m lm_vm::LoadedModule, allow: &[&str]) -> World<'m>
 
 /// Drive the root until it blocks on a proc, so the barrier finds a
 /// world with live machines.
-fn run_to_first_block(world: &mut World<'_>) {
+fn run_to_first_block(world: &mut World) {
     match world.drive_root() {
         RootEvent::Blocked => {}
         other => panic!("the root must block on a proc, got {other:?}"),

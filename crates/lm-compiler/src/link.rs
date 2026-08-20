@@ -1111,7 +1111,7 @@ fn reloc_type(
         },
         BcType::Run(t) => BcType::Run(types[*t as usize]),
         BcType::Wait(t) => BcType::Wait(types[*t as usize]),
-        BcType::Snapshot(t) => BcType::Snapshot(types[*t as usize]),
+        BcType::RunSnapshot(t) => BcType::RunSnapshot(types[*t as usize]),
         BcType::PendingCall(a, r) => BcType::PendingCall(types[*a as usize], types[*r as usize]),
         BcType::Handle(m, r) => BcType::Handle(types[*m as usize], types[*r as usize]),
         BcType::Op(op, f) => BcType::Op(*op, types[*f as usize]),

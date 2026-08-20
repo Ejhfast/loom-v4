@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     /// Render a terminal outcome as stable text.
     pub fn show_outcome(&self, outcome: &Outcome) -> String {
         match outcome {
@@ -160,7 +160,7 @@ impl<'m> World<'m> {
             | (BcType::PolicyTable, ClosedType::PolicyTable)
             | (BcType::Vm, ClosedType::Vm)
             | (BcType::Digest, ClosedType::Digest)
-            | (BcType::SnapshotImage, ClosedType::SnapshotImage)
+            | (BcType::VmSnapshot, ClosedType::VmSnapshot)
             | (BcType::Bytes, ClosedType::Bytes)
             | (BcType::FileHandle, ClosedType::FileHandle)
             | (BcType::ResourceHandle, ClosedType::ResourceHandle) => true,
@@ -176,7 +176,7 @@ impl<'m> World<'m> {
             (BcType::List(source), ClosedType::List(target))
             | (BcType::Run(source), ClosedType::Run(target))
             | (BcType::Wait(source), ClosedType::Wait(target))
-            | (BcType::Snapshot(source), ClosedType::Snapshot(target)) => {
+            | (BcType::RunSnapshot(source), ClosedType::RunSnapshot(target)) => {
                 child(self, *source, *target)
             }
             (BcType::Map(a, b), ClosedType::Map(x, y))
@@ -202,7 +202,7 @@ impl<'m> World<'m> {
                         .zip(other)
                         .all(|(source, target)| child(self, *source, *target))
                     && child(self, *ret, *result)
-                    && self.envs.close_row(self.module, row, env) == *closed_row
+                    && self.envs.close_row(&self.module, row, env) == *closed_row
             }
             (BcType::Op(op, source), ClosedType::Op(other, target)) => {
                 op == other && child(self, *source, *target)
@@ -451,6 +451,7 @@ impl<'m> World<'m> {
                         format!("<resource {resource} of machine {surface}>")
                     }
                     Object::NativeVm { vm } => format!("<vm {vm}>"),
+                    Object::NativeRun { vm } => format!("<run {vm}>"),
                     Object::NativeTable { vm } => format!("<table {vm}>"),
                     Object::NativeRequest { .. } => "<request>".to_string(),
                     Object::NativeCall { op, .. } => {

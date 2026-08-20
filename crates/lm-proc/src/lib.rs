@@ -393,7 +393,7 @@ impl Scheduler {
     }
 
     /// Run one execution to the terminal result of its root VM.
-    pub fn run(&mut self, world: &mut World<'_>) -> Outcome {
+    pub fn run(&mut self, world: &mut World) -> Outcome {
         self.reset(world, true);
         loop {
             self.consume_events(world);
@@ -460,7 +460,7 @@ impl Scheduler {
     }
 
     /// Reset policy state at one requested run boundary.
-    fn reset(&mut self, world: &mut World<'_>, include_root: bool) {
+    fn reset(&mut self, world: &mut World, include_root: bool) {
         self.include_root = include_root;
         self.stats = SchedulerStats::default();
         self.stop = None;
@@ -478,7 +478,7 @@ impl Scheduler {
         self.consume_events(world);
     }
 
-    fn index_status(&mut self, world: &World<'_>, task: TaskKey, status: TaskStatus) {
+    fn index_status(&mut self, world: &World, task: TaskKey, status: TaskStatus) {
         match status {
             TaskStatus::Ready => self.enqueue(task),
             TaskStatus::Blocked(wake) => self.block(world, task, wake),
@@ -504,7 +504,7 @@ impl Scheduler {
     /// The primary condition comes from the machine state. A task that
     /// holds a `drive` call adds one condition for each surface it
     /// drives, so a request from any descendant reaches it.
-    fn block(&mut self, world: &World<'_>, task: TaskKey, wake: WakeKey) {
+    fn block(&mut self, world: &World, task: TaskKey, wake: WakeKey) {
         if self.tasks.get(&task) == Some(&IndexedState::Blocked(wake)) {
             return;
         }
@@ -528,7 +528,7 @@ impl Scheduler {
         self.waiting.insert(completion, task);
     }
 
-    fn park(&mut self, world: &World<'_>, task: TaskKey, wait: WaitSetKey) {
+    fn park(&mut self, world: &World, task: TaskKey, wait: WaitSetKey) {
         if self.tasks.get(&task) == Some(&IndexedState::Parked(wait)) {
             return;
         }
@@ -567,12 +567,12 @@ impl Scheduler {
         self.tasks.remove(&task);
     }
 
-    fn refresh(&mut self, world: &World<'_>, task: TaskKey) {
+    fn refresh(&mut self, world: &World, task: TaskKey) {
         self.index_status(world, task, world.task_status(task));
     }
 
     /// Apply changes produced by the last execution slice.
-    fn consume_events(&mut self, world: &mut World<'_>) {
+    fn consume_events(&mut self, world: &mut World) {
         if !world.swap_schedule_events(&mut self.events) {
             return;
         }
@@ -591,7 +591,7 @@ impl Scheduler {
     }
 
     /// Move indexed waiters whose wake condition changed.
-    fn wake(&mut self, world: &World<'_>, wake: WakeKey) {
+    fn wake(&mut self, world: &World, wake: WakeKey) {
         let Some(waiters) = self.blocked.take(wake) else {
             if let Some(waiters) = self.parked.take_wake(wake) {
                 self.wake_parked(world, waiters);
@@ -624,7 +624,7 @@ impl Scheduler {
         }
     }
 
-    fn wake_parked(&mut self, world: &World<'_>, waiters: Waiters) {
+    fn wake_parked(&mut self, world: &World, waiters: Waiters) {
         waiters.for_each(|task| {
             if !matches!(self.tasks.get(&task), Some(IndexedState::Parked(_))) {
                 return;
@@ -637,7 +637,7 @@ impl Scheduler {
     }
 
     /// Poll every completion that is ready now.
-    fn poll_completions(&mut self, world: &mut World<'_>) {
+    fn poll_completions(&mut self, world: &mut World) {
         if self.waiting.is_empty() && !self.parked.has_completions() {
             return;
         }
@@ -648,7 +648,7 @@ impl Scheduler {
         }
     }
 
-    fn complete_completion(&mut self, world: &World<'_>, completion: CompletionKey) {
+    fn complete_completion(&mut self, world: &World, completion: CompletionKey) {
         if let Some(task) = self.waiting.remove(&completion) {
             if self.tasks.get(&task) == Some(&IndexedState::Waiting(completion)) {
                 self.stats.unblocked = self.stats.unblocked.saturating_add(1);
@@ -661,7 +661,7 @@ impl Scheduler {
     }
 
     /// Take the next valid FIFO task.
-    fn next_ready(&mut self, world: &World<'_>) -> Option<TaskKey> {
+    fn next_ready(&mut self, world: &World) -> Option<TaskKey> {
         while let Some((task, ticket)) = self.ready.pop_front() {
             if self.tasks.get(&task) != Some(&IndexedState::Queued(ticket)) {
                 continue;
@@ -675,7 +675,7 @@ impl Scheduler {
     }
 
     /// Install one slice exit after its events enter the queue.
-    fn finish_slice(&mut self, world: &mut World<'_>, task: TaskKey, exit: Option<SliceExit>) {
+    fn finish_slice(&mut self, world: &mut World, task: TaskKey, exit: Option<SliceExit>) {
         match exit {
             Some(SliceExit::Yielded) => self.enqueue(task),
             Some(SliceExit::Blocked(wake)) => self.block(world, task, wake),
@@ -686,7 +686,7 @@ impl Scheduler {
         }
     }
 
-    fn finish_terminal(&mut self, world: &mut World<'_>, task: TaskKey) {
+    fn finish_terminal(&mut self, world: &mut World, task: TaskKey) {
         self.drop_task(task);
         world.retire_scheduler_task(task);
         self.wake(world, WakeKey::Send(task));
@@ -698,7 +698,7 @@ impl Scheduler {
     /// Specification 18.6 makes a deadlock a policy decision. The
     /// deterministic scheduler is the supervisor here, and it converts
     /// the condition into one fault per blocked machine.
-    fn fail_every_block(&mut self, world: &mut World<'_>) {
+    fn fail_every_block(&mut self, world: &mut World) {
         let tasks: Vec<TaskKey> = self
             .tasks
             .iter()
@@ -713,7 +713,7 @@ impl Scheduler {
     }
 
     /// Fault tasks when the host completion source fails.
-    fn fail_waiting(&mut self, world: &mut World<'_>) {
+    fn fail_waiting(&mut self, world: &mut World) {
         let mut tasks: Vec<TaskKey> = self.waiting.values().copied().collect();
         tasks.extend(self.parked.tasks_with_completions());
         tasks.sort_unstable();
@@ -729,7 +729,7 @@ impl Scheduler {
 
 /// Run one world to its root terminal result with the deterministic
 /// scheduler.
-pub fn run_world(world: &mut World<'_>) -> Outcome {
+pub fn run_world(world: &mut World) -> Outcome {
     Scheduler::default().run(world)
 }
 
@@ -788,7 +788,7 @@ pub struct WorkerOutcome {
 ///
 /// Tests use it to bring every proc to a stop without touching the
 /// root machine.
-pub fn drain_procs(world: &mut World<'_>) -> usize {
+pub fn drain_procs(world: &mut World) -> usize {
     let mut scheduler = Scheduler::default();
     scheduler.reset(world, false);
     let mut slices = 0;

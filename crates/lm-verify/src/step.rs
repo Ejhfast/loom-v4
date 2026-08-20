@@ -1748,7 +1748,7 @@ pub(crate) fn step(
                         }
                         lm_abi::OP_VM_SNAPSHOT_HELD => {
                             let t = pop_run(state)?;
-                            let snapshot = ctx.intern(BcType::Snapshot(t));
+                            let snapshot = ctx.intern(BcType::RunSnapshot(t));
                             let error = ctx
                                 .plain_inst(ctx.core.snapshot_error, "SnapshotError")
                                 .map_err(&fail)?;
@@ -1779,7 +1779,7 @@ pub(crate) fn step(
                                 ));
                             }
                             let t = pop_run(state)?;
-                            let snapshot = ctx.intern(BcType::Snapshot(t));
+                            let snapshot = ctx.intern(BcType::RunSnapshot(t));
                             let error = ctx
                                 .plain_inst(ctx.core.snapshot_error, "SnapshotError")
                                 .map_err(&fail)?;
@@ -1794,7 +1794,7 @@ pub(crate) fn step(
                                     "`Proc.SnapshotWait` needs a proc handle".to_string(),
                                 ));
                             };
-                            let snapshot = ctx.intern(BcType::Snapshot(result));
+                            let snapshot = ctx.intern(BcType::RunSnapshot(result));
                             let error = ctx
                                 .plain_inst(ctx.core.snapshot_error, "SnapshotError")
                                 .map_err(&fail)?;
@@ -1802,7 +1802,7 @@ pub(crate) fn step(
                             push(state, out)?;
                         }
                         lm_abi::OP_VM_SNAPSHOT_SELF => {
-                            let image = ctx.intern(BcType::SnapshotImage);
+                            let image = ctx.intern(BcType::VmSnapshot);
                             let error = ctx
                                 .plain_inst(ctx.core.snapshot_error, "SnapshotError")
                                 .map_err(&fail)?;
@@ -1815,7 +1815,7 @@ pub(crate) fn step(
                             if ctx.ty(recv) != BcType::Vm {
                                 return Err(fail("`Vm.Restore` needs a Vm receiver".to_string()));
                             }
-                            let BcType::Snapshot(t) = ctx.ty(snapshot) else {
+                            let BcType::RunSnapshot(t) = ctx.ty(snapshot) else {
                                 return Err(fail(
                                     "`Vm.Restore` needs a typed snapshot".to_string(),
                                 ));

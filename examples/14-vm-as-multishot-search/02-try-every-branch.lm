@@ -46,7 +46,7 @@ def finish(child: Run[Int], first: Int): Int with Vm
   end
 end
 
-def explore(image: Snapshot[Int], count: Int): [Int] with Vm
+def explore(image: RunSnapshot[Int], count: Int): [Int] with Vm
   out: [Int] = []
   index = 0
   while index < count

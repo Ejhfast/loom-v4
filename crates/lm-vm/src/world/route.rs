@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     /// Handle one perform of `vm`: record the pending request, then
     /// stop for a driver or resolve policy.
     pub(super) fn handle_perform(
@@ -987,7 +987,7 @@ impl<'m> World<'m> {
             }
         };
         self.machines[id as usize].load_frame(
-            self.module,
+            &self.module,
             func,
             moved_args,
             Some(closure_ref),

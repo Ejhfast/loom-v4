@@ -5,20 +5,20 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     /// Create a world with the entry loaded into the root machine.
-    pub fn new(loaded: &'m LoadedModule, config: VmConfig, host: Box<dyn Host>) -> World<'m> {
+    pub fn new(loaded: &LoadedModule, config: VmConfig, host: Box<dyn Host>) -> World {
         World::new_with_limits(loaded, config, WorldLimits::default(), host)
     }
 
     /// Create a world with exact aggregate limits.
     pub fn new_with_limits(
-        loaded: &'m LoadedModule,
+        loaded: &LoadedModule,
         config: VmConfig,
         limits: WorldLimits,
         host: Box<dyn Host>,
-    ) -> World<'m> {
-        let module = loaded.module();
+    ) -> World {
+        let module = loaded.module_store();
         let budget = WorldBudget::new(limits);
         let local_heap_is_aggregate = config.heap_bytes <= budget.limits.max_heap_bytes
             && config.heap_bytes / lm_heap::MIN_OBJECT_COST <= budget.limits.max_heap_objects;
@@ -36,16 +36,16 @@ impl<'m> World<'m> {
         // The entry function of a program takes no type argument, so
         // the root frame carries the empty environment.
         root.load_frame(
-            module,
+            &module,
             module.entry,
             Vec::new(),
             None,
             lm_value::TypeEnvId::EMPTY,
         );
         World {
-            loaded,
+            loaded: loaded.clone(),
             module,
-            dispatch: loaded.dispatch(),
+            dispatch: loaded.dispatch_store(),
             core: loaded.core_layout(),
             machines: vec![root],
             mock_free: Vec::new(),
@@ -861,12 +861,12 @@ impl<'m> World<'m> {
                         .unwrap_or(u32::MAX)
                         .max(1);
                     let limit = requested.min(available).min(turn);
-                    let module = self.module;
-                    let dispatch = self.dispatch;
+                    let module = self.module.clone();
+                    let dispatch = self.dispatch.clone();
                     let envs = &mut self.envs;
                     let machine = &mut self.machines[act.vm as usize];
                     let (outcome, retired) =
-                        machine.exec_for_quantum(module, dispatch, envs, limit);
+                        machine.exec_for_quantum(&module, &dispatch, envs, limit);
                     self.budget.fuel -= u64::from(retired);
                     if let Some(remaining) = &mut quantum {
                         *remaining = remaining.saturating_sub(retired);

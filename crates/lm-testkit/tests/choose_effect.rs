@@ -122,7 +122,7 @@ fn a_pending_choice_point_never_blocks_a_capture() {
   end
 end
 
-def answer_with(snap: Snapshot[Int], choice: Int): Int with Vm
+def answer_with(snap: RunSnapshot[Int], choice: Int): Int with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(restored)
     case restored.drive()

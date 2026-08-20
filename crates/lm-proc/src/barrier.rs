@@ -75,7 +75,7 @@ impl Barrier {
     /// freeze, record, preflight, resume. A failure resumes every
     /// machine the barrier stopped, so the original world is
     /// unchanged.
-    pub fn run(&self, world: &mut World<'_>, root: VmId) -> Result<BarrierReport, BarrierError> {
+    pub fn run(&self, world: &mut World, root: VmId) -> Result<BarrierReport, BarrierError> {
         let report = world.run_cut(self.id, root)?;
         // The barrier itself encodes nothing, so it resumes the
         // original world here.
@@ -96,7 +96,7 @@ impl Barrier {
     /// answered.
     pub fn capture(
         &self,
-        world: &mut World<'_>,
+        world: &mut World,
         root: VmId,
     ) -> Result<SnapshotImage, lm_vm::snapshot::SnapshotFail> {
         let image = world.capture_snapshot(self.id, root, false)?;

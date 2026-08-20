@@ -406,7 +406,7 @@ fn encode_closed_type(out: &mut Out, node: &ClosedType) {
         ClosedType::List(e)
         | ClosedType::Run(e)
         | ClosedType::Wait(e)
-        | ClosedType::Snapshot(e) => out.leb(*e as u64),
+        | ClosedType::RunSnapshot(e) => out.leb(*e as u64),
         ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
             out.leb(*a as u64);
             out.leb(*b as u64);
@@ -503,7 +503,9 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.bytes.extend_from_slice(bytes);
         }
         Object::Substring(text) => out.str(text),
-        Object::NativeVm { vm } | Object::NativeTable { vm } => out.leb(*vm as u64),
+        Object::NativeVm { vm } | Object::NativeRun { vm } | Object::NativeTable { vm } => {
+            out.leb(*vm as u64)
+        }
         Object::NativeRequest { vm, ordinal } => {
             out.leb(*vm as u64);
             out.u64(*ordinal);
@@ -1405,7 +1407,7 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
         8 => ClosedType::PolicyTable,
         9 => ClosedType::Vm,
         10 => ClosedType::Digest,
-        11 => ClosedType::SnapshotImage,
+        11 => ClosedType::VmSnapshot,
         12 => ClosedType::Class(class_slot(cur)?),
         13 => {
             let class = class_slot(cur)?;
@@ -1445,7 +1447,7 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
             let op = decode_op(cur)?;
             ClosedType::Op(op, closed_ref(cur, at)?)
         }
-        22 => ClosedType::Snapshot(closed_ref(cur, at)?),
+        22 => ClosedType::RunSnapshot(closed_ref(cur, at)?),
         23 => ClosedType::Bytes,
         24 => ClosedType::FileHandle,
         25 => ClosedType::ResourceHandle,
@@ -1772,6 +1774,9 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
         },
         23 => Object::NativeTlsStream {
             resource: cur.u64()?,
+        },
+        25 => Object::NativeRun {
+            vm: machine_ref(cur, ctx)?,
         },
         other => {
             return err(

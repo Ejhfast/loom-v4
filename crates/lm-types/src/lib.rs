@@ -43,8 +43,8 @@ pub const POLICY_TABLE: TypeId = TypeId(7);
 pub const VM: TypeId = TypeId(8);
 /// The frozen canonical graph digest type.
 pub const DIGEST: TypeId = TypeId(9);
-/// One verified snapshot image whose result type is not yet checked.
-pub const SNAPSHOT_IMAGE: TypeId = TypeId(10);
+/// One admitted VM snapshot without a distinguished result type.
+pub const VM_SNAPSHOT: TypeId = TypeId(10);
 /// Immutable binary data.
 pub const BYTES: TypeId = TypeId(11);
 /// A typed file resource designator.
@@ -131,14 +131,10 @@ pub enum Type {
     /// A proc handle: the mailbox message type and the terminal
     /// result type of the proc.
     Handle(TypeId, TypeId),
-    /// One verified snapshot image with no checked result type. A
-    /// receiverless self snapshot and the loader both produce it,
-    /// because neither can name the enclosing machine result type
-    /// (specification 17.1).
-    SnapshotImage,
-    /// One snapshot of a machine world, typed by the terminal result
-    /// type of its root machine.
-    Snapshot(TypeId),
+    /// One admitted VM snapshot without a distinguished result type.
+    VmSnapshot,
+    /// One VM snapshot with a distinguished run result type.
+    RunSnapshot(TypeId),
     /// A file resource designator.
     FileHandle,
     /// A holder-local resource-management designator.
@@ -214,7 +210,7 @@ impl TypeStore {
         store.intern(Type::PolicyTable);
         store.intern(Type::Vm);
         store.intern(Type::Digest);
-        store.intern(Type::SnapshotImage);
+        store.intern(Type::VmSnapshot);
         store.intern(Type::Bytes);
         store.intern(Type::FileHandle);
         store.intern(Type::ResourceHandle);
@@ -530,7 +526,7 @@ impl TypeStore {
             "PolicyTable" => Some(POLICY_TABLE),
             "Vm" => Some(VM),
             "Digest" => Some(DIGEST),
-            "SnapshotImage" => Some(SNAPSHOT_IMAGE),
+            "VmSnapshot" => Some(VM_SNAPSHOT),
             "Bytes" => Some(BYTES),
             "FileHandle" => Some(FILE_HANDLE),
             "ResourceHandle" => Some(RESOURCE_HANDLE),
@@ -708,8 +704,8 @@ impl TypeStore {
                 | Type::Wait(_)
                 | Type::PendingCall(_, _)
                 | Type::Handle(_, _)
-                | Type::SnapshotImage
-                | Type::Snapshot(_)
+                | Type::VmSnapshot
+                | Type::RunSnapshot(_)
                 | Type::FileHandle
                 | Type::ResourceHandle
         )
@@ -732,7 +728,7 @@ impl TypeStore {
                 | Type::Projection { base: element, .. }
                 | Type::Run(element)
                 | Type::Wait(element)
-                | Type::Snapshot(element)
+                | Type::RunSnapshot(element)
                 | Type::Op(_, element) => stack.push(*element),
                 Type::Map(key, value)
                 | Type::PendingCall(key, value)
@@ -835,9 +831,9 @@ impl TypeStore {
                 let t = self.substitute(t, targs, rowargs);
                 self.intern(Type::Wait(t))
             }
-            Type::Snapshot(t) => {
+            Type::RunSnapshot(t) => {
                 let t = self.substitute(t, targs, rowargs);
-                self.intern(Type::Snapshot(t))
+                self.intern(Type::RunSnapshot(t))
             }
             Type::PendingCall(a, r) => {
                 let a = self.substitute(a, targs, rowargs);
@@ -883,7 +879,7 @@ impl TypeStore {
             Type::Callback(params, _, ret, _) => {
                 params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
             }
-            Type::Run(t) | Type::Wait(t) | Type::Snapshot(t) => self.contains_var(*t),
+            Type::Run(t) | Type::Wait(t) | Type::RunSnapshot(t) => self.contains_var(*t),
             Type::PendingCall(a, r) => self.contains_var(*a) || self.contains_var(*r),
             Type::Handle(m, r) => self.contains_var(*m) || self.contains_var(*r),
             _ => false,
@@ -909,7 +905,7 @@ impl TypeStore {
                     || params.iter().any(|p| self.contains_effect_var(*p))
                     || self.contains_effect_var(*ret)
             }
-            Type::Run(t) | Type::Wait(t) | Type::Snapshot(t) => self.contains_effect_var(*t),
+            Type::Run(t) | Type::Wait(t) | Type::RunSnapshot(t) => self.contains_effect_var(*t),
             Type::PendingCall(a, r) => self.contains_effect_var(*a) || self.contains_effect_var(*r),
             Type::Handle(m, r) => self.contains_effect_var(*m) || self.contains_effect_var(*r),
             _ => false,
@@ -1046,9 +1042,9 @@ impl TypeStore {
                 "Wait[{}]",
                 self.display_inner(*t, variable_name, associated_name)
             ),
-            Type::SnapshotImage => "SnapshotImage".to_string(),
-            Type::Snapshot(t) => format!(
-                "Snapshot[{}]",
+            Type::VmSnapshot => "VmSnapshot".to_string(),
+            Type::RunSnapshot(t) => format!(
+                "RunSnapshot[{}]",
                 self.display_inner(*t, variable_name, associated_name)
             ),
             Type::FileHandle => "FileHandle".to_string(),

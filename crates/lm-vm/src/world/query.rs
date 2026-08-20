@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     /// The next mailbox cut marker of this world.
     pub fn next_cut(&mut self) -> u64 {
         self.cut += 1;
@@ -153,7 +153,7 @@ impl<'m> World<'m> {
     ) -> Result<crate::snapshot::SnapshotImage, crate::snapshot::ImageError> {
         let limits = crate::snapshot::LoadLimits::default();
         self.record_snapshot_check();
-        let image = crate::snapshot::codec::load_external(bytes, self.loaded, limits)?;
+        let image = crate::snapshot::codec::load_external(bytes, &self.loaded, limits)?;
         self.trust_image(&image);
         Ok(image)
     }
@@ -202,6 +202,7 @@ impl<'m> World<'m> {
         for r in order {
             let target = match heap.get(r) {
                 Object::NativeVm { vm }
+                | Object::NativeRun { vm }
                 | Object::NativeTable { vm }
                 | Object::NativeRequest { vm, .. }
                 | Object::NativeCall { vm, .. } => Some(*vm),
@@ -424,7 +425,7 @@ impl<'m> World<'m> {
 
     /// The loaded program.
     pub fn module(&self) -> &Module {
-        self.module
+        &self.module
     }
 
     /// The resource limits of one machine.

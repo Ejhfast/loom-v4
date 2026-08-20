@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'m> World<'m> {
+impl World {
     pub(super) fn allocate_wait(
         &mut self,
         vm: VmId,

@@ -71,7 +71,7 @@ fn object_resource(object: &Object) -> Option<u64> {
     }
 }
 
-impl<'m> World<'m> {
+impl World {
     pub(super) fn build_host_value(
         &mut self,
         vm: VmId,
@@ -194,7 +194,7 @@ impl<'m> World<'m> {
                 for (part, template) in parts.iter().zip(templates) {
                     let field = self
                         .envs
-                        .close(self.module, template, env)
+                        .close(&self.module, template, env)
                         .map_err(|_| FaultCode::BoundaryLimit)?;
                     fields.push(self.build_host_value(vm, part, field)?);
                 }

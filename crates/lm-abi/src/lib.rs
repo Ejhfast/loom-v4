@@ -126,7 +126,7 @@ pub enum AbiPrimitive {
     Int,
     String,
     Bytes,
-    SnapshotImage,
+    VmSnapshot,
 }
 
 impl AbiPrimitive {
@@ -137,7 +137,7 @@ impl AbiPrimitive {
             AbiPrimitive::Int => "Int",
             AbiPrimitive::String => "String",
             AbiPrimitive::Bytes => "Bytes",
-            AbiPrimitive::SnapshotImage => "SnapshotImage",
+            AbiPrimitive::VmSnapshot => "VmSnapshot",
         }
     }
 }
@@ -254,7 +254,7 @@ impl AbiType {
     pub const INT: AbiType = AbiType::Primitive(AbiPrimitive::Int);
     pub const STR: AbiType = AbiType::Primitive(AbiPrimitive::String);
     pub const BYTES: AbiType = AbiType::Primitive(AbiPrimitive::Bytes);
-    pub const SNAPSHOT_IMAGE: AbiType = AbiType::Primitive(AbiPrimitive::SnapshotImage);
+    pub const VM_SNAPSHOT: AbiType = AbiType::Primitive(AbiPrimitive::VmSnapshot);
     pub const TEXT: AbiType = AbiType::Core(AbiCore::Text);
     pub const SUBSTRING: AbiType = AbiType::Core(AbiCore::Substring);
     pub const CHAR: AbiType = AbiType::Core(AbiCore::Char);
@@ -285,9 +285,9 @@ impl AbiType {
             AbiType::IO_ERROR,
         ],
     );
-    pub const RESULT_SNAPSHOT_IMAGE_ERROR: AbiType = AbiType::Apply(
+    pub const RESULT_VM_SNAPSHOT_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
-        &[AbiType::SNAPSHOT_IMAGE, AbiType::SNAPSHOT_ERROR],
+        &[AbiType::VM_SNAPSHOT, AbiType::SNAPSHOT_ERROR],
     );
     pub const RESULT_FILE_HANDLE_FS_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
@@ -1689,7 +1689,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Run[T]) -> Result[Snapshot[T], SnapshotError]",
+        schema: "[T](Run[T]) -> Result[RunSnapshot[T], SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1697,8 +1697,8 @@ pub const OPS: [OpDef; 70] = [
         member: "SnapshotSelf",
         kind: OpKind::VmControl,
         params: &[],
-        reply: AbiType::RESULT_SNAPSHOT_IMAGE_ERROR,
-        schema: "() -> Result[SnapshotImage, SnapshotError]",
+        reply: AbiType::RESULT_VM_SNAPSHOT_ERROR,
+        schema: "() -> Result[VmSnapshot, SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1707,7 +1707,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "(Bytes) -> Result[SnapshotImage, SnapshotError]",
+        schema: "(Bytes) -> Result[VmSnapshot, SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1716,7 +1716,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Vm, Snapshot[T]) -> Result[Run[T], RestoreError]",
+        schema: "[T](Vm, RunSnapshot[T]) -> Result[Run[T], RestoreError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1833,7 +1833,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[M,R](Handle[M,R], Int) -> Result[Snapshot[R], SnapshotError]",
+        schema: "[M,R](Handle[M,R], Int) -> Result[RunSnapshot[R], SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -1905,7 +1905,7 @@ pub const OPS: [OpDef; 70] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T](Run[T], Int) -> Result[Snapshot[T], SnapshotError]",
+        schema: "[T](Run[T], Int) -> Result[RunSnapshot[T], SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {

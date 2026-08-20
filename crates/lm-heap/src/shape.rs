@@ -271,9 +271,10 @@ pub enum Object {
     ByteBuf(NativeByteBuffer),
     /// Immutable binary data. Born frozen.
     Bytes(SharedBytes),
-    /// A holder-local handle to one machine in the world registry.
-    /// The static type separates `Vm` and `Run[T]` views.
+    /// A holder-local handle to one persistent VM image.
     NativeVm { vm: u32 },
+    /// A holder-local handle to one active or stopped invocation.
+    NativeRun { vm: u32 },
     /// A holder-local handle to the policy table of one machine.
     NativeTable { vm: u32 },
     /// A holder-local token for one pending perform of one machine.
@@ -431,6 +432,15 @@ const SHAPE_BB: ShapeDesc = ShapeDesc {
 };
 const SHAPE_VM: ShapeDesc = ShapeDesc {
     name: "Vm",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::HolderLocal,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+const SHAPE_RUN: ShapeDesc = ShapeDesc {
+    name: "Run",
     has_refs: false,
     born_frozen: true,
     child_order: "none",
@@ -609,7 +619,7 @@ const SHAPE_TLS_STREAM: ShapeDesc = ShapeDesc {
 
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 25] = [
+pub const SHAPES: [&ShapeDesc; 26] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -635,6 +645,7 @@ pub const SHAPES: [&ShapeDesc; 25] = [
     &SHAPE_TCP_LISTENER,
     &SHAPE_TLS_STREAM,
     &SHAPE_SNAPSHOT_REF,
+    &SHAPE_RUN,
 ];
 
 impl Object {
@@ -720,6 +731,7 @@ impl Object {
             Object::ByteBuf(bytes) => Object::ByteBuf(bytes.try_clone_buffer()?),
             Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
             Object::NativeVm { vm } => Object::NativeVm { vm: *vm },
+            Object::NativeRun { vm } => Object::NativeRun { vm: *vm },
             Object::NativeTable { vm } => Object::NativeTable { vm: *vm },
             Object::NativeRequest { vm, ordinal } => Object::NativeRequest {
                 vm: *vm,
@@ -796,6 +808,7 @@ impl Object {
             Object::NativeTcpListener { .. } => 22,
             Object::NativeTlsStream { .. } => 23,
             Object::NativeSnapshotRef { .. } => 24,
+            Object::NativeRun { .. } => 25,
         }
     }
 
@@ -826,6 +839,7 @@ impl Object {
                 Object::StrBuilder(s) => s.retained_capacity(),
                 Object::ByteBuf(b) => b.retained_capacity(),
                 Object::NativeVm { .. }
+                | Object::NativeRun { .. }
                 | Object::NativeTable { .. }
                 | Object::NativeRequest { .. }
                 | Object::NativeCall { .. }
@@ -881,6 +895,7 @@ impl Object {
             | Object::StrBuilder(_)
             | Object::ByteBuf(_)
             | Object::NativeVm { .. }
+            | Object::NativeRun { .. }
             | Object::NativeTable { .. }
             | Object::NativeRequest { .. }
             | Object::NativeCall { .. }
@@ -1172,6 +1187,7 @@ mod tests {
             Object::NativeTcpListener { resource: 6 },
             Object::NativeTlsStream { resource: 7 },
             Object::NativeSnapshotRef { image: 3 },
+            Object::NativeRun { vm: 2 },
         ]
     }
 
@@ -1337,6 +1353,7 @@ mod tests {
             Object::NativeTcpListener { resource: 0 },
             Object::NativeTlsStream { resource: 0 },
             Object::NativeSnapshotRef { image: 0 },
+            Object::NativeRun { vm: 0 },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1479,6 +1496,7 @@ mod tests {
                 "PendingCall",
                 "ResourceHandle",
                 "Wait",
+                "Run",
             ]
         );
     }

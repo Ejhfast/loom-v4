@@ -965,20 +965,20 @@ end
 go()
 ";
 
-/// A machine handle carries the result type of the machine it names.
+/// A run handle carries the result type of the run it names.
 /// The outer object tag proves nothing about that type, so admission
 /// reads the target machine.
 #[test]
 fn a_machine_handle_that_names_another_result_type_faults() {
     let loaded = program(TWO_MACHINES_SOURCE);
     let images = boundaries(&loaded, &["Vm"], 60);
-    // Two machine handles that name two loaded machines of two result
+    // Two run handles name two loaded machines of two result
     // types. The swap then keeps the lifecycle state of both targets,
     // so only the result-type rule catches it.
     let pair = |image: &Image| -> Option<(usize, usize)> {
         let loaded_target = |at: usize| -> Option<u32> {
             match image.machines[0].objects[at].object {
-                Object::NativeVm { vm } => {
+                Object::NativeRun { vm } => {
                     let target = &image.machines[vm as usize];
                     (target.state != lm_vm::snapshot::ImageState::Empty
                         && target.body_func.is_some())
@@ -1014,14 +1014,14 @@ fn a_machine_handle_that_names_another_result_type_faults() {
     );
     let (first_at, second_at) = pair(&image).expect("the capture holds the pair");
     let target = |at: usize| match image.machines[0].objects[at].object {
-        Object::NativeVm { vm } => vm,
-        _ => unreachable!("the entry is a machine handle"),
+        Object::NativeRun { vm } => vm,
+        _ => unreachable!("the entry is a run handle"),
     };
     let mut broken = image.clone();
-    broken.machines[0].objects[first_at].object = Object::NativeVm {
+    broken.machines[0].objects[first_at].object = Object::NativeRun {
         vm: target(second_at),
     };
-    broken.machines[0].objects[second_at].object = Object::NativeVm {
+    broken.machines[0].objects[second_at].object = Object::NativeRun {
         vm: target(first_at),
     };
     assert_eq!(faults(&loaded, &broken, &["Vm"]), FaultCode::TypeMismatch);
@@ -1042,8 +1042,8 @@ end
 go()
 ";
 
-/// An empty machine handle names a machine with no loaded program.
-/// The type states the lifecycle state, so admission reads the target.
+/// A VM image handle names a machine with no loaded program.
+/// A forged target stays contained by the activation check.
 #[test]
 fn an_empty_machine_handle_that_names_a_loaded_machine_stays_contained() {
     let loaded = program(VM_IMAGE_SOURCE);
@@ -1061,9 +1061,7 @@ fn an_empty_machine_handle_that_names_a_loaded_machine_stays_contained() {
             && image.machines[0]
                 .objects
                 .iter()
-                .filter(|entry| matches!(entry.object, Object::NativeVm { .. }))
-                .count()
-                >= 2
+                .any(|entry| matches!(entry.object, Object::NativeVm { .. }))
     });
     let empty = image
         .machines
@@ -1567,7 +1565,7 @@ go()
 ";
 
 /// A nested snapshot stays opaque, and its declared root result type
-/// still has to match the `Snapshot[T]` that holds it. Admission reads
+/// still has to match the `RunSnapshot[T]` that holds it. Admission reads
 /// the nested container header and never trusts the outer image.
 #[test]
 fn a_nested_snapshot_of_another_root_type_rejects() {

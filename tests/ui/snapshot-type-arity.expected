@@ -1,2 +1,2 @@
-error[E1024]: `Snapshot` takes 1 type argument, found 2
+error[E1024]: `RunSnapshot` takes 1 type argument, found 2
   --> tests/ui/snapshot-type-arity.lm:1:11

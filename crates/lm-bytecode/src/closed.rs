@@ -49,7 +49,7 @@ pub enum ClosedType {
     PolicyTable,
     Vm,
     Digest,
-    SnapshotImage,
+    VmSnapshot,
     Bytes,
     FileHandle,
     ResourceHandle,
@@ -72,7 +72,7 @@ pub enum ClosedType {
     /// An identity-indexed operation value: the manifest slot and the
     /// callable function type.
     Op(u32, ClosedTypeId),
-    Snapshot(ClosedTypeId),
+    RunSnapshot(ClosedTypeId),
 }
 
 impl ClosedType {
@@ -83,7 +83,7 @@ impl ClosedType {
             ClosedType::List(_)
             | ClosedType::Run(_)
             | ClosedType::Wait(_)
-            | ClosedType::Snapshot(_)
+            | ClosedType::RunSnapshot(_)
             | ClosedType::Op(_, _) => 1,
             ClosedType::Map(_, _) | ClosedType::PendingCall(_, _) | ClosedType::Handle(_, _) => 2,
             ClosedType::Fn(params, _, _, _) | ClosedType::Callback(params, _, _, _) => {
@@ -101,7 +101,7 @@ impl ClosedType {
             ClosedType::List(e)
             | ClosedType::Run(e)
             | ClosedType::Wait(e)
-            | ClosedType::Snapshot(e) => vec![*e],
+            | ClosedType::RunSnapshot(e) => vec![*e],
             ClosedType::Op(_, e) => vec![*e],
             ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
                 vec![*a, *b]
@@ -128,7 +128,7 @@ impl ClosedType {
             ClosedType::List(e) => ClosedType::List(map(*e)),
             ClosedType::Run(e) => ClosedType::Run(map(*e)),
             ClosedType::Wait(e) => ClosedType::Wait(map(*e)),
-            ClosedType::Snapshot(e) => ClosedType::Snapshot(map(*e)),
+            ClosedType::RunSnapshot(e) => ClosedType::RunSnapshot(map(*e)),
             ClosedType::Op(op, e) => ClosedType::Op(*op, map(*e)),
             ClosedType::Map(a, b) => ClosedType::Map(map(*a), map(*b)),
             ClosedType::PendingCall(a, b) => ClosedType::PendingCall(map(*a), map(*b)),
@@ -662,7 +662,7 @@ impl TypeEnvs {
             BcType::PolicyTable => ClosedType::PolicyTable,
             BcType::Vm => ClosedType::Vm,
             BcType::Digest => ClosedType::Digest,
-            BcType::SnapshotImage => ClosedType::SnapshotImage,
+            BcType::VmSnapshot => ClosedType::VmSnapshot,
             BcType::Bytes => ClosedType::Bytes,
             BcType::FileHandle => ClosedType::FileHandle,
             BcType::ResourceHandle => ClosedType::ResourceHandle,
@@ -748,7 +748,7 @@ impl TypeEnvs {
             ),
             BcType::Run(t) => ClosedType::Run(child(self, *t)),
             BcType::Wait(t) => ClosedType::Wait(child(self, *t)),
-            BcType::Snapshot(t) => ClosedType::Snapshot(child(self, *t)),
+            BcType::RunSnapshot(t) => ClosedType::RunSnapshot(child(self, *t)),
             BcType::PendingCall(a, r) => ClosedType::PendingCall(child(self, *a), child(self, *r)),
             BcType::Handle(m, r) => ClosedType::Handle(child(self, *m), child(self, *r)),
             BcType::Op(op, f) => ClosedType::Op(*op, child(self, *f)),
@@ -1159,7 +1159,7 @@ impl TypeEnvs {
                     child(self, &mut out, *arg);
                 }
             }
-            ClosedType::List(e) | ClosedType::Run(e) | ClosedType::Snapshot(e) => {
+            ClosedType::List(e) | ClosedType::Run(e) | ClosedType::RunSnapshot(e) => {
                 child(self, &mut out, *e);
             }
             ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
@@ -1226,7 +1226,7 @@ pub fn bc_children(node: &BcType, out: &mut Vec<u32>) {
         | BcType::Projection { base: e, .. }
         | BcType::Run(e)
         | BcType::Wait(e)
-        | BcType::Snapshot(e)
+        | BcType::RunSnapshot(e)
         | BcType::Op(_, e) => out.push(*e),
         BcType::Map(a, b) | BcType::PendingCall(a, b) | BcType::Handle(a, b) => {
             out.push(*a);
@@ -1260,7 +1260,7 @@ pub fn tag_of(node: &ClosedType) -> u8 {
         ClosedType::PolicyTable => 8,
         ClosedType::Vm => 9,
         ClosedType::Digest => 10,
-        ClosedType::SnapshotImage => 11,
+        ClosedType::VmSnapshot => 11,
         ClosedType::Class(_) => 12,
         ClosedType::Inst(_, _) => 13,
         ClosedType::List(_) => 14,
@@ -1271,7 +1271,7 @@ pub fn tag_of(node: &ClosedType) -> u8 {
         ClosedType::PendingCall(_, _) => 19,
         ClosedType::Handle(_, _) => 20,
         ClosedType::Op(_, _) => 21,
-        ClosedType::Snapshot(_) => 22,
+        ClosedType::RunSnapshot(_) => 22,
         ClosedType::Bytes => 23,
         ClosedType::FileHandle => 24,
         ClosedType::ResourceHandle => 25,

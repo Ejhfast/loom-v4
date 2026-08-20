@@ -29,7 +29,7 @@ pub(crate) struct RestorePlan {
     gate_members: Vec<VmId>,
 }
 
-impl World<'_> {
+impl World {
     /// Restore one admitted image and return its root identifier.
     pub fn restore_image(
         &mut self,
@@ -171,6 +171,13 @@ impl World<'_> {
                 child_counts[ordinal],
             )?;
             machines.push(machine);
+        }
+        for source in &image.machines {
+            for entry in &source.objects {
+                if let Object::NativeVm { vm } = &entry.object {
+                    machines[*vm as usize].is_image = true;
+                }
+            }
         }
 
         Ok(RestorePlan {
@@ -557,6 +564,7 @@ fn relocate_metadata(object: &mut Object, ids: &[VmId], env_map: &[TypeEnvId], t
             *env = Witness(env_map[env.env().0 as usize]);
         }
         Object::NativeVm { vm }
+        | Object::NativeRun { vm }
         | Object::NativeTable { vm }
         | Object::NativeRequest { vm, .. }
         | Object::NativeCall { vm, .. } => {

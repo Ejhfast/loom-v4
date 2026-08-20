@@ -2,8 +2,8 @@
 #
 # A snapshot copies one machine world at one moment and persists the
 # copy (specification 17.1). The conditions that block a copy are
-# ordinary typed errors, not machine faults (17.4). `Snapshot[T]` and
-# `SnapshotImage` are native holder types declared by the ABI.
+# ordinary typed errors, not machine faults (17.4). `RunSnapshot[T]` and
+# `VmSnapshot` are native snapshot types declared by the ABI.
 
 enum SnapshotError
   # A live host attachment has no bytes to copy. The path names the
