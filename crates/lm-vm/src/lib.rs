@@ -58,10 +58,18 @@ pub enum Outcome {
 pub struct VmConfig {
     /// Instruction budget. Each instruction costs one unit.
     ///
-    /// The default is unbounded. A program that serves forever is an
-    /// ordinary program (specification 7.2 declares `serve(): Never`),
-    /// so a root program takes no instruction cap it did not ask for.
-    /// A caller that runs code it does not trust states a bound.
+    /// A program that serves forever is an ordinary program
+    /// (specification 7.2 declares `serve(): Never`), so a root
+    /// program takes no instruction cap it did not ask for. A caller
+    /// that runs code it does not trust states a bound.
+    ///
+    /// The default is the largest value, not the absence of a bound.
+    /// One machine retires about 445 million instructions each second
+    /// on the reference implementation, so the default lasts about
+    /// 1300 years of continuous execution. This is a lifetime budget
+    /// counting down; `Machine::exec_for_quantum` is the separate
+    /// per-call bound, and it is the mechanism a caller must use to
+    /// limit work it does not trust.
     pub fuel: u64,
     /// The largest frame-stack depth.
     pub max_frames: u32,
@@ -127,8 +135,9 @@ pub struct WorldLimits {
     pub max_resources: usize,
     /// The instruction budget shared by all machines.
     ///
-    /// The default is unbounded, for the reason `VmConfig::fuel`
-    /// states. An embedder that bounds one world states a value.
+    /// The default is the largest value, for the reason
+    /// `VmConfig::fuel` states. An embedder that bounds one world
+    /// states a value.
     pub fuel: u64,
     /// The largest stored proc trace.
     pub max_trace_events: usize,
