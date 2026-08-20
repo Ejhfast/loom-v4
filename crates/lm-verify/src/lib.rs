@@ -2746,6 +2746,29 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             }
         }
     }
+    // Validate all direct conformance references first. One conformance
+    // can resolve another conformance during its semantic checks.
+    for (index, conformance) in module.conformances.iter().enumerate() {
+        let cerr = |message: String| terr(format!("conformance {index}: {message}"));
+        let Some(class) = module.classes.get(conformance.class as usize) else {
+            return Err(cerr("the class index is out of range".to_string()));
+        };
+        ctx.check_interface_use(&conformance.application, class.type_params, 0)
+            .map_err(&cerr)?;
+        let contract = &module.interfaces[conformance.application.interface as usize];
+        if conformance.associated.len() != contract.associated.len() {
+            return Err(cerr(
+                "the associated bindings do not match the contract".to_string(),
+            ));
+        }
+        if conformance
+            .associated
+            .iter()
+            .any(|ty| *ty as usize >= module.types.len())
+        {
+            return Err(cerr("an associated binding is out of range".to_string()));
+        }
+    }
     // Validate each explicit conformance and its method witnesses.
     let iterable_interface = module
         .interfaces
@@ -2758,26 +2781,14 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
     let mut conformance_keys = HashSet::new();
     for (index, conformance) in module.conformances.iter().enumerate() {
         let cerr = |message: String| terr(format!("conformance {index}: {message}"));
-        let Some(class) = module.classes.get(conformance.class as usize) else {
-            return Err(cerr("the class index is out of range".to_string()));
-        };
-        ctx.check_interface_use(&conformance.application, class.type_params, 0)
-            .map_err(&cerr)?;
+        let class = &module.classes[conformance.class as usize];
         if !conformance_keys.insert((conformance.class, conformance.application.interface)) {
             return Err(cerr(
                 "the class repeats one interface conformance".to_string(),
             ));
         }
         let contract = &module.interfaces[conformance.application.interface as usize];
-        if conformance.associated.len() != contract.associated.len() {
-            return Err(cerr(
-                "the associated bindings do not match the contract".to_string(),
-            ));
-        }
         for ty in &conformance.associated {
-            if *ty as usize >= module.types.len() {
-                return Err(cerr("an associated binding is out of range".to_string()));
-            }
             if !ctx.vars_bounded(*ty, class.type_params, 0) {
                 return Err(cerr(
                     "an associated binding uses an unbound variable".to_string(),

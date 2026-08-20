@@ -159,6 +159,75 @@ fn mutated_modules_never_panic_the_decoder_verifier_or_vm() {
     });
 }
 
+/// A conformance can resolve a later conformance. The verifier must
+/// validate the later conformance before this resolution starts.
+#[test]
+fn an_invalid_type_in_a_later_conformance_rejects_without_a_panic() {
+    let source = r#"
+final class NumbersIterator implements Iterator
+  type Item = Int
+
+  def next(mut self): Option[Int]
+    None
+  end
+end
+
+final class Numbers implements Iterable
+  type Item = Int
+  type Iter = NumbersIterator
+
+  def iterator(self): NumbersIterator
+    NumbersIterator()
+  end
+end
+
+Numbers()
+"#;
+    let mut module = lm_testkit::compile_text("seed.lm", source).expect("the seed compiles");
+    let iterable = module
+        .interfaces
+        .iter()
+        .position(|item| item.key == "core.Iterable")
+        .expect("Iterable exists") as u32;
+    let iterator = module
+        .interfaces
+        .iter()
+        .position(|item| item.key == "core.Iterator")
+        .expect("Iterator exists") as u32;
+    let numbers = module
+        .classes
+        .iter()
+        .position(|item| item.name == "Numbers")
+        .expect("Numbers exists") as u32;
+    let numbers_iterator = module
+        .classes
+        .iter()
+        .position(|item| item.name == "NumbersIterator")
+        .expect("NumbersIterator exists") as u32;
+    let iterable_at = module
+        .conformances
+        .iter()
+        .position(|item| item.class == numbers && item.application.interface == iterable)
+        .expect("the Iterable conformance exists");
+    let iterator_at = module
+        .conformances
+        .iter()
+        .position(|item| item.class == numbers_iterator && item.application.interface == iterator)
+        .expect("the Iterator conformance exists");
+    if iterable_at > iterator_at {
+        module.conformances.swap(iterable_at, iterator_at);
+    }
+    let iterator_at = module
+        .conformances
+        .iter()
+        .position(|item| item.class == numbers_iterator && item.application.interface == iterator)
+        .expect("the Iterator conformance still exists");
+    module.conformances[iterator_at].associated[0] = u32::MAX;
+
+    let error = lm_verify::verify_module(&module).expect_err("the invalid type verifies");
+    assert!(error.message.contains("associated binding is out of range"));
+}
+
 /// The snapshot mutation seed: the checkpoint world, plus its
 /// program.
 ///
