@@ -1,0 +1,1285 @@
+//! The child budget, record reclamation, and the VM kernel.
+//!
+//! One part of the `World` surface. `world/mod.rs` holds the
+//! state these methods read.
+
+use super::*;
+
+impl<'m> World<'m> {
+    /// Reserve one child machine from the budget of `parent`.
+    ///
+    /// The parent holds a child budget. Each reservation charges one
+    /// unit to the parent and hands the rest of the budget to the
+    /// child, so the machine tower can never grow deeper than the
+    /// budget the root minted. The reservation happens before any
+    /// machine record exists, so a refusal changes nothing.
+    ///
+    /// The local budget bounds tower depth per branch. `WorldBudget`
+    /// bounds the total machine count and shared resources.
+    pub(crate) fn reserve_child(&mut self, parent: VmId) -> Option<VmConfig> {
+        if !self.share_heap_budget() {
+            return None;
+        }
+        if !self.can_reserve_child(parent) {
+            // A dead record still holds a slot and a budget unit. Free
+            // the dead records once, then answer the request again.
+            self.collect_machines();
+        }
+        if !self.can_reserve_child(parent) {
+            return None;
+        }
+        let m = &mut self.machines[parent as usize];
+        let budget = m.config.max_children;
+        m.children += 1;
+        let remaining = budget - m.children;
+        Some(VmConfig {
+            max_children: remaining,
+            ..m.config
+        })
+    }
+
+    /// True when the parent can charge one more child right now.
+    pub(super) fn can_reserve_child(&mut self, parent: VmId) -> bool {
+        if !self.has_machine_room(1) {
+            return false;
+        }
+        if self.vm_free.is_empty() && self.machines.try_reserve(1).is_err() {
+            return false;
+        }
+        let m = &self.machines[parent as usize];
+        m.children < m.config.max_children
+    }
+
+    /// True when the machine table can add `count` records.
+    ///
+    /// A free slot takes a new record, so the count of live records
+    /// decides the limit, not the length of the table.
+    pub(crate) fn has_machine_room(&self, count: usize) -> bool {
+        self.machines
+            .len()
+            .saturating_sub(self.vm_free.len())
+            .saturating_sub(self.mock_free.len())
+            .checked_add(count)
+            .is_some_and(|total| total <= self.budget.limits.max_machines as usize)
+    }
+
+    /// Reclaim every machine record that no live machine names.
+    ///
+    /// A machine is data (specification 1). A record that no live
+    /// machine names can never run again and can never be inspected,
+    /// so the world frees the record, returns the slot, and returns
+    /// the child budget to the parent. A driver that restores one
+    /// world for each branch of a search therefore pays for the
+    /// branches it still holds, not for every branch it ever built.
+    ///
+    /// The reachability walk is the walk a snapshot cut uses
+    /// (`machine_references`), so the live set here is the set a
+    /// capture would close over.
+    ///
+    /// The pass is conservative. It keeps every machine it cannot
+    /// prove dead: a machine on a live activation stack, a machine the
+    /// scheduler owns, a paused machine, a machine one barrier holds,
+    /// a machine that owns a host resource, and a machine that waits
+    /// on the host. A walk that fails frees nothing.
+    pub(crate) fn collect_machines(&mut self) -> usize {
+        let count = self.machines.len();
+        let mut free_slot = vec![false; count];
+        for id in self.vm_free.iter().chain(self.mock_free.iter()) {
+            free_slot[*id as usize] = true;
+        }
+        let mut live = vec![false; count];
+        let mut queue: Vec<VmId> = Vec::new();
+        let root = |live: &mut Vec<bool>, queue: &mut Vec<VmId>, vm: VmId| {
+            if (vm as usize) < count && !live[vm as usize] {
+                live[vm as usize] = true;
+                queue.push(vm);
+            }
+        };
+        for id in 0..count as VmId {
+            if free_slot[id as usize] {
+                continue;
+            }
+            let m = &self.machines[id as usize];
+            // A machine with no parent is the world root or one mock
+            // record. Neither takes part in the child budget.
+            //
+            // An empty record is a machine that no handle names yet.
+            // `Vm.New` allocates the record before it allocates the
+            // handle, and the embedding API hands one back before any
+            // guest value holds it. The pass keeps every such record,
+            // because it cannot tell a new one from an abandoned one.
+            if m.vm.parent.is_none()
+                || m.vm.state == MachineState::Empty
+                || m.active > 0
+                || m.owner != Ownership::Holder
+                || m.paused
+                || m.barrier.is_some()
+            {
+                root(&mut live, &mut queue, id);
+            }
+        }
+        for (holder, stack) in &self.suspended {
+            root(&mut live, &mut queue, *holder);
+            for act in &stack.activations {
+                root(&mut live, &mut queue, act.vm);
+                if let Some(reply) = act.reply_to {
+                    root(&mut live, &mut queue, reply);
+                }
+            }
+        }
+        for group in &self.gate_groups {
+            for member in &group.members {
+                root(&mut live, &mut queue, *member);
+            }
+        }
+        for bound in self.bound_resources.values() {
+            root(&mut live, &mut queue, bound.owner);
+        }
+        let mut head = 0;
+        while head < queue.len() {
+            let vm = queue[head];
+            head += 1;
+            if !self.is_live_machine(vm) {
+                continue;
+            }
+            let Ok(found) = self.machine_references(vm) else {
+                // The walk proved nothing, so the pass frees nothing.
+                return 0;
+            };
+            for target in found {
+                if (target as usize) < count && !live[target as usize] {
+                    live[target as usize] = true;
+                    queue.push(target);
+                }
+            }
+        }
+        let mut freed = 0;
+        for id in 0..count as VmId {
+            if live[id as usize] || free_slot[id as usize] {
+                continue;
+            }
+            let m = &self.machines[id as usize];
+            if m.active > 0
+                || m.owner != Ownership::Holder
+                || m.paused
+                || m.barrier.is_some()
+                || m.resources.live_count() > 0
+                || matches!(
+                    m.vm.state,
+                    MachineState::Running | MachineState::Waiting | MachineState::Blocked
+                )
+            {
+                continue;
+            }
+            let parent = m.vm.parent;
+            let generation = m.generation.wrapping_add(1);
+            self.machines[id as usize] = self.empty_machine(self.config, None, generation);
+            if let Some(up) = parent {
+                let record = &mut self.machines[up as usize];
+                record.children = record.children.saturating_sub(1);
+            }
+            self.vm_free.push(id);
+            freed += 1;
+        }
+        self.collect_images();
+        freed
+    }
+
+    /// Free every admitted image that no surviving machine names.
+    ///
+    /// A guest snapshot value names one slot of the image table. The
+    /// pass reads the surviving machines, so it runs after the
+    /// machine sweep and never frees an image a freed machine held.
+    pub(super) fn collect_images(&mut self) {
+        if self.images.is_empty() {
+            return;
+        }
+        let mut used = vec![false; self.images.len()];
+        let mut free_slot = vec![false; self.machines.len()];
+        for id in self.vm_free.iter().chain(self.mock_free.iter()) {
+            free_slot[*id as usize] = true;
+        }
+        for id in 0..self.machines.len() as VmId {
+            if free_slot[id as usize] || !self.is_live_machine(id) {
+                continue;
+            }
+            let Ok(found) = self.image_references(id) else {
+                // The walk proved nothing, so the pass frees nothing.
+                return;
+            };
+            for slot in found {
+                if let Some(seen) = used.get_mut(slot as usize) {
+                    *seen = true;
+                }
+            }
+        }
+        for slot in 0..self.images.len() as u32 {
+            if used[slot as usize] || self.images[slot as usize].is_none() {
+                continue;
+            }
+            self.images[slot as usize] = None;
+            self.image_free.push(slot);
+        }
+    }
+
+    /// Attach the aggregate heap ledger before a second machine exists.
+    pub(crate) fn share_heap_budget(&mut self) -> bool {
+        if self.heap_shared {
+            return true;
+        }
+        if self.machines.len() != 1 {
+            return false;
+        }
+        if !self.machines[0]
+            .vm
+            .heap
+            .attach_budget(self.budget.heap.clone())
+        {
+            return false;
+        }
+        self.heap_shared = true;
+        true
+    }
+
+    /// Create one detached machine with the world ledgers.
+    pub(crate) fn empty_machine(
+        &self,
+        config: VmConfig,
+        parent: Option<VmId>,
+        generation: u32,
+    ) -> Machine {
+        debug_assert!(self.heap_shared);
+        Machine::empty_with_budgets(
+            config,
+            parent,
+            generation,
+            self.budget.heap.clone(),
+            self.budget.resources.clone(),
+        )
+    }
+
+    /// Enter the proc body after the constructor frame returned.
+    pub(super) fn enter_proc_body(&mut self, vm: VmId, instance: Value) {
+        let Some(body) = self.machines[vm as usize].start_body.take() else {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the machine stores no proc body",
+                None,
+            );
+            return;
+        };
+        let (func, env) = match self.machines[vm as usize].vm.heap.get(body) {
+            Object::Closure { func, env, .. } => (*func, env.env()),
+            _ => {
+                self.machines[vm as usize].set_fault(
+                    FaultCode::TypeMismatch,
+                    "the proc body is not a closure",
+                    None,
+                );
+                return;
+            }
+        };
+        self.machines[vm as usize].load_frame(self.module, func, vec![instance], Some(body), env);
+    }
+
+    /// Read one machine handle out of a holder value.
+    ///
+    /// The argument comes from the pending record of the machine, and
+    /// a restored machine states that record, so the read tests the
+    /// shape. `None` faults the caller at its use site.
+    pub(super) fn handle_vm(&self, holder: VmId, value: Value) -> Option<VmId> {
+        let r = value.as_obj()?;
+        match self.machines[holder as usize].vm.heap.get(r) {
+            Object::NativeVm { vm } => Some(*vm),
+            _ => None,
+        }
+    }
+
+    /// The machine one argument names, or a fault on the caller.
+    pub(super) fn vm_arg(&mut self, vm: VmId, op: u32, value: Value) -> Option<VmId> {
+        match self.handle_vm(vm, value) {
+            Some(target) => Some(target),
+            None => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the receiver is not a machine handle",
+                );
+                None
+            }
+        }
+    }
+
+    /// Execute one VM control operation of the machine `vm`.
+    pub(super) fn kernel_exec(
+        &mut self,
+        stack: &mut Vec<Activation>,
+        vm: VmId,
+        op: u32,
+        dispatch_mode: DispatchMode,
+    ) {
+        let stored: Vec<Value> = match self.machines[vm as usize].vm.pending.as_ref() {
+            Some(pending) => pending.args.clone(),
+            None => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::MalformedState,
+                    "the kernel found no pending request",
+                );
+                return;
+            }
+        };
+        // A restored machine states its own argument list. `arg` reads
+        // a missing position as the uninitialized marker, and every
+        // shape test below rejects that marker, so a short list faults
+        // the caller instead of indexing past the list.
+        let args = Args(&stored);
+        match op {
+            lm_abi::OP_VM_NEW => {
+                // The parent reserves the child from its own budget
+                // first. The reservation is fail-atomic: a rejected
+                // reservation creates no machine and charges nothing.
+                let child_config = match self.reserve_child(vm) {
+                    Some(config) => config,
+                    None => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "the parent has no child budget left",
+                        );
+                        return;
+                    }
+                };
+                let child = self.install_child(child_config, vm);
+                match self.machines[vm as usize].alloc(Object::NativeVm { vm: child }) {
+                    Ok(handle) => self.install_value_reply(vm, handle),
+                    Err(code) => {
+                        // No handle names the child, so the whole call
+                        // rolls back: the record returns to the free
+                        // list and the parent gets its reservation back.
+                        let generation = self.machines[child as usize].generation;
+                        self.machines[child as usize] =
+                            self.empty_machine(self.config, None, generation);
+                        self.vm_free.push(child);
+                        self.machines[vm as usize].children -= 1;
+                        self.machines[vm as usize].set_fault(code, "", Some(op));
+                    }
+                }
+            }
+            lm_abi::OP_VM_FROM_FN => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if self.machines[target as usize].vm.state != MachineState::Empty {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is loaded");
+                    return;
+                }
+                let program = match self.transfer(vm, target, args[1]) {
+                    Ok(value) => value,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the program is not sendable");
+                        return;
+                    }
+                };
+                // The argument view: unit, or a tuple whose elements
+                /* become the initial parameter locals. */
+                let Some(closure_ref) = program.as_obj() else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the program value is not a closure",
+                    );
+                    return;
+                };
+                let mut locals = Vec::new();
+                if let Value::Obj(r) = args[2] {
+                    let items = match self.machines[vm as usize].vm.heap.get(r) {
+                        Object::Tuple { items } => items.clone(),
+                        _ => {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::TypeMismatch,
+                                "the argument view is not a tuple",
+                            );
+                            return;
+                        }
+                    };
+                    // The program is not reachable from the target
+                    // machine yet, so it stays rooted while the
+                    // arguments cross.
+                    self.machines[target as usize]
+                        .vm
+                        .heap
+                        .push_host_root(closure_ref);
+                    let moved = self.transfer_all(vm, target, &items);
+                    self.machines[target as usize]
+                        .vm
+                        .heap
+                        .pop_host_root(closure_ref);
+                    match moved {
+                        Ok(values) => locals = values,
+                        Err(code) => {
+                            self.fault_caller(vm, op, code, "an argument is not sendable");
+                            return;
+                        }
+                    }
+                }
+                // The program closure carries the environment of the
+                // frame that built it, so a machine whose entry
+                // function is generic records the arguments that frame
+                // applied.
+                let (func, env) = match self.machines[target as usize].vm.heap.get(closure_ref) {
+                    Object::Closure { func, env, .. } => (*func, env.env()),
+                    _ => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::TypeMismatch,
+                            "the program value is not a closure",
+                        );
+                        return;
+                    }
+                };
+                // The arguments cross a machine boundary, so they meet
+                // the parameter types of the program before the frame
+                // loads them.
+                if let Err(code) = self.check_frame_args(target, func, env, &locals) {
+                    self.fault_caller(vm, op, code, "an argument does not carry its declared type");
+                    return;
+                }
+                self.machines[target as usize].load_frame(
+                    self.module,
+                    func,
+                    locals,
+                    Some(closure_ref),
+                    env,
+                );
+                match self.machines[vm as usize].alloc(Object::NativeVm { vm: target }) {
+                    Ok(handle) => self.install_value_reply(vm, handle),
+                    Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
+                }
+            }
+            lm_abi::OP_VM_RUN
+            | lm_abi::OP_VM_STEP
+            | lm_abi::OP_VM_DRIVE
+            | lm_abi::OP_VM_DRIVE_FOR => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                // `Vm.DriveFor` bounds the turn. A bound below one
+                // retires nothing, so it reads as one instruction.
+                let turn_fuel = if op == lm_abi::OP_VM_DRIVE_FOR {
+                    match args[1] {
+                        Value::Int(n) => Some((n.max(1)).min(u32::MAX as i64) as u32),
+                        _ => {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::TypeMismatch,
+                                "`Vm.DriveFor` needs an instruction count",
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let (mode, family) = match op {
+                    lm_abi::OP_VM_RUN => (StopMode::RunToTerminal, Family::Run),
+                    lm_abi::OP_VM_STEP => (StopMode::OneStep, Family::Step),
+                    lm_abi::OP_VM_DRIVE_FOR => (StopMode::DriveToAsk, Family::DriveFor),
+                    _ => (StopMode::DriveToAsk, Family::Drive),
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                // The first run, step, or drive of a restored root
+                // opens the world gate (specification 17.5).
+                self.open_gate(target);
+                if self.machines[target as usize].vm.routed.is_some() {
+                    if matches!(op, lm_abi::OP_VM_DRIVE | lm_abi::OP_VM_DRIVE_FOR) {
+                        self.recover_routed_asked(target, vm, op);
+                    } else {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "the machine holds a routed request; drive it",
+                        );
+                    }
+                    return;
+                }
+                match self.machines[target as usize].vm.state {
+                    MachineState::Empty => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "the machine is empty",
+                        );
+                    }
+                    MachineState::Done | MachineState::Faulted => {
+                        // Terminal execution calls return the stored
+                        // event idempotently.
+                        match self.build_terminal_event(target, vm, family) {
+                            Ok(value) => self.install_value_reply(vm, value),
+                            Err(code) => {
+                                self.machines[vm as usize].set_fault(code, "", Some(op));
+                            }
+                        }
+                    }
+                    MachineState::Asked => {
+                        if matches!(op, lm_abi::OP_VM_DRIVE | lm_abi::OP_VM_DRIVE_FOR) {
+                            // Token recovery: the same semantic request
+                            // with a fresh holder token.
+                            if self.machines[target as usize].vm.pending.is_none() {
+                                self.fault_caller(
+                                    vm,
+                                    op,
+                                    FaultCode::MalformedState,
+                                    "the asked machine holds no request",
+                                );
+                                return;
+                            }
+                            let fresh = match self.machines[target as usize].take_request_ordinal()
+                            {
+                                Ok(ordinal) => ordinal,
+                                Err(code) => {
+                                    self.machines[target as usize].set_fault(
+                                        code,
+                                        "the request ordinal is exhausted",
+                                        Some(op),
+                                    );
+                                    let built =
+                                        self.build_terminal_event(target, vm, Family::Drive);
+                                    self.reply_or_fault(vm, op, built);
+                                    return;
+                                }
+                            };
+                            if let Some(pending) =
+                                self.machines[target as usize].vm.pending.as_mut()
+                            {
+                                pending.ordinal = fresh;
+                            }
+                            self.deliver_asked(target, vm, fresh);
+                        } else {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::InvalidVmState,
+                                "the machine is asked; drive it",
+                            );
+                        }
+                    }
+                    // A blocked machine takes this path too. It waits
+                    // on another machine of this world, exactly as a
+                    // waiting machine waits on the host. The driver
+                    // loop suspends the whole stack at its next turn,
+                    // and the scheduler parks this holder on the same
+                    // wake condition. The holder resumes its control
+                    // call when the condition clears.
+                    MachineState::Ready | MachineState::Waiting | MachineState::Blocked => {
+                        if self.machines[vm as usize].vm.nested.is_some() {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::InvalidVmState,
+                                "the machine already waits on nested control",
+                            );
+                            return;
+                        }
+                        self.machines[vm as usize].vm.nested = Some(target);
+                        if dispatch_mode == DispatchMode::DeferNested {
+                            self.machines[vm as usize].vm.state = MachineState::Ready;
+                        } else {
+                            self.push_activation(
+                                stack,
+                                Activation {
+                                    vm: target,
+                                    mode,
+                                    family,
+                                    reply_to: Some(vm),
+                                    retired: false,
+                                    fuel: turn_fuel,
+                                },
+                            );
+                        }
+                    }
+                    // A running machine holds an execution reference,
+                    // and the guard above already refused one.
+                    MachineState::Running => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "the machine is in use",
+                        );
+                    }
+                }
+            }
+            lm_abi::OP_VM_DRIVE_WAIT => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                if self.machines[target as usize].vm.state == MachineState::Empty {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is empty");
+                    return;
+                }
+                self.create_wait(vm, op, WaitSource::Drive { target });
+            }
+            lm_abi::OP_VM_TABLE => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                match self.machines[vm as usize].alloc(Object::NativeTable { vm: target }) {
+                    Ok(handle) => self.install_value_reply(vm, handle),
+                    Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
+                }
+            }
+            lm_abi::OP_VM_HANDLES => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                let built = self
+                    .controlled_file_resources(target)
+                    .and_then(|resources| self.build_resource_list(vm, target, &resources));
+                self.reply_or_fault(vm, op, built);
+            }
+            lm_abi::OP_VM_RESOURCE => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                let Some(resource) = self.file_handle_resource(vm, args[1]) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not an external resource",
+                    );
+                    return;
+                };
+                let built = self.build_resource_control(vm, target, resource);
+                self.reply_or_fault(vm, op, built);
+            }
+            lm_abi::OP_VM_SERVE_FILE => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|reference| {
+                    match self.machines[vm as usize].vm.heap.get(reference) {
+                        Object::NativeCall {
+                            vm,
+                            ordinal,
+                            op: call_op,
+                        } => Some((*vm, *ordinal, *call_op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                let Some(sink) =
+                    self.reply_sink(vm, op, surface, token.0, token.1, Some(lm_abi::OP_FS_OPEN))
+                else {
+                    return;
+                };
+                let resource = match self.register_driver_file(sink.target, vm) {
+                    Ok(resource) => resource,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the resource limit is full");
+                        return;
+                    }
+                };
+                let built = self.machines[sink.target as usize]
+                    .alloc(Object::NativeFileHandle { resource })
+                    .and_then(|handle| {
+                        self.make_instance(sink.target, self.core.result_ok, vec![handle])
+                    });
+                let reply = match built {
+                    Ok(reply) => reply,
+                    Err(code) => {
+                        self.retire_file(resource, false);
+                        self.fault_caller(vm, op, code, "the file reply allocation failed");
+                        return;
+                    }
+                };
+                let control = match self.build_resource_control(vm, surface, resource) {
+                    Ok(control) => control,
+                    Err(code) => {
+                        self.retire_file(resource, false);
+                        self.fault_caller(vm, op, code, "the resource control allocation failed");
+                        return;
+                    }
+                };
+                self.install_value_reply(sink.target, reply);
+                if self.machines[sink.target as usize].vm.state == MachineState::Faulted {
+                    self.retire_file(resource, false);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the minted reply did not match Fs.Open",
+                    );
+                    return;
+                }
+                self.consume_reply_sink(sink);
+                self.install_value_reply(vm, control);
+            }
+            lm_abi::OP_VM_SERVE_TCP_STREAM => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|reference| {
+                    match self.machines[vm as usize].vm.heap.get(reference) {
+                        Object::NativeCall {
+                            vm,
+                            ordinal,
+                            op: call_op,
+                        } => Some((*vm, *ordinal, *call_op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                if token.2 != lm_abi::OP_TCP_CONNECT && token.2 != lm_abi::OP_TCP_ACCEPT {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::InvalidRequestToken,
+                        "the call token is not for Tcp.Connect or Tcp.Accept",
+                    );
+                    return;
+                }
+                let Some(sink) = self.reply_sink(vm, op, surface, token.0, token.1, Some(token.2))
+                else {
+                    return;
+                };
+                let peer = match self.transfer(vm, sink.target, args[2]) {
+                    Ok(peer) => peer,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the peer address is not sendable");
+                        return;
+                    }
+                };
+                let resource = match self.register_driver_resource(
+                    sink.target,
+                    vm,
+                    crate::ResourceKind::TcpStream,
+                    token.2,
+                ) {
+                    Ok(resource) => resource,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the resource limit is full");
+                        return;
+                    }
+                };
+                let built = self.machines[sink.target as usize]
+                    .alloc(Object::NativeTcpStream { resource })
+                    .and_then(|stream| {
+                        if token.2 == lm_abi::OP_TCP_ACCEPT {
+                            self.make_instance(sink.target, self.core.pair, vec![stream, peer])
+                        } else {
+                            Ok(stream)
+                        }
+                    })
+                    .and_then(|value| {
+                        self.make_instance(sink.target, self.core.result_ok, vec![value])
+                    });
+                let reply = match built {
+                    Ok(reply) => reply,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the TCP reply allocation failed");
+                        return;
+                    }
+                };
+                let control = match self.build_resource_control(vm, surface, resource) {
+                    Ok(control) => control,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the resource control allocation failed");
+                        return;
+                    }
+                };
+                self.install_value_reply(sink.target, reply);
+                if self.machines[sink.target as usize].vm.state == MachineState::Faulted {
+                    self.retire_resource(resource, false);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the minted reply did not match the TCP call",
+                    );
+                    return;
+                }
+                self.consume_reply_sink(sink);
+                self.install_value_reply(vm, control);
+            }
+            lm_abi::OP_VM_SERVE_TCP_LISTENER => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|reference| {
+                    match self.machines[vm as usize].vm.heap.get(reference) {
+                        Object::NativeCall {
+                            vm,
+                            ordinal,
+                            op: call_op,
+                        } => Some((*vm, *ordinal, *call_op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                let Some(sink) = self.reply_sink(
+                    vm,
+                    op,
+                    surface,
+                    token.0,
+                    token.1,
+                    Some(lm_abi::OP_TCP_LISTEN),
+                ) else {
+                    return;
+                };
+                let resource = match self.register_driver_resource(
+                    sink.target,
+                    vm,
+                    crate::ResourceKind::TcpListener,
+                    lm_abi::OP_TCP_LISTEN,
+                ) {
+                    Ok(resource) => resource,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the resource limit is full");
+                        return;
+                    }
+                };
+                let built = self.machines[sink.target as usize]
+                    .alloc(Object::NativeTcpListener { resource })
+                    .and_then(|listener| {
+                        self.make_instance(sink.target, self.core.result_ok, vec![listener])
+                    });
+                let reply = match built {
+                    Ok(reply) => reply,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the TCP reply allocation failed");
+                        return;
+                    }
+                };
+                let control = match self.build_resource_control(vm, surface, resource) {
+                    Ok(control) => control,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the resource control allocation failed");
+                        return;
+                    }
+                };
+                self.install_value_reply(sink.target, reply);
+                if self.machines[sink.target as usize].vm.state == MachineState::Faulted {
+                    self.retire_resource(resource, false);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the minted reply did not match Tcp.Listen",
+                    );
+                    return;
+                }
+                self.consume_reply_sink(sink);
+                self.install_value_reply(vm, control);
+            }
+            lm_abi::OP_VM_SERVE_TLS_STREAM => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|reference| {
+                    match self.machines[vm as usize].vm.heap.get(reference) {
+                        Object::NativeCall {
+                            vm,
+                            ordinal,
+                            op: call_op,
+                        } => Some((*vm, *ordinal, *call_op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                let Some(sink) = self.reply_sink(
+                    vm,
+                    op,
+                    surface,
+                    token.0,
+                    token.1,
+                    Some(lm_abi::OP_TLS_HANDSHAKE),
+                ) else {
+                    return;
+                };
+                let Some(source) = self.pending_resource_of(sink.target, ResourceErrors::Net)
+                else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the TLS handshake has no TCP stream",
+                    );
+                    return;
+                };
+                let valid_source = self.bound_resources.get(&source).is_some_and(|bound| {
+                    bound.owner == sink.target
+                        && bound.kind == crate::ResourceKind::TcpStream
+                        && matches!(bound.backing, ResourceBacking::Driver(driver) if driver == vm)
+                });
+                if !valid_source {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the TLS handshake does not use this driver's TCP stream",
+                    );
+                    return;
+                }
+                // The handshake consumes its TCP stream.
+                self.retire_resource(source, false);
+                let resource = match self.register_driver_resource(
+                    sink.target,
+                    vm,
+                    crate::ResourceKind::TlsStream,
+                    lm_abi::OP_TLS_HANDSHAKE,
+                ) {
+                    Ok(resource) => resource,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the resource limit is full");
+                        return;
+                    }
+                };
+                let built = self.machines[sink.target as usize]
+                    .alloc(Object::NativeTlsStream { resource })
+                    .and_then(|stream| {
+                        self.make_instance(sink.target, self.core.result_ok, vec![stream])
+                    });
+                let reply = match built {
+                    Ok(reply) => reply,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the TLS reply allocation failed");
+                        return;
+                    }
+                };
+                let control = match self.build_resource_control(vm, surface, resource) {
+                    Ok(control) => control,
+                    Err(code) => {
+                        self.retire_resource(resource, false);
+                        self.fault_caller(vm, op, code, "the resource control allocation failed");
+                        return;
+                    }
+                };
+                self.install_value_reply(sink.target, reply);
+                if self.machines[sink.target as usize].vm.state == MachineState::Faulted {
+                    self.retire_resource(resource, false);
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the minted reply did not match Tls.Handshake",
+                    );
+                    return;
+                }
+                self.consume_reply_sink(sink);
+                self.install_value_reply(vm, control);
+            }
+            lm_abi::OP_VM_RESOURCE_SAME => {
+                let Some((_left_surface, left)) = self.resource_control(vm, args[0]) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the receiver is not a resource control",
+                    );
+                    return;
+                };
+                let Some((_right_surface, right)) = self.resource_control(vm, args[1]) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a resource control",
+                    );
+                    return;
+                };
+                let same = left == right && self.bound_resources.contains_key(&left);
+                self.install_value_reply(vm, Value::Bool(same));
+            }
+            lm_abi::OP_VM_RESOURCE_IS_OPEN
+            | lm_abi::OP_VM_RESOURCE_CLOSE
+            | lm_abi::OP_VM_RESOURCE_KIND => {
+                let Some((_surface, resource)) = self.resource_control(vm, args[0]) else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the receiver is not a resource control",
+                    );
+                    return;
+                };
+                match op {
+                    lm_abi::OP_VM_RESOURCE_IS_OPEN => {
+                        let open = self.bound_resources.contains_key(&resource);
+                        self.install_value_reply(vm, Value::Bool(open));
+                    }
+                    lm_abi::OP_VM_RESOURCE_CLOSE => {
+                        let closed = self.retire_resource(resource, true);
+                        self.install_value_reply(vm, Value::Bool(closed));
+                    }
+                    _ => {
+                        let name = self
+                            .bound_resources
+                            .get(&resource)
+                            .map(|bound| match bound.kind {
+                                crate::ResourceKind::File => "file",
+                                crate::ResourceKind::TcpStream => "tcp-stream",
+                                crate::ResourceKind::TcpListener => "tcp-listener",
+                                crate::ResourceKind::TlsStream => "tls-stream",
+                                crate::ResourceKind::PendingOperation => "pending-operation",
+                            })
+                            .unwrap_or("closed");
+                        let built = self.machines[vm as usize].alloc(Object::Str(name.into()));
+                        self.reply_or_fault(vm, op, built);
+                    }
+                }
+            }
+            lm_abi::OP_VM_ANSWER => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|r| {
+                    match self.machines[vm as usize].vm.heap.get(r) {
+                        Object::NativeCall { vm, ordinal, op } => Some((*vm, *ordinal, *op)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a call token",
+                    );
+                    return;
+                };
+                let Some(sink) = self.reply_sink(vm, op, surface, token.0, token.1, Some(token.2))
+                else {
+                    return;
+                };
+                let reply = match self.transfer(vm, sink.target, args[2]) {
+                    Ok(value) => value,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the reply is not sendable");
+                        return;
+                    }
+                };
+                self.install_value_reply(sink.target, reply);
+                self.consume_reply_sink(sink);
+                self.install_value_reply(vm, Value::Unit);
+            }
+            lm_abi::OP_VM_REJECT | lm_abi::OP_VM_DISPATCH => {
+                let Some(surface) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let found = args[1].as_obj().and_then(|r| {
+                    match self.machines[vm as usize].vm.heap.get(r) {
+                        Object::NativeRequest { vm, ordinal } => Some((*vm, *ordinal)),
+                        _ => None,
+                    }
+                });
+                let Some(token) = found else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the argument is not a request token",
+                    );
+                    return;
+                };
+                let Some(sink) = self.reply_sink(vm, op, surface, token.0, token.1, None) else {
+                    return;
+                };
+                if op == lm_abi::OP_VM_REJECT {
+                    let built = args[2].as_obj().and_then(|r| {
+                        match self.machines[vm as usize].vm.heap.get(r) {
+                            Object::NativeFault { code, message, op } => Some(FaultRec {
+                                code: *code,
+                                message: message.clone(),
+                                op: *op,
+                            }),
+                            _ => None,
+                        }
+                    });
+                    let Some(rec) = built else {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::TypeMismatch,
+                            "the argument is not a fault value",
+                        );
+                        return;
+                    };
+                    let pending_op = self.pending_op(sink.target);
+                    self.machines[sink.target as usize].set_fault(
+                        rec.code,
+                        rec.message,
+                        pending_op,
+                    );
+                    self.consume_reply_sink(sink);
+                    self.install_value_reply(vm, Value::Unit);
+                } else {
+                    // The caller's reply installs before policy can
+                    // stack a mock run above it.
+                    self.consume_reply_sink(sink);
+                    self.install_value_reply(vm, Value::Unit);
+                    let _ = self.resolve_and_dispatch(
+                        stack,
+                        sink.target,
+                        sink.cursor,
+                        DispatchMode::DeferNested,
+                    );
+                }
+            }
+            lm_abi::OP_VM_SNAPSHOT_HELD => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                self.take_snapshot(vm, op, target, false);
+            }
+            lm_abi::OP_VM_SNAPSHOT_WAIT_HELD => {
+                let Some(target) = self.vm_arg(vm, op, args[0]) else {
+                    return;
+                };
+                let Value::Int(fuel) = args[1] else {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::TypeMismatch,
+                        "the fuel argument is not an integer",
+                    );
+                    return;
+                };
+                if target == vm || self.machines[target as usize].active > 0 {
+                    self.fault_caller(vm, op, FaultCode::InvalidVmState, "the machine is in use");
+                    return;
+                }
+                if !self.expect_holder_owned(vm, op, target) {
+                    return;
+                }
+                let result = self.snapshot_wait(target, fuel.max(0) as u64);
+                self.install_snapshot_result(vm, op, result);
+            }
+            lm_abi::OP_VM_SNAPSHOT_SELF => {
+                // The performing machine is the root of its own world.
+                // The capture runs while `Vm.SnapshotSelf` is pending,
+                // so the restored root holds that request
+                // (specification 17.6).
+                self.take_snapshot(vm, op, vm, true);
+            }
+            lm_abi::OP_VM_LOAD_SNAPSHOT => {
+                // This build has no guest snapshot decoder.
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::InvalidVmState,
+                    "Vm.LoadSnapshot is not available in this build",
+                );
+            }
+            lm_abi::OP_VM_RESTORE => self.restore_snapshot(vm, op, args),
+            lm_abi::OP_PROC_RECV_WAIT
+            | lm_abi::OP_WAIT_WAIT
+            | lm_abi::OP_WAIT_CHOOSE
+            | lm_abi::OP_WAIT_CANCEL => self.wait_exec(vm, op, args),
+            lm_abi::OP_PROC_RUN
+            | lm_abi::OP_PROC_SPAWN
+            | lm_abi::OP_PROC_SEND
+            | lm_abi::OP_PROC_CLOSE
+            | lm_abi::OP_PROC_RECV
+            | lm_abi::OP_PROC_DONE
+            | lm_abi::OP_PROC_PAUSE
+            | lm_abi::OP_PROC_RESUME
+            | lm_abi::OP_PROC_SNAPSHOT_WAIT => self.proc_exec(vm, op, stored),
+            // Every `VmControl` slot of the manifest has an arm above.
+            // A slot without one names a manifest this build does not
+            // hold, so the caller faults.
+            _ => self.fault_caller(
+                vm,
+                op,
+                FaultCode::MalformedState,
+                "the operation has no kernel rule",
+            ),
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Typed waits.
+    // ------------------------------------------------------------
+}
