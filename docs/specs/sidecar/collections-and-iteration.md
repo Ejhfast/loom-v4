@@ -43,6 +43,8 @@ The bytecode has explicit pack and empty-case instructions.
 
 The verifier checks each instruction against the pinned `Option` roles.
 
+Equality gives a bare `None` the static type of its left operand.
+
 Pattern tests and field reads understand the native representation.
 
 Snapshots encode the semantic arm and payload. They do not encode process-local table numbers.
@@ -50,6 +52,18 @@ Snapshots encode the semantic arm and payload. They do not encode process-local 
 Transfers remap the closed type of each empty-case value.
 
 Digests encode the semantic `Option` structure.
+
+The digest instruction records the static receiver type.
+
+The digest walk passes closed types through fields, captures, lists, maps, and tuples.
+
+The encoding gives `Some` and `None` separate tags.
+
+Each tag also records the closed `Option` family hash.
+
+Thus, `Some(value)` never has the same structural encoding as `value`.
+
+The digest cache includes the closed root type.
 
 The first implementation reserves this layout for pinned `Option`.
 
@@ -89,6 +103,8 @@ The source classes add no wrapper object.
 
 List literals and map literals produce these native class values.
 
+The checker validates map keys for literals and `Map[K,V]()` calls.
+
 `[T]` remains type sugar for `List[T]`.
 
 `{K: V}` remains type sugar for `Map[K,V]`.
@@ -114,6 +130,10 @@ The runtime starts epoch tracking when a traversal captures the epoch.
 The runtime can skip epoch writes before tracking starts.
 
 Each structural change increments the epoch after tracking starts.
+
+An increment at the maximum epoch raises `CollectionEpochExhausted`.
+
+This fault is separate from `CollectionModified`.
 
 These changes include length, capacity, and element-order changes.
 
@@ -189,6 +209,8 @@ final class PureSource implements Source[effect ()]
   type Item = Int
 end
 ```
+
+Generic calls infer interface effect arguments from the selected conformance.
 
 A type parameter adds one or more bounds after a colon.
 
@@ -275,6 +297,10 @@ for key, value in table
 end
 ```
 
+The `_` loop binding is a wildcard.
+
+Repeated `_` bindings bind no name and remain valid.
+
 The source expression runs once.
 
 The iterator expression runs once.
@@ -350,6 +376,8 @@ A structural source change invalidates the view.
 Freezing a view freezes its reachable source graph.
 
 Snapshots preserve the source edge, range, position, and epoch.
+
+Snapshots also preserve spare list and map capacity.
 
 ## 12. Closures and traversal methods
 

@@ -1408,7 +1408,6 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::BytesCompact)
         | Instr::Native(lm_bytecode::NativeInstr::BytesTextView)
         | Instr::Freeze
-        | Instr::Digest
         | Instr::EqDigest
         | Instr::NeDigest
         | Instr::Jump(_)
@@ -1422,6 +1421,9 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::FaultDenied
         | Instr::RequestOp
         | Instr::Unreachable => *instr,
+        Instr::Digest { ty } => Instr::Digest {
+            ty: reloc.types[*ty as usize],
+        },
         Instr::AsCall { op, ty } => Instr::AsCall {
             op: *op,
             ty: reloc.types[*ty as usize],

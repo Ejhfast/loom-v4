@@ -694,6 +694,27 @@ impl Ctx {
         interface < self.user_interface_start
     }
 
+    /// Render one type with names from its lexical scope.
+    pub(crate) fn display_type(&self, env: &TyEnv, ty: TypeId) -> String {
+        self.store.display_with_names(
+            ty,
+            &|index| {
+                if index == 0 && env.self_interface.is_some() {
+                    return Some("Self".to_string());
+                }
+                let position = index.checked_sub(env.type_offset)? as usize;
+                env.type_names.get(position).cloned()
+            },
+            &|interface, assoc| {
+                self.interfaces
+                    .get(interface.0 as usize)?
+                    .associated
+                    .get(assoc as usize)
+                    .map(|item| item.name.clone())
+            },
+        )
+    }
+
     /// Look up a class or enum type name in the given scope.
     pub(crate) fn lookup_type(&self, name: &str, env: &TyEnv) -> Option<u32> {
         if env.core_scope {
@@ -811,6 +832,36 @@ impl Ctx {
         }
     }
 
+    /// Find one interface application for a type in this scope.
+    pub(crate) fn type_conformance(
+        &mut self,
+        env: &TyEnv,
+        ty: TypeId,
+        interface: u32,
+    ) -> Option<InterfaceUse> {
+        match self.store.get(ty).clone() {
+            Type::Var(index) if index >= env.type_offset => env
+                .type_bounds
+                .get((index - env.type_offset) as usize)
+                .and_then(|bounds| {
+                    bounds
+                        .iter()
+                        .find(|item| item.interface == interface)
+                        .cloned()
+                }),
+            Type::Projection {
+                interface: owner,
+                assoc,
+                ..
+            } => self.interfaces[owner.0 as usize]
+                .associated
+                .get(assoc as usize)
+                .and_then(|item| item.bound.clone())
+                .filter(|item| item.interface == interface),
+            _ => self.conformance_use(ty, interface),
+        }
+    }
+
     /// Test one type against one required interface application.
     pub(crate) fn type_conforms(
         &mut self,
@@ -818,25 +869,7 @@ impl Ctx {
         ty: TypeId,
         required: &InterfaceUse,
     ) -> bool {
-        let found = match self.store.get(ty).clone() {
-            Type::Var(index) if index >= env.type_offset => env
-                .type_bounds
-                .get((index - env.type_offset) as usize)
-                .and_then(|bounds| {
-                    bounds
-                        .iter()
-                        .find(|item| item.interface == required.interface)
-                        .cloned()
-                }),
-            Type::Projection {
-                interface, assoc, ..
-            } => self.interfaces[interface.0 as usize]
-                .associated
-                .get(assoc as usize)
-                .and_then(|item| item.bound.clone())
-                .filter(|item| item.interface == required.interface),
-            _ => self.conformance_use(ty, required.interface),
-        };
+        let found = self.type_conformance(env, ty, required.interface);
         found.is_some_and(|application| {
             application.type_args == required.type_args && application.row_args == required.row_args
         })

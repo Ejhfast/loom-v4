@@ -391,7 +391,8 @@ impl AbiType {
 /// Version 7 adds generic native collection operations.
 /// Version 8 completes the mutable collection leaf operations.
 /// Version 9 adds the list reorder marker.
-pub const INTRINSIC_ABI_VERSION: u32 = 9;
+/// Version 10 gives collection epoch exhaustion its own fault.
+pub const INTRINSIC_ABI_VERSION: u32 = 10;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;

@@ -369,6 +369,64 @@ fn unify(
     }
 }
 
+/// Infer one effect argument from an interface application row.
+fn infer_bound_row(ctx: &Ctx, declared: &Row, actual: &Row, rowargs: &mut [Option<Row>]) {
+    let mut variables = Vec::new();
+    for elem in declared {
+        let lm_types::RowElem::Var(index) = elem else {
+            continue;
+        };
+        let index = *index as usize;
+        if index < rowargs.len() && !variables.contains(&index) {
+            variables.push(index);
+        }
+    }
+    let solve = if variables.len() == 1 {
+        Some(variables[0])
+    } else {
+        let unresolved: Vec<usize> = variables
+            .iter()
+            .copied()
+            .filter(|index| rowargs[*index].is_none())
+            .collect();
+        (unresolved.len() == 1).then_some(unresolved[0])
+    };
+    let Some(solve) = solve else {
+        return;
+    };
+
+    let mut fixed = Vec::new();
+    for elem in declared {
+        match elem {
+            lm_types::RowElem::Var(index) if *index as usize == solve => {}
+            lm_types::RowElem::Var(index) => {
+                let Some(Some(row)) = rowargs.get(*index as usize) else {
+                    return;
+                };
+                fixed.extend_from_slice(row);
+            }
+            lm_types::RowElem::Op(_) => fixed.push(*elem),
+        }
+    }
+    let fixed = ctx.store.canonical_row(fixed);
+    if fixed.iter().any(|elem| !actual.contains(elem)) {
+        return;
+    }
+    let inferred = ctx.store.canonical_row(
+        actual
+            .iter()
+            .copied()
+            .filter(|elem| !fixed.contains(elem))
+            .collect(),
+    );
+    if rowargs[solve]
+        .as_ref()
+        .is_none_or(|held| ctx.store.row_included(held, &inferred))
+    {
+        rowargs[solve] = Some(inferred);
+    }
+}
+
 /// Return true when one function value fits a callback parameter.
 fn callback_accepts(ctx: &Ctx, expected: TypeId, found: TypeId) -> bool {
     let Type::Callback(ep, em, er, erow) = ctx.store.get(expected) else {
@@ -472,8 +530,8 @@ impl<'o> FnChecker<'o> {
             "E1004",
             format!(
                 "expected {}, found {}",
-                ctx.store.display(expected),
-                ctx.store.display(found)
+                ctx.display_type(&self.env, expected),
+                ctx.display_type(&self.env, found)
             ),
             span,
         )
@@ -532,7 +590,7 @@ impl<'o> FnChecker<'o> {
                 format!(
                     "this callable never returns, and no `return` gives a value \
                      of type {}; declare the result type `Never`",
-                    ctx.store.display(ret)
+                    ctx.display_type(&self.env, ret)
                 ),
                 span,
             ));
@@ -1044,7 +1102,7 @@ impl<'o> FnChecker<'o> {
                 "E1053",
                 format!(
                     "the type {} has no interface method named `{name}`",
-                    ctx.store.display(recv.ty)
+                    ctx.display_type(&self.env, recv.ty)
                 ),
                 span,
             ));
@@ -1098,7 +1156,7 @@ impl<'o> FnChecker<'o> {
         let mut slots = Vec::with_capacity(bindings.len());
         let mut scope = HashMap::new();
         for ((name, span), ty) in bindings.iter().zip(types) {
-            if scope.contains_key(name) {
+            if name != "_" && scope.contains_key(name) {
                 return Err(Diagnostic::new(
                     "E1010",
                     format!("the loop binding `{name}` occurs more than once"),
@@ -1106,7 +1164,9 @@ impl<'o> FnChecker<'o> {
                 ));
             }
             let slot = self.hidden_local(*ty, mutable);
-            scope.insert(name.clone(), slot);
+            if name != "_" {
+                scope.insert(name.clone(), slot);
+            }
             slots.push(slot);
         }
         Ok((slots, scope))
@@ -1212,7 +1272,7 @@ impl<'o> FnChecker<'o> {
                                 "E1053",
                                 format!(
                                     "the type {} does not conform to Iterable",
-                                    ctx.store.display(source_ty)
+                                    ctx.display_type(&self.env, source_ty)
                                 ),
                                 value.span,
                             )
@@ -1454,7 +1514,10 @@ impl<'o> FnChecker<'o> {
         let Some((class, class_args)) = class_of(ctx, recv_h.ty) else {
             return Err(Diagnostic::new(
                 "E1027",
-                format!("the type {} has no fields", ctx.store.display(recv_h.ty)),
+                format!(
+                    "the type {} has no fields",
+                    ctx.display_type(&self.env, recv_h.ty)
+                ),
                 recv.span,
             ));
         };
@@ -1916,7 +1979,7 @@ impl<'o> FnChecker<'o> {
                             format!(
                                 "cannot interpolate a value of type {}; this slice \
                                  interpolates Int, Bool, and Text",
-                                ctx.store.display(h.ty)
+                                ctx.display_type(&self.env, h.ty)
                             ),
                             e.span,
                         ));
@@ -2229,6 +2292,14 @@ impl<'o> FnChecker<'o> {
                     args,
                     expected,
                 )?;
+                if ctx.classes[class as usize].native_repr == Some(NativeRepr::Map) {
+                    let key =
+                        out.targs.first().copied().ok_or_else(|| {
+                            Diagnostic::new("E1024", "Map needs a key type", span)
+                        })?;
+                    let key_span = type_args.first().map(|arg| arg.span).unwrap_or(name_span);
+                    check_key_type(ctx, key, key_span)?;
+                }
                 Ok(HExpr {
                     ty: out.ret,
                     mutable: true,
@@ -2500,7 +2571,7 @@ impl<'o> FnChecker<'o> {
                     "E1032",
                     format!(
                         "cannot call a value of type {}; it is not a closure",
-                        ctx.store.display(callee.ty)
+                        ctx.display_type(&self.env, callee.ty)
                     ),
                     callee_span,
                 ));
@@ -2719,6 +2790,20 @@ impl<'o> FnChecker<'o> {
                 span,
             ));
         }
+        for (index, bounds) in type_bounds.iter().enumerate() {
+            for bound in bounds {
+                let Some(found) = ctx.type_conformance(&self.env, targs[index], bound.interface)
+                else {
+                    continue;
+                };
+                if bound.row_args.len() != found.row_args.len() {
+                    continue;
+                }
+                for (declared, actual) in bound.row_args.iter().zip(&found.row_args) {
+                    infer_bound_row(ctx, declared, actual, &mut rowargs);
+                }
+            }
+        }
         let rowargs: Vec<Row> = rowargs.into_iter().map(|r| r.unwrap_or_default()).collect();
         for (index, bounds) in type_bounds.iter().enumerate() {
             for bound in bounds {
@@ -2728,7 +2813,7 @@ impl<'o> FnChecker<'o> {
                         "E1053",
                         format!(
                             "the type argument `{}` does not conform to `{}`",
-                            ctx.store.display(targs[index]),
+                            ctx.display_type(&self.env, targs[index]),
                             ctx.interfaces[required.interface as usize].name
                         ),
                         span,
@@ -2878,7 +2963,10 @@ impl<'o> FnChecker<'o> {
         let Some((class, class_args)) = class_of(ctx, recv_h.ty) else {
             return Err(Diagnostic::new(
                 "E1027",
-                format!("the type {} has no fields", ctx.store.display(recv_h.ty)),
+                format!(
+                    "the type {} has no fields",
+                    ctx.display_type(&self.env, recv_h.ty)
+                ),
                 recv.span,
             ));
         };
@@ -3010,10 +3098,18 @@ impl<'o> FnChecker<'o> {
                     expected, span,
                 );
             }
-            if name == "freeze" && args.is_empty() && type_args.is_empty() {
+            if name == "freeze"
+                && ctx.store.is_heap(recv_ty)
+                && args.is_empty()
+                && type_args.is_empty()
+            {
                 return Ok(freeze_expr(recv_h));
             }
-            if name == "digest" && args.is_empty() && type_args.is_empty() {
+            if name == "digest"
+                && ctx.store.is_heap(recv_ty)
+                && args.is_empty()
+                && type_args.is_empty()
+            {
                 return Ok(digest_expr(recv_h));
             }
             return Err(Diagnostic::new(
@@ -3298,7 +3394,7 @@ impl<'o> FnChecker<'o> {
                     },
                     format!(
                         "the type {} has no method named `{name}`",
-                        ctx.store.display(recv_ty)
+                        ctx.display_type(&self.env, recv_ty)
                     ),
                     name_span,
                 ));
@@ -3693,7 +3789,7 @@ impl<'o> FnChecker<'o> {
                 "E1027",
                 format!(
                     "the type {} does not support indexing",
-                    ctx.store.display(recv_h.ty)
+                    ctx.display_type(&self.env, recv_h.ty)
                 ),
                 recv.span,
             )),
@@ -3716,7 +3812,7 @@ impl<'o> FnChecker<'o> {
                 "E1047",
                 format!(
                     "`{what}` needs a class or enum instance, found {}",
-                    ctx.store.display(v.ty)
+                    ctx.display_type(&self.env, v.ty)
                 ),
                 value.span,
             ));
@@ -3729,7 +3825,7 @@ impl<'o> FnChecker<'o> {
                 format!(
                     "the target of `{what}` must be a class or enum type, \
                      found {}",
-                    ctx.store.display(target)
+                    ctx.display_type(&self.env, target)
                 ),
                 ty.span,
             ));
@@ -3741,8 +3837,8 @@ impl<'o> FnChecker<'o> {
                 "E1047",
                 format!(
                     "`{what}` between {} and {} can never succeed",
-                    ctx.store.display(v.ty),
-                    ctx.store.display(target)
+                    ctx.display_type(&self.env, v.ty),
+                    ctx.display_type(&self.env, target)
                 ),
                 span,
             ));
@@ -4245,7 +4341,7 @@ impl<'o> FnChecker<'o> {
                     "E1004",
                     format!(
                         "`sys.proc.run` needs a loaded machine, found {}",
-                        ctx.store.display(vm.ty)
+                        ctx.display_type(&self.env, vm.ty)
                     ),
                     args[0].span,
                 ));
@@ -4522,7 +4618,7 @@ impl<'o> FnChecker<'o> {
                         "E1004",
                         format!(
                             "`from_fn` needs a function value, found {}",
-                            ctx.store.display(program.ty)
+                            ctx.display_type(&self.env, program.ty)
                         ),
                         args[0].span,
                     ));
@@ -4659,7 +4755,7 @@ impl<'o> FnChecker<'o> {
                         "E1004",
                         format!(
                             "`restore` needs a typed snapshot, found {}",
-                            ctx.store.display(snapshot.ty)
+                            ctx.display_type(&self.env, snapshot.ty)
                         ),
                         args[0].span,
                     ));
@@ -4727,7 +4823,7 @@ impl<'o> FnChecker<'o> {
                         "E1004",
                         format!(
                             "`resource` needs a file or stream resource, found {}",
-                            ctx.store.display(handle.ty)
+                            ctx.display_type(&self.env, handle.ty)
                         ),
                         args[0].span,
                     ));
@@ -4888,7 +4984,7 @@ impl<'o> FnChecker<'o> {
                         "E1004",
                         format!(
                             "`answer` needs a PendingCall token, found {}",
-                            ctx.store.display(call.ty)
+                            ctx.display_type(&self.env, call.ty)
                         ),
                         args[0].span,
                     ));
@@ -4991,7 +5087,7 @@ impl<'o> FnChecker<'o> {
                         "E1004",
                         format!(
                             "`choose` needs a wait, found {}",
-                            ctx.store.display(right.ty)
+                            ctx.display_type(&self.env, right.ty)
                         ),
                         args[0].span,
                     ));
@@ -5207,7 +5303,7 @@ impl<'o> FnChecker<'o> {
                     "E1026",
                     format!("the type {} has no method named `{name}`", {
                         let id = ctx.store.intern(recv_ty);
-                        ctx.store.display(id)
+                        ctx.display_type(&self.env, id)
                     }),
                     name_span,
                 ));
@@ -5409,7 +5505,11 @@ impl<'o> FnChecker<'o> {
                         left.span,
                     );
                 }
-                let r = self.synth_expr(ctx, right)?;
+                let r = if matches!(&right.kind, ExprKind::Name(name) if name == "None") {
+                    self.check_expr(ctx, right, l.ty)?
+                } else {
+                    self.synth_expr(ctx, right)?
+                };
                 let related = ctx.store.compatible(l.ty, r.ty) || ctx.store.compatible(r.ty, l.ty);
                 if !related {
                     return Err(self.mismatch(ctx, l.ty, r.ty, right.span));
@@ -5424,8 +5524,8 @@ impl<'o> FnChecker<'o> {
                             format!(
                                 "tuple equality needs equal static tuple types; \
                                  the sides are {} and {}",
-                                ctx.store.display(l.ty),
-                                ctx.store.display(r.ty)
+                                ctx.display_type(&self.env, l.ty),
+                                ctx.display_type(&self.env, r.ty)
                             ),
                             left.span,
                         ));
@@ -5436,7 +5536,7 @@ impl<'o> FnChecker<'o> {
                             format!(
                                 "cannot compare {} values with `{}`; a tuple \
                                  element does not support equality",
-                                ctx.store.display(operand_ty),
+                                ctx.display_type(&self.env, operand_ty),
                                 op.text()
                             ),
                             left.span,
@@ -5460,7 +5560,7 @@ impl<'o> FnChecker<'o> {
                         "E1017",
                         format!(
                             "cannot compare {} values with `{}`",
-                            ctx.store.display(operand_ty),
+                            ctx.display_type(&self.env, operand_ty),
                             op.text()
                         ),
                         left.span,
@@ -5995,7 +6095,7 @@ impl<'o> FnChecker<'o> {
                 format!(
                     "the case does not cover every value of {}; add the missing \
                      arms or a `_` arm",
-                    ctx.store.display(scrut_ty)
+                    ctx.display_type(&self.env, scrut_ty)
                 ),
                 span,
             ));
@@ -6090,7 +6190,7 @@ impl<'o> FnChecker<'o> {
                         format!(
                             "this tuple pattern has {} element(s), but {} has {}",
                             elems.len(),
-                            ctx.store.display(scrut_ty),
+                            ctx.display_type(&self.env, scrut_ty),
                             elem_tys.len()
                         ),
                         pat.span,
@@ -6175,7 +6275,7 @@ impl<'o> FnChecker<'o> {
                         format!(
                             "the scrutinee type {} has no constructors; use a \
                              binding or `_`",
-                            ctx.store.display(scrut_ty)
+                            ctx.display_type(&self.env, scrut_ty)
                         ),
                         pat.span,
                     ));
@@ -6366,7 +6466,7 @@ impl<'o> FnChecker<'o> {
             "E1041",
             format!(
                 "{what} pattern cannot match a scrutinee of type {}",
-                ctx.store.display(scrut_ty)
+                ctx.display_type(&self.env, scrut_ty)
             ),
             span,
         )

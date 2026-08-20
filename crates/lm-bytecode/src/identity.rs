@@ -85,7 +85,8 @@ use std::collections::{BTreeSet, HashMap};
 /// resources with their VM controls. Both landed on separate
 /// branches, so version 20 is the first that carries them together.
 /// Version 22 adds interface contracts, callbacks, and native collection lowering.
-pub const COMPILER_ABI_VERSION: u32 = 22;
+/// Version 23 adds the receiver type to semantic digest instructions.
+pub const COMPILER_ABI_VERSION: u32 = 23;
 
 /// The refinement work budget of one component.
 ///
@@ -647,7 +648,6 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BytesCompact)
         | Instr::Native(NativeInstr::BytesTextView)
         | Instr::Freeze
-        | Instr::Digest
         | Instr::EqDigest
         | Instr::NeDigest
         | Instr::Return
@@ -730,7 +730,8 @@ fn preflight_instr(
         Instr::TupleNew { ty, count: _ }
         | Instr::ListNew { ty, count: _ }
         | Instr::MapNew { ty, count: _ }
-        | Instr::MapPut { ty, .. } => {
+        | Instr::MapPut { ty, .. }
+        | Instr::Digest { ty } => {
             if *ty as usize >= s.types {
                 return Err(bad("type index"));
             }
@@ -1741,7 +1742,7 @@ impl<'a> Resolver<'a> {
             Instr::CallArgs => 0x75,
             Instr::FaultCode => 0x76,
             Instr::Unreachable => 0x77,
-            Instr::Digest => 0x78,
+            Instr::Digest { .. } => 0x78,
             Instr::EqDigest => 0x79,
             Instr::NeDigest => 0x7a,
             Instr::FaultDenied => 0x88,
@@ -1892,6 +1893,9 @@ impl<'a> Resolver<'a> {
                 out.extend_from_slice(&self.type_digest(*ty));
                 out.push(u8::from(*discard));
             }
+            Instr::Digest { ty } => {
+                out.extend_from_slice(&self.type_digest(*ty));
+            }
 
             Instr::Jump(b) => {
                 u(out, *b);
@@ -2035,7 +2039,6 @@ impl<'a> Resolver<'a> {
             | Instr::CallArgs
             | Instr::FaultCode
             | Instr::Unreachable
-            | Instr::Digest
             | Instr::EqDigest
             | Instr::NeDigest
             | Instr::FaultDenied

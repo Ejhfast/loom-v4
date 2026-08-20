@@ -18,7 +18,7 @@ use lm_value::{ObjRef, Value};
 
 /// The domain separator of the canonical value encoding. A change to
 /// the encoding must change this string.
-const DOMAIN: &[u8] = b"lm-value-digest-v2\0";
+const DOMAIN: &[u8] = b"lm-value-digest-v3\0";
 
 /// Value tags inside the canonical encoding.
 const V_UNIT: u8 = 0x00;
@@ -32,6 +32,24 @@ const V_OP: u8 = 0x03;
 const V_REF: u8 = 0x04;
 const V_CHAR: u8 = 0x05;
 const V_EMPTY_CASE: u8 = 0x06;
+const V_OPTION_SOME: u8 = 0x07;
+const V_OPTION_NONE: u8 = 0x08;
+
+/// The static case named by one native `Option` type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DigestOptionCase {
+    Family,
+    Some,
+    None,
+}
+
+/// The semantic form of one native `Option` type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DigestOption {
+    pub case: DigestOptionCase,
+    pub family: u32,
+    pub payload: u32,
+}
 
 /// The verified semantic identity of transferred code and classes.
 ///
@@ -46,6 +64,27 @@ pub trait CodeIdentity {
     fn class_hash(&self, class: u32) -> Result<[u8; 32], FaultCode>;
     /// The content hash of one closed type slot.
     fn type_hash(&self, ty: u32) -> Result<[u8; 32], FaultCode>;
+
+    /// Resolve one closed type as a native `Option` type.
+    fn option_shape(&mut self, _: u32) -> Result<Option<DigestOption>, FaultCode> {
+        Ok(None)
+    }
+
+    /// Give one static type for each value stored by `object`.
+    fn child_types(
+        &mut self,
+        object: &Object,
+        _: Option<u32>,
+    ) -> Result<Vec<Option<u32>>, FaultCode> {
+        let count = match object {
+            Object::Instance { fields, .. } => fields.len(),
+            Object::List { items, .. } | Object::Tuple { items } => items.len(),
+            Object::Map { entries, .. } => entries.len().saturating_mul(2),
+            Object::Closure { captures, .. } => captures.len(),
+            _ => 0,
+        };
+        Ok(vec![None; count])
+    }
 }
 
 /// The digest hash function.
@@ -93,18 +132,35 @@ pub fn compute(
     heap: &Heap,
     scratch: &mut GraphScratch,
     value: Value,
-    codes: &dyn CodeIdentity,
+    expected: Option<u32>,
+    codes: &mut dyn CodeIdentity,
     limits: &GraphLimits,
 ) -> Result<[u8; 32], FaultCode> {
     let roots: Vec<ObjRef> = value.as_obj().into_iter().collect();
     walk(heap, scratch, &roots, limits, &mut DigestCheck { heap })?;
     let order = scratch.order();
     let mut out: Vec<u8> = Vec::with_capacity(DOMAIN.len() + 64 + order.len() * 16);
+    let mut expected_by_slot = vec![None; heap.slot_count()];
     out.extend_from_slice(DOMAIN);
-    encode_value(&mut out, value, scratch, codes)?;
+    encode_value(
+        &mut out,
+        value,
+        expected,
+        &mut expected_by_slot,
+        scratch,
+        codes,
+    )?;
     count(&mut out, order.len())?;
     for r in order {
-        encode_object(&mut out, heap.get(*r), scratch, codes)?;
+        let expected = expected_by_slot.get(r.slot as usize).copied().flatten();
+        encode_object(
+            &mut out,
+            heap.get(*r),
+            expected,
+            &mut expected_by_slot,
+            scratch,
+            codes,
+        )?;
     }
     Ok(hash(&out))
 }
@@ -114,9 +170,16 @@ pub fn compute(
 fn encode_value(
     out: &mut Vec<u8>,
     value: Value,
+    expected: Option<u32>,
+    expected_by_slot: &mut [Option<u32>],
     scratch: &GraphScratch,
-    codes: &dyn CodeIdentity,
+    codes: &mut dyn CodeIdentity,
 ) -> Result<(), FaultCode> {
+    if let Some(expected) = expected {
+        if let Some(option) = codes.option_shape(expected)? {
+            return encode_option(out, value, option, expected_by_slot, scratch, codes);
+        }
+    }
     match value {
         Value::Unit => out.push(V_UNIT),
         Value::Bool(v) => {
@@ -145,6 +208,14 @@ fn encode_value(
         Value::Obj(r) => {
             out.push(V_REF);
             out.extend_from_slice(&scratch.ordinal(r.slot).to_le_bytes());
+            if let Some(expected) = expected {
+                let slot = expected_by_slot
+                    .get_mut(r.slot as usize)
+                    .ok_or(FaultCode::BoundaryViolation)?;
+                if slot.is_none() {
+                    *slot = Some(expected);
+                }
+            }
         }
         Value::Callback(_) | Value::Uninit => {
             // A field without a first assignment has no canonical
@@ -153,6 +224,47 @@ fn encode_value(
         }
     }
     Ok(())
+}
+
+/// Write one native `Option` wrapper with its semantic family type.
+fn encode_option(
+    out: &mut Vec<u8>,
+    value: Value,
+    option: DigestOption,
+    expected_by_slot: &mut [Option<u32>],
+    scratch: &GraphScratch,
+    codes: &mut dyn CodeIdentity,
+) -> Result<(), FaultCode> {
+    let stored_none = matches!(
+        value,
+        Value::EmptyCase { ty, arm: 1 } if ty == option.family
+    );
+    let is_none = match option.case {
+        DigestOptionCase::Family => stored_none,
+        DigestOptionCase::Some => false,
+        DigestOptionCase::None => true,
+    };
+    if is_none {
+        if !stored_none {
+            return Err(FaultCode::BoundaryViolation);
+        }
+        out.push(V_OPTION_NONE);
+        out.extend_from_slice(&codes.type_hash(option.family)?);
+        return Ok(());
+    }
+    if stored_none {
+        return Err(FaultCode::BoundaryViolation);
+    }
+    out.push(V_OPTION_SOME);
+    out.extend_from_slice(&codes.type_hash(option.family)?);
+    encode_value(
+        out,
+        value,
+        Some(option.payload),
+        expected_by_slot,
+        scratch,
+        codes,
+    )
 }
 
 /// Write one length prefix.
@@ -170,9 +282,13 @@ fn count(out: &mut Vec<u8>, n: usize) -> Result<(), FaultCode> {
 fn encode_object(
     out: &mut Vec<u8>,
     object: &Object,
+    expected: Option<u32>,
+    expected_by_slot: &mut [Option<u32>],
     scratch: &GraphScratch,
-    codes: &dyn CodeIdentity,
+    codes: &mut dyn CodeIdentity,
 ) -> Result<(), FaultCode> {
+    let child_types = codes.child_types(object, expected)?;
+    let mut child_types = child_types.into_iter();
     out.push(object.tag());
     match object {
         Object::Str(text) | Object::Substring(text) => {
@@ -186,13 +302,27 @@ fn encode_object(
             out.extend_from_slice(&codes.class_hash(*class)?);
             count(out, fields.len())?;
             for field in fields {
-                encode_value(out, *field, scratch, codes)?;
+                encode_value(
+                    out,
+                    *field,
+                    child_types.next().flatten(),
+                    expected_by_slot,
+                    scratch,
+                    codes,
+                )?;
             }
         }
         Object::List { items, .. } | Object::Tuple { items } => {
             count(out, items.len())?;
             for item in items {
-                encode_value(out, *item, scratch, codes)?;
+                encode_value(
+                    out,
+                    *item,
+                    child_types.next().flatten(),
+                    expected_by_slot,
+                    scratch,
+                    codes,
+                )?;
             }
         }
         Object::Map { entries, .. } => {
@@ -200,8 +330,22 @@ fn encode_object(
             // index never enters the encoding.
             count(out, entries.len())?;
             for (key, value) in entries {
-                encode_value(out, *key, scratch, codes)?;
-                encode_value(out, *value, scratch, codes)?;
+                encode_value(
+                    out,
+                    *key,
+                    child_types.next().flatten(),
+                    expected_by_slot,
+                    scratch,
+                    codes,
+                )?;
+                encode_value(
+                    out,
+                    *value,
+                    child_types.next().flatten(),
+                    expected_by_slot,
+                    scratch,
+                    codes,
+                )?;
             }
         }
         // The witness stays outside the encoding for the same reason.
@@ -209,7 +353,14 @@ fn encode_object(
             out.extend_from_slice(&codes.func_hash(*func)?);
             count(out, captures.len())?;
             for capture in captures {
-                encode_value(out, *capture, scratch, codes)?;
+                encode_value(
+                    out,
+                    *capture,
+                    child_types.next().flatten(),
+                    expected_by_slot,
+                    scratch,
+                    codes,
+                )?;
             }
         }
         Object::NativeFault { code, message, op } => {

@@ -136,6 +136,38 @@ fn interface_contracts_cross_module_boundaries() {
 }
 
 #[test]
+fn interface_bounds_infer_nonempty_effect_rows() {
+    let source = r#"
+interface Source[effect e]
+  def next(mut self): Int with e
+end
+
+final class PureCounter implements Source[effect ()]
+  def next(mut self): Int
+    1
+  end
+end
+
+final class LoudCounter implements Source[effect (Io.Print)]
+  def next(mut self): Int with Io.Print
+    sys.io.print("tick")
+    2
+  end
+end
+
+def drain[S: Source[effect (e)], effect e](mut source: S): Int with e
+  source.next()
+end
+
+drain(PureCounter()) + drain(LoudCounter())
+"#;
+    assert_eq!(
+        run_allowed("collections.lm", source, &["Io.Print"]).expect("the program runs"),
+        "Done(3)"
+    );
+}
+
+#[test]
 fn native_for_covers_list_map_text_and_range() {
     let source = r#"
 class Source
@@ -749,6 +781,86 @@ table = {"a": 1, "b": 2}
 }
 
 #[test]
+fn snapshots_preserve_spare_collection_capacity() {
+    let source = r#"
+values: List[Int] = []
+values.reserve(20)
+values.push(1)
+table: Map[Int, Int] = {}
+table.reserve(20)
+table.put(1, 2)
+(values, table)
+"#;
+    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let loaded = lm_vm::load(module).expect("the module loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(([1], {1: 2}))");
+    let gate = world.next_gate();
+    let snapshot = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the snapshot succeeds");
+    let before = collection_capacities(snapshot.world());
+    assert!(before.0 >= 20);
+    assert!(before.1 >= 20);
+
+    let bytes = codec::encode(snapshot.world(), usize::MAX).expect("the image encodes");
+    let decoded = codec::decode(&bytes, LoadLimits::default()).expect("the image decodes");
+    assert_eq!(collection_capacities(&decoded), before);
+
+    let admitted = codec::load_external(&bytes, &loaded, LoadLimits::default())
+        .expect("the image is admitted");
+    let mut fresh = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let target = fresh.new_child(0).expect("the target exists");
+    let root = fresh
+        .restore_image(0, target, &admitted)
+        .expect("the image restores");
+    assert_eq!(heap_collection_capacities(fresh.heap_of(root)), before);
+}
+
+fn collection_capacities(image: &lm_vm::snapshot::Image) -> (usize, usize) {
+    let mut list = None;
+    let mut map = None;
+    for object in image
+        .machines
+        .iter()
+        .flat_map(|machine| machine.objects.iter())
+    {
+        match &object.object {
+            Object::List { items, .. } if items.len() == 1 => list = Some(items.capacity()),
+            Object::Map { entries, .. } if entries.len() == 1 => map = Some(entries.capacity()),
+            _ => {}
+        }
+    }
+    (
+        list.expect("the image contains the list"),
+        map.expect("the image contains the map"),
+    )
+}
+
+fn heap_collection_capacities(heap: &lm_heap::Heap) -> (usize, usize) {
+    let mut list = None;
+    let mut map = None;
+    heap.for_each_live(|_, _, object| match object {
+        Object::List { items, .. } if items.len() == 1 => list = Some(items.capacity()),
+        Object::Map { entries, .. } if entries.len() == 1 => map = Some(entries.capacity()),
+        _ => {}
+    });
+    (
+        list.expect("the heap contains the list"),
+        map.expect("the heap contains the map"),
+    )
+}
+
+#[test]
 fn snapshot_decoder_rejects_epochs_outside_supported_range() {
     let module = compile_text("collections.lm", "[1]\n").expect("the source compiles");
     let loaded = lm_vm::load(module).expect("the module loads");
@@ -806,6 +918,111 @@ nested: Option[Option[Int]] = Some(None)
         "Done(([Some(1), None], {1: Some(2), 2: None}, Some(None)))"
     );
     assert_eq!(heap.slots, 3);
+}
+
+#[test]
+fn option_digests_encode_each_semantic_wrapper() {
+    let source = r#"
+some_int: List[Option[Int]] = [Some(5)]
+plain_int: List[Int] = [5]
+some_none: List[Option[Option[Int]]] = [Some(None)]
+plain_none: List[Option[Int]] = [None]
+outer_none: List[Option[Option[Int]]] = [None]
+some_int.freeze()
+plain_int.freeze()
+some_none.freeze()
+plain_none.freeze()
+outer_none.freeze()
+(
+  some_int.digest() != plain_int.digest(),
+  some_none.digest() != plain_none.digest(),
+  some_none.digest() != outer_none.digest()
+)
+"#;
+    assert_eq!(outcome(source), "Done((true, true, true))");
+}
+
+#[test]
+fn option_digests_follow_all_typed_object_edges() {
+    let source = r#"
+final class Box[T]
+  value: T
+
+  def init(mut self, value: T)
+    self.value = value
+  end
+end
+
+def held[T](value: T): Digest
+  closure = do ||: T value end
+  closure.digest()
+end
+
+some_box = Box[Option[Int]](Some(5))
+plain_box = Box[Int](5)
+some_tuple: (Option[Int],) = (Some(5),)
+plain_tuple: (Int,) = (5,)
+some_map: Map[Int, Option[Int]] = {1: Some(5)}
+plain_map: Map[Int, Int] = {1: 5}
+some_box.freeze()
+plain_box.freeze()
+some_tuple.freeze()
+plain_tuple.freeze()
+some_map.freeze()
+plain_map.freeze()
+(
+  some_box.digest() != plain_box.digest(),
+  some_tuple.digest() != plain_tuple.digest(),
+  some_map.digest() != plain_map.digest(),
+  held[Option[Int]](Some(5)) != held[Int](5)
+)
+"#;
+    assert_eq!(outcome(source), "Done((true, true, true, true))");
+}
+
+#[test]
+fn scalar_digest_calls_fail_during_checking() {
+    let failure = error("1.digest()\n");
+    assert!(failure.contains("E1026") || failure.contains("E1027"));
+    assert!(!failure.contains("verifier"));
+    let failure = error("1.freeze()\n");
+    assert!(failure.contains("E1026") || failure.contains("E1027"));
+    assert!(!failure.contains("verifier"));
+}
+
+#[test]
+fn empty_map_constructors_check_their_key_type() {
+    let source = r#"
+final class Key
+  value: Int = 1
+end
+
+Map[Key, Int]()
+"#;
+    assert!(error(source).contains("E1033"));
+}
+
+#[test]
+fn repeated_loop_wildcards_bind_no_name() {
+    let source = r#"
+count = 0
+for _, _ in {1: 2, 3: 4}
+  count = count + 1
+end
+count
+"#;
+    assert_eq!(outcome(source), "Done(2)");
+    assert!(error("for key, key in {1: 2}\nend\n").contains("E1010"));
+}
+
+#[test]
+fn equality_gives_bare_none_the_other_operand_type() {
+    let source = r#"
+present: Option[Int] = Some(1)
+absent: Option[Int] = None
+(present == None, absent == None)
+"#;
+    assert_eq!(outcome(source), "Done((false, true))");
 }
 
 #[test]

@@ -624,47 +624,49 @@ impl World<'_> {
         let mut objects: Vec<ImageObject> = Vec::with_capacity(order.len());
         for r in &order {
             let frozen = self.heap_of(vm).is_frozen(*r);
-            let source = self.heap_of(vm).get(*r).clone();
+            let source = self.heap_of(vm).get(*r);
             let object = match source {
                 Object::NativeVm { vm: target } => Object::NativeVm {
-                    vm: self.require_ordinal(target, ordinal_of)?,
+                    vm: self.require_ordinal(*target, ordinal_of)?,
                 },
                 Object::NativeTable { vm: target } => Object::NativeTable {
-                    vm: self.require_ordinal(target, ordinal_of)?,
+                    vm: self.require_ordinal(*target, ordinal_of)?,
                 },
                 Object::NativeRequest {
                     vm: target,
                     ordinal,
                 } => Object::NativeRequest {
-                    vm: self.require_ordinal(target, ordinal_of)?,
-                    ordinal,
+                    vm: self.require_ordinal(*target, ordinal_of)?,
+                    ordinal: *ordinal,
                 },
                 Object::NativeCall {
                     vm: target,
                     ordinal,
                     op,
                 } => Object::NativeCall {
-                    vm: self.require_ordinal(target, ordinal_of)?,
-                    ordinal,
-                    op,
+                    vm: self.require_ordinal(*target, ordinal_of)?,
+                    ordinal: *ordinal,
+                    op: *op,
                 },
                 Object::NativeHandle { proc, generation } => Object::NativeHandle {
-                    proc: self.require_ordinal(proc, ordinal_of)?,
-                    generation,
+                    proc: self.require_ordinal(*proc, ordinal_of)?,
+                    generation: *generation,
                 },
                 Object::NativeFileHandle { .. } => Object::NativeFileHandle { resource: 0 },
                 Object::NativeTcpStream { .. } => Object::NativeTcpStream { resource: 0 },
                 Object::NativeTcpListener { .. } => Object::NativeTcpListener { resource: 0 },
                 Object::NativeTlsStream { .. } => Object::NativeTlsStream { resource: 0 },
                 Object::NativeResourceHandle { surface, .. } => Object::NativeResourceHandle {
-                    surface: self.require_ordinal(surface, ordinal_of)?,
+                    surface: self.require_ordinal(*surface, ordinal_of)?,
                     resource: 0,
                 },
                 Object::NativeWait { owner, token } => Object::NativeWait {
-                    owner: self.require_ordinal(owner, ordinal_of)?,
-                    token,
+                    owner: self.require_ordinal(*owner, ordinal_of)?,
+                    token: *token,
                 },
-                other => other.remap(map).unwrap_or(other),
+                other => other
+                    .try_clone_remapped(map)
+                    .map_err(|_| SnapshotFail::LimitExceeded)?,
             };
             objects.push(ImageObject { frozen, object });
         }

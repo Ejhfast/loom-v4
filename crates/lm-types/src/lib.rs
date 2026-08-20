@@ -933,6 +933,25 @@ impl TypeStore {
 
     /// Render one type name for diagnostics.
     pub fn display(&self, id: TypeId) -> String {
+        self.display_with_names(id, &|_| None, &|_, _| None)
+    }
+
+    /// Render one type with source names supplied by the caller.
+    pub fn display_with_names(
+        &self,
+        id: TypeId,
+        variable_name: &impl Fn(u32) -> Option<String>,
+        associated_name: &impl Fn(InterfaceId, u32) -> Option<String>,
+    ) -> String {
+        self.display_inner(id, variable_name, associated_name)
+    }
+
+    fn display_inner(
+        &self,
+        id: TypeId,
+        variable_name: &impl Fn(u32) -> Option<String>,
+        associated_name: &impl Fn(InterfaceId, u32) -> Option<String>,
+    ) -> String {
         match self.get(id) {
             Type::Unit => "()".to_string(),
             Type::Bool => "Bool".to_string(),
@@ -943,13 +962,26 @@ impl TypeStore {
             Type::Digest => "Digest".to_string(),
             Type::Class(c) => self.classes[c.0 as usize].name.clone(),
             Type::Inst(c, args) => {
-                let parts: Vec<String> = args.iter().map(|a| self.display(*a)).collect();
+                let parts: Vec<String> = args
+                    .iter()
+                    .map(|a| self.display_inner(*a, variable_name, associated_name))
+                    .collect();
                 format!("{}[{}]", self.classes[c.0 as usize].name, parts.join(", "))
             }
-            Type::List(e) => format!("[{}]", self.display(*e)),
-            Type::Map(k, v) => format!("{{{}: {}}}", self.display(*k), self.display(*v)),
+            Type::List(e) => format!(
+                "[{}]",
+                self.display_inner(*e, variable_name, associated_name)
+            ),
+            Type::Map(k, v) => format!(
+                "{{{}: {}}}",
+                self.display_inner(*k, variable_name, associated_name),
+                self.display_inner(*v, variable_name, associated_name)
+            ),
             Type::Tuple(elems) => {
-                let parts: Vec<String> = elems.iter().map(|e| self.display(*e)).collect();
+                let parts: Vec<String> = elems
+                    .iter()
+                    .map(|e| self.display_inner(*e, variable_name, associated_name))
+                    .collect();
                 if parts.len() == 1 {
                     format!("({},)", parts[0])
                 } else {
@@ -965,10 +997,10 @@ impl TypeStore {
                     if muts.get(i).copied().unwrap_or(false) {
                         out.push_str("mut ");
                     }
-                    out.push_str(&self.display(*p));
+                    out.push_str(&self.display_inner(*p, variable_name, associated_name));
                 }
                 out.push_str(") -> ");
-                out.push_str(&self.display(*ret));
+                out.push_str(&self.display_inner(*ret, variable_name, associated_name));
                 if !row.is_empty() {
                     out.push_str(" with ");
                     out.push_str(&self.display_row(row));
@@ -984,45 +1016,62 @@ impl TypeStore {
                     if muts.get(i).copied().unwrap_or(false) {
                         out.push_str("mut ");
                     }
-                    out.push_str(&self.display(*p));
+                    out.push_str(&self.display_inner(*p, variable_name, associated_name));
                 }
                 out.push_str(") -> ");
-                out.push_str(&self.display(*ret));
+                out.push_str(&self.display_inner(*ret, variable_name, associated_name));
                 if !row.is_empty() {
                     out.push_str(" with ");
                     out.push_str(&self.display_row(row));
                 }
                 out
             }
-            Type::Var(i) => format!("${i}"),
+            Type::Var(i) => variable_name(*i).unwrap_or_else(|| format!("${i}")),
             Type::Projection {
                 base,
                 interface,
                 assoc,
-            } => format!(
-                "{}.<interface {} type {}>",
-                self.display(*base),
-                interface.0,
-                assoc
-            ),
+            } => {
+                let base = self.display_inner(*base, variable_name, associated_name);
+                let name = associated_name(*interface, *assoc)
+                    .unwrap_or_else(|| format!("<interface {} type {}>", interface.0, assoc));
+                format!("{base}.{name}")
+            }
             Type::Fault => "Fault".to_string(),
             Type::Request => "Request".to_string(),
             Type::PolicyTable => "PolicyTable".to_string(),
             Type::EmptyVm => "EmptyVm".to_string(),
-            Type::Vm(t) => format!("Vm[{}]", self.display(*t)),
-            Type::Wait(t) => format!("Wait[{}]", self.display(*t)),
+            Type::Vm(t) => format!(
+                "Vm[{}]",
+                self.display_inner(*t, variable_name, associated_name)
+            ),
+            Type::Wait(t) => format!(
+                "Wait[{}]",
+                self.display_inner(*t, variable_name, associated_name)
+            ),
             Type::SnapshotImage => "SnapshotImage".to_string(),
-            Type::Snapshot(t) => format!("Snapshot[{}]", self.display(*t)),
+            Type::Snapshot(t) => format!(
+                "Snapshot[{}]",
+                self.display_inner(*t, variable_name, associated_name)
+            ),
             Type::FileHandle => "FileHandle".to_string(),
             Type::ResourceHandle => "ResourceHandle".to_string(),
-            Type::PendingCall(a, r) => {
-                format!("PendingCall[{}, {}]", self.display(*a), self.display(*r))
-            }
-            Type::Handle(m, r) => {
-                format!("Handle[{}, {}]", self.display(*m), self.display(*r))
-            }
+            Type::PendingCall(a, r) => format!(
+                "PendingCall[{}, {}]",
+                self.display_inner(*a, variable_name, associated_name),
+                self.display_inner(*r, variable_name, associated_name)
+            ),
+            Type::Handle(m, r) => format!(
+                "Handle[{}, {}]",
+                self.display_inner(*m, variable_name, associated_name),
+                self.display_inner(*r, variable_name, associated_name)
+            ),
             Type::Op(op, f) => {
-                format!("Op[{}, {}]", lm_abi::op_name(*op), self.display(*f))
+                format!(
+                    "Op[{}, {}]",
+                    lm_abi::op_name(*op),
+                    self.display_inner(*f, variable_name, associated_name)
+                )
             }
         }
     }

@@ -152,7 +152,9 @@ pub enum RootEvent {
 /// so the digest encoder reads the definition hash instead.
 struct ModuleCodes<'m> {
     identity: &'m lm_bytecode::identity::ModuleIdentity,
-    envs: &'m lm_bytecode::closed::TypeEnvs,
+    module: &'m Module,
+    envs: &'m mut lm_bytecode::closed::TypeEnvs,
+    core: CoreLayout,
 }
 
 /// The aggregate ledgers of one root VM and its spawned procs.
@@ -242,6 +244,149 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
         self.envs
             .cached_digest(ty)
             .ok_or(FaultCode::BoundaryViolation)
+    }
+
+    fn option_shape(&mut self, ty: u32) -> Result<Option<lm_graph::DigestOption>, FaultCode> {
+        let Some(ClosedType::Inst(class, args)) = self.envs.ty(ty).cloned() else {
+            return Ok(None);
+        };
+        if args.len() != 1 {
+            return Ok(None);
+        }
+        let option = self.core.option.ok_or(FaultCode::BoundaryViolation)?;
+        let some = self.core.option_some.ok_or(FaultCode::BoundaryViolation)?;
+        let none = self.core.option_none.ok_or(FaultCode::BoundaryViolation)?;
+        let case = if class == option {
+            lm_graph::DigestOptionCase::Family
+        } else if class == some {
+            lm_graph::DigestOptionCase::Some
+        } else if class == none {
+            lm_graph::DigestOptionCase::None
+        } else {
+            return Ok(None);
+        };
+        let family = if class == option {
+            ty
+        } else {
+            self.envs
+                .intern(ClosedType::Inst(option, vec![args[0]]))
+                .map_err(|_| FaultCode::BoundaryLimit)?
+        };
+        self.envs
+            .digest(self.module, &self.identity.class_hashes, family);
+        Ok(Some(lm_graph::DigestOption {
+            case,
+            family,
+            payload: args[0],
+        }))
+    }
+
+    fn child_types(
+        &mut self,
+        object: &Object,
+        expected: Option<u32>,
+    ) -> Result<Vec<Option<u32>>, FaultCode> {
+        let typed = |types: Vec<u32>| types.into_iter().map(Some).collect();
+        match object {
+            Object::List { items, .. } => {
+                let Some(ClosedType::List(element)) =
+                    expected.and_then(|ty| self.envs.ty(ty)).cloned()
+                else {
+                    return Err(FaultCode::BoundaryViolation);
+                };
+                Ok(vec![Some(element); items.len()])
+            }
+            Object::Map { entries, .. } => {
+                let Some(ClosedType::Map(key, value)) =
+                    expected.and_then(|ty| self.envs.ty(ty)).cloned()
+                else {
+                    return Err(FaultCode::BoundaryViolation);
+                };
+                let mut types = Vec::with_capacity(entries.len().saturating_mul(2));
+                for _ in entries {
+                    types.push(Some(key));
+                    types.push(Some(value));
+                }
+                Ok(types)
+            }
+            Object::Tuple { items } => {
+                let Some(ClosedType::Tuple(types)) =
+                    expected.and_then(|ty| self.envs.ty(ty)).cloned()
+                else {
+                    return Err(FaultCode::BoundaryViolation);
+                };
+                if types.len() != items.len() {
+                    return Err(FaultCode::BoundaryViolation);
+                }
+                Ok(typed(types))
+            }
+            Object::Instance { class, fields, env } => {
+                let layout = self
+                    .module
+                    .classes
+                    .get(*class as usize)
+                    .ok_or(FaultCode::BoundaryViolation)?;
+                if layout.fields.len() != fields.len() {
+                    return Err(FaultCode::BoundaryViolation);
+                }
+                let witness_args = self
+                    .envs
+                    .env(env.env())
+                    .map(|held| held.types.clone())
+                    .ok_or(FaultCode::BoundaryViolation)?;
+                let args = if witness_args.len() == layout.type_params as usize {
+                    witness_args
+                } else {
+                    let expected = expected.ok_or(FaultCode::BoundaryViolation)?;
+                    let (want_class, want_args) = self
+                        .envs
+                        .as_instance(expected)
+                        .ok_or(FaultCode::BoundaryViolation)?;
+                    if *class == want_class || layout.type_params as usize == want_args.len() {
+                        want_args
+                    } else {
+                        return Err(FaultCode::BoundaryViolation);
+                    }
+                };
+                let field_env = self
+                    .envs
+                    .env_of(args, Vec::new())
+                    .map_err(|_| FaultCode::BoundaryLimit)?;
+                let mut types = Vec::with_capacity(layout.fields.len());
+                for (_, field_ty) in &layout.fields {
+                    let closed = self
+                        .envs
+                        .close(self.module, *field_ty, field_env)
+                        .map_err(|_| FaultCode::BoundaryLimit)?;
+                    types.push(closed);
+                }
+                Ok(typed(types))
+            }
+            Object::Closure {
+                func,
+                captures,
+                env,
+            } => {
+                let body = self
+                    .module
+                    .funcs
+                    .get(*func as usize)
+                    .ok_or(FaultCode::BoundaryViolation)?;
+                if body.captures.len() != captures.len() {
+                    return Err(FaultCode::BoundaryViolation);
+                }
+                let mut types = Vec::with_capacity(body.captures.len());
+                for capture in &body.captures {
+                    let closed = self
+                        .envs
+                        .close(self.module, *capture, env.env())
+                        .map_err(|_| FaultCode::BoundaryLimit)?;
+                    types.push(closed);
+                }
+                Ok(typed(types))
+            }
+            _ => Ok(Vec::new()),
+        }
     }
 }
 
@@ -1301,8 +1446,8 @@ impl<'m> World<'m> {
                         Ok(Some(ExecOutcome::CallArgs { call })) => {
                             self.handle_call_args(act.vm, call)
                         }
-                        Ok(Some(ExecOutcome::Digest { value })) => {
-                            self.handle_digest(act.vm, value)
+                        Ok(Some(ExecOutcome::Digest { value, ty, env })) => {
+                            self.handle_digest(act.vm, value, ty, env)
                         }
                     }
                 }
@@ -6440,28 +6585,37 @@ impl<'m> World<'m> {
         }
     }
 
-    /// `call.args()` executed by `vm`.
     /// `value.digest()` executed by `vm`.
     ///
     /// The digest mode requires a frozen graph and rejects a live
     /// holder-local value with `BoundaryViolation`. A frozen object
     /// never changes, so the heap caches the result.
-    fn handle_digest(&mut self, vm: VmId, value: ObjRef) {
+    fn handle_digest(&mut self, vm: VmId, value: ObjRef, ty: u32, env: TypeEnvId) {
         // The machine that asks for the digest pays for the walk.
         let limits = self.machines[vm as usize].config.graph;
         let loaded = self.loaded;
         let built = match loaded.identity() {
             Ok(identity) => {
-                for ty in 0..self.envs.type_count() {
-                    self.envs
-                        .digest(self.module, &identity.class_hashes, ty as u32);
-                }
-                let codes = ModuleCodes {
+                let expected = self
+                    .envs
+                    .close(self.module, ty, env)
+                    .map_err(|_| FaultCode::BoundaryLimit);
+                let mut codes = ModuleCodes {
                     identity,
-                    envs: &self.envs,
+                    module: self.module,
+                    envs: &mut self.envs,
+                    core: self.core,
                 };
                 let heap = &mut self.machines[vm as usize].vm.heap;
-                lm_graph::digest_value(heap, Value::Obj(value), &codes, &limits)
+                expected.and_then(|expected| {
+                    lm_graph::digest_typed_value(
+                        heap,
+                        Value::Obj(value),
+                        expected,
+                        &mut codes,
+                        &limits,
+                    )
+                })
             }
             Err(code) => Err(code),
         };

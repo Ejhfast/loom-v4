@@ -726,8 +726,9 @@ fn digest_on_a_scalar_is_rejected_by_the_verifier() {
     'outer: for func in &mut module.funcs {
         for block in &mut func.blocks {
             for i in 0..block.len() {
-                if matches!(block[i], Instr::Digest) {
+                if matches!(block[i], Instr::Digest { .. }) {
                     block[i - 1] = Instr::ConstInt(1);
+                    block[i] = Instr::Digest { ty: 2 };
                     patched = true;
                     break 'outer;
                 }

@@ -261,6 +261,11 @@ pub enum CompactError {
     InvalidReference,
 }
 
+struct DigestCacheEntry {
+    generation: u32,
+    values: Vec<(Option<u32>, [u8; 32])>,
+}
+
 /// The VM heap.
 pub struct Heap {
     pages: Vec<Vec<Entry>>,
@@ -276,10 +281,8 @@ pub struct Heap {
     /// The reusable graph work tables. `lm-graph` borrows them for
     /// the length of one walk and returns them afterwards.
     scratch: GraphScratch,
-    /// The canonical digest of frozen objects, keyed by slot. A
-    /// frozen object never changes, so an entry stays valid until the
-    /// slot is freed.
-    digests: std::collections::HashMap<u32, ([u8; 32], u32)>,
+    /// Canonical digests of frozen objects, keyed by slot and type.
+    digests: std::collections::HashMap<u32, DigestCacheEntry>,
     /// The aggregate ledger of the owning world.
     budget: Option<HeapBudget>,
     /// Shared immutable allocations referenced by this heap.
@@ -751,8 +754,20 @@ impl Heap {
 
     /// The cached canonical digest of one frozen object.
     pub fn cached_digest(&self, r: ObjRef) -> Option<[u8; 32]> {
+        self.cached_digest_for(r, None)
+    }
+
+    /// The cached digest of one frozen object under one static type.
+    pub fn cached_typed_digest(&self, r: ObjRef, ty: u32) -> Option<[u8; 32]> {
+        self.cached_digest_for(r, Some(ty))
+    }
+
+    fn cached_digest_for(&self, r: ObjRef, ty: Option<u32>) -> Option<[u8; 32]> {
         match self.digests.get(&r.slot) {
-            Some((digest, generation)) if *generation == r.generation => Some(*digest),
+            Some(entry) if entry.generation == r.generation => entry
+                .values
+                .iter()
+                .find_map(|(held, digest)| (*held == ty).then_some(*digest)),
             _ => None,
         }
     }
@@ -761,8 +776,32 @@ impl Heap {
     /// object never changes, so the entry stays valid until the slot
     /// is freed.
     pub fn cache_digest(&mut self, r: ObjRef, digest: [u8; 32]) {
+        self.cache_digest_for(r, None, digest);
+    }
+
+    /// Cache one canonical digest under its static root type.
+    pub fn cache_typed_digest(&mut self, r: ObjRef, ty: u32, digest: [u8; 32]) {
+        self.cache_digest_for(r, Some(ty), digest);
+    }
+
+    fn cache_digest_for(&mut self, r: ObjRef, ty: Option<u32>, digest: [u8; 32]) {
         debug_assert!(self.is_frozen(r), "only a frozen object caches a digest");
-        self.digests.insert(r.slot, (digest, r.generation));
+        let entry = self
+            .digests
+            .entry(r.slot)
+            .or_insert_with(|| DigestCacheEntry {
+                generation: r.generation,
+                values: Vec::new(),
+            });
+        if entry.generation != r.generation {
+            entry.generation = r.generation;
+            entry.values.clear();
+        }
+        if let Some((_, held)) = entry.values.iter_mut().find(|(held, _)| *held == ty) {
+            *held = digest;
+        } else {
+            entry.values.push((ty, digest));
+        }
     }
 
     /// The number of cached digests, for the cache tests.

@@ -459,10 +459,12 @@ fn encode_object(out: &mut Out, object: &Object) {
         }
         Object::List { items, epoch } => {
             out.u64(u64::from(epoch.0));
+            out.leb(items.capacity() as u64);
             out.values(items);
         }
         Object::Map { entries, index } => {
             out.u64(u64::from(index.epoch.0));
+            out.leb(entries.capacity() as u64);
             out.leb(entries.len() as u64);
             for (key, value) in entries {
                 out.value(*key);
@@ -862,6 +864,23 @@ impl<'b, 'd> Cursor<'b, 'd> {
             );
         }
         Ok(n as usize)
+    }
+
+    /// One allocation count that can exceed the remaining byte count.
+    fn allocation_count(&mut self, cap: u64, what: &str) -> Read<usize> {
+        let n = self.leb()?;
+        if n > cap {
+            return err(
+                ImageReason::LimitExceeded,
+                format!("the {what} count {n} passes the load limit {cap}"),
+            );
+        }
+        usize::try_from(n).map_err(|_| {
+            ImageError::new(
+                ImageReason::LimitExceeded,
+                format!("the {what} count does not fit this host"),
+            )
+        })
     }
 
     fn str(&mut self, cap: u32) -> Read<String> {
@@ -1579,14 +1598,35 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             let fields = decode_values(cur, objects, 0, limits.max_stack_values as u64, "field")?;
             Object::Instance { class, fields, env }
         }
-        2 => Object::List {
-            epoch: decode_epoch(cur)?,
-            items: decode_values(cur, objects, 0, limits.max_stack_values as u64, "list item")?,
-        },
+        2 => {
+            let epoch = decode_epoch(cur)?;
+            let max_capacity = u64::try_from(limits.max_bytes / 16).unwrap_or(u64::MAX);
+            let capacity = cur.allocation_count(max_capacity, "list capacity")?;
+            let count = cur.count(limits.max_stack_values as u64, "list item")?;
+            if capacity < count {
+                return err(
+                    ImageReason::Layout,
+                    "a list capacity is smaller than its item count",
+                );
+            }
+            let mut items = cur.vector(capacity, "list capacity")?;
+            for _ in 0..count {
+                items.push(decode_value(cur, objects, 0)?);
+            }
+            Object::List { epoch, items }
+        }
         3 => {
             let epoch = decode_epoch(cur)?;
+            let max_capacity = u64::try_from(limits.max_bytes / 32).unwrap_or(u64::MAX);
+            let capacity = cur.allocation_count(max_capacity, "map capacity")?;
             let count = cur.count(limits.max_stack_values as u64, "map entry")?;
-            let mut entries: Vec<(Value, Value)> = cur.vector(count, "map entries")?;
+            if capacity < count {
+                return err(
+                    ImageReason::Layout,
+                    "a map capacity is smaller than its entry count",
+                );
+            }
+            let mut entries: Vec<(Value, Value)> = cur.vector(capacity, "map capacity")?;
             for _ in 0..count {
                 let key = decode_value(cur, objects, 0)?;
                 let value = decode_value(cur, objects, 0)?;

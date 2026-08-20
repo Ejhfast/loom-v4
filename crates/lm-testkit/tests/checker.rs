@@ -11,6 +11,15 @@ fn code_of(source: &str) -> String {
 }
 
 #[test]
+fn associated_type_diagnostics_use_source_names() {
+    let source = "interface Shaped\n  type Unit\n  def area(self): Self.Unit\nend\n\
+                  def total[S: Shaped](a: S): Int\n  a.area()\nend\n";
+    let error = compile_text("t.lm", source).expect_err("the source must fail");
+    assert!(error.contains("expected Int, found S.Unit"), "{error}");
+    assert!(!error.contains("<interface"), "{error}");
+}
+
+#[test]
 fn negative_cases_have_stable_codes() {
     // Scanner rules.
     assert_eq!(code_of("\u{1}\n"), "E0001");

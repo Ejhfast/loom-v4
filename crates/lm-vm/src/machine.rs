@@ -397,7 +397,11 @@ pub enum ExecOutcome {
     CallArgs { call: ObjRef },
     /// `value.digest()`. The world resolves code and class identity,
     /// so the digest never names a numeric slot.
-    Digest { value: ObjRef },
+    Digest {
+        value: ObjRef,
+        ty: u32,
+        env: TypeEnvId,
+    },
 }
 
 /// The serializable state of one machine.
@@ -3354,9 +3358,10 @@ impl Machine {
                 lm_graph::freeze(&mut self.vm.heap, r, &self.config.graph)?;
                 self.push(Value::Obj(r))?;
             }
-            Instr::Digest => {
-                let r = self.pop_obj()?;
-                return Ok(ExecOutcome::Digest { value: r });
+            Instr::Digest { ty } => {
+                let env = self.frame_env();
+                let value = self.pop_obj()?;
+                return Ok(ExecOutcome::Digest { value, ty, env });
             }
             Instr::EqDigest | Instr::NeDigest => {
                 let b = self.pop_obj()?;

@@ -19,9 +19,9 @@ pub mod digest;
 pub mod engine;
 pub mod mode;
 
-pub use digest::CodeIdentity;
+pub use digest::{CodeIdentity, DigestOption, DigestOptionCase};
 pub use engine::{walk, GraphCost, GraphLimits, Visitor};
 pub use mode::{
-    collect, copy_within, detach, digest_value, freeze, snapshot_ordinals, transfer, verify_frozen,
-    verify_sendable, CopyMode,
+    collect, copy_within, detach, digest_typed_value, digest_value, freeze, snapshot_ordinals,
+    transfer, verify_frozen, verify_sendable, CopyMode,
 };

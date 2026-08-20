@@ -366,8 +366,10 @@ pub enum Instr {
     },
     /// Pop an object reference, freeze its graph, push the same reference.
     Freeze,
-    /// Pop a frozen object reference and push its canonical digest.
-    Digest,
+    /// Pop a frozen object of `ty` and push its canonical digest.
+    Digest {
+        ty: u32,
+    },
     /// Pop two digests and push their value equality.
     EqDigest,
     /// Pop two digests and push their value inequality.
@@ -969,8 +971,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// active byte-buffer scan instructions and the native `TlsStream`
 /// class representation. Both landed on separate branches, so version
 /// 24 is the first that carries them together.
-/// Version 29 adds interfaces, native collections, callbacks, and native `Option` values.
-pub const VERSION: u16 = 29;
+/// Version 30 adds the static receiver type to `Digest`.
+pub const VERSION: u16 = 30;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1806,7 +1808,10 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::EqBytes) => out.push(OP_EQ_BYTES),
         Instr::Native(NativeInstr::NeBytes) => out.push(OP_NE_BYTES),
         Instr::Freeze => out.push(OP_FREEZE),
-        Instr::Digest => out.push(OP_DIGEST),
+        Instr::Digest { ty } => {
+            out.push(OP_DIGEST);
+            write_u32(out, *ty);
+        }
         Instr::EqDigest => out.push(OP_EQ_DIGEST),
         Instr::NeDigest => out.push(OP_NE_DIGEST),
         Instr::Jump(block) => {
@@ -2833,7 +2838,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_EQ_BYTES => Instr::Native(NativeInstr::EqBytes),
         OP_NE_BYTES => Instr::Native(NativeInstr::NeBytes),
         OP_FREEZE => Instr::Freeze,
-        OP_DIGEST => Instr::Digest,
+        OP_DIGEST => Instr::Digest { ty: cur.u32()? },
         OP_EQ_DIGEST => Instr::EqDigest,
         OP_NE_DIGEST => Instr::NeDigest,
         OP_JUMP => Instr::Jump(cur.u32()?),

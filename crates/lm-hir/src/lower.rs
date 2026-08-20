@@ -1260,6 +1260,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 args,
             } => self.lower_map_get(expr, args),
             HExprKind::Native { op, args } => {
+                let operand_ty = args.first().map(|arg| arg.ty);
                 for arg in args {
                     self.lower_expr(arg);
                 }
@@ -1283,7 +1284,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                         // The result type must exist in the module
                         // type table before the verifier reads it.
                         self.m.intern_type(BcType::Digest);
-                        Instr::Digest
+                        Instr::Digest {
+                            ty: self
+                                .m
+                                .bc_ty(operand_ty.expect("digest has one receiver argument")),
+                        }
                     }
                     NativeOp::ListGet | NativeOp::MapGet => unreachable!("handled above"),
                 };
@@ -2717,7 +2722,7 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::SbFinish)
         | Instr::Native(lm_bytecode::NativeInstr::BbFinish)
         | Instr::Freeze
-        | Instr::Digest => (1, 1),
+        | Instr::Digest { .. } => (1, 1),
         Instr::EqDigest | Instr::NeDigest => (2, 1),
         Instr::StoreField(_) => (2, 0),
         Instr::ListAt
@@ -2970,7 +2975,7 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::BbAt) => "BbAt".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => "BbFindFrom".to_string(),
         Instr::Freeze => "Freeze".to_string(),
-        Instr::Digest => "Digest".to_string(),
+        Instr::Digest { ty } => format!("Digest {ty}"),
         Instr::EqDigest => "EqDigest".to_string(),
         Instr::NeDigest => "NeDigest".to_string(),
         Instr::Jump(b) => format!("Jump -> b{b}"),

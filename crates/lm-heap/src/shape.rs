@@ -43,7 +43,7 @@ impl StructuralEpoch {
             return Ok(());
         }
         if self.0 == u32::MAX {
-            return Err(FaultCode::CollectionModified);
+            return Err(FaultCode::CollectionEpochExhausted);
         }
         Ok(())
     }
@@ -84,7 +84,7 @@ mod epoch_tests {
         let mut epoch = StructuralEpoch(u32::MAX - 1);
         epoch.bump().expect("the final valid increment succeeds");
         assert_eq!(epoch.0, u32::MAX);
-        assert_eq!(epoch.bump(), Err(FaultCode::CollectionModified));
+        assert_eq!(epoch.bump(), Err(FaultCode::CollectionEpochExhausted));
         assert_eq!(epoch.0, u32::MAX);
     }
 }
@@ -635,10 +635,11 @@ impl Object {
         }
         fn copy_values(
             source: &[Value],
+            capacity: usize,
             map: &mut impl FnMut(ObjRef) -> ObjRef,
         ) -> Result<Vec<Value>, TryReserveError> {
             let mut target = Vec::new();
-            target.try_reserve_exact(source.len())?;
+            target.try_reserve_exact(capacity)?;
             for value in source {
                 target.push(match value {
                     Value::Obj(reference) => Value::Obj(map(*reference)),
@@ -652,16 +653,16 @@ impl Object {
             Object::Str(text) => Object::Str(text.clone()),
             Object::Instance { class, fields, env } => Object::Instance {
                 class: *class,
-                fields: copy_values(fields, &mut map)?,
+                fields: copy_values(fields, fields.len(), &mut map)?,
                 env: *env,
             },
             Object::List { items, epoch } => Object::List {
-                items: copy_values(items, &mut map)?,
+                items: copy_values(items, items.capacity(), &mut map)?,
                 epoch: *epoch,
             },
             Object::Map { entries, index } => {
                 let mut copied = Vec::new();
-                copied.try_reserve_exact(entries.len())?;
+                copied.try_reserve_exact(entries.capacity())?;
                 for (key, value) in entries {
                     let key = match key {
                         Value::Obj(reference) => Value::Obj(map(*reference)),
@@ -683,7 +684,7 @@ impl Object {
                 }
             }
             Object::Tuple { items } => Object::Tuple {
-                items: copy_values(items, &mut map)?,
+                items: copy_values(items, items.len(), &mut map)?,
             },
             Object::Closure {
                 func,
@@ -691,7 +692,7 @@ impl Object {
                 env,
             } => Object::Closure {
                 func: *func,
-                captures: copy_values(captures, &mut map)?,
+                captures: copy_values(captures, captures.len(), &mut map)?,
                 env: *env,
             },
             Object::StrBuilder(text) => Object::StrBuilder(text.try_clone_buffer()?),

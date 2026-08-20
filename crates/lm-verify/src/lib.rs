@@ -1223,7 +1223,8 @@ impl<'m> Ctx<'m> {
 /// service control on a separate branch, so version 17 is the first
 /// that accepts both.
 /// Version 19 verifies interfaces, callbacks, native `Option`, and collection operations.
-pub const VERIFIER_VERSION: u32 = 19;
+/// Version 20 verifies the declared receiver type of each digest.
+pub const VERIFIER_VERSION: u32 = 20;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -4897,9 +4898,14 @@ fn step(
             }
             push(state, ty)?;
         }
-        Instr::Digest => {
-            let ty = pop(state)?;
-            if !ctx.is_heap(ty) {
+        Instr::Digest { ty } => {
+            let found = pop(state)?;
+            if found != *ty {
+                return Err(fail(format!(
+                    "digest states type {ty}, but its operand has type {found}"
+                )));
+            }
+            if !ctx.is_heap(*ty) {
                 return Err(fail(format!("digest on non-object type {ty}")));
             }
             let idx = {
@@ -6343,7 +6349,7 @@ mod tests {
     /// a value that is not an object.
     #[test]
     fn rejects_digest_on_a_scalar() {
-        let mut m = module_with(vec![vec![ConstInt(1), Digest, Return]]);
+        let mut m = module_with(vec![vec![ConstInt(1), Digest { ty: TY_INT }, Return]]);
         m.types.push(BcType::Digest);
         m.funcs[0].ret = 4;
         let e = verify_module(&m).unwrap_err();
@@ -6381,7 +6387,7 @@ mod tests {
     /// neighbouring type.
     #[test]
     fn rejects_digest_without_the_result_type() {
-        let m = module_with(vec![vec![ConstStr(0), Digest, Return]]);
+        let m = module_with(vec![vec![ConstStr(0), Digest { ty: TY_STR }, Return]]);
         let e = verify_module(&m).unwrap_err();
         assert!(e.message.contains("Digest is not in the type table"), "{e}");
     }

@@ -433,27 +433,55 @@ fn copy_passes(
 pub fn digest_value(
     heap: &mut Heap,
     value: Value,
-    codes: &dyn CodeIdentity,
+    codes: &mut dyn CodeIdentity,
+    limits: &GraphLimits,
+) -> Result<[u8; 32], FaultCode> {
+    digest_with_type(heap, value, None, codes, limits)
+}
+
+/// The canonical digest under one closed static root type.
+pub fn digest_typed_value(
+    heap: &mut Heap,
+    value: Value,
+    expected: u32,
+    codes: &mut dyn CodeIdentity,
+    limits: &GraphLimits,
+) -> Result<[u8; 32], FaultCode> {
+    digest_with_type(heap, value, Some(expected), codes, limits)
+}
+
+fn digest_with_type(
+    heap: &mut Heap,
+    value: Value,
+    expected: Option<u32>,
+    codes: &mut dyn CodeIdentity,
     limits: &GraphLimits,
 ) -> Result<[u8; 32], FaultCode> {
     if let Value::Obj(root) = value {
         // A cache hit costs one lookup, which is under every published
         // limit, so the walk and its limits do not run again. The
         // frozen bit is monotonic, so a cached answer stays true.
-        if let Some(cached) = heap.cached_digest(root) {
+        let cached = match expected {
+            Some(ty) => heap.cached_typed_digest(root, ty),
+            None => heap.cached_digest(root),
+        };
+        if let Some(cached) = cached {
             return Ok(cached);
         }
     }
     let mut scratch = heap.take_scratch();
     let out = {
         let view: &Heap = heap;
-        digest::compute(view, &mut scratch, value, codes, limits)
+        digest::compute(view, &mut scratch, value, expected, codes, limits)
     };
     heap.put_scratch(scratch);
     let out = out?;
     if let Value::Obj(root) = value {
         // Only a frozen object caches: the walk proved it frozen.
-        heap.cache_digest(root, out);
+        match expected {
+            Some(ty) => heap.cache_typed_digest(root, ty, out),
+            None => heap.cache_digest(root, out),
+        }
     }
     Ok(out)
 }
@@ -941,12 +969,14 @@ mod tests {
         }
         let b = frozen_ring(&mut second, 1, 2);
         assert_ne!(a.slot, b.slot);
-        let da = digest_value(&mut first, Value::Obj(a), &Slots, &limits()).expect("a digests");
-        let db = digest_value(&mut second, Value::Obj(b), &Slots, &limits()).expect("b digests");
+        let da = digest_value(&mut first, Value::Obj(a), &mut Slots, &limits()).expect("a digests");
+        let db =
+            digest_value(&mut second, Value::Obj(b), &mut Slots, &limits()).expect("b digests");
         assert_eq!(da, db);
         // A different ring digests differently.
         let c = frozen_ring(&mut second, 1, 3);
-        let dc = digest_value(&mut second, Value::Obj(c), &Slots, &limits()).expect("c digests");
+        let dc =
+            digest_value(&mut second, Value::Obj(c), &mut Slots, &limits()).expect("c digests");
         assert_ne!(da, dc);
     }
 
@@ -964,8 +994,10 @@ mod tests {
         let two = heap.alloc(Object::Tuple {
             items: vec![Value::Obj(left), Value::Obj(right)],
         });
-        let d1 = digest_value(&mut heap, Value::Obj(one), &Slots, &limits()).expect("one digests");
-        let d2 = digest_value(&mut heap, Value::Obj(two), &Slots, &limits()).expect("two digests");
+        let d1 =
+            digest_value(&mut heap, Value::Obj(one), &mut Slots, &limits()).expect("one digests");
+        let d2 =
+            digest_value(&mut heap, Value::Obj(two), &mut Slots, &limits()).expect("two digests");
         assert_ne!(d1, d2);
     }
 
@@ -977,12 +1009,12 @@ mod tests {
             epoch: Default::default(),
         });
         assert_eq!(
-            digest_value(&mut heap, Value::Obj(mutable), &Slots, &limits()),
+            digest_value(&mut heap, Value::Obj(mutable), &mut Slots, &limits()),
             Err(FaultCode::UnsendableValue)
         );
         let handle = heap.alloc(Object::NativeVm { vm: 1 });
         assert_eq!(
-            digest_value(&mut heap, Value::Obj(handle), &Slots, &limits()),
+            digest_value(&mut heap, Value::Obj(handle), &mut Slots, &limits()),
             Err(FaultCode::BoundaryViolation)
         );
     }
@@ -992,9 +1024,11 @@ mod tests {
         let mut heap = Heap::new(1 << 20);
         let root = frozen_ring(&mut heap, 1, 2);
         assert_eq!(heap.digest_cache_len(), 0);
-        let first = digest_value(&mut heap, Value::Obj(root), &Slots, &limits()).expect("digests");
+        let first =
+            digest_value(&mut heap, Value::Obj(root), &mut Slots, &limits()).expect("digests");
         assert_eq!(heap.digest_cache_len(), 1);
-        let second = digest_value(&mut heap, Value::Obj(root), &Slots, &limits()).expect("digests");
+        let second =
+            digest_value(&mut heap, Value::Obj(root), &mut Slots, &limits()).expect("digests");
         assert_eq!(first, second);
     }
 
@@ -1016,8 +1050,10 @@ mod tests {
         };
         let forward = build(&mut heap, 1, 2);
         let backward = build(&mut heap, 2, 1);
-        let d1 = digest_value(&mut heap, Value::Obj(forward), &Slots, &limits()).expect("digests");
-        let d2 = digest_value(&mut heap, Value::Obj(backward), &Slots, &limits()).expect("digests");
+        let d1 =
+            digest_value(&mut heap, Value::Obj(forward), &mut Slots, &limits()).expect("digests");
+        let d2 =
+            digest_value(&mut heap, Value::Obj(backward), &mut Slots, &limits()).expect("digests");
         assert_ne!(d1, d2);
     }
 
@@ -1056,7 +1092,7 @@ mod tests {
             Err(FaultCode::BoundaryLimit)
         );
         assert_eq!(
-            digest_value(&mut heap, Value::Obj(root), &Slots, &tight),
+            digest_value(&mut heap, Value::Obj(root), &mut Slots, &tight),
             Err(FaultCode::BoundaryLimit)
         );
         assert_eq!(
@@ -1086,7 +1122,7 @@ mod tests {
                 }
                 freeze(&mut heap, head, &limits()).expect("the freeze finishes");
                 verify_frozen(&mut heap, head, &limits()).expect("the graph is frozen");
-                digest_value(&mut heap, Value::Obj(head), &Slots, &limits())
+                digest_value(&mut heap, Value::Obj(head), &mut Slots, &limits())
                     .expect("the digest finishes");
                 snapshot_ordinals(&mut heap, &[head], &limits()).expect("the walk finishes");
                 let mut dst = Heap::new(64 << 20);
