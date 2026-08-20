@@ -2205,6 +2205,25 @@ pub fn group_contains_op(group: GroupSlot, operation: OpSlot) -> bool {
     group_operation_bits()[group as usize][operation as usize]
 }
 
+/// Return the groups and effect sets that contain one operation.
+///
+/// The slots come in ascending order, which is the order the policy
+/// table reads. Most operations name one namespace group, so most
+/// lists hold one slot.
+pub fn groups_containing_op(operation: OpSlot) -> &'static [GroupSlot] {
+    static BY_OP: std::sync::OnceLock<Vec<Vec<GroupSlot>>> = std::sync::OnceLock::new();
+    let table = BY_OP.get_or_init(|| {
+        (0..OP_COUNT)
+            .map(|operation| {
+                (0..GROUP_COUNT)
+                    .filter(|group| group_contains_op(*group, operation))
+                    .collect()
+            })
+            .collect()
+    });
+    &table[operation as usize]
+}
+
 /// Return the exact operation closure of one group or effect set.
 pub fn group_operations(group: GroupSlot) -> Vec<OpSlot> {
     group_operation_bits()[group as usize]
