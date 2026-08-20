@@ -396,4 +396,39 @@ mod tests {
         let linked = crate::link("app.main", &link_env.freeze()).expect("the program links");
         assert_eq!(linked.module.slots.len(), 1);
     }
+
+    #[test]
+    fn runtime_append_keeps_every_existing_index() {
+        let base = compile(
+            "def base(): Int\n  1\nend\nbase()\n",
+            &CompileOptions::new(),
+        );
+        let addition = compile_module_with_options(
+            "revision",
+            &SourceFile::new("revision.lm", "def added(): Int\n  2\nend\nadded()\n"),
+            &crate::CompileEnv::new().freeze(),
+            true,
+            &CompileOptions::new().late_function("added"),
+        )
+        .expect("the addition compiles");
+        let appended = lm_bytecode::append::append_linked(&base.module, &addition.module)
+            .expect("the module appends");
+        assert_eq!(
+            &appended.module.strings[..base.module.strings.len()],
+            &base.module.strings
+        );
+        assert_eq!(
+            &appended.module.types[..base.module.types.len()],
+            &base.module.types
+        );
+        assert_eq!(
+            &appended.module.classes[..base.module.classes.len()],
+            &base.module.classes
+        );
+        assert_eq!(
+            &appended.module.funcs[..base.module.funcs.len()],
+            &base.module.funcs
+        );
+        lm_verify::verify_module(&appended.module).expect("the appended module verifies");
+    }
 }
