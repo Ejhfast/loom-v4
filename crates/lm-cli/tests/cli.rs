@@ -495,6 +495,22 @@ fn run_budget_example_outlives_its_child_budget() {
 }
 
 #[test]
+fn run_queens_example_counts_every_board() {
+    assert_eq!(
+        search_example("05-n-queens.lm"),
+        "Done((2, 10, 4, 40, 92))\n"
+    );
+}
+
+#[test]
+fn run_effect_example_forks_state_and_output_together() {
+    assert_eq!(
+        search_example("06-fork-a-program-with-effects.lm"),
+        "Done((12, \"wave 2 wave 2 wave 2 \"))\n"
+    );
+}
+
+#[test]
 fn run_http_server_example_routes_three_requests() {
     let out = lm(&[
         "run",

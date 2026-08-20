@@ -9406,6 +9406,44 @@ mod tests {
         assert!(world.proc_alive(1, 1));
     }
 
+    /// A reclaimed slot takes a new generation, so a key minted for
+    /// the freed record never names the machine that reuses the slot.
+    ///
+    /// This is the whole safety argument of the reclamation pass. A
+    /// completion key and a wake key both compare the generation
+    /// beside the machine identifier, so a slot that came back at its
+    /// old generation would deliver a reply to the wrong machine.
+    /// `a_retired_slot_takes_a_new_generation` states the same rule
+    /// for a retired mock.
+    #[test]
+    fn a_reclaimed_slot_takes_a_new_generation() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        assert!(world.share_heap_budget());
+        let child = world.install_child(VmConfig::default(), 0);
+        // An empty record is one the pass always keeps, because it
+        // cannot tell a new machine from an abandoned one. This one
+        // ran and finished, and no value names it.
+        world.machines[child as usize].vm.state = MachineState::Done;
+        assert_eq!(world.generation_of(child), 0);
+        assert!(world.proc_alive(child, 0));
+
+        assert_eq!(world.collect_machines(), 1, "the dead record frees");
+        assert_eq!(world.generation_of(child), 1);
+        assert!(
+            !world.proc_alive(child, 0),
+            "the stale key names a dead machine"
+        );
+
+        // The next child takes the freed slot back. The key minted
+        // before the pass must not name it.
+        let reused = world.install_child(VmConfig::default(), 0);
+        assert_eq!(reused, child, "the pass returned the slot");
+        assert_eq!(world.generation_of(reused), 1);
+        assert!(!world.proc_alive(child, 0));
+        assert!(world.proc_alive(reused, 1));
+    }
+
     /// A mock start that fails returns its machine slot at once.
     ///
     /// The slot is taken before the handler and the arguments cross,

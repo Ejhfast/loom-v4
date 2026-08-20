@@ -1,0 +1,100 @@
+# Search an ordinary program, not a pure specification.
+#
+# Run with `--allow Vm`. The child prints, but no print reaches a
+# terminal: the driver answers `Io.Print` itself.
+#
+# `rollout` is the kind of program someone would write anyway. It
+# keeps a growing list, it accumulates a running total, and it reports
+# progress as it goes. It holds no search and no undo.
+#
+# This is the part a plain recursive function cannot copy. Each branch
+# is a whole world, so each branch forks the list, the running total,
+# and the effects together. A function would have to unwind the list
+# by hand and take back the output it already produced.
+#
+# The driver plays two roles at once here. It answers the choice
+# points, and it serves the print effect, so every branch also gets
+# its own transcript.
+
+def rollout(): Int with Choose, Io.Print
+  applied: [Int] = []
+  risk = 0
+  step = 0
+  while step < 3
+    # One to three machines in this wave.
+    size = 1 + sys.choose.pick(3)
+    applied.push(size)
+    # Risk grows faster than size, so one big wave costs more than
+    # three small ones.
+    risk = risk + size * size
+    sys.io.print("wave {size} ")
+    step = step + 1
+  end
+  # The plan is only valid when it lands exactly six machines.
+  if applied.at(0) + applied.at(1) + applied.at(2) == 6
+    risk
+  else
+    0
+  end
+end
+
+# Answer the pending choice with `index`, then keep searching.
+def take(branch: Vm[Int], index: Int, log: String): (Int, String) with Vm
+  case branch.drive()
+  in Asked(request)
+    case request
+    in Call(Choose.Pick, call, (_,))
+      branch.answer(call, index)
+      cheapest(branch, log)
+    in _ then (0, log)
+    end
+  in Done(value) then (value, log)
+  in Fault(_)    then (0, log)
+  end
+end
+
+# The cheapest valid plan below this machine, with its transcript.
+# Zero means no valid plan in this subtree.
+def cheapest(child: Vm[Int], log: String): (Int, String) with Vm
+  case child.drive()
+  in Done(value) then (value, log)
+  in Fault(_)    then (0, log)
+  in Asked(request)
+    case request
+    # The transcript belongs to this branch alone. A sibling branch
+    # never sees this line, because it resumes from the capture
+    # taken before the line existed.
+    in Call(Io.Print, call, (text,))
+      child.answer(call, ())
+      cheapest(child, "{log}{text}")
+    in Call(Choose.Pick, call, (count,))
+      case child.snapshot()
+      in Ok(image)
+        best = 0
+        best_log = log
+        index = 0
+        while index < count
+          case sys.vm.Vm().restore(image)
+          in Ok(branch)
+            case take(branch, index, log)
+            in (risk, trail)
+              if risk != 0 and (best == 0 or risk < best)
+                best = risk
+                best_log = trail
+              end
+            end
+          in Err(_) then ()
+          end
+          index = index + 1
+        end
+        (best, best_log)
+      in Err(_) then (0, log)
+      end
+    in _ then (0, log)
+    end
+  end
+end
+
+# Three waves of two cost 4 + 4 + 4. Any other split of six costs
+# more, so the search reports 12 and the transcript that produced it.
+cheapest(sys.vm.Vm().from_fn(rollout, args: ()), "")

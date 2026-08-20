@@ -1,0 +1,93 @@
+# A full n-queens search, and how little a machine costs.
+#
+# Run with `--allow Vm`. This example opens no file and no socket.
+#
+# `place` holds no search. It builds one board, and it gives up the
+# moment two queens attack. It never removes a queen, and it has no
+# stack of candidates. Read it as a description of a legal board.
+#
+# The driver turns that description into a search. It captures the
+# machine at each row and restores the capture once for each column,
+# so an illegal prefix ends one branch and never costs another.
+#
+# Every node of the tree is a machine. Eight queens visit about two
+# thousand legal prefixes, so this run builds and drops many thousands
+# of machines in well under a second. A machine is a small record and
+# a heap, and a machine no live machine names goes away again.
+
+# One board attempt. Answer 1 for a full legal board, 0 otherwise.
+def place(n: Int): Int with Choose
+  columns: [Int] = []
+  row = 0
+  while row < n
+    column = sys.choose.pick(n)
+    # Reject as soon as the new queen attacks an older one. The
+    # branch ends here, so the driver never explores below it.
+    older = 0
+    while older < columns.len()
+      seen = columns.at(older)
+      gap = row - older
+      if seen == column or column - seen == gap or seen - column == gap
+        return 0
+      end
+      older = older + 1
+    end
+    columns.push(column)
+    row = row + 1
+  end
+  1
+end
+
+def take(branch: Vm[Int], index: Int): Int with Vm
+  case branch.drive()
+  in Asked(request)
+    case request
+    in Call(Choose.Pick, call, (_,))
+      branch.answer(call, index)
+      count(branch)
+    in _ then 0
+    end
+  in Done(value) then value
+  in Fault(_)    then 0
+  end
+end
+
+# Total the legal boards below this machine.
+def count(child: Vm[Int]): Int with Vm
+  case child.drive()
+  in Done(value) then value
+  in Fault(_)    then 0
+  in Asked(request)
+    case request
+    in Call(Choose.Pick, call, (columns,))
+      case child.snapshot()
+      in Ok(image)
+        total = 0
+        column = 0
+        while column < columns
+          case sys.vm.Vm().restore(image)
+          in Ok(branch)
+            total = total + take(branch, column)
+          in Err(_) then ()
+          end
+          column = column + 1
+        end
+        total
+      in Err(_) then 0
+      end
+    in _ then 0
+    end
+  end
+end
+
+def solutions(n: Int): Int with Vm
+  count(sys.vm.Vm().from_fn(place, args: (n,)))
+end
+
+# Boards four through eight hold 2, 10, 4, 40, and 92 solutions.
+#
+# The search keeps going: nine gives 352 and ten gives 724. Ten builds
+# roughly a hundred thousand machines and finishes in about a second
+# on the reference host. This example stops at eight so the checked
+# suite stays quick.
+(solutions(4), solutions(5), solutions(6), solutions(7), solutions(8))
