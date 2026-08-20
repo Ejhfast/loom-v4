@@ -8,8 +8,7 @@ use lm_vm::VmConfig;
 
 fn run_example(path: &str) -> String {
     let source = std::fs::read_to_string(repo_root().join(path)).expect("the example reads");
-    let vm = run_text(path, &source, VmConfig::default()).expect("the example runs");
-    vm
+    run_text(path, &source, VmConfig::default()).expect("the example runs")
 }
 
 #[test]

@@ -454,6 +454,23 @@ impl World {
                         format!("<vm {image}:{generation}>")
                     }
                     Object::NativeRun { vm } => format!("<run {vm}>"),
+                    Object::NativeCode(code) => {
+                        format!(
+                            "<{:?} index {} bytes {}>",
+                            code.kind,
+                            code.index,
+                            code.bytes.len()
+                        )
+                    }
+                    Object::NativeCodeHandle {
+                        image,
+                        generation,
+                        instance,
+                        kind,
+                        index,
+                    } => format!(
+                        "<{kind:?} {index} in instance {instance} of VM {image}:{generation}>"
+                    ),
                     Object::NativeTable { vm } => format!("<table {vm}>"),
                     Object::NativeRequest { .. } => "<request>".to_string(),
                     Object::NativeCall { op, .. } => {

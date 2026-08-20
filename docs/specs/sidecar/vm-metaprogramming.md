@@ -188,6 +188,10 @@ Monomorphic functions can also cross typed APIs as ordinary function values.
 
 Generic definitions use `FunctionDef`. Loom does not need rank-N function values for this API.
 
+The Stage 6 bootstrap surface accepts monomorphic functions without captures or `mut` parameters.
+
+Lookup returns `CodeError` for another function. Later stages can add typed applications without changing the handle representation.
+
 ## 7. Static and late binding
 
 Every code reference uses one of two linkage modes.
@@ -538,6 +542,10 @@ The snapshot API has two value types.
 | `VmSnapshot` | One complete stopped `Vm` | One stopped `Vm` |
 
 `Run.snapshot()` returns `Result[RunSnapshot[T], SnapshotError]`.
+
+`SnapshotImage` stores no selected run. It stores the complete admitted machine graph.
+
+`RunSnapshot[T]` pairs that image with one typed run selector. The selector belongs to the view, not the image.
 
 A run snapshot captures the run, its reachable processes, and all required installation state.
 

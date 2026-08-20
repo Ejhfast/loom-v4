@@ -234,7 +234,8 @@ use tables::verify_tables;
 /// Version 20 verifies the declared receiver type of each digest.
 /// Version 21 separates persistent VMs from typed runs.
 /// Version 23 verifies late-bound slot contracts and instructions.
-pub const VERIFIER_VERSION: u32 = 23;
+/// Version 24 verifies reified code controls.
+pub const VERIFIER_VERSION: u32 = 24;
 
 /// Verify a full module. Every table and every function must pass.
 ///

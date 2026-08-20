@@ -153,7 +153,7 @@ impl World {
     ) -> Result<crate::snapshot::SnapshotImage, crate::snapshot::ImageError> {
         let limits = crate::snapshot::LoadLimits::default();
         self.record_snapshot_check();
-        let image = crate::snapshot::codec::load_external(bytes, &self.loaded, limits)?;
+        let image = crate::snapshot::codec::load_external(bytes, &self.base_loaded, limits)?;
         self.trust_image(&image);
         Ok(image)
     }
@@ -440,6 +440,13 @@ impl World {
         self.loaded.identity()
     }
 
+    /// The semantic identity of the module that started this world.
+    pub(crate) fn base_identity(
+        &self,
+    ) -> Result<&lm_bytecode::identity::ModuleIdentity, FaultCode> {
+        self.base_loaded.identity()
+    }
+
     /// Store one admitted image in the world table and name its slot.
     ///
     /// A guest snapshot value names a slot here. The table therefore
@@ -469,6 +476,16 @@ impl World {
     /// hash. The module computes it once (`LoadedModule`).
     pub(crate) fn verification_hash(&self) -> [u8; 32] {
         self.loaded.verification_hash()
+    }
+
+    /// The verification hash of the module that started this world.
+    pub(crate) fn base_verification_hash(&self) -> [u8; 32] {
+        self.base_loaded.verification_hash()
+    }
+
+    /// The current verified aggregate code.
+    pub(crate) fn loaded_code(&self) -> LoadedModule {
+        self.loaded.clone()
     }
 
     /// The loaded program.

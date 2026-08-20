@@ -2456,12 +2456,25 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 | NativeRepr::TcpStream
                 | NativeRepr::TcpListener
                 | NativeRepr::TlsStream
+                | NativeRepr::Artifact
+                | NativeRepr::VerifiedModule
+                | NativeRepr::SlotSpec
+                | NativeRepr::CodeInstance
+                | NativeRepr::Slot
+                | NativeRepr::FunctionDef
         )
     ) {
-        let ret = m.intern_type(BcType::Class(cidx));
+        let ret = if class.type_params == 0 {
+            m.intern_type(BcType::Class(cidx))
+        } else {
+            let args = (0..class.type_params)
+                .map(|index| m.intern_type(BcType::Var(index)))
+                .collect();
+            m.intern_type(BcType::Inst(cidx, args))
+        };
         return Func {
             name: format!("<new {}>", class.name),
-            type_params: 0,
+            type_params: class.type_params,
             effect_params: 0,
             params: vec![],
             param_muts: vec![],

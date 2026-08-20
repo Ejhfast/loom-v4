@@ -156,19 +156,6 @@ impl World {
                 }
             }
         };
-        // The admitted state names the program it passed against. This
-        // world runs one program, so a mismatch is a local fault, not
-        // a restore this call trusts.
-        let semantic = self.identity().map(|id| id.semantic_hash);
-        if semantic != Ok(image.identity().module_semantic) {
-            self.fault_caller(
-                vm,
-                op,
-                FaultCode::BoundaryViolation,
-                "the snapshot image was admitted against another program",
-            );
-            return;
-        }
         let target = match self.prepare_run_target(vm, image_vm) {
             Some(target) => target,
             None => {
@@ -217,9 +204,6 @@ impl World {
                 self.make_instance(vm, self.core.restore_limit_exceeded, vec![])
                     .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]))
             }
-            // The check above already answered this case, so the guest
-            // never reaches it. Restore states the rule again for
-            // every caller, and a mismatch here is a boundary fault.
             Err(crate::snapshot::RestoreFail::OtherProgram) => {
                 self.discard_restore_reply(vm, reply);
                 self.rollback_run_target(vm, target);

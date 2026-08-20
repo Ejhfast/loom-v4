@@ -70,7 +70,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 12 preserves spare list and map capacity.
 /// Version 15 stores VM images apart from run machine records.
 /// Version 16 stores current late-bound slot targets in VM images.
-pub const FORMAT_VERSION: u32 = 17;
+/// Version 18 stores installed code and module instances.
+pub const FORMAT_VERSION: u32 = 18;
 
 /// The section kinds, in canonical order.
 ///
@@ -278,6 +279,25 @@ pub struct ImageVm {
     pub slots: Vec<ImageSlotTarget>,
     /// The canonical frozen heap owned by value slots.
     pub objects: Vec<ImageObject>,
+    /// Module instances installed into this VM image.
+    pub instances: Vec<ImageInstance>,
+}
+
+/// One module instance in a portable VM image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageInstance {
+    /// The artifact ordinal in `Image::installations`.
+    pub installation: u32,
+    /// The source module semantic hash.
+    pub semantic_hash: [u8; 32],
+    /// The relocated entry function.
+    pub entry: u32,
+    /// Source function indices mapped into the aggregate code store.
+    pub funcs: Vec<u32>,
+    /// Source class indices mapped into the aggregate code store.
+    pub classes: Vec<u32>,
+    /// Source slot indices mapped into the aggregate slot store.
+    pub slots: Vec<u32>,
 }
 
 /// One portable target in a VM image slot table.
@@ -382,6 +402,8 @@ pub struct Image {
     pub funcs: Vec<(u32, [u8; 32])>,
     /// Every referenced class slot with its definition hash.
     pub classes: Vec<(u32, [u8; 32])>,
+    /// Verified artifacts in successful installation order.
+    pub installations: Vec<Vec<u8>>,
     /// The closed type table of this image.
     ///
     /// No entry holds a free type variable, and every child index
@@ -419,6 +441,9 @@ impl Image {
         let mut bytes = std::mem::size_of::<Image>();
         bytes = bytes.saturating_add(self.funcs.len() * std::mem::size_of::<(u32, [u8; 32])>());
         bytes = bytes.saturating_add(self.classes.len() * std::mem::size_of::<(u32, [u8; 32])>());
+        for artifact in &self.installations {
+            bytes = bytes.saturating_add(artifact.len());
+        }
         bytes = bytes.saturating_add(
             self.types.len() * std::mem::size_of::<lm_bytecode::closed::ClosedType>(),
         );
@@ -448,6 +473,13 @@ impl Image {
             bytes = bytes.saturating_add(image.objects.len() * std::mem::size_of::<ImageObject>());
             for object in &image.objects {
                 bytes = bytes.saturating_add(object.object.cost());
+            }
+            bytes =
+                bytes.saturating_add(image.instances.len() * std::mem::size_of::<ImageInstance>());
+            for instance in &image.instances {
+                bytes = bytes.saturating_add(instance.funcs.len() * std::mem::size_of::<u32>());
+                bytes = bytes.saturating_add(instance.classes.len() * std::mem::size_of::<u32>());
+                bytes = bytes.saturating_add(instance.slots.len() * std::mem::size_of::<u32>());
             }
         }
         for machine in &self.machines {
@@ -502,6 +534,10 @@ pub enum Origin {
 /// bytes. Restore compares it with the running program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmissionIdentity {
+    /// The semantic hash of the module that started the world.
+    pub base_semantic: [u8; 32],
+    /// The verification hash of the module that started the world.
+    pub base_verification: [u8; 32],
     /// The semantic hash of the program the image runs.
     pub module_semantic: [u8; 32],
     /// The verification hash of that exact verified module.
@@ -533,6 +569,8 @@ pub struct SnapshotImage {
     /// restores inside one process encodes nothing.
     bytes: std::sync::OnceLock<std::sync::Arc<Vec<u8>>>,
     world: std::sync::Arc<Image>,
+    /// The verified aggregate code that admission reconstructed.
+    loaded: crate::LoadedModule,
     /// The container hash of the bytes. It follows the bytes.
     hash: std::sync::OnceLock<[u8; 32]>,
     /// The program and ABI identity this image passed admission
@@ -567,6 +605,11 @@ impl SnapshotImage {
     /// The admitted machine world.
     pub fn world(&self) -> &Image {
         &self.world
+    }
+
+    /// The verified aggregate code of this image.
+    pub(crate) fn loaded(&self) -> &crate::LoadedModule {
+        &self.loaded
     }
 
     /// One editable copy of the admitted world.

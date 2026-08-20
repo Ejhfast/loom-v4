@@ -171,18 +171,36 @@ impl<'o> FnChecker<'o> {
         let recv_h = self.synth_expr(ctx, recv)?;
         let recv_ty = recv_h.ty;
         // Native control methods on the VM surface types.
-        if matches!(
-            ctx.store.get(recv_ty),
-            Type::Vm
-                | Type::Run(_)
-                | Type::Wait(_)
-                | Type::PolicyTable
-                | Type::Request
-                | Type::PendingCall(_, _)
-                | Type::Handle(_, _)
-                | Type::ResourceHandle
-                | Type::Fault
-        ) {
+        let code_control = match ctx.store.get(recv_ty) {
+            Type::Class(class) => matches!(
+                ctx.classes[class.0 as usize].native_repr,
+                Some(
+                    NativeRepr::Artifact
+                        | NativeRepr::VerifiedModule
+                        | NativeRepr::SlotSpec
+                        | NativeRepr::CodeInstance
+                        | NativeRepr::Slot
+                )
+            ),
+            Type::Inst(class, _) => {
+                ctx.classes[class.0 as usize].native_repr == Some(NativeRepr::FunctionDef)
+            }
+            _ => false,
+        };
+        if code_control
+            || matches!(
+                ctx.store.get(recv_ty),
+                Type::Vm
+                    | Type::Run(_)
+                    | Type::Wait(_)
+                    | Type::PolicyTable
+                    | Type::Request
+                    | Type::PendingCall(_, _)
+                    | Type::Handle(_, _)
+                    | Type::ResourceHandle
+                    | Type::Fault
+            )
+        {
             let out =
                 self.check_control_method(ctx, recv_h, name, name_span, type_args, args, span)?;
             return Ok(out.expect("control receivers resolve or fail"));

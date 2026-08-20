@@ -7,6 +7,7 @@
 //! `drive` are stop modes of this one loop.
 
 mod capture;
+mod code;
 mod machines;
 mod procs;
 mod query;
@@ -36,7 +37,7 @@ use crate::{FaultCode, LoadedModule, Outcome, VmConfig, WorldLimits};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId};
 use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, BcType, Module};
-use lm_heap::{Heap, HeapBudget, Object, StructuralEpoch};
+use lm_heap::{Heap, HeapBudget, Object, SharedBytes, StructuralEpoch};
 use lm_value::{ObjRef, TypeEnvId, Value};
 
 /// The fuel budget of one mock handler run.
@@ -180,6 +181,27 @@ struct WorldBudget {
     fuel: u64,
 }
 
+/// One module installation inside one persistent VM image.
+#[derive(Debug, Clone)]
+pub(crate) struct InstalledInstance {
+    /// The world installation record that supplied this instance.
+    pub(crate) installation: u32,
+    /// Canonical source artifact bytes.
+    pub(crate) artifact: SharedBytes,
+    /// The semantic identity of the source module.
+    pub(crate) semantic_hash: [u8; 32],
+    /// The relocated entry function.
+    pub(crate) entry: u32,
+    /// Source function indices mapped into the world code store.
+    pub(crate) funcs: Vec<u32>,
+    /// Source class indices mapped into the world code store.
+    pub(crate) classes: Vec<u32>,
+    /// Source slot indices mapped into the world slot store.
+    pub(crate) slots: Vec<u32>,
+    /// Exported source names mapped into the world function store.
+    pub(crate) exports: Vec<(String, u32)>,
+}
+
 /// One persistent execution image in the world image registry.
 pub(crate) struct VmImageRecord {
     /// The generation that validates a holder-local image handle.
@@ -192,6 +214,8 @@ pub(crate) struct VmImageRecord {
     pub(crate) slots: Vec<ImageSlotTarget>,
     /// Frozen values owned by value slots in this image.
     pub(crate) heap: Heap,
+    /// Module installations owned by this image.
+    pub(crate) instances: Vec<InstalledInstance>,
 }
 
 /// One successful restore reply held before restore commit.
@@ -421,10 +445,19 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
 
 /// The world: the loaded code plus every machine.
 pub struct World {
-    loaded: LoadedModule,
+    /// The verified module that started this world.
+    base_loaded: LoadedModule,
+    pub(crate) loaded: LoadedModule,
     pub(crate) module: std::sync::Arc<Module>,
-    dispatch: std::sync::Arc<[crate::DispatchRow]>,
-    core: CoreLayout,
+    pub(crate) dispatch: std::sync::Arc<[crate::DispatchRow]>,
+    pub(crate) core: CoreLayout,
+    /// Slots present when this world started.
+    ///
+    /// A new image receives these initial targets. Later installed
+    /// slots remain empty until that image installs their module.
+    base_slot_count: usize,
+    /// Artifacts in successful installation order.
+    pub(crate) installations: Vec<SharedBytes>,
     pub(crate) machines: Vec<Machine>,
     /// Persistent VM images, separate from run machine records.
     pub(crate) vm_images: Vec<VmImageRecord>,
@@ -724,6 +757,114 @@ mod tests {
             bindings: vec![],
         })
         .expect("the trivial module verifies")
+    }
+
+    fn installable_artifact(value: i64) -> SharedBytes {
+        let contract = BcCallableContract {
+            type_params: 0,
+            effect_params: 0,
+            type_bounds: vec![],
+            params: vec![],
+            param_muts: vec![],
+            ret: 2,
+            row: vec![],
+        };
+        lm_bytecode::encode(&Module {
+            strings: vec![],
+            types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
+            selectors: vec![],
+            apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
+            classes: vec![],
+            funcs: vec![Func {
+                name: "revision".to_string(),
+                type_params: 0,
+                effect_params: 0,
+                params: vec![],
+                param_muts: vec![],
+                ret: 2,
+                row: vec![],
+                captures: vec![],
+                local_types: vec![],
+                blocks: vec![vec![Instr::ConstInt(value), Instr::Return]],
+            }],
+            imports: vec![],
+            slots: vec![SlotSpec {
+                key: [19; 32],
+                contract: SlotContract::Function(contract),
+                initial: Some(SlotTarget::Function(0)),
+            }],
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            entry: 0,
+            exports: vec![],
+            bindings: vec![],
+        })
+        .into()
+    }
+
+    #[test]
+    fn installation_appends_code_and_changes_only_its_target_image() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let target = world.new_vm_image(0).expect("the target image fits");
+        let other = world.new_vm_image(0).expect("the other image fits");
+        let frame = world.machines[0].vm.frames[0].func;
+
+        let first = world
+            .install_artifact(target, installable_artifact(7))
+            .expect("the artifact installs");
+        assert_eq!(first, 0);
+        assert_eq!(world.machines[0].vm.frames[0].func, frame);
+        assert_eq!(world.vm_images[target.image as usize].instances.len(), 1);
+        assert!(matches!(
+            world.vm_images[target.image as usize].slots[0],
+            ImageSlotTarget::Function(_)
+        ));
+        assert_eq!(
+            world.vm_images[other.image as usize].slots[0],
+            ImageSlotTarget::Empty
+        );
+
+        let late = world.new_vm_image(0).expect("the later image fits");
+        assert_eq!(
+            world.vm_images[late.image as usize].slots[0],
+            ImageSlotTarget::Empty
+        );
+    }
+
+    #[test]
+    fn repeated_installation_creates_distinct_instances_without_duplicate_code() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let target = world.new_vm_image(0).expect("the target image fits");
+        let artifact = installable_artifact(8);
+        let first = world
+            .install_artifact(target, artifact.clone())
+            .expect("the first installation succeeds");
+        let functions = world.module.funcs.len();
+        let second = world
+            .install_artifact(target, artifact)
+            .expect("the second installation succeeds");
+        assert_eq!((first, second), (0, 1));
+        assert_eq!(world.module.funcs.len(), functions);
+        assert_eq!(world.vm_images[target.image as usize].instances.len(), 2);
+    }
+
+    #[test]
+    fn failed_installation_changes_no_world_code_or_image_state() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let target = world.new_vm_image(0).expect("the target image fits");
+        let verification = world.loaded.verification_hash();
+        let slots = world.vm_images[target.image as usize].slots.clone();
+        let result = world.install_artifact(target, vec![1, 2, 3].into());
+        assert!(result.is_err());
+        assert_eq!(world.loaded.verification_hash(), verification);
+        assert_eq!(world.vm_images[target.image as usize].slots, slots);
+        assert!(world.vm_images[target.image as usize].instances.is_empty());
     }
 
     #[test]

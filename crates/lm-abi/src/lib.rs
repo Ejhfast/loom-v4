@@ -28,8 +28,9 @@ pub use sha::{sha256, sha256_hex};
 /// controls and fuel-bounded snapshot waiting. Version 7 adds typed
 /// waits and selectable drive and receive sources. Version 8 adds
 /// transparent effect sets and the DNS and TCP operations. Version 9
-/// adds the TLS client resource and its effect sets.
-pub const ABI_VERSION: u32 = 10;
+/// adds the TLS client resource and its effect sets. Version 11 adds
+/// verified code installation and activation controls.
+pub const ABI_VERSION: u32 = 11;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -1456,9 +1457,18 @@ pub const OP_TLS_LOCAL_ADDRESS: OpSlot = 65;
 pub const OP_TLS_PEER_ADDRESS: OpSlot = 66;
 pub const OP_TLS_CLOSE: OpSlot = 67;
 pub const OP_VM_SERVE_TLS_STREAM: OpSlot = 68;
+pub const OP_VM_ARTIFACT: OpSlot = 70;
+pub const OP_VM_VERIFY: OpSlot = 71;
+pub const OP_VM_INSTALL: OpSlot = 72;
+pub const OP_VM_INSTANCE_ENTRY: OpSlot = 73;
+pub const OP_VM_INSTANCE_FUNCTION: OpSlot = 74;
+pub const OP_VM_INSTANCE_SLOT: OpSlot = 75;
+pub const OP_VM_INSTANCE_SLOT_SPEC: OpSlot = 76;
+pub const OP_VM_ACTIVATE_DEF: OpSlot = 77;
+pub const OP_VM_REPLACE_FUNCTION: OpSlot = 78;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 70] = [
+pub const OPS: [OpDef; 79] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -2118,6 +2128,87 @@ pub const OPS: [OpDef; 70] = [
         params: &[AbiType::INT],
         reply: AbiType::INT,
         schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "Artifact",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Bytes) -> Artifact",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "Verify",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Artifact) -> Result[VerifiedModule, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "Install",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Vm, VerifiedModule) -> Result[Instance, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "InstanceEntry",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](Instance) -> Result[FunctionDef[A,T], CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "InstanceFunction",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](Instance, String) -> Result[FunctionDef[A,T], CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "InstanceSlot",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Instance, Int) -> Result[Slot, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "InstanceSlotSpec",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Instance, Int) -> Result[SlotSpec, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ActivateDef",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](Vm, FunctionDef[A,T], control A) -> Run[T]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ReplaceFunction",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](Vm, Slot, FunctionDef[A,T]) -> Result[(), CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
 ];

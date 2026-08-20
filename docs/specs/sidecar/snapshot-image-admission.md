@@ -82,19 +82,18 @@ select a weaker restore path.
 
 `VmSnapshot` is the untyped guest view of one admitted complete image.
 
-The image can contain a distinguished run marker. External loading
-preserves this marker without assigning its result type.
+The image contains no distinguished run marker.
 
-`VmSnapshot.cast_result[T]` checks the marker and its result type.
+`VmSnapshot.select[T](run)` checks one run selector and its result type.
 Success returns `RunSnapshot[T]` without copying the image.
 
-A full snapshot from `Vm.snapshot()` has no distinguished run marker.
-Its `cast_result` operation therefore returns a typed error.
+A full snapshot from `Vm.snapshot()` contains every selected run in that VM.
 
 ### 2.5 RunSnapshot[T]
 
-`RunSnapshot[T]` is a typed guest view over one `SnapshotImage`. It does
-not own another image and does not add another admission state.
+`RunSnapshot[T]` is a typed guest view over one `SnapshotImage` and one run selector.
+
+It does not own another image. It does not add another admission state.
 
 The view selects one distinguished run. Its terminal result has type
 `T`.
@@ -195,6 +194,10 @@ Structural resolution enforces these rules:
 - Every object ordinal names one object in the correct heap.
 - Every function, class, type, and operation identity resolves.
 - Every code identity matches verified code.
+- Every installed artifact decodes and passes independent verification.
+- Replaying installations produces the declared aggregate code identity.
+- Every instance carries the exact relocation of its installation.
+- Every installed-code handle names one valid image, instance, and definition.
 - Every frame names a reachable instruction boundary.
 - Every frame environment ordinal resolves.
 - Frame bases fill the local arena exactly.

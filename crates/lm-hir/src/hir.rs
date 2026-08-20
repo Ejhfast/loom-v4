@@ -155,6 +155,12 @@ pub enum NativeRepr {
     TcpStream,
     TcpListener,
     TlsStream,
+    Artifact,
+    VerifiedModule,
+    SlotSpec,
+    CodeInstance,
+    Slot,
+    FunctionDef,
 }
 
 /// One checked class with its full field layout.

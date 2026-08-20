@@ -12,10 +12,10 @@ use crate::machine::{
     ImageSlotTarget as RuntimeSlotTarget, Machine, MachineState, Mailbox, Ownership, Pending,
     PolicyCursor, RoutedRequest, Terminal, VmId, VmImageKey, WaitEntry, WaitSource,
 };
-use crate::world::{VmImageRecord, World};
-use crate::VmConfig;
+use crate::world::{InstalledInstance, VmImageRecord, World};
+use crate::{LoadedModule, VmConfig};
 use lm_bytecode::closed::TypeImportPlan;
-use lm_heap::{Heap, Object};
+use lm_heap::{Heap, Object, SharedBytes};
 use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 
 /// One complete restore that is ready for commit.
@@ -29,6 +29,9 @@ pub(crate) struct RestorePlan {
     gate_members: Vec<VmId>,
     image_records: Vec<(u32, VmImageRecord)>,
     image_appended: usize,
+    image_replacement: Option<(u32, VmImageRecord)>,
+    loaded: Option<LoadedModule>,
+    installations: Vec<SharedBytes>,
 }
 
 /// Portable image records prepared before restore commit.
@@ -36,6 +39,7 @@ struct PreparedImages {
     keys: Vec<VmImageKey>,
     records: Vec<(u32, VmImageRecord)>,
     appended: usize,
+    replacement: Option<(u32, VmImageRecord)>,
 }
 
 impl World {
@@ -57,10 +61,33 @@ impl World {
         target: VmId,
         admitted: &SnapshotImage,
     ) -> Result<RestorePlan, RestoreFail> {
-        let running = self.identity().map_err(|_| RestoreFail::OtherProgram)?;
         let identity = admitted.identity();
-        if identity.module_semantic != running.semantic_hash
-            || identity.verification != self.verification_hash()
+        let base = self
+            .base_identity()
+            .map_err(|_| RestoreFail::OtherProgram)?;
+        if identity.base_semantic != base.semantic_hash
+            || identity.base_verification != self.base_verification_hash()
+        {
+            return Err(RestoreFail::OtherProgram);
+        }
+        let aggregate_matches = identity.module_semantic
+            == self
+                .identity()
+                .map_err(|_| RestoreFail::OtherProgram)?
+                .semantic_hash
+            && identity.verification == self.verification_hash();
+        let current_is_base = self.verification_hash() == self.base_verification_hash();
+        if !aggregate_matches && !current_is_base {
+            return Err(RestoreFail::OtherProgram);
+        }
+        let loaded = (!aggregate_matches).then(|| admitted.loaded().clone());
+        if aggregate_matches
+            && (self.installations.len() != admitted.world().installations.len()
+                || self
+                    .installations
+                    .iter()
+                    .zip(&admitted.world().installations)
+                    .any(|(left, right)| left.as_slice() != right.as_slice()))
         {
             return Err(RestoreFail::OtherProgram);
         }
@@ -119,6 +146,47 @@ impl World {
         self.prepare_gate_group()
             .map_err(|_| RestoreFail::LimitExceeded)?;
 
+        let image = admitted.world();
+        let installation_base = if loaded.is_some() {
+            u32::try_from(self.installations.len()).map_err(|_| RestoreFail::LimitExceeded)?
+        } else {
+            0
+        };
+        let mut artifact_table = try_vec(image.installations.len())?;
+        let mut installations = try_vec(if loaded.is_some() {
+            image.installations.len()
+        } else {
+            0
+        })?;
+        if loaded.is_some() {
+            self.installations
+                .try_reserve_exact(image.installations.len())
+                .map_err(|_| RestoreFail::LimitExceeded)?;
+            for artifact in &image.installations {
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(artifact.len())
+                    .map_err(|_| RestoreFail::LimitExceeded)?;
+                bytes.extend_from_slice(artifact);
+                let bytes = SharedBytes::from(bytes);
+                artifact_table.push(bytes.clone());
+                installations.push(bytes);
+            }
+        } else {
+            artifact_table.extend(self.installations.iter().cloned());
+        }
+        if let Some(code) = &loaded {
+            let count = code.module().slots.len();
+            for image in &mut self.vm_images {
+                if image.live && image.slots.len() < count {
+                    image
+                        .slots
+                        .try_reserve_exact(count - image.slots.len())
+                        .map_err(|_| RestoreFail::LimitExceeded)?;
+                }
+            }
+        }
+
         let types = self
             .envs
             .prepare_import(&image.types, &image.envs)
@@ -137,7 +205,15 @@ impl World {
             ids.push(u32::try_from(raw).map_err(|_| RestoreFail::LimitExceeded)?);
         }
 
-        let prepared_images = self.prepare_image_import(target, image, &ids, env_map, type_map)?;
+        let prepared_images = self.prepare_image_import(
+            target,
+            image,
+            &ids,
+            env_map,
+            type_map,
+            installation_base,
+            &artifact_table,
+        )?;
 
         let ceiling = self.config_of(target);
         let mut configs = try_vec(count)?;
@@ -207,10 +283,14 @@ impl World {
             gate_members: ids,
             image_records: prepared_images.records,
             image_appended: prepared_images.appended,
+            image_replacement: prepared_images.replacement,
+            loaded,
+            installations,
         })
     }
 
     /// Plan portable VM image records without changing the registry.
+    #[allow(clippy::too_many_arguments)]
     fn prepare_image_import(
         &mut self,
         target: VmId,
@@ -218,6 +298,8 @@ impl World {
         ids: &[VmId],
         env_map: &[TypeEnvId],
         type_map: &[u32],
+        installation_base: u32,
+        artifacts: &[SharedBytes],
     ) -> Result<PreparedImages, RestoreFail> {
         let target_key = self.machines[target as usize].image;
         let reused_source = target_key.and_then(|_| image.machines[0].image);
@@ -263,11 +345,9 @@ impl World {
             keys.push(key);
         }
         let mut records = try_vec(new_count)?;
+        let mut replacement = None;
         let ceiling = self.config_of(target);
         for (ordinal, source) in image.vm_images.iter().enumerate() {
-            if Some(ordinal as u32) == reused_source {
-                continue;
-            }
             let key = keys[ordinal];
             let config = clamp_image(&source.limits, ceiling);
             let mut heap = self.empty_image_heap(config);
@@ -289,21 +369,66 @@ impl World {
                     }
                 });
             }
-            records.push((
-                key.image,
-                VmImageRecord {
-                    generation: key.generation,
-                    live: true,
-                    config,
-                    slots,
-                    heap,
-                },
-            ));
+            let mut instances = try_vec(source.instances.len())?;
+            for instance in &source.instances {
+                let artifact = artifacts
+                    .get(instance.installation as usize)
+                    .ok_or(RestoreFail::OtherProgram)?;
+                let module = lm_bytecode::decode(artifact.as_slice())
+                    .map_err(|_| RestoreFail::OtherProgram)?;
+                let mut exports = try_vec(module.exports.len())?;
+                for export in &module.exports {
+                    if export.kind != lm_bytecode::ExportKind::Function {
+                        continue;
+                    }
+                    let function = *instance
+                        .funcs
+                        .get(export.def as usize)
+                        .ok_or(RestoreFail::OtherProgram)?;
+                    let mut name = String::new();
+                    name.try_reserve_exact(export.name.len())
+                        .map_err(|_| RestoreFail::LimitExceeded)?;
+                    name.push_str(&export.name);
+                    exports.push((name, function));
+                }
+                let mut funcs = try_vec(instance.funcs.len())?;
+                funcs.extend_from_slice(&instance.funcs);
+                let mut classes = try_vec(instance.classes.len())?;
+                classes.extend_from_slice(&instance.classes);
+                let mut instance_slots = try_vec(instance.slots.len())?;
+                instance_slots.extend_from_slice(&instance.slots);
+                instances.push(InstalledInstance {
+                    installation: installation_base
+                        .checked_add(instance.installation)
+                        .ok_or(RestoreFail::LimitExceeded)?,
+                    artifact: artifact.clone(),
+                    semantic_hash: instance.semantic_hash,
+                    entry: instance.entry,
+                    funcs,
+                    classes,
+                    slots: instance_slots,
+                    exports,
+                });
+            }
+            let record = VmImageRecord {
+                generation: key.generation,
+                live: true,
+                config,
+                slots,
+                heap,
+                instances,
+            };
+            if Some(ordinal as u32) == reused_source {
+                replacement = Some((key.image, record));
+            } else {
+                records.push((key.image, record));
+            }
         }
         Ok(PreparedImages {
             keys,
             records,
             appended,
+            replacement,
         })
     }
 
@@ -324,7 +449,26 @@ impl World {
             gate_members,
             image_records,
             image_appended,
+            image_replacement,
+            loaded,
+            installations,
         } = plan;
+        if let Some(loaded) = loaded {
+            self.loaded = loaded;
+            self.module = self.loaded.module_store();
+            self.dispatch = self.loaded.dispatch_store();
+            self.core = self.loaded.core_layout();
+            let slot_count = self.module.slots.len();
+            for image in &mut self.vm_images {
+                if image.live {
+                    image.slots.resize(slot_count, RuntimeSlotTarget::Empty);
+                }
+            }
+        }
+        self.installations.extend(installations);
+        if let Some((slot, record)) = image_replacement {
+            self.vm_images[slot as usize] = record;
+        }
         let reused = image_records.len().saturating_sub(image_appended);
         for (index, (slot, record)) in image_records.into_iter().enumerate() {
             if index < reused {
@@ -751,6 +895,13 @@ fn relocate_metadata(
             *env = Witness(env_map[env.env().0 as usize]);
         }
         Object::NativeVm { image, generation } => {
+            let key = image_keys[*image as usize];
+            *image = key.image;
+            *generation = key.generation;
+        }
+        Object::NativeCodeHandle {
+            image, generation, ..
+        } => {
             let key = image_keys[*image as usize];
             *image = key.image;
             *generation = key.generation;

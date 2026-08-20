@@ -87,6 +87,12 @@ impl<'o> FnChecker<'o> {
                             | NativeRepr::TcpStream
                             | NativeRepr::TcpListener
                             | NativeRepr::TlsStream
+                            | NativeRepr::Artifact
+                            | NativeRepr::VerifiedModule
+                            | NativeRepr::SlotSpec
+                            | NativeRepr::CodeInstance
+                            | NativeRepr::Slot
+                            | NativeRepr::FunctionDef
                     )
                 ) {
                     return Err(Diagnostic::new(

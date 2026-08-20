@@ -24,17 +24,21 @@
 //! costs at least one byte, so `count > remaining` rejects at once.
 
 use super::{
-    AdmissionBudget, Image, ImageBlock, ImageCallback, ImageError, ImageFrame, ImageLimits,
-    ImageMachine, ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor, ImageReason,
-    ImageRoutedRequest, ImageSlotTarget, ImageState, ImageTerminal, ImageVm, ImageWaitEntry,
-    ImageWaitSource, LoadLimits, Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION, MAGIC,
-    SECTION_CODE, SECTION_HEADER, SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
+    AdmissionBudget, Image, ImageBlock, ImageCallback, ImageError, ImageFrame, ImageInstance,
+    ImageLimits, ImageMachine, ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor,
+    ImageReason, ImageRoutedRequest, ImageSlotTarget, ImageState, ImageTerminal, ImageVm,
+    ImageWaitEntry, ImageWaitSource, LoadLimits, Origin, SnapshotFail, SnapshotImage,
+    FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER, SECTION_HEAPS, SECTION_MACHINES,
+    SECTION_TYPES,
 };
 use crate::LoadedModule;
 use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
-use lm_heap::{MapIndex, NativeByteBuffer, NativeStringBuilder, Object, StructuralEpoch};
+use lm_heap::{
+    CodeHandleKind, MapIndex, NativeByteBuffer, NativeStringBuilder, Object, PortableCode,
+    PortableCodeKind, StructuralEpoch,
+};
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::cell::Cell;
 
@@ -243,7 +247,7 @@ impl Out {
 /// buffer passes it, so a runaway world never builds a huge buffer.
 pub fn encode(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
     let header = section_header(image);
-    let code = section_code(image);
+    let code = section_code(image, limit)?;
     let types = section_types(image, limit)?;
     let heaps = section_heaps(image, limit)?;
     let machines = section_machines(image, limit)?;
@@ -326,10 +330,10 @@ fn section_header(image: &Image) -> Vec<u8> {
     out.bytes
 }
 
-fn section_code(image: &Image) -> Vec<u8> {
+fn section_code(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
     let mut out = Out {
         bytes: Vec::new(),
-        limit: usize::MAX,
+        limit,
         bad_op: None,
     };
     out.leb(image.funcs.len() as u64);
@@ -342,7 +346,15 @@ fn section_code(image: &Image) -> Vec<u8> {
         out.leb(*slot as u64);
         out.hash(hash);
     }
-    out.bytes
+    out.leb(image.installations.len() as u64);
+    for artifact in &image.installations {
+        out.leb(artifact.len() as u64);
+        out.bytes.extend_from_slice(artifact);
+        if out.over_limit() {
+            return Err(SnapshotFail::LimitExceeded);
+        }
+    }
+    out.into_bytes()
 }
 
 /// The closed type table and the type environment table.
@@ -514,6 +526,33 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.u32(*generation);
         }
         Object::NativeRun { vm } | Object::NativeTable { vm } => out.leb(*vm as u64),
+        Object::NativeCode(code) => {
+            out.u8(match code.kind {
+                PortableCodeKind::Artifact => 0,
+                PortableCodeKind::VerifiedModule => 1,
+                PortableCodeKind::SlotSpec => 2,
+            });
+            out.leb(code.index as u64);
+            out.leb(code.bytes.len() as u64);
+            out.bytes.extend_from_slice(code.bytes.as_slice());
+        }
+        Object::NativeCodeHandle {
+            image,
+            generation,
+            instance,
+            kind,
+            index,
+        } => {
+            out.leb(*image as u64);
+            out.u32(*generation);
+            out.leb(*instance as u64);
+            out.u8(match kind {
+                CodeHandleKind::Instance => 0,
+                CodeHandleKind::Slot => 1,
+                CodeHandleKind::Function => 2,
+            });
+            out.leb(*index as u64);
+        }
         Object::NativeRequest { vm, ordinal } => {
             out.leb(*vm as u64);
             out.u64(*ordinal);
@@ -595,6 +634,18 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
                     out.u8(4);
                     out.leb(*proc as u64);
                     out.u32(*generation);
+                }
+            }
+        }
+        out.leb(image.instances.len() as u64);
+        for instance in &image.instances {
+            out.leb(instance.installation as u64);
+            out.hash(&instance.semantic_hash);
+            out.leb(instance.entry as u64);
+            for values in [&instance.funcs, &instance.classes, &instance.slots] {
+                out.leb(values.len() as u64);
+                for value in values {
+                    out.leb(*value as u64);
                 }
             }
         }
@@ -1010,7 +1061,7 @@ pub fn load_external(
     let (image, hash) = decode_inner(bytes, limits, &decode_budget)?;
     decode_budget.charge(bytes.len(), "container copy")?;
     let mut admission_budget = AdmissionBudget::default();
-    let identity = super::admit::prove(&image, loaded, &mut admission_budget)?;
+    let proof = super::admit::prove(&image, loaded, &mut admission_budget)?;
     // The decoder accepts one byte string for one image, so the bytes
     // it received are the canonical bytes of the admitted image.
     let mut owned = Vec::new();
@@ -1024,8 +1075,9 @@ pub fn load_external(
     Ok(SnapshotImage {
         bytes: std::sync::OnceLock::from(std::sync::Arc::new(owned)),
         world: std::sync::Arc::new(image),
+        loaded: proof.loaded,
         hash: std::sync::OnceLock::from(hash),
-        identity,
+        identity: proof.identity,
         origin: Origin::ExternalContainer,
         byte_limit: usize::MAX,
     })
@@ -1050,6 +1102,7 @@ pub fn load_external(
 pub(super) fn from_trusted_capture(
     image: Image,
     identity: super::AdmissionIdentity,
+    loaded: LoadedModule,
     limit: usize,
 ) -> Result<SnapshotImage, SnapshotFail> {
     if image.resident_bytes() > limit {
@@ -1058,6 +1111,7 @@ pub(super) fn from_trusted_capture(
     Ok(SnapshotImage {
         bytes: std::sync::OnceLock::new(),
         world: std::sync::Arc::new(image),
+        loaded,
         hash: std::sync::OnceLock::new(),
         identity,
         origin: Origin::TrustedCapture,
@@ -1072,6 +1126,7 @@ pub(super) fn from_trusted_capture(
 pub(super) fn seal_admitted(
     image: Image,
     identity: super::AdmissionIdentity,
+    loaded: LoadedModule,
     limit: usize,
 ) -> Result<SnapshotImage, ImageError> {
     // The encoder has two failures, and they break two rules. A
@@ -1093,6 +1148,7 @@ pub(super) fn seal_admitted(
     Ok(SnapshotImage {
         bytes: std::sync::OnceLock::from(std::sync::Arc::new(bytes)),
         world: std::sync::Arc::new(image),
+        loaded,
         hash: std::sync::OnceLock::from(hash),
         identity,
         origin: Origin::ExternalContainer,
@@ -1297,6 +1353,13 @@ fn decode_inner(
         last = Some(slot);
         classes.push((slot, hash));
     }
+    let installation_count = code.count(limits.max_code_slots as u64, "installation")?;
+    let mut installations = code.vector(installation_count, "installation table")?;
+    for _ in 0..installation_count {
+        let length = code.count(limits.max_bytes as u64, "artifact byte")?;
+        let source = code.take(length)?;
+        installations.push(code.copy_bytes(source, "installed artifact")?);
+    }
     if code.remaining() != 0 {
         return err(ImageReason::Trailing, "the code section holds extra bytes");
     }
@@ -1379,10 +1442,48 @@ fn decode_inner(
             };
             slots.push(target);
         }
+        let instance_count = records.count(ctx.limits.max_code_slots as u64, "module instance")?;
+        let mut instances = records.vector(instance_count, "module instance table")?;
+        for _ in 0..instance_count {
+            let installation = records.leb()?;
+            if installation >= installation_count as u64 {
+                return err(
+                    ImageReason::Reference,
+                    "a module instance names no installed artifact",
+                );
+            }
+            let installation = installation as u32;
+            let semantic_hash = records.hash()?;
+            let entry = u32::try_from(records.leb()?).map_err(|_| {
+                ImageError::new(ImageReason::Reference, "an instance entry is too large")
+            })?;
+            let mut read_map = |what: &str| -> Result<Vec<u32>, ImageError> {
+                let count = records.count(ctx.limits.max_code_slots as u64, what)?;
+                let mut values = records.vector(count, what)?;
+                for _ in 0..count {
+                    values.push(u32::try_from(records.leb()?).map_err(|_| {
+                        ImageError::new(
+                            ImageReason::Reference,
+                            format!("an instance {what} index is too large"),
+                        )
+                    })?);
+                }
+                Ok(values)
+            };
+            instances.push(ImageInstance {
+                installation,
+                semantic_hash,
+                entry,
+                funcs: read_map("function relocation")?,
+                classes: read_map("class relocation")?,
+                slots: read_map("slot relocation")?,
+            });
+        }
         vm_images.push(ImageVm {
             limits,
             slots,
             objects,
+            instances,
         });
     }
     let mut machines: Vec<ImageMachine> = records.vector(machine_count, "machine table")?;
@@ -1406,6 +1507,7 @@ fn decode_inner(
             result_type,
             funcs,
             classes,
+            installations,
             types,
             envs,
             vm_images,
@@ -1870,6 +1972,60 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
         25 => Object::NativeRun {
             vm: machine_ref(cur, ctx)?,
         },
+        26 => {
+            let kind = match cur.u8()? {
+                0 => PortableCodeKind::Artifact,
+                1 => PortableCodeKind::VerifiedModule,
+                2 => PortableCodeKind::SlotSpec,
+                _ => {
+                    return err(
+                        ImageReason::Layout,
+                        "a portable code kind is invalid".to_string(),
+                    )
+                }
+            };
+            let index = u32::try_from(cur.leb()?).map_err(|_| {
+                ImageError::new(ImageReason::Reference, "a portable code index is too large")
+            })?;
+            let count = cur.count(limits.max_bytes as u64, "artifact byte")?;
+            let source = cur.take(count)?;
+            Object::NativeCode(Box::new(PortableCode {
+                kind,
+                bytes: cur.copy_bytes(source, "artifact bytes")?.into(),
+                index,
+            }))
+        }
+        27 => {
+            let image = image_ref(cur, ctx)?;
+            let generation = cur.u32()?;
+            let instance = u32::try_from(cur.leb()?).map_err(|_| {
+                ImageError::new(ImageReason::Reference, "an instance index is too large")
+            })?;
+            let kind = match cur.u8()? {
+                0 => CodeHandleKind::Instance,
+                1 => CodeHandleKind::Slot,
+                2 => CodeHandleKind::Function,
+                _ => {
+                    return err(
+                        ImageReason::Layout,
+                        "an installed code handle kind is invalid".to_string(),
+                    )
+                }
+            };
+            let index = u32::try_from(cur.leb()?).map_err(|_| {
+                ImageError::new(
+                    ImageReason::Reference,
+                    "an installed code index is too large",
+                )
+            })?;
+            Object::NativeCodeHandle {
+                image,
+                generation,
+                instance,
+                kind,
+                index,
+            }
+        }
         other => {
             return err(
                 ImageReason::Layout,

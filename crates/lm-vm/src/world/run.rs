@@ -43,10 +43,13 @@ impl World {
             lm_value::TypeEnvId::EMPTY,
         );
         World {
+            base_loaded: loaded.clone(),
             loaded: loaded.clone(),
             module,
             dispatch: loaded.dispatch_store(),
             core: loaded.core_layout(),
+            base_slot_count: loaded.module().slots.len(),
+            installations: Vec::new(),
             machines: vec![root],
             vm_images: Vec::new(),
             vm_image_free: Vec::new(),

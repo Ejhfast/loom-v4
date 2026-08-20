@@ -1411,6 +1411,120 @@ pub(crate) fn step(
                             let vm = ctx.intern(BcType::Vm);
                             push(state, vm)?;
                         }
+                        lm_abi::OP_VM_ARTIFACT => {
+                            pop_expect(state, ctx.intern(BcType::Bytes))?;
+                            let artifact = ctx
+                                .plain_inst(ctx.core.artifact, "Artifact")
+                                .map_err(&fail)?;
+                            push(state, artifact)?;
+                        }
+                        lm_abi::OP_VM_VERIFY => {
+                            let artifact = ctx
+                                .plain_inst(ctx.core.artifact, "Artifact")
+                                .map_err(&fail)?;
+                            pop_expect(state, artifact)?;
+                            let verified = ctx
+                                .plain_inst(ctx.core.verified_module, "VerifiedModule")
+                                .map_err(&fail)?;
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(verified, error).map_err(&fail)?;
+                            push(state, result)?;
+                        }
+                        lm_abi::OP_VM_INSTALL => {
+                            let verified = ctx
+                                .plain_inst(ctx.core.verified_module, "VerifiedModule")
+                                .map_err(&fail)?;
+                            pop_expect(state, verified)?;
+                            pop_expect(state, ctx.intern(BcType::Vm))?;
+                            let instance = ctx
+                                .plain_inst(ctx.core.instance, "Instance")
+                                .map_err(&fail)?;
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(instance, error).map_err(&fail)?;
+                            push(state, result)?;
+                        }
+                        lm_abi::OP_VM_INSTANCE_ENTRY | lm_abi::OP_VM_INSTANCE_FUNCTION => {
+                            if op == lm_abi::OP_VM_INSTANCE_FUNCTION {
+                                pop_expect(state, TY_STR)?;
+                            }
+                            let instance = ctx
+                                .plain_inst(ctx.core.instance, "Instance")
+                                .map_err(&fail)?;
+                            pop_expect(state, instance)?;
+                            let Some(result) = ctx.core.result else {
+                                return Err(fail(
+                                    "the module does not carry the pinned core Result definition"
+                                        .to_string(),
+                                ));
+                            };
+                            let Some(function_def) = ctx.core.function_def else {
+                                return Err(fail(
+                                    "the module does not carry the pinned core FunctionDef definition"
+                                        .to_string(),
+                                ));
+                            };
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let BcType::Inst(found_result, result_args) = ctx.ty(reply_ty) else {
+                                return Err(fail(
+                                    "an instance function lookup needs a Result reply".to_string(),
+                                ));
+                            };
+                            if found_result != result
+                                || result_args.len() != 2
+                                || result_args[1] != error
+                            {
+                                return Err(fail(
+                                    "an instance function lookup has the wrong error type"
+                                        .to_string(),
+                                ));
+                            }
+                            let BcType::Inst(found_function, function_args) =
+                                ctx.ty(result_args[0])
+                            else {
+                                return Err(fail(
+                                    "an instance function lookup needs a FunctionDef result"
+                                        .to_string(),
+                                ));
+                            };
+                            if found_function != function_def || function_args.len() != 2 {
+                                return Err(fail(
+                                    "an instance function lookup has the wrong function type"
+                                        .to_string(),
+                                ));
+                            }
+                            if !matches!(ctx.ty(function_args[0]), BcType::Unit | BcType::Tuple(_))
+                            {
+                                return Err(fail(
+                                    "a FunctionDef argument view must be unit or a tuple"
+                                        .to_string(),
+                                ));
+                            }
+                            push(state, reply_ty)?;
+                        }
+                        lm_abi::OP_VM_INSTANCE_SLOT | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => {
+                            pop_expect(state, TY_INT)?;
+                            let instance = ctx
+                                .plain_inst(ctx.core.instance, "Instance")
+                                .map_err(&fail)?;
+                            pop_expect(state, instance)?;
+                            let value = if op == lm_abi::OP_VM_INSTANCE_SLOT {
+                                ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?
+                            } else {
+                                ctx.plain_inst(ctx.core.slot_spec, "SlotSpec")
+                                    .map_err(&fail)?
+                            };
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(value, error).map_err(&fail)?;
+                            push(state, result)?;
+                        }
                         lm_abi::OP_VM_ACTIVATE => {
                             let args_ty = pop(state)?;
                             let fn_ty = pop(state)?;
@@ -1437,6 +1551,59 @@ pub(crate) fn step(
                             }
                             let run = ctx.intern(BcType::Run(ret));
                             push(state, run)?;
+                        }
+                        lm_abi::OP_VM_ACTIVATE_DEF => {
+                            let args_ty = pop(state)?;
+                            let definition = pop(state)?;
+                            pop_expect(state, ctx.intern(BcType::Vm))?;
+                            let Some(function_def) = ctx.core.function_def else {
+                                return Err(fail(
+                                    "the module does not carry the pinned core FunctionDef definition"
+                                        .to_string(),
+                                ));
+                            };
+                            let BcType::Inst(found, parts) = ctx.ty(definition) else {
+                                return Err(fail(
+                                    "`Vm.ActivateDef` needs a FunctionDef".to_string(),
+                                ));
+                            };
+                            if found != function_def
+                                || parts.len() != 2
+                                || !ctx.is_subtype(args_ty, parts[0])
+                            {
+                                return Err(fail(
+                                    "`Vm.ActivateDef` arguments do not match the definition"
+                                        .to_string(),
+                                ));
+                            }
+                            let run = ctx.intern(BcType::Run(parts[1]));
+                            push(state, run)?;
+                        }
+                        lm_abi::OP_VM_REPLACE_FUNCTION => {
+                            let definition = pop(state)?;
+                            let slot = pop(state)?;
+                            pop_expect(state, ctx.intern(BcType::Vm))?;
+                            let function_def = ctx.core.function_def.ok_or_else(|| {
+                                fail(
+                                    "the module does not carry the pinned core FunctionDef definition"
+                                        .to_string(),
+                                )
+                            })?;
+                            if !matches!(ctx.ty(definition), BcType::Inst(class, args) if class == function_def && args.len() == 2)
+                            {
+                                return Err(fail(
+                                    "`Vm.ReplaceFunction` needs a FunctionDef".to_string(),
+                                ));
+                            }
+                            let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
+                            if slot != slot_ty {
+                                return Err(fail("`Vm.ReplaceFunction` needs a Slot".to_string()));
+                            }
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(TY_UNIT, error).map_err(&fail)?;
+                            push(state, result)?;
                         }
                         lm_abi::OP_VM_RUN | lm_abi::OP_VM_STEP | lm_abi::OP_VM_DRIVE => {
                             let t = pop_run(state)?;

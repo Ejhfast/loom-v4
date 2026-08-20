@@ -577,6 +577,11 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_BYTE_BUFFER, "ByteBuffer"),
         (lm_bytecode::corepin::ROLE_CHAR, "Char"),
         (lm_bytecode::corepin::ROLE_TLS_STREAM, "TlsStream"),
+        (lm_bytecode::corepin::ROLE_ARTIFACT, "Artifact"),
+        (lm_bytecode::corepin::ROLE_VERIFIED_MODULE, "VerifiedModule"),
+        (lm_bytecode::corepin::ROLE_SLOT_SPEC, "SlotSpec"),
+        (lm_bytecode::corepin::ROLE_INSTANCE, "Instance"),
+        (lm_bytecode::corepin::ROLE_SLOT, "Slot"),
     ];
     for (role, name) in native_roles {
         let Some(idx) = slot(role) else { continue };
@@ -596,6 +601,7 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
     for (role, name, arity) in [
         (lm_bytecode::corepin::ROLE_LIST, "List", 1),
         (lm_bytecode::corepin::ROLE_MAP, "Map", 2),
+        (lm_bytecode::corepin::ROLE_FUNCTION_DEF, "FunctionDef", 2),
     ] {
         let Some(idx) = slot(role) else { continue };
         let class = &module.classes[idx as usize];
@@ -609,6 +615,26 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             return Err(terr(format!(
                 "the core role `{name}` does not name its native collection class"
             )));
+        }
+    }
+    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_CODE_ERROR) {
+        let class = &module.classes[idx as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || fields.len() != 1
+            || fields[0] != &BcType::Str
+        {
+            return Err(terr(
+                "the CodeError role does not name its final error class".to_string(),
+            ));
         }
     }
     let text_roles = [

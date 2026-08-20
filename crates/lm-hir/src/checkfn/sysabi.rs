@@ -265,6 +265,28 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
+        if group == "Vm" && member == "artifact" {
+            if args.len() != 1 {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!(
+                        "`sys.vm.artifact` expects 1 argument(s), found {}",
+                        args.len()
+                    ),
+                    span,
+                ));
+            }
+            let bytes = self.check_expr(ctx, &args[0], lm_types::BYTES)?;
+            self.charge_op(ctx, lm_abi::OP_VM_ARTIFACT, span)?;
+            return Ok(HExpr {
+                ty: Self::core_class(ctx, "Artifact"),
+                mutable: false,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_VM_ARTIFACT,
+                    args: vec![bytes],
+                },
+            });
+        }
         // `sys.vm.snapshot_self()` performs `Vm.SnapshotSelf`. The
         // calling function cannot name the enclosing machine result
         // type, so the reply is an untyped `VmSnapshot`.
@@ -596,6 +618,22 @@ impl<'o> FnChecker<'o> {
         span: Span,
     ) -> Result<Option<HExpr>, Diagnostic> {
         let recv_ty = ctx.store.get(recv_h.ty).clone();
+        let code_class = match &recv_ty {
+            Type::Class(class) => [
+                "Artifact",
+                "VerifiedModule",
+                "SlotSpec",
+                "Instance",
+                "Slot",
+                "CodeError",
+            ]
+            .into_iter()
+            .find(|name| ctx.core_types.get(*name) == Some(&class.0)),
+            Type::Inst(class, _) if ctx.core_types.get("FunctionDef") == Some(&class.0) => {
+                Some("FunctionDef")
+            }
+            _ => None,
+        };
         if !matches!(
             recv_ty,
             Type::Vm
@@ -607,33 +645,142 @@ impl<'o> FnChecker<'o> {
                 | Type::Handle(_, _)
                 | Type::ResourceHandle
                 | Type::Fault
-        ) {
+        ) && code_class.is_none()
+        {
             return Ok(None);
         }
-        if !type_args.is_empty() {
+        let code_takes_types =
+            code_class == Some("Instance") && matches!(name, "entry" | "function");
+        if !type_args.is_empty() && !code_takes_types {
             return Err(Diagnostic::new(
                 "E1024",
                 "a native control method does not take type arguments",
                 name_span,
             ));
         }
-        let out = match recv_ty {
-            Type::Vm | Type::Run(_) => {
-                self.check_machine_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
-            }
-            Type::Wait(_) => {
-                self.check_wait_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
-            }
-            Type::Handle(_, _) => {
-                self.check_proc_handle_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
-            }
-            Type::ResourceHandle => self
-                .check_resource_handle_method(ctx, recv_h, recv_ty, name, name_span, args, span)?,
-            _ => {
-                self.check_value_control_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
+        let out = if let Some(class) = code_class {
+            self.check_code_method(ctx, recv_h, class, name, name_span, type_args, args, span)?
+        } else {
+            match recv_ty {
+                Type::Vm | Type::Run(_) => {
+                    self.check_machine_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
+                }
+                Type::Wait(_) => {
+                    self.check_wait_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
+                }
+                Type::Handle(_, _) => self
+                    .check_proc_handle_method(ctx, recv_h, recv_ty, name, name_span, args, span)?,
+                Type::ResourceHandle => self.check_resource_handle_method(
+                    ctx, recv_h, recv_ty, name, name_span, args, span,
+                )?,
+                _ => self.check_value_control_method(
+                    ctx, recv_h, recv_ty, name, name_span, args, span,
+                )?,
             }
         };
         Ok(Some(out))
+    }
+
+    /// Check one method of an opaque code value.
+    #[allow(clippy::too_many_arguments)]
+    fn check_code_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        class: &str,
+        name: &str,
+        name_span: Span,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let code_error = Self::core_class(ctx, "CodeError");
+        let result = |ctx: &mut Ctx, ok| Self::core_inst(ctx, "Result", vec![ok, code_error]);
+        match (class, name) {
+            ("Artifact", "verify") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_VERIFY, span)?;
+                let verified = Self::core_class(ctx, "VerifiedModule");
+                Ok(HExpr {
+                    ty: result(ctx, verified),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_VERIFY,
+                        args: vec![recv_h],
+                    },
+                })
+            }
+            ("Instance", "entry") | ("Instance", "function") => {
+                if type_args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1024",
+                        format!("`{name}` needs argument and result type arguments"),
+                        name_span,
+                    ));
+                }
+                let env = self.env.clone();
+                let input = resolve_type(ctx, &env, &type_args[0])?;
+                let output = resolve_type(ctx, &env, &type_args[1])?;
+                if !matches!(ctx.store.get(input), Type::Unit | Type::Tuple(_)) {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "a function definition argument view must be () or a tuple",
+                        type_args[0].span,
+                    ));
+                }
+                let function = Self::core_inst(ctx, "FunctionDef", vec![input, output]);
+                let (op, values) = if name == "entry" {
+                    Self::expect_no_args(name, args, span)?;
+                    (lm_abi::OP_VM_INSTANCE_ENTRY, vec![recv_h])
+                } else {
+                    if args.len() != 1 {
+                        return Err(Diagnostic::new(
+                            "E1006",
+                            format!("`function` expects 1 argument(s), found {}", args.len()),
+                            span,
+                        ));
+                    }
+                    let binding = self.check_expr(ctx, &args[0], STRING)?;
+                    (lm_abi::OP_VM_INSTANCE_FUNCTION, vec![recv_h, binding])
+                };
+                self.charge_op(ctx, op, span)?;
+                Ok(HExpr {
+                    ty: result(ctx, function),
+                    mutable: true,
+                    kind: HExprKind::Perform { op, args: values },
+                })
+            }
+            ("Instance", "slot") | ("Instance", "slot_spec") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`{name}` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let index = self.check_expr(ctx, &args[0], INT)?;
+                let (op, value) = if name == "slot" {
+                    (lm_abi::OP_VM_INSTANCE_SLOT, Self::core_class(ctx, "Slot"))
+                } else {
+                    (
+                        lm_abi::OP_VM_INSTANCE_SLOT_SPEC,
+                        Self::core_class(ctx, "SlotSpec"),
+                    )
+                };
+                self.charge_op(ctx, op, span)?;
+                Ok(HExpr {
+                    ty: result(ctx, value),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op,
+                        args: vec![recv_h, index],
+                    },
+                })
+            }
+            _ => {
+                Err(self.no_control_method(ctx, ctx.store.get(recv_h.ty).clone(), name, name_span))
+            }
+        }
     }
 
     /// The one diagnostic every control receiver states for a name it
@@ -682,30 +829,100 @@ impl<'o> FnChecker<'o> {
                 // instead of calling `check_args_simple`.
                 let args = arrange_args(args, &["program", "args"], "activate")?;
                 let program = self.synth_expr(ctx, args[0])?;
-                let Type::Fn(params, _, ret, _) = ctx.store.get(program.ty).clone() else {
-                    return Err(Diagnostic::new(
-                        "E1004",
-                        format!(
-                            "`activate` needs a function value, found {}",
-                            ctx.display_type(&self.env, program.ty)
-                        ),
-                        args[0].span,
-                    ));
-                };
-                let want = if params.is_empty() {
-                    UNIT
-                } else {
-                    ctx.store.intern(Type::Tuple(params))
+                let (want, ret, op) = match ctx.store.get(program.ty).clone() {
+                    Type::Fn(params, _, ret, _) => {
+                        let view = if params.is_empty() {
+                            UNIT
+                        } else {
+                            ctx.store.intern(Type::Tuple(params))
+                        };
+                        (view, ret, lm_abi::OP_VM_ACTIVATE)
+                    }
+                    Type::Inst(class, values)
+                        if ctx.core_types.get("FunctionDef") == Some(&class.0)
+                            && values.len() == 2 =>
+                    {
+                        (values[0], values[1], lm_abi::OP_VM_ACTIVATE_DEF)
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "E1004",
+                            format!(
+                                "`activate` needs a function or function definition, found {}",
+                                ctx.display_type(&self.env, program.ty)
+                            ),
+                            args[0].span,
+                        ));
+                    }
                 };
                 let tuple = self.check_expr(ctx, args[1], want)?;
-                self.charge_op(ctx, lm_abi::OP_VM_ACTIVATE, span)?;
+                self.charge_op(ctx, op, span)?;
                 let run_ty = ctx.store.intern(Type::Run(ret));
                 HExpr {
                     ty: run_ty,
                     mutable: true,
                     kind: HExprKind::Perform {
-                        op: lm_abi::OP_VM_ACTIVATE,
+                        op,
                         args: vec![recv_h, program, tuple],
+                    },
+                }
+            }
+            (Type::Vm, "install") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`install` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let module = Self::core_class(ctx, "VerifiedModule");
+                let module = self.check_expr(ctx, &args[0], module)?;
+                self.charge_op(ctx, lm_abi::OP_VM_INSTALL, span)?;
+                let instance = Self::core_class(ctx, "Instance");
+                let error = Self::core_class(ctx, "CodeError");
+                let ty = Self::core_inst(ctx, "Result", vec![instance, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_INSTALL,
+                        args: vec![recv_h, module],
+                    },
+                }
+            }
+            (Type::Vm, "replace") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`replace` expects 2 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let slot_ty = Self::core_class(ctx, "Slot");
+                let slot = self.check_expr(ctx, &args[0], slot_ty)?;
+                let target = self.synth_expr(ctx, &args[1])?;
+                let valid = matches!(
+                    ctx.store.get(target.ty),
+                    Type::Inst(class, values)
+                        if ctx.core_types.get("FunctionDef") == Some(&class.0)
+                            && values.len() == 2
+                );
+                if !valid {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`replace` needs a FunctionDef target",
+                        args[1].span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_REPLACE_FUNCTION, span)?;
+                let error = Self::core_class(ctx, "CodeError");
+                let ty = Self::core_inst(ctx, "Result", vec![UNIT, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_REPLACE_FUNCTION,
+                        args: vec![recv_h, slot, target],
                     },
                 }
             }

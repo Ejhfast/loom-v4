@@ -18,8 +18,8 @@ use lm_value::ObjRef;
 #[cfg(test)]
 use lm_value::Value;
 pub use shape::{
-    dump_shapes, BoundaryPolicy, MapIndex, Object, ShapeDesc, StructuralEpoch, MIN_OBJECT_COST,
-    SHAPES,
+    dump_shapes, BoundaryPolicy, CodeHandleKind, MapIndex, Object, PortableCode, PortableCodeKind,
+    ShapeDesc, StructuralEpoch, MIN_OBJECT_COST, SHAPES,
 };
 pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,

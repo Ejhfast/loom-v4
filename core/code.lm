@@ -1,0 +1,27 @@
+# Core: verified code values and live installation handles.
+
+final class Artifact
+end
+
+final class VerifiedModule
+end
+
+final class SlotSpec
+end
+
+final class Instance
+end
+
+final class Slot
+end
+
+final class FunctionDef[A, T]
+end
+
+final class CodeError
+  message: String
+
+  def init(mut self, message: String)
+    self.message = message
+  end
+end

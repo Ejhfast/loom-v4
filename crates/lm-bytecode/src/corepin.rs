@@ -151,10 +151,17 @@ pub struct CoreLayout {
     pub list: Option<u32>,
     /// The core method table of native map values.
     pub map: Option<u32>,
+    pub artifact: Option<u32>,
+    pub verified_module: Option<u32>,
+    pub slot_spec: Option<u32>,
+    pub instance: Option<u32>,
+    pub slot: Option<u32>,
+    pub function_def: Option<u32>,
+    pub code_error: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 108] = [
+pub const PINNED_LABELS: [&str; 115] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -263,6 +270,13 @@ pub const PINNED_LABELS: [&str; 108] = [
     "TlsStream",
     "List",
     "Map",
+    "Artifact",
+    "VerifiedModule",
+    "SlotSpec",
+    "Instance",
+    "Slot",
+    "FunctionDef",
+    "CodeError",
 ];
 
 /// The core role of immediate integer values.
@@ -341,6 +355,13 @@ pub const ROLE_TLS_LIMIT_EXCEEDED: usize = 104;
 pub const ROLE_TLS_STREAM: usize = 105;
 pub const ROLE_LIST: usize = 106;
 pub const ROLE_MAP: usize = 107;
+pub const ROLE_ARTIFACT: usize = 108;
+pub const ROLE_VERIFIED_MODULE: usize = 109;
+pub const ROLE_SLOT_SPEC: usize = 110;
+pub const ROLE_INSTANCE: usize = 111;
+pub const ROLE_SLOT: usize = 112;
+pub const ROLE_FUNCTION_DEF: usize = 113;
+pub const ROLE_CODE_ERROR: usize = 114;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -499,6 +520,13 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "TlsStream" => &mut layout.tls_stream,
         "List" => &mut layout.list,
         "Map" => &mut layout.map,
+        "Artifact" => &mut layout.artifact,
+        "VerifiedModule" => &mut layout.verified_module,
+        "SlotSpec" => &mut layout.slot_spec,
+        "Instance" => &mut layout.instance,
+        "Slot" => &mut layout.slot,
+        "FunctionDef" => &mut layout.function_def,
+        "CodeError" => &mut layout.code_error,
         _ => unreachable!("only known labels enter the map"),
     }
 }

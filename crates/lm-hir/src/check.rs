@@ -40,6 +40,8 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/vm.lm"),
     "\n",
+    include_str!("../../../core/code.lm"),
+    "\n",
     include_str!("../../../core/proc.lm"),
     "\n",
     include_str!("../../../core/wait.lm"),
@@ -57,7 +59,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 54] = [
+pub const PRELUDE_TYPES: [&str; 61] = [
     "Option",
     "Result",
     "Ordering",
@@ -74,6 +76,13 @@ pub const PRELUDE_TYPES: [&str; 54] = [
     "Choice",
     "SnapshotError",
     "RestoreError",
+    "Artifact",
+    "VerifiedModule",
+    "SlotSpec",
+    "Instance",
+    "Slot",
+    "FunctionDef",
+    "CodeError",
     "FsError",
     "OpenOptions",
     "SeekFrom",
@@ -2992,6 +3001,12 @@ fn resolve_class(
         (true, "TcpStream") => Some(NativeRepr::TcpStream),
         (true, "TcpListener") => Some(NativeRepr::TcpListener),
         (true, "TlsStream") => Some(NativeRepr::TlsStream),
+        (true, "Artifact") => Some(NativeRepr::Artifact),
+        (true, "VerifiedModule") => Some(NativeRepr::VerifiedModule),
+        (true, "SlotSpec") => Some(NativeRepr::SlotSpec),
+        (true, "Instance") => Some(NativeRepr::CodeInstance),
+        (true, "Slot") => Some(NativeRepr::Slot),
+        (true, "FunctionDef") => Some(NativeRepr::FunctionDef),
         _ => None,
     };
     let text_parent = ctx.core_types.get("Text").copied();
@@ -3009,7 +3024,7 @@ fn resolve_class(
     };
     let valid_native_arity = match native_repr {
         Some(NativeRepr::List) => type_names.len() == 1,
-        Some(NativeRepr::Map) => type_names.len() == 2,
+        Some(NativeRepr::Map | NativeRepr::FunctionDef) => type_names.len() == 2,
         Some(_) => type_names.is_empty(),
         None => true,
     };
@@ -3042,6 +3057,13 @@ fn resolve_class(
             let value = ctx.store.intern(Type::Var(1));
             ctx.store.intern(Type::Map(key, value))
         }
+        Some(NativeRepr::FunctionDef) => {
+            let args = vec![
+                ctx.store.intern(Type::Var(0)),
+                ctx.store.intern(Type::Var(1)),
+            ];
+            ctx.store.intern(Type::Inst(ClassId(idx), args))
+        }
         Some(
             NativeRepr::Text
             | NativeRepr::Substring
@@ -3051,7 +3073,12 @@ fn resolve_class(
             | NativeRepr::TcpResource
             | NativeRepr::TcpStream
             | NativeRepr::TcpListener
-            | NativeRepr::TlsStream,
+            | NativeRepr::TlsStream
+            | NativeRepr::Artifact
+            | NativeRepr::VerifiedModule
+            | NativeRepr::SlotSpec
+            | NativeRepr::CodeInstance
+            | NativeRepr::Slot,
         ) => ctx.store.intern(Type::Class(ClassId(idx))),
         None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
         None => {

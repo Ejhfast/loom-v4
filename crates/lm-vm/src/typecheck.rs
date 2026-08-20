@@ -140,6 +140,12 @@ enum Kind {
     TcpStream,
     TcpListener,
     TlsStream,
+    Artifact,
+    VerifiedModule,
+    SlotSpec,
+    CodeInstance,
+    Slot,
+    FunctionDef,
 }
 
 enum Node {
@@ -275,6 +281,16 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::TcpListener)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_TLS_STREAM] == *class {
                 Node::Heap(Kind::TlsStream)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_ARTIFACT] == *class {
+                Node::Heap(Kind::Artifact)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_VERIFIED_MODULE] == *class {
+                Node::Heap(Kind::VerifiedModule)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_SLOT_SPEC] == *class {
+                Node::Heap(Kind::SlotSpec)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_INSTANCE] == *class {
+                Node::Heap(Kind::CodeInstance)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_SLOT] == *class {
+                Node::Heap(Kind::Slot)
             } else {
                 Node::Heap(Kind::Instance)
             }
@@ -307,6 +323,12 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
         {
             Node::Heap(Kind::Map)
         }
+        ClosedType::Inst(class, args)
+            if args.len() == 2
+                && *class == module.core_roles[lm_bytecode::corepin::ROLE_FUNCTION_DEF] =>
+        {
+            Node::Heap(Kind::FunctionDef)
+        }
         ClosedType::Inst(_, _) => Node::Heap(Kind::Instance),
     })
 }
@@ -338,6 +360,16 @@ fn kind_of(object: &Object) -> Kind {
         Object::NativeTcpStream { .. } => Kind::TcpStream,
         Object::NativeTcpListener { .. } => Kind::TcpListener,
         Object::NativeTlsStream { .. } => Kind::TlsStream,
+        Object::NativeCode(code) => match code.kind {
+            lm_heap::PortableCodeKind::Artifact => Kind::Artifact,
+            lm_heap::PortableCodeKind::VerifiedModule => Kind::VerifiedModule,
+            lm_heap::PortableCodeKind::SlotSpec => Kind::SlotSpec,
+        },
+        Object::NativeCodeHandle { kind, .. } => match kind {
+            lm_heap::CodeHandleKind::Instance => Kind::CodeInstance,
+            lm_heap::CodeHandleKind::Slot => Kind::Slot,
+            lm_heap::CodeHandleKind::Function => Kind::FunctionDef,
+        },
     }
 }
 

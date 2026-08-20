@@ -6,7 +6,10 @@
 //! `lm inspect <file.lms>` prints it, and the deterministic snapshot
 //! diff of the test suite compares two dumps line by line.
 
-use super::{Image, ImageBlock, ImagePolicyCursor, ImageTerminal, ImageWaitSource, SnapshotImage};
+use super::{
+    Image, ImageBlock, ImagePolicyCursor, ImageSlotTarget, ImageTerminal, ImageWaitSource,
+    SnapshotImage,
+};
 use lm_heap::Object;
 use lm_value::Value;
 use std::fmt::Write as _;
@@ -60,12 +63,54 @@ pub fn dump_image(world: &Image) -> String {
     for (slot, hash) in &world.classes {
         let _ = writeln!(out, "class {slot} {}", hex(hash));
     }
+    for (ordinal, artifact) in world.installations.iter().enumerate() {
+        let hash = lm_bytecode::identity::container_hash(artifact);
+        let _ = writeln!(
+            out,
+            "installation {ordinal} bytes {} hash {}",
+            artifact.len(),
+            hex(&hash)
+        );
+    }
     let _ = writeln!(
         out,
         "closed-types {} environments {}",
         world.types.len(),
         world.envs.len()
     );
+    for (ordinal, image) in world.vm_images.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "VM image {ordinal} slots {} objects {} instances {}",
+            image.slots.len(),
+            image.objects.len(),
+            image.instances.len()
+        );
+        for (slot, target) in image.slots.iter().enumerate() {
+            let _ = writeln!(out, "  slot {slot} {}", slot_text(*target));
+        }
+        for (index, instance) in image.instances.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "  instance {index} installation {} entry {} semantic {}",
+                instance.installation,
+                instance.entry,
+                hex(&instance.semantic_hash)
+            );
+            let _ = writeln!(out, "    functions {:?}", instance.funcs);
+            let _ = writeln!(out, "    classes {:?}", instance.classes);
+            let _ = writeln!(out, "    slots {:?}", instance.slots);
+        }
+        for (index, entry) in image.objects.iter().enumerate() {
+            let state = if entry.frozen { "frozen" } else { "mutable" };
+            let _ = writeln!(
+                out,
+                "  image-object {index} {} {state} {}",
+                entry.object.shape().name,
+                payload(&entry.object)
+            );
+        }
+    }
     for (ordinal, machine) in world.machines.iter().enumerate() {
         let parent = match machine.parent {
             None => "outside".to_string(),
@@ -184,6 +229,18 @@ pub fn dump_image(world: &Image) -> String {
     out
 }
 
+fn slot_text(target: ImageSlotTarget) -> String {
+    match target {
+        ImageSlotTarget::Empty => "empty".to_string(),
+        ImageSlotTarget::Function(function) => format!("function {function}"),
+        ImageSlotTarget::Class(class) => format!("class {class}"),
+        ImageSlotTarget::Value(value) => format!("value {}", show(value)),
+        ImageSlotTarget::Process { proc, generation } => {
+            format!("process {proc}:{generation}")
+        }
+    }
+}
+
 /// The deterministic difference between two dumps.
 ///
 /// The dump is one fact per line and it repeats exactly, so a line
@@ -256,6 +313,23 @@ fn payload(object: &Object) -> String {
         Object::Substring(text) => format!("substring {text:?}"),
         Object::NativeVm { image, generation } => format!("VM image {image}:{generation}"),
         Object::NativeRun { vm } => format!("run {vm}"),
+        Object::NativeCode(code) => {
+            format!(
+                "portable {:?} index {} bytes {}",
+                code.kind,
+                code.index,
+                code.bytes.len()
+            )
+        }
+        Object::NativeCodeHandle {
+            image,
+            generation,
+            instance,
+            kind,
+            index,
+        } => format!(
+            "installed {kind:?} {index} in instance {instance} of image {image}:{generation}"
+        ),
         Object::NativeTable { vm } => format!("table of machine {vm}"),
         Object::NativeRequest { vm, ordinal } => format!("request {ordinal} of machine {vm}"),
         Object::NativeCall { vm, ordinal, op } => {

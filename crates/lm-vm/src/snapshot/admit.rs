@@ -37,7 +37,7 @@ use crate::LoadedModule;
 use lm_bytecode::closed::{ClosedType, TypeEnv, TypeEnvs};
 use lm_bytecode::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
 use lm_bytecode::{BcType, ExtendedInstr, Instr, SlotContract};
-use lm_heap::Object;
+use lm_heap::{CodeHandleKind, Object, PortableCodeKind};
 use lm_value::Value;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -122,8 +122,14 @@ pub fn admit(
     loaded: &LoadedModule,
     budget: &mut AdmissionBudget,
 ) -> Result<SnapshotImage, ImageError> {
-    let identity = prove(&image, loaded, budget)?;
-    codec::seal_admitted(image, identity, budget.byte_limit())
+    let proof = prove(&image, loaded, budget)?;
+    codec::seal_admitted(image, proof.identity, proof.loaded, budget.byte_limit())
+}
+
+/// Verified code and identity produced by one admission proof.
+pub(super) struct AdmissionProof {
+    pub(super) identity: AdmissionIdentity,
+    pub(super) loaded: LoadedModule,
 }
 
 /// Prove the admission rule over one image.
@@ -135,29 +141,107 @@ pub(super) fn prove(
     image: &Image,
     loaded: &LoadedModule,
     budget: &mut AdmissionBudget,
-) -> Result<AdmissionIdentity, ImageError> {
+) -> Result<AdmissionProof, ImageError> {
     budget.charge(admission_cost(image)?)?;
-    let identity = loaded.identity().map_err(|_| {
+    let base_identity = loaded.identity().map_err(|_| {
         ImageError::admission(ImageReason::Code, "the program has no verified identity")
     })?;
-    let module = loaded.module();
+    let (aggregate, installations) = rebuild_aggregate(image, loaded)?;
+    let identity = aggregate.identity().map_err(|_| {
+        ImageError::admission(
+            ImageReason::Code,
+            "the installed code has no verified identity",
+        )
+    })?;
+    let module = aggregate.module();
     check_identity(image, identity)?;
     let tables = resolve_type_tables(image, module)?;
     let admit = Admit {
         image,
         module,
         identity,
+        installations: &installations,
         witness: tables,
     };
     admit.run()?;
-    Ok(AdmissionIdentity {
-        module_semantic: identity.semantic_hash,
-        verification: loaded.verification_hash(),
-        format: image.format,
-        abi_version: image.abi_version,
-        compiler_abi: image.compiler_abi,
-        verifier_version: image.verifier_version,
+    Ok(AdmissionProof {
+        identity: AdmissionIdentity {
+            base_semantic: base_identity.semantic_hash,
+            base_verification: loaded.verification_hash(),
+            module_semantic: identity.semantic_hash,
+            verification: aggregate.verification_hash(),
+            format: image.format,
+            abi_version: image.abi_version,
+            compiler_abi: image.compiler_abi,
+            verifier_version: image.verifier_version,
+        },
+        loaded: aggregate,
     })
+}
+
+/// Rebuild and verify the aggregate code stated by an image.
+fn rebuild_aggregate(
+    image: &Image,
+    base: &LoadedModule,
+) -> Result<(LoadedModule, Vec<InstallationProof>), ImageError> {
+    if image.installations.is_empty() {
+        return Ok((base.clone(), Vec::new()));
+    }
+    let mut module = base.module().clone();
+    let mut proofs = Vec::new();
+    proofs
+        .try_reserve_exact(image.installations.len())
+        .map_err(|_| {
+            ImageError::admission(
+                ImageReason::Budget,
+                "the installation proof allocation failed",
+            )
+        })?;
+    for (index, bytes) in image.installations.iter().enumerate() {
+        let addition = lm_bytecode::decode(bytes).map_err(|error| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("installed artifact {index} did not decode: {error}"),
+            )
+        })?;
+        let admitted = crate::load(addition.clone()).map_err(|error| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("installed artifact {index} did not verify: {error}"),
+            )
+        })?;
+        let source_identity = admitted.identity().map_err(|_| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("installed artifact {index} has no semantic identity"),
+            )
+        })?;
+        let appended = lm_bytecode::append::append_linked(&module, &addition).map_err(|error| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("installed artifact {index} did not link: {error}"),
+            )
+        })?;
+        proofs.push(InstallationProof {
+            semantic_hash: source_identity.semantic_hash,
+            entry: appended.reloc.funcs[addition.entry as usize],
+            reloc: appended.reloc,
+        });
+        module = appended.module;
+    }
+    let loaded = crate::load(module).map_err(|error| {
+        ImageError::admission(
+            ImageReason::Code,
+            format!("the installed aggregate did not verify: {error}"),
+        )
+    })?;
+    Ok((loaded, proofs))
+}
+
+struct InstallationProof {
+    semantic_hash: [u8; 32],
+    entry: u32,
+    reloc: lm_bytecode::append::AppendReloc,
 }
 
 fn fail<T>(reason: ImageReason, detail: impl Into<String>) -> Result<T, ImageError> {
@@ -178,9 +262,19 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
     };
     add(image.funcs.len())?;
     add(image.classes.len())?;
+    add(image.installations.len())?;
+    for artifact in &image.installations {
+        add(artifact.len())?;
+    }
     add(image.vm_images.len())?;
     for image in &image.vm_images {
         add(image.slots.len())?;
+        add(image.instances.len())?;
+        for instance in &image.instances {
+            add(instance.funcs.len())?;
+            add(instance.classes.len())?;
+            add(instance.slots.len())?;
+        }
         for entry in &image.objects {
             let edges = object_edges(&entry.object);
             add(2usize.saturating_add(edges.saturating_mul(2)))?;
@@ -327,6 +421,7 @@ struct Admit<'m> {
     image: &'m Image,
     module: &'m lm_bytecode::Module,
     identity: &'m ModuleIdentity,
+    installations: &'m [InstallationProof],
     /// The witness tables the image carries.
     witness: WitnessTables,
 }
@@ -527,6 +622,7 @@ impl Admit<'_> {
             return fail(ImageReason::State, "a snapshot world holds no machine");
         }
         self.check_code_manifest()?;
+        self.check_instances()?;
         self.check_slot_state()?;
         for image in 0..self.image.vm_images.len() {
             self.check_vm_image_heap(image as u32)?;
@@ -618,6 +714,69 @@ impl Admit<'_> {
             .classes
             .binary_search_by_key(&slot, |(s, _)| *s)
             .is_ok()
+    }
+
+    /// Prove each module instance against its installation record.
+    fn check_instances(&self) -> Result<(), ImageError> {
+        for (image, vm) in self.image.vm_images.iter().enumerate() {
+            for (index, instance) in vm.instances.iter().enumerate() {
+                let Some(proof) = self.installations.get(instance.installation as usize) else {
+                    return fail(
+                        ImageReason::Code,
+                        format!("VM image {image} instance {index} names no installation"),
+                    );
+                };
+                if instance.semantic_hash != proof.semantic_hash
+                    || instance.entry != proof.entry
+                    || instance.funcs != proof.reloc.funcs
+                    || instance.classes != proof.reloc.classes
+                    || instance.slots != proof.reloc.slots
+                {
+                    return fail(
+                        ImageReason::Code,
+                        format!("VM image {image} instance {index} has invalid relocation"),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Prove one portable code value before restore can expose it.
+    fn check_portable_code(
+        &self,
+        kind: PortableCodeKind,
+        bytes: &[u8],
+        index: u32,
+    ) -> Result<(), ImageError> {
+        if kind == PortableCodeKind::Artifact {
+            return Ok(());
+        }
+        let module = lm_bytecode::decode(bytes).map_err(|error| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("a portable code value did not decode: {error}"),
+            )
+        })?;
+        crate::load(module.clone()).map_err(|error| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("a portable code value did not verify: {error}"),
+            )
+        })?;
+        if kind == PortableCodeKind::SlotSpec && index as usize >= module.slots.len() {
+            return fail(
+                ImageReason::Code,
+                "a portable slot specification names no source slot",
+            );
+        }
+        if kind == PortableCodeKind::VerifiedModule && index != u32::MAX {
+            return fail(
+                ImageReason::Code,
+                "a verified module value carries a source index",
+            );
+        }
+        Ok(())
     }
 
     /// Prove each captured target against its immutable module contract.
@@ -837,6 +996,9 @@ impl Admit<'_> {
                     }
                     self.env_of(env.env().0)?;
                 }
+                Object::NativeCode(code) => {
+                    self.check_portable_code(code.kind, code.bytes.as_slice(), code.index)?;
+                }
                 _ => {}
             }
         }
@@ -960,8 +1122,11 @@ impl Admit<'_> {
                 visit(image)?;
             }
             for entry in &machine.objects {
-                if let Object::NativeVm { image, .. } = entry.object {
-                    visit(image)?;
+                match entry.object {
+                    Object::NativeVm { image, .. } | Object::NativeCodeHandle { image, .. } => {
+                        visit(image)?
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1115,6 +1280,52 @@ impl Admit<'_> {
                         )),
                     );
                 }
+            }
+            if let Object::NativeCodeHandle {
+                image,
+                generation,
+                instance,
+                kind,
+                index,
+            } = entry.object
+            {
+                if generation != 0 || image >= images {
+                    return fail(
+                        ImageReason::Reference,
+                        at(&format!(
+                            "object {ordinal} holds an invalid code image handle"
+                        )),
+                    );
+                }
+                let Some(record) = self.image.vm_images[image as usize]
+                    .instances
+                    .get(instance as usize)
+                else {
+                    return fail(
+                        ImageReason::Reference,
+                        at(&format!("object {ordinal} names no module instance")),
+                    );
+                };
+                let valid = match kind {
+                    CodeHandleKind::Instance => index == instance,
+                    CodeHandleKind::Function => {
+                        record.funcs.contains(&index) && self.func_named(index)
+                    }
+                    CodeHandleKind::Slot => {
+                        record.slots.contains(&index) && (index as usize) < self.module.slots.len()
+                    }
+                };
+                if !valid {
+                    return fail(
+                        ImageReason::Code,
+                        at(&format!(
+                            "object {ordinal} holds an invalid installed code handle"
+                        )),
+                    );
+                }
+            }
+            if let Object::NativeCode(code) = &entry.object {
+                self.check_portable_code(code.kind, code.bytes.as_slice(), code.index)?;
             }
             let target = match entry.object {
                 Object::NativeRun { vm } | Object::NativeTable { vm } => Some(vm),

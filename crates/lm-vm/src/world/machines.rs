@@ -271,7 +271,11 @@ impl World {
         }
         let mut slots = Vec::new();
         slots.try_reserve_exact(self.module.slots.len()).ok()?;
-        for slot in &self.module.slots {
+        for (index, slot) in self.module.slots.iter().enumerate() {
+            if index >= self.base_slot_count {
+                slots.push(ImageSlotTarget::Empty);
+                continue;
+            }
             slots.push(match slot.initial {
                 Some(lm_bytecode::SlotTarget::Function(func)) => ImageSlotTarget::Function(func),
                 Some(lm_bytecode::SlotTarget::Class(class)) => ImageSlotTarget::Class(class),
@@ -284,6 +288,7 @@ impl World {
             record.config = config;
             record.slots = slots;
             record.heap = Heap::with_budget(config.heap_bytes, self.budget.heap.clone());
+            record.instances.clear();
             return Some(VmImageKey {
                 image,
                 generation: record.generation,
@@ -297,6 +302,7 @@ impl World {
             config,
             slots,
             heap: Heap::with_budget(config.heap_bytes, self.budget.heap.clone()),
+            instances: Vec::new(),
         });
         Some(VmImageKey {
             image,
@@ -315,7 +321,101 @@ impl World {
         record.live = false;
         record.generation = record.generation.wrapping_add(1);
         record.heap = Heap::with_budget(record.config.heap_bytes, self.budget.heap.clone());
+        record.instances.clear();
         self.vm_image_free.push(key.image);
+    }
+
+    /// Install one verified linked artifact into one stopped image.
+    ///
+    /// The append linker preserves all existing numeric indices.
+    /// The method commits only after the aggregate module verifies.
+    pub(super) fn install_artifact(
+        &mut self,
+        key: VmImageKey,
+        artifact: SharedBytes,
+    ) -> Result<u32, String> {
+        self.check_slot_safepoint(key)
+            .map_err(|_| "the VM image is not at a safe installation point".to_string())?;
+
+        let addition = lm_bytecode::decode(artifact.as_slice())
+            .map_err(|error| format!("the artifact did not decode: {error}"))?;
+        let admitted = crate::load(addition.clone())
+            .map_err(|error| format!("the artifact did not verify: {error}"))?;
+        let identity = admitted
+            .identity()
+            .map_err(|_| "the artifact has no semantic identity".to_string())?;
+        let appended = lm_bytecode::append::append_linked(&self.module, &addition)?;
+        let next = crate::load(appended.module)
+            .map_err(|error| format!("the installed code did not verify: {error}"))?;
+
+        let slot_count = next.module().slots.len();
+        let target_index = key.image as usize;
+        let instance_index = self.vm_images[target_index].instances.len();
+        let instance_index = u32::try_from(instance_index)
+            .map_err(|_| "the VM image has too many module instances".to_string())?;
+        let installation = u32::try_from(self.installations.len())
+            .map_err(|_| "the world has too many installations".to_string())?;
+
+        for image in &mut self.vm_images {
+            if image.live && image.slots.len() < slot_count {
+                image
+                    .slots
+                    .try_reserve_exact(slot_count - image.slots.len())
+                    .map_err(|_| "the VM image has no slot capacity".to_string())?;
+            }
+        }
+        self.vm_images[target_index]
+            .instances
+            .try_reserve(1)
+            .map_err(|_| "the VM image has no instance capacity".to_string())?;
+        self.installations
+            .try_reserve(1)
+            .map_err(|_| "the world has no installation capacity".to_string())?;
+
+        for image in &mut self.vm_images {
+            if image.live {
+                image.slots.resize(slot_count, ImageSlotTarget::Empty);
+            }
+        }
+        let target = &mut self.vm_images[target_index];
+        for (source, initial) in appended.slot_initials.iter().enumerate() {
+            let slot = appended.reloc.slots[source] as usize;
+            if matches!(target.slots[slot], ImageSlotTarget::Empty) {
+                target.slots[slot] = match initial {
+                    Some(lm_bytecode::SlotTarget::Function(func)) => {
+                        ImageSlotTarget::Function(*func)
+                    }
+                    Some(lm_bytecode::SlotTarget::Class(class)) => ImageSlotTarget::Class(*class),
+                    None => ImageSlotTarget::Empty,
+                };
+            }
+        }
+        target.instances.push(InstalledInstance {
+            installation,
+            artifact: artifact.clone(),
+            semantic_hash: identity.semantic_hash,
+            entry: appended.reloc.funcs[addition.entry as usize],
+            funcs: appended.reloc.funcs.clone(),
+            classes: appended.reloc.classes,
+            slots: appended.reloc.slots,
+            exports: addition
+                .exports
+                .iter()
+                .filter(|export| export.kind == lm_bytecode::ExportKind::Function)
+                .map(|export| {
+                    (
+                        export.name.clone(),
+                        appended.reloc.funcs[export.def as usize],
+                    )
+                })
+                .collect(),
+        });
+        self.loaded = next;
+        self.module = self.loaded.module_store();
+        self.dispatch = self.loaded.dispatch_store();
+        self.core = self.loaded.core_layout();
+        self.installations.push(artifact);
+        Ok(instance_index)
     }
 
     /// Replace one callable slot at an image safepoint.
@@ -878,6 +978,15 @@ impl World {
                     }
                 }
             }
+            lm_abi::OP_VM_ARTIFACT
+            | lm_abi::OP_VM_VERIFY
+            | lm_abi::OP_VM_INSTALL
+            | lm_abi::OP_VM_INSTANCE_ENTRY
+            | lm_abi::OP_VM_INSTANCE_FUNCTION
+            | lm_abi::OP_VM_INSTANCE_SLOT
+            | lm_abi::OP_VM_INSTANCE_SLOT_SPEC
+            | lm_abi::OP_VM_ACTIVATE_DEF
+            | lm_abi::OP_VM_REPLACE_FUNCTION => self.code_exec(vm, op, args),
             lm_abi::OP_VM_ACTIVATE => {
                 let Some(image) = self.image_arg(vm, op, args[0]) else {
                     return;

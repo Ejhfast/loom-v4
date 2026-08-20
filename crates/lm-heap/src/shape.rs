@@ -225,6 +225,30 @@ impl PartialEq for MapIndex {
     }
 }
 
+/// One portable verified-code value kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortableCodeKind {
+    Artifact,
+    VerifiedModule,
+    SlotSpec,
+}
+
+/// One holder-local installed-code handle kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeHandleKind {
+    Instance,
+    Slot,
+    Function,
+}
+
+/// One immutable portable code payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortableCode {
+    pub kind: PortableCodeKind,
+    pub bytes: SharedBytes,
+    pub index: u32,
+}
+
 /// The payload of one heap object.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Object {
@@ -275,6 +299,16 @@ pub enum Object {
     NativeVm { image: u32, generation: u32 },
     /// A holder-local handle to one active or stopped invocation.
     NativeRun { vm: u32 },
+    /// Portable code bytes and an optional source table index.
+    NativeCode(Box<PortableCode>),
+    /// A holder-local handle into one installed VM image.
+    NativeCodeHandle {
+        image: u32,
+        generation: u32,
+        instance: u32,
+        kind: CodeHandleKind,
+        index: u32,
+    },
     /// A holder-local handle to the policy table of one machine.
     NativeTable { vm: u32 },
     /// A holder-local token for one pending perform of one machine.
@@ -617,9 +651,29 @@ const SHAPE_TLS_STREAM: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_CODE: ShapeDesc = ShapeDesc {
+    name: "PortableCode",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: true,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_CODE_HANDLE: ShapeDesc = ShapeDesc {
+    name: "CodeHandle",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::HolderLocal,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 26] = [
+pub const SHAPES: [&ShapeDesc; 28] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -646,6 +700,8 @@ pub const SHAPES: [&ShapeDesc; 26] = [
     &SHAPE_TLS_STREAM,
     &SHAPE_SNAPSHOT_REF,
     &SHAPE_RUN,
+    &SHAPE_CODE,
+    &SHAPE_CODE_HANDLE,
 ];
 
 impl Object {
@@ -735,6 +791,20 @@ impl Object {
                 generation: *generation,
             },
             Object::NativeRun { vm } => Object::NativeRun { vm: *vm },
+            Object::NativeCode(code) => Object::NativeCode(Box::new((**code).clone())),
+            Object::NativeCodeHandle {
+                image,
+                generation,
+                instance,
+                kind,
+                index,
+            } => Object::NativeCodeHandle {
+                image: *image,
+                generation: *generation,
+                instance: *instance,
+                kind: *kind,
+                index: *index,
+            },
             Object::NativeTable { vm } => Object::NativeTable { vm: *vm },
             Object::NativeRequest { vm, ordinal } => Object::NativeRequest {
                 vm: *vm,
@@ -812,6 +882,8 @@ impl Object {
             Object::NativeTlsStream { .. } => 23,
             Object::NativeSnapshotRef { .. } => 24,
             Object::NativeRun { .. } => 25,
+            Object::NativeCode(_) => 26,
+            Object::NativeCodeHandle { .. } => 27,
         }
     }
 
@@ -843,10 +915,12 @@ impl Object {
                 Object::ByteBuf(b) => b.retained_capacity(),
                 Object::NativeVm { .. }
                 | Object::NativeRun { .. }
+                | Object::NativeCodeHandle { .. }
                 | Object::NativeTable { .. }
                 | Object::NativeRequest { .. }
                 | Object::NativeCall { .. }
                 | Object::NativeHandle { .. } => VALUE_COST,
+                Object::NativeCode(_) => VALUE_COST,
                 Object::NativeFileHandle { .. }
                 | Object::NativeResourceHandle { .. }
                 | Object::NativeWait { .. }
@@ -867,6 +941,9 @@ impl Object {
                 Some((text.allocation_key(), text.retained_capacity()))
             }
             Object::Bytes(bytes) => Some((bytes.allocation_key(), bytes.retained_capacity())),
+            Object::NativeCode(code) => {
+                Some((code.bytes.allocation_key(), code.bytes.retained_capacity()))
+            }
             _ => None,
         }
     }
@@ -876,6 +953,7 @@ impl Object {
         match self {
             Object::Str(text) | Object::Substring(text) => text.allocation_is_unique(),
             Object::Bytes(bytes) => bytes.allocation_is_unique(),
+            Object::NativeCode(code) => code.bytes.allocation_is_unique(),
             _ => false,
         }
     }
@@ -899,6 +977,8 @@ impl Object {
             | Object::ByteBuf(_)
             | Object::NativeVm { .. }
             | Object::NativeRun { .. }
+            | Object::NativeCode(_)
+            | Object::NativeCodeHandle { .. }
             | Object::NativeTable { .. }
             | Object::NativeRequest { .. }
             | Object::NativeCall { .. }
@@ -957,6 +1037,7 @@ impl Object {
             Object::NativeSnapshot(image) => Object::NativeSnapshot(image.clone()),
             Object::NativeSnapshotRef { image } => Object::NativeSnapshotRef { image: *image },
             Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
+            Object::NativeCode(code) => Object::NativeCode(Box::new((**code).clone())),
             Object::NativeFileHandle { resource } => Object::NativeFileHandle {
                 resource: *resource,
             },
@@ -1025,6 +1106,7 @@ impl Object {
             | Object::NativeHandle { .. }
             | Object::NativeSnapshot(_)
             | Object::NativeSnapshotRef { .. } => return None,
+            Object::NativeCode(_) => return None,
             Object::Bytes(_)
             | Object::NativeFileHandle { .. }
             | Object::NativeTcpStream { .. }

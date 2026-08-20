@@ -662,6 +662,36 @@ impl Machine {
                         Ok(class)
                     }
                 }
+                Object::NativeCode(code) => {
+                    let role = match code.kind {
+                        lm_heap::PortableCodeKind::Artifact => lm_bytecode::corepin::ROLE_ARTIFACT,
+                        lm_heap::PortableCodeKind::VerifiedModule => {
+                            lm_bytecode::corepin::ROLE_VERIFIED_MODULE
+                        }
+                        lm_heap::PortableCodeKind::SlotSpec => lm_bytecode::corepin::ROLE_SLOT_SPEC,
+                    };
+                    let class = module.core_roles[role];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::NativeCodeHandle { kind, .. } => {
+                    let role = match kind {
+                        lm_heap::CodeHandleKind::Instance => lm_bytecode::corepin::ROLE_INSTANCE,
+                        lm_heap::CodeHandleKind::Slot => lm_bytecode::corepin::ROLE_SLOT,
+                        lm_heap::CodeHandleKind::Function => {
+                            lm_bytecode::corepin::ROLE_FUNCTION_DEF
+                        }
+                    };
+                    let class = module.core_roles[role];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
                 _ => Err(BAD_TYPE),
             },
             _ => Err(BAD_TYPE),

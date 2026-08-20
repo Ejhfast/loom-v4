@@ -13,9 +13,10 @@
 //! and calls this one, so the world has exactly one cut algorithm.
 
 use super::{
-    codec, Image, ImageBlock, ImageCallback, ImageFrame, ImageLimits, ImageMachine, ImageMailbox,
-    ImageObject, ImagePending, ImagePolicyCursor, ImageRoutedRequest, ImageSlotTarget, ImageState,
-    ImageTerminal, ImageVm, ImageWaitEntry, ImageWaitSource, SnapshotFail, SnapshotImage,
+    codec, Image, ImageBlock, ImageCallback, ImageFrame, ImageInstance, ImageLimits, ImageMachine,
+    ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor, ImageRoutedRequest,
+    ImageSlotTarget, ImageState, ImageTerminal, ImageVm, ImageWaitEntry, ImageWaitSource,
+    SnapshotFail, SnapshotImage,
 };
 use crate::machine::{
     Block, FrameCapture, MachineState, PolicyCursor, Terminal, VmId, VmImageKey, WaitSource,
@@ -224,7 +225,7 @@ impl World {
         // The constructor stays inside the snapshot module, so no host
         // code can promote an arbitrary image through this path.
         let identity = self.admission_identity()?;
-        codec::from_trusted_capture(image, identity, limit)
+        codec::from_trusted_capture(image, identity, self.loaded_code(), limit)
     }
 
     /// The admission identity of the program this world runs.
@@ -232,7 +233,15 @@ impl World {
         let identity = self.identity().map_err(|code| {
             SnapshotFail::Fault(code, "the program has no verified identity".to_string())
         })?;
+        let base = self.base_identity().map_err(|code| {
+            SnapshotFail::Fault(
+                code,
+                "the base program has no verified identity".to_string(),
+            )
+        })?;
         Ok(super::AdmissionIdentity {
+            base_semantic: base.semantic_hash,
+            base_verification: self.base_verification_hash(),
             module_semantic: identity.semantic_hash,
             verification: self.verification_hash(),
             format: super::FORMAT_VERSION,
@@ -373,16 +382,20 @@ impl World {
                 )?
             };
             for reference in objects {
-                if let Object::NativeVm { image, generation } =
-                    self.machines[vm as usize].vm.heap.get(reference)
-                {
-                    self.append_image_key(
-                        VmImageKey {
-                            image: *image,
-                            generation: *generation,
-                        },
-                        &mut image_order,
-                    )?;
+                match self.machines[vm as usize].vm.heap.get(reference) {
+                    Object::NativeVm { image, generation }
+                    | Object::NativeCodeHandle {
+                        image, generation, ..
+                    } => {
+                        self.append_image_key(
+                            VmImageKey {
+                                image: *image,
+                                generation: *generation,
+                            },
+                            &mut image_order,
+                        )?;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -487,6 +500,18 @@ impl World {
         // loader derives the same digest from the machine witness and
         // proves the two agree.
         let result_type = self.machine_result_digest(root, &class_hashes)?;
+        let mut installations = Vec::new();
+        installations
+            .try_reserve_exact(self.installations.len())
+            .map_err(|_| SnapshotFail::LimitExceeded)?;
+        for artifact in &self.installations {
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(artifact.len())
+                .map_err(|_| SnapshotFail::LimitExceeded)?;
+            bytes.extend_from_slice(artifact.as_slice());
+            installations.push(bytes);
+        }
         Ok(Image {
             format: super::FORMAT_VERSION,
             abi_version: lm_abi::ABI_VERSION,
@@ -496,6 +521,7 @@ impl World {
             result_type,
             funcs,
             classes,
+            installations,
             types,
             envs,
             vm_images,
@@ -601,10 +627,33 @@ impl World {
                 }
             });
         }
+        let mut instances = Vec::new();
+        instances
+            .try_reserve_exact(record.instances.len())
+            .map_err(|_| SnapshotFail::LimitExceeded)?;
+        for instance in &record.instances {
+            let copy = |source: &[u32]| -> Result<Vec<u32>, SnapshotFail> {
+                let mut target = Vec::new();
+                target
+                    .try_reserve_exact(source.len())
+                    .map_err(|_| SnapshotFail::LimitExceeded)?;
+                target.extend_from_slice(source);
+                Ok(target)
+            };
+            instances.push(ImageInstance {
+                installation: instance.installation,
+                semantic_hash: instance.semantic_hash,
+                entry: instance.entry,
+                funcs: copy(&instance.funcs)?,
+                classes: copy(&instance.classes)?,
+                slots: copy(&instance.slots)?,
+            });
+        }
         Ok(ImageVm {
             limits: image_limits(record.config),
             slots,
             objects,
+            instances,
         })
     }
 
@@ -863,6 +912,30 @@ impl World {
                             )
                         })?,
                         generation: 0,
+                    }
+                }
+                Object::NativeCodeHandle {
+                    image,
+                    generation,
+                    instance,
+                    kind,
+                    index,
+                } => {
+                    let key = VmImageKey {
+                        image: *image,
+                        generation: *generation,
+                    };
+                    Object::NativeCodeHandle {
+                        image: image_ordinal(key).ok_or_else(|| {
+                            SnapshotFail::Fault(
+                                FaultCode::BoundaryViolation,
+                                "a code handle has no VM image ordinal".to_string(),
+                            )
+                        })?,
+                        generation: 0,
+                        instance: *instance,
+                        kind: *kind,
+                        index: *index,
                     }
                 }
                 Object::NativeRun { vm: target } => Object::NativeRun {
