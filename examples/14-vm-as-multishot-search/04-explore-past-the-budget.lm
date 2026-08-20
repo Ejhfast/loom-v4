@@ -1,0 +1,74 @@
+# Explore more branches than the child budget allows at one time.
+#
+# Run with `--allow Vm`. This example opens no file and no socket.
+#
+# A machine may create 1024 children by default. This search restores
+# far more than that, and it still finishes.
+#
+# The budget counts the children a machine holds, not the children it
+# ever made. A branch that ends and that no value names can never run
+# again and can never be read, so the world frees its record and
+# returns its budget unit. A search therefore pays for the branches it
+# still holds, which is the depth of one path, not the whole tree.
+#
+# The instruction budget is the other half. A driver takes no cap it
+# did not ask for, so an exhaustive walk is an ordinary program. A
+# driver that runs code it does not trust states a bound instead.
+
+def sides(): Int with Choose
+  a = 1 + sys.choose.pick(11)
+  b = 1 + sys.choose.pick(11)
+  c = 1 + sys.choose.pick(11)
+  if a * a + b * b == c * c and a + b + c == 24
+    1
+  else
+    0
+  end
+end
+
+def take(branch: Vm[Int], index: Int): Int with Vm
+  case branch.drive()
+  in Asked(request)
+    case request
+    in Call(Choose.Pick, call, (_,))
+      branch.answer(call, index)
+      walk(branch)
+    in _ then 0
+    end
+  in Done(value) then value
+  in Fault(_)    then 0
+  end
+end
+
+# Visit every leaf and total the answers. Nothing stops early, so the
+# walk builds one machine for each node of the tree.
+def walk(child: Vm[Int]): Int with Vm
+  case child.drive()
+  in Done(value) then value
+  in Fault(_)    then 0
+  in Asked(request)
+    case request
+    in Call(Choose.Pick, call, (count,))
+      case child.snapshot()
+      in Ok(image)
+        total = 0
+        index = 0
+        while index < count
+          case sys.vm.Vm().restore(image)
+          in Ok(branch)
+            total = total + take(branch, index)
+          in Err(_) then ()
+          end
+          index = index + 1
+        end
+        total
+      in Err(_) then 0
+      end
+    in _ then 0
+    end
+  end
+end
+
+# 11 * 11 * 11 leaves, plus the nodes above them. That is well past
+# 1024 machines, and the default budget is 1024.
+walk(sys.vm.Vm().from_fn(sides, args: ()))

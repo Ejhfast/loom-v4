@@ -1155,7 +1155,18 @@ One graph walker must define reachability and ordering for freeze, verification,
 sys.io       sys.fs       sys.clock    sys.rand
 sys.dns      sys.tcp      sys.tls      sys.proc
 sys.vm       sys.compiler sys.reflect  sys.wait
+sys.choose
 ```
+
+`Choose.Pick(Int) -> Int` states a number of candidates and answers one
+index. It is the choice point of a search. A driver reads the count and
+answers, so a searched program holds no randomness authority and needs
+no `Rand` grant. The operation carries no candidate list, because every
+exact operation is monomorphic and a count names a branch.
+
+A machine stopped at a choice point is ordinary machine state, so a
+snapshot of it restores once for each candidate.
+`examples/14-vm-as-multishot-search` shows the driver.
 
 The ABI supplies one descriptor constant for each exact operation and group.
 
@@ -1616,6 +1627,19 @@ At most one host thread owns execution. Guest execution remains one logical thre
 A VM has instruction/intrinsic fuel, heap-byte limit, frame/operand limit, boundary-byte limit, mailbox limit, and snapshot-byte limit. One bytecode instruction consumes one fuel unit; pure intrinsics have deterministic published charges based on logical input size rather than host hash-table probe count.
 
 A parent granting child resources reserves them from its own budget. A root host may mint resources. Exceeding a limit faults only that VM.
+
+The instruction budget of one machine and the budget one world shares
+both default to the largest value. A program that serves forever is an
+ordinary program, and section 7.2 declares `serve(): Never`, so a root
+program takes no cap it did not ask for. A caller that runs code it
+does not trust states a bound. The default is a very large number, not
+the absence of a bound.
+
+The child budget counts the children a machine holds, not the children
+it ever created. A child that ended, that no live machine names, and
+that holds no host resource can never run again and can never be read,
+so the world frees its record and returns its budget unit. A search
+driver therefore pays for the branches it still holds.
 
 ### 14.12 One interpreter loop
 

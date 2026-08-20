@@ -1,0 +1,85 @@
+# Resume one suspended program once for every candidate.
+#
+# Run with `--allow Vm`. This example opens no file and no socket.
+#
+# A machine stopped at a choice point is a value, and a snapshot of it
+# is an ordinary value too. Restoring that snapshot gives back a
+# machine that asks the same question again, so one suspended program
+# answers every candidate.
+#
+# A one-shot continuation cannot do this. Here the shared prefix runs
+# once, each branch resumes from it, and no branch can reach another.
+
+def program(): Int with Choose
+  # The prefix every branch shares. One capture pays for it once.
+  base = 100
+  base + 10 * sys.choose.pick(4) + sys.choose.pick(4)
+end
+
+# Answer the pending choice with `first`, then every later choice
+# with zero, and report the result.
+def finish(child: Vm[Int], first: Int): Int with Vm
+  answered = false
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request
+      in Call(Choose.Pick, call, (count,))
+        index = if answered
+          0
+        else
+          answered = true
+          first
+        end
+        if index >= count
+          return 0 - 1
+        end
+        child.answer(call, index)
+      in _
+        return 0 - 2
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return 0 - 3
+    end
+  end
+end
+
+def explore(image: Snapshot[Int], count: Int): [Int] with Vm
+  out: [Int] = []
+  index = 0
+  while index < count
+    # Every restore is a separate world. A branch cannot reach the
+    # image, the original machine, or another branch.
+    case sys.vm.Vm().restore(image)
+    in Ok(branch) then out.push(finish(branch, index))
+    in Err(_)     then out.push(0 - 4)
+    end
+    index = index + 1
+  end
+  out
+end
+
+child = sys.vm.Vm().from_fn(program, args: ())
+
+# Run the prefix, then stop on the first question.
+case child.drive()
+in Asked(first)
+  case first
+  in Call(Choose.Pick, call, (count,))
+    case child.snapshot()
+    in Ok(image)
+      # The capture holds the pending question, so each restored
+      # machine asks it again and takes its own answer.
+      results = explore(image, count)
+      # The original still holds the same question, unanswered.
+      child.answer(call, 3)
+      (results, finish(child, 0))
+    in Err(_) then ([0 - 5], 0 - 5)
+    end
+  in _ then ([0 - 6], 0 - 6)
+  end
+in Done(_)  then ([0 - 7], 0 - 7)
+in Fault(_) then ([0 - 8], 0 - 8)
+end

@@ -456,6 +456,44 @@ fn run_closure_example_needs_no_annotation() {
     );
 }
 
+/// Run one `examples/14-vm-as-multishot-search` program. Each one
+/// drives a child machine, so each one needs `Vm` and nothing else.
+fn search_example(name: &str) -> String {
+    let path = format!("examples/14-vm-as-multishot-search/{name}");
+    let out = lm(&["run", "--show-result", "--allow", "Vm", &path]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    stdout(&out)
+}
+
+#[test]
+fn run_choice_example_answers_with_an_index() {
+    assert_eq!(
+        search_example("01-answer-a-choice.lm"),
+        "Done((0, 11, 33))\n"
+    );
+}
+
+#[test]
+fn run_branch_example_restores_one_capture_per_candidate() {
+    assert_eq!(
+        search_example("02-try-every-branch.lm"),
+        "Done(([100, 110, 120, 130], 130))\n"
+    );
+}
+
+#[test]
+fn run_backtracking_example_finds_the_triangle() {
+    assert_eq!(
+        search_example("03-solve-by-backtracking.lm"),
+        "Done(30405)\n"
+    );
+}
+
+#[test]
+fn run_budget_example_outlives_its_child_budget() {
+    assert_eq!(search_example("04-explore-past-the-budget.lm"), "Done(2)\n");
+}
+
 #[test]
 fn run_http_server_example_routes_three_requests() {
     let out = lm(&[

@@ -1,0 +1,46 @@
+# A driver decides what a program chooses.
+#
+# Run with `--allow Vm`. The child never reaches the host.
+#
+# `sys.choose.pick(n)` states a number of candidates and asks for one
+# index. The operation carries no candidate list, because the manifest
+# is monomorphic and a count is enough to name a branch.
+#
+# The child holds `Choose`, not `Rand`. A searched program needs no
+# randomness authority, and a driver that answers the same index twice
+# gets the same run twice.
+
+def program(): Int with Choose
+  # Two independent choice points. Together they name 16 runs.
+  10 * sys.choose.pick(4) + sys.choose.pick(4)
+end
+
+# Answer every choice point with one fixed index.
+def always(child: Vm[Int], index: Int): Int with Vm
+  loop do
+    case child.drive()
+    in Asked(request)
+      case request
+      in Call(Choose.Pick, call, (count,))
+        if index >= count
+          return 0 - 1
+        end
+        child.answer(call, index)
+      in _
+        return 0 - 2
+      end
+    in Done(value)
+      return value
+    in Fault(_)
+      return 0 - 3
+    end
+  end
+end
+
+def run_with(index: Int): Int with Vm
+  always(sys.vm.Vm().from_fn(program, args: ()), index)
+end
+
+# The driver reads the count, so it can also refuse a candidate it
+# does not want to explore.
+(run_with(0), run_with(1), run_with(3))

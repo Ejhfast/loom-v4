@@ -1,0 +1,75 @@
+# Search a program that states a problem but never solves it.
+#
+# Run with `--allow Vm`. This example opens no file and no socket.
+#
+# `sides` reads like a specification: pick three numbers, then say
+# whether they answer the question. It holds no search, no stack of
+# candidates, and no backtracking. It cannot even see that it runs
+# more than once.
+#
+# The driver supplies all of that. It captures the machine at each
+# choice point and restores that capture once for each candidate, so
+# the work above a choice point runs once for the whole subtree.
+
+# The problem: a right triangle with whole sides and perimeter 12.
+def sides(): Int with Choose
+  a = 1 + sys.choose.pick(10)
+  b = 1 + sys.choose.pick(10)
+  c = 1 + sys.choose.pick(10)
+  if a * a + b * b == c * c and a + b + c == 12
+    # Report the answer as one number: 3, 4, 5 becomes 30405.
+    a * 10000 + b * 100 + c
+  else
+    0
+  end
+end
+
+# Answer the pending choice with `index`, then keep searching.
+def take(branch: Vm[Int], index: Int): Int with Vm
+  case branch.drive()
+  in Asked(request)
+    case request
+    in Call(Choose.Pick, call, (_,))
+      branch.answer(call, index)
+      search(branch)
+    in _ then 0
+    end
+  in Done(value) then value
+  in Fault(_)    then 0
+  end
+end
+
+# Depth-first search. Zero means "no answer in this subtree".
+def search(child: Vm[Int]): Int with Vm
+  case child.drive()
+  in Done(value) then value
+  in Fault(_)    then 0
+  in Asked(request)
+    case request
+    in Call(Choose.Pick, call, (count,))
+      # One capture serves every candidate at this level.
+      case child.snapshot()
+      in Ok(image)
+        index = 0
+        while index < count
+          case sys.vm.Vm().restore(image)
+          in Ok(branch)
+            found = take(branch, index)
+            # Stop at the first answer. The rest of the subtree
+            # never runs, and its machines never exist.
+            if found != 0
+              return found
+            end
+          in Err(_) then ()
+          end
+          index = index + 1
+        end
+        0
+      in Err(_) then 0
+      end
+    in _ then 0
+    end
+  end
+end
+
+search(sys.vm.Vm().from_fn(sides, args: ()))
