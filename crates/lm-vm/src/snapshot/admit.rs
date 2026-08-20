@@ -2081,11 +2081,12 @@ impl Admit<'_> {
                         );
                     }
                 }
-                // A virtual call and a closure call take their callee
-                // from a runtime value, so the call site names none.
+                // These calls select their callees from runtime values.
+                // Their call sites name no function.
                 (
                     Instr::CallVirtual { .. }
                     | Instr::CallVirtualG { .. }
+                    | Instr::CallInterface { .. }
                     | Instr::CallValue { .. },
                     None,
                 ) => {}

@@ -848,6 +848,53 @@ fn a_frame_inside_an_overridden_method_admits() {
     assert!(count > 0, "no capture stopped inside the override");
 }
 
+const INTERFACE_FRAME_SOURCE: &str = "\
+interface Priced
+  def price(self): Int
+end
+
+final class Book implements Priced
+  def price(self): Int
+    12
+  end
+end
+
+def describe[P: Priced](item: P): Int
+  item.price()
+end
+
+describe(Book())
+";
+
+/// An interface call selects one method through a generic bound.
+/// Every frame inside that method is a valid stop point.
+#[test]
+fn a_frame_inside_a_generic_interface_call_admits() {
+    let loaded = program(INTERFACE_FRAME_SOURCE);
+    let method = loaded
+        .module()
+        .classes
+        .iter()
+        .find(|class| class.name == "Book")
+        .and_then(|class| class.methods.first())
+        .map(|(_, function)| *function)
+        .expect("the program declares Book.price");
+    let images = boundaries(&loaded, &[], 80);
+    let mut count = 0usize;
+    for image in &images {
+        if !image.machines[0]
+            .frames
+            .iter()
+            .any(|frame| frame.func == method)
+        {
+            continue;
+        }
+        count += 1;
+        assert_eq!(admit(&loaded, image), None, "a generic interface frame");
+    }
+    assert!(count > 0, "no capture stopped inside Book.price");
+}
+
 // ---------------------------------------------------------------
 // Generic instance fields.
 // ---------------------------------------------------------------
