@@ -760,16 +760,16 @@ impl Parser<'_> {
         let mut params = Vec::new();
         loop {
             let mut mutable = false;
-            let mut nonescaping = false;
+            let mut escaping = false;
             loop {
                 match self.peek() {
                     Tok::KwMut if !mutable => {
                         self.pos += 1;
                         mutable = true;
                     }
-                    Tok::KwNonescaping if !nonescaping => {
+                    Tok::KwEscaping if !escaping => {
                         self.pos += 1;
-                        nonescaping = true;
+                        escaping = true;
                     }
                     _ => break,
                 }
@@ -781,7 +781,7 @@ impl Parser<'_> {
             params.push(Param {
                 name: pname,
                 mutable,
-                nonescaping,
+                escaping,
                 ty,
                 span,
             });

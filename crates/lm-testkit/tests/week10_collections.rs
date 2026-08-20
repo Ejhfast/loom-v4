@@ -354,8 +354,10 @@ values = [1, 2, 3, 4, 5]
 
 #[test]
 fn structural_mutation_invalidates_traversal() {
+    assert!(error("xs = [1, 2]\nfor value in xs\n  xs.push(value)\nend\n0\n").contains("E1065"));
+    assert!(error("m = {1: 10}\nfor key, value in m\n  m.put(2, 20)\nend\n0\n").contains("E1065"));
     assert_eq!(
-        outcome("xs = [1, 2]\nfor value in xs\n  xs.push(value)\nend\n0\n"),
+        outcome("xs = [1, 2]\nalias = xs\nfor value in xs\n  alias.push(value)\nend\n0\n"),
         "Fault(CollectionModified)"
     );
     assert_eq!(
@@ -363,7 +365,7 @@ fn structural_mutation_invalidates_traversal() {
         "Fault(CollectionModified)"
     );
     assert_eq!(
-        outcome("m = {1: 10}\nfor key, value in m\n  m.put(2, 20)\nend\n0\n"),
+        outcome("m = {1: 10}\nalias = m\nfor key, value in m\n  alias.put(2, 20)\nend\n0\n"),
         "Fault(CollectionModified)"
     );
     assert_eq!(
@@ -388,16 +390,52 @@ view.len()
 }
 
 #[test]
+fn for_rejects_direct_mutation_paths() {
+    let through_parameter = r#"
+def replace(mut values: List[Int])
+  values.set(0, 9)
+end
+
+values = [1, 2]
+for value in values
+  replace(values)
+end
+"#;
+    assert!(error(through_parameter).contains("E1065"));
+
+    let through_field = r#"
+final class Holder
+  values: List[Int]
+
+  def init(mut self, values: List[Int])
+    self.values = values
+  end
+
+  def extend(mut self)
+    for value in self.values
+      self.values.push(value)
+    end
+  end
+end
+
+Holder([1, 2]).extend()
+"#;
+    assert!(error(through_field).contains("E1065"));
+}
+
+#[test]
 fn value_replacement_remains_valid_during_traversal() {
     let source = r#"
 xs = [1, 2, 3]
+xs_mut = xs
 for value in xs
-  xs.set(0, xs.at(0) + 1)
+  xs_mut.set(0, xs.at(0) + 1)
 end
 
 table = {1: 10, 2: 20}
+table_mut = table
 for key, value in table
-  table.put(key, value + 1)
+  table_mut.put(key, value + 1)
 end
 
 (xs, table)
@@ -645,7 +683,7 @@ fn callbacks_do_not_allocate_guest_closures() {
 }
 
 #[test]
-fn callbacks_forward_effects_and_remain_nonescaping() {
+fn callbacks_forward_effects_and_default_to_nonescaping() {
     let source = r#"
 def emit(values: List[Int]): Int with Io.Print
   values.each() { |value: Int| with Io.Print sys.io.print("{value}") }
@@ -660,11 +698,11 @@ emit([1, 2])
     );
 
     let relay = r#"
-def apply(nonescaping f: (Int) -> Int): Int
+def apply(f: (Int) -> Int): Int
   f(2)
 end
 
-def relay(nonescaping f: (Int) -> Int): Int
+def relay(f: (Int) -> Int): Int
   apply(f)
 end
 
@@ -673,17 +711,59 @@ relay() { |value: Int| value + 3 }
     assert_eq!(outcome(relay), "Done(5)");
 
     for invalid in [
-        "def leak(nonescaping f: () -> Int): () -> Int\n  f\nend\nleak() { || 1 }\n",
-        "def leak(nonescaping f: () -> Int): Int\n  saved = f\n  saved()\nend\nleak() { || 1 }\n",
-        "def leak(nonescaping f: () -> Int): Int\n  pair = (f,)\n  pair[0]()\nend\nleak() { || 1 }\n",
-        "def leak(nonescaping f: () -> Int): Int\n  list = [f]\n  list.at(0)()\nend\nleak() { || 1 }\n",
-        "def leak(nonescaping f: () -> Int): Int\n  inner = do ||: Int f() end\n  inner()\nend\nleak() { || 1 }\n",
-        "def id[T](value: T): T\n  value\nend\ndef leak(nonescaping f: () -> Int): Int\n  id(f)()\nend\nleak() { || 1 }\n",
+        "def leak(f: () -> Int): () -> Int\n  f\nend\nleak() { || 1 }\n",
+        "def leak(f: () -> Int): Int\n  saved = f\n  saved()\nend\nleak() { || 1 }\n",
+        "def leak(f: () -> Int): Int\n  pair = (f,)\n  pair[0]()\nend\nleak() { || 1 }\n",
+        "def leak(f: () -> Int): Int\n  list = [f]\n  list.at(0)()\nend\nleak() { || 1 }\n",
+        "def leak(f: () -> Int): Int\n  inner = do ||: Int f() end\n  inner()\nend\nleak() { || 1 }\n",
+        "def id[T](value: T): T\n  value\nend\ndef leak(f: () -> Int): Int\n  id(f)()\nend\nleak() { || 1 }\n",
     ] {
         let failure = compile_text("collections.lm", invalid);
         assert!(failure.is_err(), "{invalid}");
         assert!(failure.unwrap_err().contains("E1064"), "{invalid}");
     }
+}
+
+#[test]
+fn stored_functions_can_accept_nonescaping_callbacks() {
+    let source = r#"
+apply = do |value: Int, body: (Int) -> Int|: Int
+  body(value)
+end
+
+apply(41) { |value: Int| value + 1 }
+"#;
+    assert_eq!(outcome(source), "Done(42)");
+}
+
+#[test]
+fn escaping_allows_a_function_parameter_to_leave_its_call() {
+    let source = r#"
+def keep(escaping f: () -> Int): () -> Int
+  f
+end
+
+saved = keep() { || 7 }
+saved()
+"#;
+    assert_eq!(outcome(source), "Done(7)");
+    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let entry = &module.funcs[module.entry as usize];
+    assert!(entry
+        .blocks
+        .iter()
+        .flatten()
+        .any(|item| matches!(item, Instr::MakeClosure { .. })));
+    assert!(!entry
+        .blocks
+        .iter()
+        .flatten()
+        .any(|item| { matches!(item, Instr::Extended(ExtendedInstr::MakeCallback { .. })) }));
+
+    let invalid = "def bad(escaping value: Int): Int\n  value\nend\nbad(1)\n";
+    let failure = error(invalid);
+    assert!(failure.contains("E1064"));
+    assert!(failure.contains("must have a function type"));
 }
 
 #[test]
@@ -1043,7 +1123,7 @@ def id[T](value: T): T
   value
 end
 
-def use_callback(nonescaping f: (Int) -> Int): Int
+def use_callback(f: (Int) -> Int): Int
   id[Int](f(1))
 end
 

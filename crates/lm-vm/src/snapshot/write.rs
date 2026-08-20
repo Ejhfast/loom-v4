@@ -360,6 +360,11 @@ impl World<'_> {
                     funcs.push(frame.func);
                 }
             }
+            for callback in &machine.callbacks {
+                if !funcs.contains(&callback.func) {
+                    funcs.push(callback.func);
+                }
+            }
             // The machine witness names its body function, and a
             // terminal machine keeps neither a frame nor a body
             // closure, so the manifest must carry it too.

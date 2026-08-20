@@ -99,7 +99,7 @@ struct Universe {
 
 #[derive(Clone, Copy, Default)]
 struct TypeFacts {
-    contains_callback: bool,
+    stores_callback: bool,
     contains_projection: bool,
     max_type_var: Option<u32>,
     max_effect_var: Option<u32>,
@@ -107,7 +107,7 @@ struct TypeFacts {
 
 impl TypeFacts {
     fn include(&mut self, other: Self) {
-        self.contains_callback |= other.contains_callback;
+        self.stores_callback |= other.stores_callback;
         self.contains_projection |= other.contains_projection;
         self.max_type_var = self.max_type_var.max(other.max_type_var);
         self.max_effect_var = self.max_effect_var.max(other.max_effect_var);
@@ -132,7 +132,7 @@ fn type_facts(ty: &BcType, known: &[TypeFacts]) -> TypeFacts {
     let mut facts = TypeFacts::default();
     match ty {
         BcType::Callback(params, _, ret, row) => {
-            facts.contains_callback = true;
+            facts.stores_callback = true;
             for child in params {
                 include_type_facts(&mut facts, known, *child);
             }
@@ -145,7 +145,7 @@ fn type_facts(ty: &BcType, known: &[TypeFacts]) -> TypeFacts {
         }
         BcType::Fn(params, _, ret, row) => {
             for child in params {
-                include_type_facts(&mut facts, known, *child);
+                include_parameter_type_facts(&mut facts, known, *child);
             }
             include_type_facts(&mut facts, known, *ret);
             for element in row {
@@ -181,6 +181,15 @@ fn type_facts(ty: &BcType, known: &[TypeFacts]) -> TypeFacts {
 
 fn include_type_facts(facts: &mut TypeFacts, known: &[TypeFacts], child: u32) {
     facts.include(known.get(child as usize).copied().unwrap_or_default());
+}
+
+fn include_parameter_type_facts(facts: &mut TypeFacts, known: &[TypeFacts], child: u32) {
+    let Some(child) = known.get(child as usize).copied() else {
+        return;
+    };
+    facts.contains_projection |= child.contains_projection;
+    facts.max_type_var = facts.max_type_var.max(child.max_type_var);
+    facts.max_effect_var = facts.max_effect_var.max(child.max_effect_var);
 }
 
 /// Shared lookup context for one module.
@@ -597,7 +606,7 @@ impl<'m> Ctx<'m> {
             if *ty as usize >= self.module.types.len() {
                 return Err("an interface type argument is out of range".to_string());
             }
-            if self.contains_callback(*ty) {
+            if self.stores_callback(*ty) {
                 return Err("an interface type argument cannot contain a callback".to_string());
             }
             if !self.vars_bounded(*ty, type_params, effect_params) {
@@ -1014,13 +1023,13 @@ impl<'m> Ctx<'m> {
         )
     }
 
-    /// Return true when one type contains a nonescaping callback.
-    fn contains_callback(&self, ty: u32) -> bool {
+    /// Return true when one value position contains a callback.
+    fn stores_callback(&self, ty: u32) -> bool {
         self.uni
             .borrow()
             .facts
             .get(ty as usize)
-            .map(|facts| facts.contains_callback)
+            .map(|facts| facts.stores_callback)
             .unwrap_or(false)
     }
 
@@ -2159,16 +2168,25 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         }),
         core,
     };
-    // A callback is a direct parameter type only. No composite type
-    // can contain it, including another callback signature.
+    // A callback can occur only as one direct callable parameter.
+    // A safe higher-order function type can occur in any value position.
     let mut callback_children = Vec::new();
     for idx in 0..module.types.len() as u32 {
         callback_children.clear();
-        ctx.type_children(idx, &mut callback_children);
-        if callback_children
-            .iter()
-            .any(|child| ctx.contains_callback(*child))
-        {
+        let invalid = match ctx.ty(idx) {
+            BcType::Fn(params, _, ret, _) | BcType::Callback(params, _, ret, _) => {
+                params.iter().any(|param| {
+                    ctx.stores_callback(*param) && !matches!(ctx.ty(*param), BcType::Callback(..))
+                }) || ctx.stores_callback(ret)
+            }
+            _ => {
+                ctx.type_children(idx, &mut callback_children);
+                callback_children
+                    .iter()
+                    .any(|child| ctx.stores_callback(*child))
+            }
+        };
+        if invalid {
             return Err(terr(format!(
                 "type {idx} stores a nonescaping callback inside another type"
             )));
@@ -2203,7 +2221,7 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                     "application {aidx} references an invalid type index"
                 )));
             }
-            if ctx.contains_callback(*t) {
+            if ctx.stores_callback(*t) {
                 return Err(terr(format!(
                     "application {aidx} contains a nonescaping callback"
                 )));
@@ -2345,13 +2363,13 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                 }
             }
             for ty in &method.params {
-                if ctx.contains_callback(*ty) && !matches!(ctx.ty(*ty), BcType::Callback(..)) {
+                if ctx.stores_callback(*ty) && !matches!(ctx.ty(*ty), BcType::Callback(..)) {
                     return Err(ierr(
                         "a callback must be a direct method parameter".to_string(),
                     ));
                 }
             }
-            if ctx.contains_callback(method.ret) {
+            if ctx.stores_callback(method.ret) {
                 return Err(ierr("a method cannot return a callback".to_string()));
             }
             if !ctx.row_vars_bounded(&method.row, contract.effect_params) {
@@ -2622,7 +2640,7 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                     "field `{fname}` uses an associated type without its interface bound"
                 )));
             }
-            if ctx.contains_callback(*fty) {
+            if ctx.stores_callback(*fty) {
                 return Err(cerr(format!(
                     "field `{fname}` cannot store a nonescaping callback"
                 )));
@@ -2765,7 +2783,7 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                     "an associated binding uses an unbound variable".to_string(),
                 ));
             }
-            if ctx.contains_callback(*ty) {
+            if ctx.stores_callback(*ty) {
                 return Err(cerr(
                     "an associated binding cannot contain a callback".to_string(),
                 ));
@@ -2981,14 +2999,14 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             }
         }
         for ty in &func.params {
-            if ctx.contains_callback(*ty) && !matches!(ctx.ty(*ty), BcType::Callback(..)) {
+            if ctx.stores_callback(*ty) && !matches!(ctx.ty(*ty), BcType::Callback(..)) {
                 return Err(err(
                     fidx as u32,
                     "a callback must be a direct function parameter",
                 ));
             }
         }
-        if func.captures.iter().any(|ty| ctx.contains_callback(*ty)) {
+        if func.captures.iter().any(|ty| ctx.stores_callback(*ty)) {
             return Err(err(
                 fidx as u32,
                 "a closure cannot capture a nonescaping callback",
@@ -2996,14 +3014,14 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         }
         if func.local_types[func.params.len()..]
             .iter()
-            .any(|ty| ctx.contains_callback(*ty))
+            .any(|ty| ctx.stores_callback(*ty))
         {
             return Err(err(
                 fidx as u32,
                 "a local cannot store a nonescaping callback",
             ));
         }
-        if ctx.contains_callback(func.ret) {
+        if ctx.stores_callback(func.ret) {
             return Err(err(
                 fidx as u32,
                 "a function cannot return a nonescaping callback",

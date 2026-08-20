@@ -82,7 +82,7 @@ A line comment starts with `#` and extends to the newline. There are no block co
 ### 2.3 Keywords
 
 ```text
-and as break case class continue def do effect else elsif end enum
+and as break case class continue def do effect else elsif end enum escaping
 false if in loop mut not or return self super then true use while with
 ```
 
@@ -627,6 +627,16 @@ The compiler infers:
 
 It does not infer public APIs globally. Fields, method parameters, top-level function parameters, and non-unit public results are annotated. Recursive functions must declare a result and row before their bodies are checked. Omitting a function or method result means `()`; omitting a closure result requests local inference.
 
+A direct function parameter type is nonescaping by default.
+
+The `escaping` marker gives that parameter an ordinary function type.
+
+Function types in fields, results, locals, and containers remain escaping.
+
+A nonescaping parameter can be called or passed to another nonescaping parameter.
+
+It cannot be returned, stored, captured, or used inside a type argument.
+
 Generic inference and literal/branch joining never invent `Any` merely because two types are unrelated; source must request an explicit dynamic boundary. No implicit numeric conversion, truthiness conversion, string conversion, or user-defined coercion exists. A failed local constraint produces one diagnostic at the smallest expression whose expected and synthesized types disagree.
 
 ### 5.10 Flow refinement, patterns, and exhaustiveness
@@ -668,6 +678,7 @@ The VM does not re-check this theorem at run time. Policy remains a separate dyn
 | no implicit nil and enum/Boolean cases are exhaustive | policy grants or operation success |
 | required fields are initialized before `self` escapes | deep frozenness, sendability, digestibility, or resource liveness |
 | writes and mutating calls use a locally mutable reference | uniqueness or alias freedom |
+| a direct `for` source has no direct mutation in its body | mutation through an alias or opaque call |
 | scoped designators do not enter an escaping position | general lifetime inference or borrow checking |
 | overrides preserve call and row substitutability | termination, fuel use, heap use, or asymptotic cost |
 | every possible perform is contained in the declared row | absence of faults, deadlock, host failure, or timing side channels |
@@ -1101,6 +1112,14 @@ The checker tracks mutable/read-only capability separately from nominal type:
 - `self` is read-only unless declared `mut self`;
 - a field read through a read-only reference is read-only;
 - a `mut` argument position requires mutable capability.
+
+A `for` loop treats its direct source place as read-only inside the body.
+
+The rule follows local names, captures, and direct field paths.
+
+A direct `mut self` call or `mut` argument use fails with `E1065`.
+
+Runtime epoch checks detect structural mutation through aliases and opaque calls.
 
 The analysis is local, does not prove uniqueness, and does not track aliases across calls.
 
@@ -3322,7 +3341,8 @@ generic_params  = "[", generic_param, { ",", generic_param }, "]" ;
 generic_param   = IDENT | "effect", IDENT ;
 
 parameters      = parameter, { ",", parameter } ;
-parameter       = [ "mut" ], IDENT, ":", type ;
+parameter       = { parameter_modifier }, IDENT, ":", type ;
+parameter_modifier = "mut" | "escaping" ;
 field_parameters= field_parameter, { ",", field_parameter } ;
 field_parameter = IDENT, ":", type ;
 
@@ -3427,6 +3447,8 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 ### A.1 Clarifications
 
 - `method_parameters` always starts with untyped source `self` or `mut self`; its containing class supplies the type. There are no source static methods.
+- A parameter modifier can occur once. The two modifiers can use either order.
+- `escaping` is valid only when the parameter has a direct function type.
 - Classes and enums declare only type parameters. Top-level functions and methods may additionally declare `effect` parameters.
 - `()` is unit. `(T,)` and `(T,U)` are tuple types; the same parenthesized list followed by `->` is a function parameter list. A one-element tuple requires the trailing comma.
 - `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.

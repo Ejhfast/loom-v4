@@ -2651,24 +2651,25 @@ fn resolve_sig(
     })
 }
 
-/// Resolve one parameter and apply its nonescaping marker.
+/// Resolve one parameter and apply its escape rule.
 pub(crate) fn resolve_param_type(
     ctx: &mut Ctx,
     env: &TyEnv,
     param: &ast::Param,
 ) -> Result<TypeId, Diagnostic> {
     let ty = resolve_type(ctx, env, &param.ty)?;
-    if !param.nonescaping {
-        return Ok(ty);
-    }
-    let Type::Fn(params, muts, ret, row) = ctx.store.get(ty).clone() else {
-        return Err(Diagnostic::new(
+    match (param.escaping, ctx.store.get(ty).clone()) {
+        (false, Type::Fn(params, muts, ret, row)) => {
+            Ok(ctx.store.intern_callback(params, muts, ret, row))
+        }
+        (true, Type::Fn(..)) => Ok(ty),
+        (true, _) => Err(Diagnostic::new(
             "E1064",
-            "a nonescaping parameter must have a function type",
+            "an `escaping` parameter must have a function type",
             param.ty.span,
-        ));
-    };
-    Ok(ctx.store.intern_callback(params, muts, ret, row))
+        )),
+        (false, _) => Ok(ty),
+    }
 }
 
 /// Resolve one method declaration into a signature and reserve its

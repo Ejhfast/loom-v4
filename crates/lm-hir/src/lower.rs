@@ -27,6 +27,7 @@ fn extended(instr: ExtendedInstr) -> Instr {
 /// Module-wide interning state during lowering.
 struct ModLowerer<'m> {
     store: &'m TypeStore,
+    funcs: &'m [HirFunc],
     /// Small expression bodies that direct calls can inline.
     inline_bodies: Vec<Option<HExpr>>,
     strings: Vec<String>,
@@ -64,6 +65,23 @@ impl<'m> ModLowerer<'m> {
         self.types.push(ty.clone());
         self.type_index.insert(ty, idx);
         idx
+    }
+
+    /// Intern the exact callback type of one function body.
+    fn callback_type(&mut self, func: u32) -> u32 {
+        let (params, muts, ret, row) = {
+            let target = &self.funcs[func as usize];
+            (
+                target.params.clone(),
+                target.param_muts.clone(),
+                target.ret,
+                target.row.clone(),
+            )
+        };
+        let params = params.into_iter().map(|ty| self.bc_ty(ty)).collect();
+        let ret = self.bc_ty(ret);
+        let row = self.bc_row(&row);
+        self.intern_type(BcType::Callback(params, muts, ret, row))
     }
 
     /// Convert a checker row into the bytecode row form. Operation
@@ -226,6 +244,7 @@ impl<'m> ModLowerer<'m> {
 pub fn lower_module(hir: &HirModule) -> Module {
     let mut m = ModLowerer {
         store: &hir.store,
+        funcs: &hir.funcs,
         inline_bodies: hir.funcs.iter().map(inline_body).collect(),
         strings: Vec::new(),
         string_index: HashMap::new(),
@@ -1126,6 +1145,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 for capture in captures {
                     self.lower_expr(capture);
                 }
+                self.m.callback_type(*func);
                 self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::MakeCallback {
                     func: *func,

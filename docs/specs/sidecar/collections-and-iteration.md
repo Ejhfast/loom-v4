@@ -335,13 +335,29 @@ Its `Option` steps use no guest heap objects.
 
 ## 10. Mutation during traversal
 
+The checker treats a stable `for` source as read-only inside its loop body.
+
+A `mut self` call on that source fails with `E1065`.
+
+Passing that source to a `mut` parameter also fails with `E1065`.
+
+The rule follows local names, captures, and direct field paths.
+
+The rule rejects all direct mutation, including value replacement.
+
+Loom has no exclusive ownership rule.
+
+An alias can hide the same source from this static check.
+
 An iterator compares its captured epoch before each step.
 
 A structural mismatch raises `CollectionModified`.
 
-List `set` remains valid during traversal.
+Runtime epoch checks remain mandatory for aliases and opaque calls.
 
-Map value replacement remains valid during traversal.
+List `set` remains valid through an alias during traversal.
+
+Map value replacement remains valid through an alias during traversal.
 
 All structural changes invalidate active iterators and views.
 
@@ -389,7 +405,13 @@ Trailing braces remain ordinary Loom closures.
 
 Collection methods use effect-polymorphic closure parameters.
 
-The compiler marks selected parameters as nonescaping.
+Function-typed parameters are nonescaping by default.
+
+The `escaping` marker permits one function parameter to leave its call.
+
+The marker does not apply to fields, results, locals, or nested function values.
+
+An `escaping` marker on another parameter type fails with `E1064`.
 
 A nonescaping closure cannot be stored, returned, or captured.
 
@@ -400,6 +422,8 @@ The compiler can use a stack callback descriptor for such a call.
 The descriptor contains code, captures, and the active type environment.
 
 Snapshots preserve an active descriptor as machine state.
+
+The snapshot code manifest includes every active callback function.
 
 Ordinary escaping closures keep their heap representation.
 
@@ -441,7 +465,7 @@ Implement the work in this order:
 4. Add native iterators and `for` specialization.
 5. Move `List` and `Map` method tables into core.
 6. Add the complete collection operation surface.
-7. Add nonescaping callback verification and lowering.
+7. Add default nonescaping callback verification and lowering.
 8. Add collection views and eager materializers.
 9. Run correctness, compiler, and language benchmarks.
 

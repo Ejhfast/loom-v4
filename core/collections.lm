@@ -151,7 +151,7 @@ final class List[T] implements Counted, Iterable
     intrinsic("list.contains", self, value)
   end
 
-  def position[effect e](self, nonescaping predicate: (T) -> Bool with e): Option[Int] with e
+  def position[effect e](self, predicate: (T) -> Bool with e): Option[Int] with e
     index = 0
     for value in self
       if predicate(value)
@@ -162,7 +162,7 @@ final class List[T] implements Counted, Iterable
     None
   end
 
-  def find[effect e](self, nonescaping predicate: (T) -> Bool with e): Option[T] with e
+  def find[effect e](self, predicate: (T) -> Bool with e): Option[T] with e
     for value in self
       if predicate(value)
         return Some(value)
@@ -171,14 +171,14 @@ final class List[T] implements Counted, Iterable
     None
   end
 
-  def each[effect e](self, nonescaping f: (T) -> () with e): () with e
+  def each[effect e](self, f: (T) -> () with e): () with e
     for value in self
       f(value)
     end
     ()
   end
 
-  def map[U, effect e](self, nonescaping f: (T) -> U with e): List[U] with e
+  def map[U, effect e](self, f: (T) -> U with e): List[U] with e
     result = List[U]()
     result.reserve(self.len())
     for value in self
@@ -187,7 +187,7 @@ final class List[T] implements Counted, Iterable
     result
   end
 
-  def filter[effect e](self, nonescaping f: (T) -> Bool with e): List[T] with e
+  def filter[effect e](self, f: (T) -> Bool with e): List[T] with e
     result = List[T]()
     for value in self
       if f(value)
@@ -197,7 +197,7 @@ final class List[T] implements Counted, Iterable
     result
   end
 
-  def filter_map[U, effect e](self, nonescaping f: (T) -> Option[U] with e): List[U] with e
+  def filter_map[U, effect e](self, f: (T) -> Option[U] with e): List[U] with e
     result = List[U]()
     for value in self
       case f(value)
@@ -208,7 +208,7 @@ final class List[T] implements Counted, Iterable
     result
   end
 
-  def fold[U, effect e](self, initial: U, nonescaping f: (U, T) -> U with e): U with e
+  def fold[U, effect e](self, initial: U, f: (U, T) -> U with e): U with e
     result = initial
     for value in self
       result = f(result, value)
@@ -216,7 +216,7 @@ final class List[T] implements Counted, Iterable
     result
   end
 
-  def any[effect e](self, nonescaping f: (T) -> Bool with e): Bool with e
+  def any[effect e](self, f: (T) -> Bool with e): Bool with e
     for value in self
       if f(value)
         return true
@@ -225,7 +225,7 @@ final class List[T] implements Counted, Iterable
     false
   end
 
-  def all[effect e](self, nonescaping f: (T) -> Bool with e): Bool with e
+  def all[effect e](self, f: (T) -> Bool with e): Bool with e
     for value in self
       if not f(value)
         return false
@@ -234,7 +234,7 @@ final class List[T] implements Counted, Iterable
     true
   end
 
-  def sort_by[effect e](mut self, nonescaping compare: (T, T) -> Ordering with e): () with e
+  def sort_by[effect e](mut self, compare: (T, T) -> Ordering with e): () with e
     length = self.len()
     if length < 2
       return
@@ -329,7 +329,7 @@ final class Map[K, V] implements Counted, Iterable
   def get_or_insert_with[effect e](
     mut self,
     key: K,
-    nonescaping f: () -> V with e
+    f: () -> V with e
   ): V with e
     case self.get(key)
     in Some(value)
@@ -392,14 +392,14 @@ final class Map[K, V] implements Counted, Iterable
     result
   end
 
-  def each[effect e](self, nonescaping f: (K, V) -> () with e): () with e
+  def each[effect e](self, f: (K, V) -> () with e): () with e
     for key, value in self
       f(key, value)
     end
     ()
   end
 
-  def map_values[U, effect e](self, nonescaping f: (K, V) -> U with e): Map[K, U] with e
+  def map_values[U, effect e](self, f: (K, V) -> U with e): Map[K, U] with e
     result = Map[K, U]()
     result.reserve(self.len())
     for key, value in self
@@ -408,7 +408,7 @@ final class Map[K, V] implements Counted, Iterable
     result
   end
 
-  def retain[effect e](mut self, nonescaping f: (K, V) -> Bool with e): () with e
+  def retain[effect e](mut self, f: (K, V) -> Bool with e): () with e
     removed = List[K]()
     for key, value in self
       if not f(key, value)

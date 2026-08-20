@@ -715,7 +715,7 @@ impl TypeStore {
         )
     }
 
-    /// Return true when one type contains a nonescaping callback.
+    /// Return true when one value position contains a callback.
     pub fn contains_callback(&self, id: TypeId) -> bool {
         let mut stack = vec![id];
         let mut seen = vec![false; self.types.len()];
@@ -740,10 +740,7 @@ impl TypeStore {
                     stack.push(*key);
                     stack.push(*value);
                 }
-                Type::Fn(params, _, ret, _) => {
-                    stack.extend(params.iter().copied());
-                    stack.push(*ret);
-                }
+                Type::Fn(_, _, ret, _) => stack.push(*ret),
                 _ => {}
             }
         }

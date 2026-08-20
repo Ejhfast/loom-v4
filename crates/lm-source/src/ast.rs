@@ -187,8 +187,8 @@ pub struct Param {
     pub name: String,
     /// True for a `mut` parameter with mutable capability.
     pub mutable: bool,
-    /// True when the parameter accepts a callback that cannot escape.
-    pub nonescaping: bool,
+    /// True when a function parameter can escape its call.
+    pub escaping: bool,
     pub ty: TypeExpr,
     pub span: Span,
 }
@@ -590,6 +590,9 @@ fn dump_params(params: &[Param], leading_comma: bool) -> String {
         }
         if p.mutable {
             out.push_str("mut ");
+        }
+        if p.escaping {
+            out.push_str("escaping ");
         }
         let _ = write!(out, "{}: {}", p.name, dump_type(&p.ty));
     }

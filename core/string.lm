@@ -76,7 +76,7 @@ class Text implements Counted, Iterable
     end
   end
 
-  def each[effect e](self, nonescaping f: (Char) -> () with e): () with e
+  def each[effect e](self, f: (Char) -> () with e): () with e
     index = 0
     length = self.byte_len()
     while index < length
@@ -87,7 +87,7 @@ class Text implements Counted, Iterable
     ()
   end
 
-  def map[effect e](self, nonescaping f: (Char) -> Char with e): String with e
+  def map[effect e](self, f: (Char) -> Char with e): String with e
     builder = StringBuilder()
     index = 0
     length = self.byte_len()

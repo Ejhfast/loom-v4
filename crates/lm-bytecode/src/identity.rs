@@ -86,7 +86,8 @@ use std::collections::{BTreeSet, HashMap};
 /// branches, so version 20 is the first that carries them together.
 /// Version 22 adds interface contracts, callbacks, and native collection lowering.
 /// Version 23 adds the receiver type to semantic digest instructions.
-pub const COMPILER_ABI_VERSION: u32 = 23;
+/// Version 24 makes direct function parameters nonescaping by default.
+pub const COMPILER_ABI_VERSION: u32 = 24;
 
 /// The refinement work budget of one component.
 ///

@@ -92,6 +92,26 @@ enum CapSource {
     Capture(u32),
 }
 
+/// One stable value place that a `for` loop reads.
+#[derive(Clone, PartialEq, Eq)]
+enum IteratedPlace {
+    Local(u32),
+    Capture(u32),
+    Field(Box<IteratedPlace>, u32),
+}
+
+fn iterated_place(expr: &HExpr) -> Option<IteratedPlace> {
+    match &expr.kind {
+        HExprKind::Local(slot) => Some(IteratedPlace::Local(*slot)),
+        HExprKind::Capture(slot) => Some(IteratedPlace::Capture(*slot)),
+        HExprKind::FieldGet { recv, field } => Some(IteratedPlace::Field(
+            Box::new(iterated_place(recv)?),
+            *field,
+        )),
+        _ => None,
+    }
+}
+
 struct CaptureRec {
     name: String,
     ty: TypeId,
@@ -162,6 +182,7 @@ pub(crate) struct FnChecker<'o> {
     captures: Vec<CaptureRec>,
     is_closure: bool,
     loop_depth: u32,
+    iterated_places: Vec<IteratedPlace>,
     /// True when the body holds a `return`. It witnesses the
     /// declared result type.
     saw_return: bool,
@@ -458,6 +479,7 @@ impl<'o> FnChecker<'o> {
             captures: Vec::new(),
             is_closure: false,
             loop_depth: 0,
+            iterated_places: Vec::new(),
             saw_return: false,
             ret,
             self_class: None,
@@ -535,6 +557,21 @@ impl<'o> FnChecker<'o> {
             ),
             span,
         )
+    }
+
+    /// Reject a direct mutation of an active `for` source.
+    fn guard_iterated_mutation(&self, value: &HExpr, span: Span) -> Result<(), Diagnostic> {
+        let Some(place) = iterated_place(value) else {
+            return Ok(());
+        };
+        if self.iterated_places.contains(&place) {
+            return Err(Diagnostic::new(
+                "E1065",
+                "cannot mutate a value during its `for` traversal",
+                span,
+            ));
+        }
+        Ok(())
     }
 
     /// Require the row of a call to be inside the declared row. The
@@ -1114,6 +1151,9 @@ impl<'o> FnChecker<'o> {
                 span,
             ));
         }
+        if requirement.mut_self {
+            self.guard_iterated_mutation(&recv, span)?;
+        }
         if !requirement.params.is_empty() {
             return Err(Diagnostic::new(
                 "E1053",
@@ -1184,6 +1224,7 @@ impl<'o> FnChecker<'o> {
         let source = self.synth_expr(ctx, value)?;
         let source_ty = source.ty;
         let source_mut = source.mutable;
+        let iterated = iterated_place(&source);
 
         let (kind, binding_types, binding_mut) = match ctx.store.get(source_ty).clone() {
             Type::List(element) => {
@@ -1356,7 +1397,14 @@ impl<'o> FnChecker<'o> {
         let (bindings, scope) = self.for_bindings(bindings, &binding_types, binding_mut)?;
         self.scopes.push(scope);
         self.loop_depth += 1;
+        let tracks_iterated = iterated.is_some();
+        if let Some(place) = iterated {
+            self.iterated_places.push(place);
+        }
         let result = self.check_block(ctx, body, BlockMode::Stmt, span);
+        if tracks_iterated {
+            self.iterated_places.pop();
+        }
         self.loop_depth -= 1;
         self.scopes.pop();
         let (body, _, _) = result?;
@@ -1531,6 +1579,7 @@ impl<'o> FnChecker<'o> {
                 field_span,
             ));
         }
+        self.guard_iterated_mutation(&recv_h, field_span)?;
         let declared = ctx.classes[class as usize].field_tys[fidx];
         let field_ty = ctx.store.substitute(declared, &class_args, &[]);
         let value = self.check_expr(ctx, value, field_ty)?;
@@ -2630,6 +2679,9 @@ impl<'o> FnChecker<'o> {
                     arg.span,
                 ));
             }
+            if *is_mut {
+                self.guard_iterated_mutation(&h, arg.span)?;
+            }
             checked.push(h);
         }
         Ok(checked)
@@ -2840,6 +2892,9 @@ impl<'o> FnChecker<'o> {
                     "a `mut` parameter needs a mutable value",
                     arg.span,
                 ));
+            }
+            if *is_mut {
+                self.guard_iterated_mutation(&h, arg.span)?;
             }
             checked.push(h);
         }
@@ -3138,6 +3193,9 @@ impl<'o> FnChecker<'o> {
                     name_span,
                 ));
             }
+            if requirement.mut_self {
+                self.guard_iterated_mutation(&recv_h, name_span)?;
+            }
             let checked = self.check_args_simple(
                 ctx,
                 args,
@@ -3207,6 +3265,9 @@ impl<'o> FnChecker<'o> {
                         format!("the method `{name}` needs a mutable receiver"),
                         name_span,
                     ));
+                }
+                if sig.mut_self {
+                    self.guard_iterated_mutation(&recv_h, name_span)?;
                 }
                 let class_names = ctx.classes[class as usize].type_params.clone();
                 let mut type_names = class_names.clone();
@@ -3406,6 +3467,9 @@ impl<'o> FnChecker<'o> {
                 format!("the method `{name}` needs a mutable receiver"),
                 name_span,
             ));
+        }
+        if needs_mut {
+            self.guard_iterated_mutation(&recv_h, name_span)?;
         }
         let muts = vec![false; params.len()];
         let mut all_args = vec![recv_h];
@@ -3687,6 +3751,9 @@ impl<'o> FnChecker<'o> {
                 name_span,
             ));
         }
+        if sig.mut_self {
+            self.guard_iterated_mutation(&self_expr, name_span)?;
+        }
         let out = self.check_poly_call(
             ctx,
             name,
@@ -3918,6 +3985,7 @@ impl<'o> FnChecker<'o> {
             captures: Vec::new(),
             is_closure: true,
             loop_depth: 0,
+            iterated_places: Vec::new(),
             saw_return: false,
             ret: ret_kind,
             self_class: None,
