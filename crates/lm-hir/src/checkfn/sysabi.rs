@@ -1,0 +1,1332 @@
+//! The sys surface, ABI types, descriptors, and control methods.
+//!
+//! One part of the `FnChecker` surface. `checkfn/mod.rs` holds the
+//! state and the free helpers these methods use.
+
+use super::*;
+
+impl<'o> FnChecker<'o> {
+    /// Map a surface `sys` member name to its manifest group name.
+    pub(super) fn sys_group(name: &str) -> Option<&'static str> {
+        sys_group_name(name)
+    }
+
+    /// True when the bare name `sys` means the ABI root object here.
+    pub(super) fn sys_in_scope(&mut self) -> Result<bool, Diagnostic> {
+        Ok(self.resolve_name("sys")?.is_none())
+    }
+
+    /// Resolve a name to its `use` binding. Locals, module functions,
+    /// and module types shadow a `use` binding, per the resolution
+    /// order.
+    pub(super) fn use_binding(
+        &mut self,
+        ctx: &Ctx,
+        name: &str,
+    ) -> Result<Option<UseBinding>, Diagnostic> {
+        if self.env.core_scope
+            || self.resolve_name(name)?.is_some()
+            || ctx.func_index.contains_key(name)
+            || ctx.lookup_type(name, &self.env).is_some()
+        {
+            return Ok(None);
+        }
+        Ok(ctx.uses.get(name).cloned())
+    }
+
+    /// Read `sys.<group>` out of a receiver expression: the qualified
+    /// form, or a `use`-bound group alias.
+    pub(super) fn sys_group_of(
+        &mut self,
+        ctx: &Ctx,
+        recv: &ast::Expr,
+    ) -> Result<Option<&'static str>, Diagnostic> {
+        match &recv.kind {
+            ExprKind::Field {
+                recv: inner, name, ..
+            } => {
+                if matches!(inner.kind, ExprKind::Name(ref n) if n == "sys")
+                    && self.sys_in_scope()?
+                {
+                    return Ok(Self::sys_group(name));
+                }
+            }
+            ExprKind::Name(name) => {
+                if let Some(UseBinding::SysGroup(group)) = self.use_binding(ctx, name)? {
+                    return Ok(Some(group));
+                }
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+
+    /// Convert one manifest type to a checker type.
+    pub(super) fn abi_type_id(ctx: &mut Ctx, t: lm_abi::AbiType) -> TypeId {
+        Self::abi_type_id_with_vars(ctx, t, &[])
+    }
+
+    /// Convert one manifest type with intrinsic generic parameters.
+    pub(super) fn abi_type_id_with_vars(
+        ctx: &mut Ctx,
+        t: lm_abi::AbiType,
+        vars: &[TypeId],
+    ) -> TypeId {
+        match t {
+            lm_abi::AbiType::Primitive(primitive) => match primitive {
+                lm_abi::AbiPrimitive::Unit => UNIT,
+                lm_abi::AbiPrimitive::Bool => BOOL,
+                lm_abi::AbiPrimitive::Int => INT,
+                lm_abi::AbiPrimitive::String => STRING,
+                lm_abi::AbiPrimitive::Bytes => lm_types::BYTES,
+                lm_abi::AbiPrimitive::SnapshotImage => lm_types::SNAPSHOT_IMAGE,
+            },
+            lm_abi::AbiType::Core(core) => {
+                let name = match core {
+                    lm_abi::AbiCore::Text => "Text",
+                    lm_abi::AbiCore::Substring => "Substring",
+                    lm_abi::AbiCore::Char => "Char",
+                    lm_abi::AbiCore::StringBuilder => "StringBuilder",
+                    lm_abi::AbiCore::ByteBuffer => "ByteBuffer",
+                    lm_abi::AbiCore::OpenOptions => "OpenOptions",
+                    lm_abi::AbiCore::SeekFrom => "SeekFrom",
+                    lm_abi::AbiCore::IoError => "IoError",
+                    lm_abi::AbiCore::FsError => "FsError",
+                    lm_abi::AbiCore::SnapshotError => "SnapshotError",
+                    lm_abi::AbiCore::IpAddress => "IpAddress",
+                    lm_abi::AbiCore::SocketAddress => "SocketAddress",
+                    lm_abi::AbiCore::NetError => "NetError",
+                    lm_abi::AbiCore::TcpRead => "TcpRead",
+                    lm_abi::AbiCore::Shutdown => "Shutdown",
+                    lm_abi::AbiCore::TlsError => "TlsError",
+                };
+                Self::core_class(ctx, name)
+            }
+            lm_abi::AbiType::Native(native) => match native {
+                lm_abi::AbiNative::FileHandle => lm_types::FILE_HANDLE,
+                lm_abi::AbiNative::TcpResource => Self::core_class(ctx, "TcpResource"),
+                lm_abi::AbiNative::TcpStream => Self::core_class(ctx, "TcpStream"),
+                lm_abi::AbiNative::TcpListener => Self::core_class(ctx, "TcpListener"),
+                lm_abi::AbiNative::TlsStream => Self::core_class(ctx, "TlsStream"),
+            },
+            lm_abi::AbiType::Var(index) => vars
+                .get(index as usize)
+                .copied()
+                .expect("the intrinsic generic parameter is in scope"),
+            lm_abi::AbiType::List(element) => {
+                let element = Self::abi_type_id_with_vars(ctx, *element, vars);
+                ctx.store.intern(Type::List(element))
+            }
+            lm_abi::AbiType::Map(key, value) => {
+                let key = Self::abi_type_id_with_vars(ctx, *key, vars);
+                let value = Self::abi_type_id_with_vars(ctx, *value, vars);
+                ctx.store.intern(Type::Map(key, value))
+            }
+            lm_abi::AbiType::Tuple(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|element| Self::abi_type_id_with_vars(ctx, *element, vars))
+                    .collect();
+                ctx.store.intern(Type::Tuple(elements))
+            }
+            lm_abi::AbiType::Apply(constructor, arguments) => {
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| Self::abi_type_id_with_vars(ctx, *argument, vars))
+                    .collect();
+                Self::core_inst(ctx, constructor.text(), arguments)
+            }
+        }
+    }
+
+    /// The callable function type of one fixed operation.
+    pub(super) fn op_fn_type(ctx: &mut Ctx, op: u32) -> TypeId {
+        let def = lm_abi::op(op);
+        debug_assert_eq!(def.kind, lm_abi::OpKind::Fixed);
+        let params: Vec<TypeId> = def
+            .params
+            .iter()
+            .map(|p| Self::abi_type_id(ctx, *p))
+            .collect();
+        let ret = Self::abi_type_id(ctx, def.reply);
+        ctx.store
+            .intern_fn(params.clone(), vec![false; params.len()], ret, vec![])
+    }
+
+    /// The argument-view type of one fixed operation: `()` for a
+    /// zero-parameter operation, a tuple otherwise.
+    pub(super) fn op_args_type(ctx: &mut Ctx, op: u32) -> TypeId {
+        let def = lm_abi::op(op);
+        if def.params.is_empty() {
+            return UNIT;
+        }
+        let elems: Vec<TypeId> = def
+            .params
+            .iter()
+            .map(|p| Self::abi_type_id(ctx, *p))
+            .collect();
+        ctx.store.intern(Type::Tuple(elems))
+    }
+
+    /// Charge one exact operation to the enclosing row.
+    pub(super) fn charge_op(
+        &mut self,
+        ctx: &mut Ctx,
+        op: u32,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let idx = ctx.store.intern_row_name(&lm_abi::op_name(op));
+        let row = vec![lm_types::RowElem::Op(idx)];
+        self.charge_row(ctx, &row, span)
+    }
+
+    /// The mailbox message type of the enclosing proc class, when the
+    /// method belongs to a subclass of the core class `Proc`.
+    pub(super) fn proc_mailbox_type(&self, ctx: &Ctx) -> Option<TypeId> {
+        let class = self.self_class?;
+        let proc = *ctx.core_types.get("Proc")?;
+        let arity = ctx.classes[class as usize].type_params.len();
+        let own: Vec<TypeId> = (0..arity)
+            .map(|i| {
+                ctx.store
+                    .find(&Type::Var(i as u32))
+                    .expect("a class parameter type is interned")
+            })
+            .collect();
+        let args =
+            ctx.store
+                .ancestor_args(lm_types::ClassId(class), &own, lm_types::ClassId(proc))?;
+        args.first().copied()
+    }
+
+    /// An instance type of a core enum found by name.
+    pub(super) fn core_inst(ctx: &mut Ctx, name: &str, args: Vec<TypeId>) -> TypeId {
+        let class = ctx.core_types[name];
+        ctx.store.intern(Type::Inst(lm_types::ClassId(class), args))
+    }
+
+    /// The instance type of a core enum without type parameters.
+    pub(super) fn core_class(ctx: &mut Ctx, name: &str) -> TypeId {
+        let class = ctx.core_types[name];
+        ctx.store.intern(Type::Class(lm_types::ClassId(class)))
+    }
+
+    /// Reject arguments on a native method that takes none.
+    pub(super) fn expect_no_args(
+        name: &str,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if args.is_empty() {
+            return Ok(());
+        }
+        Err(Diagnostic::new(
+            "E1006",
+            format!("`{name}` expects 0 argument(s), found {}", args.len()),
+            span,
+        ))
+    }
+
+    /// Check a direct operation call `sys.<group>.<Member>(args)`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn check_sys_call(
+        &mut self,
+        ctx: &mut Ctx,
+        group: &str,
+        member: &str,
+        name_span: Span,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if !type_args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1024",
+                "an operation call does not take type arguments",
+                name_span,
+            ));
+        }
+        // `sys.vm.Vm()` creates an EmptyVm through `Vm.New`.
+        if group == "Vm" && member == "Vm" {
+            if !args.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    "`sys.vm.Vm` expects 0 argument(s)",
+                    span,
+                ));
+            }
+            self.charge_op(ctx, lm_abi::OP_VM_NEW, span)?;
+            return Ok(HExpr {
+                ty: lm_types::EMPTY_VM,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_VM_NEW,
+                    args: vec![],
+                },
+            });
+        }
+        // `sys.vm.snapshot_self()` performs `Vm.SnapshotSelf`. The
+        // calling function cannot name the enclosing machine result
+        // type, so the reply is an untyped `SnapshotImage`
+        // (specification 17.1).
+        if group == "Vm" && member == "snapshot_self" {
+            if !args.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!(
+                        "`sys.vm.snapshot_self` expects 0 argument(s), found {}",
+                        args.len()
+                    ),
+                    span,
+                ));
+            }
+            self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_SELF, span)?;
+            let error = Self::core_class(ctx, "SnapshotError");
+            let ty = Self::core_inst(ctx, "Result", vec![lm_types::SNAPSHOT_IMAGE, error]);
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_VM_SNAPSHOT_SELF,
+                    args: vec![],
+                },
+            });
+        }
+        // `sys.proc.recv()` performs `Proc.Recv`. The mailbox type
+        // comes from the enclosing proc class, so the call is valid
+        // only inside a method of a subclass of `Proc[M]`.
+        if group == "Proc" && matches!(member, "recv" | "recv_wait") {
+            if !args.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!(
+                        "`sys.proc.{member}` expects 0 argument(s), found {}",
+                        args.len()
+                    ),
+                    span,
+                ));
+            }
+            let mailbox = self.proc_mailbox_type(ctx).ok_or_else(|| {
+                Diagnostic::new(
+                    "E1051",
+                    format!(
+                        "`sys.proc.{member}` is only valid inside a method of a `Proc` subclass"
+                    ),
+                    name_span,
+                )
+            })?;
+            // The performing proc is the receiver. Its class fixes the
+            // mailbox type, so the verifier reads the class table
+            // instead of a claim at the call site.
+            let receiver = self.synth_self(ctx, span)?;
+            let recv = Self::core_inst(ctx, "Recv", vec![mailbox]);
+            let (op, ty) = if member == "recv" {
+                (lm_abi::OP_PROC_RECV, recv)
+            } else {
+                (
+                    lm_abi::OP_PROC_RECV_WAIT,
+                    ctx.store.intern(Type::Wait(recv)),
+                )
+            };
+            self.charge_op(ctx, op, span)?;
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op,
+                    args: vec![receiver],
+                },
+            });
+        }
+        // `sys.proc.run(vm)` transfers one loaded machine to the
+        // scheduler. The mailbox-bearing form comes from proc-class
+        // lowering, so this surface chooses `M = Never`.
+        if group == "Proc" && member == "run" {
+            if args.len() != 1 {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!("`sys.proc.run` expects 1 argument(s), found {}", args.len()),
+                    span,
+                ));
+            }
+            let vm = self.synth_expr(ctx, &args[0])?;
+            let Type::Vm(result) = ctx.store.get(vm.ty).clone() else {
+                return Err(Diagnostic::new(
+                    "E1004",
+                    format!(
+                        "`sys.proc.run` needs a loaded machine, found {}",
+                        ctx.display_type(&self.env, vm.ty)
+                    ),
+                    args[0].span,
+                ));
+            };
+            self.charge_op(ctx, lm_abi::OP_PROC_RUN, span)?;
+            let ty = ctx.store.intern(Type::Handle(NEVER, result));
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_PROC_RUN,
+                    args: vec![vm],
+                },
+            });
+        }
+        let op = Self::resolve_sys_member(group, member, name_span)?;
+        let def = lm_abi::op(op);
+        let params: Vec<TypeId> = def
+            .params
+            .iter()
+            .map(|p| Self::abi_type_id(ctx, *p))
+            .collect();
+        let muts = vec![false; params.len()];
+        let checked = self.check_args_simple(ctx, args, &params, &muts, NO_NAMES, member, span)?;
+        self.charge_op(ctx, op, span)?;
+        let ret = Self::abi_type_id(ctx, def.reply);
+        Ok(HExpr {
+            ty: ret,
+            mutable: true,
+            kind: HExprKind::Perform { op, args: checked },
+        })
+    }
+
+    /// Resolve one surface member name inside a group to its fixed
+    /// operation slot. The surface form is snake_case; a capitalized
+    /// spelling of a real operation gets the casing rule.
+    pub(super) fn resolve_sys_member(
+        group: &str,
+        member: &str,
+        name_span: Span,
+    ) -> Result<u32, Diagnostic> {
+        let starts_upper = member
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_uppercase())
+            .unwrap_or(false);
+        if starts_upper {
+            if lm_abi::fixed_member(group, member).is_some() {
+                return Err(Diagnostic::new(
+                    "E1051",
+                    format!(
+                        "callable `sys` members use snake_case; write `sys.{}.{}`",
+                        group.to_ascii_lowercase(),
+                        snake_member(member)
+                    ),
+                    name_span,
+                ));
+            }
+            return Err(Diagnostic::new(
+                "E1051",
+                format!("the group `{group}` has no operation named `{member}`"),
+                name_span,
+            ));
+        }
+        lm_abi::fixed_member(group, &camel_member(member)).ok_or_else(|| {
+            Diagnostic::new(
+                "E1051",
+                format!("the group `{group}` has no operation named `{member}`"),
+                name_span,
+            )
+        })
+    }
+
+    /// Check a first-class operation value `sys.<group>.<member>`.
+    pub(super) fn check_sys_value(
+        &mut self,
+        ctx: &mut Ctx,
+        group: &str,
+        member: &str,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if group == "Vm" && member == "Vm" {
+            return Err(Diagnostic::new(
+                "E1051",
+                "`sys.vm.Vm` is not a value; call `sys.vm.Vm()` to create a machine",
+                span,
+            ));
+        }
+        let op = Self::resolve_sys_member(group, member, span)?;
+        let fn_ty = Self::op_fn_type(ctx, op);
+        let ty = ctx.store.intern(Type::Op(op, fn_ty));
+        Ok(HExpr {
+            ty,
+            mutable: true,
+            kind: HExprKind::OpConst(op),
+        })
+    }
+
+    /// Resolve a policy-target descriptor expression: a group name
+    /// such as `Io`, or an exact name such as `Clock.Now`.
+    pub(super) fn resolve_descriptor(
+        &self,
+        expr: &ast::Expr,
+    ) -> Result<(TargetKind, u32, String), Diagnostic> {
+        self.resolve_descriptor_for(expr, "a policy target")
+    }
+
+    /// Resolve a descriptor expression with a context word for the
+    /// shape diagnostic.
+    pub(super) fn resolve_descriptor_for(
+        &self,
+        expr: &ast::Expr,
+        what: &str,
+    ) -> Result<(TargetKind, u32, String), Diagnostic> {
+        match &expr.kind {
+            ExprKind::Name(name) => {
+                if let Some(slot) = lm_abi::group_by_name(name) {
+                    return Ok((TargetKind::Group, slot, name.clone()));
+                }
+                Err(Diagnostic::new(
+                    "E1051",
+                    format!("`{name}` is not a group in the operation manifest"),
+                    expr.span,
+                ))
+            }
+            ExprKind::Field { recv, name, .. } => {
+                if let ExprKind::Name(group) = &recv.kind {
+                    let full = format!("{group}.{name}");
+                    if let Some(slot) = lm_abi::op_by_name(&full) {
+                        return Ok((TargetKind::Exact, slot, full));
+                    }
+                    if let Some(slot) = lm_abi::group_by_name(&full) {
+                        return Ok((TargetKind::Group, slot, full));
+                    }
+                    return Err(Diagnostic::new(
+                        "E1051",
+                        format!(
+                            "`{full}` is not an operation or effect set in the operation manifest"
+                        ),
+                        expr.span,
+                    ));
+                }
+                Err(Diagnostic::new(
+                    "E1051",
+                    format!("{what} must be a group name or an exact operation name"),
+                    expr.span,
+                ))
+            }
+            _ => Err(Diagnostic::new(
+                "E1051",
+                format!("{what} must be a group name or an exact operation name"),
+                expr.span,
+            )),
+        }
+    }
+
+    /// Check a policy-table edit method.
+    pub(super) fn check_table_edit(
+        &mut self,
+        ctx: &mut Ctx,
+        table: HExpr,
+        name: &str,
+        name_span: Span,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let action = match name {
+            "pass" => TableAction::Pass,
+            "block" => TableAction::Block,
+            "mock" => TableAction::Mock,
+            "clear" => TableAction::Clear,
+            _ => {
+                return Err(Diagnostic::new(
+                    "E1026",
+                    format!("`PolicyTable` has no method named `{name}`"),
+                    name_span,
+                ));
+            }
+        };
+        let want_args = if action == TableAction::Mock { 2 } else { 1 };
+        if args.len() != want_args {
+            return Err(Diagnostic::new(
+                "E1006",
+                format!(
+                    "`{name}` expects {want_args} argument(s), found {}",
+                    args.len()
+                ),
+                span,
+            ));
+        }
+        let (kind, slot, target_name) = self.resolve_descriptor(&args[0])?;
+        let mock = if action == TableAction::Mock {
+            if kind != TargetKind::Exact || lm_abi::op(slot).kind != lm_abi::OpKind::Fixed {
+                return Err(Diagnostic::new(
+                    "E1051",
+                    "`mock` needs an exact host operation, for example `Clock.Now`",
+                    args[0].span,
+                ));
+            }
+            let handler_ty = Self::op_fn_type(ctx, slot);
+            let handler = self.check_expr(ctx, &args[1], handler_ty)?;
+            Some(Box::new(handler))
+        } else {
+            None
+        };
+        if action == TableAction::Pass {
+            // The dependent grant rule: passing authority is charged
+            // to the granter's row.
+            let idx = ctx.store.intern_row_name(&target_name);
+            let row = vec![lm_types::RowElem::Op(idx)];
+            self.charge_row(ctx, &row, span)?;
+        }
+        Ok(HExpr {
+            ty: UNIT,
+            mutable: true,
+            kind: HExprKind::TableEdit {
+                action,
+                kind,
+                slot,
+                table: Box::new(table),
+                mock,
+            },
+        })
+    }
+
+    /// Check the native methods of the VM control surface: EmptyVm,
+    /// Vm[T], resource controls, and the other VM control receivers.
+    /// Return `None` when the receiver type has no such method.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn check_control_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv_h: HExpr,
+        name: &str,
+        name_span: Span,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<Option<HExpr>, Diagnostic> {
+        let recv_ty = ctx.store.get(recv_h.ty).clone();
+        if !matches!(
+            recv_ty,
+            Type::EmptyVm
+                | Type::Vm(_)
+                | Type::Wait(_)
+                | Type::PolicyTable
+                | Type::Request
+                | Type::PendingCall(_, _)
+                | Type::Handle(_, _)
+                | Type::ResourceHandle
+                | Type::Fault
+        ) {
+            return Ok(None);
+        }
+        if !type_args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1024",
+                "a native control method does not take type arguments",
+                name_span,
+            ));
+        }
+        let out = match (recv_ty, name) {
+            (Type::EmptyVm, "from_fn") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`from_fn` expects 2 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                // The type of the second parameter comes from the
+                // first, so this method arranges the labels itself
+                // instead of calling `check_args_simple`.
+                let args = arrange_args(args, &["program", "args"], "from_fn")?;
+                let program = self.synth_expr(ctx, args[0])?;
+                let Type::Fn(params, _, ret, _) = ctx.store.get(program.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`from_fn` needs a function value, found {}",
+                            ctx.display_type(&self.env, program.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                let want = if params.is_empty() {
+                    UNIT
+                } else {
+                    ctx.store.intern(Type::Tuple(params))
+                };
+                let tuple = self.check_expr(ctx, args[1], want)?;
+                self.charge_op(ctx, lm_abi::OP_VM_FROM_FN, span)?;
+                let vm_ty = ctx.store.intern(Type::Vm(ret));
+                HExpr {
+                    ty: vm_ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_FROM_FN,
+                        args: vec![recv_h, program, tuple],
+                    },
+                }
+            }
+            (Type::Vm(t), "snapshot_wait") => {
+                // The held form. `Handle[M,R].snapshot_wait` waits on a
+                // scheduler proc; this one advances a machine the
+                // caller holds.
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`snapshot_wait` expects 1 argument, found {}", args.len()),
+                        span,
+                    ));
+                }
+                let fuel = self.check_expr(ctx, &args[0], INT)?;
+                self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_WAIT_HELD, span)?;
+                let snapshot = ctx.store.intern(Type::Snapshot(t));
+                let error = Self::core_class(ctx, "SnapshotError");
+                let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SNAPSHOT_WAIT_HELD,
+                        args: vec![recv_h, fuel],
+                    },
+                }
+            }
+            (Type::Vm(t), "drive_for") => {
+                // A bounded drive turn. `None` reports that the turn
+                // spent its instructions and the machine can run again.
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`drive_for` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let count = self.check_expr(ctx, &args[0], INT)?;
+                self.charge_op(ctx, lm_abi::OP_VM_DRIVE_FOR, span)?;
+                let event = Self::core_inst(ctx, "DriveEvent", vec![t]);
+                let ty = Self::core_inst(ctx, "Option", vec![event]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_DRIVE_FOR,
+                        args: vec![recv_h, count],
+                    },
+                }
+            }
+            (Type::Vm(t), "run") | (Type::Vm(t), "step") | (Type::Vm(t), "drive") => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`{name}` expects 0 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let (op, event) = match name {
+                    "run" => (lm_abi::OP_VM_RUN, "RunResult"),
+                    "step" => (lm_abi::OP_VM_STEP, "StepEvent"),
+                    _ => (lm_abi::OP_VM_DRIVE, "DriveEvent"),
+                };
+                self.charge_op(ctx, op, span)?;
+                let ty = Self::core_inst(ctx, event, vec![t]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Vm(t), "drive_wait") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_DRIVE_WAIT, span)?;
+                let event = Self::core_inst(ctx, "DriveEvent", vec![t]);
+                let ty = ctx.store.intern(Type::Wait(event));
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_DRIVE_WAIT,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Vm(t), "snapshot") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_HELD, span)?;
+                let snapshot = ctx.store.intern(Type::Snapshot(t));
+                let error = Self::core_class(ctx, "SnapshotError");
+                let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SNAPSHOT_HELD,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::EmptyVm, "restore") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`restore` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let snapshot = self.synth_expr(ctx, &args[0])?;
+                let Type::Snapshot(t) = ctx.store.get(snapshot.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`restore` needs a typed snapshot, found {}",
+                            ctx.display_type(&self.env, snapshot.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                self.charge_op(ctx, lm_abi::OP_VM_RESTORE, span)?;
+                let vm = ctx.store.intern(Type::Vm(t));
+                let error = Self::core_class(ctx, "RestoreError");
+                let ty = Self::core_inst(ctx, "Result", vec![vm, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESTORE,
+                        args: vec![recv_h, snapshot],
+                    },
+                }
+            }
+            (Type::Vm(_), "table") => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`table` expects 0 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_TABLE, span)?;
+                HExpr {
+                    ty: lm_types::POLICY_TABLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_TABLE,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Vm(_), "handles") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_HANDLES, span)?;
+                let ty = ctx.store.intern(Type::List(lm_types::RESOURCE_HANDLE));
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_HANDLES,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Vm(_), "resource") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`resource` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let handle = self.synth_expr(ctx, &args[0])?;
+                let tcp_resource = Self::core_class(ctx, "TcpResource");
+                let tls_stream = Self::core_class(ctx, "TlsStream");
+                if handle.ty != lm_types::FILE_HANDLE
+                    && !ctx.store.compatible(tcp_resource, handle.ty)
+                    && handle.ty != tls_stream
+                {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`resource` needs a file or stream resource, found {}",
+                            ctx.display_type(&self.env, handle.ty)
+                        ),
+                        args[0].span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE,
+                        args: vec![recv_h, handle],
+                    },
+                }
+            }
+            (Type::Vm(_), "serve_file") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`serve_file` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let want_args = Self::op_args_type(ctx, lm_abi::OP_FS_OPEN);
+                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_FS_OPEN).reply);
+                if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`serve_file` needs a current Fs.Open call",
+                        args[0].span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_SERVE_FILE, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SERVE_FILE,
+                        args: vec![recv_h, call],
+                    },
+                }
+            }
+            (Type::Vm(_), "serve_tcp_stream") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`serve_tcp_stream` expects 2 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let connect_args = Self::op_args_type(ctx, lm_abi::OP_TCP_CONNECT);
+                let connect_reply =
+                    Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TCP_CONNECT).reply);
+                let accept_args = Self::op_args_type(ctx, lm_abi::OP_TCP_ACCEPT);
+                let accept_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TCP_ACCEPT).reply);
+                let valid = ctx.store.get(call.ty)
+                    == &Type::PendingCall(connect_args, connect_reply)
+                    || ctx.store.get(call.ty) == &Type::PendingCall(accept_args, accept_reply);
+                if !valid {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`serve_tcp_stream` needs a current Tcp.Connect or Tcp.Accept call",
+                        args[0].span,
+                    ));
+                }
+                let address = Self::core_class(ctx, "SocketAddress");
+                let peer = self.check_expr(ctx, &args[1], address)?;
+                self.charge_op(ctx, lm_abi::OP_VM_SERVE_TCP_STREAM, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SERVE_TCP_STREAM,
+                        args: vec![recv_h, call, peer],
+                    },
+                }
+            }
+            (Type::Vm(_), "serve_tcp_listener") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`serve_tcp_listener` expects 1 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let want_args = Self::op_args_type(ctx, lm_abi::OP_TCP_LISTEN);
+                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TCP_LISTEN).reply);
+                if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`serve_tcp_listener` needs a current Tcp.Listen call",
+                        args[0].span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_SERVE_TCP_LISTENER, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SERVE_TCP_LISTENER,
+                        args: vec![recv_h, call],
+                    },
+                }
+            }
+            (Type::Vm(_), "serve_tls_stream") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`serve_tls_stream` expects 1 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let call = self.synth_expr(ctx, &args[0])?;
+                let want_args = Self::op_args_type(ctx, lm_abi::OP_TLS_HANDSHAKE);
+                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TLS_HANDSHAKE).reply);
+                if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "`serve_tls_stream` needs a current Tls.Handshake call",
+                        args[0].span,
+                    ));
+                }
+                self.charge_op(ctx, lm_abi::OP_VM_SERVE_TLS_STREAM, span)?;
+                HExpr {
+                    ty: lm_types::RESOURCE_HANDLE,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SERVE_TLS_STREAM,
+                        args: vec![recv_h, call],
+                    },
+                }
+            }
+            (Type::Vm(_), "answer") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`answer` expects 2 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                // The reply type comes from the call token, so this
+                // method arranges the labels itself.
+                let args = arrange_args(args, &["call", "value"], "answer")?;
+                let call = self.synth_expr(ctx, args[0])?;
+                let Type::PendingCall(_, reply) = ctx.store.get(call.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`answer` needs a PendingCall token, found {}",
+                            ctx.display_type(&self.env, call.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                let value = self.check_expr(ctx, args[1], reply)?;
+                self.charge_op(ctx, lm_abi::OP_VM_ANSWER, span)?;
+                HExpr {
+                    ty: UNIT,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_ANSWER,
+                        args: vec![recv_h, call, value],
+                    },
+                }
+            }
+            (Type::Vm(_), "reject") => {
+                if args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`reject` expects 2 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let args = arrange_args(args, &["request", "fault"], "reject")?;
+                let request = self.check_expr(ctx, args[0], lm_types::REQUEST)?;
+                let fault = self.check_expr(ctx, args[1], lm_types::FAULT)?;
+                self.charge_op(ctx, lm_abi::OP_VM_REJECT, span)?;
+                HExpr {
+                    ty: UNIT,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_REJECT,
+                        args: vec![recv_h, request, fault],
+                    },
+                }
+            }
+            (Type::Vm(_), "dispatch") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`dispatch` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let request = self.check_expr(ctx, &args[0], lm_types::REQUEST)?;
+                self.charge_op(ctx, lm_abi::OP_VM_DISPATCH, span)?;
+                HExpr {
+                    ty: UNIT,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_DISPATCH,
+                        args: vec![recv_h, request],
+                    },
+                }
+            }
+            (Type::PolicyTable, _) => {
+                return self
+                    .check_table_edit(ctx, recv_h, name, name_span, args, span)
+                    .map(Some);
+            }
+            (Type::PendingCall(a, _), "args") => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`args` expects 0 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                HExpr {
+                    ty: a,
+                    mutable: true,
+                    kind: HExprKind::CallArgs {
+                        call: Box::new(recv_h),
+                    },
+                }
+            }
+            (Type::Wait(t), "wait") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_WAIT_WAIT, span)?;
+                HExpr {
+                    ty: t,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_WAIT_WAIT,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Wait(left), "choose") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`choose` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let right = self.synth_expr(ctx, &args[0])?;
+                let Type::Wait(right_result) = ctx.store.get(right.ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "`choose` needs a wait, found {}",
+                            ctx.display_type(&self.env, right.ty)
+                        ),
+                        args[0].span,
+                    ));
+                };
+                self.charge_op(ctx, lm_abi::OP_WAIT_CHOOSE, span)?;
+                let choice = Self::core_inst(ctx, "Choice", vec![left, right_result]);
+                let ty = ctx.store.intern(Type::Wait(choice));
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_WAIT_CHOOSE,
+                        args: vec![recv_h, right],
+                    },
+                }
+            }
+            (Type::Wait(_), "cancel") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_WAIT_CANCEL, span)?;
+                HExpr {
+                    ty: BOOL,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_WAIT_CANCEL,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Handle(m, _), "send") => {
+                if m == NEVER {
+                    return Err(Diagnostic::new(
+                        "E1026",
+                        "a proc with no mailbox has no `send` method",
+                        name_span,
+                    ));
+                }
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`send` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let message = self.check_expr(ctx, &args[0], m)?;
+                self.charge_op(ctx, lm_abi::OP_PROC_SEND, span)?;
+                let ty = Self::core_class(ctx, "SendResult");
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_PROC_SEND,
+                        args: vec![recv_h, message],
+                    },
+                }
+            }
+            (Type::Handle(_, _), "close") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_PROC_CLOSE, span)?;
+                let ty = Self::core_class(ctx, "SendResult");
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_PROC_CLOSE,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Handle(_, r), "done") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_PROC_DONE, span)?;
+                let ty = Self::core_inst(ctx, "ProcResult", vec![r]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_PROC_DONE,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::Handle(_, r), "snapshot_wait") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`snapshot_wait` expects 1 argument, found {}", args.len()),
+                        span,
+                    ));
+                }
+                let fuel = self.check_expr(ctx, &args[0], INT)?;
+                self.charge_op(ctx, lm_abi::OP_PROC_SNAPSHOT_WAIT, span)?;
+                let snapshot = ctx.store.intern(Type::Snapshot(r));
+                let error = Self::core_class(ctx, "SnapshotError");
+                let ty = Self::core_inst(ctx, "Result", vec![snapshot, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_PROC_SNAPSHOT_WAIT,
+                        args: vec![recv_h, fuel],
+                    },
+                }
+            }
+            (Type::Handle(_, r), "pause") | (Type::Handle(_, r), "resume") => {
+                Self::expect_no_args(name, args, span)?;
+                let (op, ok) = if name == "pause" {
+                    (lm_abi::OP_PROC_PAUSE, ctx.store.intern(Type::Vm(r)))
+                } else {
+                    (lm_abi::OP_PROC_RESUME, UNIT)
+                };
+                self.charge_op(ctx, op, span)?;
+                let error = Self::core_class(ctx, "ProcError");
+                let ty = Self::core_inst(ctx, "Result", vec![ok, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::ResourceHandle, "is_open") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_IS_OPEN, span)?;
+                HExpr {
+                    ty: BOOL,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE_IS_OPEN,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::ResourceHandle, "close") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_CLOSE, span)?;
+                HExpr {
+                    ty: BOOL,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE_CLOSE,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::ResourceHandle, "kind") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_KIND, span)?;
+                HExpr {
+                    ty: STRING,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE_KIND,
+                        args: vec![recv_h],
+                    },
+                }
+            }
+            (Type::ResourceHandle, "same_resource") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!(
+                            "`same_resource` expects 1 argument(s), found {}",
+                            args.len()
+                        ),
+                        span,
+                    ));
+                }
+                let other = self.check_expr(ctx, &args[0], lm_types::RESOURCE_HANDLE)?;
+                self.charge_op(ctx, lm_abi::OP_VM_RESOURCE_SAME, span)?;
+                HExpr {
+                    ty: BOOL,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_RESOURCE_SAME,
+                        args: vec![recv_h, other],
+                    },
+                }
+            }
+            // The erased inspection surface of a request. A wildcard
+            // arm holds no operation identity, so this names the
+            // operation as text for a report or a denial message. The
+            // request must still be live: a continuation spends it.
+            (Type::Request, "op_name") => {
+                Self::expect_no_args(name, args, span)?;
+                HExpr {
+                    ty: STRING,
+                    mutable: true,
+                    kind: HExprKind::RequestOpName {
+                        request: Box::new(recv_h),
+                    },
+                }
+            }
+            (Type::Fault, "code") => {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`code` expects 0 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                HExpr {
+                    ty: STRING,
+                    mutable: true,
+                    kind: HExprKind::FaultCodeGet {
+                        fault: Box::new(recv_h),
+                    },
+                }
+            }
+            (recv_ty, _) => {
+                return Err(Diagnostic::new(
+                    "E1026",
+                    format!("the type {} has no method named `{name}`", {
+                        let id = ctx.store.intern(recv_ty);
+                        ctx.display_type(&self.env, id)
+                    }),
+                    name_span,
+                ));
+            }
+        };
+        Ok(Some(out))
+    }
+}
