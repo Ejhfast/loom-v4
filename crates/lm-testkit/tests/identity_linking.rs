@@ -700,6 +700,10 @@ fn chain_cycle(n: usize) -> Module {
         types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
         selectors: vec![],
         apps: vec![],
+        interfaces: vec![],
+        conformances: vec![],
+        class_bounds: vec![],
+        func_bounds: vec![vec![]; funcs.len()],
         imports: vec![],
         core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
         classes: vec![],
@@ -821,6 +825,10 @@ fn many_chains(count: usize, per: usize, repeats: usize) -> Module {
         types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
         selectors: vec![],
         apps: vec![],
+        interfaces: vec![],
+        conformances: vec![],
+        class_bounds: vec![],
+        func_bounds: vec![vec![]; funcs.len()],
         imports: vec![],
         core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
         classes: vec![],
@@ -1290,6 +1298,12 @@ fn an_impossible_binding_count_rejects_before_the_reserve() {
     assert!(lm_bytecode::decode(&good).is_ok(), "the sample must decode");
     let export_at = u32::from_le_bytes(good[14..18].try_into().unwrap()) as usize;
     let binding_at = export_at
+        + 4
+        + module
+            .interfaces
+            .iter()
+            .map(|interface| 8 + interface.name.len() + interface.key.len())
+            .sum::<usize>()
         + 4
         + module
             .classes

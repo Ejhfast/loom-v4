@@ -406,6 +406,7 @@ impl<'a> Scanner<'a> {
             "self" => Tok::KwSelf,
             "super" => Tok::KwSuper,
             "mut" => Tok::KwMut,
+            "nonescaping" => Tok::KwNonescaping,
             "as" => Tok::KwAs,
             "case" => Tok::KwCase,
             "select" => Tok::KwSelect,
@@ -417,12 +418,16 @@ impl<'a> Scanner<'a> {
             "with" => Tok::KwWith,
             "loop" => Tok::KwLoop,
             "use" => Tok::KwUse,
+            "interface" => Tok::KwInterface,
+            "implements" => Tok::KwImplements,
+            "type" => Tok::KwType,
+            "for" => Tok::KwFor,
             _ => Tok::Ident(word.to_string()),
         };
         // Track statement blocks, so a block body inside `(`, `[`, or
         // `{` still ends its statements at newlines.
         match &tok {
-            Tok::KwIf | Tok::KwCase | Tok::KwSelect | Tok::KwWhile | Tok::KwLoop => {
+            Tok::KwIf | Tok::KwCase | Tok::KwSelect | Tok::KwWhile | Tok::KwLoop | Tok::KwFor => {
                 self.nesting.push(Nest::Block);
             }
             Tok::KwDo => {

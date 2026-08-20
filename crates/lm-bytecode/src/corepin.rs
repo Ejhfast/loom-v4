@@ -147,10 +147,14 @@ pub struct CoreLayout {
     pub tls_closed: Option<u32>,
     pub tls_limit_exceeded: Option<u32>,
     pub tls_stream: Option<u32>,
+    /// The core method table of native list values.
+    pub list: Option<u32>,
+    /// The core method table of native map values.
+    pub map: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 106] = [
+pub const PINNED_LABELS: [&str; 108] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -257,10 +261,21 @@ pub const PINNED_LABELS: [&str; 106] = [
     "TlsError.Closed",
     "TlsError.LimitExceeded",
     "TlsStream",
+    "List",
+    "Map",
 ];
 
 /// The core role of immediate integer values.
 pub const ROLE_INT: usize = 59;
+
+/// The core role of the native `Option` family.
+pub const ROLE_OPTION: usize = 0;
+
+/// The core role of the native `Some` arm.
+pub const ROLE_OPTION_SOME: usize = 1;
+
+/// The core role of the native `None` arm.
+pub const ROLE_OPTION_NONE: usize = 2;
 
 /// The core role of immediate Boolean values.
 pub const ROLE_BOOL: usize = 60;
@@ -324,6 +339,8 @@ pub const ROLE_TLS_NETWORK: usize = 102;
 pub const ROLE_TLS_CLOSED: usize = 103;
 pub const ROLE_TLS_LIMIT_EXCEEDED: usize = 104;
 pub const ROLE_TLS_STREAM: usize = 105;
+pub const ROLE_LIST: usize = 106;
+pub const ROLE_MAP: usize = 107;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -480,6 +497,8 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "TlsError.Closed" => &mut layout.tls_closed,
         "TlsError.LimitExceeded" => &mut layout.tls_limit_exceeded,
         "TlsStream" => &mut layout.tls_stream,
+        "List" => &mut layout.list,
+        "Map" => &mut layout.map,
         _ => unreachable!("only known labels enter the map"),
     }
 }

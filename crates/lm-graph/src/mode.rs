@@ -194,13 +194,16 @@ fn copy_value(
     mode: CopyMode,
 ) -> Result<Value, FaultCode> {
     let root = match value {
-        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Char(_) | Value::Op(_) => {
-            return Ok(value)
-        }
+        Value::Unit
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Char(_)
+        | Value::Op(_)
+        | Value::EmptyCase { .. } => return Ok(value),
         // A verified read never produces the marker, and a local slot
         // that holds it is unreadable. A caller that still hands one
         // over takes a local fault instead of a host panic.
-        Value::Uninit => return Err(FaultCode::BoundaryViolation),
+        Value::Callback(_) | Value::Uninit => return Err(FaultCode::BoundaryViolation),
         Value::Obj(r) => r,
     };
     let mut scratch = src.take_scratch();
@@ -240,13 +243,16 @@ pub fn copy_within(
     limits: &GraphLimits,
 ) -> Result<Value, FaultCode> {
     let root = match value {
-        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Char(_) | Value::Op(_) => {
-            return Ok(value)
-        }
+        Value::Unit
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Char(_)
+        | Value::Op(_)
+        | Value::EmptyCase { .. } => return Ok(value),
         // A verified read never produces the marker, and a local slot
         // that holds it is unreadable. A caller that still hands one
         // over takes a local fault instead of a host panic.
-        Value::Uninit => return Err(FaultCode::BoundaryViolation),
+        Value::Callback(_) | Value::Uninit => return Err(FaultCode::BoundaryViolation),
         Value::Obj(r) => r,
     };
     let mut scratch = heap.take_scratch();
@@ -505,6 +511,12 @@ mod tests {
             out[0] = class as u8;
             Ok(out)
         }
+
+        fn type_hash(&self, ty: u32) -> Result<[u8; 32], FaultCode> {
+            let mut out = [2u8; 32];
+            out[0] = ty as u8;
+            Ok(out)
+        }
     }
 
     fn limits() -> GraphLimits {
@@ -515,11 +527,13 @@ mod tests {
     fn frozen_ring(heap: &mut Heap, first: i64, second: i64) -> ObjRef {
         let a = heap.alloc(Object::List {
             items: vec![Value::Int(first)],
+            epoch: Default::default(),
         });
         let b = heap.alloc(Object::List {
             items: vec![Value::Int(second), Value::Obj(a)],
+            epoch: Default::default(),
         });
-        if let Object::List { items } = heap.get_mut(a) {
+        if let Object::List { items, .. } = heap.get_mut(a) {
             items.push(Value::Obj(b));
         }
         heap.recharge(a);
@@ -560,9 +574,13 @@ mod tests {
     #[test]
     fn a_rejected_freeze_leaves_every_bit_alone() {
         let mut heap = Heap::new(1 << 20);
-        let leaf = heap.alloc(Object::List { items: vec![] });
+        let leaf = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
         let root = heap.alloc(Object::List {
             items: vec![Value::Obj(leaf)],
+            epoch: Default::default(),
         });
         let tight = GraphLimits {
             max_objects: 1,
@@ -579,7 +597,10 @@ mod tests {
     #[test]
     fn verification_rejects_a_mutable_child() {
         let mut heap = Heap::new(1 << 20);
-        let leaf = heap.alloc(Object::List { items: vec![] });
+        let leaf = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
         let root = heap.alloc(Object::Tuple {
             items: vec![Value::Obj(leaf)],
         });
@@ -624,7 +645,10 @@ mod tests {
     #[test]
     fn the_sendable_check_admits_a_mutable_graph() {
         let mut heap = Heap::new(1 << 20);
-        let leaf = heap.alloc(Object::List { items: vec![] });
+        let leaf = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
         let root = heap.alloc(Object::Tuple {
             items: vec![Value::Obj(leaf)],
         });
@@ -659,11 +683,11 @@ mod tests {
         assert!(dst.is_frozen(new_root));
         // The ring closes back on the copied root, not on the source.
         let next = match dst.get(new_root) {
-            Object::List { items } => items[1].as_obj().expect("the next node"),
+            Object::List { items, .. } => items[1].as_obj().expect("the next node"),
             other => panic!("expected a list, got {other:?}"),
         };
         let back = match dst.get(next) {
-            Object::List { items } => items[1].as_obj().expect("the back edge"),
+            Object::List { items, .. } => items[1].as_obj().expect("the back edge"),
             other => panic!("expected a list, got {other:?}"),
         };
         assert_eq!(back, new_root);
@@ -677,6 +701,7 @@ mod tests {
         let mut dst = Heap::new(1 << 20);
         let mutable = src.alloc(Object::List {
             items: vec![Value::Int(1)],
+            epoch: Default::default(),
         });
         let moved = transfer(&mut src, &mut dst, &[], Value::Obj(mutable), &limits())
             .expect("a mutable graph crosses");
@@ -685,12 +710,12 @@ mod tests {
         assert_eq!(dst.live_count(), 1);
         // The copy is a second object: a later source write is not
         // visible through it.
-        if let Object::List { items } = src.get_mut(mutable) {
+        if let Object::List { items, .. } = src.get_mut(mutable) {
             items.push(Value::Int(2));
         }
         src.recharge(mutable);
         match dst.get(new_root) {
-            Object::List { items } => assert_eq!(items, &vec![Value::Int(1)]),
+            Object::List { items, .. } => assert_eq!(items, &vec![Value::Int(1)]),
             other => panic!("expected a list, got {other:?}"),
         }
         let handle = src.alloc(Object::NativeVm { vm: 3 });
@@ -710,10 +735,12 @@ mod tests {
         let mut dst = Heap::new(1 << 20);
         let inner = src.alloc(Object::List {
             items: vec![Value::Int(7)],
+            epoch: Default::default(),
         });
         freeze(&mut src, inner, &limits()).expect("the inner list freezes");
         let outer = src.alloc(Object::List {
             items: vec![Value::Obj(inner)],
+            epoch: Default::default(),
         });
         assert!(!src.is_frozen(outer));
         let moved = transfer(&mut src, &mut dst, &[], Value::Obj(outer), &limits())
@@ -721,7 +748,7 @@ mod tests {
         let new_outer = moved.as_obj().expect("the copy is an object");
         assert!(!dst.is_frozen(new_outer), "the wrapper stays mutable");
         let new_inner = match dst.get(new_outer) {
-            Object::List { items } => items[0].as_obj().expect("the inner list"),
+            Object::List { items, .. } => items[0].as_obj().expect("the inner list"),
             other => panic!("expected a list, got {other:?}"),
         };
         assert!(dst.is_frozen(new_inner), "the subgraph stays frozen");
@@ -734,9 +761,11 @@ mod tests {
         let mut heap = Heap::new(1 << 20);
         let leaf = heap.alloc(Object::List {
             items: vec![Value::Int(1)],
+            epoch: Default::default(),
         });
         let root = heap.alloc(Object::List {
             items: vec![Value::Obj(leaf), Value::Obj(leaf)],
+            epoch: Default::default(),
         });
         let copy = copy_within(&mut heap, &[root], Value::Obj(root), &limits())
             .expect("a mutable graph copies");
@@ -746,7 +775,7 @@ mod tests {
         assert!(!heap.is_frozen(new_root), "the copy stays mutable");
         // The shared leaf stays one object inside the copy.
         let (first, second) = match heap.get(new_root) {
-            Object::List { items } => (
+            Object::List { items, .. } => (
                 items[0].as_obj().expect("the first child"),
                 items[1].as_obj().expect("the second child"),
             ),
@@ -755,12 +784,12 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, leaf);
         // A write through the source is not visible in the copy.
-        if let Object::List { items } = heap.get_mut(leaf) {
+        if let Object::List { items, .. } = heap.get_mut(leaf) {
             items.push(Value::Int(2));
         }
         heap.recharge(leaf);
         match heap.get(first) {
-            Object::List { items } => assert_eq!(items, &vec![Value::Int(1)]),
+            Object::List { items, .. } => assert_eq!(items, &vec![Value::Int(1)]),
             other => panic!("expected a list, got {other:?}"),
         }
         // The one-heap path keeps the shape rule of the copy.
@@ -884,6 +913,7 @@ mod tests {
         let leaf = src.alloc(Object::Str("leaf".into()));
         let root = src.alloc(Object::List {
             items: vec![Value::Obj(leaf), Value::Obj(leaf)],
+            epoch: Default::default(),
         });
         assert!(!src.is_frozen(root));
         let copy = detach(&mut src, &mut dst, &[], Value::Obj(root), &limits())
@@ -942,7 +972,10 @@ mod tests {
     #[test]
     fn the_digest_rejects_mutable_and_nondigestible_graphs() {
         let mut heap = Heap::new(1 << 20);
-        let mutable = heap.alloc(Object::List { items: vec![] });
+        let mutable = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
         assert_eq!(
             digest_value(&mut heap, Value::Obj(mutable), &Slots, &limits()),
             Err(FaultCode::UnsendableValue)
@@ -1041,10 +1074,14 @@ mod tests {
             .stack_size(256 * 1024)
             .spawn(|| {
                 let mut heap = Heap::new(64 << 20);
-                let mut head = heap.alloc(Object::List { items: vec![] });
+                let mut head = heap.alloc(Object::List {
+                    items: vec![],
+                    epoch: Default::default(),
+                });
                 for _ in 0..50_000 {
                     head = heap.alloc(Object::List {
                         items: vec![Value::Obj(head)],
+                        epoch: Default::default(),
                     });
                 }
                 freeze(&mut heap, head, &limits()).expect("the freeze finishes");

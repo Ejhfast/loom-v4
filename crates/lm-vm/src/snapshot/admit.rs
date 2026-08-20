@@ -152,7 +152,7 @@ pub(super) fn prove(
     admit.run()?;
     Ok(AdmissionIdentity {
         module_semantic: identity.semantic_hash,
-        verification: lm_bytecode::identity::verification_hash(module),
+        verification: loaded.verification_hash(),
         format: image.format,
         abi_version: image.abi_version,
         compiler_abi: image.compiler_abi,
@@ -190,6 +190,10 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
     for machine in &image.machines {
         add(1)?;
         add(machine.frames.len())?;
+        add(machine.callbacks.len())?;
+        for callback in &machine.callbacks {
+            add(callback.captures.len())?;
+        }
         add(machine.locals.len())?;
         add(machine.operands.len())?;
         add(machine.literals.len())?;
@@ -211,11 +215,13 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
 fn closed_type_parts(node: &ClosedType) -> usize {
     match node {
         ClosedType::Inst(_, args) | ClosedType::Tuple(args) => args.len(),
-        ClosedType::Fn(params, markers, _, row) => params
-            .len()
-            .saturating_add(markers.len())
-            .saturating_add(row.len())
-            .saturating_add(1),
+        ClosedType::Fn(params, markers, _, row) | ClosedType::Callback(params, markers, _, row) => {
+            params
+                .len()
+                .saturating_add(markers.len())
+                .saturating_add(row.len())
+                .saturating_add(1)
+        }
         ClosedType::List(_)
         | ClosedType::Vm(_)
         | ClosedType::Op(_, _)
@@ -228,7 +234,7 @@ fn closed_type_parts(node: &ClosedType) -> usize {
 fn object_edges(object: &Object) -> usize {
     match object {
         Object::Instance { fields, .. } => fields.len(),
-        Object::List { items } | Object::Tuple { items } => items.len(),
+        Object::List { items, .. } | Object::Tuple { items } => items.len(),
         Object::Map { entries, .. } => entries.len().saturating_mul(2),
         Object::Closure { captures, .. } => captures.len(),
         _ => 0,
@@ -384,7 +390,9 @@ fn resolve_type_tables(
             }
             _ => {}
         }
-        if let ClosedType::Fn(params, muts, _, row) = node {
+        if let ClosedType::Fn(params, muts, _, row) | ClosedType::Callback(params, muts, _, row) =
+            node
+        {
             if params.len() != muts.len() {
                 return fail(
                     ImageReason::Layout,
@@ -512,6 +520,7 @@ impl Admit<'_> {
         // position instead of the traversal an edit moved.
         for (vm, machine) in self.image.machines.iter().enumerate() {
             self.check_order(machine, vm as u32)?;
+            self.check_callback_order(machine, vm as u32)?;
         }
         Ok(())
     }
@@ -621,6 +630,7 @@ impl Admit<'_> {
     fn check_references(&self, vm: u32) -> Result<(), ImageError> {
         let m = self.machine(vm);
         let objects = m.objects.len() as u32;
+        let callbacks = m.callbacks.len() as u32;
         let machines = self.image.machines.len() as u32;
         let at = |what: &str| format!("machine {vm}: {what}");
         let object_ref = |value: &Value, what: &str| -> Result<(), ImageError> {
@@ -639,6 +649,36 @@ impl Admit<'_> {
                         r.slot
                     )),
                 ),
+                Value::Callback(reference) if reference.generation != 0 => fail(
+                    ImageReason::Reference,
+                    at(&format!(
+                        "{what} holds callback generation {}, and an image reference requires zero",
+                        reference.generation
+                    )),
+                ),
+                Value::Callback(reference) if reference.slot >= callbacks => fail(
+                    ImageReason::Reference,
+                    at(&format!(
+                        "{what} names callback ordinal {} of {callbacks}",
+                        reference.slot
+                    )),
+                ),
+                Value::EmptyCase { ty, arm } => {
+                    let option = self.module.core_roles[lm_bytecode::corepin::ROLE_OPTION];
+                    let valid = *arm == 1
+                        && self.image.types.get(*ty as usize).is_some_and(|node| {
+                            matches!(node, ClosedType::Inst(class, args)
+                                if *class == option && args.len() == 1)
+                        });
+                    if valid {
+                        Ok(())
+                    } else {
+                        fail(
+                            ImageReason::Reference,
+                            at(&format!("{what} holds an invalid empty case")),
+                        )
+                    }
+                }
                 _ => Ok(()),
             }
         };
@@ -961,13 +1001,40 @@ impl Admit<'_> {
                     )),
                 );
             }
-            if let Some(closure) = frame.closure {
-                if closure >= objects {
+            if let Some(closure) = &frame.closure {
+                object_ref(closure, &format!("frame {idx} capture context"))?;
+            }
+        }
+        for (idx, callback) in m.callbacks.iter().enumerate() {
+            if callback.func as usize >= self.module.funcs.len() || !self.func_named(callback.func)
+            {
+                return fail(
+                    ImageReason::Code,
+                    at(&format!("callback {idx} names no function")),
+                );
+            }
+            let target = &self.module.funcs[callback.func as usize];
+            if callback.captures.len() != target.captures.len() {
+                return fail(
+                    ImageReason::Layout,
+                    at(&format!("callback {idx} has another capture count")),
+                );
+            }
+            self.env_of(callback.env)?;
+            if callback.owner_depth == 0 || callback.owner_depth as usize > m.frames.len() {
+                return fail(
+                    ImageReason::Layout,
+                    at(&format!("callback {idx} has an invalid owner depth")),
+                );
+            }
+            for (capture, value) in callback.captures.iter().enumerate() {
+                if matches!(value, Value::Callback(_)) {
                     return fail(
-                        ImageReason::Reference,
-                        at(&format!("frame {idx} names no capture context object")),
+                        ImageReason::State,
+                        at(&format!("callback {idx} captures another callback")),
                     );
                 }
+                object_ref(value, &format!("callback {idx} capture {capture}"))?;
             }
         }
         for (idx, value) in m.locals.iter().enumerate() {
@@ -1124,13 +1191,34 @@ impl Admit<'_> {
             let Some(closure) = frame.closure else {
                 continue;
             };
-            match m.objects[closure as usize].object {
+            match closure {
                 // The frame runs that closure, so the two carry one
                 // environment. A frame that named another environment
                 // would read its captures under a substitution the
                 // closure never held.
-                Object::Closure { func, env, .. }
-                    if func == frame.func && env.env().0 == frame.env => {}
+                Value::Obj(reference) => match m.objects[reference.slot as usize].object {
+                    Object::Closure { func, env, .. }
+                        if func == frame.func && env.env().0 == frame.env => {}
+                    _ => {
+                        return fail(
+                            ImageReason::Reference,
+                            at(&format!(
+                                "frame {idx} names a capture context that is not its own closure"
+                            )),
+                        )
+                    }
+                },
+                Value::Callback(reference) => {
+                    let callback = &m.callbacks[reference.slot as usize];
+                    if callback.func != frame.func || callback.env != frame.env {
+                        return fail(
+                            ImageReason::Reference,
+                            at(&format!(
+                                "frame {idx} names a capture context that is not its own callback"
+                            )),
+                        );
+                    }
+                }
                 _ => {
                     return fail(
                         ImageReason::Reference,
@@ -1758,6 +1846,59 @@ impl Admit<'_> {
                     "machine {vm}: {} stored objects are unreachable",
                     count - next
                 ),
+            );
+        }
+        Ok(())
+    }
+
+    /// Prove canonical callback order and reachability.
+    fn check_callback_order(&self, machine: &ImageMachine, vm: u32) -> Result<(), ImageError> {
+        let count = machine.callbacks.len();
+        let mut seen = work_vec(count)?;
+        seen.resize(count, false);
+        let mut values = Vec::new();
+        for frame in &machine.frames {
+            if let Some(value) = frame.closure {
+                values.push(value);
+            }
+        }
+        values.extend(machine.locals.iter().copied());
+        values.extend(machine.operands.iter().copied());
+        if let Some(pending) = &machine.pending {
+            values.extend(pending.args.iter().copied());
+        }
+        if let Some(ImageTerminal::Done(value)) = machine.terminal {
+            values.push(value);
+        }
+        values.extend(machine.mailbox.queue.iter().copied());
+        let mut next = 0usize;
+        let mut cursor = 0usize;
+        while cursor < values.len() {
+            let value = values[cursor];
+            cursor += 1;
+            let Value::Callback(reference) = value else {
+                continue;
+            };
+            let index = reference.slot as usize;
+            if seen[index] {
+                continue;
+            }
+            if index != next {
+                return fail(
+                    ImageReason::Order,
+                    format!(
+                        "machine {vm}: callback traversal reaches {index} where canonical order needs {next}"
+                    ),
+                );
+            }
+            seen[index] = true;
+            next += 1;
+            values.extend(machine.callbacks[index].captures.iter().copied());
+        }
+        if next != count {
+            return fail(
+                ImageReason::Order,
+                format!("machine {vm}: {} callbacks are unreachable", count - next),
             );
         }
         Ok(())

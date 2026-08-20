@@ -18,10 +18,11 @@ use crate::schedule::{
     WaitSourceKey, WakeKey,
 };
 use crate::{FaultCode, LoadedModule, Outcome, VmConfig, WorldLimits};
+use lm_bytecode::closed::{ClosedType, ClosedTypeId};
 use lm_bytecode::corepin::CoreLayout;
-use lm_bytecode::{BcClassKind, Module};
-use lm_heap::{Heap, HeapBudget, Object};
-use lm_value::{ObjRef, Value};
+use lm_bytecode::{BcClassKind, BcType, Module};
+use lm_heap::{Heap, HeapBudget, Object, StructuralEpoch};
+use lm_value::{ObjRef, TypeEnvId, Value};
 
 /// The fuel budget of one mock handler run.
 const MOCK_FUEL: u64 = 1_000_000;
@@ -151,6 +152,7 @@ pub enum RootEvent {
 /// so the digest encoder reads the definition hash instead.
 struct ModuleCodes<'m> {
     identity: &'m lm_bytecode::identity::ModuleIdentity,
+    envs: &'m lm_bytecode::closed::TypeEnvs,
 }
 
 /// The aggregate ledgers of one root VM and its spawned procs.
@@ -179,6 +181,19 @@ struct BoundResource {
     owner: VmId,
     kind: crate::ResourceKind,
     backing: ResourceBacking,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ShowExpected {
+    Module { ty: u32, env: TypeEnvId },
+    Closed(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShowOption {
+    Family,
+    Some,
+    None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +235,12 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
             .class_hashes
             .get(class as usize)
             .copied()
+            .ok_or(FaultCode::BoundaryViolation)
+    }
+
+    fn type_hash(&self, ty: u32) -> Result<[u8; 32], FaultCode> {
+        self.envs
+            .cached_digest(ty)
             .ok_or(FaultCode::BoundaryViolation)
     }
 }
@@ -1268,9 +1289,12 @@ impl<'m> World<'m> {
                             slot,
                             mock,
                         })) => self.handle_table_edit(act.vm, table, action, kind, slot, mock),
-                        Ok(Some(ExecOutcome::AsCall { request, op })) => {
-                            self.handle_as_call(act.vm, request, op)
-                        }
+                        Ok(Some(ExecOutcome::AsCall {
+                            request,
+                            op,
+                            ty,
+                            env,
+                        })) => self.handle_as_call(act.vm, request, op, ty, env),
                         Ok(Some(ExecOutcome::RequestOp { request })) => {
                             self.handle_request_op(act.vm, request)
                         }
@@ -1550,7 +1574,7 @@ impl<'m> World<'m> {
             ExitKind::Terminal => self.build_terminal_event(act.vm, parent, act.family),
             ExitKind::Ran => self.make_instance(parent, self.core.step_ran, vec![]),
             ExitKind::Waiting => self.make_instance(parent, self.core.step_waiting, vec![]),
-            ExitKind::Bounded => self.make_instance(parent, self.core.option_none, vec![]),
+            ExitKind::Bounded => self.pending_option_none(parent),
         };
         match value {
             Ok(value) => self.install_value_reply(parent, value),
@@ -1670,8 +1694,8 @@ impl<'m> World<'m> {
         if family != Family::DriveFor {
             return built;
         }
-        let some = self.core.option_some;
-        built.and_then(|value| self.make_instance(parent, some, vec![value]))
+        let _ = parent;
+        built
     }
 
     /// The `Done` arm of one event family.
@@ -1738,6 +1762,39 @@ impl<'m> World<'m> {
         })
     }
 
+    fn close_option_family(&mut self, ty: u32, env: TypeEnvId) -> Result<ClosedTypeId, FaultCode> {
+        let closed = self
+            .envs
+            .close(self.module, ty, env)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        let (class, argument) = match self.envs.ty(closed) {
+            Some(ClosedType::Inst(class, args)) if args.len() == 1 => (*class, args[0]),
+            _ => return Err(FaultCode::MalformedState),
+        };
+        let option = self.core.option.ok_or(FaultCode::MalformedState)?;
+        let some = self.core.option_some.ok_or(FaultCode::MalformedState)?;
+        let none = self.core.option_none.ok_or(FaultCode::MalformedState)?;
+        if class != option && class != some && class != none {
+            return Err(FaultCode::MalformedState);
+        }
+        if class == option {
+            return Ok(closed);
+        }
+        self.envs
+            .intern(ClosedType::Inst(option, vec![argument]))
+            .map_err(|_| FaultCode::BoundaryLimit)
+    }
+
+    fn native_option_none(&mut self, ty: u32, env: TypeEnvId) -> Result<Value, FaultCode> {
+        let ty = self.close_option_family(ty, env)?;
+        Ok(Value::EmptyCase { ty, arm: 1 })
+    }
+
+    fn pending_option_none(&mut self, vm: VmId) -> Result<Value, FaultCode> {
+        let (ty, env) = self.reply_type(vm)?;
+        self.native_option_none(ty, env)
+    }
+
     /// The reply of one perform carries the type the instruction
     /// states.
     ///
@@ -1750,6 +1807,28 @@ impl<'m> World<'m> {
     /// terminal result of `run`, `step`, `drive`, and `done`, the
     /// mailbox receive, the pending call reply, the spawn result, the
     /// mock reply, and the restore result together.
+    fn reply_type(&self, vm: VmId) -> Result<(u32, TypeEnvId), FaultCode> {
+        let frame = self.machines[vm as usize]
+            .vm
+            .frames
+            .last()
+            .ok_or(FaultCode::MalformedState)?;
+        let at = frame.ip.checked_sub(1).ok_or(FaultCode::MalformedState)?;
+        let instr = self
+            .module
+            .funcs
+            .get(frame.func as usize)
+            .and_then(|code| code.blocks.get(frame.block as usize))
+            .and_then(|block| block.get(at as usize))
+            .ok_or(FaultCode::MalformedState)?;
+        let ty = match instr {
+            lm_bytecode::Instr::Perform { reply_ty, .. }
+            | lm_bytecode::Instr::PerformValue { reply_ty, .. } => *reply_ty,
+            _ => return Err(FaultCode::MalformedState),
+        };
+        Ok((ty, frame.env))
+    }
+
     fn check_reply(&mut self, vm: VmId, value: Value) -> Result<(), FaultCode> {
         // Every value of a world that restored nothing came out of
         // verified code, so the check states a rule the verifier
@@ -1758,24 +1837,9 @@ impl<'m> World<'m> {
         if !self.restored_any {
             return Ok(());
         }
+        let (reply_ty, env) = self.reply_type(vm)?;
         let module = self.module;
         let machine = &self.machines[vm as usize];
-        let frame = machine.vm.frames.last().ok_or(FaultCode::MalformedState)?;
-        // The perform moved the counter past its own instruction, so
-        // the instruction before the counter is that perform.
-        let at = frame.ip.checked_sub(1).ok_or(FaultCode::MalformedState)?;
-        let instr = module
-            .funcs
-            .get(frame.func as usize)
-            .and_then(|code| code.blocks.get(frame.block as usize))
-            .and_then(|block| block.get(at as usize))
-            .ok_or(FaultCode::MalformedState)?;
-        let reply_ty = match instr {
-            lm_bytecode::Instr::Perform { reply_ty, .. }
-            | lm_bytecode::Instr::PerformValue { reply_ty, .. } => *reply_ty,
-            _ => return Err(FaultCode::MalformedState),
-        };
-        let env = frame.env;
         crate::typecheck::check_boundary_value(
             module,
             &machine.vm.heap,
@@ -1905,7 +1969,14 @@ impl<'m> World<'m> {
 
     /// Convert one host reply into a guest value and install it.
     fn install_host_reply(&mut self, vm: VmId, reply: HostValue) {
-        match self.build_host_value(vm, &reply) {
+        let built = self.reply_type(vm).and_then(|(ty, env)| {
+            let expected = self
+                .envs
+                .close(self.module, ty, env)
+                .map_err(|_| FaultCode::BoundaryLimit)?;
+            self.build_host_value(vm, &reply, expected)
+        });
+        match built {
             Ok(value) => self.install_value_reply_with_file_close(vm, value, false),
             Err(code) => self.machines[vm as usize].set_fault(code, "", None),
         }
@@ -1914,7 +1985,12 @@ impl<'m> World<'m> {
         }
     }
 
-    fn build_host_value(&mut self, vm: VmId, value: &HostValue) -> Result<Value, FaultCode> {
+    fn build_host_value(
+        &mut self,
+        vm: VmId,
+        value: &HostValue,
+        expected: ClosedTypeId,
+    ) -> Result<Value, FaultCode> {
         match value {
             HostValue::Unit => Ok(Value::Unit),
             HostValue::Int(v) => Ok(Value::Int(*v)),
@@ -1924,11 +2000,23 @@ impl<'m> World<'m> {
             }
             HostValue::File(token) => self.build_host_file(vm, *token),
             HostValue::List(values) => {
+                let element = match self.envs.ty(expected).cloned() {
+                    Some(ClosedType::List(element)) => element,
+                    Some(ClosedType::Inst(class, args))
+                        if Some(class) == self.core.list && args.len() == 1 =>
+                    {
+                        args[0]
+                    }
+                    _ => return Err(FaultCode::TypeMismatch),
+                };
                 let mut items = Vec::with_capacity(values.len());
                 for value in values {
-                    items.push(self.build_host_value(vm, value)?);
+                    items.push(self.build_host_value(vm, value, element)?);
                 }
-                self.machines[vm as usize].alloc(Object::List { items })
+                self.machines[vm as usize].alloc(Object::List {
+                    items,
+                    epoch: StructuralEpoch::default(),
+                })
             }
             HostValue::SocketAddress(address) => self.build_host_address(vm, *address),
             HostValue::TcpStream(token) => {
@@ -1939,10 +2027,6 @@ impl<'m> World<'m> {
             }
             HostValue::TlsStream(token) => self.build_host_tls(vm, *token),
             HostValue::Ctor(ctor, parts) => {
-                let mut fields = Vec::with_capacity(parts.len());
-                for part in parts {
-                    fields.push(self.build_host_value(vm, part)?);
-                }
                 let class = match ctor {
                     CoreCtor::Some => self.core.option_some,
                     CoreCtor::None => self.core.option_none,
@@ -1975,7 +2059,59 @@ impl<'m> World<'m> {
                     CoreCtor::TlsClosed => self.core.tls_closed,
                     CoreCtor::TlsLimitExceeded => self.core.tls_limit_exceeded,
                 };
-                self.make_instance(vm, class, fields)
+                if matches!(ctor, CoreCtor::Some | CoreCtor::None) {
+                    let (class, args) = match self.envs.ty(expected).cloned() {
+                        Some(ClosedType::Inst(class, args)) => (class, args),
+                        _ => return Err(FaultCode::TypeMismatch),
+                    };
+                    let option = self.core.option.ok_or(FaultCode::MalformedState)?;
+                    let some = self.core.option_some.ok_or(FaultCode::MalformedState)?;
+                    let none = self.core.option_none.ok_or(FaultCode::MalformedState)?;
+                    if args.len() != 1 || (class != option && class != some && class != none) {
+                        return Err(FaultCode::TypeMismatch);
+                    }
+                    if matches!(ctor, CoreCtor::Some) {
+                        if parts.len() != 1 {
+                            return Err(FaultCode::TypeMismatch);
+                        }
+                        return self.build_host_value(vm, &parts[0], args[0]);
+                    }
+                    if !parts.is_empty() {
+                        return Err(FaultCode::TypeMismatch);
+                    }
+                    let family = self
+                        .envs
+                        .intern(ClosedType::Inst(option, args))
+                        .map_err(|_| FaultCode::BoundaryLimit)?;
+                    return Ok(Value::EmptyCase { ty: family, arm: 1 });
+                }
+                let class = class.ok_or(FaultCode::MalformedState)?;
+                let args = match self.envs.ty(expected).cloned() {
+                    Some(ClosedType::Inst(_, args)) => args,
+                    Some(ClosedType::Class(_)) => Vec::new(),
+                    _ => return Err(FaultCode::TypeMismatch),
+                };
+                let env = self
+                    .envs
+                    .env_of(args, Vec::new())
+                    .map_err(|_| FaultCode::BoundaryLimit)?;
+                let templates: Vec<u32> = self.module.classes[class as usize]
+                    .fields
+                    .iter()
+                    .map(|(_, ty)| *ty)
+                    .collect();
+                if templates.len() != parts.len() {
+                    return Err(FaultCode::TypeMismatch);
+                }
+                let mut fields = Vec::with_capacity(parts.len());
+                for (part, template) in parts.iter().zip(templates) {
+                    let field = self
+                        .envs
+                        .close(self.module, template, env)
+                        .map_err(|_| FaultCode::BoundaryLimit)?;
+                    fields.push(self.build_host_value(vm, part, field)?);
+                }
+                self.make_instance(vm, Some(class), fields)
             }
         }
     }
@@ -2384,7 +2520,10 @@ impl<'m> World<'m> {
                 }
             }
         }
-        let list = self.machines[holder as usize].alloc(Object::List { items });
+        let list = self.machines[holder as usize].alloc(Object::List {
+            items,
+            epoch: StructuralEpoch::default(),
+        });
         for root in roots {
             self.machines[holder as usize].vm.heap.pop_host_root(root);
         }
@@ -3120,7 +3259,7 @@ impl<'m> World<'m> {
                             ResourceBacking::Driver(_) => Err(FaultCode::TypeMismatch),
                         }
                     }
-                    Object::List { items } => {
+                    Object::List { items, .. } => {
                         let mut values = Vec::with_capacity(items.len());
                         for item in items {
                             let Value::Obj(reference) = item else {
@@ -5031,7 +5170,10 @@ impl<'m> World<'m> {
             }
             crate::snapshot::SnapshotFail::ResourceActive { path, kind } => {
                 let items: Vec<Value> = path.iter().map(|p| Value::Int(*p as i64)).collect();
-                let list = self.machines[vm as usize].alloc(Object::List { items })?;
+                let list = self.machines[vm as usize].alloc(Object::List {
+                    items,
+                    epoch: StructuralEpoch::default(),
+                })?;
                 // The list holds no root yet, so it stays host-rooted
                 // while the kind string allocates.
                 let list_ref = list.as_obj().ok_or(FaultCode::MalformedState)?;
@@ -6255,7 +6397,14 @@ impl<'m> World<'m> {
     }
 
     /// The operation identity test of a `Call` pattern, run by `vm`.
-    fn handle_as_call(&mut self, vm: VmId, request: ObjRef, op: u32) {
+    fn handle_as_call(
+        &mut self,
+        vm: VmId,
+        request: ObjRef,
+        op: u32,
+        ty: u32,
+        env: lm_value::TypeEnvId,
+    ) {
         let (rv, ordinal) = match self.machines[vm as usize].vm.heap.get(request) {
             Object::NativeRequest { vm, ordinal } => (*vm, *ordinal),
             _ => {
@@ -6277,15 +6426,13 @@ impl<'m> World<'m> {
                     .unwrap_or(false)
         };
         let built = if matches {
-            self.machines[vm as usize]
-                .alloc(Object::NativeCall {
-                    vm: rv,
-                    ordinal,
-                    op,
-                })
-                .and_then(|call| self.make_instance(vm, self.core.option_some, vec![call]))
+            self.machines[vm as usize].alloc(Object::NativeCall {
+                vm: rv,
+                ordinal,
+                op,
+            })
         } else {
-            self.make_instance(vm, self.core.option_none, vec![])
+            self.native_option_none(ty, env)
         };
         match built.and_then(|value| self.machines[vm as usize].push(value).map(|_| ())) {
             Ok(()) => {}
@@ -6305,7 +6452,14 @@ impl<'m> World<'m> {
         let loaded = self.loaded;
         let built = match loaded.identity() {
             Ok(identity) => {
-                let codes = ModuleCodes { identity };
+                for ty in 0..self.envs.type_count() {
+                    self.envs
+                        .digest(self.module, &identity.class_hashes, ty as u32);
+                }
+                let codes = ModuleCodes {
+                    identity,
+                    envs: &self.envs,
+                };
                 let heap = &mut self.machines[vm as usize].vm.heap;
                 lm_graph::digest_value(heap, Value::Obj(value), &codes, &limits)
             }
@@ -7722,6 +7876,11 @@ impl<'m> World<'m> {
         self.module
     }
 
+    /// The hash of every verified input in the loaded program.
+    pub(crate) fn verification_hash(&self) -> [u8; 32] {
+        self.loaded.verification_hash()
+    }
+
     /// The resource limits of one machine.
     pub fn config_of(&self, vm: VmId) -> VmConfig {
         self.machines[vm as usize].config
@@ -7810,10 +7969,13 @@ impl<'m> World<'m> {
 #[inline]
 fn scalar_copy(value: Value) -> Option<Result<Value, FaultCode>> {
     match value {
-        Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Char(_) | Value::Op(_) => {
-            Some(Ok(value))
-        }
-        Value::Uninit => Some(Err(FaultCode::BoundaryViolation)),
+        Value::Unit
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Char(_)
+        | Value::Op(_)
+        | Value::EmptyCase { .. } => Some(Ok(value)),
+        Value::Callback(_) | Value::Uninit => Some(Err(FaultCode::BoundaryViolation)),
         Value::Obj(_) => None,
     }
 }
@@ -7871,7 +8033,22 @@ impl<'m> World<'m> {
     /// Render a terminal outcome as stable text.
     pub fn show_outcome(&self, outcome: &Outcome) -> String {
         match outcome {
-            Outcome::Done(value) => format!("Done({})", self.show_value(*value)),
+            Outcome::Done(value) => {
+                let code = &self.module.funcs[self.module.entry as usize];
+                let expected = ShowExpected::Module {
+                    ty: code.ret,
+                    env: TypeEnvId::EMPTY,
+                };
+                let mut visited = Vec::new();
+                let shown = self.show_value_inner(
+                    &self.machines[0].vm.heap,
+                    *value,
+                    Some(expected),
+                    0,
+                    &mut visited,
+                );
+                format!("Done({shown})")
+            }
             Outcome::Fault(code) => format!("Fault({code})"),
         }
     }
@@ -7884,23 +8061,257 @@ impl<'m> World<'m> {
     /// Render one value of one machine.
     pub fn show_value_of(&self, vm: VmId, value: Value) -> String {
         let mut visited = Vec::new();
-        self.show_value_inner(&self.machines[vm as usize].vm.heap, value, 0, &mut visited)
+        self.show_value_inner(
+            &self.machines[vm as usize].vm.heap,
+            value,
+            None,
+            0,
+            &mut visited,
+        )
+    }
+
+    /// Render one terminal result with the machine result type.
+    pub fn show_result_of(&self, vm: VmId, value: Value) -> String {
+        let machine = &self.machines[vm as usize];
+        let expected = machine.body_func.map(|func| ShowExpected::Module {
+            ty: self.module.funcs[func as usize].ret,
+            env: machine.witness,
+        });
+        let mut visited = Vec::new();
+        self.show_value_inner(&machine.vm.heap, value, expected, 0, &mut visited)
+    }
+
+    fn resolve_show_expected(&self, expected: ShowExpected) -> Option<ShowExpected> {
+        let mut current = expected;
+        for _ in 0..=self.module.types.len() {
+            let ShowExpected::Module { ty, env } = current else {
+                return Some(current);
+            };
+            match self.module.types.get(ty as usize)? {
+                BcType::Var(index) => {
+                    let closed = *self.envs.env(env)?.types.get(*index as usize)?;
+                    current = ShowExpected::Closed(closed);
+                }
+                _ => return Some(current),
+            }
+        }
+        None
+    }
+
+    fn show_option_shape(&self, expected: ShowExpected) -> Option<(ShowOption, ShowExpected)> {
+        let expected = self.resolve_show_expected(expected)?;
+        let option = self.core.option?;
+        let some = self.core.option_some?;
+        let none = self.core.option_none?;
+        let (class, payload) = match expected {
+            ShowExpected::Module { ty, env } => match self.module.types.get(ty as usize)? {
+                BcType::Inst(class, args) if args.len() == 1 => {
+                    (*class, ShowExpected::Module { ty: args[0], env })
+                }
+                _ => return None,
+            },
+            ShowExpected::Closed(ty) => match self.envs.ty(ty)? {
+                ClosedType::Inst(class, args) if args.len() == 1 => {
+                    (*class, ShowExpected::Closed(args[0]))
+                }
+                _ => return None,
+            },
+        };
+        let case = if class == option {
+            ShowOption::Family
+        } else if class == some {
+            ShowOption::Some
+        } else if class == none {
+            ShowOption::None
+        } else {
+            return None;
+        };
+        Some((case, payload))
+    }
+
+    fn empty_matches_option(&self, expected: ShowExpected, stored: u32) -> bool {
+        let Some((_, expected_payload)) = self.show_option_shape(expected) else {
+            return false;
+        };
+        let Some(ClosedType::Inst(class, args)) = self.envs.ty(stored) else {
+            return false;
+        };
+        self.core.option == Some(*class)
+            && args.len() == 1
+            && self.show_expected_equals_closed(expected_payload, args[0], 0)
+    }
+
+    fn show_expected_equals_closed(&self, expected: ShowExpected, closed: u32, depth: u32) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        let Some(expected) = self.resolve_show_expected(expected) else {
+            return false;
+        };
+        if let ShowExpected::Closed(found) = expected {
+            return found == closed;
+        }
+        let ShowExpected::Module { ty, env } = expected else {
+            return false;
+        };
+        let Some(source) = self.module.types.get(ty as usize) else {
+            return false;
+        };
+        let Some(target) = self.envs.ty(closed) else {
+            return false;
+        };
+        let child = |this: &Self, source: u32, target: u32| {
+            this.show_expected_equals_closed(
+                ShowExpected::Module { ty: source, env },
+                target,
+                depth + 1,
+            )
+        };
+        match (source, target) {
+            (BcType::Unit, ClosedType::Unit)
+            | (BcType::Bool, ClosedType::Bool)
+            | (BcType::Int, ClosedType::Int)
+            | (BcType::Str, ClosedType::Str)
+            | (BcType::Fault, ClosedType::Fault)
+            | (BcType::Request, ClosedType::Request)
+            | (BcType::PolicyTable, ClosedType::PolicyTable)
+            | (BcType::EmptyVm, ClosedType::EmptyVm)
+            | (BcType::Digest, ClosedType::Digest)
+            | (BcType::SnapshotImage, ClosedType::SnapshotImage)
+            | (BcType::Bytes, ClosedType::Bytes)
+            | (BcType::FileHandle, ClosedType::FileHandle)
+            | (BcType::ResourceHandle, ClosedType::ResourceHandle) => true,
+            (BcType::Class(a), ClosedType::Class(b)) => a == b,
+            (BcType::Inst(a, source), ClosedType::Inst(b, target)) => {
+                a == b
+                    && source.len() == target.len()
+                    && source
+                        .iter()
+                        .zip(target)
+                        .all(|(source, target)| child(self, *source, *target))
+            }
+            (BcType::List(source), ClosedType::List(target))
+            | (BcType::Vm(source), ClosedType::Vm(target))
+            | (BcType::Wait(source), ClosedType::Wait(target))
+            | (BcType::Snapshot(source), ClosedType::Snapshot(target)) => {
+                child(self, *source, *target)
+            }
+            (BcType::Map(a, b), ClosedType::Map(x, y))
+            | (BcType::PendingCall(a, b), ClosedType::PendingCall(x, y))
+            | (BcType::Handle(a, b), ClosedType::Handle(x, y)) => {
+                child(self, *a, *x) && child(self, *b, *y)
+            }
+            (BcType::Tuple(source), ClosedType::Tuple(target)) => {
+                source.len() == target.len()
+                    && source
+                        .iter()
+                        .zip(target)
+                        .all(|(source, target)| child(self, *source, *target))
+            }
+            (
+                BcType::Fn(params, muts, ret, row),
+                ClosedType::Fn(other, flags, result, closed_row),
+            ) => {
+                muts == flags
+                    && params.len() == other.len()
+                    && params
+                        .iter()
+                        .zip(other)
+                        .all(|(source, target)| child(self, *source, *target))
+                    && child(self, *ret, *result)
+                    && self.envs.close_row(self.module, row, env) == *closed_row
+            }
+            (BcType::Op(op, source), ClosedType::Op(other, target)) => {
+                op == other && child(self, *source, *target)
+            }
+            _ => false,
+        }
+    }
+
+    fn show_list_element(&self, expected: ShowExpected) -> Option<ShowExpected> {
+        match self.resolve_show_expected(expected)? {
+            ShowExpected::Module { ty, env } => match self.module.types.get(ty as usize)? {
+                BcType::List(element) => Some(ShowExpected::Module { ty: *element, env }),
+                _ => None,
+            },
+            ShowExpected::Closed(ty) => match self.envs.ty(ty)? {
+                ClosedType::List(element) => Some(ShowExpected::Closed(*element)),
+                _ => None,
+            },
+        }
+    }
+
+    fn show_map_elements(&self, expected: ShowExpected) -> Option<(ShowExpected, ShowExpected)> {
+        match self.resolve_show_expected(expected)? {
+            ShowExpected::Module { ty, env } => match self.module.types.get(ty as usize)? {
+                BcType::Map(key, value) => Some((
+                    ShowExpected::Module { ty: *key, env },
+                    ShowExpected::Module { ty: *value, env },
+                )),
+                _ => None,
+            },
+            ShowExpected::Closed(ty) => match self.envs.ty(ty)? {
+                ClosedType::Map(key, value) => {
+                    Some((ShowExpected::Closed(*key), ShowExpected::Closed(*value)))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    fn show_tuple_elements(&self, expected: ShowExpected) -> Option<Vec<ShowExpected>> {
+        match self.resolve_show_expected(expected)? {
+            ShowExpected::Module { ty, env } => match self.module.types.get(ty as usize)? {
+                BcType::Tuple(elements) => Some(
+                    elements
+                        .iter()
+                        .map(|ty| ShowExpected::Module { ty: *ty, env })
+                        .collect(),
+                ),
+                _ => None,
+            },
+            ShowExpected::Closed(ty) => match self.envs.ty(ty)? {
+                ClosedType::Tuple(elements) => Some(
+                    elements
+                        .iter()
+                        .map(|ty| ShowExpected::Closed(*ty))
+                        .collect(),
+                ),
+                _ => None,
+            },
+        }
     }
 
     fn show_value_inner(
         &self,
         heap: &Heap,
         value: Value,
+        expected: Option<ShowExpected>,
         depth: u32,
         visited: &mut Vec<ObjRef>,
     ) -> String {
         const MAX_SHOW_DEPTH: u32 = 32;
+        if let Some(expected) = expected {
+            if let Some((case, payload)) = self.show_option_shape(expected) {
+                let none = case == ShowOption::None
+                    || (case == ShowOption::Family
+                        && matches!(value, Value::EmptyCase { ty, arm: 1 } if self.empty_matches_option(expected, ty)));
+                if none {
+                    return "None".to_string();
+                }
+                let inner = self.show_value_inner(heap, value, Some(payload), depth + 1, visited);
+                return format!("Some({inner})");
+            }
+        }
         match value {
             Value::Unit => "()".to_string(),
             Value::Bool(v) => v.to_string(),
             Value::Int(v) => v.to_string(),
             Value::Char(value) => format!("{value:?}"),
             Value::Op(op) => format!("<op {}>", lm_abi::op_name(op)),
+            Value::Callback(reference) => format!("<callback {}>", reference.slot),
+            Value::EmptyCase { arm: 1, .. } => "None".to_string(),
+            Value::EmptyCase { ty, arm } => format!("<empty type {ty} arm {arm}>"),
             Value::Uninit => "<uninit>".to_string(),
             Value::Obj(r) => {
                 if depth >= MAX_SHOW_DEPTH {
@@ -7912,24 +8323,38 @@ impl<'m> World<'m> {
                 match heap.get(r) {
                     Object::Str(text) => render_string(text),
                     Object::Substring(text) => render_string(text),
-                    Object::List { items } => {
+                    Object::List { items, .. } => {
                         visited.push(r);
+                        let element = expected.and_then(|ty| self.show_list_element(ty));
                         let parts: Vec<String> = items
                             .iter()
-                            .map(|v| self.show_value_inner(heap, *v, depth + 1, visited))
+                            .map(|v| self.show_value_inner(heap, *v, element, depth + 1, visited))
                             .collect();
                         visited.pop();
                         format!("[{}]", parts.join(", "))
                     }
                     Object::Map { entries, .. } => {
                         visited.push(r);
+                        let elements = expected.and_then(|ty| self.show_map_elements(ty));
                         let parts: Vec<String> = entries
                             .iter()
                             .map(|(k, v)| {
                                 format!(
                                     "{}: {}",
-                                    self.show_value_inner(heap, *k, depth + 1, visited),
-                                    self.show_value_inner(heap, *v, depth + 1, visited)
+                                    self.show_value_inner(
+                                        heap,
+                                        *k,
+                                        elements.map(|pair| pair.0),
+                                        depth + 1,
+                                        visited,
+                                    ),
+                                    self.show_value_inner(
+                                        heap,
+                                        *v,
+                                        elements.map(|pair| pair.1),
+                                        depth + 1,
+                                        visited,
+                                    )
                                 )
                             })
                             .collect();
@@ -7938,9 +8363,22 @@ impl<'m> World<'m> {
                     }
                     Object::Tuple { items } => {
                         visited.push(r);
+                        let elements = expected.and_then(|ty| self.show_tuple_elements(ty));
                         let parts: Vec<String> = items
                             .iter()
-                            .map(|v| self.show_value_inner(heap, *v, depth + 1, visited))
+                            .enumerate()
+                            .map(|(index, v)| {
+                                self.show_value_inner(
+                                    heap,
+                                    *v,
+                                    elements
+                                        .as_ref()
+                                        .and_then(|types| types.get(index))
+                                        .copied(),
+                                    depth + 1,
+                                    visited,
+                                )
+                            })
                             .collect();
                         visited.pop();
                         if parts.len() == 1 {
@@ -7949,7 +8387,7 @@ impl<'m> World<'m> {
                             format!("({})", parts.join(", "))
                         }
                     }
-                    Object::Instance { class, fields, .. } => {
+                    Object::Instance { class, fields, env } => {
                         visited.push(r);
                         let bc = &self.module.classes[*class as usize];
                         let text = if bc.kind == BcClassKind::Case {
@@ -7961,7 +8399,19 @@ impl<'m> World<'m> {
                             } else {
                                 let parts: Vec<String> = fields
                                     .iter()
-                                    .map(|v| self.show_value_inner(heap, *v, depth + 1, visited))
+                                    .zip(bc.fields.iter())
+                                    .map(|(v, (_, ty))| {
+                                        self.show_value_inner(
+                                            heap,
+                                            *v,
+                                            Some(ShowExpected::Module {
+                                                ty: *ty,
+                                                env: env.env(),
+                                            }),
+                                            depth + 1,
+                                            visited,
+                                        )
+                                    })
                                     .collect();
                                 format!("{}({})", short, parts.join(", "))
                             }
@@ -7970,11 +8420,20 @@ impl<'m> World<'m> {
                                 .fields
                                 .iter()
                                 .zip(fields.iter())
-                                .map(|((name, _), v)| {
+                                .map(|((name, ty), v)| {
                                     format!(
                                         "{}: {}",
                                         name,
-                                        self.show_value_inner(heap, *v, depth + 1, visited)
+                                        self.show_value_inner(
+                                            heap,
+                                            *v,
+                                            Some(ShowExpected::Module {
+                                                ty: *ty,
+                                                env: env.env(),
+                                            }),
+                                            depth + 1,
+                                            visited,
+                                        )
                                     )
                                 })
                                 .collect();
@@ -8104,7 +8563,7 @@ impl<'m> World<'m> {
                 r.generation,
                 object.shape().name,
                 state,
-                self.show_value_inner(&m.vm.heap, Value::Obj(r), 0, &mut visited)
+                self.show_value_inner(&m.vm.heap, Value::Obj(r), None, 0, &mut visited)
             );
         });
         out
@@ -8186,6 +8645,10 @@ mod tests {
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
@@ -8340,6 +8803,7 @@ mod tests {
         let mutable = world.machines[0]
             .alloc(Object::List {
                 items: vec![Value::Int(1)],
+                epoch: Default::default(),
             })
             .expect("the list allocates");
         let moved = world
@@ -8350,12 +8814,12 @@ mod tests {
         let copy = moved.as_obj().expect("the copy is an object");
         assert!(!world.machines[0].vm.heap.is_frozen(copy));
         // A later write through the source misses the copy.
-        if let Object::List { items } = world.machines[0].vm.heap.get_mut(source) {
+        if let Object::List { items, .. } = world.machines[0].vm.heap.get_mut(source) {
             items.push(Value::Int(2));
         }
         world.machines[0].vm.heap.recharge(source);
         match world.machines[0].vm.heap.get(copy) {
-            Object::List { items } => assert_eq!(items, &vec![Value::Int(1)]),
+            Object::List { items, .. } => assert_eq!(items, &vec![Value::Int(1)]),
             other => panic!("expected a list, got {other:?}"),
         }
     }

@@ -9,13 +9,20 @@
 //! methods into ordinary instructions with scratch locals.
 
 use crate::hir::*;
-use lm_bytecode::{BcClass, BcClassKind, BcRow, BcType, Func, Instr, Module, TypeApp, NO_PARENT};
+use lm_bytecode::{
+    BcAssociated, BcClass, BcClassKind, BcConformance, BcInterface, BcInterfaceMethod,
+    BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Instr, Module, TypeApp, NO_PARENT,
+};
 use lm_source::ast::BinOp;
 use lm_types::{
     ClassKind, Row, RowElem, Type, TypeId, TypeStore, BOOL, DIGEST, INT, NEVER, STRING, UNIT,
 };
 use std::collections::HashMap;
 use std::fmt::Write as _;
+
+fn extended(instr: ExtendedInstr) -> Instr {
+    Instr::Extended(instr)
+}
 
 /// Module-wide interning state during lowering.
 struct ModLowerer<'m> {
@@ -91,6 +98,29 @@ impl<'m> ModLowerer<'m> {
         self.intern_app(types, rows)
     }
 
+    fn interface_use(&mut self, application: &HirInterfaceUse) -> BcInterfaceUse {
+        BcInterfaceUse {
+            interface: application.interface,
+            types: application
+                .types
+                .iter()
+                .map(|item| self.bc_ty(*item))
+                .collect(),
+            rows: application
+                .rows
+                .iter()
+                .map(|row| self.bc_row(row))
+                .collect(),
+        }
+    }
+
+    fn bounds(&mut self, bounds: &[Vec<HirInterfaceUse>]) -> Vec<Vec<BcInterfaceUse>> {
+        bounds
+            .iter()
+            .map(|items| items.iter().map(|item| self.interface_use(item)).collect())
+            .collect()
+    }
+
     /// Convert an interned checker type to a type-table index.
     /// `Never` types occupy unreachable value positions only, so they
     /// share the unit entry.
@@ -128,7 +158,25 @@ impl<'m> ModLowerer<'m> {
                 let row = self.bc_row(&row);
                 self.intern_type(BcType::Fn(params, muts, ret, row))
             }
+            Type::Callback(params, muts, ret, row) => {
+                let params: Vec<u32> = params.iter().map(|p| self.bc_ty(*p)).collect();
+                let ret = self.bc_ty(ret);
+                let row = self.bc_row(&row);
+                self.intern_type(BcType::Callback(params, muts, ret, row))
+            }
             Type::Var(i) => self.intern_type(BcType::Var(i)),
+            Type::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                let base = self.bc_ty(base);
+                self.intern_type(BcType::Projection {
+                    base,
+                    interface: interface.0,
+                    assoc,
+                })
+            }
             Type::Fault => self.intern_type(BcType::Fault),
             Type::Request => self.intern_type(BcType::Request),
             Type::PolicyTable => self.intern_type(BcType::PolicyTable),
@@ -196,7 +244,12 @@ pub fn lower_module(hir: &HirModule) -> Module {
     m.intern_type(BcType::Bool);
     m.intern_type(BcType::Int);
     m.intern_type(BcType::Str);
-    // Selectors in class-declaration order.
+    // Selectors in interface and class declaration order.
+    for interface in &hir.interfaces {
+        for method in &interface.methods {
+            m.selector(&method.selector);
+        }
+    }
     for class in &hir.classes {
         for (name, _) in &class.methods {
             m.selector(name);
@@ -209,6 +262,69 @@ pub fn lower_module(hir: &HirModule) -> Module {
     for (cidx, class) in hir.classes.iter().enumerate() {
         funcs.push(lower_new_func(&mut m, class, cidx as u32));
     }
+    let interfaces: Vec<BcInterface> = hir
+        .interfaces
+        .iter()
+        .map(|interface| BcInterface {
+            name: interface.name.clone(),
+            key: interface.key.clone(),
+            type_params: interface.type_params,
+            effect_params: interface.effect_params,
+            generic_is_effect: interface.generic_is_effect.clone(),
+            type_bounds: m.bounds(&interface.type_bounds),
+            associated: interface
+                .associated
+                .iter()
+                .map(|item| BcAssociated {
+                    name: item.name.clone(),
+                    bound: item.bound.as_ref().map(|bound| m.interface_use(bound)),
+                })
+                .collect(),
+            methods: interface
+                .methods
+                .iter()
+                .map(|method| BcInterfaceMethod {
+                    selector: m.selector(&method.selector),
+                    mut_self: method.mut_self,
+                    params: method.params.iter().map(|item| m.bc_ty(*item)).collect(),
+                    param_muts: method.param_muts.clone(),
+                    ret: m.bc_ty(method.ret),
+                    row: m.bc_row(&method.row),
+                })
+                .collect(),
+        })
+        .collect();
+    let conformances: Vec<BcConformance> = hir
+        .conformances
+        .iter()
+        .map(|conformance| BcConformance {
+            class: conformance.class,
+            application: m.interface_use(&conformance.application),
+            associated: conformance
+                .associated
+                .iter()
+                .map(|item| m.bc_ty(*item))
+                .collect(),
+        })
+        .collect();
+    let mut func_bounds: Vec<Vec<Vec<BcInterfaceUse>>> = hir
+        .funcs
+        .iter()
+        .map(|func| m.bounds(&func.type_bounds))
+        .collect();
+    for (index, class) in hir.classes.iter().enumerate() {
+        let constructor = &funcs[hir.funcs.len() + index];
+        if constructor.type_params == 0 {
+            func_bounds.push(Vec::new());
+        } else {
+            func_bounds.push(m.bounds(&class.type_bounds));
+        }
+    }
+    let class_bounds = hir
+        .classes
+        .iter()
+        .map(|class| m.bounds(&class.type_bounds))
+        .collect();
     let classes: Vec<BcClass> = hir
         .classes
         .iter()
@@ -292,6 +408,10 @@ pub fn lower_module(hir: &HirModule) -> Module {
         types: m.types,
         selectors: m.selectors,
         apps: m.apps,
+        interfaces,
+        conformances,
+        class_bounds,
+        func_bounds,
         imports,
         core_roles: hir.core_roles,
         classes,
@@ -326,6 +446,14 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     }
 
     fn emit(&mut self, instr: Instr) {
+        if matches!(instr, Instr::Pop) {
+            if let Some(Instr::MapPut { discard, .. }) = self.blocks[self.cur].last_mut() {
+                if !*discard {
+                    *discard = true;
+                    return;
+                }
+            }
+        }
         self.blocks[self.cur].push(instr);
     }
 
@@ -471,6 +599,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::Jump(cond_b));
                 self.switch_to(exit_b);
             }
+            HStmt::For {
+                source,
+                bindings,
+                kind,
+                body,
+            } => self.lower_for(source, bindings, kind, body),
             HStmt::Return { value } => {
                 match value {
                     Some(value) => self.lower_expr(value),
@@ -497,6 +631,240 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit(Instr::Pop);
             }
         }
+    }
+
+    /// Lower one checked traversal strategy.
+    fn lower_for(&mut self, source: &HExpr, bindings: &[u32], kind: &HForKind, body: &[HStmt]) {
+        let source_slot = match kind {
+            HForKind::List { source_slot, .. }
+            | HForKind::Map { source_slot, .. }
+            | HForKind::Text { source_slot, .. }
+            | HForKind::Range { source_slot, .. }
+            | HForKind::Generic { source_slot, .. } => *source_slot,
+        };
+        self.lower_expr(source);
+        self.emit(Instr::StoreLocal(source_slot));
+
+        match kind {
+            HForKind::List {
+                index_slot,
+                epoch_slot,
+                element,
+                ..
+            } => {
+                self.m.bc_ty(*element);
+                self.emit(Instr::LoadLocal(source_slot));
+                self.emit(extended(ExtendedInstr::ListEpoch));
+                self.emit(Instr::StoreLocal(*epoch_slot));
+                self.emit(Instr::ConstInt(0));
+                self.emit(Instr::StoreLocal(*index_slot));
+
+                let cond_b = self.new_block();
+                let body_b = self.new_block();
+                let exit_b = self.new_block();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(cond_b);
+                self.emit(Instr::LoadLocal(*index_slot));
+                self.emit(Instr::LoadLocal(source_slot));
+                self.emit(Instr::LoadLocal(*epoch_slot));
+                self.emit(extended(ExtendedInstr::ListIterLen));
+                self.emit(Instr::LtInt);
+                self.emit(Instr::JumpIfFalse(exit_b));
+                self.emit(Instr::Jump(body_b));
+
+                self.switch_to(body_b);
+                self.emit(Instr::LoadLocal(source_slot));
+                self.emit(Instr::LoadLocal(*index_slot));
+                self.emit(Instr::ListAt);
+                self.emit(Instr::StoreLocal(bindings[0]));
+                self.increment_local(*index_slot);
+                self.loops.push((cond_b, exit_b));
+                self.lower_block_stmt(body);
+                self.loops.pop();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(exit_b);
+            }
+            HForKind::Map {
+                index_slot,
+                epoch_slot,
+                key,
+                value,
+                pair,
+                ..
+            } => {
+                self.m.bc_ty(*key);
+                self.m.bc_ty(*value);
+                self.emit(Instr::LoadLocal(source_slot));
+                self.emit(extended(ExtendedInstr::MapEpoch));
+                self.emit(Instr::StoreLocal(*epoch_slot));
+                self.emit(Instr::ConstInt(0));
+                self.emit(Instr::StoreLocal(*index_slot));
+
+                let cond_b = self.new_block();
+                let body_b = self.new_block();
+                let exit_b = self.new_block();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(cond_b);
+                self.emit(Instr::LoadLocal(*index_slot));
+                self.emit(Instr::LoadLocal(source_slot));
+                self.emit(Instr::LoadLocal(*epoch_slot));
+                self.emit(extended(ExtendedInstr::MapIterLen));
+                self.emit(Instr::LtInt);
+                self.emit(Instr::JumpIfFalse(exit_b));
+                self.emit(Instr::Jump(body_b));
+
+                self.switch_to(body_b);
+                if bindings.len() == 1 {
+                    self.emit(Instr::LoadLocal(source_slot));
+                    self.emit(Instr::LoadLocal(*index_slot));
+                    self.emit(extended(ExtendedInstr::MapKeyAt));
+                    self.emit(Instr::LoadLocal(source_slot));
+                    self.emit(Instr::LoadLocal(*index_slot));
+                    self.emit(extended(ExtendedInstr::MapValueAt));
+                    let pair = self.m.bc_ty(*pair);
+                    self.emit(Instr::TupleNew { ty: pair, count: 2 });
+                    self.emit(Instr::StoreLocal(bindings[0]));
+                } else {
+                    self.emit(Instr::LoadLocal(source_slot));
+                    self.emit(Instr::LoadLocal(*index_slot));
+                    self.emit(extended(ExtendedInstr::MapKeyAt));
+                    self.emit(Instr::StoreLocal(bindings[0]));
+                    self.emit(Instr::LoadLocal(source_slot));
+                    self.emit(Instr::LoadLocal(*index_slot));
+                    self.emit(extended(ExtendedInstr::MapValueAt));
+                    self.emit(Instr::StoreLocal(bindings[1]));
+                }
+                self.increment_local(*index_slot);
+                self.loops.push((cond_b, exit_b));
+                self.lower_block_stmt(body);
+                self.loops.pop();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(exit_b);
+            }
+            HForKind::Text {
+                cursor_slot, item, ..
+            } => {
+                self.m.bc_ty(*item);
+                self.emit(Instr::ConstInt(0));
+                self.emit(Instr::StoreLocal(*cursor_slot));
+
+                let cond_b = self.new_block();
+                let body_b = self.new_block();
+                let exit_b = self.new_block();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(cond_b);
+                self.emit(Instr::LoadLocal(*cursor_slot));
+                self.emit(Instr::LoadLocal(source_slot));
+                self.emit(Instr::Native(lm_bytecode::NativeInstr::StrByteLen));
+                self.emit(Instr::LtInt);
+                self.emit(Instr::JumpIfFalse(exit_b));
+                self.emit(Instr::Jump(body_b));
+
+                self.switch_to(body_b);
+                self.emit(Instr::LoadLocal(source_slot));
+                self.emit(Instr::LoadLocal(*cursor_slot));
+                self.emit(Instr::Native(lm_bytecode::NativeInstr::TextAtByte));
+                self.emit(Instr::StoreLocal(bindings[0]));
+                self.emit(Instr::LoadLocal(*cursor_slot));
+                self.emit(Instr::LoadLocal(bindings[0]));
+                self.emit(Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len));
+                self.emit(Instr::Add);
+                self.emit(Instr::StoreLocal(*cursor_slot));
+                self.loops.push((cond_b, exit_b));
+                self.lower_block_stmt(body);
+                self.loops.pop();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(exit_b);
+            }
+            HForKind::Range {
+                cursor_slot,
+                stop_slot,
+                ..
+            } => {
+                self.emit(Instr::LoadLocal(source_slot));
+                self.emit(Instr::LoadField(0));
+                self.emit(Instr::StoreLocal(*cursor_slot));
+                self.emit(Instr::LoadLocal(source_slot));
+                self.emit(Instr::LoadField(1));
+                self.emit(Instr::StoreLocal(*stop_slot));
+
+                let cond_b = self.new_block();
+                let body_b = self.new_block();
+                let exit_b = self.new_block();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(cond_b);
+                self.emit(Instr::LoadLocal(*cursor_slot));
+                self.emit(Instr::LoadLocal(*stop_slot));
+                self.emit(Instr::LtInt);
+                self.emit(Instr::JumpIfFalse(exit_b));
+                self.emit(Instr::Jump(body_b));
+
+                self.switch_to(body_b);
+                self.emit(Instr::LoadLocal(*cursor_slot));
+                self.emit(Instr::StoreLocal(bindings[0]));
+                self.increment_local(*cursor_slot);
+                self.loops.push((cond_b, exit_b));
+                self.lower_block_stmt(body);
+                self.loops.pop();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(exit_b);
+            }
+            HForKind::Generic {
+                iterator_slot,
+                option_slot,
+                item_slot,
+                iterator,
+                next,
+                some_ty,
+                item,
+                ..
+            } => {
+                self.m.bc_ty(*item);
+                self.lower_expr(iterator);
+                self.emit(Instr::StoreLocal(*iterator_slot));
+
+                let cond_b = self.new_block();
+                let body_b = self.new_block();
+                let exit_b = self.new_block();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(cond_b);
+                self.lower_expr(next);
+                self.emit(Instr::StoreLocal(*option_slot));
+                self.emit(Instr::LoadLocal(*option_slot));
+                let some_ty = self.m.bc_ty(*some_ty);
+                self.emit(Instr::IsType(some_ty));
+                self.emit(Instr::JumpIfFalse(exit_b));
+                self.emit(Instr::Jump(body_b));
+
+                self.switch_to(body_b);
+                self.emit(Instr::LoadLocal(*option_slot));
+                self.emit(Instr::CastType(some_ty));
+                self.emit(extended(ExtendedInstr::OptionPayload { ty: some_ty }));
+                if let Some(item_slot) = item_slot {
+                    self.emit(Instr::StoreLocal(*item_slot));
+                    self.emit(Instr::LoadLocal(*item_slot));
+                    self.emit(Instr::TupleGet(0));
+                    self.emit(Instr::StoreLocal(bindings[0]));
+                    self.emit(Instr::LoadLocal(*item_slot));
+                    self.emit(Instr::TupleGet(1));
+                    self.emit(Instr::StoreLocal(bindings[1]));
+                } else {
+                    self.emit(Instr::StoreLocal(bindings[0]));
+                }
+                self.loops.push((cond_b, exit_b));
+                self.lower_block_stmt(body);
+                self.loops.pop();
+                self.emit(Instr::Jump(cond_b));
+                self.switch_to(exit_b);
+            }
+        }
+    }
+
+    fn increment_local(&mut self, slot: u32) {
+        self.emit(Instr::LoadLocal(slot));
+        self.emit(Instr::ConstInt(1));
+        self.emit(Instr::Add);
+        self.emit(Instr::StoreLocal(slot));
     }
 
     /// Lower a statement list without a value. Return true when the
@@ -638,12 +1006,15 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     .inline_bodies
                     .get(*func as usize)
                     .and_then(Clone::clone);
-                if targs.is_empty() && rowargs.is_empty() {
+                if rowargs.is_empty() {
                     if let Some(template) = inline {
-                        if let Some(expr) =
+                        if let Some(mut expanded) =
                             instantiate_inline(&template, args, &self.m.inline_bodies)
                         {
-                            self.lower_expr(&expr);
+                            // The caller has already substituted each
+                            // function type variable in the result.
+                            expanded.ty = expr.ty;
+                            self.lower_expr(&expanded);
                             return;
                         }
                     }
@@ -654,6 +1025,20 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.emit_call(*func, targs, rowargs);
             }
             HExprKind::Construct { class, targs, args } => {
+                if *class == self.m.core.some_class {
+                    for arg in args {
+                        self.lower_expr(arg);
+                    }
+                    let ty = self.m.bc_ty(expr.ty);
+                    self.emit(extended(ExtendedInstr::OptionSome { ty }));
+                    return;
+                }
+                if *class == self.m.core.none_class {
+                    debug_assert!(args.is_empty());
+                    let ty = self.m.bc_ty(expr.ty);
+                    self.emit(extended(ExtendedInstr::OptionNone { ty }));
+                    return;
+                }
                 for arg in args {
                     self.lower_expr(arg);
                 }
@@ -692,9 +1077,38 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     });
                 }
             }
+            HExprKind::InterfaceCall {
+                recv,
+                interface,
+                method,
+                selector: _,
+                args,
+                ..
+            } => {
+                self.lower_expr(recv);
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                let recv_ty = self.m.bc_ty(recv.ty);
+                self.emit(Instr::CallInterface {
+                    interface: *interface,
+                    method: *method,
+                    recv_ty,
+                });
+            }
             HExprKind::FieldGet { recv, field } => {
                 self.lower_expr(recv);
-                self.emit(Instr::LoadField(*field));
+                let native_option_payload = *field == 0
+                    && matches!(
+                        self.m.store.get(recv.ty),
+                        Type::Inst(class, _) if class.0 == self.m.core.some_class
+                    );
+                let recv_ty = self.m.bc_ty(recv.ty);
+                self.emit(if native_option_payload {
+                    extended(ExtendedInstr::OptionPayload { ty: recv_ty })
+                } else {
+                    Instr::LoadField(*field)
+                });
             }
             HExprKind::MakeClosure { func, captures } => {
                 for capture in captures {
@@ -707,6 +1121,21 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     func: *func,
                     captures: captures.len() as u32,
                 });
+            }
+            HExprKind::MakeCallback { func, captures } => {
+                for capture in captures {
+                    self.lower_expr(capture);
+                }
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::MakeCallback {
+                    func: *func,
+                    captures: captures.len() as u32,
+                }));
+            }
+            HExprKind::AsCallback(value) => {
+                self.lower_expr(value);
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::AsCallback));
             }
             HExprKind::CallValue { callee, args } => {
                 let is_op = matches!(self.m.store.get(callee.ty), Type::Op(_, _));
@@ -841,7 +1270,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     NativeOp::MapLen => Instr::MapLen,
                     NativeOp::MapHas => Instr::MapHas,
                     NativeOp::MapAt => Instr::MapAt,
-                    NativeOp::MapPut => Instr::MapPut,
+                    NativeOp::MapPut => Instr::MapPut {
+                        ty: self.m.bc_ty(expr.ty),
+                        discard: false,
+                    },
                     NativeOp::BytesNew => {
                         self.m.intern_type(BcType::Bytes);
                         Instr::Native(lm_bytecode::NativeInstr::BytesNew)
@@ -857,7 +1289,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 };
                 self.emit(instr);
             }
-            HExprKind::Intrinsic { intrinsic, args } => self.lower_intrinsic(*intrinsic, args),
+            HExprKind::Intrinsic { intrinsic, args } => {
+                self.lower_intrinsic(*intrinsic, args, expr.ty)
+            }
             HExprKind::Interp(parts) => {
                 self.m
                     .intern_type(BcType::Class(self.m.string_builder_class));
@@ -972,67 +1406,20 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         }
     }
 
-    /// Lower `list.get(i)` into a bounds test around `ListAt` plus a
-    /// call of the pinned core `Option` constructors.
+    /// Lower `list.get(i)` to one checked native read.
     fn lower_list_get(&mut self, expr: &HExpr, args: &[HExpr]) {
-        let elem = self.option_arg(expr.ty);
-        let list_slot = self.scratch_of(args[0].ty);
-        let idx_slot = self.scratch_of(INT);
         self.lower_expr(&args[0]);
-        self.emit(Instr::StoreLocal(list_slot));
         self.lower_expr(&args[1]);
-        self.emit(Instr::StoreLocal(idx_slot));
-        let none_b = self.new_block();
-        let join_b = self.new_block();
-        self.emit(Instr::LoadLocal(idx_slot));
-        self.emit(Instr::ConstInt(0));
-        self.emit(Instr::GeInt);
-        self.emit(Instr::JumpIfFalse(none_b));
-        self.emit(Instr::LoadLocal(idx_slot));
-        self.emit(Instr::LoadLocal(list_slot));
-        self.emit(Instr::ListLen);
-        self.emit(Instr::LtInt);
-        self.emit(Instr::JumpIfFalse(none_b));
-        self.emit(Instr::LoadLocal(list_slot));
-        self.emit(Instr::LoadLocal(idx_slot));
-        self.emit(Instr::ListAt);
-        let some_new = self.m.new_base + self.m.core.some_class;
-        self.emit_call(some_new, &[elem], &[]);
-        self.emit(Instr::Jump(join_b));
-        self.switch_to(none_b);
-        let none_new = self.m.new_base + self.m.core.none_class;
-        self.emit_call(none_new, &[elem], &[]);
-        self.emit(Instr::Jump(join_b));
-        self.switch_to(join_b);
+        let ty = self.m.bc_ty(expr.ty);
+        self.emit(extended(ExtendedInstr::ListGet { ty }));
     }
 
-    /// Lower `map.get(k)` into `MapHas`/`MapAt` plus a call of the
-    /// pinned core `Option` constructors.
+    /// Lower `map.get(k)` to one hash-table probe.
     fn lower_map_get(&mut self, expr: &HExpr, args: &[HExpr]) {
-        let value_ty = self.option_arg(expr.ty);
-        let map_slot = self.scratch_of(args[0].ty);
-        let key_slot = self.scratch_of(args[1].ty);
         self.lower_expr(&args[0]);
-        self.emit(Instr::StoreLocal(map_slot));
         self.lower_expr(&args[1]);
-        self.emit(Instr::StoreLocal(key_slot));
-        let none_b = self.new_block();
-        let join_b = self.new_block();
-        self.emit(Instr::LoadLocal(map_slot));
-        self.emit(Instr::LoadLocal(key_slot));
-        self.emit(Instr::MapHas);
-        self.emit(Instr::JumpIfFalse(none_b));
-        self.emit(Instr::LoadLocal(map_slot));
-        self.emit(Instr::LoadLocal(key_slot));
-        self.emit(Instr::MapAt);
-        let some_new = self.m.new_base + self.m.core.some_class;
-        self.emit_call(some_new, &[value_ty], &[]);
-        self.emit(Instr::Jump(join_b));
-        self.switch_to(none_b);
-        let none_new = self.m.new_base + self.m.core.none_class;
-        self.emit_call(none_new, &[value_ty], &[]);
-        self.emit(Instr::Jump(join_b));
-        self.switch_to(join_b);
+        let ty = self.m.bc_ty(expr.ty);
+        self.emit(extended(ExtendedInstr::MapGet { ty }));
     }
 
     /// Lower `int.abs` with existing checked integer instructions.
@@ -1056,7 +1443,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     }
 
     /// Lower one manifest intrinsic to existing instructions.
-    fn lower_intrinsic(&mut self, intrinsic: lm_abi::IntrinsicSlot, args: &[HExpr]) {
+    fn lower_intrinsic(&mut self, intrinsic: lm_abi::IntrinsicSlot, args: &[HExpr], reply: TypeId) {
         if intrinsic == lm_abi::INTRINSIC_INT_ABS {
             self.lower_int_abs(&args[0]);
             return;
@@ -1221,17 +1608,48 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             }
             lm_abi::INTRINSIC_TEXT_SPLIT => Instr::Native(lm_bytecode::NativeInstr::TextSplit),
             lm_abi::INTRINSIC_TEXT_LINES => Instr::Native(lm_bytecode::NativeInstr::TextLines),
+            lm_abi::INTRINSIC_LIST_LEN => Instr::ListLen,
+            lm_abi::INTRINSIC_LIST_AT => Instr::ListAt,
+            lm_abi::INTRINSIC_LIST_GET => extended(ExtendedInstr::ListGet {
+                ty: self.m.bc_ty(reply),
+            }),
+            lm_abi::INTRINSIC_LIST_PUSH => Instr::ListPush,
+            lm_abi::INTRINSIC_MAP_LEN => Instr::MapLen,
+            lm_abi::INTRINSIC_MAP_HAS => Instr::MapHas,
+            lm_abi::INTRINSIC_MAP_AT => Instr::MapAt,
+            lm_abi::INTRINSIC_MAP_GET => extended(ExtendedInstr::MapGet {
+                ty: self.m.bc_ty(reply),
+            }),
+            lm_abi::INTRINSIC_MAP_PUT => Instr::MapPut {
+                ty: self.m.bc_ty(reply),
+                discard: false,
+            },
+            lm_abi::INTRINSIC_LIST_EPOCH => extended(ExtendedInstr::ListEpoch),
+            lm_abi::INTRINSIC_LIST_ITER_LEN => extended(ExtendedInstr::ListIterLen),
+            lm_abi::INTRINSIC_MAP_EPOCH => extended(ExtendedInstr::MapEpoch),
+            lm_abi::INTRINSIC_MAP_ITER_LEN => extended(ExtendedInstr::MapIterLen),
+            lm_abi::INTRINSIC_MAP_KEY_AT => extended(ExtendedInstr::MapKeyAt),
+            lm_abi::INTRINSIC_MAP_VALUE_AT => extended(ExtendedInstr::MapValueAt),
+            lm_abi::INTRINSIC_LIST_CAPACITY => extended(ExtendedInstr::ListCapacity),
+            lm_abi::INTRINSIC_LIST_SET => extended(ExtendedInstr::ListSet),
+            lm_abi::INTRINSIC_LIST_POP => extended(ExtendedInstr::ListPop {
+                ty: self.m.bc_ty(reply),
+            }),
+            lm_abi::INTRINSIC_LIST_INSERT => extended(ExtendedInstr::ListInsert),
+            lm_abi::INTRINSIC_LIST_REMOVE => extended(ExtendedInstr::ListRemove),
+            lm_abi::INTRINSIC_LIST_SWAP_REMOVE => extended(ExtendedInstr::ListSwapRemove),
+            lm_abi::INTRINSIC_LIST_RESERVE => extended(ExtendedInstr::ListReserve),
+            lm_abi::INTRINSIC_LIST_TRUNCATE => extended(ExtendedInstr::ListTruncate),
+            lm_abi::INTRINSIC_LIST_CONTAINS => extended(ExtendedInstr::ListContains),
+            lm_abi::INTRINSIC_LIST_REORDER => extended(ExtendedInstr::ListReorder),
+            lm_abi::INTRINSIC_MAP_REMOVE => extended(ExtendedInstr::MapRemove {
+                ty: self.m.bc_ty(reply),
+            }),
+            lm_abi::INTRINSIC_MAP_CLEAR => extended(ExtendedInstr::MapClear),
+            lm_abi::INTRINSIC_MAP_RESERVE => extended(ExtendedInstr::MapReserve),
             _ => unreachable!("the checker accepts only manifest intrinsics"),
         };
         self.emit(instr);
-    }
-
-    /// The argument of a core `Option[T]` result type.
-    fn option_arg(&self, ty: TypeId) -> TypeId {
-        match self.m.store.get(ty) {
-            Type::Inst(_, args) => args[0],
-            _ => unreachable!("get results are Option instances"),
-        }
     }
 
     /// Lower one `case` expression. The scrutinee is stored first;
@@ -1315,7 +1733,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 let slot = self.scratch_of(*ty);
                 self.emit(Instr::LoadLocal(src));
                 match projection {
-                    Projection::AsCall(op) => self.emit(Instr::AsCall(*op)),
+                    Projection::AsCall(op) => {
+                        let ty = self.m.bc_ty(*ty);
+                        self.emit(Instr::AsCall { op: *op, ty });
+                    }
                     Projection::CallArgs => self.emit(Instr::CallArgs),
                 }
                 self.emit(Instr::StoreLocal(slot));
@@ -1363,7 +1784,16 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                         }
                         let field_slot = self.scratch_of(field_tys[fidx]);
                         self.emit(Instr::LoadLocal(cast_slot));
-                        self.emit(Instr::LoadField(fidx as u32));
+                        let native_option_payload = fidx == 0
+                            && matches!(
+                                self.m.store.get(*ty),
+                                Type::Inst(class, _) if class.0 == self.m.core.some_class
+                            );
+                        self.emit(if native_option_payload {
+                            extended(ExtendedInstr::OptionPayload { ty: bc })
+                        } else {
+                            Instr::LoadField(fidx as u32)
+                        });
                         self.emit(Instr::StoreLocal(field_slot));
                         self.lower_pattern(sub, field_slot, fail);
                     }
@@ -1395,7 +1825,6 @@ const INLINE_NODE_LIMIT: usize = 8;
 /// Select one safe expression body for direct-call inlining.
 fn inline_body(func: &HirFunc) -> Option<HExpr> {
     if func.imported
-        || func.type_params != 0
         || func.effect_params != 0
         || !func.row.is_empty()
         || !func.captures.is_empty()
@@ -1523,18 +1952,19 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
                 shift_expr_in_place(a, base, max);
             }
         }
-        HExprKind::MethodCall { recv, args, .. } => {
+        HExprKind::MethodCall { recv, args, .. } | HExprKind::InterfaceCall { recv, args, .. } => {
             shift_expr_in_place(recv, base, max);
             for a in args {
                 shift_expr_in_place(a, base, max);
             }
         }
         HExprKind::FieldGet { recv, .. } => shift_expr_in_place(recv, base, max),
-        HExprKind::MakeClosure { captures, .. } => {
+        HExprKind::MakeClosure { captures, .. } | HExprKind::MakeCallback { captures, .. } => {
             for c in captures {
                 shift_expr_in_place(c, base, max);
             }
         }
+        HExprKind::AsCallback(value) => shift_expr_in_place(value, base, max),
         HExprKind::Spawn { args, .. } => {
             for a in args {
                 shift_expr_in_place(a, base, max);
@@ -1654,6 +2084,73 @@ fn shift_stmt_in_place(stmt: &mut HStmt, base: u32, max: &mut u32) {
         }
         HStmt::While { cond, body } => {
             shift_expr_in_place(cond, base, max);
+            for s in body {
+                shift_stmt_in_place(s, base, max);
+            }
+        }
+        HStmt::For {
+            source,
+            bindings,
+            kind,
+            body,
+        } => {
+            shift_expr_in_place(source, base, max);
+            for slot in bindings {
+                shift_slot(slot, base, max);
+            }
+            match kind {
+                HForKind::List {
+                    source_slot,
+                    index_slot,
+                    epoch_slot,
+                    ..
+                }
+                | HForKind::Map {
+                    source_slot,
+                    index_slot,
+                    epoch_slot,
+                    ..
+                } => {
+                    shift_slot(source_slot, base, max);
+                    shift_slot(index_slot, base, max);
+                    shift_slot(epoch_slot, base, max);
+                }
+                HForKind::Text {
+                    source_slot,
+                    cursor_slot,
+                    ..
+                } => {
+                    shift_slot(source_slot, base, max);
+                    shift_slot(cursor_slot, base, max);
+                }
+                HForKind::Range {
+                    source_slot,
+                    cursor_slot,
+                    stop_slot,
+                } => {
+                    shift_slot(source_slot, base, max);
+                    shift_slot(cursor_slot, base, max);
+                    shift_slot(stop_slot, base, max);
+                }
+                HForKind::Generic {
+                    source_slot,
+                    iterator_slot,
+                    option_slot,
+                    item_slot,
+                    iterator,
+                    next,
+                    ..
+                } => {
+                    shift_slot(source_slot, base, max);
+                    shift_slot(iterator_slot, base, max);
+                    shift_slot(option_slot, base, max);
+                    if let Some(slot) = item_slot {
+                        shift_slot(slot, base, max);
+                    }
+                    shift_expr_in_place(iterator, base, max);
+                    shift_expr_in_place(next, base, max);
+                }
+            }
             for s in body {
                 shift_stmt_in_place(s, base, max);
             }
@@ -1961,6 +2458,39 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
             ]],
         };
     }
+    if class.native_repr == Some(NativeRepr::List) {
+        let element = m.intern_type(BcType::Var(0));
+        let list = m.intern_type(BcType::List(element));
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 1,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: list,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::ListNew { ty: list, count: 0 }, Instr::Return]],
+        };
+    }
+    if class.native_repr == Some(NativeRepr::Map) {
+        let key = m.intern_type(BcType::Var(0));
+        let value = m.intern_type(BcType::Var(1));
+        let map = m.intern_type(BcType::Map(key, value));
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params: 2,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: map,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![],
+            blocks: vec![vec![Instr::MapNew { ty: map, count: 0 }, Instr::Return]],
+        };
+    }
     let params: Vec<u32> = class.ctor_params.iter().map(|t| m.bc_ty(*t)).collect();
     let type_params = class.type_params;
     let vars: Vec<TypeId> = Vec::new();
@@ -1976,6 +2506,41 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
         (inst, Some(app))
     };
     let row = m.bc_row(&class.ctor_row);
+    if cidx == m.core.some_class {
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params,
+            effect_params: 0,
+            params: params.clone(),
+            param_muts: class.ctor_param_muts.clone(),
+            ret: self_bc,
+            row,
+            captures: vec![],
+            local_types: params,
+            blocks: vec![vec![
+                Instr::LoadLocal(0),
+                extended(ExtendedInstr::OptionSome { ty: self_bc }),
+                Instr::Return,
+            ]],
+        };
+    }
+    if cidx == m.core.none_class {
+        return Func {
+            name: format!("<new {}>", class.name),
+            type_params,
+            effect_params: 0,
+            params: params.clone(),
+            param_muts: class.ctor_param_muts.clone(),
+            ret: self_bc,
+            row,
+            captures: vec![],
+            local_types: params,
+            blocks: vec![vec![
+                extended(ExtendedInstr::OptionNone { ty: self_bc }),
+                Instr::Return,
+            ]],
+        };
+    }
     let self_slot = params.len() as u32;
     // The slot table starts with the constructor parameters and the
     // `self` scratch slot.
@@ -2163,11 +2728,12 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::SbAppendInt)
         | Instr::Native(lm_bytecode::NativeInstr::SbAppendBool)
         | Instr::Native(lm_bytecode::NativeInstr::BbAppend) => (2, 1),
-        Instr::MapPut
+        Instr::MapPut { discard: false, .. }
         | Instr::Native(lm_bytecode::NativeInstr::BytesSlice)
         | Instr::Native(lm_bytecode::NativeInstr::TextSlice)
         | Instr::Native(lm_bytecode::NativeInstr::TextSliceBytes)
         | Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => (3, 1),
+        Instr::MapPut { discard: true, .. } => (3, 0),
         Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
         Instr::MapNew { count, .. } => (2 * *count as usize, 1),
         Instr::MakeClosure { captures, .. } => (*captures as usize, 1),
@@ -2197,12 +2763,51 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
                 (1, 1)
             }
         }
-        Instr::AsCall(_) => (1, 1),
+        Instr::AsCall { .. } => (1, 1),
         Instr::CallArgs => (1, 1),
         Instr::FaultCode => (1, 1),
         Instr::FaultDenied => (1, 1),
         Instr::RequestOp => (1, 1),
         Instr::Unreachable => (0, 0),
+        Instr::CallInterface {
+            interface, method, ..
+        } => {
+            let argc = module.interfaces[*interface as usize].methods[*method as usize]
+                .params
+                .len();
+            (argc + 1, 1)
+        }
+        Instr::Extended(instr) => extended_stack_effect(instr),
+    }
+}
+
+fn extended_stack_effect(instr: &ExtendedInstr) -> (usize, usize) {
+    match instr {
+        ExtendedInstr::OptionNone { .. } => (0, 1),
+        ExtendedInstr::OptionSome { .. }
+        | ExtendedInstr::OptionPayload { .. }
+        | ExtendedInstr::ListEpoch
+        | ExtendedInstr::MapEpoch
+        | ExtendedInstr::ListCapacity
+        | ExtendedInstr::ListPop { .. }
+        | ExtendedInstr::ListReorder
+        | ExtendedInstr::MapClear
+        | ExtendedInstr::AsCallback => (1, 1),
+        ExtendedInstr::ListGet { .. }
+        | ExtendedInstr::MapGet { .. }
+        | ExtendedInstr::ListIterLen
+        | ExtendedInstr::MapIterLen
+        | ExtendedInstr::MapKeyAt
+        | ExtendedInstr::MapValueAt
+        | ExtendedInstr::ListRemove
+        | ExtendedInstr::ListSwapRemove
+        | ExtendedInstr::ListReserve
+        | ExtendedInstr::ListTruncate
+        | ExtendedInstr::ListContains
+        | ExtendedInstr::MapRemove { .. }
+        | ExtendedInstr::MapReserve => (2, 1),
+        ExtendedInstr::ListSet | ExtendedInstr::ListInsert => (3, 1),
+        ExtendedInstr::MakeCallback { captures, .. } => (*captures as usize, 1),
     }
 }
 
@@ -2324,7 +2929,7 @@ fn instr_text(instr: &Instr) -> String {
         Instr::MapLen => "MapLen".to_string(),
         Instr::MapHas => "MapHas".to_string(),
         Instr::MapAt => "MapAt".to_string(),
-        Instr::MapPut => "MapPut".to_string(),
+        Instr::MapPut { ty, discard } => format!("MapPut ty{ty} discard {discard}"),
         Instr::Native(lm_bytecode::NativeInstr::SbNew) => "SbNew".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::SbAppendStr) => "SbAppendStr".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::SbAppendInt) => "SbAppendInt".to_string(),
@@ -2393,12 +2998,51 @@ fn instr_text(instr: &Instr) -> String {
             };
             format!("TableEdit {action_text} {target}")
         }
-        Instr::AsCall(op) => format!("AsCall {}", op_text(*op)),
+        Instr::AsCall { op, ty } => format!("AsCall {} type{ty}", op_text(*op)),
         Instr::CallArgs => "CallArgs".to_string(),
         Instr::FaultCode => "FaultCode".to_string(),
         Instr::FaultDenied => "FaultDenied".to_string(),
         Instr::RequestOp => "RequestOp".to_string(),
         Instr::Unreachable => "Unreachable".to_string(),
+        Instr::CallInterface {
+            interface,
+            method,
+            recv_ty,
+        } => format!("CallInterface interface{interface} method{method} type{recv_ty}"),
+        Instr::Extended(instr) => extended_instr_text(instr),
+    }
+}
+
+fn extended_instr_text(instr: &ExtendedInstr) -> String {
+    match instr {
+        ExtendedInstr::MakeCallback { func, captures } => {
+            format!("MakeCallback fn{func} captures {captures}")
+        }
+        ExtendedInstr::AsCallback => "AsCallback".to_string(),
+        ExtendedInstr::OptionSome { ty } => format!("OptionSome ty{ty}"),
+        ExtendedInstr::OptionNone { ty } => format!("OptionNone ty{ty}"),
+        ExtendedInstr::OptionPayload { ty } => format!("OptionPayload ty{ty}"),
+        ExtendedInstr::ListGet { ty } => format!("ListGet ty{ty}"),
+        ExtendedInstr::MapGet { ty } => format!("MapGet ty{ty}"),
+        ExtendedInstr::ListEpoch => "ListEpoch".to_string(),
+        ExtendedInstr::ListIterLen => "ListIterLen".to_string(),
+        ExtendedInstr::MapEpoch => "MapEpoch".to_string(),
+        ExtendedInstr::MapIterLen => "MapIterLen".to_string(),
+        ExtendedInstr::MapKeyAt => "MapKeyAt".to_string(),
+        ExtendedInstr::MapValueAt => "MapValueAt".to_string(),
+        ExtendedInstr::ListCapacity => "ListCapacity".to_string(),
+        ExtendedInstr::ListSet => "ListSet".to_string(),
+        ExtendedInstr::ListPop { ty } => format!("ListPop ty{ty}"),
+        ExtendedInstr::ListInsert => "ListInsert".to_string(),
+        ExtendedInstr::ListRemove => "ListRemove".to_string(),
+        ExtendedInstr::ListSwapRemove => "ListSwapRemove".to_string(),
+        ExtendedInstr::ListReserve => "ListReserve".to_string(),
+        ExtendedInstr::ListTruncate => "ListTruncate".to_string(),
+        ExtendedInstr::ListContains => "ListContains".to_string(),
+        ExtendedInstr::ListReorder => "ListReorder".to_string(),
+        ExtendedInstr::MapRemove { ty } => format!("MapRemove ty{ty}"),
+        ExtendedInstr::MapClear => "MapClear".to_string(),
+        ExtendedInstr::MapReserve => "MapReserve".to_string(),
     }
 }
 
@@ -2472,7 +3116,38 @@ fn type_text(module: &Module, idx: u32) -> String {
             }
             out
         }
+        BcType::Callback(params, muts, ret, row) => {
+            let parts: Vec<String> = params
+                .iter()
+                .zip(muts.iter())
+                .map(|(p, m)| {
+                    if *m {
+                        format!("mut {}", type_text(module, *p))
+                    } else {
+                        type_text(module, *p)
+                    }
+                })
+                .collect();
+            let mut out = format!(
+                "nonescaping ({}) -> {}",
+                parts.join(", "),
+                type_text(module, *ret)
+            );
+            if !row.is_empty() {
+                out.push_str(" with ");
+                out.push_str(&row_text(module, row));
+            }
+            out
+        }
         BcType::Var(i) => format!("${i}"),
+        BcType::Projection {
+            base,
+            interface,
+            assoc,
+        } => format!(
+            "{}.interface{interface}.assoc{assoc}",
+            type_text(module, *base)
+        ),
         BcType::Fault => "Fault".to_string(),
         BcType::Request => "Request".to_string(),
         BcType::PolicyTable => "PolicyTable".to_string(),

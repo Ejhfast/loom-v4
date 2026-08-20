@@ -32,7 +32,8 @@ use crate::env::FrozenLinkEnv;
 use lm_bytecode::identity::{module_identity, ModuleIdentity};
 use lm_bytecode::interface::Interface;
 use lm_bytecode::{
-    BcClass, BcRow, BcType, Func, Import, ImportKind, Instr, Module, TypeApp, NO_PARENT,
+    BcAssociated, BcClass, BcConformance, BcInterface, BcInterfaceMethod, BcInterfaceUse, BcRow,
+    BcType, ExtendedInstr, Func, Import, ImportKind, Instr, Module, TypeApp, NO_PARENT,
 };
 use std::collections::HashMap;
 
@@ -136,7 +137,11 @@ struct Merged {
     apps: Vec<TypeApp>,
     app_index: HashMap<TypeApp, u32>,
     classes: Vec<BcClass>,
+    class_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
+    interfaces: Vec<BcInterface>,
+    conformances: Vec<BcConformance>,
     funcs: Vec<Func>,
+    func_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
     /// The merged core role table. Every module carries the same core,
     /// so every module fills the same roles with the same merged
     /// classes.
@@ -148,6 +153,8 @@ struct Merged {
     /// module that first provided it. A second version of one key is
     /// a rejection, and the message names both providers.
     class_version: HashMap<String, ([u8; 32], String)>,
+    /// One merged interface slot per nominal key.
+    interface_by_key: HashMap<String, (u32, String)>,
     /// Structural hash to merged function index. A function value is
     /// identified by its structural hash, so content alone decides
     /// which code objects merge.
@@ -161,6 +168,8 @@ struct Merged {
     binding_version: HashMap<String, ([u8; 32], String)>,
     /// (module path, export name) to the merged class index.
     class_exports: HashMap<(String, String), u32>,
+    /// (module path, export name) to the merged interface index.
+    interface_exports: HashMap<(String, String), u32>,
     /// (module path, export name) to the merged function index.
     func_exports: HashMap<(String, String), u32>,
     /// (module path, class export name) to the merged constructor.
@@ -181,14 +190,20 @@ impl Default for Merged {
             apps: Vec::new(),
             app_index: HashMap::new(),
             classes: Vec::new(),
+            class_bounds: Vec::new(),
+            interfaces: Vec::new(),
+            conformances: Vec::new(),
             funcs: Vec::new(),
+            func_bounds: Vec::new(),
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             class_by_def: HashMap::new(),
             class_version: HashMap::new(),
+            interface_by_key: HashMap::new(),
             func_by_hash: HashMap::new(),
             bindings: Vec::new(),
             binding_version: HashMap::new(),
             class_exports: HashMap::new(),
+            interface_exports: HashMap::new(),
             func_exports: HashMap::new(),
             ctor_exports: HashMap::new(),
             export_hash: HashMap::new(),
@@ -245,6 +260,7 @@ struct Reloc {
     selectors: Vec<u32>,
     apps: Vec<u32>,
     classes: Vec<u32>,
+    interfaces: Vec<u32>,
     funcs: Vec<u32>,
 }
 
@@ -277,7 +293,11 @@ pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError>
         imports: Vec::new(),
         core_roles: merged.core_roles,
         classes: merged.classes,
+        class_bounds: merged.class_bounds,
+        interfaces: merged.interfaces,
+        conformances: merged.conformances,
         funcs: merged.funcs,
+        func_bounds: merged.func_bounds,
         entry,
         exports: Vec::new(),
         bindings: merged.bindings,
@@ -421,14 +441,43 @@ fn relocate(
                     fields: Vec::new(),
                     methods: Vec::new(),
                 });
+                merged.class_bounds.push(Vec::new());
                 merged.class_by_def.insert(key, at);
                 classes[idx as usize] = at;
                 created_classes.push(idx);
             }
         }
     }
+    // Interface keys are nominal. Assign every merged index before
+    // type relocation because a projection names an interface.
+    let mut interfaces: Vec<u32> = vec![u32::MAX; module.interfaces.len()];
+    let mut created_interfaces: Vec<u32> = Vec::new();
+    let mut shared_interfaces: Vec<u32> = Vec::new();
+    for (idx, source) in module.interfaces.iter().enumerate() {
+        if let Some((existing, _)) = merged.interface_by_key.get(&source.key) {
+            interfaces[idx] = *existing;
+            shared_interfaces.push(idx as u32);
+            continue;
+        }
+        let at = merged.interfaces.len() as u32;
+        merged.interfaces.push(BcInterface {
+            name: source.name.clone(),
+            key: source.key.clone(),
+            type_params: 0,
+            effect_params: 0,
+            generic_is_effect: Vec::new(),
+            type_bounds: Vec::new(),
+            associated: Vec::new(),
+            methods: Vec::new(),
+        });
+        merged
+            .interface_by_key
+            .insert(source.key.clone(), (at, path.to_string()));
+        interfaces[idx] = at;
+        created_interfaces.push(idx as u32);
+    }
     for (idx, ty) in module.types.iter().enumerate() {
-        let relocated = reloc_type(ty, &types, &classes, &strings);
+        let relocated = reloc_type(ty, &types, &classes, &interfaces, &strings);
         types[idx] = merged.ty(relocated);
     }
     for (idx, app) in module.apps.iter().enumerate() {
@@ -480,6 +529,7 @@ fn relocate(
                     local_types: Vec::new(),
                     blocks: Vec::new(),
                 });
+                merged.func_bounds.push(Vec::new());
                 merged.func_by_hash.insert(hash, at);
                 funcs[idx] = at;
                 created_funcs.push(idx as u32);
@@ -492,6 +542,7 @@ fn relocate(
         selectors,
         apps,
         classes,
+        interfaces,
         funcs,
     };
     // The core role table: every module carries the same core, and the
@@ -556,19 +607,63 @@ fn relocate(
                 source.key
             )));
         }
+        let bounds = module
+            .class_bounds
+            .get(*idx as usize)
+            .map(|items| reloc_bounds(items, &reloc))
+            .unwrap_or_default();
+        if created_classes.contains(idx) {
+            merged.class_bounds[at] = bounds;
+        } else if merged.class_bounds[at] != bounds {
+            return Err(fail(format!(
+                "the class `{}` of `{path}` shares a definition with different interface bounds",
+                source.key
+            )));
+        }
+    }
+    for idx in created_interfaces.iter().chain(shared_interfaces.iter()) {
+        let source = &module.interfaces[*idx as usize];
+        let at = reloc.interfaces[*idx as usize] as usize;
+        let filled = reloc_interface(source, &reloc);
+        if created_interfaces.contains(idx) {
+            merged.interfaces[at] = filled;
+        } else if merged.interfaces[at] != filled {
+            let provider = &merged.interface_by_key[&source.key].1;
+            return Err(fail(format!(
+                "the interface `{}` arrives with two contracts, from `{provider}` and from `{path}`",
+                source.key
+            )));
+        }
     }
     for idx in created_funcs.iter().chain(shared_funcs.iter()) {
         let source = &module.funcs[*idx as usize];
         let at = reloc.funcs[*idx as usize] as usize;
         let filled = reloc_func(source, &reloc);
+        let bounds = module
+            .func_bounds
+            .get(*idx as usize)
+            .map(|items| reloc_bounds(items, &reloc))
+            .unwrap_or_default();
         if created_funcs.contains(idx) {
             merged.funcs[at] = filled;
+            merged.func_bounds[at] = bounds;
         } else if !same_body(&merged.funcs[at], &filled) {
             return Err(fail(format!(
                 "the function `{}` of `{path}` shares a definition hash with a \
                  different definition",
                 source.name
             )));
+        } else if merged.func_bounds[at] != bounds {
+            return Err(fail(format!(
+                "the function `{}` of `{path}` shares code with different interface bounds",
+                source.name
+            )));
+        }
+    }
+    for source in &module.conformances {
+        let filled = reloc_conformance(source, &reloc);
+        if !merged.conformances.contains(&filled) {
+            merged.conformances.push(filled);
         }
     }
     merge_bindings(merged, module, identity, path, &reloc)?;
@@ -894,6 +989,8 @@ fn register_exports(
         // checked here too.
         let limit = if export.kind.is_class() {
             reloc.classes.len()
+        } else if export.kind.is_interface() {
+            reloc.interfaces.len()
         } else {
             reloc.funcs.len()
         };
@@ -912,6 +1009,8 @@ fn register_exports(
         // does not hold the definition.
         let imported = if export.kind.is_class() {
             extern_classes[export.def as usize]
+        } else if export.kind.is_interface() {
+            false
         } else {
             extern_funcs[export.def as usize]
         };
@@ -937,6 +1036,10 @@ fn register_exports(
                     .ctor_exports
                     .insert(key, reloc.funcs[export.ctor as usize]);
             }
+        } else if export.kind.is_interface() {
+            merged
+                .interface_exports
+                .insert(key, reloc.interfaces[export.def as usize]);
         } else {
             merged
                 .func_exports
@@ -969,7 +1072,13 @@ fn reloc_row(row: &[BcRow], strings: &[u32]) -> Vec<BcRow> {
         .collect()
 }
 
-fn reloc_type(ty: &BcType, types: &[u32], classes: &[u32], strings: &[u32]) -> BcType {
+fn reloc_type(
+    ty: &BcType,
+    types: &[u32],
+    classes: &[u32],
+    interfaces: &[u32],
+    strings: &[u32],
+) -> BcType {
     match ty {
         BcType::Class(c) => BcType::Class(classes[*c as usize]),
         BcType::Inst(c, args) => BcType::Inst(
@@ -985,6 +1094,21 @@ fn reloc_type(ty: &BcType, types: &[u32], classes: &[u32], strings: &[u32]) -> B
             types[*ret as usize],
             reloc_row(row, strings),
         ),
+        BcType::Callback(params, muts, ret, row) => BcType::Callback(
+            params.iter().map(|p| types[*p as usize]).collect(),
+            muts.clone(),
+            types[*ret as usize],
+            reloc_row(row, strings),
+        ),
+        BcType::Projection {
+            base,
+            interface,
+            assoc,
+        } => BcType::Projection {
+            base: types[*base as usize],
+            interface: interfaces[*interface as usize],
+            assoc: *assoc,
+        },
         BcType::Vm(t) => BcType::Vm(types[*t as usize]),
         BcType::Wait(t) => BcType::Wait(types[*t as usize]),
         BcType::Snapshot(t) => BcType::Snapshot(types[*t as usize]),
@@ -992,6 +1116,84 @@ fn reloc_type(ty: &BcType, types: &[u32], classes: &[u32], strings: &[u32]) -> B
         BcType::Handle(m, r) => BcType::Handle(types[*m as usize], types[*r as usize]),
         BcType::Op(op, f) => BcType::Op(*op, types[*f as usize]),
         other => other.clone(),
+    }
+}
+
+fn reloc_interface_use(application: &BcInterfaceUse, reloc: &Reloc) -> BcInterfaceUse {
+    BcInterfaceUse {
+        interface: reloc.interfaces[application.interface as usize],
+        types: application
+            .types
+            .iter()
+            .map(|item| reloc.types[*item as usize])
+            .collect(),
+        rows: application
+            .rows
+            .iter()
+            .map(|row| reloc_row(row, &reloc.strings))
+            .collect(),
+    }
+}
+
+fn reloc_bounds(bounds: &[Vec<BcInterfaceUse>], reloc: &Reloc) -> Vec<Vec<BcInterfaceUse>> {
+    bounds
+        .iter()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| reloc_interface_use(item, reloc))
+                .collect()
+        })
+        .collect()
+}
+
+fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
+    BcInterface {
+        name: source.name.clone(),
+        key: source.key.clone(),
+        type_params: source.type_params,
+        effect_params: source.effect_params,
+        generic_is_effect: source.generic_is_effect.clone(),
+        type_bounds: reloc_bounds(&source.type_bounds, reloc),
+        associated: source
+            .associated
+            .iter()
+            .map(|item| BcAssociated {
+                name: item.name.clone(),
+                bound: item
+                    .bound
+                    .as_ref()
+                    .map(|bound| reloc_interface_use(bound, reloc)),
+            })
+            .collect(),
+        methods: source
+            .methods
+            .iter()
+            .map(|method| BcInterfaceMethod {
+                selector: reloc.selectors[method.selector as usize],
+                mut_self: method.mut_self,
+                params: method
+                    .params
+                    .iter()
+                    .map(|item| reloc.types[*item as usize])
+                    .collect(),
+                param_muts: method.param_muts.clone(),
+                ret: reloc.types[method.ret as usize],
+                row: reloc_row(&method.row, &reloc.strings),
+            })
+            .collect(),
+    }
+}
+
+fn reloc_conformance(source: &BcConformance, reloc: &Reloc) -> BcConformance {
+    BcConformance {
+        class: reloc.classes[source.class as usize],
+        application: reloc_interface_use(&source.application, reloc),
+        associated: source
+            .associated
+            .iter()
+            .map(|item| reloc.types[*item as usize])
+            .collect(),
     }
 }
 
@@ -1084,6 +1286,10 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         },
         Instr::IsType(ty) => Instr::IsType(reloc.types[*ty as usize]),
         Instr::CastType(ty) => Instr::CastType(reloc.types[*ty as usize]),
+        Instr::MapPut { ty, discard } => Instr::MapPut {
+            ty: reloc.types[*ty as usize],
+            discard: *discard,
+        },
         // Every remaining operand is function-local or manifest-dense.
         Instr::ConstUnit
         | Instr::ConstBool(_)
@@ -1162,7 +1368,6 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::MapLen
         | Instr::MapHas
         | Instr::MapAt
-        | Instr::MapPut
         | Instr::Native(lm_bytecode::NativeInstr::SbNew)
         | Instr::Native(lm_bytecode::NativeInstr::SbAppendStr)
         | Instr::Native(lm_bytecode::NativeInstr::SbAppendInt)
@@ -1212,11 +1417,72 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Return
         | Instr::OpConst(_)
         | Instr::TableEdit { .. }
-        | Instr::AsCall(_)
         | Instr::CallArgs
         | Instr::FaultCode
         | Instr::FaultDenied
         | Instr::RequestOp
         | Instr::Unreachable => *instr,
+        Instr::AsCall { op, ty } => Instr::AsCall {
+            op: *op,
+            ty: reloc.types[*ty as usize],
+        },
+        Instr::CallInterface {
+            interface,
+            method,
+            recv_ty,
+        } => Instr::CallInterface {
+            interface: reloc.interfaces[*interface as usize],
+            method: *method,
+            recv_ty: reloc.types[*recv_ty as usize],
+        },
+        Instr::Extended(instr) => Instr::Extended(reloc_extended(instr, reloc)),
+    }
+}
+
+fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
+    match instr {
+        ExtendedInstr::MakeCallback { func, captures } => ExtendedInstr::MakeCallback {
+            func: reloc.funcs[*func as usize],
+            captures: *captures,
+        },
+        ExtendedInstr::OptionSome { ty } => ExtendedInstr::OptionSome {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::OptionNone { ty } => ExtendedInstr::OptionNone {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::OptionPayload { ty } => ExtendedInstr::OptionPayload {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::ListGet { ty } => ExtendedInstr::ListGet {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::MapGet { ty } => ExtendedInstr::MapGet {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::ListPop { ty } => ExtendedInstr::ListPop {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::MapRemove { ty } => ExtendedInstr::MapRemove {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::AsCallback
+        | ExtendedInstr::ListEpoch
+        | ExtendedInstr::ListIterLen
+        | ExtendedInstr::MapEpoch
+        | ExtendedInstr::MapIterLen
+        | ExtendedInstr::MapKeyAt
+        | ExtendedInstr::MapValueAt
+        | ExtendedInstr::ListCapacity
+        | ExtendedInstr::ListSet
+        | ExtendedInstr::ListInsert
+        | ExtendedInstr::ListRemove
+        | ExtendedInstr::ListSwapRemove
+        | ExtendedInstr::ListReserve
+        | ExtendedInstr::ListTruncate
+        | ExtendedInstr::ListContains
+        | ExtendedInstr::ListReorder
+        | ExtendedInstr::MapClear
+        | ExtendedInstr::MapReserve => *instr,
     }
 }

@@ -12,7 +12,7 @@
 //! application. The verifier shares no code with the source checker.
 
 use lm_bytecode::corepin::CoreLayout;
-use lm_bytecode::{BcClassKind, BcRow, BcType, Func, Instr, Module};
+use lm_bytecode::{BcClassKind, BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Instr, Module};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -94,6 +94,24 @@ struct State {
 struct Universe {
     types: Vec<BcType>,
     index: HashMap<BcType, u32>,
+    facts: Vec<TypeFacts>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TypeFacts {
+    contains_callback: bool,
+    contains_projection: bool,
+    max_type_var: Option<u32>,
+    max_effect_var: Option<u32>,
+}
+
+impl TypeFacts {
+    fn include(&mut self, other: Self) {
+        self.contains_callback |= other.contains_callback;
+        self.contains_projection |= other.contains_projection;
+        self.max_type_var = self.max_type_var.max(other.max_type_var);
+        self.max_effect_var = self.max_effect_var.max(other.max_effect_var);
+    }
 }
 
 impl Universe {
@@ -102,10 +120,67 @@ impl Universe {
             return *idx;
         }
         let idx = self.types.len() as u32;
+        let facts = type_facts(&ty, &self.facts);
         self.types.push(ty.clone());
+        self.facts.push(facts);
         self.index.insert(ty, idx);
         idx
     }
+}
+
+fn type_facts(ty: &BcType, known: &[TypeFacts]) -> TypeFacts {
+    let mut facts = TypeFacts::default();
+    match ty {
+        BcType::Callback(params, _, ret, row) => {
+            facts.contains_callback = true;
+            for child in params {
+                include_type_facts(&mut facts, known, *child);
+            }
+            include_type_facts(&mut facts, known, *ret);
+            for element in row {
+                if let BcRow::Var(var) = element {
+                    facts.max_effect_var = facts.max_effect_var.max(Some(*var));
+                }
+            }
+        }
+        BcType::Fn(params, _, ret, row) => {
+            for child in params {
+                include_type_facts(&mut facts, known, *child);
+            }
+            include_type_facts(&mut facts, known, *ret);
+            for element in row {
+                if let BcRow::Var(var) = element {
+                    facts.max_effect_var = facts.max_effect_var.max(Some(*var));
+                }
+            }
+        }
+        BcType::Inst(_, args) | BcType::Tuple(args) => {
+            for child in args {
+                include_type_facts(&mut facts, known, *child);
+            }
+        }
+        BcType::List(child) | BcType::Vm(child) | BcType::Wait(child) | BcType::Snapshot(child) => {
+            include_type_facts(&mut facts, known, *child)
+        }
+        BcType::Projection { base, .. } => {
+            facts.contains_projection = true;
+            include_type_facts(&mut facts, known, *base);
+        }
+        BcType::Map(left, right)
+        | BcType::PendingCall(left, right)
+        | BcType::Handle(left, right) => {
+            include_type_facts(&mut facts, known, *left);
+            include_type_facts(&mut facts, known, *right);
+        }
+        BcType::Op(_, function) => include_type_facts(&mut facts, known, *function),
+        BcType::Var(var) => facts.max_type_var = Some(*var),
+        _ => {}
+    }
+    facts
+}
+
+fn include_type_facts(facts: &mut TypeFacts, known: &[TypeFacts], child: u32) {
+    facts.include(known.get(child as usize).copied().unwrap_or_default());
 }
 
 /// Shared lookup context for one module.
@@ -126,6 +201,52 @@ impl<'m> Ctx<'m> {
 
     fn intern(&self, ty: BcType) -> u32 {
         self.uni.borrow_mut().intern(ty)
+    }
+
+    /// Return the canonical self type of one class.
+    fn class_self_type(&self, class: u32) -> Option<u32> {
+        if self.core.int == Some(class) {
+            return Some(TY_INT);
+        }
+        if self.core.boolean == Some(class) {
+            return Some(TY_BOOL);
+        }
+        if self.core.string == Some(class) {
+            return Some(TY_STR);
+        }
+        if self.core.bytes == Some(class) {
+            return Some(self.intern(BcType::Bytes));
+        }
+        let entry = self.module.classes.get(class as usize)?;
+        if self.core.list == Some(class) && entry.type_params == 1 {
+            let element = self.intern(BcType::Var(0));
+            return Some(self.intern(BcType::List(element)));
+        }
+        if self.core.map == Some(class) && entry.type_params == 2 {
+            let key = self.intern(BcType::Var(0));
+            let value = self.intern(BcType::Var(1));
+            return Some(self.intern(BcType::Map(key, value)));
+        }
+        if entry.type_params == 0 {
+            return self.class_ty[class as usize];
+        }
+        let args = (0..entry.type_params)
+            .map(|index| self.intern(BcType::Var(index)))
+            .collect();
+        Some(self.intern(BcType::Inst(class, args)))
+    }
+
+    /// Return the payload type of a pinned `Option` family or arm.
+    fn option_arg(&self, ty: u32) -> Option<u32> {
+        let (class, args) = self.as_instance(ty)?;
+        let is_option = Some(class) == self.core.option
+            || Some(class) == self.core.option_some
+            || Some(class) == self.core.option_none;
+        if is_option && args.len() == 1 {
+            Some(args[0])
+        } else {
+            None
+        }
     }
 
     /// The type arguments of `ancestor` seen from an instance of
@@ -246,6 +367,7 @@ impl<'m> Ctx<'m> {
         match self.ty(ty) {
             BcType::Inst(_, args) | BcType::Tuple(args) => out.extend(args),
             BcType::List(e)
+            | BcType::Projection { base: e, .. }
             | BcType::Vm(e)
             | BcType::Wait(e)
             | BcType::Snapshot(e)
@@ -254,7 +376,7 @@ impl<'m> Ctx<'m> {
                 out.push(a);
                 out.push(b);
             }
-            BcType::Fn(params, _, ret, _) => {
+            BcType::Fn(params, _, ret, _) | BcType::Callback(params, _, ret, _) => {
                 out.extend(params);
                 out.push(ret);
             }
@@ -292,6 +414,21 @@ impl<'m> Ctx<'m> {
             let child = |c: u32| done.get(&c).copied().unwrap_or(c);
             let built = match self.ty(cur) {
                 BcType::Var(i) => targs.get(i as usize).copied().unwrap_or(cur),
+                BcType::Projection {
+                    base,
+                    interface,
+                    assoc,
+                } => {
+                    let base = child(base);
+                    self.projected_type(base, interface, assoc)
+                        .unwrap_or_else(|| {
+                            self.intern(BcType::Projection {
+                                base,
+                                interface,
+                                assoc,
+                            })
+                        })
+                }
                 BcType::Inst(c, args) => {
                     self.intern(BcType::Inst(c, args.iter().map(|a| child(*a)).collect()))
                 }
@@ -301,6 +438,12 @@ impl<'m> Ctx<'m> {
                     self.intern(BcType::Tuple(elems.iter().map(|e| child(*e)).collect()))
                 }
                 BcType::Fn(params, muts, ret, row) => self.intern(BcType::Fn(
+                    params.iter().map(|p| child(*p)).collect(),
+                    muts,
+                    child(ret),
+                    self.row_subst(&row, rows),
+                )),
+                BcType::Callback(params, muts, ret, row) => self.intern(BcType::Callback(
                     params.iter().map(|p| child(*p)).collect(),
                     muts,
                     child(ret),
@@ -316,6 +459,260 @@ impl<'m> Ctx<'m> {
             done.insert(cur, built);
         }
         done.get(&ty).copied().unwrap_or(ty)
+    }
+
+    fn subst_interface_use(
+        &self,
+        application: &BcInterfaceUse,
+        types: &[u32],
+        rows: &[Vec<BcRow>],
+    ) -> BcInterfaceUse {
+        BcInterfaceUse {
+            interface: application.interface,
+            types: application
+                .types
+                .iter()
+                .map(|item| self.subst(*item, types, rows))
+                .collect(),
+            rows: application
+                .rows
+                .iter()
+                .map(|item| self.row_subst(item, rows))
+                .collect(),
+        }
+    }
+
+    fn concrete_conformance(
+        &self,
+        ty: u32,
+        interface: u32,
+    ) -> Option<(&lm_bytecode::BcConformance, Vec<u32>)> {
+        let (mut class, mut args) = self.as_instance(ty)?;
+        loop {
+            if let Some(conformance) = self
+                .module
+                .conformances
+                .iter()
+                .find(|item| item.class == class && item.application.interface == interface)
+            {
+                return Some((conformance, args));
+            }
+            let entry = &self.module.classes[class as usize];
+            let parent = entry.parent()?;
+            if !entry.parent_args.is_empty() {
+                args = entry
+                    .parent_args
+                    .iter()
+                    .map(|item| self.subst(*item, &args, &[]))
+                    .collect();
+            } else if self.module.classes[parent as usize].type_params == 0 {
+                args.clear();
+            }
+            class = parent;
+        }
+    }
+
+    fn projected_type(&self, base: u32, interface: u32, assoc: u32) -> Option<u32> {
+        let (conformance, args) = self.concrete_conformance(base, interface)?;
+        let template = *conformance.associated.get(assoc as usize)?;
+        Some(self.subst(template, &args, &[]))
+    }
+
+    fn interface_application(
+        &self,
+        func: u32,
+        ty: u32,
+        interface: u32,
+        depth: u32,
+    ) -> Option<BcInterfaceUse> {
+        let bounds = self.module.func_bounds.get(func as usize)?;
+        self.interface_application_with_bounds(ty, interface, bounds, depth)
+    }
+
+    /// Resolve one interface application from an explicit bound table.
+    fn interface_application_with_bounds(
+        &self,
+        ty: u32,
+        interface: u32,
+        bounds: &[Vec<BcInterfaceUse>],
+        depth: u32,
+    ) -> Option<BcInterfaceUse> {
+        if depth > 32 {
+            return None;
+        }
+        match self.ty(ty) {
+            BcType::Var(index) => bounds
+                .get(index as usize)?
+                .iter()
+                .find(|item| item.interface == interface)
+                .cloned(),
+            BcType::Projection {
+                base,
+                interface: owner,
+                assoc,
+            } => {
+                let owner_application =
+                    self.interface_application_with_bounds(base, owner, bounds, depth + 1)?;
+                let bound = self
+                    .module
+                    .interfaces
+                    .get(owner as usize)?
+                    .associated
+                    .get(assoc as usize)?
+                    .bound
+                    .as_ref()?;
+                if bound.interface != interface {
+                    return None;
+                }
+                let mut types = vec![base];
+                types.extend(owner_application.types.iter().copied());
+                Some(self.subst_interface_use(bound, &types, &owner_application.rows))
+            }
+            _ => {
+                let (conformance, args) = self.concrete_conformance(ty, interface)?;
+                Some(self.subst_interface_use(&conformance.application, &args, &[]))
+            }
+        }
+    }
+
+    /// Validate one interface application in one generic scope.
+    fn check_interface_use(
+        &self,
+        application: &BcInterfaceUse,
+        type_params: u32,
+        effect_params: u32,
+    ) -> Result<(), String> {
+        let contract = self
+            .module
+            .interfaces
+            .get(application.interface as usize)
+            .ok_or_else(|| "the interface index is out of range".to_string())?;
+        if application.types.len() != contract.type_params as usize {
+            return Err("the interface type argument count is wrong".to_string());
+        }
+        if application.rows.len() != contract.effect_params as usize {
+            return Err("the interface effect argument count is wrong".to_string());
+        }
+        for ty in &application.types {
+            if *ty as usize >= self.module.types.len() {
+                return Err("an interface type argument is out of range".to_string());
+            }
+            if self.contains_callback(*ty) {
+                return Err("an interface type argument cannot contain a callback".to_string());
+            }
+            if !self.vars_bounded(*ty, type_params, effect_params) {
+                return Err("an interface type argument uses an unbound variable".to_string());
+            }
+        }
+        for row in &application.rows {
+            if !self.row_vars_bounded(row, effect_params) {
+                return Err("an interface row uses an unbound variable".to_string());
+            }
+            for element in row {
+                if let BcRow::Op(string) = element {
+                    let Some(name) = self.module.strings.get(*string as usize) else {
+                        return Err("an interface row string is out of range".to_string());
+                    };
+                    if !lm_abi::row_name_valid(name) {
+                        return Err("an interface row names an unknown effect".to_string());
+                    }
+                }
+            }
+            if !self.row_canonical(row) {
+                return Err("an interface row is not canonical".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Test the generic arguments of one interface application.
+    fn interface_arguments_meet_bounds(
+        &self,
+        receiver: u32,
+        application: &BcInterfaceUse,
+        scope_bounds: &[Vec<BcInterfaceUse>],
+    ) -> bool {
+        let Some(contract) = self.module.interfaces.get(application.interface as usize) else {
+            return false;
+        };
+        let mut types = Vec::with_capacity(application.types.len() + 1);
+        types.push(receiver);
+        types.extend_from_slice(&application.types);
+        for (actual, bounds) in application.types.iter().zip(&contract.type_bounds) {
+            for bound in bounds {
+                let required = self.subst_interface_use(bound, &types, &application.rows);
+                let found = self.interface_application_with_bounds(
+                    *actual,
+                    required.interface,
+                    scope_bounds,
+                    0,
+                );
+                if found.as_ref() != Some(&required) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Test a generic type application against one bound table.
+    fn type_arguments_meet_bounds(
+        &self,
+        actual_types: &[u32],
+        actual_rows: &[Vec<BcRow>],
+        required_bounds: &[Vec<BcInterfaceUse>],
+        scope_bounds: &[Vec<BcInterfaceUse>],
+    ) -> bool {
+        if actual_types.len() != required_bounds.len() {
+            return false;
+        }
+        for (actual, bounds) in actual_types.iter().zip(required_bounds) {
+            for bound in bounds {
+                let required = self.subst_interface_use(bound, actual_types, actual_rows);
+                let found = self.interface_application_with_bounds(
+                    *actual,
+                    required.interface,
+                    scope_bounds,
+                    0,
+                );
+                if found.as_ref() != Some(&required) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Test every associated projection in one type.
+    fn projections_proven(&self, ty: u32, bounds: &[Vec<BcInterfaceUse>]) -> bool {
+        if !self
+            .uni
+            .borrow()
+            .facts
+            .get(ty as usize)
+            .is_some_and(|facts| facts.contains_projection)
+        {
+            return true;
+        }
+        let mut stack = vec![ty];
+        let mut children = Vec::new();
+        while let Some(current) = stack.pop() {
+            if let BcType::Projection {
+                base, interface, ..
+            } = self.ty(current)
+            {
+                if self
+                    .interface_application_with_bounds(base, interface, bounds, 0)
+                    .is_none()
+                {
+                    return false;
+                }
+            }
+            children.clear();
+            self.type_children(current, &mut children);
+            stack.extend(children.iter().copied());
+        }
+        true
     }
 
     /// Return true when a value of type `found` is valid where the
@@ -372,6 +769,17 @@ impl<'m> Ctx<'m> {
                         // not valid where the expected type promises a
                         // read-only call. A parameter compares in the
                         // other direction.
+                        if fp.len() != ep.len()
+                            || !fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
+                            || !self.row_included(&frow, &erow)
+                        {
+                            return false;
+                        }
+                        work.extend(fp.iter().zip(ep.iter()).map(|(f, e)| (*e, *f)));
+                        work.push((fr, er));
+                        true
+                    }
+                    (BcType::Callback(fp, fm, fr, frow), BcType::Callback(ep, em, er, erow)) => {
                         if fp.len() != ep.len()
                             || !fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
                             || !self.row_included(&frow, &erow)
@@ -564,6 +972,8 @@ impl<'m> Ctx<'m> {
             BcType::Bool => self.core.boolean.map(|class| (class, vec![])),
             BcType::Str => self.core.string.map(|class| (class, vec![])),
             BcType::Bytes => self.core.bytes.map(|class| (class, vec![])),
+            BcType::List(element) => self.core.list.map(|class| (class, vec![element])),
+            BcType::Map(key, value) => self.core.map.map(|class| (class, vec![key, value])),
             BcType::Class(c) => Some((c, vec![])),
             BcType::Inst(c, args) => Some((c, args)),
             _ => None,
@@ -604,37 +1014,26 @@ impl<'m> Ctx<'m> {
         )
     }
 
+    /// Return true when one type contains a nonescaping callback.
+    fn contains_callback(&self, ty: u32) -> bool {
+        self.uni
+            .borrow()
+            .facts
+            .get(ty as usize)
+            .map(|facts| facts.contains_callback)
+            .unwrap_or(false)
+    }
+
     /// Check that every type variable inside `ty` is below `limit`
     /// and every row variable is below `elimit`.
     ///
-    /// The walk is iterative, so a deeply nested type table costs heap
-    /// instead of Rust stack.
     fn vars_bounded(&self, ty: u32, limit: u32, elimit: u32) -> bool {
-        let mut stack: Vec<u32> = vec![ty];
-        let mut children: Vec<u32> = Vec::new();
-        let mut seen: HashSet<u32> = HashSet::new();
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            match self.ty(cur) {
-                BcType::Var(i) => {
-                    if i >= limit {
-                        return false;
-                    }
-                }
-                BcType::Fn(_, _, _, row) => {
-                    if !self.row_vars_bounded(&row, elimit) {
-                        return false;
-                    }
-                }
-                _ => {}
-            }
-            children.clear();
-            self.type_children(cur, &mut children);
-            stack.extend(children.iter().copied());
-        }
-        true
+        let uni = self.uni.borrow();
+        let Some(facts) = uni.facts.get(ty as usize) else {
+            return false;
+        };
+        facts.max_type_var.is_none_or(|var| var < limit)
+            && facts.max_effect_var.is_none_or(|var| var < elimit)
     }
 
     fn row_vars_bounded(&self, row: &[BcRow], elimit: u32) -> bool {
@@ -700,9 +1099,17 @@ impl<'m> Ctx<'m> {
                 }
                 lm_abi::AbiNative::TlsStream => self.plain_inst(self.core.tls_stream, "TlsStream"),
             },
+            lm_abi::AbiType::Var(index) => Err(format!(
+                "the fixed ABI type names generic parameter {index}"
+            )),
             lm_abi::AbiType::List(element) => {
                 let element = self.abi_ty(*element)?;
                 Ok(self.intern(BcType::List(element)))
+            }
+            lm_abi::AbiType::Map(key, value) => {
+                let key = self.abi_ty(*key)?;
+                let value = self.abi_ty(*value)?;
+                Ok(self.intern(BcType::Map(key, value)))
             }
             lm_abi::AbiType::Tuple(elements) => {
                 let mut types = Vec::with_capacity(elements.len());
@@ -815,7 +1222,8 @@ impl<'m> Ctx<'m> {
 /// equality. Version 16 also named native TLS resources and their
 /// service control on a separate branch, so version 17 is the first
 /// that accepts both.
-pub const VERIFIER_VERSION: u32 = 17;
+/// Version 19 verifies interfaces, callbacks, native `Option`, and collection operations.
+pub const VERIFIER_VERSION: u32 = 19;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -1469,6 +1877,24 @@ fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             )));
         }
     }
+    for (role, name, arity) in [
+        (lm_bytecode::corepin::ROLE_LIST, "List", 1),
+        (lm_bytecode::corepin::ROLE_MAP, "Map", 2),
+    ] {
+        let Some(idx) = slot(role) else { continue };
+        let class = &module.classes[idx as usize];
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != arity
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !class.fields.is_empty()
+        {
+            return Err(terr(format!(
+                "the core role `{name}` does not name its native collection class"
+            )));
+        }
+    }
     let text_roles = [
         slot(lm_bytecode::corepin::ROLE_TEXT),
         slot(lm_bytecode::corepin::ROLE_STRING),
@@ -1561,6 +1987,23 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             BcType::Unit | BcType::Bool | BcType::Int | BcType::Str => {}
             BcType::Digest | BcType::Bytes | BcType::FileHandle | BcType::ResourceHandle => {}
             BcType::Var(_) => {}
+            BcType::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                check_ref(*base)?;
+                let Some(contract) = module.interfaces.get(*interface as usize) else {
+                    return Err(terr(format!(
+                        "type {idx} names interface {interface}, which does not exist"
+                    )));
+                };
+                if *assoc as usize >= contract.associated.len() {
+                    return Err(terr(format!(
+                        "type {idx} names associated type {assoc}, which does not exist"
+                    )));
+                }
+            }
             BcType::Class(c) => {
                 if *c as usize >= module.classes.len() {
                     return Err(terr(format!(
@@ -1602,7 +2045,7 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                 if !text_key
                     && !matches!(
                         module.types[*k as usize],
-                        BcType::Bool | BcType::Int | BcType::Str | BcType::Bytes
+                        BcType::Bool | BcType::Int | BcType::Str | BcType::Bytes | BcType::Var(_)
                     )
                 {
                     return Err(terr(format!(
@@ -1621,7 +2064,7 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                     check_ref(*e)?;
                 }
             }
-            BcType::Fn(params, muts, ret, row) => {
+            BcType::Fn(params, muts, ret, row) | BcType::Callback(params, muts, ret, row) => {
                 if muts.len() != params.len() {
                     return Err(terr(format!(
                         "type {idx} has a function type whose mut markers do \
@@ -1701,18 +2144,38 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
         }
         depth.push(own);
     }
+    let mut facts = Vec::with_capacity(module.types.len());
+    for ty in &module.types {
+        facts.push(type_facts(ty, &facts));
+    }
     let ctx = Ctx {
         module,
         class_ty,
         uni: RefCell::new(Universe {
             types: module.types.clone(),
             index,
+            facts,
         }),
         core,
     };
+    // A callback is a direct parameter type only. No composite type
+    // can contain it, including another callback signature.
+    let mut callback_children = Vec::new();
+    for idx in 0..module.types.len() as u32 {
+        callback_children.clear();
+        ctx.type_children(idx, &mut callback_children);
+        if callback_children
+            .iter()
+            .any(|child| ctx.contains_callback(*child))
+        {
+            return Err(terr(format!(
+                "type {idx} stores a nonescaping callback inside another type"
+            )));
+        }
+    }
     // Row canonicality inside function types.
     for (idx, ty) in module.types.iter().enumerate() {
-        if let BcType::Fn(_, _, _, row) = ty {
+        if let BcType::Fn(_, _, _, row) | BcType::Callback(_, _, _, row) = ty {
             if !ctx.row_canonical(row) {
                 return Err(terr(format!("type {idx} has a non-canonical row")));
             }
@@ -1739,6 +2202,11 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                     "application {aidx} references an invalid type index"
                 )));
             }
+            if ctx.contains_callback(*t) {
+                return Err(terr(format!(
+                    "application {aidx} contains a nonescaping callback"
+                )));
+            }
         }
         for row in &app.rows {
             for elem in row {
@@ -1759,6 +2227,218 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             }
             if !ctx.row_canonical(row) {
                 return Err(terr(format!("application {aidx} has a non-canonical row")));
+            }
+        }
+    }
+    // Validate nominal interface contracts before any bound uses them.
+    let mut interface_keys: HashMap<&str, usize> = HashMap::new();
+    for (iidx, contract) in module.interfaces.iter().enumerate() {
+        let ierr = |message: String| terr(format!("interface {iidx}: {message}"));
+        if contract.name.is_empty() || contract.key.is_empty() {
+            return Err(ierr("the name and key must not be empty".to_string()));
+        }
+        if let Some(first) = interface_keys.insert(contract.key.as_str(), iidx) {
+            return Err(ierr(format!("the key duplicates interface {first}")));
+        }
+        if contract.generic_is_effect.len()
+            != (contract.type_params + contract.effect_params) as usize
+            || contract
+                .generic_is_effect
+                .iter()
+                .filter(|item| !**item)
+                .count()
+                != contract.type_params as usize
+            || contract
+                .generic_is_effect
+                .iter()
+                .filter(|item| **item)
+                .count()
+                != contract.effect_params as usize
+        {
+            return Err(ierr(
+                "the generic kind markers do not match the arities".to_string(),
+            ));
+        }
+        if contract.type_bounds.len() != contract.type_params as usize {
+            return Err(ierr(
+                "the type-bound table does not match the type arity".to_string(),
+            ));
+        }
+        let self_application = BcInterfaceUse {
+            interface: iidx as u32,
+            types: (0..contract.type_params)
+                .map(|parameter| ctx.intern(BcType::Var(parameter + 1)))
+                .collect(),
+            rows: (0..contract.effect_params)
+                .map(|parameter| vec![BcRow::Var(parameter)])
+                .collect(),
+        };
+        let mut interface_scope = vec![vec![self_application]];
+        interface_scope.extend(contract.type_bounds.clone());
+        for (parameter, bounds) in contract.type_bounds.iter().enumerate() {
+            let mut seen = HashSet::new();
+            for bound in bounds {
+                ctx.check_interface_use(bound, contract.type_params + 1, contract.effect_params)
+                    .map_err(&ierr)?;
+                if !seen.insert(bound.interface) {
+                    return Err(ierr(
+                        "one type parameter repeats an interface bound".to_string(),
+                    ));
+                }
+                let receiver = ctx.intern(BcType::Var(parameter as u32 + 1));
+                if !ctx.interface_arguments_meet_bounds(receiver, bound, &interface_scope) {
+                    return Err(ierr(
+                        "an interface bound has arguments outside their bounds".to_string(),
+                    ));
+                }
+            }
+        }
+        let mut associated_names = HashSet::new();
+        for (associated_index, associated) in contract.associated.iter().enumerate() {
+            if associated.name.is_empty() || !associated_names.insert(associated.name.as_str()) {
+                return Err(ierr(
+                    "associated type names must be nonempty and unique".to_string(),
+                ));
+            }
+            if let Some(bound) = &associated.bound {
+                ctx.check_interface_use(bound, contract.type_params + 1, contract.effect_params)
+                    .map_err(&ierr)?;
+                let base = ctx.intern(BcType::Var(0));
+                let receiver = ctx.intern(BcType::Projection {
+                    base,
+                    interface: iidx as u32,
+                    assoc: associated_index as u32,
+                });
+                if !ctx.interface_arguments_meet_bounds(receiver, bound, &interface_scope) {
+                    return Err(ierr(
+                        "an associated bound has arguments outside their bounds".to_string(),
+                    ));
+                }
+            }
+        }
+        let mut method_selectors = HashSet::new();
+        for method in &contract.methods {
+            if method.selector as usize >= module.selectors.len() {
+                return Err(ierr("a method selector is out of range".to_string()));
+            }
+            if !method_selectors.insert(method.selector) {
+                return Err(ierr("a method selector appears twice".to_string()));
+            }
+            if method.param_muts.len() != method.params.len() {
+                return Err(ierr(
+                    "method mut markers do not match the parameters".to_string(),
+                ));
+            }
+            for ty in method.params.iter().chain([&method.ret]) {
+                if *ty as usize >= module.types.len() {
+                    return Err(ierr("a method type is out of range".to_string()));
+                }
+                if !ctx.vars_bounded(*ty, contract.type_params + 1, contract.effect_params) {
+                    return Err(ierr("a method type uses an unbound variable".to_string()));
+                }
+                if !ctx.projections_proven(*ty, &interface_scope) {
+                    return Err(ierr(
+                        "a method type uses an associated type without its interface bound"
+                            .to_string(),
+                    ));
+                }
+            }
+            for ty in &method.params {
+                if ctx.contains_callback(*ty) && !matches!(ctx.ty(*ty), BcType::Callback(..)) {
+                    return Err(ierr(
+                        "a callback must be a direct method parameter".to_string(),
+                    ));
+                }
+            }
+            if ctx.contains_callback(method.ret) {
+                return Err(ierr("a method cannot return a callback".to_string()));
+            }
+            if !ctx.row_vars_bounded(&method.row, contract.effect_params) {
+                return Err(ierr("a method row uses an unbound variable".to_string()));
+            }
+            for element in &method.row {
+                if let BcRow::Op(string) = element {
+                    let Some(name) = module.strings.get(*string as usize) else {
+                        return Err(ierr("a method row string is out of range".to_string()));
+                    };
+                    if !lm_abi::row_name_valid(name) {
+                        return Err(ierr("a method row names an unknown effect".to_string()));
+                    }
+                }
+            }
+            if !ctx.row_canonical(&method.row) {
+                return Err(ierr("a method row is not canonical".to_string()));
+            }
+        }
+    }
+    if module.func_bounds.len() != module.funcs.len() {
+        return Err(terr(
+            "the function-bound table does not match the function table".to_string(),
+        ));
+    }
+    for (fidx, bounds) in module.func_bounds.iter().enumerate() {
+        let func = &module.funcs[fidx];
+        if bounds.len() != func.type_params as usize {
+            return Err(err(
+                fidx as u32,
+                format!(
+                    "the type-bound table has {} entries for `{}`, which has {} type parameters",
+                    bounds.len(),
+                    func.name,
+                    func.type_params
+                ),
+            ));
+        }
+        for (parameter, items) in bounds.iter().enumerate() {
+            let mut seen = HashSet::new();
+            for bound in items {
+                ctx.check_interface_use(bound, func.type_params, func.effect_params)
+                    .map_err(|message| err(fidx as u32, message))?;
+                if !seen.insert(bound.interface) {
+                    return Err(err(
+                        fidx as u32,
+                        "one type parameter repeats an interface bound",
+                    ));
+                }
+                let receiver = ctx.intern(BcType::Var(parameter as u32));
+                if !ctx.interface_arguments_meet_bounds(receiver, bound, bounds) {
+                    return Err(err(
+                        fidx as u32,
+                        "an interface bound has arguments outside their bounds",
+                    ));
+                }
+            }
+        }
+    }
+    if module.class_bounds.len() != module.classes.len() {
+        return Err(terr(
+            "the class-bound table does not match the class table".to_string(),
+        ));
+    }
+    for (cidx, bounds) in module.class_bounds.iter().enumerate() {
+        let class = &module.classes[cidx];
+        let cerr = |message: String| terr(format!("class {cidx}: {message}"));
+        if bounds.len() != class.type_params as usize {
+            return Err(cerr(
+                "the type-bound table does not match the type arity".to_string(),
+            ));
+        }
+        for (parameter, items) in bounds.iter().enumerate() {
+            let mut seen = HashSet::new();
+            for bound in items {
+                ctx.check_interface_use(bound, class.type_params, 0)
+                    .map_err(&cerr)?;
+                if !seen.insert(bound.interface) {
+                    return Err(cerr(
+                        "one type parameter repeats an interface bound".to_string(),
+                    ));
+                }
+                let receiver = ctx.intern(BcType::Var(parameter as u32));
+                if !ctx.interface_arguments_meet_bounds(receiver, bound, bounds) {
+                    return Err(cerr(
+                        "an interface bound has arguments outside their bounds".to_string(),
+                    ));
+                }
             }
         }
     }
@@ -1796,6 +2476,24 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
     }
     if extern_funcs.get(module.entry as usize) == Some(&true) {
         return Err(terr("the entry function cannot be imported".to_string()));
+    }
+    // Class and interface checks inspect function signatures. Reject
+    // invalid indices before those checks use the type universe.
+    for (fidx, func) in module.funcs.iter().enumerate() {
+        for ty in func
+            .params
+            .iter()
+            .chain(func.captures.iter())
+            .chain(func.local_types.iter())
+            .chain([&func.ret])
+        {
+            if *ty as usize >= module.types.len() {
+                return Err(err(
+                    fidx as u32,
+                    "the signature references an invalid type index",
+                ));
+            }
+        }
     }
     // Validate classes.
     for (cidx, class) in module.classes.iter().enumerate() {
@@ -1918,34 +2616,19 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                     "field `{fname}` uses a type variable outside the class arity"
                 )));
             }
+            if !ctx.projections_proven(*fty, &module.class_bounds[cidx]) {
+                return Err(cerr(format!(
+                    "field `{fname}` uses an associated type without its interface bound"
+                )));
+            }
+            if ctx.contains_callback(*fty) {
+                return Err(cerr(format!(
+                    "field `{fname}` cannot store a nonescaping callback"
+                )));
+            }
         }
         // The canonical self type of the class.
-        let own_ty = if core.int == Some(cidx as u32) {
-            Some(TY_INT)
-        } else if core.boolean == Some(cidx as u32) {
-            Some(TY_BOOL)
-        } else if core.string == Some(cidx as u32) {
-            Some(TY_STR)
-        } else if core.bytes == Some(cidx as u32) {
-            ctx.uni.borrow().index.get(&BcType::Bytes).copied()
-        } else if class.type_params == 0 {
-            ctx.class_ty[cidx]
-        } else {
-            let vars: Vec<u32> = (0..class.type_params)
-                .map(|i| ctx.uni.borrow().index.get(&BcType::Var(i)).copied())
-                .collect::<Option<Vec<u32>>>()
-                .unwrap_or_default()
-                .to_vec();
-            if vars.len() == class.type_params as usize {
-                ctx.uni
-                    .borrow()
-                    .index
-                    .get(&BcType::Inst(cidx as u32, vars))
-                    .copied()
-            } else {
-                None
-            }
-        };
+        let own_ty = ctx.class_self_type(cidx as u32);
         let mut seen = Vec::new();
         for (sel, func) in &class.methods {
             if *sel as usize >= module.selectors.len() {
@@ -2044,6 +2727,189 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
             }
         }
     }
+    // Validate each explicit conformance and its method witnesses.
+    let iterable_interface = module
+        .interfaces
+        .iter()
+        .position(|interface| interface.key == "core.Iterable");
+    let iterator_interface = module
+        .interfaces
+        .iter()
+        .position(|interface| interface.key == "core.Iterator");
+    let mut conformance_keys = HashSet::new();
+    for (index, conformance) in module.conformances.iter().enumerate() {
+        let cerr = |message: String| terr(format!("conformance {index}: {message}"));
+        let Some(class) = module.classes.get(conformance.class as usize) else {
+            return Err(cerr("the class index is out of range".to_string()));
+        };
+        ctx.check_interface_use(&conformance.application, class.type_params, 0)
+            .map_err(&cerr)?;
+        if !conformance_keys.insert((conformance.class, conformance.application.interface)) {
+            return Err(cerr(
+                "the class repeats one interface conformance".to_string(),
+            ));
+        }
+        let contract = &module.interfaces[conformance.application.interface as usize];
+        if conformance.associated.len() != contract.associated.len() {
+            return Err(cerr(
+                "the associated bindings do not match the contract".to_string(),
+            ));
+        }
+        for ty in &conformance.associated {
+            if *ty as usize >= module.types.len() {
+                return Err(cerr("an associated binding is out of range".to_string()));
+            }
+            if !ctx.vars_bounded(*ty, class.type_params, 0) {
+                return Err(cerr(
+                    "an associated binding uses an unbound variable".to_string(),
+                ));
+            }
+            if ctx.contains_callback(*ty) {
+                return Err(cerr(
+                    "an associated binding cannot contain a callback".to_string(),
+                ));
+            }
+            if !ctx.projections_proven(*ty, &module.class_bounds[conformance.class as usize]) {
+                return Err(cerr(
+                    "an associated binding uses an unproven associated type".to_string(),
+                ));
+            }
+        }
+        let self_ty = ctx
+            .class_self_type(conformance.class)
+            .ok_or_else(|| cerr("the class has no canonical self type".to_string()))?;
+        if !ctx.interface_arguments_meet_bounds(
+            self_ty,
+            &conformance.application,
+            &module.class_bounds[conformance.class as usize],
+        ) {
+            return Err(cerr(
+                "the interface arguments do not meet their bounds".to_string(),
+            ));
+        }
+        let mut contract_types = Vec::with_capacity(conformance.application.types.len() + 1);
+        contract_types.push(self_ty);
+        contract_types.extend_from_slice(&conformance.application.types);
+        for (associated, actual) in contract.associated.iter().zip(&conformance.associated) {
+            let Some(bound) = &associated.bound else {
+                continue;
+            };
+            let required =
+                ctx.subst_interface_use(bound, &contract_types, &conformance.application.rows);
+            let found = ctx.interface_application_with_bounds(
+                *actual,
+                required.interface,
+                &module.class_bounds[conformance.class as usize],
+                0,
+            );
+            if found.as_ref() != Some(&required) {
+                return Err(cerr(format!(
+                    "the associated binding `{}` does not meet its bound",
+                    associated.name
+                )));
+            }
+        }
+        if iterable_interface == Some(conformance.application.interface as usize) {
+            let iterator = iterator_interface.ok_or_else(|| {
+                cerr("the core Iterable contract needs core Iterator".to_string())
+            })?;
+            let item_index = contract
+                .associated
+                .iter()
+                .position(|item| item.name == "Item")
+                .ok_or_else(|| cerr("the core Iterable contract needs Item".to_string()))?;
+            let iter_index = contract
+                .associated
+                .iter()
+                .position(|item| item.name == "Iter")
+                .ok_or_else(|| cerr("the core Iterable contract needs Iter".to_string()))?;
+            let iterator_item = module.interfaces[iterator]
+                .associated
+                .iter()
+                .position(|item| item.name == "Item")
+                .ok_or_else(|| cerr("the core Iterator contract needs Item".to_string()))?
+                as u32;
+            let item = conformance.associated[item_index];
+            let iter = conformance.associated[iter_index];
+            let actual = ctx
+                .projected_type(iter, iterator as u32, iterator_item)
+                .unwrap_or_else(|| {
+                    ctx.intern(BcType::Projection {
+                        base: iter,
+                        interface: iterator as u32,
+                        assoc: iterator_item,
+                    })
+                });
+            if actual != item {
+                return Err(cerr(
+                    "Iterable.Item must equal Iterable.Iter.Item".to_string(),
+                ));
+            }
+        }
+        let class_args: Vec<u32> = (0..class.type_params)
+            .map(|item| ctx.intern(BcType::Var(item)))
+            .collect();
+        for requirement in &contract.methods {
+            let target = ctx
+                .find_method(conformance.class, requirement.selector)
+                .ok_or_else(|| cerr("a required method is missing".to_string()))?;
+            let owner = ctx
+                .method_owner(conformance.class, requirement.selector)
+                .ok_or_else(|| cerr("a required method has no owner".to_string()))?;
+            let owner_args = ctx
+                .ancestor_args(conformance.class, &class_args, owner)
+                .ok_or_else(|| cerr("a required method owner is not an ancestor".to_string()))?;
+            let method = &module.funcs[target as usize];
+            if method.type_params != module.classes[owner as usize].type_params
+                || method.effect_params != 0
+            {
+                return Err(cerr(
+                    "an interface method implementation cannot add generics".to_string(),
+                ));
+            }
+            if method.params.len() != requirement.params.len() + 1
+                || method.param_muts.len() != method.params.len()
+                || method.param_muts.first().copied() != Some(requirement.mut_self)
+                || method.param_muts[1..] != requirement.param_muts[..]
+            {
+                return Err(cerr(
+                    "an interface method implementation has a different parameter shape"
+                        .to_string(),
+                ));
+            }
+            let actual_params: Vec<u32> = method.params[1..]
+                .iter()
+                .map(|item| ctx.subst(*item, &owner_args, &[]))
+                .collect();
+            let required_params: Vec<u32> = requirement
+                .params
+                .iter()
+                .map(|item| ctx.subst(*item, &contract_types, &conformance.application.rows))
+                .collect();
+            if actual_params != required_params {
+                return Err(cerr(
+                    "an interface method implementation changes parameter types".to_string(),
+                ));
+            }
+            let actual_ret = ctx.subst(method.ret, &owner_args, &[]);
+            let required_ret = ctx.subst(
+                requirement.ret,
+                &contract_types,
+                &conformance.application.rows,
+            );
+            if !ctx.is_subtype(actual_ret, required_ret) {
+                return Err(cerr(
+                    "an interface method implementation widens the result type".to_string(),
+                ));
+            }
+            let required_row = ctx.row_subst(&requirement.row, &conformance.application.rows);
+            if !ctx.row_included(&method.row, &required_row) {
+                return Err(cerr(
+                    "an interface method implementation widens the effect row".to_string(),
+                ));
+            }
+        }
+    }
     // Validate the declared core role slots. The class table is
     // validated above, so every field type index is inside the type
     // table by now.
@@ -2106,6 +2972,41 @@ fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyErr
                     "the signature uses a variable outside the declared generic arity",
                 ));
             }
+            if !ctx.projections_proven(*t, &module.func_bounds[fidx]) {
+                return Err(err(
+                    fidx as u32,
+                    "the signature uses an associated type without its interface bound",
+                ));
+            }
+        }
+        for ty in &func.params {
+            if ctx.contains_callback(*ty) && !matches!(ctx.ty(*ty), BcType::Callback(..)) {
+                return Err(err(
+                    fidx as u32,
+                    "a callback must be a direct function parameter",
+                ));
+            }
+        }
+        if func.captures.iter().any(|ty| ctx.contains_callback(*ty)) {
+            return Err(err(
+                fidx as u32,
+                "a closure cannot capture a nonescaping callback",
+            ));
+        }
+        if func.local_types[func.params.len()..]
+            .iter()
+            .any(|ty| ctx.contains_callback(*ty))
+        {
+            return Err(err(
+                fidx as u32,
+                "a local cannot store a nonescaping callback",
+            ));
+        }
+        if ctx.contains_callback(func.ret) {
+            return Err(err(
+                fidx as u32,
+                "a function cannot return a nonescaping callback",
+            ));
         }
         for elem in &func.row {
             match elem {
@@ -2223,6 +3124,12 @@ fn check_app(
                 at("type application uses a variable outside the caller scope"),
             ));
         }
+        if !ctx.projections_proven(*t, &ctx.module.func_bounds[fidx as usize]) {
+            return Err(err(
+                fidx,
+                at("type application uses an unproven associated type"),
+            ));
+        }
     }
     for row in &app.rows {
         if !ctx.row_vars_bounded(row, caller.effect_params) {
@@ -2285,9 +3192,20 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         return Err(err(fidx, at("string index out of range")));
                     }
                 }
-                Instr::LoadLocal(slot) | Instr::StoreLocal(slot) => {
+                Instr::LoadLocal(slot) => {
                     if *slot >= func.local_count() {
                         return Err(err(fidx, at("local slot out of range")));
+                    }
+                }
+                Instr::StoreLocal(slot) => {
+                    if *slot >= func.local_count() {
+                        return Err(err(fidx, at("local slot out of range")));
+                    }
+                    if matches!(
+                        ctx.ty(func.local_types[*slot as usize]),
+                        BcType::Callback(..)
+                    ) {
+                        return Err(err(fidx, at("a callback cannot be stored in a local")));
                     }
                 }
                 Instr::Call(callee) => {
@@ -2320,6 +3238,18 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         target.type_params,
                         target.effect_params,
                     )?;
+                    let application = &module.apps[*app as usize];
+                    if !ctx.type_arguments_meet_bounds(
+                        &application.types,
+                        &application.rows,
+                        &module.func_bounds[*callee as usize],
+                        &module.func_bounds[fidx as usize],
+                    ) {
+                        return Err(err(
+                            fidx,
+                            at("a call type argument does not meet its interface bounds"),
+                        ));
+                    }
                 }
                 Instr::CallVirtual { selector, .. } => {
                     if *selector as usize >= module.selectors.len() {
@@ -2399,6 +3329,8 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         ctx.core.bytes,
                         ctx.core.string_builder,
                         ctx.core.byte_buffer,
+                        ctx.core.list,
+                        ctx.core.map,
                     ];
                     if native.contains(&Some(*class)) {
                         return Err(err(fidx, at("New cannot allocate a native core class")));
@@ -2423,6 +3355,8 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         ctx.core.bytes,
                         ctx.core.string_builder,
                         ctx.core.byte_buffer,
+                        ctx.core.list,
+                        ctx.core.map,
                     ];
                     if native.contains(&Some(*class)) {
                         return Err(err(fidx, at("NewG cannot allocate a native core class")));
@@ -2431,12 +3365,25 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         return Err(err(fidx, at("a type application on a non-generic class")));
                     }
                     check_app(ctx, func, fidx, at_dyn, *app, c.type_params, 0)?;
+                    let application = &module.apps[*app as usize];
+                    if !ctx.type_arguments_meet_bounds(
+                        &application.types,
+                        &[],
+                        &module.class_bounds[*class as usize],
+                        &module.func_bounds[fidx as usize],
+                    ) {
+                        return Err(err(
+                            fidx,
+                            at("a class type argument does not meet its interface bounds"),
+                        ));
+                    }
                 }
                 Instr::ListNew { ty, .. }
                 | Instr::MapNew { ty, .. }
                 | Instr::TupleNew { ty, .. }
                 | Instr::IsType(ty)
-                | Instr::CastType(ty) => {
+                | Instr::CastType(ty)
+                | Instr::MapPut { ty, .. } => {
                     if *ty as usize >= module.types.len() {
                         return Err(err(fidx, at("type index out of range")));
                     }
@@ -2471,12 +3418,68 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                         ));
                     }
                 }
+                Instr::CallInterface {
+                    interface,
+                    method,
+                    recv_ty,
+                } => {
+                    let Some(contract) = module.interfaces.get(*interface as usize) else {
+                        return Err(err(fidx, at("interface index out of range")));
+                    };
+                    if contract.methods.get(*method as usize).is_none() {
+                        return Err(err(fidx, at("interface method index out of range")));
+                    }
+                    if !ctx.vars_bounded(*recv_ty, func.type_params, func.effect_params) {
+                        return Err(err(
+                            fidx,
+                            at("interface receiver type uses a variable outside the caller scope"),
+                        ));
+                    }
+                    if !ctx.projections_proven(*recv_ty, &module.func_bounds[fidx as usize]) {
+                        return Err(err(
+                            fidx,
+                            at("interface receiver type uses an unproven associated type"),
+                        ));
+                    }
+                }
+                Instr::Extended(instr) => match instr {
+                    ExtendedInstr::MakeCallback { func: f, captures } => {
+                        let Some(target) = module.funcs.get(*f as usize) else {
+                            return Err(err(fidx, at("closure function out of range")));
+                        };
+                        if target.captures.len() != *captures as usize {
+                            return Err(err(fidx, at("closure capture count mismatch")));
+                        }
+                        let closed = target.type_params == 0 && target.effect_params == 0;
+                        if !closed
+                            && (target.type_params != func.type_params
+                                || target.effect_params != func.effect_params)
+                        {
+                            return Err(err(
+                                fidx,
+                                at("a closure body must keep the enclosing generic arity"),
+                            ));
+                        }
+                    }
+                    ExtendedInstr::OptionSome { ty }
+                    | ExtendedInstr::OptionNone { ty }
+                    | ExtendedInstr::OptionPayload { ty }
+                    | ExtendedInstr::ListGet { ty }
+                    | ExtendedInstr::MapGet { ty }
+                    | ExtendedInstr::ListPop { ty }
+                    | ExtendedInstr::MapRemove { ty } => {
+                        if *ty as usize >= module.types.len() {
+                            return Err(err(fidx, at("type index out of range")));
+                        }
+                    }
+                    _ => {}
+                },
                 // A typed call token names a fixed host operation, or
                 // the receiverless self snapshot. A restored self
                 // snapshot holds that request pending, and the
                 // restorer answers it through the ordinary typed call
                 // path (specification 17.6).
-                Instr::AsCall(op) => {
+                Instr::AsCall { op, ty } => {
                     let answerable = *op < lm_abi::OP_COUNT
                         && (lm_abi::op(*op).kind == lm_abi::OpKind::Fixed
                             || *op == lm_abi::OP_VM_SNAPSHOT_SELF);
@@ -2485,6 +3488,9 @@ fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), VerifyError>
                             fidx,
                             at("as_call operation slot is out of range or not answerable"),
                         ));
+                    }
+                    if *ty as usize >= module.types.len() {
+                        return Err(err(fidx, at("as_call type index out of range")));
                     }
                 }
                 Instr::TableEdit { action, kind, slot } => {
@@ -3087,6 +4093,16 @@ fn step(
                     "virtual call type application arity mismatch".to_string(),
                 ));
             }
+            if !ctx.type_arguments_meet_bounds(
+                &targs,
+                &app.rows,
+                &module.func_bounds[target as usize],
+                &module.func_bounds[fidx as usize],
+            ) {
+                return Err(fail(
+                    "a virtual call type argument does not meet its interface bounds".to_string(),
+                ));
+            }
             let row = ctx.row_subst(&sig.row, &app.rows);
             charge_row(&row)?;
             if sig.params.len() != argc + 1 {
@@ -3102,6 +4118,41 @@ fn step(
             let ret = ctx.subst(sig.ret, &targs, &app.rows);
             push(state, ret)?;
         }
+        Instr::CallInterface {
+            interface,
+            method,
+            recv_ty: declared_recv_ty,
+        } => {
+            let contract = &module.interfaces[*interface as usize];
+            let requirement = &contract.methods[*method as usize];
+            let argc = requirement.params.len();
+            if state.stack.len() < argc + 1 {
+                return Err(fail("interface call on a short stack".to_string()));
+            }
+            let recv_ty = state.stack[state.stack.len() - 1 - argc];
+            if !ctx.is_subtype(recv_ty, *declared_recv_ty)
+                || !ctx.is_subtype(*declared_recv_ty, recv_ty)
+            {
+                return Err(fail("interface receiver type mismatch".to_string()));
+            }
+            let application = ctx
+                .interface_application(fidx, recv_ty, *interface, 0)
+                .ok_or_else(|| fail("interface call lacks a proven receiver bound".to_string()))?;
+            let mut types = Vec::with_capacity(application.types.len() + 1);
+            types.push(recv_ty);
+            types.extend_from_slice(&application.types);
+            let row = ctx.row_subst(&requirement.row, &application.rows);
+            charge_row(&row)?;
+            let params: Vec<u32> = requirement
+                .params
+                .iter()
+                .map(|param| ctx.subst(*param, &types, &application.rows))
+                .collect();
+            pop_args(state, &params)?;
+            pop_expect(state, recv_ty)?;
+            let ret = ctx.subst(requirement.ret, &types, &application.rows);
+            push(state, ret)?;
+        }
         Instr::CallValue { argc } => {
             let argc = *argc as usize;
             if state.stack.len() < argc + 1 {
@@ -3109,7 +4160,9 @@ fn step(
             }
             let callee_ty = state.stack[state.stack.len() - 1 - argc];
             let (params, ret, row) = match ctx.ty(callee_ty) {
-                BcType::Fn(params, _, ret, row) => (params, ret, row),
+                BcType::Fn(params, _, ret, row) | BcType::Callback(params, _, ret, row) => {
+                    (params, ret, row)
+                }
                 _ => {
                     return Err(fail(format!(
                         "closure call target type {callee_ty} is not a function type"
@@ -3143,6 +4196,42 @@ fn step(
             })?;
             push(state, idx)?;
         }
+        Instr::Extended(ExtendedInstr::MakeCallback { func: f, .. }) => {
+            let target = &module.funcs[*f as usize];
+            pop_args(state, &target.captures)?;
+            let callback_ty = BcType::Callback(
+                target.params.clone(),
+                target.param_muts.clone(),
+                target.ret,
+                target.row.clone(),
+            );
+            let idx = {
+                let uni = ctx.uni.borrow();
+                uni.index.get(&callback_ty).copied()
+            };
+            let idx = idx.filter(|i| (*i as usize) < module.types.len());
+            let idx = idx.ok_or_else(|| {
+                fail("the callback function type is not in the type table".to_string())
+            })?;
+            push(state, idx)?;
+        }
+        Instr::Extended(ExtendedInstr::AsCallback) => {
+            let function = pop(state)?;
+            let BcType::Fn(params, muts, ret, row) = ctx.ty(function) else {
+                return Err(fail(
+                    "callback conversion needs a function value".to_string(),
+                ));
+            };
+            let callback_ty = BcType::Callback(params, muts, ret, row);
+            let idx = {
+                let uni = ctx.uni.borrow();
+                uni.index.get(&callback_ty).copied()
+            };
+            let idx = idx.filter(|i| (*i as usize) < module.types.len());
+            let idx =
+                idx.ok_or_else(|| fail("the callback type is not in the type table".to_string()))?;
+            push(state, idx)?;
+        }
         Instr::LoadCapture(idx) => {
             let ty = func.captures[*idx as usize];
             push(state, ty)?;
@@ -3157,6 +4246,8 @@ fn step(
                 ctx.core.bytes,
                 ctx.core.string_builder,
                 ctx.core.byte_buffer,
+                ctx.core.list,
+                ctx.core.map,
             ];
             if native.contains(&Some(*class)) {
                 return Err(fail("New cannot allocate a native core class".to_string()));
@@ -3175,6 +4266,8 @@ fn step(
                 ctx.core.bytes,
                 ctx.core.string_builder,
                 ctx.core.byte_buffer,
+                ctx.core.list,
+                ctx.core.map,
             ];
             if native.contains(&Some(*class)) {
                 return Err(fail("NewG cannot allocate a native core class".to_string()));
@@ -3188,6 +4281,11 @@ fn step(
             let Some((class, class_args)) = ctx.as_instance(recv) else {
                 return Err(fail(format!("field load on non-class type {recv}")));
             };
+            if Some(class) == ctx.core.option_some {
+                return Err(fail(
+                    "native Option payloads require OptionPayload".to_string(),
+                ));
+            }
             let fields = &module.classes[class as usize].fields;
             let (_, fty) = fields
                 .get(*field as usize)
@@ -3201,6 +4299,9 @@ fn step(
             let Some((class, class_args)) = ctx.as_instance(recv) else {
                 return Err(fail(format!("field store on non-class type {recv}")));
             };
+            if Some(class) == ctx.core.option_some {
+                return Err(fail("native Option payloads cannot be stored".to_string()));
+            }
             let fields = &module.classes[class as usize].fields;
             let (_, fty) = fields
                 .get(*field as usize)
@@ -3324,7 +4425,7 @@ fn step(
             }
             push(state, v)?;
         }
-        Instr::MapPut => {
+        Instr::MapPut { ty, discard } => {
             let value = pop(state)?;
             let key = pop(state)?;
             let m = pop(state)?;
@@ -3332,6 +4433,199 @@ fn step(
             if !ctx.is_subtype(key, k) || !ctx.is_subtype(value, v) {
                 return Err(fail("map put entry types do not match".to_string()));
             }
+            let want = ctx
+                .option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            if want != v {
+                return Err(fail("map put option type does not match".to_string()));
+            }
+            if !discard {
+                push(state, *ty)?;
+            }
+        }
+        Instr::Extended(ExtendedInstr::OptionSome { ty }) => {
+            let want = ctx
+                .option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            let value = pop(state)?;
+            if !ctx.is_subtype(value, want) {
+                return Err(fail(format!(
+                    "Option payload expects type {want}, found type {value}"
+                )));
+            }
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::OptionNone { ty }) => {
+            ctx.option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::OptionPayload { ty }) => {
+            let option = pop(state)?;
+            if !ctx.is_subtype(option, *ty) || !ctx.is_subtype(*ty, option) {
+                return Err(fail("OptionPayload type mismatch".to_string()));
+            }
+            let Some((class, args)) = ctx.as_instance(*ty) else {
+                return Err(fail("OptionPayload needs Option.Some".to_string()));
+            };
+            if Some(class) != ctx.core.option_some || args.len() != 1 {
+                return Err(fail("OptionPayload needs Option.Some".to_string()));
+            }
+            push(state, args[0])?;
+        }
+        Instr::Extended(ExtendedInstr::ListGet { ty }) => {
+            let want = ctx
+                .option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            pop_expect(state, TY_INT)?;
+            let list = pop(state)?;
+            let found = as_list(list)?;
+            if found != want {
+                return Err(fail("list get option type does not match".to_string()));
+            }
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::MapGet { ty }) => {
+            let want = ctx
+                .option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            let key = pop(state)?;
+            let map = pop(state)?;
+            let (expected_key, found) = as_map(map)?;
+            if !ctx.accepts_map_query_key(key, expected_key) {
+                return Err(fail(format!(
+                    "map key expects type {expected_key}, found type {key}"
+                )));
+            }
+            if found != want {
+                return Err(fail("map get option type does not match".to_string()));
+            }
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::ListEpoch) => {
+            let list = pop(state)?;
+            as_list(list)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::ListIterLen) => {
+            pop_expect(state, TY_INT)?;
+            let list = pop(state)?;
+            as_list(list)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::MapEpoch) => {
+            let map = pop(state)?;
+            as_map(map)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::MapIterLen) => {
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            as_map(map)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::MapKeyAt) => {
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            let (key, _) = as_map(map)?;
+            push(state, key)?;
+        }
+        Instr::Extended(ExtendedInstr::MapValueAt) => {
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            let (_, value) = as_map(map)?;
+            push(state, value)?;
+        }
+        Instr::Extended(ExtendedInstr::ListCapacity) => {
+            let list = pop(state)?;
+            as_list(list)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::ListSet) => {
+            let value = pop(state)?;
+            pop_expect(state, TY_INT)?;
+            let list = pop(state)?;
+            let element = as_list(list)?;
+            if !ctx.is_subtype(value, element) {
+                return Err(fail("list set element type does not match".to_string()));
+            }
+            push(state, TY_UNIT)?;
+        }
+        Instr::Extended(ExtendedInstr::ListPop { ty }) => {
+            let list = pop(state)?;
+            let element = as_list(list)?;
+            let want = ctx
+                .option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            if want != element {
+                return Err(fail("list pop option type does not match".to_string()));
+            }
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::ListInsert) => {
+            let value = pop(state)?;
+            pop_expect(state, TY_INT)?;
+            let list = pop(state)?;
+            let element = as_list(list)?;
+            if !ctx.is_subtype(value, element) {
+                return Err(fail("list insert element type does not match".to_string()));
+            }
+            push(state, TY_UNIT)?;
+        }
+        Instr::Extended(ExtendedInstr::ListRemove)
+        | Instr::Extended(ExtendedInstr::ListSwapRemove) => {
+            pop_expect(state, TY_INT)?;
+            let list = pop(state)?;
+            let element = as_list(list)?;
+            push(state, element)?;
+        }
+        Instr::Extended(ExtendedInstr::ListReserve)
+        | Instr::Extended(ExtendedInstr::ListTruncate) => {
+            pop_expect(state, TY_INT)?;
+            let list = pop(state)?;
+            as_list(list)?;
+            push(state, TY_UNIT)?;
+        }
+        Instr::Extended(ExtendedInstr::ListContains) => {
+            let value = pop(state)?;
+            let list = pop(state)?;
+            let element = as_list(list)?;
+            if !ctx.is_subtype(value, element) {
+                return Err(fail(
+                    "list contains element type does not match".to_string(),
+                ));
+            }
+            push(state, TY_BOOL)?;
+        }
+        Instr::Extended(ExtendedInstr::ListReorder) => {
+            let list = pop(state)?;
+            as_list(list)?;
+            push(state, TY_UNIT)?;
+        }
+        Instr::Extended(ExtendedInstr::MapRemove { ty }) => {
+            let key = pop(state)?;
+            let map = pop(state)?;
+            let (expected_key, value) = as_map(map)?;
+            if !ctx.is_subtype(key, expected_key) {
+                return Err(fail("map remove key type does not match".to_string()));
+            }
+            let want = ctx
+                .option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            if want != value {
+                return Err(fail("map remove option type does not match".to_string()));
+            }
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::MapClear) => {
+            let map = pop(state)?;
+            as_map(map)?;
+            push(state, TY_UNIT)?;
+        }
+        Instr::Extended(ExtendedInstr::MapReserve) => {
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            as_map(map)?;
             push(state, TY_UNIT)?;
         }
         Instr::Native(lm_bytecode::NativeInstr::SbNew) => {
@@ -4220,7 +5514,7 @@ fn step(
             }
             push(state, TY_UNIT)?;
         }
-        Instr::AsCall(op) => {
+        Instr::AsCall { op, ty } => {
             let request = pop(state)?;
             if ctx.ty(request) != BcType::Request {
                 return Err(fail(format!("as_call on non-request type {request}")));
@@ -4232,7 +5526,10 @@ fn step(
             let out = ctx
                 .event_inst(ctx.core.option, "Option", call)
                 .map_err(&fail)?;
-            push(state, out)?;
+            if !ctx.is_subtype(*ty, out) || !ctx.is_subtype(out, *ty) {
+                return Err(fail("as_call option type mismatch".to_string()));
+            }
+            push(state, *ty)?;
         }
         Instr::CallArgs => {
             let call = pop(state)?;
@@ -4272,6 +5569,26 @@ mod tests {
     use super::*;
     use lm_bytecode::{BcClass, Func, Instr::*, Module, TypeApp, NO_PARENT};
 
+    /// Add empty interface bounds required by one test fixture.
+    fn complete_bounds(module: &mut Module) {
+        module.class_bounds = module
+            .classes
+            .iter()
+            .map(|class| vec![Vec::new(); class.type_params as usize])
+            .collect();
+        module.func_bounds = module
+            .funcs
+            .iter()
+            .map(|func| vec![Vec::new(); func.type_params as usize])
+            .collect();
+    }
+
+    fn verify_module(module: &Module) -> Result<(), VerifyError> {
+        let mut module = module.clone();
+        complete_bounds(&mut module);
+        super::verify_module(&module)
+    }
+
     fn base_types() -> Vec<BcType> {
         vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str]
     }
@@ -4301,6 +5618,10 @@ mod tests {
             types: base_types(),
             selectors: vec![],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
             classes: vec![],
             funcs: vec![plain_func("main", vec![], TY_INT, blocks)],
             imports: vec![],
@@ -4309,6 +5630,14 @@ mod tests {
             exports: vec![],
             bindings: vec![],
         }
+    }
+
+    #[test]
+    fn rejects_a_missing_function_bound_table() {
+        let mut module = module_with(vec![vec![ConstInt(0), Return]]);
+        module.func_bounds.clear();
+        let error = super::verify_module(&module).expect_err("the missing table rejects");
+        assert!(error.message.contains("function-bound table"));
     }
 
     /// A module with one class `Counter { value: Int }` and one method
@@ -4321,6 +5650,10 @@ mod tests {
             types,
             selectors: vec!["bump".to_string()],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![]],
+            func_bounds: vec![vec![], vec![]],
             classes: vec![BcClass {
                 name: "Counter".to_string(),
                 parent_args: Vec::new(),
@@ -4370,6 +5703,10 @@ mod tests {
                     rows: vec![],
                 },
             ],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![]],
+            func_bounds: vec![vec![], vec![]],
             classes: vec![BcClass {
                 name: "Box".to_string(),
                 parent_args: Vec::new(),
@@ -5091,6 +6428,10 @@ mod tests {
             types,
             selectors: vec![],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![], vec![], vec![]],
+            func_bounds: vec![vec![]],
             classes: vec![class("Animal", NO_PARENT), class("Dog", 0), class("Cat", 0)],
             funcs: vec![Func {
                 name: "main".to_string(),
@@ -5148,6 +6489,7 @@ mod tests {
             class("Box", NO_PARENT, vec![], 1),
             class("IntBox", 0, vec![TY_INT], 0),
         ];
+        complete_bounds(&mut m);
         let core = lm_bytecode::corepin::declared_layout(&m);
         let ctx = verify_tables(&m, core).expect("the tables verify");
         assert!(ctx.is_subtype(7, 5), "an IntBox fits Box[Int]");
@@ -5180,6 +6522,7 @@ mod tests {
             class("IntRight", 0, vec![TY_INT], 0),
             class("StringChild", 0, vec![TY_STR], 0),
         ];
+        complete_bounds(&mut m);
         let core = lm_bytecode::corepin::declared_layout(&m);
         let ctx = verify_tables(&m, core).expect("the tables verify");
 
@@ -5228,6 +6571,7 @@ mod tests {
             class("Left", 0),
             class("Right", 0),
         ];
+        complete_bounds(&mut m);
         let core = lm_bytecode::corepin::declared_layout(&m);
         let ctx = verify_tables(&m, core).expect("the tables verify");
 
@@ -5318,6 +6662,7 @@ mod tests {
                     rows: vec![],
                 }];
                 m.funcs.push(callee);
+                complete_bounds(&mut m);
                 // The whole pass runs first: the table rules read every
                 // entry, and `vars_bounded` walks the deep parameter.
                 verify_module(&m).expect("the module verifies");

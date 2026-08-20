@@ -402,14 +402,28 @@ fn row_variable_outside_the_arity_is_rejected() {
 
 #[test]
 fn widened_callee_row_is_rejected() {
-    // Give the pure `id` function a claimed row. Its generic caller
-    // has the empty row, so the call must fail row inclusion.
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    // Give the recursive target a claimed row. The entry function has
+    // an empty row, so its call must fail row inclusion.
+    let bytes = compile_to_bytes(
+        "corrupt.lm",
+        "def names_row() with Io.Print\n\
+         end\n\
+         def row_target(n: Int): Int\n\
+         if n == 0\n\
+           0\n\
+         else\n\
+           row_target(n - 1)\n\
+         end\n\
+         end\n\
+         row_target(2)\n",
+    )
+    .unwrap();
+    let mut module = lm_bytecode::decode(&bytes).unwrap();
     let target = module
         .funcs
         .iter()
-        .position(|f| f.name == "id")
-        .expect("the sample defines `id`");
+        .position(|f| f.name == "row_target")
+        .expect("the sample defines `row_target`");
     let op = module
         .strings
         .iter()

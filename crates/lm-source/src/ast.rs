@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 pub struct Module {
     /// The `use` lines. They come before every definition.
     pub uses: Vec<UseDecl>,
+    pub interfaces: Vec<InterfaceDef>,
     pub classes: Vec<ClassDef>,
     pub enums: Vec<EnumDef>,
     pub funcs: Vec<FuncDef>,
@@ -34,6 +35,55 @@ pub struct UseDecl {
 pub struct GenericParam {
     pub name: String,
     pub is_effect: bool,
+    pub bounds: Vec<InterfaceRef>,
+    pub span: Span,
+}
+
+/// One nominal interface application.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterfaceRef {
+    pub name: String,
+    pub args: Vec<InterfaceArg>,
+    pub span: Span,
+}
+
+/// One type or effect argument of an interface application.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterfaceArg {
+    Type(TypeExpr),
+    Effect(Vec<RowItem>, Span),
+}
+
+/// One associated type requirement or binding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssociatedType {
+    pub name: String,
+    pub name_span: Span,
+    pub bound: Option<InterfaceRef>,
+    pub value: Option<TypeExpr>,
+    pub span: Span,
+}
+
+/// One method requirement inside an interface.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterfaceMethod {
+    pub name: String,
+    pub name_span: Span,
+    pub mut_self: bool,
+    pub params: Vec<Param>,
+    pub ret: Option<TypeExpr>,
+    pub row: Vec<RowItem>,
+    pub span: Span,
+}
+
+/// One nominal interface declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterfaceDef {
+    pub name: String,
+    pub name_span: Span,
+    pub generics: Vec<GenericParam>,
+    pub associated: Vec<AssociatedType>,
+    pub methods: Vec<InterfaceMethod>,
     pub span: Span,
 }
 
@@ -63,6 +113,8 @@ pub struct ClassDef {
     pub name_span: Span,
     pub generics: Vec<GenericParam>,
     pub parent: Option<ParentClause>,
+    pub interfaces: Vec<InterfaceRef>,
+    pub associated: Vec<AssociatedType>,
     pub fields: Vec<FieldDef>,
     pub methods: Vec<MethodDef>,
     pub span: Span,
@@ -135,6 +187,8 @@ pub struct Param {
     pub name: String,
     /// True for a `mut` parameter with mutable capability.
     pub mutable: bool,
+    /// True when the parameter accepts a callback that cannot escape.
+    pub nonescaping: bool,
     pub ty: TypeExpr,
     pub span: Span,
 }
@@ -190,6 +244,12 @@ pub enum StmtKind {
     /// `while cond ... end`.
     While {
         cond: Expr,
+        body: Vec<Stmt>,
+    },
+    /// `for name in value ... end`.
+    For {
+        bindings: Vec<(String, Span)>,
+        value: Expr,
         body: Vec<Stmt>,
     },
     /// `return` with an optional value.
@@ -654,6 +714,18 @@ fn dump_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
             out.push_str("do\n");
             for s in body {
                 dump_stmt(out, s, depth + 1);
+            }
+        }
+        StmtKind::For {
+            bindings,
+            value,
+            body,
+        } => {
+            let names: Vec<&str> = bindings.iter().map(|item| item.0.as_str()).collect();
+            let _ = writeln!(out, "for {}", names.join(", "));
+            dump_expr(out, value, depth + 1);
+            for item in body {
+                dump_stmt(out, item, depth + 1);
             }
         }
         StmtKind::Return { value } => {

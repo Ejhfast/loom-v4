@@ -64,7 +64,10 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 6 encodes builders as nominal core class types.
 /// Version 7 adds shared text and byte storage.
 /// Version 8 adds closed TLS stream values.
-pub const FORMAT_VERSION: u32 = 8;
+/// Version 9 adds native empty `Option` values.
+/// Version 10 adds collection epochs.
+/// Version 11 adds active callback descriptors.
+pub const FORMAT_VERSION: u32 = 11;
 
 /// The section kinds, in canonical order.
 ///
@@ -141,8 +144,8 @@ pub struct ImageFrame {
     pub ip: u32,
     pub base_local: u32,
     pub base_operand: u32,
-    /// The capture context, as an object ordinal.
-    pub closure: Option<u32>,
+    /// The capture context, with canonical object or callback ordinals.
+    pub closure: Option<Value>,
     /// The type environment of this activation, as an ordinal of the
     /// environment table of the image.
     ///
@@ -150,6 +153,15 @@ pub struct ImageFrame {
     /// below, and it uses it where no call site exists: the bottom
     /// frame of a machine has none.
     pub env: u32,
+}
+
+/// One captured nonescaping callback descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageCallback {
+    pub func: u32,
+    pub captures: Vec<Value>,
+    pub env: u32,
+    pub owner_depth: u32,
 }
 
 /// One captured pending request.
@@ -296,6 +308,7 @@ pub struct ImageMachine {
     /// reference inside holds the ordinal of the target in this
     /// vector.
     pub objects: Vec<ImageObject>,
+    pub callbacks: Vec<ImageCallback>,
     pub frames: Vec<ImageFrame>,
     pub locals: Vec<Value>,
     pub operands: Vec<Value>,
@@ -383,7 +396,9 @@ impl Image {
         );
         for ty in &self.types {
             bytes = bytes.saturating_add(ty.child_count() * std::mem::size_of::<u32>());
-            if let lm_bytecode::closed::ClosedType::Fn(_, markers, _, row) = ty {
+            if let lm_bytecode::closed::ClosedType::Fn(_, markers, _, row)
+            | lm_bytecode::closed::ClosedType::Callback(_, markers, _, row) = ty
+            {
                 bytes = bytes.saturating_add(markers.len());
                 bytes = bytes.saturating_add(row.len() * std::mem::size_of::<u32>());
             }
@@ -405,6 +420,12 @@ impl Image {
                 bytes = bytes.saturating_add(object.object.cost());
             }
             bytes = bytes.saturating_add(machine.frames.len() * std::mem::size_of::<ImageFrame>());
+            bytes = bytes
+                .saturating_add(machine.callbacks.len() * std::mem::size_of::<ImageCallback>());
+            for callback in &machine.callbacks {
+                bytes =
+                    bytes.saturating_add(callback.captures.len() * std::mem::size_of::<Value>());
+            }
             bytes = bytes.saturating_add(machine.locals.len() * std::mem::size_of::<Value>());
             bytes = bytes.saturating_add(machine.operands.len() * std::mem::size_of::<Value>());
             bytes =
@@ -770,8 +791,13 @@ pub fn image_roots(machine: &ImageMachine) -> Vec<u32> {
         }
     };
     for frame in &machine.frames {
-        if let Some(r) = frame.closure {
-            roots.push(r);
+        if let Some(value) = &frame.closure {
+            push(value, &mut roots);
+        }
+    }
+    for callback in &machine.callbacks {
+        for value in &callback.captures {
+            push(value, &mut roots);
         }
     }
     for value in &machine.locals {

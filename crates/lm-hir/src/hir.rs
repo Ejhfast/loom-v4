@@ -62,6 +62,8 @@ pub struct HirImport {
 /// A checked module. The entry statements form one function.
 pub struct HirModule {
     pub store: TypeStore,
+    pub interfaces: Vec<HirInterface>,
+    pub conformances: Vec<HirConformance>,
     pub classes: Vec<HirClass>,
     pub funcs: Vec<HirFunc>,
     /// Index of the entry function inside `funcs`.
@@ -79,6 +81,49 @@ pub struct HirModule {
     /// methods, and the initializers. Lowering appends one binding per
     /// generated constructor.
     pub bindings: Vec<lm_bytecode::FuncBinding>,
+}
+
+/// One applied nominal interface before bytecode type interning.
+#[derive(Debug, Clone)]
+pub struct HirInterfaceUse {
+    pub interface: u32,
+    pub types: Vec<TypeId>,
+    pub rows: Vec<Row>,
+}
+
+/// One associated type requirement before bytecode lowering.
+pub struct HirAssociated {
+    pub name: String,
+    pub bound: Option<HirInterfaceUse>,
+}
+
+/// One interface method requirement before bytecode lowering.
+pub struct HirInterfaceMethod {
+    pub selector: String,
+    pub mut_self: bool,
+    pub params: Vec<TypeId>,
+    pub param_muts: Vec<bool>,
+    pub ret: TypeId,
+    pub row: Row,
+}
+
+/// One nominal interface before bytecode lowering.
+pub struct HirInterface {
+    pub name: String,
+    pub key: String,
+    pub type_params: u32,
+    pub effect_params: u32,
+    pub generic_is_effect: Vec<bool>,
+    pub type_bounds: Vec<Vec<HirInterfaceUse>>,
+    pub associated: Vec<HirAssociated>,
+    pub methods: Vec<HirInterfaceMethod>,
+}
+
+/// One class-owned conformance before bytecode lowering.
+pub struct HirConformance {
+    pub class: u32,
+    pub application: HirInterfaceUse,
+    pub associated: Vec<TypeId>,
 }
 
 /// How instances of one class are constructed.
@@ -104,6 +149,8 @@ pub enum NativeRepr {
     Bytes,
     StringBuilder,
     ByteBuffer,
+    List,
+    Map,
     TcpResource,
     TcpStream,
     TcpListener,
@@ -131,6 +178,8 @@ pub struct HirClass {
     pub parent_args: Vec<TypeId>,
     /// The number of generic type parameters.
     pub type_params: u32,
+    /// Interface bounds for each class type parameter.
+    pub type_bounds: Vec<Vec<HirInterfaceUse>>,
     pub kind: ClassKind,
     pub ctor_kind: CtorKind,
     /// Full layout: inherited fields first, own fields after them.
@@ -161,6 +210,7 @@ pub struct HirFunc {
     pub name: String,
     /// The number of generic type parameters in scope for the body.
     pub type_params: u32,
+    pub type_bounds: Vec<Vec<HirInterfaceUse>>,
     /// The number of effect parameters in scope for the body.
     pub effect_params: u32,
     /// Parameter types. Parameters use the first local slots. A method
@@ -194,12 +244,57 @@ pub enum HStmt {
         cond: HExpr,
         body: Vec<HStmt>,
     },
+    For {
+        source: HExpr,
+        bindings: Vec<u32>,
+        kind: HForKind,
+        body: Vec<HStmt>,
+    },
     Return {
         value: Option<HExpr>,
     },
     Break,
     Continue,
     Expr(HExpr),
+}
+
+/// One checked traversal strategy for a `for` statement.
+#[derive(Clone)]
+pub enum HForKind {
+    List {
+        source_slot: u32,
+        index_slot: u32,
+        epoch_slot: u32,
+        element: TypeId,
+    },
+    Map {
+        source_slot: u32,
+        index_slot: u32,
+        epoch_slot: u32,
+        key: TypeId,
+        value: TypeId,
+        pair: TypeId,
+    },
+    Text {
+        source_slot: u32,
+        cursor_slot: u32,
+        item: TypeId,
+    },
+    Range {
+        source_slot: u32,
+        cursor_slot: u32,
+        stop_slot: u32,
+    },
+    Generic {
+        source_slot: u32,
+        iterator_slot: u32,
+        option_slot: u32,
+        item_slot: Option<u32>,
+        iterator: HExpr,
+        next: Box<HExpr>,
+        some_ty: TypeId,
+        item: TypeId,
+    },
 }
 
 #[derive(Clone)]
@@ -359,6 +454,14 @@ pub enum HExprKind {
         own_rowargs: Vec<Row>,
         args: Vec<HExpr>,
     },
+    /// A method call selected through one nominal interface bound.
+    InterfaceCall {
+        recv: Box<HExpr>,
+        interface: u32,
+        method: u32,
+        selector: String,
+        args: Vec<HExpr>,
+    },
     /// `receiver.field` with a resolved layout index.
     FieldGet {
         recv: Box<HExpr>,
@@ -388,6 +491,13 @@ pub enum HExprKind {
         func: u32,
         captures: Vec<HExpr>,
     },
+    /// A stack callback descriptor with a bounded lifetime.
+    MakeCallback {
+        func: u32,
+        captures: Vec<HExpr>,
+    },
+    /// Convert an existing heap closure to a nonescaping callback.
+    AsCallback(Box<HExpr>),
     /// A call of a closure value.
     CallValue {
         callee: Box<HExpr>,
@@ -480,6 +590,7 @@ impl HStmt {
             HStmt::Return { .. } | HStmt::Break | HStmt::Continue => true,
             HStmt::Expr(e) => e.ty == lm_types::NEVER,
             HStmt::While { cond, body } => while_diverges(cond, body),
+            HStmt::For { .. } => false,
             _ => false,
         }
     }
@@ -518,7 +629,7 @@ fn stmt_breaks(stmt: &HStmt) -> bool {
     match stmt {
         HStmt::Break => true,
         // A nested loop owns every `break` inside it.
-        HStmt::While { .. } => false,
+        HStmt::While { .. } | HStmt::For { .. } => false,
         HStmt::Expr(e) => expr_breaks(e),
         HStmt::Assign { value, .. } => expr_breaks(value),
         HStmt::AssignField { recv, value, .. } => expr_breaks(recv) || expr_breaks(value),

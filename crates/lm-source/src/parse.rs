@@ -116,6 +116,7 @@ impl Parser<'_> {
 
     fn module(&mut self) -> Result<Module, Diagnostic> {
         let mut uses = Vec::new();
+        let mut interfaces = Vec::new();
         let mut classes = Vec::new();
         let mut enums = Vec::new();
         let mut funcs = Vec::new();
@@ -133,6 +134,7 @@ impl Parser<'_> {
             self.skip_newlines();
             match self.peek() {
                 Tok::Eof => break,
+                Tok::KwInterface => interfaces.push(self.interface_def()?),
                 Tok::KwClass | Tok::KwFinal => classes.push(self.class_def()?),
                 Tok::KwEnum => enums.push(self.enum_def()?),
                 Tok::KwDef => funcs.push(self.func_def()?),
@@ -151,6 +153,7 @@ impl Parser<'_> {
         }
         Ok(Module {
             uses,
+            interfaces,
             classes,
             enums,
             funcs,
@@ -224,6 +227,17 @@ impl Parser<'_> {
             params.push(GenericParam {
                 name,
                 is_effect,
+                bounds: if !is_effect && matches!(self.peek(), Tok::Colon) {
+                    self.pos += 1;
+                    let mut bounds = vec![self.interface_ref()?];
+                    while matches!(self.peek(), Tok::Plus) {
+                        self.pos += 1;
+                        bounds.push(self.interface_ref()?);
+                    }
+                    bounds
+                } else {
+                    Vec::new()
+                },
                 span,
             });
             if matches!(self.peek(), Tok::Comma) {
@@ -234,6 +248,185 @@ impl Parser<'_> {
         }
         self.expect(Tok::RBracket, "`]` to complete the generic parameter list")?;
         Ok(params)
+    }
+
+    fn interface_ref(&mut self) -> Result<InterfaceRef, Diagnostic> {
+        let (mut name, mut name_span) = self.ident("an interface name")?;
+        while matches!(self.peek(), Tok::Dot) {
+            self.pos += 1;
+            let (part, span) = self.ident("an interface name after `.`")?;
+            name.push('.');
+            name.push_str(&part);
+            name_span = name_span.to(span);
+        }
+        if !matches!(self.peek(), Tok::LBracket) {
+            return Ok(InterfaceRef {
+                name,
+                args: Vec::new(),
+                span: name_span,
+            });
+        }
+        self.pos += 1;
+        let mut args = Vec::new();
+        loop {
+            if matches!(self.peek(), Tok::KwEffect) {
+                let start = self.next();
+                self.expect(Tok::LParen, "`(` after `effect`")?;
+                let mut row = Vec::new();
+                if !matches!(self.peek(), Tok::RParen) {
+                    loop {
+                        row.push(self.row_item()?);
+                        if matches!(self.peek(), Tok::Comma) {
+                            self.pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                let close = self.expect(Tok::RParen, "`)` after the effect argument")?;
+                args.push(InterfaceArg::Effect(row, start.span.to(close.span)));
+            } else {
+                args.push(InterfaceArg::Type(self.type_expr()?));
+            }
+            if matches!(self.peek(), Tok::Comma) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        let close = self.expect(Tok::RBracket, "`]` after the interface arguments")?;
+        Ok(InterfaceRef {
+            name,
+            args,
+            span: name_span.to(close.span),
+        })
+    }
+
+    fn associated_type(&mut self, binding: bool) -> Result<AssociatedType, Diagnostic> {
+        let start = self.expect(Tok::KwType, "`type`")?;
+        let (name, name_span) = self.ident("an associated type name")?;
+        let bound = if matches!(self.peek(), Tok::Colon) {
+            self.pos += 1;
+            Some(self.interface_ref()?)
+        } else {
+            None
+        };
+        let value = if matches!(self.peek(), Tok::Assign) {
+            self.pos += 1;
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
+        if binding && value.is_none() {
+            return Err(Diagnostic::new(
+                "E1053",
+                "a class associated type needs a value",
+                name_span,
+            ));
+        }
+        if !binding && value.is_some() {
+            return Err(Diagnostic::new(
+                "E1053",
+                "an interface associated type cannot have a value",
+                name_span,
+            ));
+        }
+        let end = value
+            .as_ref()
+            .map(|item| item.span)
+            .or_else(|| bound.as_ref().map(|item| item.span))
+            .unwrap_or(name_span);
+        self.expect_terminator()?;
+        Ok(AssociatedType {
+            name,
+            name_span,
+            bound,
+            value,
+            span: start.span.to(end),
+        })
+    }
+
+    fn interface_def(&mut self) -> Result<InterfaceDef, Diagnostic> {
+        let start = self.expect(Tok::KwInterface, "`interface`")?;
+        let (name, name_span) = self.ident("an interface name")?;
+        let generics = self.generic_params()?;
+        self.expect_terminator()?;
+        let mut associated = Vec::new();
+        let mut methods = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Tok::KwType => associated.push(self.associated_type(false)?),
+                Tok::KwDef => methods.push(self.interface_method()?),
+                Tok::KwEnd => break,
+                Tok::Eof => {
+                    return Err(self.error("E1003", "expected `end`, found end of file"));
+                }
+                other => {
+                    return Err(self.error(
+                        "E1003",
+                        format!("expected `type`, `def`, or `end`, found {other}"),
+                    ));
+                }
+            }
+        }
+        let end = self.expect(Tok::KwEnd, "`end`")?;
+        self.expect_terminator()?;
+        Ok(InterfaceDef {
+            name,
+            name_span,
+            generics,
+            associated,
+            methods,
+            span: start.span.to(end.span),
+        })
+    }
+
+    fn interface_method(&mut self) -> Result<InterfaceMethod, Diagnostic> {
+        let start = self.expect(Tok::KwDef, "`def`")?;
+        let (name, name_span) = self.ident("a method name")?;
+        self.expect(Tok::LParen, "`(`")?;
+        let mut_self = match self.peek() {
+            Tok::KwSelf => {
+                self.pos += 1;
+                false
+            }
+            Tok::KwMut if matches!(self.peek_at(1), Tok::KwSelf) => {
+                self.pos += 2;
+                true
+            }
+            _ => {
+                return Err(self.error("E1053", "an interface method needs `self` or `mut self`"));
+            }
+        };
+        let mut params = Vec::new();
+        if matches!(self.peek(), Tok::Comma) {
+            self.pos += 1;
+            params = self.param_list()?;
+        }
+        self.expect(Tok::RParen, "`)`")?;
+        let ret = if matches!(self.peek(), Tok::Colon) {
+            self.pos += 1;
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
+        let row = self.row_clause()?;
+        let end = row
+            .last()
+            .map(|item| item.span)
+            .or_else(|| ret.as_ref().map(|item| item.span))
+            .unwrap_or(name_span);
+        self.expect_terminator()?;
+        Ok(InterfaceMethod {
+            name,
+            name_span,
+            mut_self,
+            params,
+            ret,
+            row,
+            span: start.span.to(end),
+        })
     }
 
     /// Parse an optional `with` effect row. In a comma-separated outer
@@ -304,14 +497,28 @@ impl Parser<'_> {
         } else {
             None
         };
+        let mut interfaces = Vec::new();
+        if matches!(self.peek(), Tok::KwImplements) {
+            self.pos += 1;
+            loop {
+                interfaces.push(self.interface_ref()?);
+                if matches!(self.peek(), Tok::Comma) {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
         self.expect_terminator()?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
+        let mut associated = Vec::new();
         loop {
             self.skip_newlines();
             match self.peek() {
                 Tok::KwEnd => break,
                 Tok::KwDef => methods.push(self.method_def()?),
+                Tok::KwType => associated.push(self.associated_type(true)?),
                 Tok::Ident(_) => {
                     let (fname, fspan) = self.ident("a field name")?;
                     self.expect(Tok::Colon, "`:` and a field type")?;
@@ -350,6 +557,8 @@ impl Parser<'_> {
             name_span,
             generics,
             parent,
+            interfaces,
+            associated,
             fields,
             methods,
             span: final_tok
@@ -546,16 +755,25 @@ impl Parser<'_> {
         })
     }
 
-    /// Parse one or more `[mut] name: Type` parameters.
+    /// Parse one or more parameters with optional capability markers.
     fn param_list(&mut self) -> Result<Vec<Param>, Diagnostic> {
         let mut params = Vec::new();
         loop {
-            let mutable = if matches!(self.peek(), Tok::KwMut) {
-                self.pos += 1;
-                true
-            } else {
-                false
-            };
+            let mut mutable = false;
+            let mut nonescaping = false;
+            loop {
+                match self.peek() {
+                    Tok::KwMut if !mutable => {
+                        self.pos += 1;
+                        mutable = true;
+                    }
+                    Tok::KwNonescaping if !nonescaping => {
+                        self.pos += 1;
+                        nonescaping = true;
+                    }
+                    _ => break,
+                }
+            }
             let (pname, pspan) = self.ident("a parameter name")?;
             self.expect(Tok::Colon, "`:` and a parameter type")?;
             let ty = self.type_expr()?;
@@ -563,6 +781,7 @@ impl Parser<'_> {
             params.push(Param {
                 name: pname,
                 mutable,
+                nonescaping,
                 ty,
                 span,
             });
@@ -598,6 +817,15 @@ impl Parser<'_> {
 
     fn type_expr_inner(&mut self) -> Result<TypeExpr, Diagnostic> {
         match self.peek() {
+            Tok::KwSelf => {
+                let start = self.next();
+                self.expect(Tok::Dot, "`.` after `Self`")?;
+                let (name, end) = self.ident("an associated type name")?;
+                Ok(TypeExpr {
+                    kind: TypeExprKind::Name(format!("Self.{name}")),
+                    span: start.span.to(end),
+                })
+            }
             Tok::Ident(_) => {
                 let (mut name, mut span) = self.ident("a type")?;
                 // A qualified type name such as `matrix.Matrix` names
@@ -767,9 +995,9 @@ impl Parser<'_> {
                 "E1002",
                 "a `def` function is only valid at the top level of a module or in a class",
             )),
-            Tok::KwClass | Tok::KwFinal => Err(self.error(
+            Tok::KwClass | Tok::KwFinal | Tok::KwInterface => Err(self.error(
                 "E1002",
-                "a `class` is only valid at the top level of a module",
+                "a type declaration is only valid at the top level of a module",
             )),
             Tok::KwEnum => Err(self.error(
                 "E1002",
@@ -837,6 +1065,38 @@ impl Parser<'_> {
                         body,
                     },
                     span,
+                })
+            }
+            Tok::KwFor => {
+                let start = self.next();
+                let mut bindings = Vec::new();
+                loop {
+                    let binding = self.ident("a loop binding")?;
+                    bindings.push(binding);
+                    if matches!(self.peek(), Tok::Comma) {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if bindings.len() > 2 {
+                    return Err(Diagnostic::new(
+                        "E1054",
+                        "a loop pattern has at most two bindings",
+                        start.span,
+                    ));
+                }
+                self.expect(Tok::KwIn, "`in`")?;
+                let value = self.expr()?;
+                let body = self.block(&[Tok::KwEnd])?;
+                let end = self.expect(Tok::KwEnd, "`end`")?;
+                Ok(Stmt {
+                    kind: StmtKind::For {
+                        bindings,
+                        value,
+                        body,
+                    },
+                    span: start.span.to(end.span),
                 })
             }
             Tok::Ident(_) if matches!(self.peek_at(1), Tok::Colon) => {

@@ -41,6 +41,10 @@ fn loop_module() -> Module {
         types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
         selectors: vec![],
         apps: vec![],
+        interfaces: vec![],
+        conformances: vec![],
+        class_bounds: vec![],
+        func_bounds: vec![vec![]],
         classes: vec![],
         funcs: vec![Func {
             name: "main".to_string(),

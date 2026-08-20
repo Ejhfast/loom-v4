@@ -18,7 +18,8 @@ use lm_value::ObjRef;
 #[cfg(test)]
 use lm_value::Value;
 pub use shape::{
-    dump_shapes, BoundaryPolicy, MapIndex, Object, ShapeDesc, MIN_OBJECT_COST, SHAPES,
+    dump_shapes, BoundaryPolicy, MapIndex, Object, ShapeDesc, StructuralEpoch, MIN_OBJECT_COST,
+    SHAPES,
 };
 pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,
@@ -961,12 +962,14 @@ mod tests {
         let a = heap.alloc(str_obj("hello"));
         let b = heap.alloc(Object::List {
             items: vec![Value::Int(1)],
+            epoch: Default::default(),
         });
         assert_eq!(heap.get(a), &str_obj("hello"));
         assert_eq!(
             heap.get(b),
             &Object::List {
-                items: vec![Value::Int(1)]
+                items: vec![Value::Int(1)],
+                epoch: Default::default(),
             }
         );
         assert_eq!(heap.live_count(), 2);
@@ -1066,7 +1069,10 @@ mod tests {
     fn strings_are_born_frozen_and_lists_are_not() {
         let mut heap = Heap::new(1 << 20);
         let s = heap.alloc(str_obj("x"));
-        let l = heap.alloc(Object::List { items: vec![] });
+        let l = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
         assert!(heap.is_frozen(s));
         assert!(!heap.is_frozen(l));
     }
@@ -1087,9 +1093,12 @@ mod tests {
     #[test]
     fn used_bytes_track_growth() {
         let mut heap = Heap::new(1 << 20);
-        let l = heap.alloc(Object::List { items: vec![] });
+        let l = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
         let before = heap.used_bytes();
-        if let Object::List { items } = heap.get_mut(l) {
+        if let Object::List { items, .. } = heap.get_mut(l) {
             items.push(Value::Int(1));
         }
         heap.recharge(l);
@@ -1100,7 +1109,10 @@ mod tests {
     fn slots_grow_in_pages() {
         let mut heap = Heap::new(64 << 20);
         for _ in 0..(PAGE_SLOTS + 1) {
-            heap.alloc(Object::List { items: vec![] });
+            heap.alloc(Object::List {
+                items: vec![],
+                epoch: Default::default(),
+            });
         }
         assert_eq!(heap.stats().pages, 2);
     }

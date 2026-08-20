@@ -23,6 +23,8 @@ pub enum FaultCode {
     FrozenWrite,
     IndexOutOfBounds,
     MissingKey,
+    /// A collection changed during active traversal.
+    CollectionModified,
     BadCast,
     PolicyDenied,
     InvalidVmState,
@@ -66,7 +68,7 @@ pub enum FaultCode {
 /// so a loader must map a name back to a code. This table is the one
 /// place that lists the codes, so a new code joins both directions at
 /// once.
-pub const FAULT_CODES: [FaultCode; 21] = [
+pub const FAULT_CODES: [FaultCode; 22] = [
     FaultCode::IntegerOverflow,
     FaultCode::DivideByZero,
     FaultCode::OutOfFuel,
@@ -75,6 +77,7 @@ pub const FAULT_CODES: [FaultCode; 21] = [
     FaultCode::FrozenWrite,
     FaultCode::IndexOutOfBounds,
     FaultCode::MissingKey,
+    FaultCode::CollectionModified,
     FaultCode::BadCast,
     FaultCode::PolicyDenied,
     FaultCode::InvalidVmState,
@@ -111,6 +114,7 @@ impl fmt::Display for FaultCode {
             FaultCode::FrozenWrite => "FrozenWrite",
             FaultCode::IndexOutOfBounds => "IndexOutOfBounds",
             FaultCode::MissingKey => "MissingKey",
+            FaultCode::CollectionModified => "CollectionModified",
             FaultCode::BadCast => "BadCast",
             FaultCode::PolicyDenied => "PolicyDenied",
             FaultCode::InvalidVmState => "InvalidVmState",

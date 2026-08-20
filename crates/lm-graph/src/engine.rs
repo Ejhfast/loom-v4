@@ -154,10 +154,17 @@ mod tests {
         let mut heap = Heap::new(1 << 20);
         // Allocate the right branch first, so allocation order and
         // child order disagree.
-        let right = heap.alloc(Object::List { items: vec![] });
-        let left = heap.alloc(Object::List { items: vec![] });
+        let right = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
+        let left = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
         let root = heap.alloc(Object::List {
             items: vec![Value::Obj(left), Value::Obj(right)],
+            epoch: Default::default(),
         });
         let mut scratch = heap.take_scratch();
         let mut seen = Recorder(Vec::new());
@@ -177,11 +184,15 @@ mod tests {
     #[test]
     fn a_cycle_terminates_and_sharing_takes_one_ordinal() {
         let mut heap = Heap::new(1 << 20);
-        let shared = heap.alloc(Object::List { items: vec![] });
+        let shared = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
         let root = heap.alloc(Object::List {
             items: vec![Value::Obj(shared), Value::Obj(shared)],
+            epoch: Default::default(),
         });
-        if let Object::List { items } = heap.get_mut(shared) {
+        if let Object::List { items, .. } = heap.get_mut(shared) {
             items.push(Value::Obj(root));
         }
         heap.recharge(shared);
@@ -201,9 +212,13 @@ mod tests {
     #[test]
     fn each_limit_rejects_on_its_own() {
         let mut heap = Heap::new(1 << 20);
-        let leaf = heap.alloc(Object::List { items: vec![] });
+        let leaf = heap.alloc(Object::List {
+            items: vec![],
+            epoch: Default::default(),
+        });
         let root = heap.alloc(Object::List {
             items: vec![Value::Obj(leaf)],
+            epoch: Default::default(),
         });
         let base = GraphLimits::default();
         for limits in [
@@ -242,10 +257,14 @@ mod tests {
             .stack_size(256 * 1024)
             .spawn(|| {
                 let mut heap = Heap::new(64 << 20);
-                let mut head = heap.alloc(Object::List { items: vec![] });
+                let mut head = heap.alloc(Object::List {
+                    items: vec![],
+                    epoch: Default::default(),
+                });
                 for _ in 0..100_000 {
                     head = heap.alloc(Object::List {
                         items: vec![Value::Obj(head)],
+                        epoch: Default::default(),
                     });
                 }
                 let mut scratch = heap.take_scratch();

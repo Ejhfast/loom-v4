@@ -20,11 +20,14 @@
 //! name an imported type. Phase B runs after the core classes land, so
 //! an imported signature may name a core type.
 
-use crate::check::{ClassInfo, Ctx, FnSig, MethodSig};
+use crate::check::{
+    AssociatedInfo, ClassInfo, ConformanceInfo, Ctx, FnSig, InterfaceInfo, InterfaceMethodSig,
+    InterfaceUse, MethodSig,
+};
 use crate::hir::{HirFunc, HirImport, HirImportDef};
 use lm_bytecode::interface::{
-    ExportEntry, IfaceClass, IfaceClassKind, IfaceFn, IfaceItem, IfaceRow, IfaceType, Interface,
-    QualName,
+    ExportEntry, IfaceClass, IfaceClassKind, IfaceFn, IfaceInterface, IfaceInterfaceUse, IfaceItem,
+    IfaceRow, IfaceType, Interface, QualName,
 };
 use lm_bytecode::ImportKind;
 use lm_source::diag::Diagnostic;
@@ -92,12 +95,22 @@ struct PendingFunc {
     iface_hash: [u8; 32],
 }
 
+/// One imported interface waiting for its contract types.
+struct PendingInterface {
+    id: u32,
+    module: String,
+    name: String,
+    interface: IfaceInterface,
+}
+
 /// The import materializer of one module.
 pub(crate) struct Materializer<'a> {
     env: &'a ImportEnv,
     /// Resolved classes, by (module path, export name).
     classes: HashMap<(String, String), u32>,
+    interfaces: HashMap<(String, String), u32>,
     pending: Vec<PendingClass>,
+    pending_interfaces: Vec<PendingInterface>,
     pending_funcs: Vec<PendingFunc>,
 }
 
@@ -110,7 +123,9 @@ impl<'a> Materializer<'a> {
         Materializer {
             env,
             classes: HashMap::new(),
+            interfaces: HashMap::new(),
             pending: Vec::new(),
+            pending_interfaces: Vec::new(),
             pending_funcs: Vec::new(),
         }
     }
@@ -140,6 +155,104 @@ impl<'a> Materializer<'a> {
     // ------------------------------------------------------------
     // Phase A: reserve class indices.
     // ------------------------------------------------------------
+
+    /// Reserve one imported interface and every contract dependency.
+    pub(crate) fn reserve_interface(
+        &mut self,
+        ctx: &mut Ctx,
+        module: &str,
+        name: &str,
+        span: Span,
+    ) -> Result<u32, Diagnostic> {
+        let key = (module.to_string(), name.to_string());
+        if let Some(id) = self.interfaces.get(&key) {
+            return Ok(*id);
+        }
+        let entry = self.export(module, name, span)?;
+        let IfaceItem::Interface(interface) = &entry.item else {
+            return Err(error(
+                span,
+                format!("`{module}.{name}` is not an interface"),
+            ));
+        };
+        let id = ctx.interfaces.len() as u32;
+        self.interfaces.insert(key, id);
+        ctx.interfaces.push(InterfaceInfo {
+            imported: true,
+            origin: Some((module.to_string(), name.to_string())),
+            name: name.to_string(),
+            type_params: (0..interface.type_params)
+                .map(|index| format!("${index}"))
+                .collect(),
+            effect_params: (0..interface.effect_params)
+                .map(|index| format!("e{index}"))
+                .collect(),
+            generic_is_effect: interface.generic_is_effect.clone(),
+            type_bounds: vec![Vec::new(); interface.type_params as usize],
+            associated: interface
+                .associated
+                .iter()
+                .map(|item| AssociatedInfo {
+                    name: item.name.clone(),
+                    bound: None,
+                })
+                .collect(),
+            methods: Vec::new(),
+        });
+        self.pending_interfaces.push(PendingInterface {
+            id,
+            module: module.to_string(),
+            name: name.to_string(),
+            interface: interface.clone(),
+        });
+        let interface = interface.clone();
+        for bounds in &interface.type_bounds {
+            for bound in bounds {
+                self.reserve_interface_use(ctx, bound, span)?;
+            }
+        }
+        for associated in &interface.associated {
+            if let Some(bound) = &associated.bound {
+                self.reserve_interface_use(ctx, bound, span)?;
+            }
+        }
+        for method in &interface.methods {
+            for ty in method.params.iter().chain([&method.ret]) {
+                self.reserve_type(ctx, ty, span)?;
+            }
+        }
+        Ok(id)
+    }
+
+    fn reserve_interface_qual(
+        &mut self,
+        ctx: &mut Ctx,
+        qual: &QualName,
+        span: Span,
+    ) -> Result<u32, Diagnostic> {
+        if qual.is_core() {
+            return ctx.core_interfaces.get(&qual.name).copied().ok_or_else(|| {
+                error(
+                    span,
+                    format!("the core interface `{}` does not exist", qual.name),
+                )
+            });
+        }
+        self.reserve_interface(ctx, &qual.module, &qual.name, span)
+    }
+
+    fn reserve_interface_use(
+        &mut self,
+        ctx: &mut Ctx,
+        application: &IfaceInterfaceUse,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        self.reserve_interface_qual(ctx, &application.interface, span)?;
+        for ty in &application.types {
+            self.reserve_type(ctx, ty, span)?;
+        }
+        Ok(())
+    }
 
     /// Reserve one imported class and every class its signature
     /// names. The recursion stops at a class already reserved, so a
@@ -201,6 +314,17 @@ impl<'a> Materializer<'a> {
         for field in &class.fields {
             self.reserve_type(ctx, &field.ty, span)?;
         }
+        for bounds in &class.type_bounds {
+            for bound in bounds {
+                self.reserve_interface_use(ctx, bound, span)?;
+            }
+        }
+        for conformance in &class.conformances {
+            self.reserve_interface_use(ctx, &conformance.application, span)?;
+            for ty in &conformance.associated {
+                self.reserve_type(ctx, ty, span)?;
+            }
+        }
         for method in &class.methods {
             self.reserve_fn(ctx, &method.sig, span)?;
         }
@@ -235,6 +359,12 @@ impl<'a> Materializer<'a> {
                     self.reserve_type(ctx, a, span)?;
                 }
             }
+            IfaceType::Projection {
+                base, interface, ..
+            } => {
+                self.reserve_type(ctx, base, span)?;
+                self.reserve_interface_qual(ctx, interface, span)?;
+            }
             IfaceType::List(e)
             | IfaceType::Vm(e)
             | IfaceType::Snapshot(e)
@@ -260,6 +390,11 @@ impl<'a> Materializer<'a> {
     }
 
     fn reserve_fn(&mut self, ctx: &mut Ctx, sig: &IfaceFn, span: Span) -> Result<(), Diagnostic> {
+        for bounds in &sig.type_bounds {
+            for bound in bounds {
+                self.reserve_interface_use(ctx, bound, span)?;
+            }
+        }
         for p in &sig.params {
             self.reserve_type(ctx, p, span)?;
         }
@@ -292,6 +427,63 @@ impl<'a> Materializer<'a> {
             sig,
             iface_hash,
         });
+        Ok(())
+    }
+
+    /// Fill every reserved interface contract.
+    pub(crate) fn finish_interfaces(
+        &mut self,
+        ctx: &mut Ctx,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let pending = std::mem::take(&mut self.pending_interfaces);
+        for item in pending {
+            let type_bounds = self.resolve_bounds(ctx, &item.interface.type_bounds, span)?;
+            let associated: Vec<AssociatedInfo> = item
+                .interface
+                .associated
+                .iter()
+                .map(|associated| {
+                    Ok(AssociatedInfo {
+                        name: associated.name.clone(),
+                        bound: associated
+                            .bound
+                            .as_ref()
+                            .map(|bound| self.resolve_interface_use(ctx, bound, span))
+                            .transpose()?,
+                    })
+                })
+                .collect::<Result<_, Diagnostic>>()?;
+            let methods: Vec<InterfaceMethodSig> = item
+                .interface
+                .methods
+                .iter()
+                .map(|method| {
+                    let params = method
+                        .params
+                        .iter()
+                        .map(|ty| self.resolve_type(ctx, ty, span))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(InterfaceMethodSig {
+                        name: method.name.clone(),
+                        mut_self: method.mut_self,
+                        params,
+                        param_muts: method.param_muts.clone(),
+                        param_names: method.param_names.clone(),
+                        ret: self.resolve_type(ctx, &method.ret, span)?,
+                        row: self.resolve_row(ctx, &method.row, span)?,
+                    })
+                })
+                .collect::<Result<_, Diagnostic>>()?;
+            let info = &mut ctx.interfaces[item.id as usize];
+            info.type_bounds = type_bounds;
+            info.associated = associated;
+            info.methods = methods;
+            debug_assert_eq!(
+                info.origin.as_ref(),
+                Some(&(item.module.clone(), item.name.clone()))
+            );
+        }
         Ok(())
     }
 
@@ -336,6 +528,7 @@ impl<'a> Materializer<'a> {
                     HirFunc {
                         name: format!("{}.{}", item.name, method.name),
                         type_params: sig.type_params.len() as u32,
+                        type_bounds: crate::check::hir_bounds(&sig.type_bounds),
                         effect_params: sig.effect_params.len() as u32,
                         params: sig.params.clone(),
                         param_muts: sig.param_muts.clone(),
@@ -371,6 +564,7 @@ impl<'a> Materializer<'a> {
                 HirFunc {
                     name: item.name.clone(),
                     type_params: sig.type_params.len() as u32,
+                    type_bounds: crate::check::hir_bounds(&sig.type_bounds),
                     effect_params: sig.effect_params.len() as u32,
                     params: sig.params.clone(),
                     param_muts: sig.param_muts.clone(),
@@ -446,6 +640,29 @@ impl<'a> Materializer<'a> {
         for method in &class.methods {
             methods.push(self.method_sig(ctx, item, method, self_ty, span)?);
         }
+        let type_bounds = self.resolve_bounds(ctx, &class.type_bounds, span)?;
+        let conformances: Vec<ConformanceInfo> = class
+            .conformances
+            .iter()
+            .map(|conformance| {
+                let application =
+                    self.resolve_interface_use(ctx, &conformance.application, span)?;
+                let associated = conformance
+                    .associated
+                    .iter()
+                    .map(|ty| self.resolve_type(ctx, ty, span))
+                    .collect::<Result<Vec<_>, _>>()?;
+                ctx.store.set_conformance(
+                    ClassId(item.id),
+                    lm_types::InterfaceId(application.interface),
+                    associated.clone(),
+                );
+                Ok(ConformanceInfo {
+                    application,
+                    associated,
+                })
+            })
+            .collect::<Result<_, Diagnostic>>()?;
         let init = match &class.init {
             None => None,
             Some(sig) => {
@@ -462,6 +679,7 @@ impl<'a> Materializer<'a> {
                     ret: lm_types::UNIT,
                     row: fsig.row.clone(),
                     own_type_params: Vec::new(),
+                    own_type_bounds: Vec::new(),
                     own_effect_params: fsig.effect_params.clone(),
                 })
             }
@@ -483,6 +701,8 @@ impl<'a> Materializer<'a> {
             name: item.name.clone(),
             parent,
             type_params,
+            type_bounds,
+            conformances,
             kind,
             self_ty,
             field_names,
@@ -521,6 +741,7 @@ impl<'a> Materializer<'a> {
             ret: sig.ret,
             row: sig.row.clone(),
             own_type_params,
+            own_type_bounds: sig.type_bounds[class_params.min(sig.type_bounds.len())..].to_vec(),
             own_effect_params: sig.effect_params.clone(),
         })
     }
@@ -553,8 +774,10 @@ impl<'a> Materializer<'a> {
         }
         let ret = self.resolve_type(ctx, &sig.ret, span)?;
         let row = self.resolve_row(ctx, &sig.row, span)?;
+        let type_bounds = self.resolve_bounds(ctx, &sig.type_bounds, span)?;
         Ok(FnSig {
             type_params: (0..sig.type_params).map(|i| format!("${i}")).collect(),
+            type_bounds,
             effect_params: (0..sig.effect_params).map(|i| format!("e{i}")).collect(),
             params,
             param_muts,
@@ -581,6 +804,69 @@ impl<'a> Materializer<'a> {
             }
         }
         Ok(ctx.store.canonical_row(out))
+    }
+
+    fn resolve_interface_qual(
+        &self,
+        ctx: &Ctx,
+        qual: &QualName,
+        span: Span,
+    ) -> Result<u32, Diagnostic> {
+        if qual.is_core() {
+            return ctx.core_interfaces.get(&qual.name).copied().ok_or_else(|| {
+                error(
+                    span,
+                    format!("the core interface `{}` does not exist", qual.name),
+                )
+            });
+        }
+        self.interfaces
+            .get(&(qual.module.clone(), qual.name.clone()))
+            .copied()
+            .ok_or_else(|| {
+                error(
+                    span,
+                    format!("the interface `{}` is not visible here", qual.text()),
+                )
+            })
+    }
+
+    fn resolve_interface_use(
+        &self,
+        ctx: &mut Ctx,
+        application: &IfaceInterfaceUse,
+        span: Span,
+    ) -> Result<InterfaceUse, Diagnostic> {
+        Ok(InterfaceUse {
+            interface: self.resolve_interface_qual(ctx, &application.interface, span)?,
+            type_args: application
+                .types
+                .iter()
+                .map(|ty| self.resolve_type(ctx, ty, span))
+                .collect::<Result<_, _>>()?,
+            row_args: application
+                .rows
+                .iter()
+                .map(|row| self.resolve_row(ctx, row, span))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    fn resolve_bounds(
+        &self,
+        ctx: &mut Ctx,
+        bounds: &[Vec<IfaceInterfaceUse>],
+        span: Span,
+    ) -> Result<Vec<Vec<InterfaceUse>>, Diagnostic> {
+        bounds
+            .iter()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| self.resolve_interface_use(ctx, item, span))
+                    .collect()
+            })
+            .collect()
     }
 
     fn resolve_qual(&self, ctx: &mut Ctx, qual: &QualName, span: Span) -> Result<u32, Diagnostic> {
@@ -619,6 +905,32 @@ impl<'a> Materializer<'a> {
             IfaceType::EmptyVm => lm_types::EMPTY_VM,
             IfaceType::SnapshotImage => lm_types::SNAPSHOT_IMAGE,
             IfaceType::Var(i) => ctx.store.intern(Type::Var(*i)),
+            IfaceType::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                let base = self.resolve_type(ctx, base, span)?;
+                let interface = self.resolve_interface_qual(ctx, interface, span)?;
+                let associated = ctx.interfaces[interface as usize]
+                    .associated
+                    .iter()
+                    .position(|item| item.name == *assoc)
+                    .ok_or_else(|| {
+                        error(
+                            span,
+                            format!(
+                                "the interface `{}` has no associated type `{assoc}`",
+                                ctx.interfaces[interface as usize].name
+                            ),
+                        )
+                    })? as u32;
+                ctx.store.intern(Type::Projection {
+                    base,
+                    interface: lm_types::InterfaceId(interface),
+                    assoc: associated,
+                })
+            }
             IfaceType::Named { class, args } => {
                 let idx = self.resolve_qual(ctx, class, span)?;
                 if args.is_empty() {
@@ -660,6 +972,20 @@ impl<'a> Materializer<'a> {
                 let ret = self.resolve_type(ctx, ret, span)?;
                 let row = self.resolve_row(ctx, row, span)?;
                 ctx.store.intern_fn(out, param_muts.clone(), ret, row)
+            }
+            IfaceType::Callback {
+                params,
+                param_muts,
+                ret,
+                row,
+            } => {
+                let mut out = Vec::with_capacity(params.len());
+                for p in params {
+                    out.push(self.resolve_type(ctx, p, span)?);
+                }
+                let ret = self.resolve_type(ctx, ret, span)?;
+                let row = self.resolve_row(ctx, row, span)?;
+                ctx.store.intern_callback(out, param_muts.clone(), ret, row)
             }
             IfaceType::Vm(t) => {
                 let t = self.resolve_type(ctx, t, span)?;

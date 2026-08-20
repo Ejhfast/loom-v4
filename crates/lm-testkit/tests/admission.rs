@@ -211,7 +211,14 @@ fn recanonicalize(machine: &mut ImageMachine) {
         }
     };
     for frame in &mut machine.frames {
-        frame.closure = frame.closure.map(|o| moved[o as usize]);
+        if let Some(closure) = &mut frame.closure {
+            value(closure);
+        }
+    }
+    for callback in &mut machine.callbacks {
+        for capture in &mut callback.captures {
+            value(capture);
+        }
     }
     for v in machine.locals.iter_mut().chain(machine.operands.iter_mut()) {
         value(v);
@@ -387,13 +394,13 @@ fn a_shared_object_checked_under_a_second_type_rejects() {
     });
     let machine = &image.machines[0];
     let strings = find_object(machine, "list of strings", |object| match object {
-        Object::List { items } => items
+        Object::List { items, .. } => items
             .iter()
             .all(|v| matches!(v, Value::Obj(_)) && !items.is_empty()),
         _ => false,
     });
     let integers = find_object(machine, "list of integers", |object| match object {
-        Object::List { items } => {
+        Object::List { items, .. } => {
             !items.is_empty() && items.iter().all(|v| matches!(v, Value::Int(_)))
         }
         _ => false,
@@ -501,13 +508,13 @@ fn a_list_local_that_names_a_list_of_strings_faults() {
     let images = boundaries(&loaded, &[], 60);
     let ints = |image: &Image| -> Vec<u32> {
         local_objects(image, |object| {
-            matches!(object, Object::List { items }
+            matches!(object, Object::List { items, .. }
                 if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Int(_))))
         })
     };
     let strings = |image: &Image| -> Vec<u32> {
         local_objects(image, |object| {
-            matches!(object, Object::List { items }
+            matches!(object, Object::List { items, .. }
                 if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Obj(_))))
         })
     };
@@ -578,7 +585,7 @@ fn one_empty_list_under_two_element_types_rejects() {
     let empty = |image: &Image| -> Vec<u32> {
         local_objects(
             image,
-            |object| matches!(object, Object::List { items } if items.is_empty()),
+            |object| matches!(object, Object::List { items, .. } if items.is_empty()),
         )
     };
     let image = pick(&images, "two empty lists in locals", |image| {
@@ -1589,7 +1596,14 @@ fn a_rotated_heap_rejects_as_non_canonical() {
         }
     };
     for frame in &mut machine.frames {
-        frame.closure = frame.closure.map(|o| (o + 1) % count);
+        if let Some(closure) = &mut frame.closure {
+            value(closure);
+        }
+    }
+    for callback in &mut machine.callbacks {
+        for capture in &mut callback.captures {
+            value(capture);
+        }
     }
     for v in machine.locals.iter_mut().chain(machine.operands.iter_mut()) {
         value(v);
@@ -1747,10 +1761,11 @@ fn a_policy_table_handle_to_its_own_machine_rejects() {
 /// exhaustive-case backstop of every dispatch on the family.
 const ABSTRACT_SOURCE: &str = "\
 def go(): Int
-  a: Option[Int] = None
+  a: Ordering = Ordering.Equal
   case a
-  in Some(v) then v
-  in None    then 41
+  in Less    then 0
+  in Equal   then 41
+  in Greater then 2
   end
 end
 

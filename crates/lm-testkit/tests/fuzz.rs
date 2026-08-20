@@ -346,7 +346,14 @@ fn recanonicalize(machine: &mut lm_vm::snapshot::ImageMachine) {
         }
     };
     for frame in &mut machine.frames {
-        frame.closure = frame.closure.and_then(|o| moved.get(o as usize).copied());
+        if let Some(closure) = &mut frame.closure {
+            value(closure);
+        }
+    }
+    for callback in &mut machine.callbacks {
+        for capture in &mut callback.captures {
+            value(capture);
+        }
     }
     for v in machine.locals.iter_mut().chain(machine.operands.iter_mut()) {
         value(v);
@@ -433,7 +440,7 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
             let m = &mut image.machines[vm];
             if !m.objects.is_empty() {
                 let at = prng.below(m.objects.len());
-                if let lm_heap::Object::List { items } = &mut m.objects[at].object {
+                if let lm_heap::Object::List { items, .. } = &mut m.objects[at].object {
                     if !items.is_empty() {
                         let slot = prng.below(items.len());
                         items[slot] = value;
@@ -830,6 +837,10 @@ fn regenerate_fuzz_corpus() {
             types,
             selectors: vec!["f".to_string()],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![]],
+            func_bounds: vec![vec![]],
             classes: vec![BcClass {
                 name: "C".to_string(),
                 parent_args: Vec::new(),
@@ -884,6 +895,10 @@ fn regenerate_fuzz_corpus() {
                 types: vec![2],
                 rows: vec![],
             }],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![]],
+            func_bounds: vec![vec![]],
             classes: vec![BcClass {
                 name: "Box".to_string(),
                 parent_args: Vec::new(),
@@ -950,6 +965,10 @@ fn regenerate_fuzz_corpus() {
             types: base_types(),
             selectors: vec![],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
@@ -1004,12 +1023,19 @@ fn regenerate_fuzz_corpus() {
             .expect("the seed loads")
             .into_image();
         let mut broken = image.clone();
-        let mut roots = (
-            broken.machines[2].frames[0].closure,
-            broken.machines[2].start_body,
-        );
+        let closure = broken.machines[2].frames[0].closure;
+        let frame = match closure {
+            Some(lm_value::Value::Obj(reference)) => Some(reference.slot),
+            _ => panic!("the frame has an object capture context"),
+        };
+        let mut roots = (frame, broken.machines[2].start_body);
         std::mem::swap(&mut roots.0, &mut roots.1);
-        broken.machines[2].frames[0].closure = roots.0;
+        broken.machines[2].frames[0].closure = roots.0.map(|slot| {
+            lm_value::Value::Obj(lm_value::ObjRef {
+                slot,
+                generation: 0,
+            })
+        });
         broken.machines[2].start_body = roots.1;
         let bad =
             lm_vm::snapshot::codec::encode(&broken, usize::MAX).expect("the damaged image encodes");

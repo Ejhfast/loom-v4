@@ -185,7 +185,7 @@ fn as_call_of_a_vm_control_slot_is_rejected() {
     let f = func_index(&module, "f");
     for block in &mut module.funcs[f].blocks {
         for instr in block.iter_mut() {
-            if let Instr::AsCall(op) = instr {
+            if let Instr::AsCall { op, .. } = instr {
                 *op = lm_abi::OP_VM_ANSWER;
             }
         }

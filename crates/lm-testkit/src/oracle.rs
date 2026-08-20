@@ -175,6 +175,12 @@ impl<'m> Oracle<'m> {
                 }
                 Ok(())
             }
+            HStmt::For {
+                source,
+                bindings,
+                kind,
+                body,
+            } => self.run_for(source, bindings, kind, body, frame, depth),
             HStmt::Return { value } => {
                 let value = match value {
                     Some(v) => self.eval(v, frame, depth)?,
@@ -189,6 +195,173 @@ impl<'m> Oracle<'m> {
                 Ok(())
             }
         }
+    }
+
+    fn run_for(
+        &self,
+        source: &HExpr,
+        bindings: &[u32],
+        kind: &HForKind,
+        body: &[HStmt],
+        frame: &mut Frame,
+        depth: u32,
+    ) -> Result<(), Stop> {
+        let source_value = self.eval(source, frame, depth)?;
+        let source_slot = match kind {
+            HForKind::List { source_slot, .. }
+            | HForKind::Map { source_slot, .. }
+            | HForKind::Text { source_slot, .. }
+            | HForKind::Range { source_slot, .. }
+            | HForKind::Generic { source_slot, .. } => *source_slot,
+        };
+        frame.set(source_slot, source_value.clone());
+
+        match kind {
+            HForKind::List {
+                index_slot,
+                epoch_slot,
+                ..
+            } => {
+                frame.set(*epoch_slot, OV::Int(0));
+                let object = self.as_obj(&source_value)?;
+                let length = match &object.borrow().kind {
+                    OKind::List(items) => items.len(),
+                    _ => return Err(Stop::Limit("list loop on a non-list")),
+                };
+                for index in 0..length {
+                    let value = match &object.borrow().kind {
+                        OKind::List(items) if items.len() == length => items[index].clone(),
+                        OKind::List(_) => return Err(Stop::Fault("CollectionModified")),
+                        _ => return Err(Stop::Limit("list loop on a non-list")),
+                    };
+                    frame.set(*index_slot, OV::Int(index as i64));
+                    frame.set(bindings[0], value);
+                    match self.run_block(body, frame, depth, false) {
+                        Ok(_) | Err(Stop::Continue) => {}
+                        Err(Stop::Break) => break,
+                        Err(other) => return Err(other),
+                    }
+                }
+            }
+            HForKind::Map {
+                index_slot,
+                epoch_slot,
+                ..
+            } => {
+                frame.set(*epoch_slot, OV::Int(0));
+                let object = self.as_obj(&source_value)?;
+                let length = match &object.borrow().kind {
+                    OKind::Map(entries) => entries.len(),
+                    _ => return Err(Stop::Limit("map loop on a non-map")),
+                };
+                for index in 0..length {
+                    let (key, value) = match &object.borrow().kind {
+                        OKind::Map(entries) if entries.len() == length => entries[index].clone(),
+                        OKind::Map(_) => return Err(Stop::Fault("CollectionModified")),
+                        _ => return Err(Stop::Limit("map loop on a non-map")),
+                    };
+                    frame.set(*index_slot, OV::Int(index as i64));
+                    if bindings.len() == 1 {
+                        frame.set(bindings[0], self.alloc(OKind::Tuple(vec![key, value])));
+                    } else {
+                        frame.set(bindings[0], key);
+                        frame.set(bindings[1], value);
+                    }
+                    match self.run_block(body, frame, depth, false) {
+                        Ok(_) | Err(Stop::Continue) => {}
+                        Err(Stop::Break) => break,
+                        Err(other) => return Err(other),
+                    }
+                }
+            }
+            HForKind::Text { cursor_slot, .. } => {
+                let text = self.as_text(&source_value)?.to_string();
+                let mut cursor = 0;
+                for value in text.chars() {
+                    frame.set(*cursor_slot, OV::Int(cursor));
+                    frame.set(bindings[0], OV::Char(value));
+                    cursor += value.len_utf8() as i64;
+                    match self.run_block(body, frame, depth, false) {
+                        Ok(_) | Err(Stop::Continue) => {}
+                        Err(Stop::Break) => break,
+                        Err(other) => return Err(other),
+                    }
+                }
+            }
+            HForKind::Range {
+                cursor_slot,
+                stop_slot,
+                ..
+            } => {
+                let object = self.as_obj(&source_value)?;
+                let (start, stop) = match &object.borrow().kind {
+                    OKind::Instance { fields, .. } => {
+                        let start = fields[0]
+                            .as_ref()
+                            .ok_or(Stop::Fault("UninitializedField"))?;
+                        let stop = fields[1]
+                            .as_ref()
+                            .ok_or(Stop::Fault("UninitializedField"))?;
+                        (self.as_int(start)?, self.as_int(stop)?)
+                    }
+                    _ => return Err(Stop::Limit("range loop on a non-range")),
+                };
+                frame.set(*stop_slot, OV::Int(stop));
+                for value in start..stop {
+                    frame.set(*cursor_slot, OV::Int(value));
+                    frame.set(bindings[0], OV::Int(value));
+                    match self.run_block(body, frame, depth, false) {
+                        Ok(_) | Err(Stop::Continue) => {}
+                        Err(Stop::Break) => break,
+                        Err(other) => return Err(other),
+                    }
+                }
+            }
+            HForKind::Generic {
+                iterator_slot,
+                option_slot,
+                item_slot,
+                iterator,
+                next,
+                some_ty,
+                ..
+            } => {
+                let iterator_value = self.eval(iterator, frame, depth)?;
+                frame.set(*iterator_slot, iterator_value);
+                loop {
+                    let option = self.eval(next, frame, depth)?;
+                    frame.set(*option_slot, option.clone());
+                    if !self.instance_matches(&option, *some_ty)? {
+                        break;
+                    }
+                    let object = self.as_obj(&option)?;
+                    let item = match &object.borrow().kind {
+                        OKind::Instance { fields, .. } => {
+                            fields[0].clone().ok_or(Stop::Fault("UninitializedField"))?
+                        }
+                        _ => return Err(Stop::Limit("iterator returned an invalid option")),
+                    };
+                    if let Some(item_slot) = item_slot {
+                        frame.set(*item_slot, item.clone());
+                        let tuple = self.as_obj(&item)?;
+                        let values = match &tuple.borrow().kind {
+                            OKind::Tuple(values) if values.len() == 2 => values.clone(),
+                            _ => return Err(Stop::Limit("iterator item is not a pair")),
+                        };
+                        frame.set(bindings[0], values[0].clone());
+                        frame.set(bindings[1], values[1].clone());
+                    } else {
+                        frame.set(bindings[0], item);
+                    }
+                    match self.run_block(body, frame, depth, false) {
+                        Ok(_) | Err(Stop::Continue) => {}
+                        Err(Stop::Break) => break,
+                        Err(other) => return Err(other),
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn as_obj(&self, value: &OV) -> Result<Rc<RefCell<OObj>>, Stop> {
@@ -238,6 +411,8 @@ impl<'m> Oracle<'m> {
                 return Ok(self.alloc(OKind::Sb(Some(String::new()))))
             }
             Some(NativeRepr::ByteBuffer) => return Ok(self.alloc(OKind::Bb(Some(Vec::new())))),
+            Some(NativeRepr::List) => return Ok(self.alloc(OKind::List(Vec::new()))),
+            Some(NativeRepr::Map) => return Ok(self.alloc(OKind::Map(Vec::new()))),
             Some(
                 NativeRepr::Text
                 | NativeRepr::Substring
@@ -339,6 +514,12 @@ impl<'m> Oracle<'m> {
                 selector,
                 args,
                 ..
+            }
+            | HExprKind::InterfaceCall {
+                recv,
+                selector,
+                args,
+                ..
             } => {
                 let recv_v = self.eval(recv, frame, depth)?;
                 let mut values = Vec::with_capacity(args.len() + 1);
@@ -371,7 +552,8 @@ impl<'m> Oracle<'m> {
                 };
                 out.ok_or(Stop::Fault("UninitializedField"))
             }
-            HExprKind::MakeClosure { func, captures } => {
+            HExprKind::MakeClosure { func, captures }
+            | HExprKind::MakeCallback { func, captures } => {
                 let mut values = Vec::with_capacity(captures.len());
                 for capture in captures {
                     values.push(self.eval(capture, frame, depth)?);
@@ -381,6 +563,7 @@ impl<'m> Oracle<'m> {
                     captures: values,
                 }))
             }
+            HExprKind::AsCallback(value) => self.eval(value, frame, depth),
             HExprKind::CallValue { callee, args } => {
                 let callee = self.eval(callee, frame, depth)?;
                 let mut values = Vec::with_capacity(args.len());
@@ -1385,6 +1568,243 @@ impl<'m> Oracle<'m> {
                 };
                 Ok(self.alloc(OKind::Bytes(bytes)))
             }
+            lm_abi::INTRINSIC_LIST_LEN
+            | lm_abi::INTRINSIC_LIST_CAPACITY
+            | lm_abi::INTRINSIC_LIST_EPOCH => {
+                let list = self.as_obj(&values[0])?;
+                let value = match &list.borrow().kind {
+                    OKind::List(items) if intrinsic == lm_abi::INTRINSIC_LIST_CAPACITY => {
+                        items.capacity()
+                    }
+                    OKind::List(items) if intrinsic == lm_abi::INTRINSIC_LIST_LEN => items.len(),
+                    OKind::List(_) => 0,
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                };
+                Ok(OV::Int(value as i64))
+            }
+            lm_abi::INTRINSIC_LIST_AT => {
+                let list = self.as_obj(&values[0])?;
+                let index = self.as_int(&values[1])?;
+                let value = match &list.borrow().kind {
+                    OKind::List(items) if index >= 0 => items.get(index as usize).cloned(),
+                    OKind::List(_) => None,
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                };
+                value.ok_or(Stop::Fault("IndexOutOfBounds"))
+            }
+            lm_abi::INTRINSIC_LIST_GET => {
+                let list = self.as_obj(&values[0])?;
+                let index = self.as_int(&values[1])?;
+                let value = match &list.borrow().kind {
+                    OKind::List(items) if index >= 0 => items.get(index as usize).cloned(),
+                    OKind::List(_) => None,
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                };
+                Ok(self.option_value(value))
+            }
+            lm_abi::INTRINSIC_LIST_PUSH => {
+                let list = self.as_obj(&values[0])?;
+                frozen_guard(&list)?;
+                match &mut list.borrow_mut().kind {
+                    OKind::List(items) => items.push(values[1].clone()),
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                }
+                Ok(OV::Unit)
+            }
+            lm_abi::INTRINSIC_LIST_ITER_LEN => {
+                let list = self.as_obj(&values[0])?;
+                let length = match &list.borrow().kind {
+                    OKind::List(items) => items.len(),
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                };
+                Ok(OV::Int(length as i64))
+            }
+            lm_abi::INTRINSIC_LIST_SET => {
+                let list = self.as_obj(&values[0])?;
+                frozen_guard(&list)?;
+                let index = self.as_int(&values[1])?;
+                let mut borrow = list.borrow_mut();
+                let item = match &mut borrow.kind {
+                    OKind::List(items) if index >= 0 => items.get_mut(index as usize),
+                    OKind::List(_) => None,
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                }
+                .ok_or(Stop::Fault("IndexOutOfBounds"))?;
+                *item = values[2].clone();
+                Ok(OV::Unit)
+            }
+            lm_abi::INTRINSIC_LIST_POP => {
+                let list = self.as_obj(&values[0])?;
+                frozen_guard(&list)?;
+                let value = match &mut list.borrow_mut().kind {
+                    OKind::List(items) => items.pop(),
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                };
+                Ok(self.option_value(value))
+            }
+            lm_abi::INTRINSIC_LIST_INSERT => {
+                let list = self.as_obj(&values[0])?;
+                frozen_guard(&list)?;
+                let index = self.as_int(&values[1])?;
+                let mut borrow = list.borrow_mut();
+                let items = match &mut borrow.kind {
+                    OKind::List(items) => items,
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                };
+                if index < 0 || index as usize > items.len() {
+                    return Err(Stop::Fault("IndexOutOfBounds"));
+                }
+                items.insert(index as usize, values[2].clone());
+                Ok(OV::Unit)
+            }
+            lm_abi::INTRINSIC_LIST_REMOVE | lm_abi::INTRINSIC_LIST_SWAP_REMOVE => {
+                let list = self.as_obj(&values[0])?;
+                frozen_guard(&list)?;
+                let index = self.as_int(&values[1])?;
+                let mut borrow = list.borrow_mut();
+                let items = match &mut borrow.kind {
+                    OKind::List(items) => items,
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                };
+                if index < 0 || index as usize >= items.len() {
+                    return Err(Stop::Fault("IndexOutOfBounds"));
+                }
+                if intrinsic == lm_abi::INTRINSIC_LIST_REMOVE {
+                    Ok(items.remove(index as usize))
+                } else {
+                    Ok(items.swap_remove(index as usize))
+                }
+            }
+            lm_abi::INTRINSIC_LIST_RESERVE => {
+                let list = self.as_obj(&values[0])?;
+                frozen_guard(&list)?;
+                let additional = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                match &mut list.borrow_mut().kind {
+                    OKind::List(items) => items.reserve(additional),
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                }
+                Ok(OV::Unit)
+            }
+            lm_abi::INTRINSIC_LIST_TRUNCATE => {
+                let list = self.as_obj(&values[0])?;
+                frozen_guard(&list)?;
+                let length = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                match &mut list.borrow_mut().kind {
+                    OKind::List(items) => items.truncate(length),
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                }
+                Ok(OV::Unit)
+            }
+            lm_abi::INTRINSIC_LIST_CONTAINS => {
+                let list = self.as_obj(&values[0])?;
+                let found = match &list.borrow().kind {
+                    OKind::List(items) => items.iter().any(|item| self.value_eq(item, &values[1])),
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                };
+                Ok(OV::Bool(found))
+            }
+            lm_abi::INTRINSIC_MAP_LEN | lm_abi::INTRINSIC_MAP_EPOCH => {
+                let map = self.as_obj(&values[0])?;
+                let value = match &map.borrow().kind {
+                    OKind::Map(entries) if intrinsic == lm_abi::INTRINSIC_MAP_LEN => entries.len(),
+                    OKind::Map(_) => 0,
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                };
+                Ok(OV::Int(value as i64))
+            }
+            lm_abi::INTRINSIC_MAP_HAS | lm_abi::INTRINSIC_MAP_AT | lm_abi::INTRINSIC_MAP_GET => {
+                let map = self.as_obj(&values[0])?;
+                let found = match &map.borrow().kind {
+                    OKind::Map(entries) => entries
+                        .iter()
+                        .find(|(key, _)| self.key_eq(key, &values[1]))
+                        .map(|(_, value)| value.clone()),
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                };
+                match intrinsic {
+                    lm_abi::INTRINSIC_MAP_HAS => Ok(OV::Bool(found.is_some())),
+                    lm_abi::INTRINSIC_MAP_AT => found.ok_or(Stop::Fault("MissingKey")),
+                    _ => Ok(self.option_value(found)),
+                }
+            }
+            lm_abi::INTRINSIC_MAP_PUT => {
+                let map = self.as_obj(&values[0])?;
+                frozen_guard(&map)?;
+                let previous = match &mut map.borrow_mut().kind {
+                    OKind::Map(entries) => {
+                        match entries
+                            .iter_mut()
+                            .find(|(key, _)| self.key_eq(key, &values[1]))
+                        {
+                            Some(entry) => Some(std::mem::replace(&mut entry.1, values[2].clone())),
+                            None => {
+                                entries.push((values[1].clone(), values[2].clone()));
+                                None
+                            }
+                        }
+                    }
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                };
+                Ok(self.option_value(previous))
+            }
+            lm_abi::INTRINSIC_MAP_ITER_LEN => {
+                let map = self.as_obj(&values[0])?;
+                let length = match &map.borrow().kind {
+                    OKind::Map(entries) => entries.len(),
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                };
+                Ok(OV::Int(length as i64))
+            }
+            lm_abi::INTRINSIC_MAP_KEY_AT | lm_abi::INTRINSIC_MAP_VALUE_AT => {
+                let map = self.as_obj(&values[0])?;
+                let index = self.as_int(&values[1])?;
+                let value = match &map.borrow().kind {
+                    OKind::Map(entries) if index >= 0 => entries.get(index as usize).map(|entry| {
+                        if intrinsic == lm_abi::INTRINSIC_MAP_KEY_AT {
+                            entry.0.clone()
+                        } else {
+                            entry.1.clone()
+                        }
+                    }),
+                    OKind::Map(_) => None,
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                };
+                value.ok_or(Stop::Fault("IndexOutOfBounds"))
+            }
+            lm_abi::INTRINSIC_MAP_REMOVE => {
+                let map = self.as_obj(&values[0])?;
+                frozen_guard(&map)?;
+                let value = match &mut map.borrow_mut().kind {
+                    OKind::Map(entries) => entries
+                        .iter()
+                        .position(|(key, _)| self.key_eq(key, &values[1]))
+                        .map(|index| entries.remove(index).1),
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                };
+                Ok(self.option_value(value))
+            }
+            lm_abi::INTRINSIC_MAP_CLEAR => {
+                let map = self.as_obj(&values[0])?;
+                frozen_guard(&map)?;
+                match &mut map.borrow_mut().kind {
+                    OKind::Map(entries) => entries.clear(),
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                }
+                Ok(OV::Unit)
+            }
+            lm_abi::INTRINSIC_MAP_RESERVE => {
+                let map = self.as_obj(&values[0])?;
+                frozen_guard(&map)?;
+                let additional = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                match &mut map.borrow_mut().kind {
+                    OKind::Map(entries) => entries.reserve(additional),
+                    _ => return Err(Stop::Limit("map op on a non-map")),
+                }
+                Ok(OV::Unit)
+            }
             _ => Err(Stop::Limit("unknown intrinsic")),
         }
     }
@@ -1499,16 +1919,19 @@ impl<'m> Oracle<'m> {
             NativeOp::MapPut => {
                 let obj = self.as_obj(&values[0])?;
                 frozen_guard(&obj)?;
-                match &mut obj.borrow_mut().kind {
+                let previous = match &mut obj.borrow_mut().kind {
                     OKind::Map(entries) => {
                         match entries.iter_mut().find(|(k, _)| self.key_eq(k, &values[1])) {
-                            Some(entry) => entry.1 = values[2].clone(),
-                            None => entries.push((values[1].clone(), values[2].clone())),
+                            Some(entry) => Some(std::mem::replace(&mut entry.1, values[2].clone())),
+                            None => {
+                                entries.push((values[1].clone(), values[2].clone()));
+                                None
+                            }
                         }
                     }
                     _ => return Err(Stop::Limit("map op on a non-map")),
-                }
-                Ok(OV::Unit)
+                };
+                Ok(self.option_value(previous))
             }
             NativeOp::BytesNew => match &values[0] {
                 OV::Str(text) => Ok(self.alloc(OKind::Bytes(text.as_bytes().to_vec()))),

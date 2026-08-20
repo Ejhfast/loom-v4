@@ -288,7 +288,7 @@ fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
     loop {
         match world.run_machine(root) {
             lm_vm::RootEvent::Done(value) => {
-                println!("Done({})", world.show_value_of(root, value));
+                println!("Done({})", world.show_result_of(root, value));
                 return Ok(ExitCode::SUCCESS);
             }
             lm_vm::RootEvent::Fault(rec) => {

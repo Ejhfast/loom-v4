@@ -22,6 +22,27 @@ fn a_small_expression_body_inlines() {
 }
 
 #[test]
+fn a_small_generic_body_inlines() {
+    let source = "def id[T](value: T): T\n  value\nend\nid(42)\n";
+    let module = compile_text("inline_generic.lm", source).expect("the program compiles");
+    let target = module
+        .funcs
+        .iter()
+        .position(|func| func.name == "id")
+        .expect("id exists") as u32;
+    let entry = &module.funcs[module.entry as usize];
+    assert!(entry
+        .blocks
+        .iter()
+        .flatten()
+        .all(|instruction| !matches!(instruction, Instr::CallG { func, .. } if *func == target)));
+    assert_eq!(
+        run_text("inline_generic.lm", source, VmConfig::default()).unwrap(),
+        "Done(42)"
+    );
+}
+
+#[test]
 fn a_repeated_parameter_prevents_inlining() {
     let source = "def twice(n: Int): Int\n  n + n\nend\ntwice(21)\n";
     let module = compile_text("inline.lm", source).expect("the program compiles");

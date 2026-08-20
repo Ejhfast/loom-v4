@@ -63,6 +63,8 @@ pub enum ClosedType {
     /// A function value type: parameters, `mut` markers, result, and
     /// one closed effect row.
     Fn(Vec<ClosedTypeId>, Vec<bool>, ClosedTypeId, ClosedRow),
+    /// A function value that cannot escape the active call chain.
+    Callback(Vec<ClosedTypeId>, Vec<bool>, ClosedTypeId, ClosedRow),
     Vm(ClosedTypeId),
     Wait(ClosedTypeId),
     PendingCall(ClosedTypeId, ClosedTypeId),
@@ -84,7 +86,9 @@ impl ClosedType {
             | ClosedType::Snapshot(_)
             | ClosedType::Op(_, _) => 1,
             ClosedType::Map(_, _) | ClosedType::PendingCall(_, _) | ClosedType::Handle(_, _) => 2,
-            ClosedType::Fn(params, _, _, _) => params.len() + 1,
+            ClosedType::Fn(params, _, _, _) | ClosedType::Callback(params, _, _, _) => {
+                params.len() + 1
+            }
             _ => 0,
         }
     }
@@ -102,7 +106,7 @@ impl ClosedType {
             ClosedType::Map(a, b) | ClosedType::PendingCall(a, b) | ClosedType::Handle(a, b) => {
                 vec![*a, *b]
             }
-            ClosedType::Fn(params, _, ret, _) => {
+            ClosedType::Fn(params, _, ret, _) | ClosedType::Callback(params, _, ret, _) => {
                 let mut out = params.clone();
                 out.push(*ret);
                 out
@@ -130,6 +134,12 @@ impl ClosedType {
             ClosedType::PendingCall(a, b) => ClosedType::PendingCall(map(*a), map(*b)),
             ClosedType::Handle(a, b) => ClosedType::Handle(map(*a), map(*b)),
             ClosedType::Fn(params, muts, ret, row) => ClosedType::Fn(
+                params.iter().map(|p| map(*p)).collect(),
+                muts.clone(),
+                map(*ret),
+                row.clone(),
+            ),
+            ClosedType::Callback(params, muts, ret, row) => ClosedType::Callback(
                 params.iter().map(|p| map(*p)).collect(),
                 muts.clone(),
                 map(*ret),
@@ -180,6 +190,7 @@ pub struct TypeImportPlan {
     envs: Vec<TypeEnv>,
     env_index: HashMap<TypeEnv, TypeEnvId>,
     env_map: Vec<TypeEnvId>,
+    type_map: Vec<ClosedTypeId>,
 }
 
 /// Runtime derivations rooted at one dense type environment.
@@ -195,6 +206,11 @@ impl TypeImportPlan {
     /// The destination identifier of each source environment.
     pub fn env_map(&self) -> &[TypeEnvId] {
         &self.env_map
+    }
+
+    /// The destination identifier of each source closed type.
+    pub fn type_map(&self) -> &[ClosedTypeId] {
+        &self.type_map
     }
 }
 
@@ -235,6 +251,8 @@ pub struct TypeEnvs {
     cache_entries: u32,
     /// One closed type per `(module type, environment)`.
     closed: HashMap<(u32, TypeEnvId), ClosedTypeId>,
+    /// The last closed pair and its result.
+    last_closed: Option<(u32, TypeEnvId, ClosedTypeId)>,
     /// The content digest of each closed type node, filled on demand.
     digests: Vec<Option<[u8; 32]>>,
     /// The nesting depth of each closed type node.
@@ -253,6 +271,11 @@ impl Default for TypeEnvs {
 }
 
 impl TypeEnvs {
+    /// Read one cached closed-type digest.
+    pub fn cached_digest(&self, id: ClosedTypeId) -> Option<[u8; 32]> {
+        self.digests.get(id as usize).copied().flatten()
+    }
+
     /// One empty table with an exact node cap.
     ///
     /// Environment zero is the empty environment, so a monomorphic
@@ -266,6 +289,7 @@ impl TypeEnvs {
             env_cache: Vec::new(),
             cache_entries: 0,
             closed: HashMap::new(),
+            last_closed: None,
             digests: Vec::new(),
             depths: Vec::new(),
             max_types,
@@ -480,6 +504,7 @@ impl TypeEnvs {
             type_index: planned_types,
             env_index: planned_envs,
             env_map,
+            type_map,
         })
     }
 
@@ -568,8 +593,14 @@ impl TypeEnvs {
         ty: u32,
         env: TypeEnvId,
     ) -> Result<ClosedTypeId, TypeEnvFull> {
-        if let Some(id) = self.closed.get(&(ty, env)) {
-            return Ok(*id);
+        if let Some((cached_ty, cached_env, id)) = self.last_closed {
+            if cached_ty == ty && cached_env == env {
+                return Ok(id);
+            }
+        }
+        if let Some(id) = self.closed.get(&(ty, env)).copied() {
+            self.last_closed = Some((ty, env, id));
+            return Ok(id);
         }
         // Each entry pairs one module type with the flag that says
         // whether its children already sit on the stack.
@@ -599,10 +630,12 @@ impl TypeEnvs {
             let closed = self.close_flat(module, &node, env)?;
             self.closed.insert((cur, env), closed);
         }
-        match self.closed.get(&(ty, env)) {
-            Some(id) => Ok(*id),
-            None => self.intern(ClosedType::Unit),
-        }
+        let id = match self.closed.get(&(ty, env)).copied() {
+            Some(id) => id,
+            None => self.intern(ClosedType::Unit)?,
+        };
+        self.last_closed = Some((ty, env, id));
+        Ok(id)
     }
 
     /// Close one module type node whose children already closed.
@@ -649,6 +682,50 @@ impl TypeEnvs {
                     None => self.intern(ClosedType::Unit),
                 };
             }
+            BcType::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                let base = child(self, *base);
+                let Some((mut class, mut args)) = self.closed_instance(module, base) else {
+                    return self.intern(ClosedType::Unit);
+                };
+                let mut steps = 0usize;
+                loop {
+                    if let Some(conformance) = module.conformances.iter().find(|item| {
+                        item.class == class && item.application.interface == *interface
+                    }) {
+                        let Some(template) = conformance.associated.get(*assoc as usize) else {
+                            return self.intern(ClosedType::Unit);
+                        };
+                        let owner = self.env_of(args, Vec::new())?;
+                        return self.close(module, *template, owner);
+                    }
+                    steps += 1;
+                    if steps > module.classes.len() {
+                        return self.intern(ClosedType::Unit);
+                    }
+                    let Some(entry) = module.classes.get(class as usize) else {
+                        return self.intern(ClosedType::Unit);
+                    };
+                    if entry.parent == NO_PARENT {
+                        return self.intern(ClosedType::Unit);
+                    }
+                    let parent = entry.parent;
+                    if !entry.parent_args.is_empty() {
+                        let owner = self.env_of(args, Vec::new())?;
+                        let mut parent_args = Vec::with_capacity(entry.parent_args.len());
+                        for template in &entry.parent_args {
+                            parent_args.push(self.close(module, *template, owner)?);
+                        }
+                        args = parent_args;
+                    } else if module.classes[parent as usize].type_params == 0 {
+                        args.clear();
+                    }
+                    class = parent;
+                }
+            }
             BcType::Inst(c, args) => {
                 ClosedType::Inst(*c, args.iter().map(|a| child(self, *a)).collect())
             }
@@ -658,6 +735,12 @@ impl TypeEnvs {
                 ClosedType::Tuple(elems.iter().map(|e| child(self, *e)).collect())
             }
             BcType::Fn(params, muts, ret, row) => ClosedType::Fn(
+                params.iter().map(|p| child(self, *p)).collect(),
+                muts.clone(),
+                child(self, *ret),
+                self.close_row(module, row, env),
+            ),
+            BcType::Callback(params, muts, ret, row) => ClosedType::Callback(
                 params.iter().map(|p| child(self, *p)).collect(),
                 muts.clone(),
                 child(self, *ret),
@@ -809,6 +892,104 @@ impl TypeEnvs {
         Ok(composed)
     }
 
+    /// Build the environment of one interface-selected class method.
+    ///
+    /// The instruction supplies the static receiver type. This type
+    /// carries generic arguments even when the value representation does not.
+    pub fn interface_method_env(
+        &mut self,
+        module: &Module,
+        callee: u32,
+        runtime_class: u32,
+        receiver: ClosedTypeId,
+    ) -> Result<Option<TypeEnvId>, TypeEnvFull> {
+        let Some(body) = module.funcs.get(callee as usize) else {
+            return Ok(None);
+        };
+        if body.type_params == 0 {
+            return Ok(Some(TypeEnvId::EMPTY));
+        }
+        let role = |index: usize| {
+            module
+                .core_roles
+                .get(index)
+                .copied()
+                .filter(|class| *class != crate::NO_ROLE)
+        };
+        let (class, args) = match self.ty(receiver).cloned() {
+            Some(ClosedType::Class(class)) => (class, Vec::new()),
+            Some(ClosedType::Inst(class, args)) => (class, args),
+            Some(ClosedType::Int) => match role(crate::corepin::ROLE_INT) {
+                Some(class) => (class, Vec::new()),
+                None => return Ok(None),
+            },
+            Some(ClosedType::Bool) => match role(crate::corepin::ROLE_BOOL) {
+                Some(class) => (class, Vec::new()),
+                None => return Ok(None),
+            },
+            Some(ClosedType::Str) => match role(crate::corepin::ROLE_STRING) {
+                Some(class) => (class, Vec::new()),
+                None => return Ok(None),
+            },
+            Some(ClosedType::Bytes) => match role(crate::corepin::ROLE_BYTES) {
+                Some(class) => (class, Vec::new()),
+                None => return Ok(None),
+            },
+            Some(ClosedType::List(element)) => match role(crate::corepin::ROLE_LIST) {
+                Some(class) => (class, vec![element]),
+                None => return Ok(None),
+            },
+            Some(ClosedType::Map(key, value)) => match role(crate::corepin::ROLE_MAP) {
+                Some(class) => (class, vec![key, value]),
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        if class != runtime_class {
+            return Ok(None);
+        }
+        let owner = match body
+            .params
+            .first()
+            .and_then(|item| module.types.get(*item as usize))
+        {
+            Some(BcType::Class(owner) | BcType::Inst(owner, _)) => *owner,
+            Some(BcType::Int) => match role(crate::corepin::ROLE_INT) {
+                Some(owner) => owner,
+                None => return Ok(None),
+            },
+            Some(BcType::Bool) => match role(crate::corepin::ROLE_BOOL) {
+                Some(owner) => owner,
+                None => return Ok(None),
+            },
+            Some(BcType::Str) => match role(crate::corepin::ROLE_STRING) {
+                Some(owner) => owner,
+                None => return Ok(None),
+            },
+            Some(BcType::Bytes) => match role(crate::corepin::ROLE_BYTES) {
+                Some(owner) => owner,
+                None => return Ok(None),
+            },
+            Some(BcType::List(_)) => match role(crate::corepin::ROLE_LIST) {
+                Some(owner) => owner,
+                None => return Ok(None),
+            },
+            Some(BcType::Map(_, _)) => match role(crate::corepin::ROLE_MAP) {
+                Some(owner) => owner,
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let types = match self.ancestor_args(module, class, &args, owner) {
+            Some(types) => types,
+            None => return Ok(None),
+        };
+        if types.len() != body.type_params as usize {
+            return Ok(None);
+        }
+        self.env_of(types, Vec::new()).map(Some)
+    }
+
     /// Build one environment from an explicit closed argument list.
     pub fn env_of(
         &mut self,
@@ -823,6 +1004,34 @@ impl TypeEnvs {
         match self.ty(ty)? {
             ClosedType::Class(c) => Some((*c, Vec::new())),
             ClosedType::Inst(c, args) => Some((*c, args.clone())),
+            _ => None,
+        }
+    }
+
+    /// Return the nominal class and arguments of one closed value type.
+    fn closed_instance(
+        &self,
+        module: &Module,
+        ty: ClosedTypeId,
+    ) -> Option<(u32, Vec<ClosedTypeId>)> {
+        let role = |index: usize| {
+            module
+                .core_roles
+                .get(index)
+                .copied()
+                .filter(|class| *class != crate::NO_ROLE)
+        };
+        match self.ty(ty)? {
+            ClosedType::Class(class) => Some((*class, Vec::new())),
+            ClosedType::Inst(class, args) => Some((*class, args.clone())),
+            ClosedType::Int => Some((role(crate::corepin::ROLE_INT)?, Vec::new())),
+            ClosedType::Bool => Some((role(crate::corepin::ROLE_BOOL)?, Vec::new())),
+            ClosedType::Str => Some((role(crate::corepin::ROLE_STRING)?, Vec::new())),
+            ClosedType::Bytes => Some((role(crate::corepin::ROLE_BYTES)?, Vec::new())),
+            ClosedType::List(element) => Some((role(crate::corepin::ROLE_LIST)?, vec![*element])),
+            ClosedType::Map(key, value) => {
+                Some((role(crate::corepin::ROLE_MAP)?, vec![*key, *value]))
+            }
             _ => None,
         }
     }
@@ -858,11 +1067,10 @@ impl TypeEnvs {
             }
             let parent = entry.parent;
             if !entry.parent_args.is_empty() {
-                // A declared generic parent records closed arguments,
-                // so the walk closes them under the empty environment.
+                let env = self.env_of(cur_args.clone(), Vec::new()).ok()?;
                 let mut out = Vec::with_capacity(entry.parent_args.len());
                 for arg in entry.parent_args.clone() {
-                    out.push(self.close(module, arg, TypeEnvId::EMPTY).ok()?);
+                    out.push(self.close(module, arg, env).ok()?);
                 }
                 cur_args = out;
             } else if module.classes.get(parent as usize)?.type_params == 0 {
@@ -982,6 +1190,24 @@ impl TypeEnvs {
                     out.extend_from_slice(name.as_bytes());
                 }
             }
+            ClosedType::Callback(params, muts, ret, row) => {
+                out.extend_from_slice(&(params.len() as u32).to_le_bytes());
+                for (param, mutable) in params.iter().zip(muts.iter()) {
+                    out.push(u8::from(*mutable));
+                    child(self, &mut out, *param);
+                }
+                child(self, &mut out, *ret);
+                out.extend_from_slice(&(row.len() as u32).to_le_bytes());
+                for slot in row {
+                    let name = module
+                        .strings
+                        .get(*slot as usize)
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                    out.extend_from_slice(name.as_bytes());
+                }
+            }
             ClosedType::Op(op, f) => {
                 out.extend_from_slice(&lm_abi::op_identity(*op));
                 child(self, &mut out, *f);
@@ -997,6 +1223,7 @@ pub fn bc_children(node: &BcType, out: &mut Vec<u32>) {
     match node {
         BcType::Inst(_, args) | BcType::Tuple(args) => out.extend(args),
         BcType::List(e)
+        | BcType::Projection { base: e, .. }
         | BcType::Vm(e)
         | BcType::Wait(e)
         | BcType::Snapshot(e)
@@ -1005,7 +1232,7 @@ pub fn bc_children(node: &BcType, out: &mut Vec<u32>) {
             out.push(*a);
             out.push(*b);
         }
-        BcType::Fn(params, _, ret, _) => {
+        BcType::Fn(params, _, ret, _) | BcType::Callback(params, _, ret, _) => {
             out.extend(params);
             out.push(*ret);
         }
@@ -1049,6 +1276,7 @@ pub fn tag_of(node: &ClosedType) -> u8 {
         ClosedType::FileHandle => 24,
         ClosedType::ResourceHandle => 25,
         ClosedType::Wait(_) => 26,
+        ClosedType::Callback(_, _, _, _) => 27,
     }
 }
 
@@ -1091,6 +1319,10 @@ mod tests {
                 types: vec![1],
                 rows: vec![],
             }],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![]],
+            func_bounds: vec![vec![]],
             imports: vec![],
             core_roles: [crate::NO_ROLE; crate::CORE_ROLE_COUNT],
             classes: vec![BcClass {

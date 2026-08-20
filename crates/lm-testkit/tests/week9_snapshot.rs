@@ -36,7 +36,9 @@ fn drive(world: &mut World<'_>) -> Outcome {
 fn run_restored(world: &mut World<'_>, root: VmId) -> String {
     loop {
         match world.run_machine(root) {
-            RootEvent::Done(value) => return format!("Done({})", world.show_value_of(root, value)),
+            RootEvent::Done(value) => {
+                return format!("Done({})", world.show_result_of(root, value));
+            }
             RootEvent::Fault(rec) => return format!("Fault({})", rec.code),
             RootEvent::Asked(_) => return "Asked".to_string(),
             RootEvent::Blocked => {

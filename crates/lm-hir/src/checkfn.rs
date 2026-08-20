@@ -10,8 +10,8 @@
 //! diagnostic.
 
 use crate::check::{
-    camel_member, check_key_type, resolve_row, resolve_type, snake_member, sys_group_name, Ctx,
-    FnSig, MethodSig, TyEnv, UseBinding,
+    camel_member, check_key_type, resolve_param_type, resolve_row, resolve_type, snake_member,
+    sys_group_name, Ctx, FnSig, InterfaceUse, MethodSig, TyEnv, UseBinding,
 };
 use crate::exhaust::{useful, APat, PatMeta};
 use crate::hir::*;
@@ -347,7 +347,9 @@ fn unify(
                 }
             }
         }
-        (Type::Fn(dp, _, dr, drow), Type::Fn(ap, _, ar, arow)) => {
+        (Type::Fn(dp, _, dr, drow), Type::Fn(ap, _, ar, arow))
+        | (Type::Callback(dp, _, dr, drow), Type::Fn(ap, _, ar, arow))
+        | (Type::Callback(dp, _, dr, drow), Type::Callback(ap, _, ar, arow)) => {
             if dp.len() == ap.len() {
                 for (d, a) in dp.iter().zip(ap.iter()) {
                     unify(ctx, *d, *a, targs, rowargs, false);
@@ -365,6 +367,28 @@ fn unify(
         }
         _ => {}
     }
+}
+
+/// Return true when one function value fits a callback parameter.
+fn callback_accepts(ctx: &Ctx, expected: TypeId, found: TypeId) -> bool {
+    let Type::Callback(ep, em, er, erow) = ctx.store.get(expected) else {
+        return false;
+    };
+    let (fp, fm, fr, frow) = match ctx.store.get(found) {
+        Type::Fn(params, muts, ret, row) => (params, muts, ret, row),
+        _ => return false,
+    };
+    fp.len() == ep.len()
+        && fp
+            .iter()
+            .zip(ep.iter())
+            .all(|(actual, required)| ctx.store.compatible(*actual, *required))
+        && fm
+            .iter()
+            .zip(em.iter())
+            .all(|(actual, required)| !*actual || *required)
+        && ctx.store.compatible(*er, *fr)
+        && ctx.store.row_included(frow, erow)
 }
 
 impl<'o> FnChecker<'o> {
@@ -406,10 +430,13 @@ impl<'o> FnChecker<'o> {
     /// Find one user module function in a user body.
     fn module_func(&self, ctx: &Ctx, name: &str) -> Option<u32> {
         if self.env.core_scope {
-            None
-        } else {
-            ctx.func_index.get(name).copied()
+            return ctx.core_func_index.get(name).copied();
         }
+        ctx.func_index.get(name).copied().or_else(|| {
+            ctx.prelude
+                .then(|| ctx.core_func_index.get(name).copied())
+                .flatten()
+        })
     }
 
     /// Resolve a name to a local or a capture, registering transitive
@@ -550,6 +577,13 @@ impl<'o> FnChecker<'o> {
             ExprKind::TupleLit(items) => {
                 if let Type::Tuple(elems) = ctx.store.get(expected).clone() {
                     if elems.len() == items.len() {
+                        if ctx.store.contains_callback(expected) {
+                            return Err(Diagnostic::new(
+                                "E1064",
+                                "a tuple cannot store a nonescaping callback",
+                                expr.span,
+                            ));
+                        }
                         let mut checked = Vec::new();
                         for (item, elem) in items.iter().zip(elems.iter()) {
                             checked.push(self.check_expr(ctx, item, *elem)?);
@@ -566,6 +600,13 @@ impl<'o> FnChecker<'o> {
             }
             ExprKind::ListLit(items) => {
                 if let Type::List(elem) = ctx.store.get(expected) {
+                    if ctx.store.contains_callback(expected) {
+                        return Err(Diagnostic::new(
+                            "E1064",
+                            "a list cannot store a nonescaping callback",
+                            expr.span,
+                        ));
+                    }
                     let elem = *elem;
                     let mut checked = Vec::new();
                     for item in items {
@@ -582,6 +623,13 @@ impl<'o> FnChecker<'o> {
             }
             ExprKind::MapLit(entries) => {
                 if let Type::Map(k, v) = ctx.store.get(expected) {
+                    if ctx.store.contains_callback(expected) {
+                        return Err(Diagnostic::new(
+                            "E1064",
+                            "a map cannot store a nonescaping callback",
+                            expr.span,
+                        ));
+                    }
                     let (k, v) = (*k, *v);
                     let mut checked = Vec::new();
                     for (key, value) in entries {
@@ -605,7 +653,7 @@ impl<'o> FnChecker<'o> {
                 body,
             } => {
                 let expected_ret = match (ret, ctx.store.get(expected)) {
-                    (None, Type::Fn(_, _, r, _)) => Some(*r),
+                    (None, Type::Fn(_, _, r, _) | Type::Callback(_, _, r, _)) => Some(*r),
                     _ => None,
                 };
                 let found =
@@ -677,9 +725,32 @@ impl<'o> FnChecker<'o> {
         &self,
         ctx: &Ctx,
         expected: TypeId,
-        found: HExpr,
+        mut found: HExpr,
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
+        if ctx.store.contains_callback(found.ty)
+            && !matches!(ctx.store.get(expected), Type::Callback(..))
+        {
+            return Err(Diagnostic::new(
+                "E1064",
+                "a nonescaping callback cannot enter an escaping value",
+                span,
+            ));
+        }
+        if callback_accepts(ctx, expected, found.ty) {
+            found.kind = match found.kind {
+                HExprKind::MakeClosure { func, captures } => {
+                    HExprKind::MakeCallback { func, captures }
+                }
+                other => HExprKind::AsCallback(Box::new(HExpr {
+                    ty: found.ty,
+                    mutable: found.mutable,
+                    kind: other,
+                })),
+            };
+            found.ty = expected;
+            return Ok(found);
+        }
         if !ctx.store.compatible(expected, found.ty) {
             return Err(self.mismatch(ctx, expected, found.ty, span));
         }
@@ -802,6 +873,11 @@ impl<'o> FnChecker<'o> {
                 }
                 Ok(HStmt::While { cond, body })
             }
+            StmtKind::For {
+                bindings,
+                value,
+                body,
+            } => self.check_for(ctx, bindings, value, body, stmt.span),
             StmtKind::Return { value } => {
                 let ret = match self.ret {
                     RetKind::Known(t) => t,
@@ -829,6 +905,16 @@ impl<'o> FnChecker<'o> {
                         None
                     }
                 };
+                if value
+                    .as_ref()
+                    .is_some_and(|value| ctx.store.contains_callback(value.ty))
+                {
+                    return Err(Diagnostic::new(
+                        "E1064",
+                        "a function cannot return a nonescaping callback",
+                        stmt.span,
+                    ));
+                }
                 // A constructor must be complete at every return.
                 if let Some(c) = &self.ctor {
                     require_complete(ctx, c.class, c, stmt.span)?;
@@ -858,6 +944,372 @@ impl<'o> FnChecker<'o> {
             }
             StmtKind::Expr(expr) => Ok(HStmt::Expr(self.synth_expr(ctx, expr)?)),
         }
+    }
+
+    fn hidden_local(&mut self, ty: TypeId, mutable: bool) -> u32 {
+        let slot = self.locals.len() as u32;
+        self.locals.push((ty, mutable));
+        slot
+    }
+
+    fn local_expr(&self, slot: u32) -> HExpr {
+        let (ty, mutable) = self.locals[slot as usize];
+        HExpr {
+            ty,
+            mutable,
+            kind: HExprKind::Local(slot),
+        }
+    }
+
+    fn interface_associated(
+        &mut self,
+        ctx: &mut Ctx,
+        ty: TypeId,
+        interface: u32,
+        assoc: u32,
+    ) -> Option<TypeId> {
+        match ctx.store.get(ty).clone() {
+            Type::Var(index) if index >= self.env.type_offset => {
+                let bounds = self
+                    .env
+                    .type_bounds
+                    .get((index - self.env.type_offset) as usize)?;
+                bounds.iter().find(|item| item.interface == interface)?;
+                Some(
+                    ctx.store
+                        .project(ty, lm_types::InterfaceId(interface), assoc),
+                )
+            }
+            Type::Projection {
+                interface: owner,
+                assoc: owner_assoc,
+                ..
+            } => {
+                let bound = ctx.interfaces[owner.0 as usize]
+                    .associated
+                    .get(owner_assoc as usize)?
+                    .bound
+                    .as_ref()?;
+                if bound.interface != interface {
+                    return None;
+                }
+                Some(
+                    ctx.store
+                        .project(ty, lm_types::InterfaceId(interface), assoc),
+                )
+            }
+            _ => ctx
+                .store
+                .resolve_conformance(ty, lm_types::InterfaceId(interface))
+                .and_then(|items| items.get(assoc as usize).copied()),
+        }
+    }
+
+    fn call_zero_method(
+        &mut self,
+        ctx: &mut Ctx,
+        recv: HExpr,
+        name: &str,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if let Some((class, class_args)) = class_of(ctx, recv.ty) {
+            let found = ctx.find_method_owner(class, name).ok_or_else(|| {
+                Diagnostic::new(
+                    "E1026",
+                    format!(
+                        "the class `{}` has no method named `{name}`",
+                        ctx.classes[class as usize].name
+                    ),
+                    span,
+                )
+            })?;
+            return self.check_declared_method(
+                ctx,
+                recv,
+                class,
+                class_args,
+                found,
+                name,
+                span,
+                &[],
+                &[],
+                None,
+                span,
+            );
+        }
+        let Some((interface, method, requirement)) =
+            ctx.bound_method(&self.env, recv.ty, name, span)?
+        else {
+            return Err(Diagnostic::new(
+                "E1053",
+                format!(
+                    "the type {} has no interface method named `{name}`",
+                    ctx.store.display(recv.ty)
+                ),
+                span,
+            ));
+        };
+        if requirement.mut_self && !recv.mutable {
+            return Err(Diagnostic::new(
+                "E1035",
+                format!("the method `{name}` needs a mutable receiver"),
+                span,
+            ));
+        }
+        if !requirement.params.is_empty() {
+            return Err(Diagnostic::new(
+                "E1053",
+                format!("the interface method `{name}` must take no arguments"),
+                span,
+            ));
+        }
+        self.charge_row(ctx, &requirement.row, span)?;
+        Ok(HExpr {
+            ty: requirement.ret,
+            mutable: true,
+            kind: HExprKind::InterfaceCall {
+                recv: Box::new(recv),
+                interface,
+                method,
+                selector: name.to_string(),
+                args: Vec::new(),
+            },
+        })
+    }
+
+    fn for_bindings(
+        &mut self,
+        bindings: &[(String, Span)],
+        types: &[TypeId],
+        mutable: bool,
+    ) -> Result<(Vec<u32>, HashMap<String, u32>), Diagnostic> {
+        if bindings.len() != types.len() {
+            let found = bindings.len();
+            let expected = types.len();
+            return Err(Diagnostic::new(
+                "E1054",
+                format!("this loop needs {expected} binding(s), found {found}"),
+                bindings
+                    .first()
+                    .map(|item| item.1)
+                    .unwrap_or(Span::new(0, 0)),
+            ));
+        }
+        let mut slots = Vec::with_capacity(bindings.len());
+        let mut scope = HashMap::new();
+        for ((name, span), ty) in bindings.iter().zip(types) {
+            if scope.contains_key(name) {
+                return Err(Diagnostic::new(
+                    "E1010",
+                    format!("the loop binding `{name}` occurs more than once"),
+                    *span,
+                ));
+            }
+            let slot = self.hidden_local(*ty, mutable);
+            scope.insert(name.clone(), slot);
+            slots.push(slot);
+        }
+        Ok((slots, scope))
+    }
+
+    fn check_for(
+        &mut self,
+        ctx: &mut Ctx,
+        bindings: &[(String, Span)],
+        value: &ast::Expr,
+        body: &[ast::Stmt],
+        span: Span,
+    ) -> Result<HStmt, Diagnostic> {
+        let before = self.ctor.as_ref().map(|item| item.state.clone());
+        let source = self.synth_expr(ctx, value)?;
+        let source_ty = source.ty;
+        let source_mut = source.mutable;
+
+        let (kind, binding_types, binding_mut) = match ctx.store.get(source_ty).clone() {
+            Type::List(element) => {
+                let source_slot = self.hidden_local(source_ty, source_mut);
+                let index_slot = self.hidden_local(INT, true);
+                let epoch_slot = self.hidden_local(INT, true);
+                (
+                    HForKind::List {
+                        source_slot,
+                        index_slot,
+                        epoch_slot,
+                        element,
+                    },
+                    vec![element],
+                    source_mut,
+                )
+            }
+            Type::Map(key, map_value) => {
+                let source_slot = self.hidden_local(source_ty, source_mut);
+                let index_slot = self.hidden_local(INT, true);
+                let epoch_slot = self.hidden_local(INT, true);
+                let pair = ctx.store.intern(Type::Tuple(vec![key, map_value]));
+                let binding_types = match bindings.len() {
+                    1 => vec![pair],
+                    2 => vec![key, map_value],
+                    _ => vec![pair],
+                };
+                (
+                    HForKind::Map {
+                        source_slot,
+                        index_slot,
+                        epoch_slot,
+                        key,
+                        value: map_value,
+                        pair,
+                    },
+                    binding_types,
+                    source_mut,
+                )
+            }
+            _ => {
+                let nominal = class_of(ctx, source_ty).map(|item| item.0);
+                let text = ctx.core_types.get("Text").copied();
+                let is_text = nominal.zip(text).is_some_and(|(class, text)| {
+                    ctx.store.class_extends(ClassId(class), ClassId(text))
+                });
+                let range = ctx.core_types.get("Range").copied();
+                if is_text {
+                    let item = ctx.classes[ctx.core_types["Char"] as usize].self_ty;
+                    let source_slot = self.hidden_local(source_ty, source_mut);
+                    let cursor_slot = self.hidden_local(INT, true);
+                    (
+                        HForKind::Text {
+                            source_slot,
+                            cursor_slot,
+                            item,
+                        },
+                        vec![item],
+                        true,
+                    )
+                } else if nominal == range {
+                    let source_slot = self.hidden_local(source_ty, source_mut);
+                    let cursor_slot = self.hidden_local(INT, true);
+                    let stop_slot = self.hidden_local(INT, true);
+                    (
+                        HForKind::Range {
+                            source_slot,
+                            cursor_slot,
+                            stop_slot,
+                        },
+                        vec![INT],
+                        true,
+                    )
+                } else {
+                    let iterable = ctx.core_interfaces["Iterable"];
+                    let item_index = ctx.interfaces[iterable as usize]
+                        .associated
+                        .iter()
+                        .position(|item| item.name == "Item")
+                        .expect("the core Iterable interface declares Item")
+                        as u32;
+                    let expected_item = self
+                        .interface_associated(ctx, source_ty, iterable, item_index)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                "E1053",
+                                format!(
+                                    "the type {} does not conform to Iterable",
+                                    ctx.store.display(source_ty)
+                                ),
+                                value.span,
+                            )
+                        })?;
+                    let source_slot = self.hidden_local(source_ty, source_mut);
+                    let iterator =
+                        self.call_zero_method(ctx, self.local_expr(source_slot), "iterator", span)?;
+                    let iterator_slot = self.hidden_local(iterator.ty, true);
+                    let next =
+                        self.call_zero_method(ctx, self.local_expr(iterator_slot), "next", span)?;
+                    let Some((option, args)) = ctx.store.nominal_class(next.ty) else {
+                        return Err(Diagnostic::new(
+                            "E1053",
+                            "Iterator.next must return Option[Item]",
+                            span,
+                        ));
+                    };
+                    if option.0 != ctx.core.option_class || args.len() != 1 {
+                        return Err(Diagnostic::new(
+                            "E1053",
+                            "Iterator.next must return Option[Item]",
+                            span,
+                        ));
+                    }
+                    let item = args[0];
+                    let item_matches = ctx.store.compatible(item, expected_item)
+                        && ctx.store.compatible(expected_item, item);
+                    if !(ctx.store.contains_var(source_ty) || item_matches) {
+                        return Err(Diagnostic::new(
+                            "E1053",
+                            "Iterable.Item must equal Iterable.Iter.Item",
+                            span,
+                        ));
+                    }
+                    let some_ty = ctx.store.substitute(
+                        ctx.classes[ctx.core.some_class as usize].self_ty,
+                        &[item],
+                        &[],
+                    );
+                    let option_slot = self.hidden_local(next.ty, true);
+                    let (binding_types, item_slot) = if bindings.len() == 2 {
+                        let Type::Tuple(items) = ctx.store.get(item).clone() else {
+                            return Err(Diagnostic::new(
+                                "E1054",
+                                "two loop bindings need a two-element item tuple",
+                                span,
+                            ));
+                        };
+                        if items.len() != 2 {
+                            return Err(Diagnostic::new(
+                                "E1054",
+                                "two loop bindings need a two-element item tuple",
+                                span,
+                            ));
+                        }
+                        let item_slot = self.hidden_local(item, true);
+                        (items, Some(item_slot))
+                    } else {
+                        (vec![item], None)
+                    };
+                    (
+                        HForKind::Generic {
+                            source_slot,
+                            iterator_slot,
+                            option_slot,
+                            item_slot,
+                            iterator,
+                            next: Box::new(next),
+                            some_ty,
+                            item,
+                        },
+                        binding_types,
+                        true,
+                    )
+                }
+            }
+        };
+
+        self.ctor_guard_loop(&before, span)?;
+        let snapshot = self.ctor.as_ref().map(|item| item.state.clone());
+        let (bindings, scope) = self.for_bindings(bindings, &binding_types, binding_mut)?;
+        self.scopes.push(scope);
+        self.loop_depth += 1;
+        let result = self.check_block(ctx, body, BlockMode::Stmt, span);
+        self.loop_depth -= 1;
+        self.scopes.pop();
+        let (body, _, _) = result?;
+        self.ctor_guard_loop(&snapshot, span)?;
+        if let (Some(ctor), Some(snapshot)) = (self.ctor.as_mut(), snapshot) {
+            ctor.state = snapshot;
+        }
+        Ok(HStmt::For {
+            source,
+            bindings,
+            kind,
+            body,
+        })
     }
 
     /// Reject a `super.init` call inside a loop condition or body.
@@ -892,6 +1344,13 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 let expected = self.locals[slot as usize].0;
+                if ctx.store.contains_callback(expected) {
+                    return Err(Diagnostic::new(
+                        "E1064",
+                        "a nonescaping callback cannot be rebound",
+                        name_span,
+                    ));
+                }
                 let value = self.check_expr(ctx, value, expected)?;
                 if was_mutable && !value.mutable && ctx.store.is_heap(expected) {
                     return Err(Diagnostic::new(
@@ -930,9 +1389,23 @@ impl<'o> FnChecker<'o> {
                     None => {
                         let value = self.synth_expr(ctx, value)?;
                         let ty = value.ty;
+                        if ctx.store.contains_callback(ty) {
+                            return Err(Diagnostic::new(
+                                "E1064",
+                                "a nonescaping callback cannot be stored in a local",
+                                name_span,
+                            ));
+                        }
                         (value, ty)
                     }
                 };
+                if ctx.store.contains_callback(local_ty) {
+                    return Err(Diagnostic::new(
+                        "E1064",
+                        "a nonescaping callback cannot be stored in a local",
+                        name_span,
+                    ));
+                }
                 let slot = self.locals.len() as u32;
                 self.locals.push((local_ty, value.mutable));
                 self.scopes
@@ -961,6 +1434,13 @@ impl<'o> FnChecker<'o> {
                 .ok_or_else(|| unknown_field(ctx, cidx, field, field_span))?;
             let field_ty = ctx.classes[cidx as usize].field_tys[fidx];
             let value = self.check_expr(ctx, value, field_ty)?;
+            if ctx.store.contains_callback(value.ty) {
+                return Err(Diagnostic::new(
+                    "E1064",
+                    "a field cannot store a nonescaping callback",
+                    field_span,
+                ));
+            }
             let c = self.ctor.as_mut().expect("ctor");
             c.state.inited[fidx] = true;
             let self_expr = self.self_value();
@@ -991,6 +1471,13 @@ impl<'o> FnChecker<'o> {
         let declared = ctx.classes[class as usize].field_tys[fidx];
         let field_ty = ctx.store.substitute(declared, &class_args, &[]);
         let value = self.check_expr(ctx, value, field_ty)?;
+        if ctx.store.contains_callback(value.ty) {
+            return Err(Diagnostic::new(
+                "E1064",
+                "a field cannot store a nonescaping callback",
+                field_span,
+            ));
+        }
         Ok(HStmt::AssignField {
             recv: recv_h,
             field: fidx as u32,
@@ -1036,6 +1523,14 @@ impl<'o> FnChecker<'o> {
             ExprKind::SelfRef => self.synth_self(ctx, expr.span),
             ExprKind::Name(name) => {
                 if let Some(res) = self.resolve_name(name)? {
+                    if matches!(res, NameRes::Capture(_, ty, _) if ctx.store.contains_callback(ty))
+                    {
+                        return Err(Diagnostic::new(
+                            "E1064",
+                            "a closure cannot capture a nonescaping callback",
+                            expr.span,
+                        ));
+                    }
                     return Ok(match res {
                         NameRes::Local(slot, ty, mutable) => HExpr {
                             ty,
@@ -1213,6 +1708,13 @@ impl<'o> FnChecker<'o> {
                     checked.push(h);
                 }
                 let ty = ctx.store.intern(Type::Tuple(tys));
+                if ctx.store.contains_callback(ty) {
+                    return Err(Diagnostic::new(
+                        "E1064",
+                        "a tuple cannot store a nonescaping callback",
+                        expr.span,
+                    ));
+                }
                 Ok(HExpr {
                     ty,
                     mutable: true,
@@ -1230,6 +1732,13 @@ impl<'o> FnChecker<'o> {
                 let elems: Vec<&ast::Expr> = items.iter().collect();
                 let (checked, elem) = self.synth_join_elems(ctx, &elems)?;
                 let ty = ctx.store.intern(Type::List(elem));
+                if ctx.store.contains_callback(ty) {
+                    return Err(Diagnostic::new(
+                        "E1064",
+                        "a list cannot store a nonescaping callback",
+                        expr.span,
+                    ));
+                }
                 Ok(HExpr {
                     ty,
                     mutable: true,
@@ -1263,6 +1772,13 @@ impl<'o> FnChecker<'o> {
                 let k = key_ty.expect("the literal has entries");
                 let checked: Vec<(HExpr, HExpr)> = keys.into_iter().zip(checked_values).collect();
                 let ty = ctx.store.intern(Type::Map(k, v));
+                if ctx.store.contains_callback(ty) {
+                    return Err(Diagnostic::new(
+                        "E1064",
+                        "a map cannot store a nonescaping callback",
+                        expr.span,
+                    ));
+                }
                 Ok(HExpr {
                     ty,
                     mutable: true,
@@ -1523,6 +2039,7 @@ impl<'o> FnChecker<'o> {
         let type_names = info.type_params.clone();
         let field_tys = info.field_tys.clone();
         let field_names = info.field_names.clone();
+        let type_bounds = info.type_bounds.clone();
         let ret = info.self_ty;
         let short = info.arm_short.clone();
         let muts = vec![false; field_tys.len()];
@@ -1531,6 +2048,7 @@ impl<'o> FnChecker<'o> {
             &short,
             span,
             &type_names,
+            &type_bounds,
             0,
             vec![None; type_names.len()],
             0,
@@ -1607,6 +2125,7 @@ impl<'o> FnChecker<'o> {
                     name,
                     span,
                     &sig.type_params.clone(),
+                    &sig.type_bounds,
                     sig.effect_params.len(),
                     vec![None; sig.type_params.len()],
                     0,
@@ -1681,6 +2200,7 @@ impl<'o> FnChecker<'o> {
                 }
                 let info = &ctx.classes[class as usize];
                 let type_names = info.type_params.clone();
+                let type_bounds = info.type_bounds.clone();
                 let ret = info.self_ty;
                 let (params, muts, names, row) = match &info.init {
                     Some(init) => (
@@ -1696,6 +2216,7 @@ impl<'o> FnChecker<'o> {
                     name,
                     span,
                     &type_names,
+                    &type_bounds,
                     0,
                     vec![None; type_names.len()],
                     0,
@@ -1804,10 +2325,16 @@ impl<'o> FnChecker<'o> {
             )
         })?;
         let def = *lm_abi::intrinsic(intrinsic);
+        let vars: Vec<TypeId> = (0..self.env.type_names.len())
+            .map(|index| {
+                ctx.store
+                    .intern(Type::Var(self.env.type_offset + index as u32))
+            })
+            .collect();
         let params: Vec<TypeId> = def
             .params
             .iter()
-            .map(|param| Self::abi_type_id(ctx, *param))
+            .map(|param| Self::abi_type_id_with_vars(ctx, *param, &vars))
             .collect();
         let checked = self.check_args_simple(
             ctx,
@@ -1819,7 +2346,7 @@ impl<'o> FnChecker<'o> {
             span,
         )?;
         Ok(HExpr {
-            ty: Self::abi_type_id(ctx, def.reply),
+            ty: Self::abi_type_id_with_vars(ctx, def.reply, &vars),
             mutable: true,
             kind: HExprKind::Intrinsic {
                 intrinsic,
@@ -1839,6 +2366,13 @@ impl<'o> FnChecker<'o> {
         span: Span,
     ) -> Result<Callee, Diagnostic> {
         if let Some(res) = self.resolve_name(name)? {
+            if matches!(res, NameRes::Capture(_, ty, _) if ctx.store.contains_callback(ty)) {
+                return Err(Diagnostic::new(
+                    "E1064",
+                    "a closure cannot capture a nonescaping callback",
+                    name_span,
+                ));
+            }
             let (ty, kind) = match res {
                 NameRes::Local(slot, ty, _) => (ty, HExprKind::Local(slot)),
                 NameRes::Capture(idx, ty, _) => (ty, HExprKind::Capture(idx)),
@@ -1958,7 +2492,9 @@ impl<'o> FnChecker<'o> {
             });
         }
         let (params, muts, ret, row) = match ctx.store.get(callee.ty) {
-            Type::Fn(params, muts, ret, row) => (params.clone(), muts.clone(), *ret, row.clone()),
+            Type::Fn(params, muts, ret, row) | Type::Callback(params, muts, ret, row) => {
+                (params.clone(), muts.clone(), *ret, row.clone())
+            }
             _ => {
                 return Err(Diagnostic::new(
                     "E1032",
@@ -2095,6 +2631,7 @@ impl<'o> FnChecker<'o> {
         what: &str,
         span: Span,
         type_names: &[String],
+        type_bounds: &[Vec<InterfaceUse>],
         effect_count: usize,
         pre_bound: Vec<Option<TypeId>>,
         own_start: usize,
@@ -2175,7 +2712,30 @@ impl<'o> FnChecker<'o> {
             }
         }
         let targs: Vec<TypeId> = targs.into_iter().map(|t| t.expect("bound")).collect();
+        if targs.iter().any(|ty| ctx.store.contains_callback(*ty)) {
+            return Err(Diagnostic::new(
+                "E1064",
+                "a type argument cannot contain a nonescaping callback",
+                span,
+            ));
+        }
         let rowargs: Vec<Row> = rowargs.into_iter().map(|r| r.unwrap_or_default()).collect();
+        for (index, bounds) in type_bounds.iter().enumerate() {
+            for bound in bounds {
+                let required = ctx.substitute_interface_use(bound, &targs, &rowargs);
+                if !ctx.type_conforms(&self.env, targs[index], &required) {
+                    return Err(Diagnostic::new(
+                        "E1053",
+                        format!(
+                            "the type argument `{}` does not conform to `{}`",
+                            ctx.store.display(targs[index]),
+                            ctx.interfaces[required.interface as usize].name
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
         // Pass B: check every argument against its substituted type.
         let mut checked = Vec::with_capacity(args.len());
         for ((arg, decl), (h, is_mut)) in args
@@ -2186,12 +2746,7 @@ impl<'o> FnChecker<'o> {
         {
             let want = ctx.store.substitute(*decl, &targs, &rowargs);
             let h = match h {
-                Some(h) => {
-                    if !ctx.store.compatible(want, h.ty) {
-                        return Err(self.mismatch(ctx, want, h.ty, arg.span));
-                    }
-                    h
-                }
+                Some(h) => self.expect_compatible(ctx, want, h, arg.span)?,
                 None => self.check_expr(ctx, arg, want)?,
             };
             if *is_mut && !h.mutable {
@@ -2432,6 +2987,21 @@ impl<'o> FnChecker<'o> {
                 self.check_control_method(ctx, recv_h, name, name_span, type_args, args, span)?;
             return Ok(out.expect("control receivers resolve or fail"));
         }
+        // Text map queries accept every Text subtype.
+        // The native path keeps one lookup probe.
+        if let Type::Map(key, _) = ctx.store.get(recv_ty).clone() {
+            let query = map_query_key_type(ctx, key);
+            if query != key && matches!(name, "has" | "at" | "get") {
+                if !type_args.is_empty() {
+                    return Err(Diagnostic::new(
+                        "E1024",
+                        "a map query does not take type arguments",
+                        name_span,
+                    ));
+                }
+                return self.check_native_method(ctx, recv_h, recv_ty, name, name_span, args, span);
+            }
+        }
         // Class and enum methods first, then the universal `freeze`.
         if let Some((class, class_args)) = class_of(ctx, recv_ty) {
             if let Some(found) = ctx.find_method_owner(class, name) {
@@ -2454,6 +3024,45 @@ impl<'o> FnChecker<'o> {
                 ),
                 name_span,
             ));
+        }
+        if let Some((interface, method, requirement)) =
+            ctx.bound_method(&self.env, recv_ty, name, name_span)?
+        {
+            if !type_args.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1024",
+                    "an interface method does not take type arguments",
+                    name_span,
+                ));
+            }
+            if requirement.mut_self && !recv_h.mutable {
+                return Err(Diagnostic::new(
+                    "E1035",
+                    format!("the method `{name}` needs a mutable receiver"),
+                    name_span,
+                ));
+            }
+            let checked = self.check_args_simple(
+                ctx,
+                args,
+                &requirement.params,
+                &requirement.param_muts,
+                &requirement.param_names,
+                name,
+                span,
+            )?;
+            self.charge_row(ctx, &requirement.row, span)?;
+            return Ok(HExpr {
+                ty: requirement.ret,
+                mutable: true,
+                kind: HExprKind::InterfaceCall {
+                    recv: Box::new(recv_h),
+                    interface,
+                    method,
+                    selector: name.to_string(),
+                    args: checked,
+                },
+            });
         }
         if !type_args.is_empty() {
             return Err(Diagnostic::new(
@@ -2515,6 +3124,11 @@ impl<'o> FnChecker<'o> {
                     name,
                     span,
                     &type_names,
+                    &{
+                        let mut bounds = ctx.classes[class as usize].type_bounds.clone();
+                        bounds.extend(sig.own_type_bounds.clone());
+                        bounds
+                    },
                     sig.own_effect_params.len(),
                     pre_bound,
                     own_start,
@@ -2528,7 +3142,9 @@ impl<'o> FnChecker<'o> {
                     expected,
                 )?;
                 let own_targs = out.targs[own_start..].to_vec();
-                if ctx.classes[class as usize].is_final {
+                if ctx.classes[class as usize].is_final
+                    || ctx.classes[class as usize].kind == ClassKind::EnumParent
+                {
                     let mut direct_targs = if owner == class {
                         out.targs[..own_start].to_vec()
                     } else {
@@ -2654,7 +3270,7 @@ impl<'o> FnChecker<'o> {
                 NativeOp::MapPut,
                 vec![*k, *v],
                 &["key", "value"],
-                UNIT,
+                ctx.option_of(*v),
                 true,
             ),
             (Type::Map(k, v), "get") => {
@@ -2980,6 +3596,7 @@ impl<'o> FnChecker<'o> {
             name,
             span,
             &sig.own_type_params.clone(),
+            &sig.own_type_bounds,
             sig.own_effect_params.len(),
             vec![None; sig.own_type_params.len()],
             0,
@@ -3176,7 +3793,7 @@ impl<'o> FnChecker<'o> {
                 ));
             }
             seen.push(&param.name);
-            ptys.push(resolve_type(ctx, &env, &param.ty)?);
+            ptys.push(resolve_param_type(ctx, &env, param)?);
             pmuts.push(param.mutable);
         }
         let declared_ret = match ret {
@@ -3251,6 +3868,20 @@ impl<'o> FnChecker<'o> {
                 imported: false,
                 name,
                 type_params: type_param_count,
+                type_bounds: env
+                    .type_bounds
+                    .iter()
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|application| HirInterfaceUse {
+                                interface: application.interface,
+                                types: application.type_args.clone(),
+                                rows: application.row_args.clone(),
+                            })
+                            .collect()
+                    })
+                    .collect(),
                 effect_params: effect_param_count,
                 params: ptys.clone(),
                 param_muts: pmuts.clone(),
@@ -3262,6 +3893,7 @@ impl<'o> FnChecker<'o> {
             },
             FnSig {
                 type_params: env.type_names.clone(),
+                type_bounds: env.type_bounds.clone(),
                 effect_params: env.effect_names.clone(),
                 params: ptys.clone(),
                 param_muts: pmuts.clone(),
@@ -3334,6 +3966,11 @@ impl<'o> FnChecker<'o> {
 
     /// Convert one manifest type to a checker type.
     fn abi_type_id(ctx: &mut Ctx, t: lm_abi::AbiType) -> TypeId {
+        Self::abi_type_id_with_vars(ctx, t, &[])
+    }
+
+    /// Convert one manifest type with intrinsic generic parameters.
+    fn abi_type_id_with_vars(ctx: &mut Ctx, t: lm_abi::AbiType, vars: &[TypeId]) -> TypeId {
         match t {
             lm_abi::AbiType::Primitive(primitive) => match primitive {
                 lm_abi::AbiPrimitive::Unit => UNIT,
@@ -3371,21 +4008,30 @@ impl<'o> FnChecker<'o> {
                 lm_abi::AbiNative::TcpListener => Self::core_class(ctx, "TcpListener"),
                 lm_abi::AbiNative::TlsStream => Self::core_class(ctx, "TlsStream"),
             },
+            lm_abi::AbiType::Var(index) => vars
+                .get(index as usize)
+                .copied()
+                .expect("the intrinsic generic parameter is in scope"),
             lm_abi::AbiType::List(element) => {
-                let element = Self::abi_type_id(ctx, *element);
+                let element = Self::abi_type_id_with_vars(ctx, *element, vars);
                 ctx.store.intern(Type::List(element))
+            }
+            lm_abi::AbiType::Map(key, value) => {
+                let key = Self::abi_type_id_with_vars(ctx, *key, vars);
+                let value = Self::abi_type_id_with_vars(ctx, *value, vars);
+                ctx.store.intern(Type::Map(key, value))
             }
             lm_abi::AbiType::Tuple(elements) => {
                 let elements = elements
                     .iter()
-                    .map(|element| Self::abi_type_id(ctx, *element))
+                    .map(|element| Self::abi_type_id_with_vars(ctx, *element, vars))
                     .collect();
                 ctx.store.intern(Type::Tuple(elements))
             }
             lm_abi::AbiType::Apply(constructor, arguments) => {
                 let arguments = arguments
                     .iter()
-                    .map(|argument| Self::abi_type_id(ctx, *argument))
+                    .map(|argument| Self::abi_type_id_with_vars(ctx, *argument, vars))
                     .collect();
                 Self::core_inst(ctx, constructor.text(), arguments)
             }

@@ -210,6 +210,8 @@ pub struct LoadedModule {
     module: Module,
     dispatch: Vec<DispatchRow>,
     core: lm_bytecode::corepin::CoreLayout,
+    /// The verifier input hash. Loading computes it once for snapshot checks.
+    verification: [u8; 32],
     /// The definition hash of every class and function.
     ///
     /// The canonical digest names code and classes by verified
@@ -222,6 +224,11 @@ pub struct LoadedModule {
 impl LoadedModule {
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    /// The hash of every verified input in this module.
+    pub fn verification_hash(&self) -> [u8; 32] {
+        self.verification
     }
 
     /// The verified semantic identity of this module.
@@ -412,6 +419,7 @@ pub fn load_with_record(
 
 /// Build the sealed dispatch tables of an admitted module.
 fn admit(module: Module) -> LoadedModule {
+    let verification = lm_bytecode::identity::verification_hash(&module);
     let core = lm_bytecode::corepin::declared_layout(&module);
     // Build the sealed per-class selector tables. A child inherits
     // the resolved parent methods; own methods override entries.
@@ -449,6 +457,7 @@ fn admit(module: Module) -> LoadedModule {
         module,
         dispatch,
         core,
+        verification,
         identity: std::sync::OnceLock::new(),
     }
 }
@@ -520,6 +529,10 @@ mod tests {
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
@@ -600,6 +613,10 @@ mod tests {
             types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
             selectors: vec![],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![vec![]],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
@@ -637,6 +654,10 @@ mod tests {
             ],
             selectors: vec![],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![]],
+            func_bounds: vec![vec![]],
             classes: vec![lm_bytecode::BcClass {
                 name: "Point".to_string(),
                 key: "Point".to_string(),

@@ -24,6 +24,71 @@ pub(crate) const VALUE_COST: usize = 16;
 /// Logical byte cost of one map entry (key and value).
 pub(crate) const ENTRY_COST: usize = 2 * VALUE_COST;
 
+/// One collection epoch. Mutation history does not change value equality.
+#[derive(Debug, Clone, Copy, Default, Eq)]
+pub struct StructuralEpoch(pub u32);
+
+impl StructuralEpoch {
+    /// Start epoch tracking and return the current epoch.
+    pub fn observe(&mut self) -> u32 {
+        if self.0 == 0 {
+            self.0 = 1;
+        }
+        self.0
+    }
+
+    /// Reject a mutation that cannot keep an `Int` epoch.
+    pub fn ensure_bumpable(&self) -> Result<(), FaultCode> {
+        if self.0 == 0 {
+            return Ok(());
+        }
+        if self.0 == u32::MAX {
+            return Err(FaultCode::CollectionModified);
+        }
+        Ok(())
+    }
+
+    /// Increment this epoch after one structural mutation.
+    pub fn bump(&mut self) -> Result<(), FaultCode> {
+        if self.0 == 0 {
+            return Ok(());
+        }
+        self.ensure_bumpable()?;
+        self.0 += 1;
+        Ok(())
+    }
+}
+
+impl PartialEq for StructuralEpoch {
+    fn eq(&self, _: &StructuralEpoch) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+
+    #[test]
+    fn an_unobserved_epoch_skips_updates() {
+        let mut epoch = StructuralEpoch::default();
+        epoch.bump().expect("an unobserved update succeeds");
+        assert_eq!(epoch.0, 0);
+        assert_eq!(epoch.observe(), 1);
+        epoch.bump().expect("an observed update succeeds");
+        assert_eq!(epoch.0, 2);
+    }
+
+    #[test]
+    fn a_structural_epoch_never_exceeds_an_int() {
+        let mut epoch = StructuralEpoch(u32::MAX - 1);
+        epoch.bump().expect("the final valid increment succeeds");
+        assert_eq!(epoch.0, u32::MAX);
+        assert_eq!(epoch.bump(), Err(FaultCode::CollectionModified));
+        assert_eq!(epoch.0, u32::MAX);
+    }
+}
+
 /// A derived open-addressed lookup index for one map.
 ///
 /// The index is a cache over the insertion-ordered entries: `built`
@@ -41,7 +106,9 @@ pub(crate) const ENTRY_COST: usize = 2 * VALUE_COST;
 #[derive(Debug, Clone, Default)]
 pub struct MapIndex {
     /// The number of entries the table already indexes.
-    pub built: usize,
+    pub built: u32,
+    /// The structural epoch stored in existing index padding.
+    pub epoch: StructuralEpoch,
     slots: Vec<MapSlot>,
 }
 
@@ -76,12 +143,19 @@ impl MapIndex {
 
     /// Add one indexed entry.
     pub fn insert(&mut self, hash: u64, entry: u32) {
-        debug_assert_eq!(entry as usize, self.built);
-        if self.slots.is_empty() || (self.built + 1) * 3 > self.slots.len() * 2 {
+        debug_assert_eq!(entry, self.built);
+        let built = self.built as usize;
+        if self.slots.is_empty() || (built + 1) * 3 > self.slots.len() * 2 {
             self.grow();
         }
         insert_map_slot(&mut self.slots, hash, entry);
         self.built += 1;
+    }
+
+    /// Clear the derived lookup table and keep the structural epoch.
+    pub fn clear(&mut self) {
+        self.built = 0;
+        self.slots.clear();
     }
 
     fn grow(&mut self) {
@@ -168,7 +242,10 @@ pub enum Object {
         env: Witness,
     },
     /// A growable list.
-    List { items: Vec<Value> },
+    List {
+        items: Vec<Value>,
+        epoch: StructuralEpoch,
+    },
     /// A map with entries in insertion order plus a derived lookup
     /// index.
     Map {
@@ -578,10 +655,11 @@ impl Object {
                 fields: copy_values(fields, &mut map)?,
                 env: *env,
             },
-            Object::List { items } => Object::List {
+            Object::List { items, epoch } => Object::List {
                 items: copy_values(items, &mut map)?,
+                epoch: *epoch,
             },
-            Object::Map { entries, .. } => {
+            Object::Map { entries, index } => {
                 let mut copied = Vec::new();
                 copied.try_reserve_exact(entries.len())?;
                 for (key, value) in entries {
@@ -595,9 +673,13 @@ impl Object {
                     };
                     copied.push((key, value));
                 }
+                let copied_index = MapIndex {
+                    epoch: index.epoch,
+                    ..MapIndex::default()
+                };
                 Object::Map {
                     entries: copied,
-                    index: MapIndex::default(),
+                    index: copied_index,
                 }
             }
             Object::Tuple { items } => Object::Tuple {
@@ -713,7 +795,7 @@ impl Object {
             + match self {
                 Object::Str(_) | Object::Bytes(_) | Object::Substring(_) => 0,
                 Object::Instance { fields, .. } => fields.len() * VALUE_COST,
-                Object::List { items } => items.len() * VALUE_COST,
+                Object::List { items, .. } => items.len() * VALUE_COST,
                 Object::Map { entries, .. } => entries.len() * ENTRY_COST,
                 Object::Tuple { items } => items.len() * VALUE_COST,
                 Object::Closure { captures, .. } => captures.len() * VALUE_COST,
@@ -790,7 +872,9 @@ impl Object {
             Object::NativeTlsStream { .. } => {}
             Object::Substring(_) => {}
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
-            Object::List { items } | Object::Tuple { items } => items.iter().for_each(&mut visit),
+            Object::List { items, .. } | Object::Tuple { items } => {
+                items.iter().for_each(&mut visit)
+            }
             Object::Map { entries, .. } => {
                 // The index holds hashes and positions only, never an
                 // object reference, so the walk covers the entries.
@@ -843,13 +927,20 @@ impl Object {
             Object::Tuple { items } => Object::Tuple {
                 items: vec![Value::Unit; items.len()],
             },
-            Object::List { items } => Object::List {
+            Object::List { items, epoch } => Object::List {
                 items: vec![Value::Unit; items.len()],
+                epoch: *epoch,
             },
-            Object::Map { entries, .. } => Object::Map {
-                entries: vec![(Value::Unit, Value::Unit); entries.len()],
-                index: MapIndex::default(),
-            },
+            Object::Map { entries, index } => {
+                let copied_index = MapIndex {
+                    epoch: index.epoch,
+                    ..MapIndex::default()
+                };
+                Object::Map {
+                    entries: vec![(Value::Unit, Value::Unit); entries.len()],
+                    index: copied_index,
+                }
+            }
             Object::Instance { class, fields, env } => Object::Instance {
                 class: *class,
                 fields: vec![Value::Unit; fields.len()],
@@ -896,18 +987,24 @@ impl Object {
             Object::Tuple { items } => Object::Tuple {
                 items: items.iter().map(|v| value(*v)).collect(),
             },
-            Object::List { items } => Object::List {
+            Object::List { items, epoch } => Object::List {
                 items: items.iter().map(|v| value(*v)).collect(),
+                epoch: *epoch,
             },
-            Object::Map { entries, .. } => Object::Map {
-                entries: entries
-                    .iter()
-                    .map(|(k, v)| (value(*k), value(*v)))
-                    .collect(),
-                // The destination index rebuilds on the first lookup
-                // over the copied keys.
-                index: MapIndex::default(),
-            },
+            Object::Map { entries, index } => {
+                let copied_index = MapIndex {
+                    epoch: index.epoch,
+                    ..MapIndex::default()
+                };
+                Object::Map {
+                    entries: entries
+                        .iter()
+                        .map(|(k, v)| (value(*k), value(*v)))
+                        .collect(),
+                    // The destination index rebuilds on the first lookup.
+                    index: copied_index,
+                }
+            }
             Object::Instance { class, fields, env } => Object::Instance {
                 class: *class,
                 fields: fields.iter().map(|v| value(*v)).collect(),
@@ -1000,6 +1097,7 @@ mod tests {
             },
             Object::List {
                 items: vec![Value::Obj(a), Value::Obj(b)],
+                epoch: Default::default(),
             },
             Object::Map {
                 entries: vec![(Value::Obj(a), Value::Obj(b))],
@@ -1163,7 +1261,10 @@ mod tests {
                 fields: vec![],
                 env: Witness::EMPTY,
             },
-            Object::List { items: vec![] },
+            Object::List {
+                items: vec![],
+                epoch: Default::default(),
+            },
             Object::Map {
                 entries: vec![],
                 index: MapIndex::default(),

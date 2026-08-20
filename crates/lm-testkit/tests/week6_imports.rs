@@ -14,6 +14,10 @@ fn importing_module(pin: [u8; 32]) -> Module {
         types: vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str],
         selectors: vec![],
         apps: vec![],
+        interfaces: vec![],
+        conformances: vec![],
+        class_bounds: vec![],
+        func_bounds: vec![vec![], vec![]],
         core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
         imports: vec![Import {
             module: "dep.math".to_string(),
@@ -164,6 +168,7 @@ fn a_class_and_its_methods_share_the_import_state() {
         fields: vec![],
         methods: vec![(0, 0)],
     });
+    module.class_bounds.push(Vec::new());
     // Function 0 is imported, so a local class must not answer with it.
     module.funcs[0].params = vec![4];
     module.funcs[0].local_types = vec![4];

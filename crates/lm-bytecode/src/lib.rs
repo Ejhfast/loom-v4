@@ -31,7 +31,7 @@ pub const NO_ROLE: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 106;
+pub const CORE_ROLE_COUNT: usize = 108;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -64,6 +64,14 @@ pub struct TypeApp {
     pub rows: Vec<Vec<BcRow>>,
 }
 
+/// One applied nominal interface in bytecode metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BcInterfaceUse {
+    pub interface: u32,
+    pub types: Vec<u32>,
+    pub rows: Vec<Vec<BcRow>>,
+}
+
 /// One entry in the module type table.
 ///
 /// Types reference other types by index. A canonical table only
@@ -89,8 +97,16 @@ pub enum BcType {
     /// parameter vector length by construction of the decoder; the
     /// verifier checks hand-built modules.
     Fn(Vec<u32>, Vec<bool>, u32, Vec<BcRow>),
+    /// A function value that cannot escape the active call chain.
+    Callback(Vec<u32>, Vec<bool>, u32, Vec<BcRow>),
     /// One type parameter of the enclosing generic function.
     Var(u32),
+    /// One associated type selected through a nominal interface.
+    Projection {
+        base: u32,
+        interface: u32,
+        assoc: u32,
+    },
     /// The frozen machine `Fault` value type.
     Fault,
     /// The opaque pending-request token type.
@@ -165,6 +181,45 @@ pub struct BcClass {
     pub methods: Vec<(u32, u32)>,
 }
 
+/// One associated type requirement of a nominal interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BcAssociated {
+    pub name: String,
+    pub bound: Option<BcInterfaceUse>,
+}
+
+/// One method requirement of a nominal interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BcInterfaceMethod {
+    pub selector: u32,
+    pub mut_self: bool,
+    pub params: Vec<u32>,
+    pub param_muts: Vec<bool>,
+    pub ret: u32,
+    pub row: Vec<BcRow>,
+}
+
+/// One nominal interface contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BcInterface {
+    pub name: String,
+    pub key: String,
+    pub type_params: u32,
+    pub effect_params: u32,
+    pub generic_is_effect: Vec<bool>,
+    pub type_bounds: Vec<Vec<BcInterfaceUse>>,
+    pub associated: Vec<BcAssociated>,
+    pub methods: Vec<BcInterfaceMethod>,
+}
+
+/// One explicit class-owned interface conformance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BcConformance {
+    pub class: u32,
+    pub application: BcInterfaceUse,
+    pub associated: Vec<u32>,
+}
+
 impl BcClass {
     pub fn parent(&self) -> Option<u32> {
         if self.parent == NO_PARENT {
@@ -179,6 +234,8 @@ impl BcClass {
 ///
 /// Jump operands name a target basic block, not a raw byte offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Use one-byte tags to keep interpreter instructions compact.
+#[repr(u8)]
 pub enum Instr {
     /// Push the unit value.
     ConstUnit,
@@ -301,8 +358,12 @@ pub enum Instr {
     MapHas,
     /// Pop a key and a map, then push the value. Faults `MissingKey`.
     MapAt,
-    /// Pop a value, a key, and a map, then insert or replace. Pushes unit.
-    MapPut,
+    /// Pop a value, a key, and a map. Insert or replace the entry.
+    /// Push the old value unless `discard` is true.
+    MapPut {
+        ty: u32,
+        discard: bool,
+    },
     /// Pop an object reference, freeze its graph, push the same reference.
     Freeze,
     /// Pop a frozen object reference and push its canonical digest.
@@ -353,7 +414,10 @@ pub enum Instr {
     },
     /// Pop a Request and push `Option[PendingCall[...]]` for the
     /// exact operation.
-    AsCall(u32),
+    AsCall {
+        op: u32,
+        ty: u32,
+    },
     /// Pop a PendingCall and push its boundary-copied argument view.
     CallArgs,
     /// Pop a Fault value and push its stable code as a string.
@@ -373,10 +437,77 @@ pub enum Instr {
     /// faults if executed. Ends the block.
     Unreachable,
     /// Structural equality for a sealed enum value: the same arm and
-    /// equal fields. The walk keeps its own stack. The two variants
-    /// sit at the end, so no existing discriminant moves.
+    /// equal fields. The walk keeps its own stack.
     EqValue,
     NeValue,
+    /// Call one method through a verified nominal interface bound.
+    CallInterface {
+        interface: u32,
+        method: u32,
+        /// The static receiver type under the active environment.
+        recv_ty: u32,
+    },
+    /// Run one instruction from an added bytecode family.
+    Extended(ExtendedInstr),
+}
+
+/// One instruction added after the base dispatch contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Use one-byte tags to keep extended instructions compact.
+#[repr(u8)]
+pub enum ExtendedInstr {
+    /// Create one machine-local callback descriptor.
+    MakeCallback { func: u32, captures: u32 },
+    /// Treat one heap closure as a nonescaping callback.
+    AsCallback,
+    /// Reclassify one payload as a native `Some` value.
+    OptionSome { ty: u32 },
+    /// Push one native `None` value.
+    OptionNone { ty: u32 },
+    /// Pop a native `Some` value and push its direct payload.
+    OptionPayload { ty: u32 },
+    /// Pop an index and a list, then push `Option[element]`.
+    ListGet { ty: u32 },
+    /// Pop a key and a map, then push `Option[value]`.
+    MapGet { ty: u32 },
+    /// Pop a list and push its structural epoch.
+    ListEpoch,
+    /// Pop an epoch and a list. Push the length after an epoch check.
+    ListIterLen,
+    /// Pop a map and push its structural epoch.
+    MapEpoch,
+    /// Pop an epoch and a map. Push the length after an epoch check.
+    MapIterLen,
+    /// Pop a position and a map. Push the key at that position.
+    MapKeyAt,
+    /// Pop a position and a map. Push the value at that position.
+    MapValueAt,
+    /// Pop a list and push its current capacity.
+    ListCapacity,
+    /// Pop a value, an index, and a list. Replace the indexed value.
+    ListSet,
+    /// Pop a list and push its final element when one exists.
+    ListPop { ty: u32 },
+    /// Pop a value, an index, and a list. Insert the value at the index.
+    ListInsert,
+    /// Pop an index and a list. Remove and push the indexed value.
+    ListRemove,
+    /// Pop an index and a list. Swap-remove and push the indexed value.
+    ListSwapRemove,
+    /// Pop an additional capacity and a list. Reserve that capacity.
+    ListReserve,
+    /// Pop a target length and a list. Remove trailing values.
+    ListTruncate,
+    /// Pop a value and a list. Push whether the list contains it.
+    ListContains,
+    /// Pop a list, increment its structural epoch, and push unit.
+    ListReorder,
+    /// Pop a key and a map. Remove and push the old value when one exists.
+    MapRemove { ty: u32 },
+    /// Pop a map and remove every entry.
+    MapClear,
+    /// Pop an additional capacity and a map. Reserve that capacity.
+    MapReserve,
 }
 
 /// One native value instruction.
@@ -628,6 +759,7 @@ pub enum ExportKind {
     Class,
     Enum,
     EnumCase,
+    Interface,
 }
 
 impl ExportKind {
@@ -637,6 +769,7 @@ impl ExportKind {
             ExportKind::Class => 1,
             ExportKind::Enum => 2,
             ExportKind::EnumCase => 3,
+            ExportKind::Interface => 4,
         }
     }
 
@@ -646,6 +779,7 @@ impl ExportKind {
             1 => Some(ExportKind::Class),
             2 => Some(ExportKind::Enum),
             3 => Some(ExportKind::EnumCase),
+            4 => Some(ExportKind::Interface),
             _ => None,
         }
     }
@@ -656,12 +790,21 @@ impl ExportKind {
             ExportKind::Class => "class",
             ExportKind::Enum => "enum",
             ExportKind::EnumCase => "case",
+            ExportKind::Interface => "interface",
         }
     }
 
     /// True when the export names a class-like definition.
     pub fn is_class(self) -> bool {
-        !matches!(self, ExportKind::Function)
+        matches!(
+            self,
+            ExportKind::Class | ExportKind::Enum | ExportKind::EnumCase
+        )
+    }
+
+    /// True when the export names an interface contract.
+    pub fn is_interface(self) -> bool {
+        matches!(self, ExportKind::Interface)
     }
 }
 
@@ -737,6 +880,14 @@ pub struct Module {
     /// Type applications referenced by generic call and allocation
     /// sites.
     pub apps: Vec<TypeApp>,
+    /// Nominal interface contracts in dense declaration order.
+    pub interfaces: Vec<BcInterface>,
+    /// Explicit class conformances.
+    pub conformances: Vec<BcConformance>,
+    /// Interface bounds aligned with the class table.
+    pub class_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
+    /// Interface bounds aligned with the function table.
+    pub func_bounds: Vec<Vec<Vec<BcInterfaceUse>>>,
     /// The import slots, in declaration order. An empty table marks a
     /// linked module, which is the only kind the loader admits.
     pub imports: Vec<Import>,
@@ -818,7 +969,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// active byte-buffer scan instructions and the native `TlsStream`
 /// class representation. Both landed on separate branches, so version
 /// 24 is the first that carries them together.
-pub const VERSION: u16 = 24;
+/// Version 29 adds interfaces, native collections, callbacks, and native `Option` values.
+pub const VERSION: u16 = 29;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -973,6 +1125,33 @@ const OP_TEXT_SPLIT: u8 = 0xb2;
 const OP_TEXT_LINES: u8 = 0xb3;
 const OP_BB_AT: u8 = 0xb4;
 const OP_BB_FIND_FROM: u8 = 0xb5;
+const OP_OPTION_SOME: u8 = 0xb8;
+const OP_OPTION_NONE: u8 = 0xb9;
+const OP_LIST_GET: u8 = 0xba;
+const OP_MAP_GET: u8 = 0xbb;
+const OP_CALL_INTERFACE: u8 = 0xbc;
+const OP_LIST_EPOCH: u8 = 0xbd;
+const OP_LIST_ITER_LEN: u8 = 0xbe;
+const OP_MAP_EPOCH: u8 = 0xbf;
+const OP_MAP_ITER_LEN: u8 = 0xc0;
+const OP_MAP_KEY_AT: u8 = 0xc1;
+const OP_MAP_VALUE_AT: u8 = 0xc2;
+const OP_LIST_CAPACITY: u8 = 0xc3;
+const OP_LIST_SET: u8 = 0xc4;
+const OP_LIST_POP: u8 = 0xc5;
+const OP_LIST_INSERT: u8 = 0xc6;
+const OP_LIST_REMOVE: u8 = 0xc7;
+const OP_LIST_SWAP_REMOVE: u8 = 0xc8;
+const OP_LIST_RESERVE: u8 = 0xc9;
+const OP_LIST_TRUNCATE: u8 = 0xca;
+const OP_LIST_CONTAINS: u8 = 0xcb;
+const OP_MAP_REMOVE: u8 = 0xcc;
+const OP_MAP_CLEAR: u8 = 0xcd;
+const OP_MAP_RESERVE: u8 = 0xce;
+const OP_MAKE_CALLBACK: u8 = 0xcf;
+const OP_AS_CALLBACK: u8 = 0xd0;
+const OP_OPTION_PAYLOAD: u8 = 0xd1;
+const OP_LIST_REORDER: u8 = 0xd2;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1001,6 +1180,8 @@ const TY_BYTES: u8 = 24;
 const TY_FILE_HANDLE: u8 = 25;
 const TY_RESOURCE_HANDLE: u8 = 26;
 const TY_WAIT: u8 = 27;
+const TY_PROJECTION: u8 = 28;
+const TY_CALLBACK: u8 = 29;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -1073,6 +1254,59 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
         for row in &app.rows {
             encode_row(&mut out, row);
         }
+    }
+    write_u32(&mut out, module.interfaces.len() as u32);
+    for interface in &module.interfaces {
+        write_u32(&mut out, interface.type_params);
+        write_u32(&mut out, interface.effect_params);
+        write_u32(&mut out, interface.generic_is_effect.len() as u32);
+        for is_effect in &interface.generic_is_effect {
+            out.push(u8::from(*is_effect));
+        }
+        encode_type_bounds(&mut out, &interface.type_bounds);
+        write_u32(&mut out, interface.associated.len() as u32);
+        for associated in &interface.associated {
+            write_bytes(&mut out, associated.name.as_bytes());
+            match &associated.bound {
+                Some(bound) => {
+                    out.push(1);
+                    encode_interface_use(&mut out, bound);
+                }
+                None => out.push(0),
+            }
+        }
+        write_u32(&mut out, interface.methods.len() as u32);
+        for method in &interface.methods {
+            write_u32(&mut out, method.selector);
+            out.push(u8::from(method.mut_self));
+            write_u32(&mut out, method.params.len() as u32);
+            for param in &method.params {
+                write_u32(&mut out, *param);
+            }
+            write_u32(&mut out, method.param_muts.len() as u32);
+            for marker in &method.param_muts {
+                out.push(u8::from(*marker));
+            }
+            write_u32(&mut out, method.ret);
+            encode_row(&mut out, &method.row);
+        }
+    }
+    write_u32(&mut out, module.conformances.len() as u32);
+    for conformance in &module.conformances {
+        write_u32(&mut out, conformance.class);
+        encode_interface_use(&mut out, &conformance.application);
+        write_u32(&mut out, conformance.associated.len() as u32);
+        for associated in &conformance.associated {
+            write_u32(&mut out, *associated);
+        }
+    }
+    write_u32(&mut out, module.class_bounds.len() as u32);
+    for bounds in &module.class_bounds {
+        encode_type_bounds(&mut out, bounds);
+    }
+    write_u32(&mut out, module.func_bounds.len() as u32);
+    for bounds in &module.func_bounds {
+        encode_type_bounds(&mut out, bounds);
     }
     write_u32(&mut out, module.imports.len() as u32);
     for import in &module.imports {
@@ -1153,6 +1387,11 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
 /// functions, and then the exported top-level definitions.
 fn encode_exports(module: &Module) -> Vec<u8> {
     let mut out = Vec::new();
+    write_u32(&mut out, module.interfaces.len() as u32);
+    for interface in &module.interfaces {
+        write_bytes(&mut out, interface.name.as_bytes());
+        write_bytes(&mut out, interface.key.as_bytes());
+    }
     write_u32(&mut out, module.classes.len() as u32);
     for class in &module.classes {
         write_bytes(&mut out, class.name.as_bytes());
@@ -1190,6 +1429,28 @@ fn encode_row(out: &mut Vec<u8>, row: &[BcRow]) {
                 out.push(ROW_VAR);
                 write_u32(out, *idx);
             }
+        }
+    }
+}
+
+fn encode_interface_use(out: &mut Vec<u8>, application: &BcInterfaceUse) {
+    write_u32(out, application.interface);
+    write_u32(out, application.types.len() as u32);
+    for ty in &application.types {
+        write_u32(out, *ty);
+    }
+    write_u32(out, application.rows.len() as u32);
+    for row in &application.rows {
+        encode_row(out, row);
+    }
+}
+
+fn encode_type_bounds(out: &mut Vec<u8>, bounds: &[Vec<BcInterfaceUse>]) {
+    write_u32(out, bounds.len() as u32);
+    for parameter in bounds {
+        write_u32(out, parameter.len() as u32);
+        for application in parameter {
+            encode_interface_use(out, application);
         }
     }
 }
@@ -1243,9 +1504,32 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
             write_u32(out, *ret);
             encode_row(out, row);
         }
+        BcType::Callback(params, muts, ret, row) => {
+            out.push(TY_CALLBACK);
+            write_u32(out, params.len() as u32);
+            for p in params {
+                write_u32(out, *p);
+            }
+            write_u32(out, muts.len() as u32);
+            for m in muts {
+                out.push(u8::from(*m));
+            }
+            write_u32(out, *ret);
+            encode_row(out, row);
+        }
         BcType::Var(i) => {
             out.push(TY_VAR);
             write_u32(out, *i);
+        }
+        BcType::Projection {
+            base,
+            interface,
+            assoc,
+        } => {
+            out.push(TY_PROJECTION);
+            write_u32(out, *base);
+            write_u32(out, *interface);
+            write_u32(out, *assoc);
         }
         BcType::Digest => out.push(TY_DIGEST),
         BcType::Fault => out.push(TY_FAULT),
@@ -1378,6 +1662,17 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::EqRef => out.push(OP_EQ_REF),
         Instr::EqValue => out.push(OP_EQ_VALUE),
         Instr::NeValue => out.push(OP_NE_VALUE),
+        Instr::CallInterface {
+            interface,
+            method,
+            recv_ty,
+        } => {
+            out.push(OP_CALL_INTERFACE);
+            write_u32(out, *interface);
+            write_u32(out, *method);
+            write_u32(out, *recv_ty);
+        }
+        Instr::Extended(instr) => encode_extended(out, *instr),
         Instr::NeRef => out.push(OP_NE_REF),
         Instr::Call(idx) => {
             out.push(OP_CALL);
@@ -1466,7 +1761,11 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::MapLen => out.push(OP_MAP_LEN),
         Instr::MapHas => out.push(OP_MAP_HAS),
         Instr::MapAt => out.push(OP_MAP_AT),
-        Instr::MapPut => out.push(OP_MAP_PUT),
+        Instr::MapPut { ty, discard } => {
+            out.push(OP_MAP_PUT);
+            write_u32(out, *ty);
+            out.push(u8::from(*discard));
+        }
         Instr::Native(NativeInstr::SbNew) => out.push(OP_SB_NEW),
         Instr::Native(NativeInstr::SbAppendStr) => out.push(OP_SB_APPEND_STR),
         Instr::Native(NativeInstr::SbAppendInt) => out.push(OP_SB_APPEND_INT),
@@ -1544,15 +1843,72 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             write_u32(out, *kind);
             write_u32(out, *slot);
         }
-        Instr::AsCall(op) => {
+        Instr::AsCall { op, ty } => {
             out.push(OP_AS_CALL);
             write_u32(out, *op);
+            write_u32(out, *ty);
         }
         Instr::CallArgs => out.push(OP_CALL_ARGS),
         Instr::FaultCode => out.push(OP_FAULT_CODE),
         Instr::FaultDenied => out.push(OP_FAULT_DENIED),
         Instr::RequestOp => out.push(OP_REQUEST_OP),
         Instr::Unreachable => out.push(OP_UNREACHABLE),
+    }
+}
+
+fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
+    match instr {
+        ExtendedInstr::MakeCallback { func, captures } => {
+            out.push(OP_MAKE_CALLBACK);
+            write_u32(out, func);
+            write_u32(out, captures);
+        }
+        ExtendedInstr::AsCallback => out.push(OP_AS_CALLBACK),
+        ExtendedInstr::OptionSome { ty } => {
+            out.push(OP_OPTION_SOME);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::OptionNone { ty } => {
+            out.push(OP_OPTION_NONE);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::OptionPayload { ty } => {
+            out.push(OP_OPTION_PAYLOAD);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::ListGet { ty } => {
+            out.push(OP_LIST_GET);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::MapGet { ty } => {
+            out.push(OP_MAP_GET);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::ListEpoch => out.push(OP_LIST_EPOCH),
+        ExtendedInstr::ListIterLen => out.push(OP_LIST_ITER_LEN),
+        ExtendedInstr::MapEpoch => out.push(OP_MAP_EPOCH),
+        ExtendedInstr::MapIterLen => out.push(OP_MAP_ITER_LEN),
+        ExtendedInstr::MapKeyAt => out.push(OP_MAP_KEY_AT),
+        ExtendedInstr::MapValueAt => out.push(OP_MAP_VALUE_AT),
+        ExtendedInstr::ListCapacity => out.push(OP_LIST_CAPACITY),
+        ExtendedInstr::ListSet => out.push(OP_LIST_SET),
+        ExtendedInstr::ListPop { ty } => {
+            out.push(OP_LIST_POP);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::ListInsert => out.push(OP_LIST_INSERT),
+        ExtendedInstr::ListRemove => out.push(OP_LIST_REMOVE),
+        ExtendedInstr::ListSwapRemove => out.push(OP_LIST_SWAP_REMOVE),
+        ExtendedInstr::ListReserve => out.push(OP_LIST_RESERVE),
+        ExtendedInstr::ListTruncate => out.push(OP_LIST_TRUNCATE),
+        ExtendedInstr::ListContains => out.push(OP_LIST_CONTAINS),
+        ExtendedInstr::ListReorder => out.push(OP_LIST_REORDER),
+        ExtendedInstr::MapRemove { ty } => {
+            out.push(OP_MAP_REMOVE);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::MapClear => out.push(OP_MAP_CLEAR),
+        ExtendedInstr::MapReserve => out.push(OP_MAP_RESERVE),
     }
 }
 
@@ -1712,6 +2068,42 @@ fn decode_row(cur: &mut Cursor<'_>) -> Result<Vec<BcRow>, DecodeError> {
     Ok(row)
 }
 
+fn decode_interface_use(cur: &mut Cursor<'_>) -> Result<BcInterfaceUse, DecodeError> {
+    let interface = cur.u32()?;
+    let type_count = cur.len()?;
+    if type_count > cur.remaining() / 4 {
+        return Err(DecodeError::BadLength);
+    }
+    let mut types = Vec::with_capacity(type_count);
+    for _ in 0..type_count {
+        types.push(cur.u32()?);
+    }
+    let row_count = cur.len()?;
+    let mut rows = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        rows.push(decode_row(cur)?);
+    }
+    Ok(BcInterfaceUse {
+        interface,
+        types,
+        rows,
+    })
+}
+
+fn decode_type_bounds(cur: &mut Cursor<'_>) -> Result<Vec<Vec<BcInterfaceUse>>, DecodeError> {
+    let parameter_count = cur.len()?;
+    let mut bounds = Vec::with_capacity(parameter_count);
+    for _ in 0..parameter_count {
+        let bound_count = cur.len()?;
+        let mut parameter = Vec::with_capacity(bound_count);
+        for _ in 0..bound_count {
+            parameter.push(decode_interface_use(cur)?);
+        }
+        bounds.push(parameter);
+    }
+    Ok(bounds)
+}
+
 /// Decode a serialized container. This checks structure only.
 ///
 /// The section table is validated with plain arithmetic before any
@@ -1759,6 +2151,14 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
 /// checked against the tables the semantic region already produced.
 fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> {
     let mut cur = Cursor { bytes, pos: 0 };
+    let interface_count = cur.len()?;
+    if interface_count != module.interfaces.len() {
+        return Err(DecodeError::ExportCountMismatch);
+    }
+    for interface in &mut module.interfaces {
+        interface.name = cur.string()?;
+        interface.key = cur.string()?;
+    }
     let class_count = cur.len()?;
     if class_count != module.classes.len() {
         return Err(DecodeError::ExportCountMismatch);
@@ -1805,6 +2205,8 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
         let ctor = cur.u32()?;
         let limit = if kind.is_class() {
             module.classes.len()
+        } else if kind.is_interface() {
+            module.interfaces.len()
         } else {
             module.funcs.len()
         };
@@ -1867,6 +2269,100 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             types: app_types,
             rows,
         });
+    }
+    let interface_count = cur.len()?;
+    let mut interfaces = Vec::with_capacity(interface_count);
+    for _ in 0..interface_count {
+        let type_params = cur.u32()?;
+        let effect_params = cur.u32()?;
+        let generic_count = cur.len()?;
+        let mut generic_is_effect = Vec::with_capacity(generic_count);
+        for _ in 0..generic_count {
+            generic_is_effect.push(cur.flag()?);
+        }
+        let type_bounds = decode_type_bounds(&mut cur)?;
+        let associated_count = cur.len()?;
+        let mut associated = Vec::with_capacity(associated_count);
+        for _ in 0..associated_count {
+            let name = cur.string()?;
+            let bound = match cur.u8()? {
+                0 => None,
+                1 => Some(decode_interface_use(&mut cur)?),
+                other => return Err(DecodeError::BadFlag(other)),
+            };
+            associated.push(BcAssociated { name, bound });
+        }
+        let method_count = cur.len()?;
+        let mut methods = Vec::with_capacity(method_count);
+        for _ in 0..method_count {
+            let selector = cur.u32()?;
+            let mut_self = cur.flag()?;
+            let param_count = cur.len()?;
+            if param_count > cur.remaining() / 4 {
+                return Err(DecodeError::BadLength);
+            }
+            let mut params = Vec::with_capacity(param_count);
+            for _ in 0..param_count {
+                params.push(cur.u32()?);
+            }
+            let marker_count = cur.len()?;
+            if marker_count != param_count {
+                return Err(DecodeError::MutMarkerCount);
+            }
+            let mut param_muts = Vec::with_capacity(marker_count);
+            for _ in 0..marker_count {
+                param_muts.push(cur.flag()?);
+            }
+            let ret = cur.u32()?;
+            let row = decode_row(&mut cur)?;
+            methods.push(BcInterfaceMethod {
+                selector,
+                mut_self,
+                params,
+                param_muts,
+                ret,
+                row,
+            });
+        }
+        interfaces.push(BcInterface {
+            name: String::new(),
+            key: String::new(),
+            type_params,
+            effect_params,
+            generic_is_effect,
+            type_bounds,
+            associated,
+            methods,
+        });
+    }
+    let conformance_count = cur.len()?;
+    let mut conformances = Vec::with_capacity(conformance_count);
+    for _ in 0..conformance_count {
+        let class = cur.u32()?;
+        let application = decode_interface_use(&mut cur)?;
+        let associated_count = cur.len()?;
+        if associated_count > cur.remaining() / 4 {
+            return Err(DecodeError::BadLength);
+        }
+        let mut associated = Vec::with_capacity(associated_count);
+        for _ in 0..associated_count {
+            associated.push(cur.u32()?);
+        }
+        conformances.push(BcConformance {
+            class,
+            application,
+            associated,
+        });
+    }
+    let class_bound_count = cur.len()?;
+    let mut class_bounds = Vec::with_capacity(class_bound_count);
+    for _ in 0..class_bound_count {
+        class_bounds.push(decode_type_bounds(&mut cur)?);
+    }
+    let function_bound_count = cur.len()?;
+    let mut func_bounds = Vec::with_capacity(function_bound_count);
+    for _ in 0..function_bound_count {
+        func_bounds.push(decode_type_bounds(&mut cur)?);
     }
     let import_count = cur.len()?;
     let mut imports = Vec::with_capacity(import_count);
@@ -1996,6 +2492,9 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             blocks,
         });
     }
+    if class_bounds.len() != classes.len() || func_bounds.len() != funcs.len() {
+        return Err(DecodeError::BadLength);
+    }
     let entry = cur.u32()?;
     if cur.pos != bytes.len() {
         return Err(DecodeError::TrailingBytes);
@@ -2035,6 +2534,10 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         types,
         selectors,
         apps,
+        interfaces,
+        conformances,
+        class_bounds,
+        func_bounds,
         imports,
         core_roles,
         classes,
@@ -2090,7 +2593,30 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
             let row = decode_row(cur)?;
             BcType::Fn(params, muts, ret, row)
         }
+        TY_CALLBACK => {
+            let count = cur.len()?;
+            let mut params = Vec::with_capacity(count);
+            for _ in 0..count {
+                params.push(cur.u32()?);
+            }
+            let mut_count = cur.len()?;
+            if mut_count != count {
+                return Err(DecodeError::MutMarkerCount);
+            }
+            let mut muts = Vec::with_capacity(mut_count);
+            for _ in 0..mut_count {
+                muts.push(cur.flag()?);
+            }
+            let ret = cur.u32()?;
+            let row = decode_row(cur)?;
+            BcType::Callback(params, muts, ret, row)
+        }
         TY_VAR => BcType::Var(cur.u32()?),
+        TY_PROJECTION => BcType::Projection {
+            base: cur.u32()?,
+            interface: cur.u32()?,
+            assoc: cur.u32()?,
+        },
         TY_DIGEST => BcType::Digest,
         TY_FAULT => BcType::Fault,
         TY_REQUEST => BcType::Request,
@@ -2195,11 +2721,21 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
             argc: cur.u32()?,
             app: cur.u32()?,
         },
+        OP_CALL_INTERFACE => Instr::CallInterface {
+            interface: cur.u32()?,
+            method: cur.u32()?,
+            recv_ty: cur.u32()?,
+        },
         OP_CALL_VALUE => Instr::CallValue { argc: cur.u32()? },
         OP_MAKE_CLOSURE => Instr::MakeClosure {
             func: cur.u32()?,
             captures: cur.u32()?,
         },
+        OP_MAKE_CALLBACK => Instr::Extended(ExtendedInstr::MakeCallback {
+            func: cur.u32()?,
+            captures: cur.u32()?,
+        }),
+        OP_AS_CALLBACK => Instr::Extended(ExtendedInstr::AsCallback),
         OP_LOAD_CAPTURE => Instr::LoadCapture(cur.u32()?),
         OP_NEW => Instr::New(cur.u32()?),
         OP_NEW_G => Instr::NewG {
@@ -2229,7 +2765,34 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_MAP_LEN => Instr::MapLen,
         OP_MAP_HAS => Instr::MapHas,
         OP_MAP_AT => Instr::MapAt,
-        OP_MAP_PUT => Instr::MapPut,
+        OP_MAP_PUT => Instr::MapPut {
+            ty: cur.u32()?,
+            discard: cur.flag()?,
+        },
+        OP_OPTION_SOME => Instr::Extended(ExtendedInstr::OptionSome { ty: cur.u32()? }),
+        OP_OPTION_NONE => Instr::Extended(ExtendedInstr::OptionNone { ty: cur.u32()? }),
+        OP_OPTION_PAYLOAD => Instr::Extended(ExtendedInstr::OptionPayload { ty: cur.u32()? }),
+        OP_LIST_GET => Instr::Extended(ExtendedInstr::ListGet { ty: cur.u32()? }),
+        OP_MAP_GET => Instr::Extended(ExtendedInstr::MapGet { ty: cur.u32()? }),
+        OP_LIST_EPOCH => Instr::Extended(ExtendedInstr::ListEpoch),
+        OP_LIST_ITER_LEN => Instr::Extended(ExtendedInstr::ListIterLen),
+        OP_MAP_EPOCH => Instr::Extended(ExtendedInstr::MapEpoch),
+        OP_MAP_ITER_LEN => Instr::Extended(ExtendedInstr::MapIterLen),
+        OP_MAP_KEY_AT => Instr::Extended(ExtendedInstr::MapKeyAt),
+        OP_MAP_VALUE_AT => Instr::Extended(ExtendedInstr::MapValueAt),
+        OP_LIST_CAPACITY => Instr::Extended(ExtendedInstr::ListCapacity),
+        OP_LIST_SET => Instr::Extended(ExtendedInstr::ListSet),
+        OP_LIST_POP => Instr::Extended(ExtendedInstr::ListPop { ty: cur.u32()? }),
+        OP_LIST_INSERT => Instr::Extended(ExtendedInstr::ListInsert),
+        OP_LIST_REMOVE => Instr::Extended(ExtendedInstr::ListRemove),
+        OP_LIST_SWAP_REMOVE => Instr::Extended(ExtendedInstr::ListSwapRemove),
+        OP_LIST_RESERVE => Instr::Extended(ExtendedInstr::ListReserve),
+        OP_LIST_TRUNCATE => Instr::Extended(ExtendedInstr::ListTruncate),
+        OP_LIST_CONTAINS => Instr::Extended(ExtendedInstr::ListContains),
+        OP_LIST_REORDER => Instr::Extended(ExtendedInstr::ListReorder),
+        OP_MAP_REMOVE => Instr::Extended(ExtendedInstr::MapRemove { ty: cur.u32()? }),
+        OP_MAP_CLEAR => Instr::Extended(ExtendedInstr::MapClear),
+        OP_MAP_RESERVE => Instr::Extended(ExtendedInstr::MapReserve),
         OP_SB_NEW => Instr::Native(NativeInstr::SbNew),
         OP_SB_APPEND_STR => Instr::Native(NativeInstr::SbAppendStr),
         OP_SB_APPEND_INT => Instr::Native(NativeInstr::SbAppendInt),
@@ -2292,7 +2855,10 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
             kind: cur.u32()?,
             slot: cur.u32()?,
         },
-        OP_AS_CALL => Instr::AsCall(cur.u32()?),
+        OP_AS_CALL => Instr::AsCall {
+            op: cur.u32()?,
+            ty: cur.u32()?,
+        },
         OP_CALL_ARGS => Instr::CallArgs,
         OP_FAULT_CODE => Instr::FaultCode,
         OP_FAULT_DENIED => Instr::FaultDenied,
@@ -2344,6 +2910,10 @@ mod tests {
                 types: vec![1],
                 rows: vec![vec![BcRow::Op(1), BcRow::Var(0)]],
             }],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![vec![], vec![]],
+            func_bounds: vec![vec![], vec![]],
             classes: vec![
                 BcClass {
                     name: "Counter".to_string(),
@@ -2483,11 +3053,21 @@ mod tests {
                 argc: 1,
                 app: 0,
             },
+            Instr::CallInterface {
+                interface: 0,
+                method: 0,
+                recv_ty: 4,
+            },
             Instr::CallValue { argc: 2 },
             Instr::MakeClosure {
                 func: 1,
                 captures: 0,
             },
+            Instr::Extended(ExtendedInstr::MakeCallback {
+                func: 1,
+                captures: 0,
+            }),
+            Instr::Extended(ExtendedInstr::AsCallback),
             Instr::LoadCapture(0),
             Instr::New(0),
             Instr::NewG { class: 1, app: 0 },
@@ -2505,7 +3085,38 @@ mod tests {
             Instr::MapLen,
             Instr::MapHas,
             Instr::MapAt,
-            Instr::MapPut,
+            Instr::MapPut {
+                ty: 0,
+                discard: false,
+            },
+            Instr::MapPut {
+                ty: 0,
+                discard: true,
+            },
+            Instr::Extended(ExtendedInstr::OptionSome { ty: 0 }),
+            Instr::Extended(ExtendedInstr::OptionNone { ty: 0 }),
+            Instr::Extended(ExtendedInstr::OptionPayload { ty: 0 }),
+            Instr::Extended(ExtendedInstr::ListGet { ty: 0 }),
+            Instr::Extended(ExtendedInstr::MapGet { ty: 0 }),
+            Instr::Extended(ExtendedInstr::ListEpoch),
+            Instr::Extended(ExtendedInstr::ListIterLen),
+            Instr::Extended(ExtendedInstr::MapEpoch),
+            Instr::Extended(ExtendedInstr::MapIterLen),
+            Instr::Extended(ExtendedInstr::MapKeyAt),
+            Instr::Extended(ExtendedInstr::MapValueAt),
+            Instr::Extended(ExtendedInstr::ListCapacity),
+            Instr::Extended(ExtendedInstr::ListSet),
+            Instr::Extended(ExtendedInstr::ListPop { ty: 0 }),
+            Instr::Extended(ExtendedInstr::ListInsert),
+            Instr::Extended(ExtendedInstr::ListRemove),
+            Instr::Extended(ExtendedInstr::ListSwapRemove),
+            Instr::Extended(ExtendedInstr::ListReserve),
+            Instr::Extended(ExtendedInstr::ListTruncate),
+            Instr::Extended(ExtendedInstr::ListContains),
+            Instr::Extended(ExtendedInstr::ListReorder),
+            Instr::Extended(ExtendedInstr::MapRemove { ty: 0 }),
+            Instr::Extended(ExtendedInstr::MapClear),
+            Instr::Extended(ExtendedInstr::MapReserve),
             Instr::Native(NativeInstr::SbNew),
             Instr::Native(NativeInstr::SbAppendStr),
             Instr::Native(NativeInstr::SbAppendInt),
@@ -2583,6 +3194,10 @@ mod tests {
             types: vec![BcType::Unit],
             selectors: vec![],
             apps: vec![],
+            interfaces: vec![],
+            conformances: vec![],
+            class_bounds: vec![],
+            func_bounds: vec![],
             classes: vec![],
             funcs: vec![],
             imports: vec![],
@@ -2650,10 +3265,10 @@ mod tests {
     fn export_count_mismatch_is_rejected() {
         let module = sample_module();
         let bytes = encode(&module);
-        // The export section starts with the class-name count.
+        // The export section starts with the interface-name count.
         let exp_at = u32::from_le_bytes(bytes[14..18].try_into().unwrap()) as usize;
         let mut corrupt = bytes.clone();
-        corrupt[exp_at..exp_at + 4].copy_from_slice(&0u32.to_le_bytes());
+        corrupt[exp_at..exp_at + 4].copy_from_slice(&1u32.to_le_bytes());
         assert!(matches!(
             decode(&corrupt),
             Err(DecodeError::ExportCountMismatch) | Err(DecodeError::BadLength)

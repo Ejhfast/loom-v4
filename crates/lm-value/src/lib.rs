@@ -14,6 +14,13 @@ pub struct ObjRef {
     pub generation: u32,
 }
 
+/// A generation-checked reference to one machine callback slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallbackRef {
+    pub slot: u32,
+    pub generation: u32,
+}
+
 /// One type environment of one world.
 ///
 /// The verifier proves a generic body once, with the type variables of
@@ -85,6 +92,16 @@ pub enum Value {
     /// exact operation. The identity-indexed type lives in the static
     /// type system, not in the value.
     Op(u32),
+    /// A reference to one machine-local nonescaping callback.
+    Callback(CallbackRef),
+    /// One nullary arm of a native one-payload enum.
+    ///
+    /// `ty` names the closed family type. `arm` names its source arm.
+    /// Pinned `Option` uses this value for `None`.
+    EmptyCase {
+        ty: u32,
+        arm: u32,
+    },
     /// The marker for an object field without a first assignment.
     /// No instruction can produce or store this value.
     Uninit,
@@ -124,6 +141,13 @@ mod tests {
     #[test]
     fn char_keeps_one_unicode_scalar() {
         assert_eq!(Value::Char('猫'), Value::Char('猫'));
+    }
+
+    #[test]
+    fn an_empty_case_keeps_the_value_size() {
+        let value = Value::EmptyCase { ty: 7, arm: 1 };
+        assert_eq!(value, Value::EmptyCase { ty: 7, arm: 1 });
+        assert_eq!(std::mem::size_of::<Value>(), 16);
     }
 
     #[test]

@@ -224,7 +224,7 @@ fn payload(object: &Object) -> String {
                 values(fields)
             )
         }
-        Object::List { items } => format!("[{}]", values(items)),
+        Object::List { items, .. } => format!("[{}]", values(items)),
         Object::Tuple { items } => format!("({})", values(items)),
         Object::Map { entries, .. } => {
             let parts: Vec<String> = entries
@@ -298,7 +298,9 @@ fn show(value: Value) -> String {
         Value::Int(v) => v.to_string(),
         Value::Char(value) => format!("{value:?}"),
         Value::Op(op) => format!("<op {}>", op_text(op)),
+        Value::EmptyCase { ty, arm } => format!("<empty type {ty} arm {arm}>"),
         Value::Obj(r) => format!("#{}", r.slot),
+        Value::Callback(reference) => format!("<callback {}>", reference.slot),
         Value::Uninit => "<uninit>".to_string(),
     }
 }

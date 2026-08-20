@@ -8,8 +8,9 @@ use super::{
     RestoreFail, SnapshotImage,
 };
 use crate::machine::{
-    Action, Block, FaultRec, Frame, Machine, MachineState, Mailbox, Ownership, Pending,
-    PolicyCursor, RoutedRequest, Terminal, VmId, WaitEntry, WaitSource,
+    Action, Block, CallbackDescriptor, CallbackSlot, FaultRec, Frame, FrameCapture, Machine,
+    MachineState, Mailbox, Ownership, Pending, PolicyCursor, RoutedRequest, Terminal, VmId,
+    WaitEntry, WaitSource,
 };
 use crate::world::World;
 use crate::VmConfig;
@@ -50,7 +51,7 @@ impl World<'_> {
         let running = self.identity().map_err(|_| RestoreFail::OtherProgram)?;
         let identity = admitted.identity();
         if identity.module_semantic != running.semantic_hash
-            || identity.verification != lm_bytecode::identity::verification_hash(self.module())
+            || identity.verification != self.verification_hash()
         {
             return Err(RestoreFail::OtherProgram);
         }
@@ -114,6 +115,7 @@ impl World<'_> {
             .prepare_import(&image.types, &image.envs)
             .map_err(|_| RestoreFail::LimitExceeded)?;
         let env_map = types.env_map();
+        let type_map = types.type_map();
 
         let mut ids = try_vec(count)?;
         ids.push(target);
@@ -155,13 +157,14 @@ impl World<'_> {
         let mut machines = try_vec(count)?;
         for (ordinal, source) in image.machines.iter().enumerate() {
             let mut machine = self.empty_machine(configs[ordinal], None, source.generation);
-            let refs = restore_heap(&mut machine, source, &ids, env_map)?;
+            let refs = restore_heap(&mut machine, source, &ids, env_map, type_map)?;
             restore_state(
                 &mut machine,
                 source,
                 &ids,
                 &generations,
                 env_map,
+                type_map,
                 &refs,
                 restorer,
                 gate,
@@ -250,6 +253,7 @@ fn restore_heap(
     source: &ImageMachine,
     ids: &[VmId],
     env_map: &[TypeEnvId],
+    type_map: &[u32],
 ) -> Result<Vec<ObjRef>, RestoreFail> {
     let mut bytes = 0usize;
     for entry in &source.objects {
@@ -277,7 +281,7 @@ fn restore_heap(
             .object
             .try_clone_remapped(|child| refs[child.slot as usize])
             .map_err(|_| RestoreFail::LimitExceeded)?;
-        relocate_metadata(&mut object, ids, env_map);
+        relocate_metadata(&mut object, ids, env_map, type_map);
         let reference = machine
             .vm
             .heap
@@ -301,6 +305,7 @@ fn restore_state(
     ids: &[VmId],
     generations: &[u32],
     env_map: &[TypeEnvId],
+    type_map: &[u32],
     refs: &[ObjRef],
     restorer: VmId,
     gate: u32,
@@ -308,18 +313,40 @@ fn restore_state(
 ) -> Result<(), RestoreFail> {
     let object_value = |value: Value| match value {
         Value::Obj(reference) => Value::Obj(refs[reference.slot as usize]),
+        Value::EmptyCase { ty, arm } => Value::EmptyCase {
+            ty: type_map[ty as usize],
+            arm,
+        },
         other => other,
     };
 
+    let mut callbacks = try_vec(source.callbacks.len())?;
+    for callback in &source.callbacks {
+        let mut captures = try_vec(callback.captures.len())?;
+        captures.extend(callback.captures.iter().copied().map(object_value));
+        callbacks.push(CallbackSlot {
+            generation: 0,
+            descriptor: Some(CallbackDescriptor {
+                func: callback.func,
+                captures,
+                env: env_map[callback.env as usize],
+                owner_depth: callback.owner_depth,
+            }),
+        });
+    }
     let mut frames = try_vec(source.frames.len())?;
     for frame in &source.frames {
+        let closure = match frame.closure.map(object_value) {
+            Some(value) => Some(FrameCapture::from_value(value).ok_or(RestoreFail::OtherProgram)?),
+            None => None,
+        };
         frames.push(Frame {
             func: frame.func,
             block: frame.block,
             ip: frame.ip,
             base_local: frame.base_local,
             base_operand: frame.base_operand,
-            closure: frame.closure.map(|ordinal| refs[ordinal as usize]),
+            closure,
             env: env_map[frame.env as usize],
         });
     }
@@ -420,6 +447,7 @@ fn restore_state(
         })
         .collect();
     machine.vm.frames = frames;
+    machine.callbacks = callbacks;
     machine.vm.locals = locals;
     machine.vm.operands = operands;
     machine.vm.literals = literals;
@@ -505,7 +533,25 @@ fn clamp(source: &ImageMachine, ceiling: VmConfig) -> VmConfig {
 }
 
 /// Relocate the world-local metadata of one restored object.
-fn relocate_metadata(object: &mut Object, ids: &[VmId], env_map: &[TypeEnvId]) {
+fn relocate_metadata(object: &mut Object, ids: &[VmId], env_map: &[TypeEnvId], type_map: &[u32]) {
+    let remap = |value: &mut Value| {
+        if let Value::EmptyCase { ty, .. } = value {
+            *ty = type_map[*ty as usize];
+        }
+    };
+    match object {
+        Object::Instance { fields, .. }
+        | Object::List { items: fields, .. }
+        | Object::Tuple { items: fields } => fields.iter_mut().for_each(remap),
+        Object::Map { entries, .. } => {
+            for (key, value) in entries {
+                remap(key);
+                remap(value);
+            }
+        }
+        Object::Closure { captures, .. } => captures.iter_mut().for_each(remap),
+        _ => {}
+    }
     match object {
         Object::Instance { env, .. } | Object::Closure { env, .. } => {
             *env = Witness(env_map[env.env().0 as usize]);

@@ -2,7 +2,10 @@
 #
 # A half-open integer range `[start, stop)`.
 
-class Range
+class Range implements Counted, Iterable
+  type Item = Int
+  type Iter = RangeIterator
+
   start: Int
   stop: Int
 
@@ -21,5 +24,9 @@ class Range
 
   def has(self, value: Int): Bool
     value >= self.start and value < self.stop
+  end
+
+  def iterator(self): RangeIterator
+    RangeIterator(self.start, self.stop)
   end
 end

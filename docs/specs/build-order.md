@@ -788,6 +788,10 @@ Week 10 starts with the handle foundation in
 `docs/specs/sidecar/handles.md`. Later slices add scoped leases, broader host
 operations, and TCP.
 
+The collection extension follows
+`docs/specs/sidecar/collections-and-iteration.md`. It adds native `Option`,
+nominal interfaces, iteration, core collections, and collection views.
+
 ### Land
 
 - Add the full operation manifest for I/O, filesystem, clock, random,

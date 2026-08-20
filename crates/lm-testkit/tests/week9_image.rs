@@ -315,10 +315,19 @@ fn a_swapped_capture_context_rejects() {
     let (loaded, bytes) = asked_tree();
     let image = accept(&loaded, &bytes);
     let mut broken = image.clone();
-    let frame = broken.machines[2].frames[0].closure;
+    let closure = broken.machines[2].frames[0].closure;
+    let frame = match closure {
+        Some(lm_value::Value::Obj(reference)) => Some(reference.slot),
+        _ => panic!("the frame has an object capture context"),
+    };
     let body = broken.machines[2].start_body;
     assert_ne!(frame, body);
-    broken.machines[2].frames[0].closure = body;
+    broken.machines[2].frames[0].closure = body.map(|slot| {
+        lm_value::Value::Obj(lm_value::ObjRef {
+            slot,
+            generation: 0,
+        })
+    });
     broken.machines[2].start_body = frame;
     let bad = codec::encode(&broken, usize::MAX).expect("the damaged image encodes");
     assert_eq!(reject(&loaded, &bad), ImageReason::Reference);

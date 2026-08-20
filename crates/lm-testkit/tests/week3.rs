@@ -341,7 +341,7 @@ fn refinement_and_cast_rules() {
         "E1047"
     );
     assert_eq!(code_of("1 is Bool\n"), "E1047");
-    assert_eq!(code_of("xs = [1]\nxs as [Int]\n"), "E1047");
+    assert_eq!(code_of("pair = (1, 2)\npair as (Int, Int)\n"), "E1047");
     // Upcasts always succeed; downcasts test at run time.
     assert_eq!(
         runs(&format!("{animals}d = Dog()\na = d as Animal\na is Dog\n")),

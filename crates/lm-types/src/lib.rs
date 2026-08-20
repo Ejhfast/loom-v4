@@ -19,6 +19,10 @@ pub struct TypeId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClassId(pub u32);
 
+/// A dense identifier for one nominal interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InterfaceId(pub u32);
+
 /// The unit type `()`.
 pub const UNIT: TypeId = TypeId(0);
 /// The `Bool` type.
@@ -99,8 +103,16 @@ pub enum Type {
     /// a result, and a row. The marker vector length equals the
     /// parameter vector length.
     Fn(Vec<TypeId>, Vec<bool>, TypeId, Row),
+    /// A function value that cannot escape the active call chain.
+    Callback(Vec<TypeId>, Vec<bool>, TypeId, Row),
     /// One type parameter of the enclosing generic definition.
     Var(u32),
+    /// One associated type selected through a nominal interface.
+    Projection {
+        base: TypeId,
+        interface: InterfaceId,
+        assoc: u32,
+    },
     /// The frozen machine `Fault` value type.
     Fault,
     /// The opaque pending-request token type.
@@ -164,6 +176,9 @@ pub struct TypeStore {
     row_name_index: HashMap<String, u32>,
     /// Primitive type identifiers mapped to their native core classes.
     native_classes: HashMap<TypeId, ClassId>,
+    native_list: Option<ClassId>,
+    native_map: Option<ClassId>,
+    conformances: HashMap<(ClassId, InterfaceId), Vec<TypeId>>,
     /// Memoized subtype answers keyed by `(expected, found)`.
     subtype_cache: RefCell<HashMap<(TypeId, TypeId), bool>>,
 }
@@ -183,6 +198,9 @@ impl TypeStore {
             row_names: Vec::new(),
             row_name_index: HashMap::new(),
             native_classes: HashMap::new(),
+            native_list: None,
+            native_map: None,
+            conformances: HashMap::new(),
             subtype_cache: RefCell::new(HashMap::new()),
         };
         // Keep this order aligned with the public constants.
@@ -225,6 +243,18 @@ impl TypeStore {
     ) -> TypeId {
         debug_assert_eq!(params.len(), muts.len());
         self.intern(Type::Fn(params, muts, ret, row))
+    }
+
+    /// Intern a nonescaping callback type.
+    pub fn intern_callback(
+        &mut self,
+        params: Vec<TypeId>,
+        muts: Vec<bool>,
+        ret: TypeId,
+        row: Row,
+    ) -> TypeId {
+        debug_assert_eq!(params.len(), muts.len());
+        self.intern(Type::Callback(params, muts, ret, row))
     }
 
     pub fn get(&self, id: TypeId) -> &Type {
@@ -334,11 +364,91 @@ impl TypeStore {
         self.subtype_cache.borrow_mut().clear();
     }
 
+    /// Link the structural list type to its native core class.
+    pub fn set_native_list_class(&mut self, class: ClassId) {
+        self.native_list = Some(class);
+        self.subtype_cache.borrow_mut().clear();
+    }
+
+    /// Link the structural map type to its native core class.
+    pub fn set_native_map_class(&mut self, class: ClassId) {
+        self.native_map = Some(class);
+        self.subtype_cache.borrow_mut().clear();
+    }
+
+    /// Record one class-owned interface conformance.
+    pub fn set_conformance(
+        &mut self,
+        class: ClassId,
+        interface: InterfaceId,
+        associated: Vec<TypeId>,
+    ) {
+        self.conformances.insert((class, interface), associated);
+    }
+
+    /// Read the associated type templates of one conformance.
+    pub fn conformance(&self, class: ClassId, interface: InterfaceId) -> Option<&[TypeId]> {
+        self.conformances
+            .get(&(class, interface))
+            .map(Vec::as_slice)
+    }
+
+    /// Resolve one associated projection when its base is concrete.
+    pub fn project(&mut self, base: TypeId, interface: InterfaceId, assoc: u32) -> TypeId {
+        let Some(associated) = self.resolve_conformance(base, interface) else {
+            return self.intern(Type::Projection {
+                base,
+                interface,
+                assoc,
+            });
+        };
+        associated.get(assoc as usize).copied().unwrap_or_else(|| {
+            self.intern(Type::Projection {
+                base,
+                interface,
+                assoc,
+            })
+        })
+    }
+
+    /// Resolve one inherited conformance for a nominal type.
+    pub fn resolve_conformance(
+        &mut self,
+        base: TypeId,
+        interface: InterfaceId,
+    ) -> Option<Vec<TypeId>> {
+        let (mut class, mut args) = self.nominal_class(base)?;
+        loop {
+            if let Some(templates) = self.conformance(class, interface).map(<[TypeId]>::to_vec) {
+                return Some(
+                    templates
+                        .into_iter()
+                        .map(|item| self.substitute(item, &args, &[]))
+                        .collect(),
+                );
+            }
+            let meta = self.class_meta(class).clone();
+            let parent = meta.parent?;
+            if meta.kind == ClassKind::EnumCase && meta.parent_args.is_empty() {
+                // An enum case passes its family arguments through.
+            } else {
+                args = meta
+                    .parent_args
+                    .iter()
+                    .map(|item| self.substitute(*item, &args, &[]))
+                    .collect();
+            }
+            class = parent;
+        }
+    }
+
     /// Get the nominal class of a primitive or class instance type.
     pub fn nominal_class(&self, ty: TypeId) -> Option<(ClassId, Vec<TypeId>)> {
         match self.get(ty) {
             Type::Class(class) => Some((*class, Vec::new())),
             Type::Inst(class, args) => Some((*class, args.clone())),
+            Type::List(element) => self.native_list.map(|class| (class, vec![*element])),
+            Type::Map(key, value) => self.native_map.map(|class| (class, vec![*key, *value])),
             _ => self
                 .native_classes
                 .get(&ty)
@@ -348,6 +458,12 @@ impl TypeStore {
     }
 
     fn type_for_nominal(&mut self, class: ClassId, args: Vec<TypeId>) -> TypeId {
+        if self.native_list == Some(class) && args.len() == 1 {
+            return self.intern(Type::List(args[0]));
+        }
+        if self.native_map == Some(class) && args.len() == 2 {
+            return self.intern(Type::Map(args[0], args[1]));
+        }
         if args.is_empty() {
             if let Some((ty, _)) = self
                 .native_classes
@@ -485,6 +601,16 @@ impl TypeStore {
                         && self.compatible(*er, *fr)
                         && self.row_included(frow, erow)
                 }
+                (Type::Callback(fp, fm, fr, frow), Type::Callback(ep, em, er, erow)) => {
+                    fp.len() == ep.len()
+                        && fp
+                            .iter()
+                            .zip(ep.iter())
+                            .all(|(f, e)| self.compatible(*f, *e))
+                        && fm.iter().zip(em.iter()).all(|(f, e)| !*f || *e)
+                        && self.compatible(*er, *fr)
+                        && self.row_included(frow, erow)
+                }
                 _ => false,
             }
         };
@@ -589,6 +715,41 @@ impl TypeStore {
         )
     }
 
+    /// Return true when one type contains a nonescaping callback.
+    pub fn contains_callback(&self, id: TypeId) -> bool {
+        let mut stack = vec![id];
+        let mut seen = vec![false; self.types.len()];
+        while let Some(current) = stack.pop() {
+            let index = current.0 as usize;
+            if seen[index] {
+                continue;
+            }
+            seen[index] = true;
+            match self.get(current) {
+                Type::Callback(..) => return true,
+                Type::Inst(_, args) | Type::Tuple(args) => stack.extend(args.iter().copied()),
+                Type::List(element)
+                | Type::Projection { base: element, .. }
+                | Type::Vm(element)
+                | Type::Wait(element)
+                | Type::Snapshot(element)
+                | Type::Op(_, element) => stack.push(*element),
+                Type::Map(key, value)
+                | Type::PendingCall(key, value)
+                | Type::Handle(key, value) => {
+                    stack.push(*key);
+                    stack.push(*value);
+                }
+                Type::Fn(params, _, ret, _) => {
+                    stack.extend(params.iter().copied());
+                    stack.push(*ret);
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// True when the type names a holder-local native class.
     ///
     /// A holder-local native value stays in the heap that holds it
@@ -620,6 +781,14 @@ impl TypeStore {
         }
         match self.get(ty).clone() {
             Type::Var(i) => targs.get(i as usize).copied().unwrap_or(ty),
+            Type::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                let base = self.substitute(base, targs, rowargs);
+                self.project(base, interface, assoc)
+            }
             Type::Inst(c, args) => {
                 let args: Vec<TypeId> = args
                     .iter()
@@ -651,6 +820,15 @@ impl TypeStore {
                 let ret = self.substitute(ret, targs, rowargs);
                 let row = self.substitute_row(&row, rowargs);
                 self.intern(Type::Fn(params, muts, ret, row))
+            }
+            Type::Callback(params, muts, ret, row) => {
+                let params: Vec<TypeId> = params
+                    .iter()
+                    .map(|p| self.substitute(*p, targs, rowargs))
+                    .collect();
+                let ret = self.substitute(ret, targs, rowargs);
+                let row = self.substitute_row(&row, rowargs);
+                self.intern(Type::Callback(params, muts, ret, row))
             }
             Type::Vm(t) => {
                 let t = self.substitute(t, targs, rowargs);
@@ -697,11 +875,15 @@ impl TypeStore {
     pub fn contains_var(&self, ty: TypeId) -> bool {
         match self.get(ty) {
             Type::Var(_) => true,
+            Type::Projection { base, .. } => self.contains_var(*base),
             Type::Inst(_, args) => args.iter().any(|a| self.contains_var(*a)),
             Type::List(e) => self.contains_var(*e),
             Type::Map(k, v) => self.contains_var(*k) || self.contains_var(*v),
             Type::Tuple(elems) => elems.iter().any(|e| self.contains_var(*e)),
             Type::Fn(params, _, ret, _) => {
+                params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
+            }
+            Type::Callback(params, _, ret, _) => {
                 params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
             }
             Type::Vm(t) | Type::Wait(t) | Type::Snapshot(t) => self.contains_var(*t),
@@ -716,10 +898,16 @@ impl TypeStore {
     pub fn contains_effect_var(&self, ty: TypeId) -> bool {
         match self.get(ty) {
             Type::Inst(_, args) => args.iter().any(|a| self.contains_effect_var(*a)),
+            Type::Projection { base, .. } => self.contains_effect_var(*base),
             Type::List(e) => self.contains_effect_var(*e),
             Type::Map(k, v) => self.contains_effect_var(*k) || self.contains_effect_var(*v),
             Type::Tuple(elems) => elems.iter().any(|e| self.contains_effect_var(*e)),
             Type::Fn(params, _, ret, row) => {
+                row.iter().any(|e| matches!(e, RowElem::Var(_)))
+                    || params.iter().any(|p| self.contains_effect_var(*p))
+                    || self.contains_effect_var(*ret)
+            }
+            Type::Callback(params, _, ret, row) => {
                 row.iter().any(|e| matches!(e, RowElem::Var(_)))
                     || params.iter().any(|p| self.contains_effect_var(*p))
                     || self.contains_effect_var(*ret)
@@ -787,7 +975,36 @@ impl TypeStore {
                 }
                 out
             }
+            Type::Callback(params, muts, ret, row) => {
+                let mut out = String::from("nonescaping (");
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    if muts.get(i).copied().unwrap_or(false) {
+                        out.push_str("mut ");
+                    }
+                    out.push_str(&self.display(*p));
+                }
+                out.push_str(") -> ");
+                out.push_str(&self.display(*ret));
+                if !row.is_empty() {
+                    out.push_str(" with ");
+                    out.push_str(&self.display_row(row));
+                }
+                out
+            }
             Type::Var(i) => format!("${i}"),
+            Type::Projection {
+                base,
+                interface,
+                assoc,
+            } => format!(
+                "{}.<interface {} type {}>",
+                self.display(*base),
+                interface.0,
+                assoc
+            ),
             Type::Fault => "Fault".to_string(),
             Type::Request => "Request".to_string(),
             Type::PolicyTable => "PolicyTable".to_string(),

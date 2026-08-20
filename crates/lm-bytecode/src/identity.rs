@@ -55,7 +55,9 @@
 //! and never recurses on the Rust stack over untrusted shapes.
 
 use crate::hash::sha256;
-use crate::{BcClassKind, BcRow, BcType, Instr, Module, NativeInstr, NO_PARENT, VERSION};
+use crate::{
+    BcClassKind, BcRow, BcType, ExtendedInstr, Instr, Module, NativeInstr, NO_PARENT, VERSION,
+};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 
@@ -82,7 +84,8 @@ use std::collections::{BTreeSet, HashMap};
 /// adds two active byte-buffer scan instructions and native TLS
 /// resources with their VM controls. Both landed on separate
 /// branches, so version 20 is the first that carries them together.
-pub const COMPILER_ABI_VERSION: u32 = 20;
+/// Version 22 adds interface contracts, callbacks, and native collection lowering.
+pub const COMPILER_ABI_VERSION: u32 = 22;
 
 /// The refinement work budget of one component.
 ///
@@ -126,6 +129,7 @@ fn fail(message: impl Into<String>) -> IdentityError {
 pub struct ModuleIdentity {
     pub class_hashes: Vec<[u8; 32]>,
     pub func_hashes: Vec<[u8; 32]>,
+    pub interface_hashes: Vec<[u8; 32]>,
     /// The semantic digest of every type-table entry.
     ///
     /// A snapshot names the result type of its root machine by this
@@ -292,6 +296,21 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             | BcType::FileHandle
             | BcType::ResourceHandle
             | BcType::Var(_) => {}
+            BcType::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                earlier(*base)?;
+                let Some(contract) = module.interfaces.get(*interface as usize) else {
+                    return Err(fail(format!("type {idx} names an interface out of range")));
+                };
+                if *assoc as usize >= contract.associated.len() {
+                    return Err(fail(format!(
+                        "type {idx} names an associated type out of range"
+                    )));
+                }
+            }
             BcType::Class(c) => class_ok(*c)?,
             BcType::Inst(c, args) => {
                 class_ok(*c)?;
@@ -309,7 +328,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
                     earlier(*e)?;
                 }
             }
-            BcType::Fn(params, muts, ret, row) => {
+            BcType::Fn(params, muts, ret, row) | BcType::Callback(params, muts, ret, row) => {
                 if muts.len() != params.len() {
                     return Err(fail(format!("type {idx}: mut markers do not align")));
                 }
@@ -335,6 +354,80 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
         }
         for row in &app.rows {
             check_row(&format!("application {aidx}"), row)?;
+        }
+    }
+    let check_use =
+        |what: &str, application: &crate::BcInterfaceUse| -> Result<(), IdentityError> {
+            if application.interface as usize >= module.interfaces.len() {
+                return Err(fail(format!("{what}: interface index out of range")));
+            }
+            for ty in &application.types {
+                if *ty as usize >= s.types {
+                    return Err(fail(format!("{what}: type index out of range")));
+                }
+            }
+            for row in &application.rows {
+                check_row(what, row)?;
+            }
+            Ok(())
+        };
+    for (iidx, interface) in module.interfaces.iter().enumerate() {
+        for bounds in &interface.type_bounds {
+            for bound in bounds {
+                check_use(&format!("interface {iidx}"), bound)?;
+            }
+        }
+        for associated in &interface.associated {
+            if let Some(bound) = &associated.bound {
+                check_use(&format!("interface {iidx}"), bound)?;
+            }
+        }
+        for method in &interface.methods {
+            if method.selector as usize >= module.selectors.len() {
+                return Err(fail(format!(
+                    "interface {iidx}: selector index out of range"
+                )));
+            }
+            for ty in method.params.iter().chain([&method.ret]) {
+                if *ty as usize >= s.types {
+                    return Err(fail(format!(
+                        "interface {iidx}: method type index out of range"
+                    )));
+                }
+            }
+            check_row(&format!("interface {iidx}"), &method.row)?;
+        }
+    }
+    if module.class_bounds.len() != s.classes || module.func_bounds.len() != s.funcs {
+        return Err(fail("interface-bound table length mismatch"));
+    }
+    for (cidx, bounds) in module.class_bounds.iter().enumerate() {
+        for parameter in bounds {
+            for bound in parameter {
+                check_use(&format!("class {cidx}"), bound)?;
+            }
+        }
+    }
+    for (fidx, bounds) in module.func_bounds.iter().enumerate() {
+        for parameter in bounds {
+            for bound in parameter {
+                check_use(&format!("function {fidx}"), bound)?;
+            }
+        }
+    }
+    for (index, conformance) in module.conformances.iter().enumerate() {
+        if conformance.class as usize >= s.classes {
+            return Err(fail(format!(
+                "conformance {index}: class index out of range"
+            )));
+        }
+        check_use(&format!("conformance {index}"), &conformance.application)?;
+        for ty in &conformance.associated {
+            if *ty as usize >= s.types {
+                return Err(fail(format!(
+                    "conformance {index}: associated type index out of range"
+                )));
+            }
         }
     }
     for (cidx, class) in module.classes.iter().enumerate() {
@@ -514,7 +607,6 @@ fn preflight_instr(
         | Instr::MapLen
         | Instr::MapHas
         | Instr::MapAt
-        | Instr::MapPut
         | Instr::Native(NativeInstr::SbNew)
         | Instr::Native(NativeInstr::SbAppendStr)
         | Instr::Native(NativeInstr::SbAppendInt)
@@ -637,7 +729,8 @@ fn preflight_instr(
         }
         Instr::TupleNew { ty, count: _ }
         | Instr::ListNew { ty, count: _ }
-        | Instr::MapNew { ty, count: _ } => {
+        | Instr::MapNew { ty, count: _ }
+        | Instr::MapPut { ty, .. } => {
             if *ty as usize >= s.types {
                 return Err(bad("type index"));
             }
@@ -657,8 +750,72 @@ fn preflight_instr(
             }
             Ok(())
         }
-        Instr::OpConst(_) | Instr::TableEdit { .. } | Instr::AsCall(_) => Ok(()),
+        Instr::AsCall { ty, .. } => {
+            if *ty as usize >= s.types {
+                return Err(bad("type index"));
+            }
+            Ok(())
+        }
+        Instr::CallInterface {
+            interface,
+            method,
+            recv_ty,
+        } => {
+            let Some(contract) = module.interfaces.get(*interface as usize) else {
+                return Err(bad("interface"));
+            };
+            if *method as usize >= contract.methods.len() {
+                return Err(bad("interface method"));
+            }
+            if *recv_ty as usize >= s.types {
+                return Err(bad("receiver type"));
+            }
+            Ok(())
+        }
+        Instr::OpConst(_) | Instr::TableEdit { .. } => Ok(()),
+        Instr::Extended(instr) => preflight_extended(s, fidx, instr),
     }
+}
+
+fn preflight_extended(s: &Space, fidx: usize, instr: &ExtendedInstr) -> Result<(), IdentityError> {
+    let bad = |what: &str| fail(format!("function {fidx}: {what} out of range"));
+    match instr {
+        ExtendedInstr::MakeCallback { func, .. } => {
+            if *func as usize >= s.funcs {
+                return Err(bad("closure function"));
+            }
+        }
+        ExtendedInstr::OptionSome { ty }
+        | ExtendedInstr::OptionNone { ty }
+        | ExtendedInstr::OptionPayload { ty }
+        | ExtendedInstr::ListGet { ty }
+        | ExtendedInstr::MapGet { ty }
+        | ExtendedInstr::ListPop { ty }
+        | ExtendedInstr::MapRemove { ty } => {
+            if *ty as usize >= s.types {
+                return Err(bad("type index"));
+            }
+        }
+        ExtendedInstr::AsCallback
+        | ExtendedInstr::ListEpoch
+        | ExtendedInstr::ListIterLen
+        | ExtendedInstr::MapEpoch
+        | ExtendedInstr::MapIterLen
+        | ExtendedInstr::MapKeyAt
+        | ExtendedInstr::MapValueAt
+        | ExtendedInstr::ListCapacity
+        | ExtendedInstr::ListSet
+        | ExtendedInstr::ListInsert
+        | ExtendedInstr::ListRemove
+        | ExtendedInstr::ListSwapRemove
+        | ExtendedInstr::ListReserve
+        | ExtendedInstr::ListTruncate
+        | ExtendedInstr::ListContains
+        | ExtendedInstr::ListReorder
+        | ExtendedInstr::MapClear
+        | ExtendedInstr::MapReserve => {}
+    }
+    Ok(())
 }
 
 // ----------------------------------------------------------------
@@ -684,6 +841,41 @@ struct Graph {
     extern_func: Vec<bool>,
 }
 
+fn push_interface_type_edges(module: &Module, space: &Space, interface: u32, out: &mut Vec<u32>) {
+    let contract = &module.interfaces[interface as usize];
+    for bounds in &contract.type_bounds {
+        for bound in bounds {
+            for ty in &bound.types {
+                out.push(space.type_node(*ty));
+            }
+        }
+    }
+    for associated in &contract.associated {
+        if let Some(bound) = &associated.bound {
+            for ty in &bound.types {
+                out.push(space.type_node(*ty));
+            }
+        }
+    }
+    for method in &contract.methods {
+        for ty in method.params.iter().chain([&method.ret]) {
+            out.push(space.type_node(*ty));
+        }
+    }
+}
+
+fn push_interface_use_edges(
+    module: &Module,
+    space: &Space,
+    application: &crate::BcInterfaceUse,
+    out: &mut Vec<u32>,
+) {
+    for ty in &application.types {
+        out.push(space.type_node(*ty));
+    }
+    push_interface_type_edges(module, space, application.interface, out);
+}
+
 impl Graph {
     fn build(module: &Module) -> Graph {
         let s = Space::of(module);
@@ -702,8 +894,31 @@ impl Graph {
                 continue;
             }
             let node = s.class_node(cidx as u32);
+            for arg in &class.parent_args {
+                succ[node as usize].push(s.type_node(*arg));
+            }
             for (_, fty) in &class.fields {
                 succ[node as usize].push(s.type_node(*fty));
+            }
+            for bounds in &module.class_bounds[cidx] {
+                for bound in bounds {
+                    push_interface_use_edges(module, &s, bound, &mut succ[node as usize]);
+                }
+            }
+            for conformance in module
+                .conformances
+                .iter()
+                .filter(|item| item.class == cidx as u32)
+            {
+                push_interface_use_edges(
+                    module,
+                    &s,
+                    &conformance.application,
+                    &mut succ[node as usize],
+                );
+                for ty in &conformance.associated {
+                    succ[node as usize].push(s.type_node(*ty));
+                }
             }
             for (_, func) in &class.methods {
                 succ[node as usize].push(s.func_node(*func));
@@ -739,6 +954,11 @@ impl Graph {
             {
                 list.push(s.type_node(*t));
             }
+            for bounds in &module.func_bounds[fidx] {
+                for bound in bounds {
+                    push_interface_use_edges(module, &s, bound, list);
+                }
+            }
             for block in &func.blocks {
                 for instr in block {
                     match instr {
@@ -752,6 +972,9 @@ impl Graph {
                             called[*f as usize] = true;
                         }
                         Instr::CallVirtualG { app, .. } => list.push(s.app_node(*app)),
+                        Instr::CallInterface { recv_ty, .. } => {
+                            list.push(s.type_node(*recv_ty));
+                        }
                         Instr::MakeClosure { func: f, .. } => {
                             list.push(s.func_node(*f));
                             made_closure[*f as usize] = true;
@@ -763,10 +986,26 @@ impl Graph {
                         Instr::TupleNew { ty, .. }
                         | Instr::ListNew { ty, .. }
                         | Instr::MapNew { ty, .. }
+                        | Instr::MapPut { ty, .. }
                         | Instr::IsType(ty)
                         | Instr::CastType(ty)
                         | Instr::Perform { reply_ty: ty, .. }
-                        | Instr::PerformValue { reply_ty: ty, .. } => list.push(s.type_node(*ty)),
+                        | Instr::PerformValue { reply_ty: ty, .. }
+                        | Instr::AsCall { ty, .. } => list.push(s.type_node(*ty)),
+                        Instr::Extended(instr) => match instr {
+                            ExtendedInstr::MakeCallback { func: f, .. } => {
+                                list.push(s.func_node(*f));
+                                made_closure[*f as usize] = true;
+                            }
+                            ExtendedInstr::OptionSome { ty }
+                            | ExtendedInstr::OptionNone { ty }
+                            | ExtendedInstr::OptionPayload { ty }
+                            | ExtendedInstr::ListGet { ty }
+                            | ExtendedInstr::MapGet { ty }
+                            | ExtendedInstr::ListPop { ty }
+                            | ExtendedInstr::MapRemove { ty } => list.push(s.type_node(*ty)),
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }
@@ -795,7 +1034,7 @@ impl Graph {
                         list.push(s.type_node(*e));
                     }
                 }
-                BcType::Fn(params, _, ret, _) => {
+                BcType::Fn(params, _, ret, _) | BcType::Callback(params, _, ret, _) => {
                     for p in params {
                         list.push(s.type_node(*p));
                     }
@@ -957,6 +1196,10 @@ impl<'a> Resolver<'a> {
         &self.module.classes[c as usize].key
     }
 
+    fn interface_key(&self, interface: u32) -> &str {
+        &self.module.interfaces[interface as usize].key
+    }
+
     fn func_ident(&self, f: u32) -> IdentRef {
         let node = self.graph.space.func_node(f);
         if self.in_comp(node) {
@@ -1032,6 +1275,82 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Write one interface application in canonical form.
+    fn interface_use_bytes(
+        &self,
+        out: &mut Vec<u8>,
+        application: &crate::BcInterfaceUse,
+        contract: bool,
+    ) {
+        write_str(out, self.interface_key(application.interface));
+        if contract {
+            out.extend_from_slice(&self.interface_digest(application.interface));
+        }
+        out.extend_from_slice(&(application.types.len() as u32).to_le_bytes());
+        for ty in &application.types {
+            out.extend_from_slice(&self.type_digest(*ty));
+        }
+        out.extend_from_slice(&(application.rows.len() as u32).to_le_bytes());
+        for row in &application.rows {
+            self.row_bytes(out, row);
+        }
+    }
+
+    fn bounds_bytes(
+        &self,
+        out: &mut Vec<u8>,
+        bounds: &[Vec<crate::BcInterfaceUse>],
+        contract: bool,
+    ) {
+        out.extend_from_slice(&(bounds.len() as u32).to_le_bytes());
+        for parameter in bounds {
+            out.extend_from_slice(&(parameter.len() as u32).to_le_bytes());
+            for bound in parameter {
+                self.interface_use_bytes(out, bound, contract);
+            }
+        }
+    }
+
+    /// Return the structural digest of one nominal interface contract.
+    fn interface_digest(&self, interface: u32) -> [u8; 32] {
+        let contract = &self.module.interfaces[interface as usize];
+        let mut out = Vec::new();
+        out.extend_from_slice(b"lm-interface-v1\0");
+        out.extend_from_slice(&contract.type_params.to_le_bytes());
+        out.extend_from_slice(&contract.effect_params.to_le_bytes());
+        out.extend_from_slice(&(contract.generic_is_effect.len() as u32).to_le_bytes());
+        for marker in &contract.generic_is_effect {
+            out.push(u8::from(*marker));
+        }
+        self.bounds_bytes(&mut out, &contract.type_bounds, false);
+        out.extend_from_slice(&(contract.associated.len() as u32).to_le_bytes());
+        for associated in &contract.associated {
+            write_str(&mut out, &associated.name);
+            match &associated.bound {
+                Some(bound) => {
+                    out.push(1);
+                    self.interface_use_bytes(&mut out, bound, false);
+                }
+                None => out.push(0),
+            }
+        }
+        out.extend_from_slice(&(contract.methods.len() as u32).to_le_bytes());
+        for method in &contract.methods {
+            write_str(&mut out, &self.module.selectors[method.selector as usize]);
+            out.push(u8::from(method.mut_self));
+            out.extend_from_slice(&(method.params.len() as u32).to_le_bytes());
+            for ty in &method.params {
+                out.extend_from_slice(&self.type_digest(*ty));
+            }
+            for marker in &method.param_muts {
+                out.push(u8::from(*marker));
+            }
+            out.extend_from_slice(&self.type_digest(method.ret));
+            self.row_bytes(&mut out, &method.row);
+        }
+        sha256(&out)
+    }
+
     /// The structural digest bytes of one type entry, using the child
     /// digests and the class identities of this context.
     fn type_digest_of(&self, ty: &BcType) -> [u8; 32] {
@@ -1082,9 +1401,31 @@ impl<'a> Resolver<'a> {
                 out.extend_from_slice(&self.type_digest(*ret));
                 self.row_bytes(&mut out, row);
             }
+            BcType::Callback(params, muts, ret, row) => {
+                out.push(29);
+                out.extend_from_slice(&(params.len() as u32).to_le_bytes());
+                for p in params {
+                    out.extend_from_slice(&self.type_digest(*p));
+                }
+                for m in muts {
+                    out.push(u8::from(*m));
+                }
+                out.extend_from_slice(&self.type_digest(*ret));
+                self.row_bytes(&mut out, row);
+            }
             BcType::Var(i) => {
                 out.push(10);
                 out.extend_from_slice(&i.to_le_bytes());
+            }
+            BcType::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                out.push(28);
+                out.extend_from_slice(&self.type_digest(*base));
+                write_str(&mut out, self.interface_key(*interface));
+                out.extend_from_slice(&assoc.to_le_bytes());
             }
             BcType::Fault => out.push(13),
             BcType::Request => out.push(14),
@@ -1158,6 +1499,7 @@ impl<'a> Resolver<'a> {
         });
         out.push(u8::from(class.is_final));
         out.extend_from_slice(&class.type_params.to_le_bytes());
+        self.bounds_bytes(&mut out, &self.module.class_bounds[c as usize], true);
         match class.parent() {
             None => out.push(0xff),
             Some(p) => {
@@ -1182,6 +1524,24 @@ impl<'a> Resolver<'a> {
             write_str(&mut out, &self.module.selectors[*sel as usize]);
             write_ident(&mut out, &self.func_ident(*func));
         }
+        let mut conformances: Vec<&crate::BcConformance> = self
+            .module
+            .conformances
+            .iter()
+            .filter(|item| item.class == c)
+            .collect();
+        conformances.sort_by(|left, right| {
+            self.interface_key(left.application.interface)
+                .cmp(self.interface_key(right.application.interface))
+        });
+        out.extend_from_slice(&(conformances.len() as u32).to_le_bytes());
+        for conformance in conformances {
+            self.interface_use_bytes(&mut out, &conformance.application, true);
+            out.extend_from_slice(&(conformance.associated.len() as u32).to_le_bytes());
+            for ty in &conformance.associated {
+                out.extend_from_slice(&self.type_digest(*ty));
+            }
+        }
         // An abstract enum parent carries its closed arm set, in arm
         // order.
         if class.kind == BcClassKind::Abstract {
@@ -1202,6 +1562,7 @@ impl<'a> Resolver<'a> {
         let mut out = Vec::new();
         out.extend_from_slice(&func.type_params.to_le_bytes());
         out.extend_from_slice(&func.effect_params.to_le_bytes());
+        self.bounds_bytes(&mut out, &self.module.func_bounds[f as usize], true);
         out.extend_from_slice(&(func.params.len() as u32).to_le_bytes());
         for p in &func.params {
             out.extend_from_slice(&self.type_digest(*p));
@@ -1307,6 +1668,7 @@ impl<'a> Resolver<'a> {
             Instr::CallG { .. } => 0x60,
             Instr::CallVirtual { .. } => 0x40,
             Instr::CallVirtualG { .. } => 0x61,
+            Instr::CallInterface { .. } => 0xbc,
             Instr::CallValue { .. } => 0x41,
             Instr::MakeClosure { .. } => 0x42,
             Instr::LoadCapture(..) => 0x43,
@@ -1326,7 +1688,7 @@ impl<'a> Resolver<'a> {
             Instr::MapLen => 0x4c,
             Instr::MapHas => 0x4d,
             Instr::MapAt => 0x4e,
-            Instr::MapPut => 0x4f,
+            Instr::MapPut { .. } => 0x4f,
             Instr::Native(NativeInstr::SbNew) => 0x50,
             Instr::Native(NativeInstr::SbAppendStr) => 0x51,
             Instr::Native(NativeInstr::SbAppendInt) => 0x52,
@@ -1375,7 +1737,7 @@ impl<'a> Resolver<'a> {
             Instr::PerformValue { .. } => 0x71,
             Instr::OpConst(..) => 0x72,
             Instr::TableEdit { .. } => 0x73,
-            Instr::AsCall(..) => 0x74,
+            Instr::AsCall { .. } => 0x74,
             Instr::CallArgs => 0x75,
             Instr::FaultCode => 0x76,
             Instr::Unreachable => 0x77,
@@ -1384,6 +1746,38 @@ impl<'a> Resolver<'a> {
             Instr::NeDigest => 0x7a,
             Instr::FaultDenied => 0x88,
             Instr::RequestOp => 0x89,
+            Instr::Extended(instr) => Self::extended_instr_tag(instr),
+        }
+    }
+
+    fn extended_instr_tag(instr: &ExtendedInstr) -> u8 {
+        match instr {
+            ExtendedInstr::MakeCallback { .. } => 0xcf,
+            ExtendedInstr::AsCallback => 0xd0,
+            ExtendedInstr::OptionSome { .. } => 0xb8,
+            ExtendedInstr::OptionNone { .. } => 0xb9,
+            ExtendedInstr::OptionPayload { .. } => 0xd1,
+            ExtendedInstr::ListGet { .. } => 0xba,
+            ExtendedInstr::MapGet { .. } => 0xbb,
+            ExtendedInstr::ListEpoch => 0xbd,
+            ExtendedInstr::ListIterLen => 0xbe,
+            ExtendedInstr::MapEpoch => 0xbf,
+            ExtendedInstr::MapIterLen => 0xc0,
+            ExtendedInstr::MapKeyAt => 0xc1,
+            ExtendedInstr::MapValueAt => 0xc2,
+            ExtendedInstr::ListCapacity => 0xc3,
+            ExtendedInstr::ListSet => 0xc4,
+            ExtendedInstr::ListPop { .. } => 0xc5,
+            ExtendedInstr::ListInsert => 0xc6,
+            ExtendedInstr::ListRemove => 0xc7,
+            ExtendedInstr::ListSwapRemove => 0xc8,
+            ExtendedInstr::ListReserve => 0xc9,
+            ExtendedInstr::ListTruncate => 0xca,
+            ExtendedInstr::ListContains => 0xcb,
+            ExtendedInstr::ListReorder => 0xd2,
+            ExtendedInstr::MapRemove { .. } => 0xcc,
+            ExtendedInstr::MapClear => 0xcd,
+            ExtendedInstr::MapReserve => 0xce,
         }
     }
 
@@ -1442,33 +1836,20 @@ impl<'a> Resolver<'a> {
                 u(out, *argc);
                 out.extend_from_slice(&self.app_digest(*app));
             }
+            Instr::CallInterface {
+                interface,
+                method,
+                recv_ty,
+            } => {
+                write_str(out, &self.module.interfaces[*interface as usize].key);
+                out.extend_from_slice(&method.to_le_bytes());
+                out.extend_from_slice(&self.type_digest(*recv_ty));
+            }
             Instr::CallValue { argc } => {
                 u(out, *argc);
             }
             Instr::MakeClosure { func, captures } => {
-                let node = self.graph.space.func_node(*func);
-                if self.graph.closure_body[*func as usize] && !self.in_comp(node) {
-                    if self.on_path.contains(func) {
-                        // A hand-built `MakeClosure` cycle: a
-                        // deterministic marker instead of recursion.
-                        out.push(0x03);
-                        let position = self
-                            .closure_list
-                            .iter()
-                            .position(|c| c == func)
-                            .unwrap_or(usize::MAX) as u32;
-                        u(out, position);
-                    } else {
-                        out.push(0x02);
-                        out.extend_from_slice(&self.body_digest(*func));
-                    }
-                } else {
-                    // An in-component closure body is a refinement
-                    // member, so it takes a colour like any other
-                    // in-component reference.
-                    write_ident(out, &self.func_ident(*func));
-                }
-                u(out, *captures);
+                self.closure_instr_bytes(out, *func, *captures);
             }
             Instr::LoadCapture(idx) => {
                 u(out, *idx);
@@ -1507,6 +1888,10 @@ impl<'a> Resolver<'a> {
                 out.extend_from_slice(&self.type_digest(*ty));
                 u(out, *count);
             }
+            Instr::MapPut { ty, discard } => {
+                out.extend_from_slice(&self.type_digest(*ty));
+                out.push(u8::from(*discard));
+            }
 
             Instr::Jump(b) => {
                 u(out, *b);
@@ -1534,8 +1919,9 @@ impl<'a> Resolver<'a> {
                 u(out, *kind);
                 u(out, *slot);
             }
-            Instr::AsCall(op) => {
+            Instr::AsCall { op, ty } => {
                 u(out, *op);
+                out.extend_from_slice(&self.type_digest(*ty));
             }
             Instr::ConstUnit
             | Instr::Pop
@@ -1605,7 +1991,6 @@ impl<'a> Resolver<'a> {
             | Instr::MapLen
             | Instr::MapHas
             | Instr::MapAt
-            | Instr::MapPut
             | Instr::Native(NativeInstr::SbNew)
             | Instr::Native(NativeInstr::SbAppendStr)
             | Instr::Native(NativeInstr::SbAppendInt)
@@ -1655,6 +2040,63 @@ impl<'a> Resolver<'a> {
             | Instr::NeDigest
             | Instr::FaultDenied
             | Instr::RequestOp => {}
+            Instr::Extended(instr) => self.extended_instr_bytes(out, instr),
+        }
+    }
+
+    fn closure_instr_bytes(&self, out: &mut Vec<u8>, func: u32, captures: u32) {
+        let node = self.graph.space.func_node(func);
+        if self.graph.closure_body[func as usize] && !self.in_comp(node) {
+            if self.on_path.contains(&func) {
+                out.push(0x03);
+                let position = self
+                    .closure_list
+                    .iter()
+                    .position(|candidate| *candidate == func)
+                    .unwrap_or(usize::MAX) as u32;
+                out.extend_from_slice(&position.to_le_bytes());
+            } else {
+                out.push(0x02);
+                out.extend_from_slice(&self.body_digest(func));
+            }
+        } else {
+            write_ident(out, &self.func_ident(func));
+        }
+        out.extend_from_slice(&captures.to_le_bytes());
+    }
+
+    fn extended_instr_bytes(&self, out: &mut Vec<u8>, instr: &ExtendedInstr) {
+        match instr {
+            ExtendedInstr::MakeCallback { func, captures } => {
+                self.closure_instr_bytes(out, *func, *captures);
+            }
+            ExtendedInstr::OptionSome { ty }
+            | ExtendedInstr::OptionNone { ty }
+            | ExtendedInstr::OptionPayload { ty }
+            | ExtendedInstr::ListGet { ty }
+            | ExtendedInstr::MapGet { ty }
+            | ExtendedInstr::ListPop { ty }
+            | ExtendedInstr::MapRemove { ty } => {
+                out.extend_from_slice(&self.type_digest(*ty));
+            }
+            ExtendedInstr::AsCallback
+            | ExtendedInstr::ListEpoch
+            | ExtendedInstr::ListIterLen
+            | ExtendedInstr::MapEpoch
+            | ExtendedInstr::MapIterLen
+            | ExtendedInstr::MapKeyAt
+            | ExtendedInstr::MapValueAt
+            | ExtendedInstr::ListCapacity
+            | ExtendedInstr::ListSet
+            | ExtendedInstr::ListInsert
+            | ExtendedInstr::ListRemove
+            | ExtendedInstr::ListSwapRemove
+            | ExtendedInstr::ListReserve
+            | ExtendedInstr::ListTruncate
+            | ExtendedInstr::ListContains
+            | ExtendedInstr::ListReorder
+            | ExtendedInstr::MapClear
+            | ExtendedInstr::MapReserve => {}
         }
     }
 }
@@ -1847,7 +2289,12 @@ fn closure_body_digests(
             let func = &module.funcs[f as usize];
             for block in &func.blocks {
                 for instr in block {
-                    if let Instr::MakeClosure { func: target, .. } = instr {
+                    let target = match instr {
+                        Instr::MakeClosure { func, .. }
+                        | Instr::Extended(ExtendedInstr::MakeCallback { func, .. }) => Some(func),
+                        _ => None,
+                    };
+                    if let Some(target) = target {
                         if graph.closure_body[*target as usize]
                             && state.body_final[*target as usize].is_none()
                             && !visiting.contains(target)
@@ -2168,6 +2615,26 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         .iter()
         .map(|h| h.expect("every type digest is scheduled"))
         .collect();
+    let scratch = RefCell::new(Vec::new());
+    let no_colours: [u32; 0] = [];
+    let resolver = Resolver {
+        module,
+        graph: &graph,
+        state: &state,
+        comp: None,
+        comp_of: &comp_of,
+        member_of: &empty_members,
+        colours: Some(&no_colours),
+        record: &scratch,
+        type_intra: &empty_digests,
+        app_intra: &empty_digests,
+        body_intra: &empty_digests,
+        on_path: &[],
+        closure_list: &[],
+    };
+    let interface_hashes: Vec<[u8; 32]> = (0..module.interfaces.len() as u32)
+        .map(|interface| resolver.interface_digest(interface))
+        .collect();
     // The module semantic hash: format version, compiler ABI, the
     // operation manifest, the explicit empty import set, the export
     // table (name to definition hash, name-sorted), the named function
@@ -2202,6 +2669,9 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             exports.push((1, &func.name, func_hashes[f]));
         }
     }
+    for (interface, contract) in module.interfaces.iter().enumerate() {
+        exports.push((2, &contract.name, interface_hashes[interface]));
+    }
     exports.sort_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(&b.0)).then(a.2.cmp(&b.2)));
     out.extend_from_slice(&(exports.len() as u32).to_le_bytes());
     for (kind, name, hash) in &exports {
@@ -2229,6 +2699,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
     Ok(ModuleIdentity {
         class_hashes,
         func_hashes,
+        interface_hashes,
         type_hashes,
         semantic_hash,
         max_refine_rounds,
@@ -2246,7 +2717,12 @@ fn fill_closure_hashes(module: &Module, graph: &Graph, state: &mut HashState) {
         let mut occurrence = 0u32;
         for block in &func.blocks {
             for instr in block {
-                if let Instr::MakeClosure { func: target, .. } = instr {
+                let target = match instr {
+                    Instr::MakeClosure { func, .. }
+                    | Instr::Extended(ExtendedInstr::MakeCallback { func, .. }) => Some(func),
+                    _ => None,
+                };
+                if let Some(target) = target {
                     if graph.closure_body[*target as usize] && first_ref[*target as usize].is_none()
                     {
                         first_ref[*target as usize] = Some((fidx as u32, occurrence));

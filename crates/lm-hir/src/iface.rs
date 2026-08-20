@@ -8,8 +8,9 @@
 
 use crate::check::{ClassInfo, Ctx, FnSig, MethodSig};
 use lm_bytecode::interface::{
-    IfaceClass, IfaceClassKind, IfaceField, IfaceFn, IfaceItem, IfaceMethod, IfaceRow, IfaceType,
-    QualName,
+    IfaceAssociated, IfaceClass, IfaceClassKind, IfaceConformance, IfaceField, IfaceFn,
+    IfaceInterface, IfaceInterfaceMethod, IfaceInterfaceUse, IfaceItem, IfaceMethod, IfaceRow,
+    IfaceType, QualName,
 };
 use lm_types::{ClassKind, Row, RowElem, Type, TypeId, TypeStore};
 
@@ -58,6 +59,22 @@ impl Naming<'_> {
         }
     }
 
+    /// The qualified name of one nominal interface.
+    pub(crate) fn interface_qual(&self, interface: u32) -> QualName {
+        let info = &self.ctx.interfaces[interface as usize];
+        if self.ctx.interface_is_core(interface) {
+            QualName::new("", info.name.clone())
+        } else if info.imported {
+            let (module, name) = info
+                .origin
+                .as_ref()
+                .expect("an imported interface records its origin");
+            QualName::new(module.clone(), name.clone())
+        } else {
+            QualName::new(self.module_path, info.name.clone())
+        }
+    }
+
     fn store(&self) -> &TypeStore {
         &self.ctx.store
     }
@@ -98,7 +115,29 @@ impl Naming<'_> {
                 ret: Box::new(self.ty(ret)),
                 row: self.row(&row),
             },
+            Type::Callback(params, muts, ret, row) => IfaceType::Callback {
+                params: params.iter().map(|p| self.ty(*p)).collect(),
+                param_muts: muts.clone(),
+                ret: Box::new(self.ty(ret)),
+                row: self.row(&row),
+            },
             Type::Var(i) => IfaceType::Var(i),
+            Type::Projection {
+                base,
+                interface,
+                assoc,
+            } => {
+                let name = self.ctx.interfaces[interface.0 as usize]
+                    .associated
+                    .get(assoc as usize)
+                    .map(|item| item.name.clone())
+                    .unwrap_or_else(|| format!("assoc{assoc}"));
+                IfaceType::Projection {
+                    base: Box::new(self.ty(base)),
+                    interface: self.interface_qual(interface.0),
+                    assoc: name,
+                }
+            }
             Type::Vm(t) => IfaceType::Vm(Box::new(self.ty(t))),
             Type::Wait(t) => IfaceType::Wait(Box::new(self.ty(t))),
             Type::Snapshot(t) => IfaceType::Snapshot(Box::new(self.ty(t))),
@@ -120,10 +159,34 @@ impl Naming<'_> {
             .collect()
     }
 
+    fn interface_use(&self, application: &crate::check::InterfaceUse) -> IfaceInterfaceUse {
+        IfaceInterfaceUse {
+            interface: self.interface_qual(application.interface),
+            types: application
+                .type_args
+                .iter()
+                .map(|ty| self.ty(*ty))
+                .collect(),
+            rows: application
+                .row_args
+                .iter()
+                .map(|row| self.row(row))
+                .collect(),
+        }
+    }
+
+    fn bounds(&self, bounds: &[Vec<crate::check::InterfaceUse>]) -> Vec<Vec<IfaceInterfaceUse>> {
+        bounds
+            .iter()
+            .map(|items| items.iter().map(|item| self.interface_use(item)).collect())
+            .collect()
+    }
+
     /// Convert one top-level function signature.
     pub(crate) fn func(&self, sig: &FnSig) -> IfaceFn {
         IfaceFn {
             type_params: sig.type_params.len() as u32,
+            type_bounds: self.bounds(&sig.type_bounds),
             effect_params: sig.effect_params.len() as u32,
             params: sig.params.iter().map(|p| self.ty(*p)).collect(),
             param_muts: sig.param_muts.clone(),
@@ -134,7 +197,10 @@ impl Naming<'_> {
     }
 
     /// Convert one method signature. `self` stays out of the lists.
-    fn method(&self, sig: &MethodSig, class_type_params: u32) -> IfaceMethod {
+    fn method(&self, sig: &MethodSig, class: &ClassInfo) -> IfaceMethod {
+        let class_type_params = class.type_params.len() as u32;
+        let mut type_bounds = self.bounds(&class.type_bounds);
+        type_bounds.extend(self.bounds(&sig.own_type_bounds));
         IfaceMethod {
             name: sig.name.clone(),
             mut_self: sig.mut_self,
@@ -143,6 +209,7 @@ impl Naming<'_> {
                 // its own after them. The interface repeats the same
                 // convention, so the count is the total.
                 type_params: class_type_params + sig.own_type_params.len() as u32,
+                type_bounds,
                 effect_params: sig.own_effect_params.len() as u32,
                 params: sig.params.iter().map(|p| self.ty(*p)).collect(),
                 param_muts: sig.param_muts.clone(),
@@ -177,16 +244,26 @@ impl Naming<'_> {
             kind,
             is_final: info.is_final,
             type_params,
+            type_bounds: self.bounds(&info.type_bounds),
+            conformances: info
+                .conformances
+                .iter()
+                .map(|conformance| IfaceConformance {
+                    application: self.interface_use(&conformance.application),
+                    associated: conformance
+                        .associated
+                        .iter()
+                        .map(|ty| self.ty(*ty))
+                        .collect(),
+                })
+                .collect(),
             parent: info.parent.map(|p| self.qual(p)),
             fields,
             own_start: info.own_start as u32,
-            methods: info
-                .methods
-                .iter()
-                .map(|m| self.method(m, type_params))
-                .collect(),
+            methods: info.methods.iter().map(|m| self.method(m, info)).collect(),
             init: info.init.as_ref().map(|m| IfaceFn {
                 type_params,
+                type_bounds: self.bounds(&info.type_bounds),
                 effect_params: m.own_effect_params.len() as u32,
                 params: m.params.iter().map(|p| self.ty(*p)).collect(),
                 param_muts: m.param_muts.clone(),
@@ -204,10 +281,47 @@ impl Naming<'_> {
         }
     }
 
+    /// Convert one nominal interface declaration.
+    pub(crate) fn interface(&self, idx: u32) -> IfaceInterface {
+        let info = &self.ctx.interfaces[idx as usize];
+        IfaceInterface {
+            type_params: info.type_params.len() as u32,
+            effect_params: info.effect_params.len() as u32,
+            generic_is_effect: info.generic_is_effect.clone(),
+            type_bounds: self.bounds(&info.type_bounds),
+            associated: info
+                .associated
+                .iter()
+                .map(|associated| IfaceAssociated {
+                    name: associated.name.clone(),
+                    bound: associated
+                        .bound
+                        .as_ref()
+                        .map(|bound| self.interface_use(bound)),
+                })
+                .collect(),
+            methods: info
+                .methods
+                .iter()
+                .map(|method| IfaceInterfaceMethod {
+                    name: method.name.clone(),
+                    mut_self: method.mut_self,
+                    params: method.params.iter().map(|ty| self.ty(*ty)).collect(),
+                    param_muts: method.param_muts.clone(),
+                    param_names: method.param_names.clone(),
+                    ret: self.ty(method.ret),
+                    row: self.row(&method.row),
+                })
+                .collect(),
+        }
+    }
+
     /// The interface item of one export.
     pub(crate) fn item(&self, kind: lm_bytecode::ExportKind, def: u32) -> IfaceItem {
         if kind.is_class() {
             IfaceItem::Class(self.class(def))
+        } else if kind.is_interface() {
+            IfaceItem::Interface(self.interface(def))
         } else {
             IfaceItem::Func(self.func(&self.ctx.sigs[def as usize]))
         }

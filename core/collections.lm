@@ -1,0 +1,827 @@
+# Core collection contracts and native collection classes.
+
+interface Iterator
+  type Item
+  def next(mut self): Option[Self.Item]
+end
+
+interface Iterable
+  type Item
+  type Iter: Iterator
+  def iterator(self): Self.Iter
+end
+
+interface Counted
+  def len(self): Int
+end
+
+final class List[T] implements Counted, Iterable
+  type Item = T
+  type Iter = ListIterator[T]
+
+  def len(self): Int
+    intrinsic("list.len", self)
+  end
+
+  def capacity(self): Int
+    intrinsic("list.capacity", self)
+  end
+
+  def is_empty(self): Bool
+    self.len() == 0
+  end
+
+  def at(self, index: Int): T
+    intrinsic("list.at", self, index)
+  end
+
+  def get(self, index: Int): Option[T]
+    intrinsic("list.get", self, index)
+  end
+
+  def first(self): Option[T]
+    self.get(0)
+  end
+
+  def last(self): Option[T]
+    if self.len() == 0
+      None
+    else
+      self.get(self.len() - 1)
+    end
+  end
+
+  def set(mut self, index: Int, value: T)
+    intrinsic("list.set", self, index, value)
+  end
+
+  def push(mut self, value: T)
+    intrinsic("list.push", self, value)
+  end
+
+  def pop(mut self): Option[T]
+    intrinsic("list.pop", self)
+  end
+
+  def insert(mut self, index: Int, value: T)
+    intrinsic("list.insert", self, index, value)
+  end
+
+  def remove(mut self, index: Int): T
+    intrinsic("list.remove", self, index)
+  end
+
+  def swap_remove(mut self, index: Int): T
+    intrinsic("list.swap_remove", self, index)
+  end
+
+  def reserve(mut self, additional: Int)
+    intrinsic("list.reserve", self, additional)
+  end
+
+  def truncate(mut self, length: Int)
+    intrinsic("list.truncate", self, length)
+  end
+
+  def clear(mut self)
+    self.truncate(0)
+  end
+
+  def copy(self): List[T]
+    result = List[T]()
+    result.reserve(self.len())
+    for value in self
+      result.push(value)
+    end
+    result
+  end
+
+  def slice(self, start: Int, length: Int): List[T]
+    if start < 0 or length < 0 or start > self.len() - length
+      self.at(-1)
+      ()
+    end
+    result = List[T]()
+    result.reserve(length)
+    index = 0
+    while index < length
+      result.push(self.at(start + index))
+      index = index + 1
+    end
+    result
+  end
+
+  def slice_view(self, start: Int, length: Int): ListSlice[T]
+    ListSlice[T](self, start, length)
+  end
+
+  def concat(self, other: List[T]): List[T]
+    result = self.copy()
+    result.extend(other)
+    result
+  end
+
+  def extend(mut self, other: List[T])
+    index = 0
+    length = other.len()
+    self.reserve(length)
+    while index < length
+      self.push(other.at(index))
+      index = index + 1
+    end
+  end
+
+  def reverse(mut self)
+    left = 0
+    right = self.len() - 1
+    if right > 0
+      intrinsic("list.reorder", self)
+    end
+    while left < right
+      first = self.at(left)
+      last = self.at(right)
+      self.set(left, last)
+      self.set(right, first)
+      left = left + 1
+      right = right - 1
+    end
+  end
+
+  def contains(self, value: T): Bool
+    intrinsic("list.contains", self, value)
+  end
+
+  def position[effect e](self, nonescaping predicate: (T) -> Bool with e): Option[Int] with e
+    index = 0
+    for value in self
+      if predicate(value)
+        return Some(index)
+      end
+      index = index + 1
+    end
+    None
+  end
+
+  def find[effect e](self, nonescaping predicate: (T) -> Bool with e): Option[T] with e
+    for value in self
+      if predicate(value)
+        return Some(value)
+      end
+    end
+    None
+  end
+
+  def each[effect e](self, nonescaping f: (T) -> () with e): () with e
+    for value in self
+      f(value)
+    end
+    ()
+  end
+
+  def map[U, effect e](self, nonescaping f: (T) -> U with e): List[U] with e
+    result = List[U]()
+    result.reserve(self.len())
+    for value in self
+      result.push(f(value))
+    end
+    result
+  end
+
+  def filter[effect e](self, nonescaping f: (T) -> Bool with e): List[T] with e
+    result = List[T]()
+    for value in self
+      if f(value)
+        result.push(value)
+      end
+    end
+    result
+  end
+
+  def filter_map[U, effect e](self, nonescaping f: (T) -> Option[U] with e): List[U] with e
+    result = List[U]()
+    for value in self
+      case f(value)
+      in Some(mapped) then result.push(mapped)
+      in None then ()
+      end
+    end
+    result
+  end
+
+  def fold[U, effect e](self, initial: U, nonescaping f: (U, T) -> U with e): U with e
+    result = initial
+    for value in self
+      result = f(result, value)
+    end
+    result
+  end
+
+  def any[effect e](self, nonescaping f: (T) -> Bool with e): Bool with e
+    for value in self
+      if f(value)
+        return true
+      end
+    end
+    false
+  end
+
+  def all[effect e](self, nonescaping f: (T) -> Bool with e): Bool with e
+    for value in self
+      if not f(value)
+        return false
+      end
+    end
+    true
+  end
+
+  def sort_by[effect e](mut self, nonescaping compare: (T, T) -> Ordering with e): () with e
+    length = self.len()
+    if length < 2
+      return
+    end
+    epoch = intrinsic("list.epoch", self)
+    source = self.copy()
+    width = 1
+    while width < length
+      result = List[T]()
+      result.reserve(length)
+      left = 0
+      while left < length
+        middle = left + width
+        if middle > length
+          middle = length
+        end
+        right = middle + width
+        if right > length
+          right = length
+        end
+        first = left
+        second = middle
+        while first < middle and second < right
+          if compare(source.at(first), source.at(second)).is_greater()
+            result.push(source.at(second))
+            second = second + 1
+          else
+            result.push(source.at(first))
+            first = first + 1
+          end
+        end
+        while first < middle
+          result.push(source.at(first))
+          first = first + 1
+        end
+        while second < right
+          result.push(source.at(second))
+          second = second + 1
+        end
+        left = right
+      end
+      source = result
+      if width > length / 2
+        width = length
+      else
+        width = width + width
+      end
+    end
+    intrinsic("list.iter_len", self, epoch)
+    intrinsic("list.reorder", self)
+    index = 0
+    while index < length
+      self.set(index, source.at(index))
+      index = index + 1
+    end
+    ()
+  end
+
+  def iterator(self): ListIterator[T]
+    ListIterator[T](self, intrinsic("list.epoch", self))
+  end
+end
+
+final class Map[K, V] implements Counted, Iterable
+  type Item = (K, V)
+  type Iter = MapIterator[K, V]
+
+  def len(self): Int
+    intrinsic("map.len", self)
+  end
+
+  def is_empty(self): Bool
+    self.len() == 0
+  end
+
+  def has(self, key: K): Bool
+    intrinsic("map.has", self, key)
+  end
+
+  def at(self, key: K): V
+    intrinsic("map.at", self, key)
+  end
+
+  def get(self, key: K): Option[V]
+    intrinsic("map.get", self, key)
+  end
+
+  def put(mut self, key: K, value: V): Option[V]
+    intrinsic("map.put", self, key, value)
+  end
+
+  def get_or_insert_with[effect e](
+    mut self,
+    key: K,
+    nonescaping f: () -> V with e
+  ): V with e
+    case self.get(key)
+    in Some(value)
+      value
+    in None
+      value = f()
+      self.put(key, value)
+      value
+    end
+  end
+
+  def remove(mut self, key: K): Option[V]
+    intrinsic("map.remove", self, key)
+  end
+
+  def clear(mut self)
+    intrinsic("map.clear", self)
+  end
+
+  def reserve(mut self, additional: Int)
+    intrinsic("map.reserve", self, additional)
+  end
+
+  def keys(self): MapKeys[K, V]
+    MapKeys[K, V](self)
+  end
+
+  def values(self): MapValues[K, V]
+    MapValues[K, V](self)
+  end
+
+  def entries(self): MapEntries[K, V]
+    MapEntries[K, V](self)
+  end
+
+  def keys_list(self): List[K]
+    result = List[K]()
+    result.reserve(self.len())
+    for key, value in self
+      result.push(key)
+    end
+    result
+  end
+
+  def values_list(self): List[V]
+    result = List[V]()
+    result.reserve(self.len())
+    for key, value in self
+      result.push(value)
+    end
+    result
+  end
+
+  def entries_list(self): List[(K, V)]
+    result = List[(K, V)]()
+    result.reserve(self.len())
+    for key, value in self
+      result.push((key, value))
+    end
+    result
+  end
+
+  def each[effect e](self, nonescaping f: (K, V) -> () with e): () with e
+    for key, value in self
+      f(key, value)
+    end
+    ()
+  end
+
+  def map_values[U, effect e](self, nonescaping f: (K, V) -> U with e): Map[K, U] with e
+    result = Map[K, U]()
+    result.reserve(self.len())
+    for key, value in self
+      result.put(key, f(key, value))
+    end
+    result
+  end
+
+  def retain[effect e](mut self, nonescaping f: (K, V) -> Bool with e): () with e
+    removed = List[K]()
+    for key, value in self
+      if not f(key, value)
+        removed.push(key)
+      end
+    end
+    for key in removed
+      self.remove(key)
+    end
+    ()
+  end
+
+  def iterator(self): MapIterator[K, V]
+    MapIterator[K, V](self, intrinsic("map.epoch", self))
+  end
+end
+
+final class ListIterator[T] implements Iterator
+  type Item = T
+
+  source: List[T]
+  index: Int
+  epoch: Int
+
+  def init(mut self, source: List[T], epoch: Int)
+    self.source = source
+    self.index = 0
+    self.epoch = epoch
+  end
+
+  def next(mut self): Option[T]
+    if self.index < intrinsic("list.iter_len", self.source, self.epoch)
+      value = intrinsic("list.at", self.source, self.index)
+      self.index = self.index + 1
+      Some(value)
+    else
+      None
+    end
+  end
+end
+
+final class MapIterator[K, V] implements Iterator
+  type Item = (K, V)
+
+  source: Map[K, V]
+  index: Int
+  epoch: Int
+
+  def init(mut self, source: Map[K, V], epoch: Int)
+    self.source = source
+    self.index = 0
+    self.epoch = epoch
+  end
+
+  def next(mut self): Option[(K, V)]
+    if self.index < intrinsic("map.iter_len", self.source, self.epoch)
+      key = intrinsic("map.key_at", self.source, self.index)
+      value = intrinsic("map.value_at", self.source, self.index)
+      self.index = self.index + 1
+      Some((key, value))
+    else
+      None
+    end
+  end
+end
+
+final class TextIterator implements Iterator
+  type Item = Char
+
+  source: Text
+  cursor: Int
+
+  def init(mut self, source: Text)
+    self.source = source
+    self.cursor = 0
+  end
+
+  def next(mut self): Option[Char]
+    if self.cursor < self.source.byte_len()
+      value = intrinsic("text.at_byte", self.source, self.cursor)
+      self.cursor = self.cursor + value.utf8_len()
+      Some(value)
+    else
+      None
+    end
+  end
+end
+
+final class RangeIterator implements Iterator
+  type Item = Int
+
+  next_value: Int
+  stop: Int
+
+  def init(mut self, start: Int, stop: Int)
+    self.next_value = start
+    self.stop = stop
+  end
+
+  def next(mut self): Option[Int]
+    if self.next_value < self.stop
+      value = self.next_value
+      self.next_value = self.next_value + 1
+      Some(value)
+    else
+      None
+    end
+  end
+end
+
+final class ListSlice[T] implements Counted, Iterable
+  type Item = T
+  type Iter = ListSliceIterator[T]
+
+  source: List[T]
+  start: Int
+  length: Int
+  epoch: Int
+
+  def init(mut self, source: List[T], start: Int, length: Int)
+    if start < 0 or length < 0 or start > source.len() - length
+      source.at(-1)
+      ()
+    end
+    self.source = source
+    self.start = start
+    self.length = length
+    self.epoch = intrinsic("list.epoch", source)
+  end
+
+  def len(self): Int
+    intrinsic("list.iter_len", self.source, self.epoch)
+    self.length
+  end
+
+  def is_empty(self): Bool
+    self.len() == 0
+  end
+
+  def at(self, index: Int): T
+    intrinsic("list.iter_len", self.source, self.epoch)
+    if index < 0 or index >= self.length
+      self.source.at(-1)
+      ()
+    end
+    self.source.at(self.start + index)
+  end
+
+  def get(self, index: Int): Option[T]
+    intrinsic("list.iter_len", self.source, self.epoch)
+    if index < 0 or index >= self.length
+      None
+    else
+      Some(self.source.at(self.start + index))
+    end
+  end
+
+  def copy(self): List[T]
+    result = List[T]()
+    result.reserve(self.len())
+    for value in self
+      result.push(value)
+    end
+    result
+  end
+
+  def iterator(self): ListSliceIterator[T]
+    intrinsic("list.iter_len", self.source, self.epoch)
+    ListSliceIterator[T](self.source, self.start, self.length, self.epoch)
+  end
+end
+
+final class ListSliceIterator[T] implements Iterator
+  type Item = T
+
+  source: List[T]
+  start: Int
+  length: Int
+  index: Int
+  epoch: Int
+
+  def init(
+    mut self,
+    source: List[T],
+    start: Int,
+    length: Int,
+    epoch: Int
+  )
+    self.source = source
+    self.start = start
+    self.length = length
+    self.index = 0
+    self.epoch = epoch
+  end
+
+  def next(mut self): Option[T]
+    intrinsic("list.iter_len", self.source, self.epoch)
+    if self.index < self.length
+      value = self.source.at(self.start + self.index)
+      self.index = self.index + 1
+      Some(value)
+    else
+      None
+    end
+  end
+end
+
+final class MapKeys[K, V] implements Counted, Iterable
+  type Item = K
+  type Iter = MapKeysIterator[K, V]
+
+  source: Map[K, V]
+  epoch: Int
+
+  def init(mut self, source: Map[K, V])
+    self.source = source
+    self.epoch = intrinsic("map.epoch", source)
+  end
+
+  def len(self): Int
+    intrinsic("map.iter_len", self.source, self.epoch)
+  end
+
+  def at(self, index: Int): K
+    intrinsic("map.iter_len", self.source, self.epoch)
+    intrinsic("map.key_at", self.source, index)
+  end
+
+  def get(self, index: Int): Option[K]
+    length = intrinsic("map.iter_len", self.source, self.epoch)
+    if index < 0 or index >= length
+      None
+    else
+      Some(intrinsic("map.key_at", self.source, index))
+    end
+  end
+
+  def iterator(self): MapKeysIterator[K, V]
+    intrinsic("map.iter_len", self.source, self.epoch)
+    MapKeysIterator[K, V](self.source, self.epoch)
+  end
+end
+
+final class MapValues[K, V] implements Counted, Iterable
+  type Item = V
+  type Iter = MapValuesIterator[K, V]
+
+  source: Map[K, V]
+  epoch: Int
+
+  def init(mut self, source: Map[K, V])
+    self.source = source
+    self.epoch = intrinsic("map.epoch", source)
+  end
+
+  def len(self): Int
+    intrinsic("map.iter_len", self.source, self.epoch)
+  end
+
+  def at(self, index: Int): V
+    intrinsic("map.iter_len", self.source, self.epoch)
+    intrinsic("map.value_at", self.source, index)
+  end
+
+  def get(self, index: Int): Option[V]
+    length = intrinsic("map.iter_len", self.source, self.epoch)
+    if index < 0 or index >= length
+      None
+    else
+      Some(intrinsic("map.value_at", self.source, index))
+    end
+  end
+
+  def iterator(self): MapValuesIterator[K, V]
+    intrinsic("map.iter_len", self.source, self.epoch)
+    MapValuesIterator[K, V](self.source, self.epoch)
+  end
+end
+
+final class MapEntries[K, V] implements Counted, Iterable
+  type Item = (K, V)
+  type Iter = MapEntriesIterator[K, V]
+
+  source: Map[K, V]
+  epoch: Int
+
+  def init(mut self, source: Map[K, V])
+    self.source = source
+    self.epoch = intrinsic("map.epoch", source)
+  end
+
+  def len(self): Int
+    intrinsic("map.iter_len", self.source, self.epoch)
+  end
+
+  def at(self, index: Int): (K, V)
+    intrinsic("map.iter_len", self.source, self.epoch)
+    (
+      intrinsic("map.key_at", self.source, index),
+      intrinsic("map.value_at", self.source, index)
+    )
+  end
+
+  def get(self, index: Int): Option[(K, V)]
+    length = intrinsic("map.iter_len", self.source, self.epoch)
+    if index < 0 or index >= length
+      None
+    else
+      Some((
+        intrinsic("map.key_at", self.source, index),
+        intrinsic("map.value_at", self.source, index)
+      ))
+    end
+  end
+
+  def iterator(self): MapEntriesIterator[K, V]
+    intrinsic("map.iter_len", self.source, self.epoch)
+    MapEntriesIterator[K, V](self.source, self.epoch)
+  end
+end
+
+final class MapKeysIterator[K, V] implements Iterator
+  type Item = K
+
+  source: Map[K, V]
+  index: Int
+  epoch: Int
+
+  def init(mut self, source: Map[K, V], epoch: Int)
+    self.source = source
+    self.index = 0
+    self.epoch = epoch
+  end
+
+  def next(mut self): Option[K]
+    if self.index < intrinsic("map.iter_len", self.source, self.epoch)
+      value = intrinsic("map.key_at", self.source, self.index)
+      self.index = self.index + 1
+      Some(value)
+    else
+      None
+    end
+  end
+end
+
+final class MapValuesIterator[K, V] implements Iterator
+  type Item = V
+
+  source: Map[K, V]
+  index: Int
+  epoch: Int
+
+  def init(mut self, source: Map[K, V], epoch: Int)
+    self.source = source
+    self.index = 0
+    self.epoch = epoch
+  end
+
+  def next(mut self): Option[V]
+    if self.index < intrinsic("map.iter_len", self.source, self.epoch)
+      value = intrinsic("map.value_at", self.source, self.index)
+      self.index = self.index + 1
+      Some(value)
+    else
+      None
+    end
+  end
+end
+
+final class MapEntriesIterator[K, V] implements Iterator
+  type Item = (K, V)
+
+  source: Map[K, V]
+  index: Int
+  epoch: Int
+
+  def init(mut self, source: Map[K, V], epoch: Int)
+    self.source = source
+    self.index = 0
+    self.epoch = epoch
+  end
+
+  def next(mut self): Option[(K, V)]
+    if self.index < intrinsic("map.iter_len", self.source, self.epoch)
+      key = intrinsic("map.key_at", self.source, self.index)
+      value = intrinsic("map.value_at", self.source, self.index)
+      self.index = self.index + 1
+      Some((key, value))
+    else
+      None
+    end
+  end
+end
+
+def list_with_capacity[T](capacity: Int): List[T]
+  result = List[T]()
+  result.reserve(capacity)
+  result
+end
+
+def list_repeated[T](value: T, count: Int): List[T]
+  result = List[T]()
+  result.reserve(count)
+  index = 0
+  while index < count
+    result.push(value)
+    index = index + 1
+  end
+  result
+end
+
+def map_with_capacity[K, V](capacity: Int): Map[K, V]
+  result = Map[K, V]()
+  result.reserve(capacity)
+  result
+end

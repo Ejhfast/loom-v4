@@ -238,7 +238,10 @@ pub enum AbiType {
     Primitive(AbiPrimitive),
     Core(AbiCore),
     Native(AbiNative),
+    /// One generic type parameter of an intrinsic declaration.
+    Var(u32),
     List(&'static AbiType),
+    Map(&'static AbiType, &'static AbiType),
     Tuple(&'static [AbiType]),
     Apply(AbiConstructor, &'static [AbiType]),
 }
@@ -351,7 +354,9 @@ impl AbiType {
             AbiType::Primitive(primitive) => primitive.text().to_string(),
             AbiType::Core(core) => core.text().to_string(),
             AbiType::Native(native) => native.text().to_string(),
+            AbiType::Var(index) => format!("${index}"),
             AbiType::List(element) => format!("List[{}]", element.text()),
+            AbiType::Map(key, value) => format!("Map[{}, {}]", key.text(), value.text()),
             AbiType::Tuple(elements) => {
                 let parts: Vec<String> = elements.iter().map(|element| element.text()).collect();
                 format!("({})", parts.join(", "))
@@ -366,8 +371,9 @@ impl AbiType {
     /// True when every generic constructor has its required arity.
     pub fn valid(self) -> bool {
         match self {
-            AbiType::Primitive(_) | AbiType::Core(_) | AbiType::Native(_) => true,
+            AbiType::Primitive(_) | AbiType::Core(_) | AbiType::Native(_) | AbiType::Var(_) => true,
             AbiType::List(element) => element.valid(),
+            AbiType::Map(key, value) => key.valid() && value.valid(),
             AbiType::Tuple(elements) => elements.iter().all(|element| element.valid()),
             AbiType::Apply(constructor, arguments) => {
                 arguments.len() == constructor.arity()
@@ -382,7 +388,10 @@ impl AbiType {
 /// Version 4 adds immutable Bytes operations and nominal builders.
 /// Version 5 adds scalar text, shared views, byte search, and finish moves.
 /// Version 6 adds bounded scans of active byte buffers.
-pub const INTRINSIC_ABI_VERSION: u32 = 6;
+/// Version 7 adds generic native collection operations.
+/// Version 8 completes the mutable collection leaf operations.
+/// Version 9 adds the list reorder marker.
+pub const INTRINSIC_ABI_VERSION: u32 = 9;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -488,9 +497,37 @@ pub const INTRINSIC_TEXT_SPLIT: IntrinsicSlot = 87;
 pub const INTRINSIC_TEXT_LINES: IntrinsicSlot = 88;
 pub const INTRINSIC_BYTE_BUFFER_AT: IntrinsicSlot = 89;
 pub const INTRINSIC_BYTE_BUFFER_FIND_FROM: IntrinsicSlot = 90;
+pub const INTRINSIC_LIST_LEN: IntrinsicSlot = 91;
+pub const INTRINSIC_LIST_AT: IntrinsicSlot = 92;
+pub const INTRINSIC_LIST_GET: IntrinsicSlot = 93;
+pub const INTRINSIC_LIST_PUSH: IntrinsicSlot = 94;
+pub const INTRINSIC_MAP_LEN: IntrinsicSlot = 95;
+pub const INTRINSIC_MAP_HAS: IntrinsicSlot = 96;
+pub const INTRINSIC_MAP_AT: IntrinsicSlot = 97;
+pub const INTRINSIC_MAP_GET: IntrinsicSlot = 98;
+pub const INTRINSIC_MAP_PUT: IntrinsicSlot = 99;
+pub const INTRINSIC_LIST_EPOCH: IntrinsicSlot = 100;
+pub const INTRINSIC_LIST_ITER_LEN: IntrinsicSlot = 101;
+pub const INTRINSIC_MAP_EPOCH: IntrinsicSlot = 102;
+pub const INTRINSIC_MAP_ITER_LEN: IntrinsicSlot = 103;
+pub const INTRINSIC_MAP_KEY_AT: IntrinsicSlot = 104;
+pub const INTRINSIC_MAP_VALUE_AT: IntrinsicSlot = 105;
+pub const INTRINSIC_LIST_CAPACITY: IntrinsicSlot = 106;
+pub const INTRINSIC_LIST_SET: IntrinsicSlot = 107;
+pub const INTRINSIC_LIST_POP: IntrinsicSlot = 108;
+pub const INTRINSIC_LIST_INSERT: IntrinsicSlot = 109;
+pub const INTRINSIC_LIST_REMOVE: IntrinsicSlot = 110;
+pub const INTRINSIC_LIST_SWAP_REMOVE: IntrinsicSlot = 111;
+pub const INTRINSIC_LIST_RESERVE: IntrinsicSlot = 112;
+pub const INTRINSIC_LIST_TRUNCATE: IntrinsicSlot = 113;
+pub const INTRINSIC_LIST_CONTAINS: IntrinsicSlot = 114;
+pub const INTRINSIC_MAP_REMOVE: IntrinsicSlot = 115;
+pub const INTRINSIC_MAP_CLEAR: IntrinsicSlot = 116;
+pub const INTRINSIC_MAP_RESERVE: IntrinsicSlot = 117;
+pub const INTRINSIC_LIST_REORDER: IntrinsicSlot = 118;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 91] = [
+pub const INTRINSICS: [IntrinsicDef; 119] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -1035,6 +1072,210 @@ pub const INTRINSICS: [IntrinsicDef; 91] = [
         name: "byte_buffer.find_from",
         params: &[AbiType::BYTE_BUFFER, AbiType::BYTES, AbiType::INT],
         reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.len",
+        params: &[AbiType::List(&AbiType::Var(0))],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.at",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::INT],
+        reply: AbiType::Var(0),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.get",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::INT],
+        reply: AbiType::Apply(AbiConstructor::Option, &[AbiType::Var(0)]),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.push",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::Var(0)],
+        reply: AbiType::UNIT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.len",
+        params: &[AbiType::Map(&AbiType::Var(0), &AbiType::Var(1))],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.has",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::Var(0),
+        ],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.at",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::Var(0),
+        ],
+        reply: AbiType::Var(1),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.get",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::Var(0),
+        ],
+        reply: AbiType::Apply(AbiConstructor::Option, &[AbiType::Var(1)]),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.put",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::Var(0),
+            AbiType::Var(1),
+        ],
+        reply: AbiType::Apply(AbiConstructor::Option, &[AbiType::Var(1)]),
+        semantic_revision: 2,
+    },
+    IntrinsicDef {
+        name: "list.epoch",
+        params: &[AbiType::List(&AbiType::Var(0))],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.iter_len",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.epoch",
+        params: &[AbiType::Map(&AbiType::Var(0), &AbiType::Var(1))],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.iter_len",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::INT,
+        ],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.key_at",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::INT,
+        ],
+        reply: AbiType::Var(0),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.value_at",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::INT,
+        ],
+        reply: AbiType::Var(1),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.capacity",
+        params: &[AbiType::List(&AbiType::Var(0))],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.set",
+        params: &[
+            AbiType::List(&AbiType::Var(0)),
+            AbiType::INT,
+            AbiType::Var(0),
+        ],
+        reply: AbiType::UNIT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.pop",
+        params: &[AbiType::List(&AbiType::Var(0))],
+        reply: AbiType::Apply(AbiConstructor::Option, &[AbiType::Var(0)]),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.insert",
+        params: &[
+            AbiType::List(&AbiType::Var(0)),
+            AbiType::INT,
+            AbiType::Var(0),
+        ],
+        reply: AbiType::UNIT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.remove",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::INT],
+        reply: AbiType::Var(0),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.swap_remove",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::INT],
+        reply: AbiType::Var(0),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.reserve",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::INT],
+        reply: AbiType::UNIT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.truncate",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::INT],
+        reply: AbiType::UNIT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.contains",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::Var(0)],
+        reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.remove",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::Var(0),
+        ],
+        reply: AbiType::Apply(AbiConstructor::Option, &[AbiType::Var(1)]),
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.clear",
+        params: &[AbiType::Map(&AbiType::Var(0), &AbiType::Var(1))],
+        reply: AbiType::UNIT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.reserve",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::INT,
+        ],
+        reply: AbiType::UNIT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.reorder",
+        params: &[AbiType::List(&AbiType::Var(0))],
+        reply: AbiType::UNIT,
         semantic_revision: 1,
     },
 ];

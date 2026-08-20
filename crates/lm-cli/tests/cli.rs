@@ -533,7 +533,7 @@ fn inspect_dumps_the_checkpoint_container() {
     let out = lm(&["inspect", "checkpoints/asked-tree.lms"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let dump = stdout(&out);
-    assert!(dump.starts_with("container 892 bytes hash "), "{dump}");
+    assert!(dump.starts_with("container 901 bytes hash "), "{dump}");
     assert!(dump.contains("machine 0 state asked"), "{dump}");
     assert!(dump.contains("pending Clock.Now"), "{dump}");
     assert!(dump.contains("obj 1 Handle frozen proc 1.0"), "{dump}");

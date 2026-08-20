@@ -16,6 +16,7 @@ while row < rows.len()
       # `to_string` takes the String retention bound, so a stored
       # value never pins the whole document.
       settings.put(key.trim().to_string(), value.trim().to_string())
+      ()
     in None then ()
     end
   end

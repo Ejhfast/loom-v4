@@ -31,6 +31,7 @@ const V_OP: u8 = 0x03;
 /// it.
 const V_REF: u8 = 0x04;
 const V_CHAR: u8 = 0x05;
+const V_EMPTY_CASE: u8 = 0x06;
 
 /// The verified semantic identity of transferred code and classes.
 ///
@@ -43,6 +44,8 @@ pub trait CodeIdentity {
     fn func_hash(&self, func: u32) -> Result<[u8; 32], FaultCode>;
     /// The definition hash of one class slot.
     fn class_hash(&self, class: u32) -> Result<[u8; 32], FaultCode>;
+    /// The content hash of one closed type slot.
+    fn type_hash(&self, ty: u32) -> Result<[u8; 32], FaultCode>;
 }
 
 /// The digest hash function.
@@ -98,7 +101,7 @@ pub fn compute(
     let order = scratch.order();
     let mut out: Vec<u8> = Vec::with_capacity(DOMAIN.len() + 64 + order.len() * 16);
     out.extend_from_slice(DOMAIN);
-    encode_value(&mut out, value, scratch)?;
+    encode_value(&mut out, value, scratch, codes)?;
     count(&mut out, order.len())?;
     for r in order {
         encode_object(&mut out, heap.get(*r), scratch, codes)?;
@@ -108,7 +111,12 @@ pub fn compute(
 
 /// Write one value. An object becomes its traversal ordinal, so the
 /// encoding records sharing and cycles without repeating a subgraph.
-fn encode_value(out: &mut Vec<u8>, value: Value, scratch: &GraphScratch) -> Result<(), FaultCode> {
+fn encode_value(
+    out: &mut Vec<u8>,
+    value: Value,
+    scratch: &GraphScratch,
+    codes: &dyn CodeIdentity,
+) -> Result<(), FaultCode> {
     match value {
         Value::Unit => out.push(V_UNIT),
         Value::Bool(v) => {
@@ -129,11 +137,16 @@ fn encode_value(out: &mut Vec<u8>, value: Value, scratch: &GraphScratch) -> Resu
             out.push(V_OP);
             out.extend_from_slice(&lm_abi::op_identity(slot));
         }
+        Value::EmptyCase { ty, arm } => {
+            out.push(V_EMPTY_CASE);
+            out.extend_from_slice(&codes.type_hash(ty)?);
+            out.extend_from_slice(&arm.to_le_bytes());
+        }
         Value::Obj(r) => {
             out.push(V_REF);
             out.extend_from_slice(&scratch.ordinal(r.slot).to_le_bytes());
         }
-        Value::Uninit => {
+        Value::Callback(_) | Value::Uninit => {
             // A field without a first assignment has no canonical
             // encoding.
             return Err(FaultCode::BoundaryViolation);
@@ -173,13 +186,13 @@ fn encode_object(
             out.extend_from_slice(&codes.class_hash(*class)?);
             count(out, fields.len())?;
             for field in fields {
-                encode_value(out, *field, scratch)?;
+                encode_value(out, *field, scratch, codes)?;
             }
         }
-        Object::List { items } | Object::Tuple { items } => {
+        Object::List { items, .. } | Object::Tuple { items } => {
             count(out, items.len())?;
             for item in items {
-                encode_value(out, *item, scratch)?;
+                encode_value(out, *item, scratch, codes)?;
             }
         }
         Object::Map { entries, .. } => {
@@ -187,8 +200,8 @@ fn encode_object(
             // index never enters the encoding.
             count(out, entries.len())?;
             for (key, value) in entries {
-                encode_value(out, *key, scratch)?;
-                encode_value(out, *value, scratch)?;
+                encode_value(out, *key, scratch, codes)?;
+                encode_value(out, *value, scratch, codes)?;
             }
         }
         // The witness stays outside the encoding for the same reason.
@@ -196,7 +209,7 @@ fn encode_object(
             out.extend_from_slice(&codes.func_hash(*func)?);
             count(out, captures.len())?;
             for capture in captures {
-                encode_value(out, *capture, scratch)?;
+                encode_value(out, *capture, scratch, codes)?;
             }
         }
         Object::NativeFault { code, message, op } => {

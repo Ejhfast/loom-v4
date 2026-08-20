@@ -13,16 +13,16 @@
 //! and calls this one, so the world has exactly one cut algorithm.
 
 use super::{
-    codec, Image, ImageBlock, ImageFrame, ImageLimits, ImageMachine, ImageMailbox, ImageObject,
-    ImagePending, ImagePolicyCursor, ImageRoutedRequest, ImageState, ImageTerminal, ImageWaitEntry,
-    ImageWaitSource, SnapshotFail, SnapshotImage,
+    codec, Image, ImageBlock, ImageCallback, ImageFrame, ImageLimits, ImageMachine, ImageMailbox,
+    ImageObject, ImagePending, ImagePolicyCursor, ImageRoutedRequest, ImageState, ImageTerminal,
+    ImageWaitEntry, ImageWaitSource, SnapshotFail, SnapshotImage,
 };
-use crate::machine::{Block, MachineState, PolicyCursor, Terminal, VmId, WaitSource};
+use crate::machine::{Block, FrameCapture, MachineState, PolicyCursor, Terminal, VmId, WaitSource};
 use crate::world::World;
 use crate::FaultCode;
 use lm_bytecode::closed::{ClosedType, TypeEnv};
 use lm_heap::Object;
-use lm_value::{ObjRef, TypeEnvId, Value, Witness};
+use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::collections::{HashMap, VecDeque};
 
 /// What one finished cut recorded.
@@ -215,7 +215,7 @@ impl World<'_> {
         })?;
         Ok(super::AdmissionIdentity {
             module_semantic: identity.semantic_hash,
-            verification: lm_bytecode::identity::verification_hash(self.module()),
+            verification: self.verification_hash(),
             format: super::FORMAT_VERSION,
             abi_version: lm_abi::ABI_VERSION,
             compiler_abi: lm_bytecode::identity::COMPILER_ABI_VERSION,
@@ -457,6 +457,9 @@ impl World<'_> {
             for frame in &machine.frames {
                 order.push(frame.env);
             }
+            for callback in &machine.callbacks {
+                order.push(callback.env);
+            }
             for entry in &machine.objects {
                 if let Object::Instance { env, .. } | Object::Closure { env, .. } = &entry.object {
                     order.push(env.env().0);
@@ -481,6 +484,13 @@ impl World<'_> {
             for ty in entry.types.iter().copied() {
                 self.push_closed(ty, &mut type_map, &mut types);
             }
+        }
+        let mut direct_types = Vec::new();
+        for machine in machines.iter() {
+            collect_machine_empty_types(machine, &mut direct_types);
+        }
+        for ty in direct_types {
+            self.push_closed(ty, &mut type_map, &mut types);
         }
         let mut envs: Vec<TypeEnv> = Vec::with_capacity(world_envs.len());
         for world in &world_envs {
@@ -514,6 +524,9 @@ impl World<'_> {
             for frame in &mut machine.frames {
                 frame.env = map_env(frame.env);
             }
+            for callback in &mut machine.callbacks {
+                callback.env = map_env(callback.env);
+            }
             for entry in &mut machine.objects {
                 match &mut entry.object {
                     Object::Instance { env, .. } | Object::Closure { env, .. } => {
@@ -522,6 +535,7 @@ impl World<'_> {
                     _ => {}
                 }
             }
+            remap_machine_empty_types(machine, &type_map);
         }
         (types, envs)
     }
@@ -589,9 +603,21 @@ impl World<'_> {
                 generation: 0,
             }
         };
+        let callback_order = self.machines[vm as usize].snapshot_callbacks();
+        let mut callback_ordinal = vec![u32::MAX; self.machines[vm as usize].callbacks.len()];
+        for (ordinal, reference) in callback_order.iter().enumerate() {
+            callback_ordinal[reference.slot as usize] = ordinal as u32;
+        }
+        let map_callback = |reference: CallbackRef| -> CallbackRef {
+            CallbackRef {
+                slot: callback_ordinal[reference.slot as usize],
+                generation: 0,
+            }
+        };
         let map_value = |v: Value| -> Value {
             match v {
                 Value::Obj(r) => Value::Obj(map(r)),
+                Value::Callback(reference) => Value::Callback(map_callback(reference)),
                 other => other,
             }
         };
@@ -642,7 +668,7 @@ impl World<'_> {
             };
             objects.push(ImageObject { frozen, object });
         }
-        let mut record = self.machine_record(vm, &map_value, ordinal_of)?;
+        let mut record = self.machine_record(vm, &map_value, &callback_order, ordinal_of)?;
         record.objects = objects;
         if is_root {
             // The restored root is holder-controlled (specification
@@ -675,6 +701,7 @@ impl World<'_> {
         &self,
         vm: VmId,
         map_value: &impl Fn(Value) -> Value,
+        callback_order: &[CallbackRef],
         ordinal_of: &impl Fn(VmId) -> Option<u32>,
     ) -> Result<ImageMachine, SnapshotFail> {
         let record = &self.machines[vm as usize];
@@ -702,15 +729,33 @@ impl World<'_> {
                 ip: f.ip,
                 base_local: f.base_local,
                 base_operand: f.base_operand,
-                closure: f.closure.map(|r| match map_value(Value::Obj(r)) {
-                    Value::Obj(r) => r.slot,
-                    _ => unreachable!("a closure maps to an object"),
-                }),
+                closure: f.closure.map(FrameCapture::value).map(map_value),
                 // The world environment identifier. `build_type_tables`
                 // rewrites it to an image ordinal.
                 env: f.env.0,
             })
             .collect();
+        let callbacks = callback_order
+            .iter()
+            .map(|reference| {
+                let descriptor = record.callback(*reference).map_err(|_| {
+                    SnapshotFail::Fault(
+                        FaultCode::BoundaryViolation,
+                        "an active callback reference is stale".to_string(),
+                    )
+                })?;
+                Ok(ImageCallback {
+                    func: descriptor.func,
+                    captures: descriptor
+                        .captures
+                        .iter()
+                        .map(|value| map_value(*value))
+                        .collect(),
+                    env: descriptor.env.0,
+                    owner_depth: descriptor.owner_depth,
+                })
+            })
+            .collect::<Result<Vec<_>, SnapshotFail>>()?;
         let block = match m.block {
             None => None,
             Some(Block::Receive) => Some(ImageBlock::Receive),
@@ -803,6 +848,7 @@ impl World<'_> {
                 mailbox_limit: record.config.mailbox_limit,
             },
             objects: Vec::new(),
+            callbacks,
             frames,
             locals: m.locals.iter().map(|v| map_value(*v)).collect(),
             operands: m.operands.iter().map(|v| map_value(*v)).collect(),
@@ -841,5 +887,117 @@ impl World<'_> {
             },
             block,
         })
+    }
+}
+
+fn collect_empty_type(value: Value, out: &mut Vec<u32>) {
+    if let Value::EmptyCase { ty, .. } = value {
+        out.push(ty);
+    }
+}
+
+fn for_object_values(object: &Object, out: &mut Vec<u32>) {
+    match object {
+        Object::Instance { fields, .. }
+        | Object::List { items: fields, .. }
+        | Object::Tuple { items: fields } => {
+            for value in fields {
+                collect_empty_type(*value, out);
+            }
+        }
+        Object::Map { entries, .. } => {
+            for (key, value) in entries {
+                collect_empty_type(*key, out);
+                collect_empty_type(*value, out);
+            }
+        }
+        Object::Closure { captures, .. } => {
+            for value in captures {
+                collect_empty_type(*value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_machine_empty_types(machine: &ImageMachine, out: &mut Vec<u32>) {
+    for entry in &machine.objects {
+        for_object_values(&entry.object, out);
+    }
+    for value in machine.locals.iter().chain(machine.operands.iter()) {
+        collect_empty_type(*value, out);
+    }
+    for callback in &machine.callbacks {
+        for value in &callback.captures {
+            collect_empty_type(*value, out);
+        }
+    }
+    if let Some(pending) = &machine.pending {
+        for value in &pending.args {
+            collect_empty_type(*value, out);
+        }
+    }
+    if let Some(ImageTerminal::Done(value)) = machine.terminal {
+        collect_empty_type(value, out);
+    }
+    for value in &machine.mailbox.queue {
+        collect_empty_type(*value, out);
+    }
+}
+
+fn remap_empty_type(value: &mut Value, map: &HashMap<u32, u32>) {
+    if let Value::EmptyCase { ty, .. } = value {
+        *ty = *map
+            .get(ty)
+            .expect("a captured empty case has an image type ordinal");
+    }
+}
+
+fn remap_object_empty_types(object: &mut Object, map: &HashMap<u32, u32>) {
+    match object {
+        Object::Instance { fields, .. }
+        | Object::List { items: fields, .. }
+        | Object::Tuple { items: fields } => {
+            for value in fields {
+                remap_empty_type(value, map);
+            }
+        }
+        Object::Map { entries, .. } => {
+            for (key, value) in entries {
+                remap_empty_type(key, map);
+                remap_empty_type(value, map);
+            }
+        }
+        Object::Closure { captures, .. } => {
+            for value in captures {
+                remap_empty_type(value, map);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remap_machine_empty_types(machine: &mut ImageMachine, map: &HashMap<u32, u32>) {
+    for entry in &mut machine.objects {
+        remap_object_empty_types(&mut entry.object, map);
+    }
+    for value in machine.locals.iter_mut().chain(machine.operands.iter_mut()) {
+        remap_empty_type(value, map);
+    }
+    for callback in &mut machine.callbacks {
+        for value in &mut callback.captures {
+            remap_empty_type(value, map);
+        }
+    }
+    if let Some(pending) = &mut machine.pending {
+        for value in &mut pending.args {
+            remap_empty_type(value, map);
+        }
+    }
+    if let Some(ImageTerminal::Done(value)) = &mut machine.terminal {
+        remap_empty_type(value, map);
+    }
+    for value in &mut machine.mailbox.queue {
+        remap_empty_type(value, map);
     }
 }

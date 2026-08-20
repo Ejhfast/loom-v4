@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 8;
+const VERSION: u16 = 11;
 
 /// The domain tag of the interface hash.
 const TAG_IFACE: &[u8] = b"lm-iface-v1\0";
@@ -93,6 +93,12 @@ pub enum IfaceType {
     Digest,
     /// One type parameter of the enclosing signature.
     Var(u32),
+    /// One associated type selected through a nominal interface.
+    Projection {
+        base: Box<IfaceType>,
+        interface: QualName,
+        assoc: String,
+    },
     /// A class or enum instance named by qualified name.
     Named {
         class: QualName,
@@ -102,6 +108,12 @@ pub enum IfaceType {
     Map(Box<IfaceType>, Box<IfaceType>),
     Tuple(Vec<IfaceType>),
     Fn {
+        params: Vec<IfaceType>,
+        param_muts: Vec<bool>,
+        ret: Box<IfaceType>,
+        row: Vec<IfaceRow>,
+    },
+    Callback {
         params: Vec<IfaceType>,
         param_muts: Vec<bool>,
         ret: Box<IfaceType>,
@@ -123,6 +135,7 @@ pub enum IfaceType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfaceFn {
     pub type_params: u32,
+    pub type_bounds: Vec<Vec<IfaceInterfaceUse>>,
     pub effect_params: u32,
     pub params: Vec<IfaceType>,
     pub param_muts: Vec<bool>,
@@ -130,6 +143,51 @@ pub struct IfaceFn {
     pub param_names: Vec<String>,
     pub ret: IfaceType,
     pub row: Vec<IfaceRow>,
+}
+
+/// One applied nominal interface in a module interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceInterfaceUse {
+    pub interface: QualName,
+    pub types: Vec<IfaceType>,
+    pub rows: Vec<Vec<IfaceRow>>,
+}
+
+/// One associated type in an exported interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceAssociated {
+    pub name: String,
+    pub bound: Option<IfaceInterfaceUse>,
+}
+
+/// One method requirement in an exported interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceInterfaceMethod {
+    pub name: String,
+    pub mut_self: bool,
+    pub params: Vec<IfaceType>,
+    pub param_muts: Vec<bool>,
+    pub param_names: Vec<String>,
+    pub ret: IfaceType,
+    pub row: Vec<IfaceRow>,
+}
+
+/// The exported surface of one nominal interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceInterface {
+    pub type_params: u32,
+    pub effect_params: u32,
+    pub generic_is_effect: Vec<bool>,
+    pub type_bounds: Vec<Vec<IfaceInterfaceUse>>,
+    pub associated: Vec<IfaceAssociated>,
+    pub methods: Vec<IfaceInterfaceMethod>,
+}
+
+/// One class-owned conformance in a module interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceConformance {
+    pub application: IfaceInterfaceUse,
+    pub associated: Vec<IfaceType>,
 }
 
 /// One method of an exported class.
@@ -175,6 +233,8 @@ pub struct IfaceClass {
     /// True when the class cannot have a subclass.
     pub is_final: bool,
     pub type_params: u32,
+    pub type_bounds: Vec<Vec<IfaceInterfaceUse>>,
+    pub conformances: Vec<IfaceConformance>,
     pub parent: Option<QualName>,
     /// The full field layout: inherited fields first.
     pub fields: Vec<IfaceField>,
@@ -201,6 +261,7 @@ pub struct IfaceClass {
 pub enum IfaceItem {
     Func(IfaceFn),
     Class(IfaceClass),
+    Interface(IfaceInterface),
 }
 
 /// One export: the name, the kind, the signature, and the two hashes.
@@ -262,6 +323,8 @@ pub fn build_interface(
     for (export, item) in module.exports.iter().zip(items) {
         let def_hash = if export.kind.is_class() {
             identity.class_hashes[export.def as usize]
+        } else if export.kind.is_interface() {
+            identity.interface_hashes[export.def as usize]
         } else {
             identity.func_hashes[export.def as usize]
         };
@@ -316,6 +379,28 @@ fn encode_row(out: &mut Vec<u8>, row: &[IfaceRow]) {
     }
 }
 
+fn encode_interface_use(out: &mut Vec<u8>, application: &IfaceInterfaceUse) {
+    encode_qual(out, &application.interface);
+    write_u32(out, application.types.len() as u32);
+    for ty in &application.types {
+        encode_type(out, ty);
+    }
+    write_u32(out, application.rows.len() as u32);
+    for row in &application.rows {
+        encode_row(out, row);
+    }
+}
+
+fn encode_bounds(out: &mut Vec<u8>, bounds: &[Vec<IfaceInterfaceUse>]) {
+    write_u32(out, bounds.len() as u32);
+    for parameter in bounds {
+        write_u32(out, parameter.len() as u32);
+        for bound in parameter {
+            encode_interface_use(out, bound);
+        }
+    }
+}
+
 fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
     match ty {
         IfaceType::Unit => out.push(0),
@@ -330,6 +415,16 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
         IfaceType::Var(i) => {
             out.push(10);
             write_u32(out, *i);
+        }
+        IfaceType::Projection {
+            base,
+            interface,
+            assoc,
+        } => {
+            out.push(27);
+            encode_type(out, base);
+            encode_qual(out, interface);
+            write_str(out, assoc);
         }
         IfaceType::Named { class, args } => {
             out.push(11);
@@ -362,6 +457,23 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
             row,
         } => {
             out.push(15);
+            write_u32(out, params.len() as u32);
+            for p in params {
+                encode_type(out, p);
+            }
+            for m in param_muts {
+                out.push(u8::from(*m));
+            }
+            encode_type(out, ret);
+            encode_row(out, row);
+        }
+        IfaceType::Callback {
+            params,
+            param_muts,
+            ret,
+            row,
+        } => {
+            out.push(28);
             write_u32(out, params.len() as u32);
             for p in params {
                 encode_type(out, p);
@@ -414,6 +526,7 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
 fn encode_fn(out: &mut Vec<u8>, sig: &IfaceFn) {
     write_u32(out, sig.type_params);
     write_u32(out, sig.effect_params);
+    encode_bounds(out, &sig.type_bounds);
     write_u32(out, sig.params.len() as u32);
     for p in &sig.params {
         encode_type(out, p);
@@ -441,6 +554,15 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
             out.push(class.kind.tag());
             out.push(u8::from(class.is_final));
             write_u32(out, class.type_params);
+            encode_bounds(out, &class.type_bounds);
+            write_u32(out, class.conformances.len() as u32);
+            for conformance in &class.conformances {
+                encode_interface_use(out, &conformance.application);
+                write_u32(out, conformance.associated.len() as u32);
+                for ty in &conformance.associated {
+                    encode_type(out, ty);
+                }
+            }
             match &class.parent {
                 None => out.push(0),
                 Some(p) => {
@@ -479,6 +601,46 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
                     out.push(1);
                     encode_qual(out, f);
                 }
+            }
+        }
+        IfaceItem::Interface(interface) => {
+            out.push(2);
+            write_u32(out, interface.type_params);
+            write_u32(out, interface.effect_params);
+            write_u32(out, interface.generic_is_effect.len() as u32);
+            for marker in &interface.generic_is_effect {
+                out.push(u8::from(*marker));
+            }
+            encode_bounds(out, &interface.type_bounds);
+            write_u32(out, interface.associated.len() as u32);
+            for associated in &interface.associated {
+                write_str(out, &associated.name);
+                match &associated.bound {
+                    Some(bound) => {
+                        out.push(1);
+                        encode_interface_use(out, bound);
+                    }
+                    None => out.push(0),
+                }
+            }
+            write_u32(out, interface.methods.len() as u32);
+            for method in &interface.methods {
+                write_str(out, &method.name);
+                out.push(u8::from(method.mut_self));
+                write_u32(out, method.params.len() as u32);
+                for ty in &method.params {
+                    encode_type(out, ty);
+                }
+                write_u32(out, method.param_muts.len() as u32);
+                for marker in &method.param_muts {
+                    out.push(u8::from(*marker));
+                }
+                write_u32(out, method.param_names.len() as u32);
+                for name in &method.param_names {
+                    write_str(out, name);
+                }
+                encode_type(out, &method.ret);
+                encode_row(out, &method.row);
             }
         }
     }
@@ -527,6 +689,39 @@ fn decode_qual(cur: &mut crate::Cursor<'_>) -> Result<QualName, DecodeError> {
     Ok(QualName { module, name })
 }
 
+fn decode_interface_use(cur: &mut crate::Cursor<'_>) -> Result<IfaceInterfaceUse, DecodeError> {
+    let interface = decode_qual(cur)?;
+    let type_count = cur.len()?;
+    let mut types = Vec::with_capacity(type_count);
+    for _ in 0..type_count {
+        types.push(decode_type(cur, 0)?);
+    }
+    let row_count = cur.len()?;
+    let mut rows = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        rows.push(decode_row(cur)?);
+    }
+    Ok(IfaceInterfaceUse {
+        interface,
+        types,
+        rows,
+    })
+}
+
+fn decode_bounds(cur: &mut crate::Cursor<'_>) -> Result<Vec<Vec<IfaceInterfaceUse>>, DecodeError> {
+    let parameter_count = cur.len()?;
+    let mut bounds = Vec::with_capacity(parameter_count);
+    for _ in 0..parameter_count {
+        let bound_count = cur.len()?;
+        let mut parameter = Vec::with_capacity(bound_count);
+        for _ in 0..bound_count {
+            parameter.push(decode_interface_use(cur)?);
+        }
+        bounds.push(parameter);
+    }
+    Ok(bounds)
+}
+
 /// Decode one type. The depth is capped, so a crafted file cannot
 /// grow the host stack.
 fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, DecodeError> {
@@ -545,6 +740,11 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
         9 => IfaceType::EmptyVm,
         19 => IfaceType::Digest,
         10 => IfaceType::Var(cur.u32()?),
+        27 => IfaceType::Projection {
+            base: Box::new(decode_type(cur, depth + 1)?),
+            interface: decode_qual(cur)?,
+            assoc: cur.string()?,
+        },
         11 => {
             let class = decode_qual(cur)?;
             let count = cur.len()?;
@@ -587,6 +787,25 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
                 row,
             }
         }
+        28 => {
+            let count = cur.len()?;
+            let mut params = Vec::with_capacity(count);
+            for _ in 0..count {
+                params.push(decode_type(cur, depth + 1)?);
+            }
+            let mut param_muts = Vec::with_capacity(count);
+            for _ in 0..count {
+                param_muts.push(cur.flag()?);
+            }
+            let ret = decode_type(cur, depth + 1)?;
+            let row = decode_row(cur)?;
+            IfaceType::Callback {
+                params,
+                param_muts,
+                ret: Box::new(ret),
+                row,
+            }
+        }
         16 => IfaceType::Vm(Box::new(decode_type(cur, depth + 1)?)),
         26 => IfaceType::Wait(Box::new(decode_type(cur, depth + 1)?)),
         17 => {
@@ -617,6 +836,7 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
 fn decode_fn(cur: &mut crate::Cursor<'_>) -> Result<IfaceFn, DecodeError> {
     let type_params = cur.u32()?;
     let effect_params = cur.u32()?;
+    let type_bounds = decode_bounds(cur)?;
     let count = cur.len()?;
     let mut params = Vec::with_capacity(count);
     for _ in 0..count {
@@ -641,6 +861,7 @@ fn decode_fn(cur: &mut crate::Cursor<'_>) -> Result<IfaceFn, DecodeError> {
     let row = decode_row(cur)?;
     Ok(IfaceFn {
         type_params,
+        type_bounds,
         effect_params,
         params,
         param_muts,
@@ -662,6 +883,21 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
             };
             let is_final = cur.flag()?;
             let type_params = cur.u32()?;
+            let type_bounds = decode_bounds(cur)?;
+            let conformance_count = cur.len()?;
+            let mut conformances = Vec::with_capacity(conformance_count);
+            for _ in 0..conformance_count {
+                let application = decode_interface_use(cur)?;
+                let associated_count = cur.len()?;
+                let mut associated = Vec::with_capacity(associated_count);
+                for _ in 0..associated_count {
+                    associated.push(decode_type(cur, 0)?);
+                }
+                conformances.push(IfaceConformance {
+                    application,
+                    associated,
+                });
+            }
             let parent = match cur.u8()? {
                 0 => None,
                 1 => Some(decode_qual(cur)?),
@@ -715,6 +951,8 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 kind,
                 is_final,
                 type_params,
+                type_bounds,
+                conformances,
                 parent,
                 fields,
                 own_start,
@@ -723,6 +961,71 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 arms,
                 arm_short,
                 family,
+            }))
+        }
+        2 => {
+            let type_params = cur.u32()?;
+            let effect_params = cur.u32()?;
+            let generic_count = cur.len()?;
+            let mut generic_is_effect = Vec::with_capacity(generic_count);
+            for _ in 0..generic_count {
+                generic_is_effect.push(cur.flag()?);
+            }
+            let type_bounds = decode_bounds(cur)?;
+            let associated_count = cur.len()?;
+            let mut associated = Vec::with_capacity(associated_count);
+            for _ in 0..associated_count {
+                let name = cur.string()?;
+                let bound = match cur.u8()? {
+                    0 => None,
+                    1 => Some(decode_interface_use(cur)?),
+                    other => return Err(DecodeError::BadFlag(other)),
+                };
+                associated.push(IfaceAssociated { name, bound });
+            }
+            let method_count = cur.len()?;
+            let mut methods = Vec::with_capacity(method_count);
+            for _ in 0..method_count {
+                let name = cur.string()?;
+                let mut_self = cur.flag()?;
+                let param_count = cur.len()?;
+                let mut params = Vec::with_capacity(param_count);
+                for _ in 0..param_count {
+                    params.push(decode_type(cur, 0)?);
+                }
+                if cur.len()? != param_count {
+                    return Err(DecodeError::BadLength);
+                }
+                let mut param_muts = Vec::with_capacity(param_count);
+                for _ in 0..param_count {
+                    param_muts.push(cur.flag()?);
+                }
+                if cur.len()? != param_count {
+                    return Err(DecodeError::BadLength);
+                }
+                let mut param_names = Vec::with_capacity(param_count);
+                for _ in 0..param_count {
+                    param_names.push(cur.string()?);
+                }
+                let ret = decode_type(cur, 0)?;
+                let row = decode_row(cur)?;
+                methods.push(IfaceInterfaceMethod {
+                    name,
+                    mut_self,
+                    params,
+                    param_muts,
+                    param_names,
+                    ret,
+                    row,
+                });
+            }
+            Ok(IfaceItem::Interface(IfaceInterface {
+                type_params,
+                effect_params,
+                generic_is_effect,
+                type_bounds,
+                associated,
+                methods,
             }))
         }
         other => Err(DecodeError::BadTypeTag(other)),
@@ -757,10 +1060,12 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
         let item = decode_item(&mut cur)?;
         // The kind and the item must agree, so a later pass never
         // reads a class item as a function.
-        let agrees = matches!(
-            (kind.is_class(), &item),
-            (true, IfaceItem::Class(_)) | (false, IfaceItem::Func(_))
-        );
+        let agrees = match (&item, kind) {
+            (IfaceItem::Class(_), kind) => kind.is_class(),
+            (IfaceItem::Interface(_), kind) => kind.is_interface(),
+            (IfaceItem::Func(_), ExportKind::Function) => true,
+            _ => false,
+        };
         if !agrees {
             return Err(DecodeError::BadExport);
         }
@@ -819,6 +1124,9 @@ pub fn type_text(ty: &IfaceType) -> String {
         IfaceType::EmptyVm => "EmptyVm".to_string(),
         IfaceType::Digest => "Digest".to_string(),
         IfaceType::Var(i) => format!("${i}"),
+        IfaceType::Projection { base, assoc, .. } => {
+            format!("{}.{}", type_text(base), assoc)
+        }
         IfaceType::Named { class, args } => {
             if args.is_empty() {
                 class.text()
@@ -855,6 +1163,30 @@ pub fn type_text(ty: &IfaceType) -> String {
                 })
                 .collect();
             let mut out = format!("({}) -> {}", parts.join(", "), type_text(ret));
+            if !row.is_empty() {
+                out.push_str(" with ");
+                out.push_str(&row_text(row));
+            }
+            out
+        }
+        IfaceType::Callback {
+            params,
+            param_muts,
+            ret,
+            row,
+        } => {
+            let parts: Vec<String> = params
+                .iter()
+                .zip(param_muts.iter())
+                .map(|(p, m)| {
+                    if *m {
+                        format!("mut {}", type_text(p))
+                    } else {
+                        type_text(p)
+                    }
+                })
+                .collect();
+            let mut out = format!("nonescaping ({}) -> {}", parts.join(", "), type_text(ret));
             if !row.is_empty() {
                 out.push_str(" with ");
                 out.push_str(&row_text(row));
@@ -941,6 +1273,13 @@ pub fn item_text(item: &IfaceItem) -> String {
             out.push('}');
             out
         }
+        IfaceItem::Interface(interface) => format!(
+            "[{} type, {} effect, {} associated, {} methods]",
+            interface.type_params,
+            interface.effect_params,
+            interface.associated.len(),
+            interface.methods.len()
+        ),
     }
 }
 

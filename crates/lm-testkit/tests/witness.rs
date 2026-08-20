@@ -332,7 +332,10 @@ fn a_closure_witness_that_disagrees_with_its_frame_rejects() {
             .frames
             .iter()
             .filter(|f| f.env != 0)
-            .filter_map(|f| f.closure)
+            .filter_map(|f| match f.closure {
+                Some(Value::Obj(reference)) => Some(reference.slot),
+                _ => None,
+            })
             .collect();
         for ordinal in targets {
             if let Object::Closure { env, .. } = &mut machine.objects[ordinal as usize].object {

@@ -24,18 +24,18 @@
 //! costs at least one byte, so `count > remaining` rejects at once.
 
 use super::{
-    AdmissionBudget, Image, ImageBlock, ImageError, ImageFrame, ImageLimits, ImageMachine,
-    ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor, ImageReason, ImageRoutedRequest,
-    ImageState, ImageTerminal, ImageWaitEntry, ImageWaitSource, LoadLimits, Origin, SnapshotFail,
-    SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER, SECTION_HEAPS,
-    SECTION_MACHINES, SECTION_TYPES,
+    AdmissionBudget, Image, ImageBlock, ImageCallback, ImageError, ImageFrame, ImageLimits,
+    ImageMachine, ImageMailbox, ImageObject, ImagePending, ImagePolicyCursor, ImageReason,
+    ImageRoutedRequest, ImageState, ImageTerminal, ImageWaitEntry, ImageWaitSource, LoadLimits,
+    Origin, SnapshotFail, SnapshotImage, FORMAT_VERSION, MAGIC, SECTION_CODE, SECTION_HEADER,
+    SECTION_HEAPS, SECTION_MACHINES, SECTION_TYPES,
 };
 use crate::LoadedModule;
 use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
-use lm_heap::{MapIndex, NativeByteBuffer, NativeStringBuilder, Object};
-use lm_value::{ObjRef, TypeEnvId, Value, Witness};
+use lm_heap::{MapIndex, NativeByteBuffer, NativeStringBuilder, Object, StructuralEpoch};
+use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::cell::Cell;
 
 /// One aggregate allocation ledger for a decoded container.
@@ -91,6 +91,8 @@ const V_OP: u8 = 3;
 const V_OBJ: u8 = 4;
 const V_UNINIT: u8 = 5;
 const V_CHAR: u8 = 6;
+const V_EMPTY_CASE: u8 = 7;
+const V_CALLBACK: u8 = 8;
 
 /// The container hash of one byte prefix.
 pub fn container_hash(prefix: &[u8]) -> [u8; 32] {
@@ -210,9 +212,18 @@ impl Out {
                 let id = self.op_identity(op);
                 self.hash(&id);
             }
+            Value::EmptyCase { ty, arm } => {
+                self.u8(V_EMPTY_CASE);
+                self.leb(ty as u64);
+                self.leb(arm as u64);
+            }
             Value::Obj(r) => {
                 self.u8(V_OBJ);
                 self.leb(r.slot as u64);
+            }
+            Value::Callback(reference) => {
+                self.u8(V_CALLBACK);
+                self.leb(reference.slot as u64);
             }
             Value::Uninit => self.u8(V_UNINIT),
         }
@@ -400,7 +411,7 @@ fn encode_closed_type(out: &mut Out, node: &ClosedType) {
             out.leb(*b as u64);
         }
         ClosedType::Tuple(elems) => list(out, elems),
-        ClosedType::Fn(params, muts, ret, row) => {
+        ClosedType::Fn(params, muts, ret, row) | ClosedType::Callback(params, muts, ret, row) => {
             out.leb(params.len() as u64);
             for (param, mutable) in params.iter().zip(muts.iter()) {
                 out.u8(u8::from(*mutable));
@@ -446,14 +457,19 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.leb(env.env().0 as u64);
             out.values(fields);
         }
-        Object::List { items } | Object::Tuple { items } => out.values(items),
-        Object::Map { entries, .. } => {
+        Object::List { items, epoch } => {
+            out.u64(u64::from(epoch.0));
+            out.values(items);
+        }
+        Object::Map { entries, index } => {
+            out.u64(u64::from(index.epoch.0));
             out.leb(entries.len() as u64);
             for (key, value) in entries {
                 out.value(*key);
                 out.value(*value);
             }
         }
+        Object::Tuple { items } => out.values(items),
         Object::Closure {
             func,
             captures,
@@ -580,6 +596,13 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
         }
         out.u32(machine.children);
         encode_limits(&mut out, &machine.limits);
+        out.leb(machine.callbacks.len() as u64);
+        for callback in &machine.callbacks {
+            out.leb(callback.func as u64);
+            out.values(&callback.captures);
+            out.leb(callback.env as u64);
+            out.leb(callback.owner_depth as u64);
+        }
         out.leb(machine.frames.len() as u64);
         for frame in &machine.frames {
             out.leb(frame.func as u64);
@@ -587,7 +610,13 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
             out.leb(frame.ip as u64);
             out.leb(frame.base_local as u64);
             out.leb(frame.base_operand as u64);
-            out.opt(frame.closure);
+            match frame.closure {
+                None => out.u8(0),
+                Some(value) => {
+                    out.u8(1);
+                    out.value(value);
+                }
+            }
             out.leb(frame.env as u64);
         }
         out.values(&machine.locals);
@@ -1383,6 +1412,18 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
         24 => ClosedType::FileHandle,
         25 => ClosedType::ResourceHandle,
         26 => ClosedType::Wait(closed_ref(cur, at)?),
+        27 => {
+            let len = cur.count(limits.max_closed_types as u64, "closed callback parameter")?;
+            let mut params = cur.vector(len, "closed callback parameters")?;
+            let mut muts = cur.vector(len, "callback parameter markers")?;
+            for _ in 0..len {
+                muts.push(cur.flag()?);
+                params.push(closed_ref(cur, at)?);
+            }
+            let ret = closed_ref(cur, at)?;
+            let row = decode_row(cur, limits)?;
+            ClosedType::Callback(params, muts, ret, row)
+        }
         other => {
             return err(
                 ImageReason::Layout,
@@ -1397,7 +1438,7 @@ fn class_slot(cur: &mut Cursor<'_, '_>) -> Read<u32> {
         .map_err(|_| ImageError::new(ImageReason::Code, "a class slot is too large"))
 }
 
-fn decode_value(cur: &mut Cursor<'_, '_>, objects: u32) -> Read<Value> {
+fn decode_value(cur: &mut Cursor<'_, '_>, objects: u32, callbacks: u32) -> Read<Value> {
     let tag = cur.u8()?;
     Ok(match tag {
         V_UNIT => Value::Unit,
@@ -1429,6 +1470,19 @@ fn decode_value(cur: &mut Cursor<'_, '_>, objects: u32) -> Read<Value> {
                 generation: 0,
             })
         }
+        V_CALLBACK => {
+            let ordinal = cur.leb()?;
+            if ordinal >= callbacks as u64 {
+                return err(
+                    ImageReason::Reference,
+                    format!("a callback reference names ordinal {ordinal} of {callbacks}"),
+                );
+            }
+            Value::Callback(CallbackRef {
+                slot: ordinal as u32,
+                generation: 0,
+            })
+        }
         V_UNINIT => Value::Uninit,
         V_CHAR => {
             let value = cur.u32()?;
@@ -1436,6 +1490,15 @@ fn decode_value(cur: &mut Cursor<'_, '_>, objects: u32) -> Read<Value> {
                 return err(ImageReason::Layout, "a Char value is not a Unicode scalar");
             };
             Value::Char(value)
+        }
+        V_EMPTY_CASE => {
+            let ty = u32::try_from(cur.leb()?).map_err(|_| {
+                ImageError::new(ImageReason::Layout, "an empty-case type is too large")
+            })?;
+            let arm = u32::try_from(cur.leb()?).map_err(|_| {
+                ImageError::new(ImageReason::Layout, "an empty-case arm is too large")
+            })?;
+            Value::EmptyCase { ty, arm }
         }
         other => {
             return err(
@@ -1446,11 +1509,17 @@ fn decode_value(cur: &mut Cursor<'_, '_>, objects: u32) -> Read<Value> {
     })
 }
 
-fn decode_values(cur: &mut Cursor<'_, '_>, objects: u32, cap: u64, what: &str) -> Read<Vec<Value>> {
+fn decode_values(
+    cur: &mut Cursor<'_, '_>,
+    objects: u32,
+    callbacks: u32,
+    cap: u64,
+    what: &str,
+) -> Read<Vec<Value>> {
     let count = cur.count(cap, what)?;
     let mut out: Vec<Value> = cur.vector(count, what)?;
     for _ in 0..count {
-        out.push(decode_value(cur, objects)?);
+        out.push(decode_value(cur, objects, callbacks)?);
     }
     Ok(out)
 }
@@ -1488,6 +1557,17 @@ fn decode_fault(cur: &mut Cursor<'_, '_>, limits: &LoadLimits) -> Read<crate::Fa
     Ok(crate::FaultRec { code, message, op })
 }
 
+fn decode_epoch(cur: &mut Cursor<'_, '_>) -> Read<StructuralEpoch> {
+    let epoch = cur.u64()?;
+    let Ok(epoch) = u32::try_from(epoch) else {
+        return err(
+            ImageReason::Layout,
+            "a collection epoch is outside its supported range",
+        );
+    };
+    Ok(StructuralEpoch(epoch))
+}
+
 fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Object> {
     let tag = cur.u8()?;
     let limits = &ctx.limits;
@@ -1496,34 +1576,42 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
         1 => {
             let class = class_slot(cur)?;
             let env = env_ref(cur, ctx)?;
-            let fields = decode_values(cur, objects, limits.max_stack_values as u64, "field")?;
+            let fields = decode_values(cur, objects, 0, limits.max_stack_values as u64, "field")?;
             Object::Instance { class, fields, env }
         }
         2 => Object::List {
-            items: decode_values(cur, objects, limits.max_stack_values as u64, "list item")?,
+            epoch: decode_epoch(cur)?,
+            items: decode_values(cur, objects, 0, limits.max_stack_values as u64, "list item")?,
         },
         3 => {
+            let epoch = decode_epoch(cur)?;
             let count = cur.count(limits.max_stack_values as u64, "map entry")?;
             let mut entries: Vec<(Value, Value)> = cur.vector(count, "map entries")?;
             for _ in 0..count {
-                let key = decode_value(cur, objects)?;
-                let value = decode_value(cur, objects)?;
+                let key = decode_value(cur, objects, 0)?;
+                let value = decode_value(cur, objects, 0)?;
                 entries.push((key, value));
             }
-            Object::Map {
-                entries,
-                index: MapIndex::default(),
-            }
+            let mut index = MapIndex::default();
+            index.epoch = epoch;
+            Object::Map { entries, index }
         }
         4 => Object::Tuple {
-            items: decode_values(cur, objects, limits.max_stack_values as u64, "tuple item")?,
+            items: decode_values(
+                cur,
+                objects,
+                0,
+                limits.max_stack_values as u64,
+                "tuple item",
+            )?,
         },
         5 => {
             let func = cur.leb()?;
             let func = u32::try_from(func)
                 .map_err(|_| ImageError::new(ImageReason::Code, "a function slot is too large"))?;
             let env = env_ref(cur, ctx)?;
-            let captures = decode_values(cur, objects, limits.max_stack_values as u64, "capture")?;
+            let captures =
+                decode_values(cur, objects, 0, limits.max_stack_values as u64, "capture")?;
             Object::Closure {
                 func,
                 captures,
@@ -1727,6 +1815,29 @@ fn decode_machine(
     }
     let children = cur.u32()?;
     let machine_limits = decode_limits(cur)?;
+    let callback_count = cur.count(limits.max_stack_values as u64, "callback")?;
+    let mut callbacks: Vec<ImageCallback> = cur.vector(callback_count, "callback table")?;
+    for _ in 0..callback_count {
+        let func = u32::try_from(cur.leb()?)
+            .map_err(|_| ImageError::new(ImageReason::Code, "a callback function is too large"))?;
+        let captures = decode_values(
+            cur,
+            count,
+            callback_count as u32,
+            limits.max_stack_values as u64,
+            "callback capture",
+        )?;
+        let env = env_ordinal(cur, ctx)?;
+        let owner_depth = u32::try_from(cur.leb()?).map_err(|_| {
+            ImageError::new(ImageReason::Layout, "a callback owner depth is too large")
+        })?;
+        callbacks.push(ImageCallback {
+            func,
+            captures,
+            env,
+            owner_depth,
+        });
+    }
     let frame_count = cur.count(limits.max_frames as u64, "frame")?;
     let mut frames: Vec<ImageFrame> = cur.vector(frame_count, "frame table")?;
     for _ in 0..frame_count {
@@ -1744,7 +1855,16 @@ fn decode_machine(
         })?;
         let base_local = cur.leb()?;
         let base_operand = cur.leb()?;
-        let closure = cur.opt(count as u64, "frame closure")?;
+        let closure = match cur.u8()? {
+            0 => None,
+            1 => Some(decode_value(cur, count, callback_count as u32)?),
+            other => {
+                return err(
+                    ImageReason::State,
+                    format!("the frame closure tag {other} is not 0 or 1"),
+                )
+            }
+        };
         let env = env_ordinal(cur, ctx)?;
         frames.push(ImageFrame {
             func,
@@ -1759,8 +1879,20 @@ fn decode_machine(
             env,
         });
     }
-    let locals = decode_values(cur, count, limits.max_stack_values as u64, "local")?;
-    let operands = decode_values(cur, count, limits.max_stack_values as u64, "operand")?;
+    let locals = decode_values(
+        cur,
+        count,
+        callback_count as u32,
+        limits.max_stack_values as u64,
+        "local",
+    )?;
+    let operands = decode_values(
+        cur,
+        count,
+        callback_count as u32,
+        limits.max_stack_values as u64,
+        "operand",
+    )?;
     let literal_count = cur.count(limits.max_code_slots as u64, "literal")?;
     let mut literals: Vec<Option<u32>> = cur.vector(literal_count, "literal table")?;
     for _ in 0..literal_count {
@@ -1771,7 +1903,13 @@ fn decode_machine(
         0 => None,
         1 => {
             let op = decode_op(cur)?;
-            let args = decode_values(cur, count, limits.max_stack_values as u64, "argument")?;
+            let args = decode_values(
+                cur,
+                count,
+                callback_count as u32,
+                limits.max_stack_values as u64,
+                "argument",
+            )?;
             let ordinal = cur.u64()?;
             Some(ImagePending { op, args, ordinal })
         }
@@ -1809,7 +1947,11 @@ fn decode_machine(
     };
     let terminal = match cur.u8()? {
         0 => None,
-        1 => Some(ImageTerminal::Done(decode_value(cur, count)?)),
+        1 => Some(ImageTerminal::Done(decode_value(
+            cur,
+            count,
+            callback_count as u32,
+        )?)),
         2 => Some(ImageTerminal::Fault(decode_fault(cur, limits)?)),
         other => {
             return err(
@@ -1828,7 +1970,13 @@ fn decode_machine(
     let closed = cur.flag()?;
     let accepted = cur.u64()?;
     let delivered = cur.u64()?;
-    let queue = decode_values(cur, count, mailbox_limit as u64, "mailbox message")?;
+    let queue = decode_values(
+        cur,
+        count,
+        callback_count as u32,
+        mailbox_limit as u64,
+        "mailbox message",
+    )?;
     let block = match cur.u8()? {
         0 => None,
         1 => Some(ImageBlock::Receive),
@@ -1867,6 +2015,7 @@ fn decode_machine(
         children,
         limits: machine_limits,
         objects,
+        callbacks,
         frames,
         locals,
         operands,

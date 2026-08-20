@@ -1,13 +1,15 @@
 //! The benchmark suite.
 //!
-//! Three groups run here: the language operations, the type checker,
-//! and artifact verification. Every case is `#[ignore]`, so the
+//! Four groups run here: language operations, collection operations,
+//! type checking, and artifact verification. Every case is `#[ignore]`, so the
 //! ordinary suite never pays for them. Run them with:
 //!
 //! ```text
 //! nix-shell --run "cargo test --release -p lm-testkit --test bench \
 //!   -- --ignored --nocapture"
 //! ```
+//!
+//! Set `LOOM_BENCH_FILTER` to one case name for a focused run.
 //!
 //! Method. Each case compiles and loads once outside the timed
 //! region, then times the run alone. The reported cost subtracts an
@@ -69,8 +71,18 @@ fn baseline() -> Duration {
     time_program("0\n")
 }
 
+fn selected(name: &str) -> bool {
+    let Ok(filter) = std::env::var("LOOM_BENCH_FILTER") else {
+        return true;
+    };
+    filter.split(',').any(|item| item == name)
+}
+
 /// Report one case: the per-operation cost above the baseline.
 fn report(name: &str, iterations: u64, source: &str, base: Duration) {
+    if !selected(name) {
+        return;
+    }
     let total = time_program(source);
     let work = total.saturating_sub(base);
     let per = work.as_nanos() as f64 / iterations as f64;
@@ -88,6 +100,9 @@ fn report(name: &str, iterations: u64, source: &str, base: Duration) {
 /// A program with no proc runs one machine there, so this case
 /// measures the path a plain `lm run` takes.
 fn report_world(name: &str, iterations: u64, source: &str, expected: &str) {
+    if !selected(name) {
+        return;
+    }
     let total = time_world(source, &[], config(), expected);
     let per = total.as_nanos() as f64 / iterations as f64;
     println!(
@@ -428,6 +443,61 @@ fn bench_language_operations() {
 
 #[test]
 #[ignore]
+fn bench_collection_operations() {
+    let base = baseline();
+    println!("LOOM\tcase\titers\tns_per_op\ttotal_ms");
+    println!(
+        "LOOM\t_baseline\t1\t{:.1}\t{:.3}",
+        base.as_nanos() as f64,
+        base.as_secs_f64() * 1e3
+    );
+
+    // Native list traversal creates no iterator or Option per element.
+    report(
+        "list_for",
+        1_000_000,
+        "xs: [Int] = []\ni = 0\nwhile i < 1000\n  xs.push(i)\n  i = i + 1\nend\n\
+         rounds = 0\ns = 0\nwhile rounds < 1000\n  for value in xs\n    s = s + value\n  end\n\
+           rounds = rounds + 1\nend\ns\n",
+        base,
+    );
+
+    // A nonescaping callback avoids one closure object per call.
+    report(
+        "list_each",
+        1_000_000,
+        "class Total\n  value: Int = 0\n  def add(mut self, n: Int)\n    self.value = self.value + n\n  end\nend\n\
+         xs: [Int] = []\ni = 0\nwhile i < 1000\n  xs.push(i)\n  i = i + 1\nend\n\
+           total = Total()\nrounds = 0\nwhile rounds < 1000\n  xs.each() { |value: Int| total.add(value) }\n\
+           rounds = rounds + 1\nend\ntotal.value\n",
+        base,
+    );
+
+    // This eager pipeline applies three ordinary core algorithms.
+    report(
+        "list_pipeline",
+        60_000,
+        "xs: [Int] = []\ni = 0\nwhile i < 20000\n  xs.push(i)\n  i = i + 1\nend\n\
+         mapped = xs.map[Int]() { |value: Int| value + 1 }\n\
+         filtered = mapped.filter() { |value: Int| value % 2 == 0 }\n\
+         filtered.fold[Int](0) { |sum: Int, value: Int| sum + value }\n",
+        base,
+    );
+
+    // Map traversal passes the key and value without a tuple object.
+    report(
+        "map_each",
+        1_000_000,
+        "class Total\n  value: Int = 0\n  def add(mut self, key: Int, value: Int)\n    self.value = self.value + key + value\n  end\nend\n\
+         table: {Int: Int} = {}\ni = 0\nwhile i < 1000\n  table.put(i, i)\n  i = i + 1\nend\n\
+           total = Total()\nrounds = 0\nwhile rounds < 1000\n  table.each() { |key: Int, value: Int| total.add(key, value) }\n\
+           rounds = rounds + 1\nend\ntotal.value\n",
+        base,
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_proc_operations() {
     let source = "class Adder < Proc[Int]\n\
                   \x20 total: Int = 0\n\
@@ -561,6 +631,26 @@ fn wide_body_source(n: usize) -> String {
     out
 }
 
+/// Generate `n` conformances and calls through one interface bound.
+fn interface_source(n: usize) -> String {
+    let mut out = String::from(
+        "interface Measured\n  type Item\n  def measure(self): Int\nend\n\
+         def read[T: Measured](value: T): Int\n  value.measure()\nend\n",
+    );
+    for i in 0..n {
+        out.push_str(&format!(
+            "final class C{i} implements Measured\n  type Item = Int\n  \
+             def measure(self): Int\n    {i}\n  end\nend\n"
+        ));
+    }
+    out.push_str("sum = 0\n");
+    for i in 0..n {
+        out.push_str(&format!("sum = sum + read(C{i}())\n"));
+    }
+    out.push_str("sum\n");
+    out
+}
+
 /// One generated shape: a name, a source generator, and the sizes
 /// the benchmarks run it at.
 type Shape = (&'static str, fn(usize) -> String, Vec<usize>);
@@ -579,7 +669,53 @@ fn shapes() -> Vec<Shape> {
         ("inference_chain", inference_source, vec![16, 64, 256]),
         ("enum_case_arms", enum_source, vec![16, 64, 256]),
         ("wide_body", wide_body_source, vec![64, 256, 1024]),
+        ("interfaces", interface_source, vec![16, 64, 256]),
     ]
+}
+
+// ---------------------------------------------------------------
+// Group 2: the bundled core image.
+// ---------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn bench_core_compilation() {
+    let mut compile_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let module = lm_hir::core_image();
+        let elapsed = start.elapsed();
+        std::hint::black_box(module.funcs.len());
+        if round > 0 {
+            compile_runs.push(elapsed);
+        }
+    }
+
+    let module = lm_hir::core_image();
+    let bytes = lm_bytecode::encode(&module);
+    let mut load_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let loaded = lm_vm::load_bytes(&bytes).expect("the core image loads");
+        let elapsed = start.elapsed();
+        std::hint::black_box(loaded.dispatch_cells());
+        if round > 0 {
+            load_runs.push(elapsed);
+        }
+    }
+
+    println!(
+        "LOOM\tcore_compile\t{}\t{}\t{:.3}\tms",
+        module.classes.len(),
+        module.funcs.len(),
+        median(compile_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_load\t{}\t{}\t{:.3}\tms",
+        bytes.len(),
+        module.funcs.len(),
+        median(load_runs).as_secs_f64() * 1e3
+    );
 }
 
 #[test]

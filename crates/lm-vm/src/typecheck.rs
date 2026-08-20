@@ -145,6 +145,11 @@ enum Kind {
 enum Node {
     Scalar(Scalar),
     Heap(Kind),
+    Callback,
+    Option {
+        payload: ClosedTypeId,
+        case: Option<bool>,
+    },
 }
 
 /// Check one value and expected type pair.
@@ -183,7 +188,7 @@ fn check_one(
             }
 
             let children = match object {
-                Object::List { items } | Object::Tuple { items } => items.len(),
+                Object::List { items, .. } | Object::Tuple { items } => items.len(),
                 Object::Map { entries, .. } => entries.len(),
                 Object::Instance { fields, .. } => fields.len(),
                 _ => 0,
@@ -192,6 +197,36 @@ fn check_one(
                 return Ok(());
             }
             check_object(module, envs, scratch, object, kind, expect)
+        }
+        Node::Callback => Err(FaultCode::BoundaryViolation),
+        Node::Option { payload, case } => {
+            if let Value::Obj(reference) = value {
+                if let Object::Instance { class, fields, .. } = heap.get(reference) {
+                    return check_instance(module, envs, scratch, *class, fields, expect);
+                }
+            }
+            let family = match envs.ty(expect).cloned() {
+                Some(ClosedType::Inst(_, args)) => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_OPTION];
+                    envs.intern(ClosedType::Inst(class, args))
+                        .map_err(env_fault)?
+                }
+                _ => return Err(FaultCode::MalformedState),
+            };
+            let is_none = matches!(
+                value,
+                Value::EmptyCase { ty, arm: 1 } if ty == family
+            );
+            match case {
+                Some(false) if !is_none => Err(FaultCode::TypeMismatch),
+                Some(true) if is_none => Err(FaultCode::TypeMismatch),
+                None | Some(false) if is_none => Ok(()),
+                None | Some(true) => {
+                    scratch.work.push((value, payload));
+                    Ok(())
+                }
+                Some(false) => unreachable!(),
+            }
         }
     }
 }
@@ -218,6 +253,7 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
         ClosedType::PendingCall(_, _) => Node::Heap(Kind::PendingCall),
         ClosedType::Handle(_, _) => Node::Heap(Kind::Handle),
         ClosedType::Fn(_, _, _, _) => Node::Heap(Kind::Closure),
+        ClosedType::Callback(_, _, _, _) => Node::Callback,
         ClosedType::List(_) => Node::Heap(Kind::List),
         ClosedType::Map(_, _) => Node::Heap(Kind::Map),
         ClosedType::Tuple(_) => Node::Heap(Kind::Tuple),
@@ -243,6 +279,34 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
             } else {
                 Node::Heap(Kind::Instance)
             }
+        }
+        ClosedType::Inst(class, args)
+            if args.len() == 1
+                && (*class == module.core_roles[lm_bytecode::corepin::ROLE_OPTION]
+                    || *class == module.core_roles[lm_bytecode::corepin::ROLE_OPTION_SOME]
+                    || *class == module.core_roles[lm_bytecode::corepin::ROLE_OPTION_NONE]) =>
+        {
+            let case = if *class == module.core_roles[lm_bytecode::corepin::ROLE_OPTION_SOME] {
+                Some(true)
+            } else if *class == module.core_roles[lm_bytecode::corepin::ROLE_OPTION_NONE] {
+                Some(false)
+            } else {
+                None
+            };
+            Node::Option {
+                payload: args[0],
+                case,
+            }
+        }
+        ClosedType::Inst(class, args)
+            if args.len() == 1 && *class == module.core_roles[lm_bytecode::corepin::ROLE_LIST] =>
+        {
+            Node::Heap(Kind::List)
+        }
+        ClosedType::Inst(class, args)
+            if args.len() == 2 && *class == module.core_roles[lm_bytecode::corepin::ROLE_MAP] =>
+        {
+            Node::Heap(Kind::Map)
         }
         ClosedType::Inst(_, _) => Node::Heap(Kind::Instance),
     })
@@ -287,16 +351,16 @@ fn check_object(
     expect: ClosedTypeId,
 ) -> Result<(), FaultCode> {
     match (object, kind) {
-        (Object::List { items }, Kind::List) => {
-            let elem = child(envs, expect, 0)?;
+        (Object::List { items, .. }, Kind::List) => {
+            let elem = child(module, envs, expect, 0)?;
             for item in items {
                 scratch.work.push((*item, elem));
             }
             Ok(())
         }
         (Object::Map { entries, .. }, Kind::Map) => {
-            let key = child(envs, expect, 0)?;
-            let value = child(envs, expect, 1)?;
+            let key = child(module, envs, expect, 0)?;
+            let value = child(module, envs, expect, 1)?;
             for (entry_key, entry_value) in entries {
                 scratch.work.push((*entry_key, key));
                 scratch.work.push((*entry_value, value));
@@ -326,11 +390,22 @@ fn check_object(
     }
 }
 
-fn child(envs: &TypeEnvs, expect: ClosedTypeId, at: usize) -> Result<ClosedTypeId, FaultCode> {
+fn child(
+    module: &Module,
+    envs: &TypeEnvs,
+    expect: ClosedTypeId,
+    at: usize,
+) -> Result<ClosedTypeId, FaultCode> {
     match (envs.ty(expect), at) {
         (Some(ClosedType::List(elem)), 0) => Ok(*elem),
         (Some(ClosedType::Map(key, _)), 0) => Ok(*key),
         (Some(ClosedType::Map(_, value)), 1) => Ok(*value),
+        (Some(ClosedType::Inst(class, args)), _)
+            if *class == module.core_roles[lm_bytecode::corepin::ROLE_LIST]
+                || *class == module.core_roles[lm_bytecode::corepin::ROLE_MAP] =>
+        {
+            args.get(at).copied().ok_or(FaultCode::TypeMismatch)
+        }
         (Some(ClosedType::Tuple(elems)), _) => {
             elems.get(at).copied().ok_or(FaultCode::TypeMismatch)
         }
@@ -439,6 +514,24 @@ fn closed_is_subtype(
                     .extend(expected_params.into_iter().zip(found_params));
                 scratch.subtype_work.push((found_result, expected_result));
             }
+            (
+                ClosedType::Callback(found_params, found_muts, found_result, found_row),
+                ClosedType::Callback(expected_params, expected_muts, expected_result, expected_row),
+            ) => {
+                if found_params.len() != expected_params.len()
+                    || !found_muts
+                        .iter()
+                        .zip(expected_muts.iter())
+                        .all(|(found, expected)| !*found || *expected)
+                    || !row_included(module, &found_row, &expected_row)
+                {
+                    return Ok(false);
+                }
+                scratch
+                    .subtype_work
+                    .extend(expected_params.into_iter().zip(found_params));
+                scratch.subtype_work.push((found_result, expected_result));
+            }
             _ => return Ok(false),
         }
     }
@@ -522,6 +615,10 @@ mod tests {
             types,
             selectors: Vec::new(),
             apps: Vec::new(),
+            interfaces: Vec::new(),
+            conformances: Vec::new(),
+            class_bounds: vec![Vec::new(); classes.len()],
+            func_bounds: vec![Vec::new(); funcs.len()],
             imports: Vec::new(),
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
             classes,

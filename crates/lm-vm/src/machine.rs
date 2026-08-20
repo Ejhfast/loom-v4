@@ -8,13 +8,13 @@
 
 use crate::resource::{ResourceBudget, ResourceRegistry};
 use crate::{FaultCode, VmConfig};
-use lm_bytecode::closed::{TypeEnvFull, TypeEnvs};
-use lm_bytecode::{Instr, Module};
+use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnvFull, TypeEnvs};
+use lm_bytecode::{ExtendedInstr, Instr, Module};
 use lm_heap::{
     process_lookup_hash, Heap, HeapBudget, MapIndex, NativeByteBuffer, NativeStringBuilder, Object,
-    SharedBytes, SharedText,
+    SharedBytes, SharedText, StructuralEpoch,
 };
-use lm_value::{ObjRef, TypeEnvId, Value, Witness};
+use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 
 /// The largest typed wait table of one machine.
 pub const MAX_LIVE_WAITS: usize = 1_024;
@@ -285,13 +285,86 @@ pub struct Frame {
     pub ip: u32,
     pub base_local: u32,
     pub base_operand: u32,
-    /// The active closure object for `LoadCapture`.
-    pub closure: Option<ObjRef>,
+    /// The active closure or callback for `LoadCapture`.
+    pub closure: Option<FrameCapture>,
     /// The type environment of this activation.
     ///
     /// The call site supplies it. A monomorphic call copies the empty
     /// environment, so a monomorphic frame does no type work.
     pub env: TypeEnvId,
+}
+
+/// One compact capture source for an active frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameCapture {
+    Closure(ObjRef),
+    Callback(CallbackRef),
+}
+
+impl FrameCapture {
+    pub fn from_value(value: Value) -> Option<Self> {
+        match value {
+            Value::Obj(reference) => Some(Self::Closure(reference)),
+            Value::Callback(reference) => Some(Self::Callback(reference)),
+            _ => None,
+        }
+    }
+
+    pub fn value(self) -> Value {
+        match self {
+            Self::Closure(reference) => Value::Obj(reference),
+            Self::Callback(reference) => Value::Callback(reference),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OptionCollectionOp {
+    OptionNone(u32),
+    OptionPayload(u32),
+    ListGet(u32),
+    MapGet(u32),
+}
+
+#[derive(Clone, Copy)]
+enum CollectionIterationOp {
+    ListEpoch,
+    ListIterLen,
+    MapEpoch,
+    MapIterLen,
+    MapEntry { value: bool },
+}
+
+#[derive(Clone, Copy)]
+enum CollectionExtensionOp {
+    ListCapacity,
+    ListSet,
+    ListPop(u32),
+    ListInsert,
+    ListRemove { swap: bool },
+    ListReserve,
+    ListTruncate,
+    ListContains,
+    ListReorder,
+    MapRemove(u32),
+    MapClear,
+    MapReserve,
+}
+
+/// One live nonescaping callback descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallbackDescriptor {
+    pub func: u32,
+    pub captures: Vec<Value>,
+    pub env: TypeEnvId,
+    pub owner_depth: u32,
+}
+
+/// One reusable callback arena slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallbackSlot {
+    pub generation: u32,
+    pub descriptor: Option<CallbackDescriptor>,
 }
 
 /// Why one instruction left the plain path.
@@ -312,7 +385,12 @@ pub enum ExecOutcome {
         mock: Option<Value>,
     },
     /// The operation identity test of a `Call` pattern.
-    AsCall { request: ObjRef, op: u32 },
+    AsCall {
+        request: ObjRef,
+        op: u32,
+        ty: u32,
+        env: TypeEnvId,
+    },
     /// `request.op_name()`.
     RequestOp { request: ObjRef },
     /// `call.args()`.
@@ -324,11 +402,8 @@ pub enum ExecOutcome {
 
 /// The serializable state of one machine.
 ///
-/// Every field here is machine state in the sense of specification
-/// 16.4: a snapshot codec can copy the bytes. Specification 17.2
-/// lists the same contents, and it excludes policy tables, live host
-/// callbacks, and live host handles. Those live beside this record in
-/// `Machine` and never enter it.
+/// These fields contain the compact machine state from specification 16.4.
+/// `Machine` stores the cold callback arena separately.
 ///
 /// The interpreter still runs as a method of `Machine`, because
 /// allocation needs the policy roots as well. `docs/notes/week7.md`
@@ -365,8 +440,7 @@ pub struct VmState {
     pub literals: Vec<Option<ObjRef>>,
 }
 
-/// One machine: its serializable state plus the four kinds of state a
-/// snapshot never copies.
+/// One machine with compact state, callback state, and host state.
 pub struct Machine {
     /// The serializable machine state.
     pub vm: VmState,
@@ -436,6 +510,8 @@ pub struct Machine {
     /// (specification 18.1), so the launch runs two frames: the
     /// constructor, then `on_spawn` over the constructed value.
     pub start_body: Option<ObjRef>,
+    /// Machine-local descriptors for active nonescaping callbacks.
+    pub callbacks: Vec<CallbackSlot>,
 }
 
 impl Machine {
@@ -502,6 +578,22 @@ impl Machine {
                 }
                 Object::ByteBuf(_) => {
                     let class = module.core_roles[lm_bytecode::corepin::ROLE_BYTE_BUFFER];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::List { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_LIST];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::Map { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_MAP];
                     if class == lm_bytecode::NO_ROLE {
                         Err(BAD_TYPE)
                     } else {
@@ -640,6 +732,7 @@ impl Machine {
             is_proc: false,
             gate: 0,
             start_body: None,
+            callbacks: Vec::new(),
         }
     }
 
@@ -687,7 +780,7 @@ impl Machine {
             ip: 0,
             base_local: 0,
             base_operand: 0,
-            closure,
+            closure: closure.map(FrameCapture::Closure),
             env,
         });
         self.vm.state = MachineState::Ready;
@@ -699,6 +792,7 @@ impl Machine {
         self.vm.pending = None;
         self.vm.nested = None;
         self.vm.routed = None;
+        self.callbacks.clear();
         self.close_resources();
         self.compact_terminal_proc();
     }
@@ -713,6 +807,7 @@ impl Machine {
         self.vm.pending = None;
         self.vm.nested = None;
         self.vm.routed = None;
+        self.callbacks.clear();
         self.close_resources();
         self.compact_terminal_proc();
     }
@@ -794,8 +889,17 @@ impl Machine {
             }
         }
         for frame in &self.vm.frames {
-            if let Some(r) = frame.closure {
-                roots.push(r);
+            if let Some(FrameCapture::Closure(reference)) = frame.closure {
+                roots.push(reference);
+            }
+        }
+        for slot in &self.callbacks {
+            if let Some(descriptor) = &slot.descriptor {
+                for value in &descriptor.captures {
+                    if let Value::Obj(reference) = value {
+                        roots.push(*reference);
+                    }
+                }
             }
         }
         if let Some(pending) = &self.vm.pending {
@@ -847,8 +951,17 @@ impl Machine {
     pub fn snapshot_roots(&self) -> Vec<ObjRef> {
         let mut roots: Vec<ObjRef> = Vec::new();
         for frame in &self.vm.frames {
-            if let Some(r) = frame.closure {
-                roots.push(r);
+            if let Some(FrameCapture::Closure(reference)) = frame.closure {
+                roots.push(reference);
+            }
+        }
+        for slot in &self.callbacks {
+            if let Some(descriptor) = &slot.descriptor {
+                for value in &descriptor.captures {
+                    if let Value::Obj(reference) = value {
+                        roots.push(*reference);
+                    }
+                }
             }
         }
         for value in self.vm.locals.iter().chain(self.vm.operands.iter()) {
@@ -876,6 +989,51 @@ impl Machine {
         }
         roots.extend(self.vm.literals.iter().flatten().copied());
         roots
+    }
+
+    /// Return active callbacks in canonical root order.
+    pub fn snapshot_callbacks(&self) -> Vec<CallbackRef> {
+        let mut callbacks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let push = |value: Value,
+                    callbacks: &mut Vec<CallbackRef>,
+                    seen: &mut std::collections::HashSet<CallbackRef>| {
+            if let Value::Callback(reference) = value {
+                if seen.insert(reference) {
+                    callbacks.push(reference);
+                }
+            }
+        };
+        for frame in &self.vm.frames {
+            if let Some(FrameCapture::Callback(reference)) = frame.closure {
+                push(Value::Callback(reference), &mut callbacks, &mut seen);
+            }
+        }
+        for value in self.vm.locals.iter().chain(self.vm.operands.iter()) {
+            push(*value, &mut callbacks, &mut seen);
+        }
+        if let Some(pending) = &self.vm.pending {
+            for value in &pending.args {
+                push(*value, &mut callbacks, &mut seen);
+            }
+        }
+        if let Some(Terminal::Done(value)) = &self.vm.terminal {
+            push(*value, &mut callbacks, &mut seen);
+        }
+        for value in &self.vm.mailbox.queue {
+            push(*value, &mut callbacks, &mut seen);
+        }
+        let mut cursor = 0;
+        while cursor < callbacks.len() {
+            let reference = callbacks[cursor];
+            cursor += 1;
+            if let Ok(descriptor) = self.callback(reference) {
+                for value in &descriptor.captures {
+                    push(*value, &mut callbacks, &mut seen);
+                }
+            }
+        }
+        callbacks
     }
 
     /// Allocate one object. When the cap would be exceeded, collect
@@ -954,7 +1112,7 @@ impl Machine {
     /// the entries appended since the last lookup.
     fn map_lookup(&mut self, r: ObjRef, key: Value) -> Result<Option<usize>, FaultCode> {
         let (built, len) = match self.vm.heap.get(r) {
-            Object::Map { entries, index } => (index.built, entries.len()),
+            Object::Map { entries, index, .. } => (index.built as usize, entries.len()),
             _ => return Err(FaultCode::TypeMismatch),
         };
         if built < len {
@@ -974,7 +1132,7 @@ impl Machine {
         }
         let hash = self.key_hash(key);
         let (entries, candidates) = match self.vm.heap.get(r) {
-            Object::Map { entries, index } => (entries, index.candidates(hash)),
+            Object::Map { entries, index, .. } => (entries, index.candidates(hash)),
             _ => return Err(FaultCode::TypeMismatch),
         };
         for i in candidates {
@@ -1054,6 +1212,30 @@ impl Machine {
         let env = envs
             .method_env(module, target, class, class_env, own)
             .map_err(env_fault)?;
+        self.push_frame(module, target, argc + 1, None, env)
+    }
+
+    /// Push one method frame selected through an interface bound.
+    #[inline(never)]
+    fn call_interface(
+        &mut self,
+        module: &Module,
+        dispatch: &[crate::DispatchRow],
+        envs: &mut TypeEnvs,
+        selector: u32,
+        argc: u32,
+        recv_ty: u32,
+    ) -> Result<(), FaultCode> {
+        let argc = argc as usize;
+        let recv = self.peek(argc)?;
+        let class = self.virtual_class(module, recv)?;
+        let target = method_of(dispatch, class, selector)?;
+        let parent = self.frame_env();
+        let receiver = envs.close(module, recv_ty, parent).map_err(env_fault)?;
+        let env = envs
+            .interface_method_env(module, target, class, receiver)
+            .map_err(env_fault)?
+            .ok_or(BAD_TYPE)?;
         self.push_frame(module, target, argc + 1, None, env)
     }
 
@@ -2005,7 +2187,10 @@ impl Machine {
                 for _ in 0..items.len() {
                     self.vm.operands.pop();
                 }
-                let value = self.alloc(Object::List { items })?;
+                let value = self.alloc(Object::List {
+                    items,
+                    epoch: StructuralEpoch::default(),
+                })?;
                 self.push(value)?;
             }
             Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith) => {
@@ -2145,6 +2330,598 @@ impl Machine {
         Ok(())
     }
 
+    /// Read one list element outside the main dispatch body.
+    #[inline(never)]
+    fn exec_list_at(&mut self) -> Result<(), FaultCode> {
+        let idx = self.pop_int()?;
+        let r = self.pop_obj()?;
+        let value = match self.vm.heap.get(r) {
+            Object::List { items, .. } => {
+                if idx < 0 || idx as usize >= items.len() {
+                    return Err(FaultCode::IndexOutOfBounds);
+                }
+                items[idx as usize]
+            }
+            _ => return Err(BAD_TYPE),
+        };
+        self.push(value)
+    }
+
+    /// Insert one map entry outside the base dispatch body.
+    #[inline(never)]
+    fn exec_map_put(
+        &mut self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        ty: u32,
+        discard: bool,
+    ) -> Result<(), FaultCode> {
+        let value = self.pop()?;
+        let key = self.pop()?;
+        let r = self.pop_obj()?;
+        self.frozen_guard(r)?;
+        let pos = self.map_lookup(r, key)?;
+        let previous = match pos {
+            Some(pos) => match self.vm.heap.get_mut(r) {
+                Object::Map { entries, .. } => {
+                    let entry = entries.get_mut(pos).ok_or(BAD_STATE)?;
+                    if discard {
+                        entry.1 = value;
+                        None
+                    } else {
+                        Some(std::mem::replace(&mut entry.1, value))
+                    }
+                }
+                _ => return Err(BAD_TYPE),
+            },
+            None => {
+                self.reserve(32, &[Value::Obj(r), key, value])?;
+                match self.vm.heap.get_mut(r) {
+                    Object::Map { entries, index } => {
+                        index.epoch.bump()?;
+                        entries.push((key, value));
+                    }
+                    _ => return Err(BAD_TYPE),
+                }
+                self.vm.heap.recharge(r);
+                None
+            }
+        };
+        if !discard {
+            match previous {
+                Some(previous) => self.push(previous)?,
+                None => {
+                    let ty = self.close_option_family(module, envs, ty)?;
+                    self.push(Value::EmptyCase { ty, arm: 1 })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute one native option collection operation.
+    #[inline(never)]
+    fn exec_option_collection(
+        &mut self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        op: OptionCollectionOp,
+    ) -> Result<(), FaultCode> {
+        match op {
+            OptionCollectionOp::OptionNone(ty) => {
+                let ty = self.close_option_family(module, envs, ty)?;
+                self.push(Value::EmptyCase { ty, arm: 1 })?;
+            }
+            OptionCollectionOp::OptionPayload(ty) => {
+                let value = *self.vm.operands.last().ok_or(BAD_STATE)?;
+                let family = self.close_option_family(module, envs, ty)?;
+                if matches!(value, Value::EmptyCase { ty, arm: 1 } if ty == family) {
+                    return Err(BAD_TYPE);
+                }
+            }
+            OptionCollectionOp::ListGet(ty) => {
+                let idx = self.pop_int()?;
+                let r = self.pop_obj()?;
+                let value = match self.vm.heap.get(r) {
+                    Object::List { items, .. } if idx >= 0 => items.get(idx as usize).copied(),
+                    Object::List { .. } => None,
+                    _ => return Err(BAD_TYPE),
+                };
+                match value {
+                    Some(value) => self.push(value)?,
+                    None => {
+                        let ty = self.close_option_family(module, envs, ty)?;
+                        self.push(Value::EmptyCase { ty, arm: 1 })?;
+                    }
+                }
+            }
+            OptionCollectionOp::MapGet(ty) => {
+                let key = self.pop()?;
+                let r = self.pop_obj()?;
+                let value = match self.map_lookup(r, key)? {
+                    Some(pos) => match self.vm.heap.get(r) {
+                        Object::Map { entries, .. } => Some(entries.get(pos).ok_or(BAD_STATE)?.1),
+                        _ => return Err(BAD_TYPE),
+                    },
+                    None => None,
+                };
+                match value {
+                    Some(value) => self.push(value)?,
+                    None => {
+                        let ty = self.close_option_family(module, envs, ty)?;
+                        self.push(Value::EmptyCase { ty, arm: 1 })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute one collection traversal operation.
+    #[inline(never)]
+    fn exec_collection_iteration(&mut self, op: CollectionIterationOp) -> Result<(), FaultCode> {
+        match op {
+            CollectionIterationOp::ListEpoch => {
+                let r = self.pop_obj()?;
+                let epoch = match self.vm.heap.get_mut(r) {
+                    Object::List { epoch, .. } => epoch.observe(),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Int(i64::from(epoch)))?;
+            }
+            CollectionIterationOp::ListIterLen => {
+                let expected = self.pop_int()?;
+                let r = self.pop_obj()?;
+                let (len, epoch) = match self.vm.heap.get(r) {
+                    Object::List { items, epoch } => (items.len(), epoch.0),
+                    _ => return Err(BAD_TYPE),
+                };
+                if expected < 0 || epoch != expected as u32 {
+                    return Err(FaultCode::CollectionModified);
+                }
+                self.push(Value::Int(len as i64))?;
+            }
+            CollectionIterationOp::MapEpoch => {
+                let r = self.pop_obj()?;
+                let epoch = match self.vm.heap.get_mut(r) {
+                    Object::Map { index, .. } => index.epoch.observe(),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Int(i64::from(epoch)))?;
+            }
+            CollectionIterationOp::MapIterLen => {
+                let expected = self.pop_int()?;
+                let r = self.pop_obj()?;
+                let (len, epoch) = match self.vm.heap.get(r) {
+                    Object::Map { entries, index } => (entries.len(), index.epoch.0),
+                    _ => return Err(BAD_TYPE),
+                };
+                if expected < 0 || epoch != expected as u32 {
+                    return Err(FaultCode::CollectionModified);
+                }
+                self.push(Value::Int(len as i64))?;
+            }
+            CollectionIterationOp::MapEntry { value } => {
+                let index = self.pop_int()?;
+                let r = self.pop_obj()?;
+                let entry = match self.vm.heap.get(r) {
+                    Object::Map { entries, .. } if index >= 0 => {
+                        entries.get(index as usize).copied()
+                    }
+                    Object::Map { .. } => None,
+                    _ => return Err(BAD_TYPE),
+                }
+                .ok_or(FaultCode::IndexOutOfBounds)?;
+                let value = if value { entry.1 } else { entry.0 };
+                self.push(value)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Create one callback outside the main dispatch body.
+    #[inline(never)]
+    fn exec_make_callback(&mut self, func: u32, captures: u32) -> Result<(), FaultCode> {
+        let split = self
+            .vm
+            .operands
+            .len()
+            .checked_sub(captures as usize)
+            .ok_or(BAD_STATE)?;
+        let captured: Vec<Value> = self.vm.operands.split_off(split);
+        let value = self.alloc_callback(func, captured, self.frame_env())?;
+        self.push(value)
+    }
+
+    /// Validate one heap closure as a nonescaping callback.
+    #[inline(never)]
+    fn exec_as_callback(&mut self) -> Result<(), FaultCode> {
+        let value = *self.vm.operands.last().ok_or(BAD_STATE)?;
+        let Value::Obj(reference) = value else {
+            return Err(BAD_TYPE);
+        };
+        if !matches!(self.vm.heap.get(reference), Object::Closure { .. }) {
+            return Err(BAD_TYPE);
+        }
+        Ok(())
+    }
+
+    /// Execute one extended collection operation outside the hot dispatch body.
+    #[inline(never)]
+    fn exec_collection_extension(
+        &mut self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        op: CollectionExtensionOp,
+    ) -> Result<(), FaultCode> {
+        match op {
+            CollectionExtensionOp::ListCapacity => {
+                let r = self.pop_obj()?;
+                let capacity = match self.vm.heap.get(r) {
+                    Object::List { items, .. } => items.capacity(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let capacity = i64::try_from(capacity).map_err(|_| FaultCode::HeapLimit)?;
+                self.push(Value::Int(capacity))?;
+            }
+            CollectionExtensionOp::ListSet => {
+                let value = self.pop()?;
+                let index = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let item = match self.vm.heap.get_mut(r) {
+                    Object::List { items, .. } if index >= 0 => items.get_mut(index as usize),
+                    Object::List { .. } => None,
+                    _ => return Err(BAD_TYPE),
+                }
+                .ok_or(FaultCode::IndexOutOfBounds)?;
+                *item = value;
+                self.push(Value::Unit)?;
+            }
+            CollectionExtensionOp::ListPop(ty) => {
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let value = match self.vm.heap.get_mut(r) {
+                    Object::List { items, epoch } if !items.is_empty() => {
+                        epoch.bump()?;
+                        items.pop()
+                    }
+                    Object::List { .. } => None,
+                    _ => return Err(BAD_TYPE),
+                };
+                if value.is_some() {
+                    self.vm.heap.recharge(r);
+                }
+                match value {
+                    Some(value) => self.push(value)?,
+                    None => {
+                        let ty = self.close_option_family(module, envs, ty)?;
+                        self.push(Value::EmptyCase { ty, arm: 1 })?;
+                    }
+                }
+            }
+            CollectionExtensionOp::ListInsert => {
+                let value = self.pop()?;
+                let index = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let length = match self.vm.heap.get(r) {
+                    Object::List { items, .. } => items.len(),
+                    _ => return Err(BAD_TYPE),
+                };
+                if index < 0 || index as usize > length {
+                    return Err(FaultCode::IndexOutOfBounds);
+                }
+                self.reserve(16, &[Value::Obj(r), value])?;
+                match self.vm.heap.get_mut(r) {
+                    Object::List { items, epoch } => {
+                        epoch.bump()?;
+                        items.insert(index as usize, value);
+                    }
+                    _ => return Err(BAD_TYPE),
+                }
+                self.vm.heap.recharge(r);
+                self.push(Value::Unit)?;
+            }
+            CollectionExtensionOp::ListRemove { swap } => {
+                let index = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let value = match self.vm.heap.get_mut(r) {
+                    Object::List { items, epoch }
+                        if index >= 0 && (index as usize) < items.len() =>
+                    {
+                        epoch.bump()?;
+                        if swap {
+                            items.swap_remove(index as usize)
+                        } else {
+                            items.remove(index as usize)
+                        }
+                    }
+                    Object::List { .. } => return Err(FaultCode::IndexOutOfBounds),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.vm.heap.recharge(r);
+                self.push(value)?;
+            }
+            CollectionExtensionOp::ListReserve => {
+                let additional = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let additional =
+                    usize::try_from(additional).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let growth = additional.checked_mul(16).ok_or(FaultCode::HeapLimit)?;
+                if let Object::List { items, epoch } = self.vm.heap.get(r) {
+                    if additional > items.capacity().saturating_sub(items.len()) {
+                        epoch.ensure_bumpable()?;
+                    }
+                } else {
+                    return Err(BAD_TYPE);
+                }
+                self.reserve(growth, &[Value::Obj(r)])?;
+                let changed = match self.vm.heap.get_mut(r) {
+                    Object::List { items, .. } => {
+                        let before = items.capacity();
+                        items
+                            .try_reserve(additional)
+                            .map_err(|_| FaultCode::HeapLimit)?;
+                        items.capacity() != before
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                if changed {
+                    match self.vm.heap.get_mut(r) {
+                        Object::List { epoch, .. } => epoch.bump()?,
+                        _ => return Err(BAD_TYPE),
+                    }
+                }
+                self.push(Value::Unit)?;
+            }
+            CollectionExtensionOp::ListTruncate => {
+                let length = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let length = usize::try_from(length).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let changed = match self.vm.heap.get_mut(r) {
+                    Object::List { items, epoch } if length < items.len() => {
+                        epoch.bump()?;
+                        items.truncate(length);
+                        true
+                    }
+                    Object::List { .. } => false,
+                    _ => return Err(BAD_TYPE),
+                };
+                if changed {
+                    self.vm.heap.recharge(r);
+                }
+                self.push(Value::Unit)?;
+            }
+            CollectionExtensionOp::ListContains => {
+                let needle = self.pop()?;
+                let r = self.pop_obj()?;
+                let items = match self.vm.heap.get(r) {
+                    Object::List { items, .. } => items,
+                    _ => return Err(BAD_TYPE),
+                };
+                let mut found = false;
+                for item in items {
+                    if self.values_equal(module, *item, needle)? {
+                        found = true;
+                        break;
+                    }
+                }
+                self.push(Value::Bool(found))?;
+            }
+            CollectionExtensionOp::ListReorder => {
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                match self.vm.heap.get_mut(r) {
+                    Object::List { epoch, .. } => epoch.bump()?,
+                    _ => return Err(BAD_TYPE),
+                }
+                self.push(Value::Unit)?;
+            }
+            CollectionExtensionOp::MapRemove(ty) => {
+                let key = self.pop()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let position = self.map_lookup(r, key)?;
+                let value = match position {
+                    Some(position) => match self.vm.heap.get_mut(r) {
+                        Object::Map { entries, index } => {
+                            index.epoch.bump()?;
+                            let value = entries.remove(position).1;
+                            index.clear();
+                            Some(value)
+                        }
+                        _ => return Err(BAD_TYPE),
+                    },
+                    None => None,
+                };
+                if value.is_some() {
+                    self.vm.heap.recharge(r);
+                }
+                match value {
+                    Some(value) => self.push(value)?,
+                    None => {
+                        let ty = self.close_option_family(module, envs, ty)?;
+                        self.push(Value::EmptyCase { ty, arm: 1 })?;
+                    }
+                }
+            }
+            CollectionExtensionOp::MapClear => {
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let changed = match self.vm.heap.get_mut(r) {
+                    Object::Map { entries, index } if !entries.is_empty() => {
+                        index.epoch.bump()?;
+                        entries.clear();
+                        index.clear();
+                        true
+                    }
+                    Object::Map { .. } => false,
+                    _ => return Err(BAD_TYPE),
+                };
+                if changed {
+                    self.vm.heap.recharge(r);
+                }
+                self.push(Value::Unit)?;
+            }
+            CollectionExtensionOp::MapReserve => {
+                let additional = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let additional =
+                    usize::try_from(additional).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let growth = additional.checked_mul(32).ok_or(FaultCode::HeapLimit)?;
+                if let Object::Map { entries, index } = self.vm.heap.get(r) {
+                    if additional > entries.capacity().saturating_sub(entries.len()) {
+                        index.epoch.ensure_bumpable()?;
+                    }
+                } else {
+                    return Err(BAD_TYPE);
+                }
+                self.reserve(growth, &[Value::Obj(r)])?;
+                let changed = match self.vm.heap.get_mut(r) {
+                    Object::Map { entries, .. } => {
+                        let before = entries.capacity();
+                        entries
+                            .try_reserve(additional)
+                            .map_err(|_| FaultCode::HeapLimit)?;
+                        entries.capacity() != before
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                if changed {
+                    match self.vm.heap.get_mut(r) {
+                        Object::Map { index, .. } => index.epoch.bump()?,
+                        _ => return Err(BAD_TYPE),
+                    }
+                }
+                self.push(Value::Unit)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute one interface call outside the base dispatch body.
+    #[inline(never)]
+    fn exec_interface_call(
+        &mut self,
+        module: &Module,
+        dispatch: &[crate::DispatchRow],
+        envs: &mut TypeEnvs,
+        interface: u32,
+        method: u32,
+        recv_ty: u32,
+    ) -> Result<(), FaultCode> {
+        let requirement = module
+            .interfaces
+            .get(interface as usize)
+            .and_then(|contract| contract.methods.get(method as usize))
+            .ok_or(BAD_STATE)?;
+        let selector = requirement.selector;
+        let argc = u32::try_from(requirement.params.len()).map_err(|_| BAD_STATE)?;
+        self.call_interface(module, dispatch, envs, selector, argc, recv_ty)
+    }
+
+    /// Execute one added instruction outside the base dispatch body.
+    #[inline(never)]
+    fn exec_extended(
+        &mut self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        instr: ExtendedInstr,
+    ) -> Result<(), FaultCode> {
+        match instr {
+            ExtendedInstr::MakeCallback { func, captures } => {
+                self.exec_make_callback(func, captures)?;
+            }
+            ExtendedInstr::AsCallback => self.exec_as_callback()?,
+            ExtendedInstr::OptionSome { .. } => {
+                // The payload already has the native `Some` representation.
+            }
+            ExtendedInstr::OptionNone { ty } => {
+                self.exec_option_collection(module, envs, OptionCollectionOp::OptionNone(ty))?;
+            }
+            ExtendedInstr::OptionPayload { ty } => {
+                self.exec_option_collection(module, envs, OptionCollectionOp::OptionPayload(ty))?;
+            }
+            ExtendedInstr::ListGet { ty } => {
+                self.exec_option_collection(module, envs, OptionCollectionOp::ListGet(ty))?;
+            }
+            ExtendedInstr::MapGet { ty } => {
+                self.exec_option_collection(module, envs, OptionCollectionOp::MapGet(ty))?;
+            }
+            ExtendedInstr::ListEpoch => {
+                self.exec_collection_iteration(CollectionIterationOp::ListEpoch)?;
+            }
+            ExtendedInstr::ListIterLen => {
+                self.exec_collection_iteration(CollectionIterationOp::ListIterLen)?;
+            }
+            ExtendedInstr::MapEpoch => {
+                self.exec_collection_iteration(CollectionIterationOp::MapEpoch)?;
+            }
+            ExtendedInstr::MapIterLen => {
+                self.exec_collection_iteration(CollectionIterationOp::MapIterLen)?;
+            }
+            ExtendedInstr::MapKeyAt => {
+                self.exec_collection_iteration(CollectionIterationOp::MapEntry { value: false })?;
+            }
+            ExtendedInstr::MapValueAt => {
+                self.exec_collection_iteration(CollectionIterationOp::MapEntry { value: true })?;
+            }
+            ExtendedInstr::ListCapacity => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::ListCapacity)?;
+            }
+            ExtendedInstr::ListSet => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::ListSet)?;
+            }
+            ExtendedInstr::ListPop { ty } => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::ListPop(ty))?;
+            }
+            ExtendedInstr::ListInsert => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::ListInsert)?;
+            }
+            ExtendedInstr::ListRemove => {
+                self.exec_collection_extension(
+                    module,
+                    envs,
+                    CollectionExtensionOp::ListRemove { swap: false },
+                )?;
+            }
+            ExtendedInstr::ListSwapRemove => {
+                self.exec_collection_extension(
+                    module,
+                    envs,
+                    CollectionExtensionOp::ListRemove { swap: true },
+                )?;
+            }
+            ExtendedInstr::ListReserve => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::ListReserve)?;
+            }
+            ExtendedInstr::ListTruncate => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::ListTruncate)?;
+            }
+            ExtendedInstr::ListContains => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::ListContains)?;
+            }
+            ExtendedInstr::ListReorder => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::ListReorder)?;
+            }
+            ExtendedInstr::MapRemove { ty } => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::MapRemove(ty))?;
+            }
+            ExtendedInstr::MapClear => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::MapClear)?;
+            }
+            ExtendedInstr::MapReserve => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::MapReserve)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Execute one fetched instruction of the current frame.
     ///
     /// `envs` is the type environment table of the world. A
@@ -2279,6 +3056,16 @@ impl Machine {
                 let want = matches!(instr, Instr::EqValue);
                 self.push(Value::Bool(equal == want))?;
             }
+            Instr::CallInterface {
+                interface,
+                method,
+                recv_ty,
+            } => {
+                self.exec_interface_call(module, dispatch, envs, interface, method, recv_ty)?;
+            }
+            Instr::Extended(instr) => {
+                self.exec_extended(module, envs, instr)?;
+            }
             Instr::EqRef => {
                 let b = self.pop_obj()?;
                 let a = self.pop_obj()?;
@@ -2333,12 +3120,24 @@ impl Machine {
                     .checked_sub(argc + 1)
                     .ok_or(BAD_STATE)?;
                 let callee = self.vm.operands.remove(callee_pos);
-                let r = callee.as_obj().ok_or(BAD_TYPE)?;
-                let (target, env) = match self.vm.heap.get(r) {
-                    Object::Closure { func, env, .. } => (*func, env.env()),
+                let (target, env, capture) = match callee {
+                    Value::Obj(reference) => match self.vm.heap.get(reference) {
+                        Object::Closure { func, env, .. } => {
+                            (*func, env.env(), FrameCapture::Closure(reference))
+                        }
+                        _ => return Err(BAD_TYPE),
+                    },
+                    Value::Callback(reference) => {
+                        let descriptor = self.callback(reference)?;
+                        (
+                            descriptor.func,
+                            descriptor.env,
+                            FrameCapture::Callback(reference),
+                        )
+                    }
                     _ => return Err(BAD_TYPE),
                 };
-                self.push_frame(module, target, argc, Some(r), env)?;
+                self.push_frame(module, target, argc, Some(capture), env)?;
             }
             // The closure retains the environment of the frame that
             // built it. Capture cannot rebuild it later, because the
@@ -2362,11 +3161,18 @@ impl Machine {
             Instr::LoadCapture(idx) => {
                 let frame = self.vm.frames.last().ok_or(BAD_STATE)?;
                 let closure = frame.closure.ok_or(BAD_STATE)?;
-                let value = match self.vm.heap.get(closure) {
-                    Object::Closure { captures, .. } => {
-                        *captures.get(idx as usize).ok_or(BAD_TYPE)?
-                    }
-                    _ => return Err(BAD_TYPE),
+                let value = match closure {
+                    FrameCapture::Closure(reference) => match self.vm.heap.get(reference) {
+                        Object::Closure { captures, .. } => {
+                            *captures.get(idx as usize).ok_or(BAD_TYPE)?
+                        }
+                        _ => return Err(BAD_TYPE),
+                    },
+                    FrameCapture::Callback(reference) => *self
+                        .callback(reference)?
+                        .captures
+                        .get(idx as usize)
+                        .ok_or(BAD_TYPE)?,
                 };
                 self.push(value)?;
             }
@@ -2408,16 +3214,16 @@ impl Machine {
                 self.push(value)?;
             }
             Instr::IsType(ty) => {
-                let r = self.pop_obj()?;
-                let matches = self.instance_matches(module, r, ty)?;
+                let value = self.pop()?;
+                let matches = self.value_matches_class(module, envs, value, ty)?;
                 self.push(Value::Bool(matches))?;
             }
             Instr::CastType(ty) => {
-                let r = self.pop_obj()?;
-                if !self.instance_matches(module, r, ty)? {
+                let value = self.pop()?;
+                if !self.value_matches_class(module, envs, value, ty)? {
                     return Err(FaultCode::BadCast);
                 }
-                self.push(Value::Obj(r))?;
+                self.push(value)?;
             }
             Instr::LoadField(field) => {
                 let r = self.pop_obj()?;
@@ -2451,30 +3257,22 @@ impl Machine {
                     .checked_sub(count as usize)
                     .ok_or(BAD_STATE)?;
                 let items: Vec<Value> = self.vm.operands.split_off(split);
-                let value = self.alloc(Object::List { items })?;
+                let value = self.alloc(Object::List {
+                    items,
+                    epoch: StructuralEpoch::default(),
+                })?;
                 self.push(value)?;
             }
             Instr::ListLen => {
                 let r = self.pop_obj()?;
                 let len = match self.vm.heap.get(r) {
-                    Object::List { items } => items.len(),
+                    Object::List { items, .. } => items.len(),
                     _ => return Err(BAD_TYPE),
                 };
                 self.push(Value::Int(len as i64))?;
             }
             Instr::ListAt => {
-                let idx = self.pop_int()?;
-                let r = self.pop_obj()?;
-                let value = match self.vm.heap.get(r) {
-                    Object::List { items } => {
-                        if idx < 0 || idx as usize >= items.len() {
-                            return Err(FaultCode::IndexOutOfBounds);
-                        }
-                        items[idx as usize]
-                    }
-                    _ => return Err(BAD_TYPE),
-                };
-                self.push(value)?;
+                self.exec_list_at()?;
             }
             Instr::ListPush => {
                 let value = self.pop()?;
@@ -2482,7 +3280,10 @@ impl Machine {
                 self.frozen_guard(r)?;
                 self.reserve(16, &[Value::Obj(r), value])?;
                 match self.vm.heap.get_mut(r) {
-                    Object::List { items } => items.push(value),
+                    Object::List { items, epoch } => {
+                        epoch.bump()?;
+                        items.push(value);
+                    }
                     _ => return Err(BAD_TYPE),
                 }
                 self.vm.heap.recharge(r);
@@ -2542,31 +3343,8 @@ impl Machine {
                 };
                 self.push(value)?;
             }
-            Instr::MapPut => {
-                let value = self.pop()?;
-                let key = self.pop()?;
-                let r = self.pop_obj()?;
-                self.frozen_guard(r)?;
-                let pos = self.map_lookup(r, key)?;
-                match pos {
-                    Some(pos) => match self.vm.heap.get_mut(r) {
-                        Object::Map { entries, .. } => {
-                            entries.get_mut(pos).ok_or(BAD_STATE)?.1 = value;
-                        }
-                        _ => return Err(BAD_TYPE),
-                    },
-                    None => {
-                        // The appended entry joins the index on the
-                        // next lookup.
-                        self.reserve(32, &[Value::Obj(r), key, value])?;
-                        match self.vm.heap.get_mut(r) {
-                            Object::Map { entries, .. } => entries.push((key, value)),
-                            _ => return Err(BAD_TYPE),
-                        }
-                        self.vm.heap.recharge(r);
-                    }
-                }
-                self.push(Value::Unit)?;
+            Instr::MapPut { ty, discard } => {
+                self.exec_map_put(module, envs, ty, discard)?;
             }
             Instr::Freeze => {
                 let r = self.pop_obj()?;
@@ -2597,9 +3375,15 @@ impl Machine {
                 self.vm.operands.truncate(frame.base_operand as usize);
                 self.vm.locals.truncate(frame.base_local as usize);
                 if self.vm.frames.is_empty() {
+                    if !self.callbacks.is_empty() {
+                        self.collect_callbacks();
+                    }
                     return Ok(ExecOutcome::Terminal(value));
                 }
                 self.push(value)?;
+                if !self.callbacks.is_empty() {
+                    self.collect_callbacks();
+                }
             }
             Instr::Unreachable => {
                 return Err(FaultCode::UnreachableCode);
@@ -2643,9 +3427,14 @@ impl Machine {
                     mock,
                 });
             }
-            Instr::AsCall(op) => {
+            Instr::AsCall { op, ty } => {
                 let request = self.pop_obj()?;
-                return Ok(ExecOutcome::AsCall { request, op });
+                return Ok(ExecOutcome::AsCall {
+                    request,
+                    op,
+                    ty,
+                    env: self.frame_env(),
+                });
             }
             Instr::CallArgs => {
                 let call = self.pop_obj()?;
@@ -2742,8 +3531,64 @@ impl Machine {
         }
     }
 
-    /// Return true when the instance class equals or extends the
-    /// class named by the target type index.
+    /// Close an `Option` family or arm type to its family type.
+    fn close_option_family(
+        &self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        ty: u32,
+    ) -> Result<ClosedTypeId, FaultCode> {
+        let closed = envs
+            .close(module, ty, self.frame_env())
+            .map_err(env_fault)?;
+        let (class, argument) = match envs.ty(closed) {
+            Some(ClosedType::Inst(class, args)) if args.len() == 1 => (*class, args[0]),
+            _ => return Err(BAD_STATE),
+        };
+        let option = module.core_roles[lm_bytecode::corepin::ROLE_OPTION];
+        let some = module.core_roles[lm_bytecode::corepin::ROLE_OPTION_SOME];
+        let none = module.core_roles[lm_bytecode::corepin::ROLE_OPTION_NONE];
+        if option == lm_bytecode::NO_ROLE {
+            return Err(BAD_STATE);
+        }
+        if class == option {
+            return Ok(closed);
+        }
+        if class != some && class != none {
+            return Err(BAD_STATE);
+        }
+        envs.intern(ClosedType::Inst(option, vec![argument]))
+            .map_err(env_fault)
+    }
+
+    /// Test one value against a class type.
+    fn value_matches_class(
+        &self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        value: Value,
+        ty: u32,
+    ) -> Result<bool, FaultCode> {
+        let target = match module.types.get(ty as usize).ok_or(BAD_STATE)? {
+            lm_bytecode::BcType::Class(class) | lm_bytecode::BcType::Inst(class, _) => *class,
+            _ => return Err(BAD_STATE),
+        };
+        let option = module.core_roles[lm_bytecode::corepin::ROLE_OPTION];
+        let some = module.core_roles[lm_bytecode::corepin::ROLE_OPTION_SOME];
+        let none = module.core_roles[lm_bytecode::corepin::ROLE_OPTION_NONE];
+        if target == option || target == some || target == none {
+            let family = self.close_option_family(module, envs, ty)?;
+            let is_none = matches!(
+                value,
+                Value::EmptyCase { ty, arm: 1 } if ty == family
+            );
+            return Ok(target == option || (target == none) == is_none);
+        }
+        let r = value.as_obj().ok_or(BAD_TYPE)?;
+        self.instance_matches(module, r, ty)
+    }
+
+    /// Return true when the instance class equals or extends the target.
     fn instance_matches(&self, module: &Module, r: ObjRef, ty: u32) -> Result<bool, FaultCode> {
         let target = match module.types.get(ty as usize).ok_or(BAD_STATE)? {
             lm_bytecode::BcType::Class(c) | lm_bytecode::BcType::Inst(c, _) => *c,
@@ -2824,6 +3669,116 @@ impl Machine {
         self.push(Value::Obj(sb))
     }
 
+    /// Create one machine-local callback descriptor.
+    fn alloc_callback(
+        &mut self,
+        func: u32,
+        captures: Vec<Value>,
+        env: TypeEnvId,
+    ) -> Result<Value, FaultCode> {
+        let owner_depth = u32::try_from(self.vm.frames.len()).map_err(|_| FaultCode::StackLimit)?;
+        let descriptor = CallbackDescriptor {
+            func,
+            captures,
+            env,
+            owner_depth,
+        };
+        if let Some((slot, entry)) = self
+            .callbacks
+            .iter_mut()
+            .enumerate()
+            .find(|(_, entry)| entry.descriptor.is_none())
+        {
+            entry.descriptor = Some(descriptor);
+            return Ok(Value::Callback(CallbackRef {
+                slot: slot as u32,
+                generation: entry.generation,
+            }));
+        }
+        self.callbacks
+            .try_reserve(1)
+            .map_err(|_| FaultCode::StackLimit)?;
+        let slot = self.callbacks.len() as u32;
+        self.callbacks.push(CallbackSlot {
+            generation: 0,
+            descriptor: Some(descriptor),
+        });
+        Ok(Value::Callback(CallbackRef {
+            slot,
+            generation: 0,
+        }))
+    }
+
+    /// Resolve one callback reference.
+    pub(crate) fn callback(
+        &self,
+        reference: CallbackRef,
+    ) -> Result<&CallbackDescriptor, FaultCode> {
+        let slot = self
+            .callbacks
+            .get(reference.slot as usize)
+            .ok_or(BAD_TYPE)?;
+        if slot.generation != reference.generation {
+            return Err(BAD_TYPE);
+        }
+        slot.descriptor.as_ref().ok_or(BAD_TYPE)
+    }
+
+    /// Release callbacks that cannot remain after one frame return.
+    fn collect_callbacks(&mut self) {
+        let depth = self.vm.frames.len() as u32;
+        if !self.callbacks.iter().any(|slot| {
+            slot.descriptor
+                .as_ref()
+                .is_some_and(|descriptor| descriptor.owner_depth >= depth)
+        }) {
+            return;
+        }
+        let mut marked = vec![false; self.callbacks.len()];
+        let mut work = Vec::new();
+        let mut mark_value = |value: Value| {
+            if let Value::Callback(reference) = value {
+                work.push(reference);
+            }
+        };
+        for value in self.vm.locals.iter().chain(self.vm.operands.iter()) {
+            mark_value(*value);
+        }
+        for frame in &self.vm.frames {
+            if let Some(FrameCapture::Callback(reference)) = frame.closure {
+                mark_value(Value::Callback(reference));
+            }
+        }
+        while let Some(reference) = work.pop() {
+            let Some(slot) = self.callbacks.get(reference.slot as usize) else {
+                continue;
+            };
+            if slot.generation != reference.generation
+                || marked.get(reference.slot as usize).copied().unwrap_or(true)
+            {
+                continue;
+            }
+            marked[reference.slot as usize] = true;
+            if let Some(descriptor) = &slot.descriptor {
+                for value in &descriptor.captures {
+                    if let Value::Callback(child) = value {
+                        work.push(*child);
+                    }
+                }
+            }
+        }
+        for (index, slot) in self.callbacks.iter_mut().enumerate() {
+            let candidate = slot
+                .descriptor
+                .as_ref()
+                .is_some_and(|descriptor| descriptor.owner_depth >= depth);
+            if candidate && !marked[index] {
+                slot.descriptor = None;
+                slot.generation = slot.generation.wrapping_add(1);
+            }
+        }
+    }
+
     /// Push a frame. The top `consume` operand values become the first
     /// local slots in order. `closure` supplies capture context for a
     /// closure call.
@@ -2832,7 +3787,7 @@ impl Machine {
         module: &Module,
         callee: u32,
         consume: usize,
-        closure: Option<ObjRef>,
+        closure: Option<FrameCapture>,
         env: TypeEnvId,
     ) -> Result<(), FaultCode> {
         if self.vm.frames.len() as u32 >= self.config.max_frames {
@@ -3047,6 +4002,9 @@ impl Machine {
                 (Value::Int(x), Value::Int(y)) => x == y,
                 (Value::Char(x), Value::Char(y)) => x == y,
                 (Value::Op(x), Value::Op(y)) => x == y,
+                (Value::EmptyCase { ty: xt, arm: xa }, Value::EmptyCase { ty: yt, arm: ya }) => {
+                    xt == yt && xa == ya
+                }
                 (Value::Obj(x), Value::Obj(y)) => {
                     if x == y {
                         continue;
