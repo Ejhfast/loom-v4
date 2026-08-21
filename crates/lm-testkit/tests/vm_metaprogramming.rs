@@ -47,6 +47,121 @@ fn run_with_compiler(source: &str) -> String {
 }
 
 #[test]
+fn portable_function_code_installs_without_a_module_handle() {
+    let source = r#"
+def execute(): Result[Int, String] with Compiler.Compile, Compiler.Verify, Vm
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  options = CompileOptions(
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = sys.compiler.compile(
+    "portable-function.lm",
+    "def add(value: Int): Int\n  value + 1\nend\n0\n",
+    env,
+    options
+  ).map_error() { |error: CompileErrors| error.message }?
+  module = artifact.verify().map_error() { |error: CodeError| error.message }?
+  code = module.function_code[(Int,), Int]("add").map_error() {
+    |error: CodeError| error.message
+  }?
+  image = sys.vm.Vm()
+  definition = image.install(code).map_error() { |error: CodeError| error.message }?
+  run = image.activate(definition, args: (41,)).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Done(value) then Ok(value)
+  in Fault(_) then Err("the installed function faulted")
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_compiler(source), "Done(Ok(42))");
+}
+
+#[test]
+fn a_named_loom_function_installs_without_source_text() {
+    let source = r#"
+def add(value: Int): Int
+  value + 1
+end
+
+def execute(): Int with Vm
+  code = codeof(add)
+  image = sys.vm.Vm()
+  definition = case image.install(code)
+  in Ok(value) then value
+  in Err(_) then return -1
+  end
+  run = case image.activate(definition, args: (41,))
+  in Ok(value) then value
+  in Err(_) then return -2
+  end
+  case run.run()
+  in Done(value) then value
+  in Fault(_) then -3
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done(42)");
+}
+
+#[test]
+fn a_named_loom_class_becomes_portable_code_without_source_text() {
+    let source = r#"
+final class Box
+  value: Int = 7
+end
+
+def execute(): Bool with Vm
+  code = codeof(Box)
+  image = sys.vm.Vm()
+  case image.install(code)
+  in Ok(_) then true
+  in Err(_) then false
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done(true)");
+}
+
+#[test]
+fn codeof_rejects_a_local_function_value() {
+    let source = r#"
+value = { |x: Int| x + 1 }
+codeof(value)
+"#;
+    let error = compile_to_bytes("local-codeof.lm", source)
+        .expect_err("a local function value is not portable code");
+    assert!(error.contains("error[E1026]"));
+    assert!(error.contains("cannot reify a local function value"));
+}
+
+#[test]
+fn codeof_rejects_an_unapplied_generic_function() {
+    let source = r#"
+def identity[T](value: T): T
+  value
+end
+
+codeof(identity)
+"#;
+    let error = compile_to_bytes("generic-codeof.lm", source)
+        .expect_err("an unapplied generic function is not portable code");
+    assert!(error.contains("error[E1026]"));
+    assert!(error.contains("needs a monomorphic function"));
+}
+
+#[test]
 fn syntax_views_cannot_be_constructed_directly() {
     let error = compile_to_bytes("forged-syntax.lm", "SyntaxNode(\"x\", Bytes(), 0)\n")
         .expect_err("the opaque syntax view rejects construction");
@@ -1035,6 +1150,41 @@ worker
     lm_bytecode::encode(&compiled.module)
 }
 
+fn live_proc_revision_artifact(body: &str) -> Vec<u8> {
+    let source = format!(
+        r#"class Worker < Proc[(Int, Handle[Int, Int])]
+  def on_spawn(self): Int with Proc
+    loop do
+      case self.receive()
+      in Msg((value, reply))
+        reply.send(step(value))
+      in Closed
+        return 0
+      end
+    end
+  end
+end
+
+def step(value: Int): Int
+  {body}
+end
+
+worker = Worker.spawn()
+worker.pause()
+worker
+"#
+    );
+    let compiled = compile_module_with_options(
+        "live-proc-revision",
+        &SourceFile::new("live-proc-revision.lm", source),
+        &CompileEnv::new().freeze(),
+        true,
+        &CompileOptions::new().late_function("step"),
+    )
+    .expect("the live proc revision compiles");
+    lm_bytecode::encode(&compiled.module)
+}
+
 fn complete_slot_artifact() -> Vec<u8> {
     let source = "final class Box\nend\n\
                   def step(value: Int): Int\n\
@@ -1521,6 +1671,120 @@ execute()
         .iter()
         .filter(|machine| machine.is_proc)
         .all(|machine| machine.image == Some(full_vm)));
+}
+
+#[test]
+fn a_paused_live_proc_uses_replaced_function_code() {
+    let first = live_proc_revision_artifact("value + 1");
+    let second = live_proc_revision_artifact("value + 100");
+    let source = r#"
+class Collector < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(value) then value
+    in Closed then -1
+    end
+  end
+end
+
+def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
+  bytes = case sys.fs.open(path, ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes)
+end
+
+def start_worker(
+  image: Vm,
+  instance: Instance
+): Result[Handle[(Int, Handle[Int, Int]), Int], String] with Vm, Proc
+  entry = instance.entry[(), Handle[(Int, Handle[Int, Int]), Int]]().map_error() {
+    |error: CodeError| error.message
+  }?
+  run = image.activate(entry, args: ()).map_error() {
+    |error: CodeError| error.message
+  }?
+  run.table().pass(Proc)
+  case run.run()
+  in Done(worker) then Ok(worker)
+  in Fault(_) then Err("the worker entry faulted")
+  end
+end
+
+def ask(
+  worker: Handle[(Int, Handle[Int, Int]), Int],
+  value: Int
+): Result[Int, String] with Proc
+  collector = Collector.spawn()
+  case worker.send((value, collector))
+  in Sent then ()
+  in Closed then return Err("the worker mailbox closed")
+  in Fault(_) then return Err("the worker send faulted")
+  end
+  case collector.done()
+  in Done(answer) then Ok(answer)
+  in Fault(_) then Err("the collector faulted")
+  end
+end
+
+def execute(): Result[(Int, Int), String] with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
+  first_module = read_artifact("first-live-proc.lmbc").verify().map_error() {
+    |error: CodeError| error.message
+  }?
+  second_module = read_artifact("second-live-proc.lmbc").verify().map_error() {
+    |error: CodeError| error.message
+  }?
+  image = sys.vm.Vm()
+  first_instance = image.install(first_module).map_error() {
+    |error: CodeError| error.message
+  }?
+  second_instance = image.install(second_module).map_error() {
+    |error: CodeError| error.message
+  }?
+  worker = start_worker(image, first_instance)?
+  worker.resume().map_error() { |_: ProcError| "the worker did not resume" }?
+  before = ask(worker, 10)?
+  case worker.pause()
+  in Ok(_) then ()
+  in Err(_) then return Err("the worker did not pause after receive")
+  end
+  spec = first_instance.slot_spec("step").map_error() {
+    |error: CodeError| error.message
+  }?
+  slot = first_instance.slot_for(spec).map_error() {
+    |error: CodeError| error.message
+  }?
+  target = second_instance.function[(Int,), Int]("step").map_error() {
+    |error: CodeError| error.message
+  }?
+  image.replace(slot, target).map_error() { |error: CodeError| error.message }?
+  worker.resume().map_error() { |_: ProcError| "the upgraded worker did not resume" }?
+  after = ask(worker, 10)?
+  worker.close()
+  worker.done()
+  Ok((before, after))
+end
+
+execute()
+"#;
+    assert_eq!(
+        run_with_files_and_grants(
+            source,
+            &[
+                ("first-live-proc.lmbc", first),
+                ("second-live-proc.lmbc", second),
+            ],
+            &["Proc"],
+        ),
+        "Done(Ok((11, 110)))"
+    );
 }
 
 #[test]

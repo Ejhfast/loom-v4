@@ -1043,6 +1043,9 @@ impl World {
             | lm_abi::OP_VM_INSTANCE_CLASS
             | lm_abi::OP_VM_INSTANCE_SLOT_FOR
             | lm_abi::OP_VM_INSTANCE_SLOT_SPEC
+            | lm_abi::OP_VM_MODULE_ENTRY_CODE
+            | lm_abi::OP_VM_MODULE_FUNCTION_CODE
+            | lm_abi::OP_VM_MODULE_CLASS_CODE
             | lm_abi::OP_VM_ACTIVATE_DEF
             | lm_abi::OP_VM_REPLACE_FUNCTION
             | lm_abi::OP_VM_REPLACE_CLASS

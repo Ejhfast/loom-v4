@@ -259,6 +259,7 @@ impl World {
                     SuspendReason::Parked { wait, .. } => Some(SliceExit::Parked(wait)),
                     _ => None,
                 })
+                .or_else(|| self.block_wake_key(target).map(SliceExit::Blocked))
                 .unwrap_or(SliceExit::Yielded),
             RootEvent::Waiting => self
                 .suspended
@@ -582,9 +583,9 @@ impl World {
             generation: self.machines[vm as usize].generation,
         };
         self.scheduler_procs.insert_prepared(key);
-        if self.task_status(key) == TaskStatus::Ready {
-            self.emit_ready(key);
-        }
+        // The scheduler uses this event to rebuild every task index.
+        // A resumed blocked proc must register its wake condition again.
+        self.emit_ready(key);
     }
 
     /// Retire one scheduler-owned proc.
@@ -763,15 +764,15 @@ impl World {
             self.fault_event(key.vm, "the scheduler task is not ready to run")
         };
         match event {
-            RootEvent::Blocked => {
-                self.suspended
-                    .get(&key.vm)
-                    .and_then(|saved| match saved.reason {
-                        SuspendReason::Blocked { wake, .. } => Some(SliceExit::Blocked(wake)),
-                        SuspendReason::Parked { wait, .. } => Some(SliceExit::Parked(wait)),
-                        _ => None,
-                    })
-            }
+            RootEvent::Blocked => self
+                .suspended
+                .get(&key.vm)
+                .and_then(|saved| match saved.reason {
+                    SuspendReason::Blocked { wake, .. } => Some(SliceExit::Blocked(wake)),
+                    SuspendReason::Parked { wait, .. } => Some(SliceExit::Parked(wait)),
+                    _ => None,
+                })
+                .or_else(|| self.block_wake_key(key.vm).map(SliceExit::Blocked)),
             RootEvent::Waiting => self.suspended.get(&key.vm).and_then(|saved| {
                 if let SuspendReason::Waiting { completion, .. } = saved.reason {
                     Some(SliceExit::Waiting(completion))

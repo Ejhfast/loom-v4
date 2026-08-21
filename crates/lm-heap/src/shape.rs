@@ -231,6 +231,8 @@ pub enum PortableCodeKind {
     Artifact,
     VerifiedModule,
     SlotSpec,
+    Function,
+    Class,
 }
 
 /// One holder-local installed-code handle kind.

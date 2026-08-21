@@ -1548,6 +1548,12 @@ fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
             func: reloc.funcs[*func as usize],
             captures: *captures,
         },
+        ExtendedInstr::FunctionCode { func } => ExtendedInstr::FunctionCode {
+            func: reloc.funcs[*func as usize],
+        },
+        ExtendedInstr::ClassCode { class } => ExtendedInstr::ClassCode {
+            class: reloc.classes[*class as usize],
+        },
         ExtendedInstr::OptionSome { ty } => ExtendedInstr::OptionSome {
             ty: reloc.types[*ty as usize],
         },

@@ -31,6 +31,157 @@ struct CodeProvider {
     classes: Vec<u32>,
 }
 
+fn closed_rows_match(
+    left_module: &lm_bytecode::Module,
+    left: &[u32],
+    right_module: &lm_bytecode::Module,
+    right: &[u32],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left_module.strings.get(*left as usize) == right_module.strings.get(*right as usize)
+        })
+}
+
+fn closed_classes_match(
+    left_module: &lm_bytecode::Module,
+    left_identity: &lm_bytecode::identity::ModuleIdentity,
+    left: u32,
+    right_module: &lm_bytecode::Module,
+    right_identity: &lm_bytecode::identity::ModuleIdentity,
+    right: u32,
+) -> bool {
+    let Some(left_class) = left_module.classes.get(left as usize) else {
+        return false;
+    };
+    let Some(right_class) = right_module.classes.get(right as usize) else {
+        return false;
+    };
+    left_class.key == right_class.key
+        && left_identity.class_hashes.get(left as usize)
+            == right_identity.class_hashes.get(right as usize)
+}
+
+fn closed_types_match(
+    left_module: &lm_bytecode::Module,
+    left_types: &lm_bytecode::closed::TypeEnvs,
+    left_identity: &lm_bytecode::identity::ModuleIdentity,
+    left: ClosedTypeId,
+    right_module: &lm_bytecode::Module,
+    right_types: &lm_bytecode::closed::TypeEnvs,
+    right_identity: &lm_bytecode::identity::ModuleIdentity,
+    right: ClosedTypeId,
+) -> bool {
+    let mut pending = vec![(left, right)];
+    while let Some((left, right)) = pending.pop() {
+        let Some(left) = left_types.ty(left) else {
+            return false;
+        };
+        let Some(right) = right_types.ty(right) else {
+            return false;
+        };
+        match (left, right) {
+            (ClosedType::Unit, ClosedType::Unit)
+            | (ClosedType::Bool, ClosedType::Bool)
+            | (ClosedType::Int, ClosedType::Int)
+            | (ClosedType::Str, ClosedType::Str)
+            | (ClosedType::Fault, ClosedType::Fault)
+            | (ClosedType::Request, ClosedType::Request)
+            | (ClosedType::PolicyTable, ClosedType::PolicyTable)
+            | (ClosedType::Vm, ClosedType::Vm)
+            | (ClosedType::Digest, ClosedType::Digest)
+            | (ClosedType::VmSnapshot, ClosedType::VmSnapshot)
+            | (ClosedType::Bytes, ClosedType::Bytes)
+            | (ClosedType::FileHandle, ClosedType::FileHandle)
+            | (ClosedType::ResourceHandle, ClosedType::ResourceHandle) => {}
+            (ClosedType::Class(left), ClosedType::Class(right)) => {
+                if !closed_classes_match(
+                    left_module,
+                    left_identity,
+                    *left,
+                    right_module,
+                    right_identity,
+                    *right,
+                ) {
+                    return false;
+                }
+            }
+            (
+                ClosedType::Inst(left_class, left_args),
+                ClosedType::Inst(right_class, right_args),
+            ) => {
+                if left_args.len() != right_args.len()
+                    || !closed_classes_match(
+                        left_module,
+                        left_identity,
+                        *left_class,
+                        right_module,
+                        right_identity,
+                        *right_class,
+                    )
+                {
+                    return false;
+                }
+                pending.extend(left_args.iter().copied().zip(right_args.iter().copied()));
+            }
+            (ClosedType::List(left), ClosedType::List(right))
+            | (ClosedType::Run(left), ClosedType::Run(right))
+            | (ClosedType::Wait(left), ClosedType::Wait(right))
+            | (ClosedType::RunSnapshot(left), ClosedType::RunSnapshot(right)) => {
+                pending.push((*left, *right));
+            }
+            (ClosedType::Map(left_key, left_value), ClosedType::Map(right_key, right_value))
+            | (
+                ClosedType::PendingCall(left_key, left_value),
+                ClosedType::PendingCall(right_key, right_value),
+            )
+            | (
+                ClosedType::Handle(left_key, left_value),
+                ClosedType::Handle(right_key, right_value),
+            ) => {
+                pending.push((*left_key, *right_key));
+                pending.push((*left_value, *right_value));
+            }
+            (ClosedType::Tuple(left), ClosedType::Tuple(right)) => {
+                if left.len() != right.len() {
+                    return false;
+                }
+                pending.extend(left.iter().copied().zip(right.iter().copied()));
+            }
+            (
+                ClosedType::Fn(left_params, left_muts, left_ret, left_row),
+                ClosedType::Fn(right_params, right_muts, right_ret, right_row),
+            )
+            | (
+                ClosedType::Callback(left_params, left_muts, left_ret, left_row),
+                ClosedType::Callback(right_params, right_muts, right_ret, right_row),
+            ) => {
+                if left_params.len() != right_params.len()
+                    || left_muts != right_muts
+                    || !closed_rows_match(left_module, left_row, right_module, right_row)
+                {
+                    return false;
+                }
+                pending.extend(
+                    left_params
+                        .iter()
+                        .copied()
+                        .zip(right_params.iter().copied()),
+                );
+                pending.push((*left_ret, *right_ret));
+            }
+            (ClosedType::Op(left_op, left_fn), ClosedType::Op(right_op, right_fn)) => {
+                if lm_abi::op_identity(*left_op) != lm_abi::op_identity(*right_op) {
+                    return false;
+                }
+                pending.push((*left_fn, *right_fn));
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 impl CodeProvider {
     fn resolve(
         &self,
@@ -143,6 +294,11 @@ impl World {
             lm_abi::OP_VM_INSTANCE_CLASS => self.code_class(vm, op, args[0], args[1]),
             lm_abi::OP_VM_INSTANCE_SLOT_FOR => self.code_slot_for(vm, op, args[0], args[1]),
             lm_abi::OP_VM_INSTANCE_SLOT_SPEC => self.code_slot_spec(vm, op, args[0], args[1]),
+            lm_abi::OP_VM_MODULE_ENTRY_CODE => self.code_module_entry(vm, op, args[0]),
+            lm_abi::OP_VM_MODULE_FUNCTION_CODE => {
+                self.code_module_function(vm, op, args[0], args[1])
+            }
+            lm_abi::OP_VM_MODULE_CLASS_CODE => self.code_module_class(vm, op, args[0], args[1]),
             lm_abi::OP_VM_ACTIVATE_DEF => self.code_activate(vm, op, args[0], args[1], args[2]),
             lm_abi::OP_VM_REPLACE_FUNCTION
             | lm_abi::OP_VM_REPLACE_CLASS
@@ -230,24 +386,201 @@ impl World {
         }
     }
 
+    fn code_module_entry(&mut self, vm: VmId, op: u32, value: Value) {
+        let code = match self.portable_code(vm, value, PortableCodeKind::VerifiedModule) {
+            Ok(code) => code,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not a VerifiedModule");
+                return;
+            }
+        };
+        let module = match lm_bytecode::decode(code.bytes.as_slice()) {
+            Ok(module) => module,
+            Err(error) => {
+                self.finish_code_error(
+                    vm,
+                    op,
+                    &format!("the verified module did not decode: {error}"),
+                );
+                return;
+            }
+        };
+        self.finish_portable_function_lookup(vm, op, code, module.entry);
+    }
+
+    fn code_module_function(&mut self, vm: VmId, op: u32, value: Value, name: Value) {
+        let code = match self.portable_code(vm, value, PortableCodeKind::VerifiedModule) {
+            Ok(code) => code,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not a VerifiedModule");
+                return;
+            }
+        };
+        let Some(name) = self.code_name(vm, op, name, "function") else {
+            return;
+        };
+        let module = match lm_bytecode::decode(code.bytes.as_slice()) {
+            Ok(module) => module,
+            Err(error) => {
+                self.finish_code_error(
+                    vm,
+                    op,
+                    &format!("the verified module did not decode: {error}"),
+                );
+                return;
+            }
+        };
+        let function = module.exports.iter().find_map(|export| {
+            (export.name == name && export.kind == lm_bytecode::ExportKind::Function)
+                .then_some(export.def)
+        });
+        let Some(function) = function else {
+            self.finish_code_error(
+                vm,
+                op,
+                "the verified module has no exported function with this name",
+            );
+            return;
+        };
+        self.finish_portable_function_lookup(vm, op, code, function);
+    }
+
+    fn code_module_class(&mut self, vm: VmId, op: u32, value: Value, name: Value) {
+        let code = match self.portable_code(vm, value, PortableCodeKind::VerifiedModule) {
+            Ok(code) => code,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not a VerifiedModule");
+                return;
+            }
+        };
+        let Some(name) = self.code_name(vm, op, name, "class") else {
+            return;
+        };
+        let module = match lm_bytecode::decode(code.bytes.as_slice()) {
+            Ok(module) => module,
+            Err(error) => {
+                self.finish_code_error(
+                    vm,
+                    op,
+                    &format!("the verified module did not decode: {error}"),
+                );
+                return;
+            }
+        };
+        let class = module.exports.iter().find_map(|export| {
+            (export.name == name && export.kind.is_class()).then_some(export.def)
+        });
+        let Some(class) = class else {
+            self.finish_code_error(
+                vm,
+                op,
+                "the verified module has no exported class with this name",
+            );
+            return;
+        };
+        let value = self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
+            kind: PortableCodeKind::Class,
+            bytes: code.bytes,
+            interface: code.interface,
+            index: class,
+        })));
+        let result = value.and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, result);
+    }
+
+    fn code_name(&mut self, vm: VmId, op: u32, value: Value, kind: &str) -> Option<String> {
+        match value
+            .as_obj()
+            .map(|reference| self.machines[vm as usize].vm.heap.get(reference))
+        {
+            Some(Object::Str(text)) => Some(text.as_str().to_string()),
+            _ => {
+                let message = format!("the {kind} name is not String");
+                self.fault_caller(vm, op, FaultCode::TypeMismatch, &message);
+                None
+            }
+        }
+    }
+
     fn code_install(
         &mut self,
         vm: VmId,
         op: u32,
         image: Value,
-        module: Value,
+        input: Value,
         links: Option<Value>,
     ) {
         let Some(key) = self.image_arg(vm, op, image) else {
             return;
         };
-        let code = match self.portable_code(vm, module, PortableCodeKind::VerifiedModule) {
-            Ok(code) => code,
-            Err(code) => {
-                self.fault_caller(vm, op, code, "the install input is not a VerifiedModule");
+        let code = match input
+            .as_obj()
+            .map(|reference| self.machines[vm as usize].vm.heap.get(reference))
+        {
+            Some(Object::NativeCode(code))
+                if matches!(
+                    code.kind,
+                    PortableCodeKind::VerifiedModule
+                        | PortableCodeKind::Function
+                        | PortableCodeKind::Class
+                ) =>
+            {
+                (**code).clone()
+            }
+            Some(Object::Closure { .. }) => match self.portable_function_value(vm, input) {
+                Ok(code) => code,
+                Err(message) => {
+                    self.finish_code_error(vm, op, &message);
+                    return;
+                }
+            },
+            _ => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the install input is not portable code or a function",
+                );
                 return;
             }
         };
+        if code.kind == PortableCodeKind::Function {
+            let source = match lm_bytecode::decode(code.bytes.as_slice()) {
+                Ok(source) => source,
+                Err(error) => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        &format!("the function code did not decode: {error}"),
+                    );
+                    return;
+                }
+            };
+            let Some(function_class) = self.core.function_def else {
+                self.machines[vm as usize].set_fault(FaultCode::MalformedState, "", Some(op));
+                return;
+            };
+            let contract = self
+                .requested_function_contract(vm, function_class)
+                .and_then(|(input, output)| {
+                    self.portable_function_matches_contract(&source, code.index, input, output)
+                });
+            match contract {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        "the function code does not match the requested contract",
+                    );
+                    return;
+                }
+                Err(fault) => {
+                    self.machines[vm as usize].set_fault(fault, "", Some(op));
+                    return;
+                }
+            }
+        }
         let imports = match links {
             Some(links) => match self.resolve_code_imports(vm, key, links, code.bytes.as_slice()) {
                 Ok(imports) => imports,
@@ -259,14 +592,48 @@ impl World {
             },
             None => Vec::new(),
         };
+        let kind = code.kind;
+        let local_index = code.index;
         match self.install_artifact(key, code.bytes, code.interface, &imports) {
             Ok(instance) => {
+                let selected = self.vm_images[key.image as usize]
+                    .instances
+                    .get(instance as usize);
+                let (handle_kind, index) = match kind {
+                    PortableCodeKind::VerifiedModule => (CodeHandleKind::Instance, instance),
+                    PortableCodeKind::Function => match selected
+                        .and_then(|selected| selected.funcs.get(local_index as usize))
+                    {
+                        Some(function) => (CodeHandleKind::Function, *function),
+                        None => {
+                            self.finish_code_error(
+                                vm,
+                                op,
+                                "the function code has an invalid index",
+                            );
+                            return;
+                        }
+                    },
+                    PortableCodeKind::Class => match selected
+                        .and_then(|selected| selected.classes.get(local_index as usize))
+                    {
+                        Some(class) => (CodeHandleKind::Class, *class),
+                        None => {
+                            self.finish_code_error(vm, op, "the class code has an invalid index");
+                            return;
+                        }
+                    },
+                    _ => {
+                        self.finish_code_error(vm, op, "the install input has another code kind");
+                        return;
+                    }
+                };
                 let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
                     image: key.image,
                     generation: key.generation,
                     instance,
-                    kind: CodeHandleKind::Instance,
-                    index: instance,
+                    kind: handle_kind,
+                    index,
                 });
                 let result = value.and_then(|value| self.code_ok(vm, value));
                 self.finish_code_result(vm, op, result);
@@ -274,6 +641,204 @@ impl World {
             Err(message) => {
                 let value = self.code_error(vm, &message);
                 self.finish_code_result(vm, op, value);
+            }
+        }
+    }
+
+    fn portable_function_value(&self, vm: VmId, value: Value) -> Result<PortableCode, String> {
+        let function = self.function_value_target(vm, value)?;
+        self.portable_function_origin(vm, function)
+    }
+
+    fn function_value_target(&self, vm: VmId, value: Value) -> Result<u32, String> {
+        let reference = value
+            .as_obj()
+            .ok_or_else(|| "the install input is not a function".to_string())?;
+        let (function, captures, env) = match self.machines[vm as usize].vm.heap.get(reference) {
+            Object::Closure {
+                func,
+                captures,
+                env,
+            } => (*func, captures.len(), env.env()),
+            _ => return Err("the install input is not a function".to_string()),
+        };
+        if captures != 0 {
+            return Err("a function with captures is not portable code".to_string());
+        }
+        if env != lm_value::TypeEnvId::EMPTY {
+            return Err("an applied generic function is not portable code".to_string());
+        }
+        let body = self
+            .module
+            .funcs
+            .get(function as usize)
+            .ok_or_else(|| "the function has no verified body".to_string())?;
+        if body.type_params != 0 || body.effect_params != 0 {
+            return Err("a generic function needs an explicit portable application".to_string());
+        }
+        if !body.captures.is_empty() {
+            return Err("a function with captures is not portable code".to_string());
+        }
+        if body.param_muts.iter().any(|marker| *marker) {
+            return Err("a function with a mut parameter is not portable code".to_string());
+        }
+        Ok(function)
+    }
+
+    fn portable_function_origin(&self, vm: VmId, function: u32) -> Result<PortableCode, String> {
+        if (function as usize) < self.base_loaded.module().funcs.len() {
+            return Ok(PortableCode {
+                kind: PortableCodeKind::Function,
+                bytes: self.base_loaded.artifact_bytes(),
+                interface: None,
+                index: function,
+            });
+        }
+        let preferred = self.machines[vm as usize].image;
+        let mut image_order: Vec<usize> = preferred
+            .into_iter()
+            .map(|key| key.image as usize)
+            .collect();
+        for (index, image) in self.vm_images.iter().enumerate() {
+            if image.live && !image_order.contains(&index) {
+                image_order.push(index);
+            }
+        }
+        for image in image_order {
+            for instance in self.vm_images[image].instances.iter().rev() {
+                if let Some(index) = instance
+                    .funcs
+                    .iter()
+                    .position(|candidate| *candidate == function)
+                {
+                    return Ok(PortableCode {
+                        kind: PortableCodeKind::Function,
+                        bytes: instance.artifact.clone(),
+                        interface: instance.interface.clone(),
+                        index: index as u32,
+                    });
+                }
+            }
+        }
+        let wanted = self
+            .identity()
+            .map_err(|_| "the function has no verified identity".to_string())?
+            .func_hashes
+            .get(function as usize)
+            .copied()
+            .ok_or_else(|| "the function has no verified identity".to_string())?;
+        for artifact in self.installations.iter().rev() {
+            let Ok(source) = lm_bytecode::decode(artifact.as_slice()) else {
+                continue;
+            };
+            let Ok(identity) = lm_bytecode::identity::module_identity(&source) else {
+                continue;
+            };
+            if let Some(index) = identity.func_hashes.iter().position(|hash| *hash == wanted) {
+                return Ok(PortableCode {
+                    kind: PortableCodeKind::Function,
+                    bytes: artifact.clone(),
+                    interface: None,
+                    index: index as u32,
+                });
+            }
+        }
+        Err("the function has no retained verified origin".to_string())
+    }
+
+    fn portable_class_origin(&self, vm: VmId, class: u32) -> Result<PortableCode, String> {
+        if (class as usize) < self.base_loaded.module().classes.len() {
+            return Ok(PortableCode {
+                kind: PortableCodeKind::Class,
+                bytes: self.base_loaded.artifact_bytes(),
+                interface: None,
+                index: class,
+            });
+        }
+        let preferred = self.machines[vm as usize].image;
+        let mut image_order: Vec<usize> = preferred
+            .into_iter()
+            .map(|key| key.image as usize)
+            .collect();
+        for (index, image) in self.vm_images.iter().enumerate() {
+            if image.live && !image_order.contains(&index) {
+                image_order.push(index);
+            }
+        }
+        for image in image_order {
+            for instance in self.vm_images[image].instances.iter().rev() {
+                if let Some(index) = instance
+                    .classes
+                    .iter()
+                    .position(|candidate| *candidate == class)
+                {
+                    return Ok(PortableCode {
+                        kind: PortableCodeKind::Class,
+                        bytes: instance.artifact.clone(),
+                        interface: instance.interface.clone(),
+                        index: index as u32,
+                    });
+                }
+            }
+        }
+        let wanted = self
+            .identity()
+            .map_err(|_| "the class has no verified identity".to_string())?
+            .class_hashes
+            .get(class as usize)
+            .copied()
+            .ok_or_else(|| "the class has no verified identity".to_string())?;
+        for artifact in self.installations.iter().rev() {
+            let Ok(source) = lm_bytecode::decode(artifact.as_slice()) else {
+                continue;
+            };
+            let Ok(identity) = lm_bytecode::identity::module_identity(&source) else {
+                continue;
+            };
+            if let Some(index) = identity
+                .class_hashes
+                .iter()
+                .position(|hash| *hash == wanted)
+            {
+                return Ok(PortableCode {
+                    kind: PortableCodeKind::Class,
+                    bytes: artifact.clone(),
+                    interface: None,
+                    index: index as u32,
+                });
+            }
+        }
+        Err("the class has no retained verified origin".to_string())
+    }
+
+    pub(super) fn handle_function_code(&mut self, vm: VmId, function: u32) {
+        match self.portable_function_origin(vm, function) {
+            Ok(code) => {
+                let value = self.machines[vm as usize]
+                    .alloc(Object::NativeCode(Box::new(code)))
+                    .and_then(|value| self.machines[vm as usize].push(value));
+                if let Err(fault) = value {
+                    self.machines[vm as usize].set_fault(fault, "", None);
+                }
+            }
+            Err(message) => {
+                self.machines[vm as usize].set_fault(FaultCode::InvalidVmState, &message, None);
+            }
+        }
+    }
+
+    pub(super) fn handle_class_code(&mut self, vm: VmId, class: u32) {
+        match self.portable_class_origin(vm, class) {
+            Ok(code) => {
+                let value = self.machines[vm as usize]
+                    .alloc(Object::NativeCode(Box::new(code)))
+                    .and_then(|value| self.machines[vm as usize].push(value));
+                if let Err(fault) = value {
+                    self.machines[vm as usize].set_fault(fault, "", None);
+                }
+            }
+            Err(message) => {
+                self.machines[vm as usize].set_fault(FaultCode::InvalidVmState, &message, None);
             }
         }
     }
@@ -467,7 +1032,11 @@ impl World {
     }
 
     fn finish_function_lookup(&mut self, vm: VmId, op: u32, instance: CodeHandle, function: u32) {
-        let contract = self.requested_function_contract(vm);
+        let Some(function_class) = self.core.function_def else {
+            self.machines[vm as usize].set_fault(FaultCode::MalformedState, "", Some(op));
+            return;
+        };
+        let contract = self.requested_function_contract(vm, function_class);
         let matches = contract
             .and_then(|(input, output)| self.function_matches_contract(function, input, output));
         match matches {
@@ -489,6 +1058,47 @@ impl World {
                 );
                 self.finish_code_result(vm, op, value);
             }
+            Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
+        }
+    }
+
+    fn finish_portable_function_lookup(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        code: PortableCode,
+        function: u32,
+    ) {
+        let Some(function_class) = self.core.function_code else {
+            self.machines[vm as usize].set_fault(FaultCode::MalformedState, "", Some(op));
+            return;
+        };
+        let contract = self.requested_function_contract(vm, function_class);
+        let source =
+            lm_bytecode::decode(code.bytes.as_slice()).map_err(|_| FaultCode::MalformedState);
+        let matches = match (contract, source) {
+            (Ok((input, output)), Ok(source)) => {
+                self.portable_function_matches_contract(&source, function, input, output)
+            }
+            (Err(code), _) | (_, Err(code)) => Err(code),
+        };
+        match matches {
+            Ok(true) => {
+                let value =
+                    self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
+                        kind: PortableCodeKind::Function,
+                        bytes: code.bytes,
+                        interface: code.interface,
+                        index: function,
+                    })));
+                let result = value.and_then(|value| self.code_ok(vm, value));
+                self.finish_code_result(vm, op, result);
+            }
+            Ok(false) => self.finish_code_error(
+                vm,
+                op,
+                "the function does not match the requested monomorphic contract",
+            ),
             Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
         }
     }
@@ -791,23 +1401,27 @@ impl World {
         }
         let replaced = match op {
             lm_abi::OP_VM_REPLACE_FUNCTION => {
-                let target = match self.code_handle(vm, target, CodeHandleKind::Function) {
-                    Ok(handle) => handle,
-                    Err(code) => {
-                        self.fault_caller(
-                            vm,
-                            op,
-                            code,
-                            "the replacement target is not a FunctionDef",
-                        );
-                        return;
+                let function = match self.code_handle(vm, target, CodeHandleKind::Function) {
+                    Ok(handle) => {
+                        if handle.image_key() != key || !self.live_function(handle) {
+                            self.finish_code_error(
+                                vm,
+                                op,
+                                "the function does not belong to this VM image",
+                            );
+                            return;
+                        }
+                        handle.index
                     }
+                    Err(_) => match self.function_value_target(vm, target) {
+                        Ok(function) => function,
+                        Err(message) => {
+                            self.finish_code_error(vm, op, &message);
+                            return;
+                        }
+                    },
                 };
-                if target.image_key() != key || !self.live_function(target) {
-                    self.finish_code_error(vm, op, "the function does not belong to this VM image");
-                    return;
-                }
-                self.replace_function_slot(key, slot.index, target.index)
+                self.replace_function_slot(key, slot.index, function)
             }
             lm_abi::OP_VM_REPLACE_CLASS => {
                 let target = match self.code_handle(vm, target, CodeHandleKind::Class) {
@@ -954,9 +1568,9 @@ impl World {
     fn requested_function_contract(
         &mut self,
         vm: VmId,
+        function_class: u32,
     ) -> Result<(ClosedTypeId, ClosedTypeId), FaultCode> {
         let result_class = self.core.result.ok_or(FaultCode::MalformedState)?;
-        let function_class = self.core.function_def.ok_or(FaultCode::MalformedState)?;
         let (reply, env) = self.reply_type(vm)?;
         let closed = self
             .envs
@@ -1017,6 +1631,69 @@ impl World {
             .close(&self.module, code.ret, lm_value::TypeEnvId::EMPTY)
             .map_err(|_| FaultCode::BoundaryLimit)?;
         Ok(actual_input == input && actual_output == output)
+    }
+
+    fn portable_function_matches_contract(
+        &mut self,
+        module: &lm_bytecode::Module,
+        function: u32,
+        input: ClosedTypeId,
+        output: ClosedTypeId,
+    ) -> Result<bool, FaultCode> {
+        let code = module
+            .funcs
+            .get(function as usize)
+            .ok_or(FaultCode::MalformedState)?;
+        if code.type_params != 0
+            || code.effect_params != 0
+            || !code.captures.is_empty()
+            || code.param_muts.iter().any(|marker| *marker)
+        {
+            return Ok(false);
+        }
+        let mut source_types = lm_bytecode::closed::TypeEnvs::default();
+        let mut parameters = Vec::with_capacity(code.params.len());
+        for parameter in &code.params {
+            parameters.push(
+                source_types
+                    .close(module, *parameter, TypeEnvId::EMPTY)
+                    .map_err(|_| FaultCode::BoundaryLimit)?,
+            );
+        }
+        let source_input = if parameters.is_empty() {
+            source_types
+                .intern(ClosedType::Unit)
+                .map_err(|_| FaultCode::BoundaryLimit)?
+        } else {
+            source_types
+                .intern(ClosedType::Tuple(parameters))
+                .map_err(|_| FaultCode::BoundaryLimit)?
+        };
+        let source_output = source_types
+            .close(module, code.ret, TypeEnvId::EMPTY)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        let source_identity = lm_bytecode::identity::module_identity(module)
+            .map_err(|_| FaultCode::MalformedState)?;
+        let target_identity = self.identity()?.clone();
+        Ok(closed_types_match(
+            module,
+            &source_types,
+            &source_identity,
+            source_input,
+            &self.module,
+            &self.envs,
+            &target_identity,
+            input,
+        ) && closed_types_match(
+            module,
+            &source_types,
+            &source_identity,
+            source_output,
+            &self.module,
+            &self.envs,
+            &target_identity,
+            output,
+        ))
     }
 
     pub(super) fn code_ok(&mut self, vm: VmId, value: Value) -> Result<Value, FaultCode> {

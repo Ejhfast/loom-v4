@@ -1321,6 +1321,14 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     captures: captures.len() as u32,
                 });
             }
+            HExprKind::FunctionCode { func } => {
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::FunctionCode { func: *func }));
+            }
+            HExprKind::ClassCode { class } => {
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::ClassCode { class: *class }));
+            }
             HExprKind::MakeCallback { func, captures } => {
                 for capture in captures {
                     self.lower_expr(capture);
@@ -2162,7 +2170,9 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         | HExprKind::Int(_)
         | HExprKind::Str(_)
         | HExprKind::Bool(_)
-        | HExprKind::Capture(_) => {}
+        | HExprKind::Capture(_)
+        | HExprKind::FunctionCode { .. }
+        | HExprKind::ClassCode { .. } => {}
         HExprKind::Not(inner) | HExprKind::Neg(inner) => shift_expr_in_place(inner, base, max),
         HExprKind::Binary { left, right, .. }
         | HExprKind::And(left, right)
@@ -2522,6 +2532,8 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 | NativeRepr::TlsStream
                 | NativeRepr::Artifact
                 | NativeRepr::VerifiedModule
+                | NativeRepr::FunctionCode
+                | NativeRepr::ClassCode
                 | NativeRepr::SlotSpec
                 | NativeRepr::CodeInstance
                 | NativeRepr::Slot
@@ -3087,6 +3099,7 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
         | ExtendedInstr::MapReserve => (2, 1),
         ExtendedInstr::ListSet | ExtendedInstr::ListInsert => (3, 1),
         ExtendedInstr::MakeCallback { captures, .. } => (*captures as usize, 1),
+        ExtendedInstr::FunctionCode { .. } | ExtendedInstr::ClassCode { .. } => (0, 1),
         ExtendedInstr::CallSlot { slot, .. } => {
             let count = match &module.slots[*slot as usize].contract {
                 lm_bytecode::SlotContract::Function(contract)
@@ -3327,6 +3340,8 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::MakeCallback { func, captures } => {
             format!("MakeCallback fn{func} captures {captures}")
         }
+        ExtendedInstr::FunctionCode { func } => format!("FunctionCode fn{func}"),
+        ExtendedInstr::ClassCode { class } => format!("ClassCode class{class}"),
         ExtendedInstr::AsCallback => "AsCallback".to_string(),
         ExtendedInstr::OptionSome { ty } => format!("OptionSome ty{ty}"),
         ExtendedInstr::OptionNone { ty } => format!("OptionNone ty{ty}"),

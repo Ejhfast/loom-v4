@@ -23,6 +23,9 @@ impl<'o> FnChecker<'o> {
         if self.env.core_scope && name == "intrinsic" {
             return self.call_intrinsic(ctx, type_args, args, span);
         }
+        if name == "codeof" {
+            return self.call_codeof(ctx, type_args, args, span);
+        }
         let callee = self.resolve_callee(ctx, name, name_span, type_args, expected, span)?;
         match callee {
             Callee::Value(callee_h) => {
@@ -105,6 +108,8 @@ impl<'o> FnChecker<'o> {
                             | NativeRepr::TlsStream
                             | NativeRepr::Artifact
                             | NativeRepr::VerifiedModule
+                            | NativeRepr::FunctionCode
+                            | NativeRepr::ClassCode
                             | NativeRepr::SlotSpec
                             | NativeRepr::CodeInstance
                             | NativeRepr::Slot
@@ -235,6 +240,85 @@ impl<'o> FnChecker<'o> {
                 name_span,
             )),
         }
+    }
+
+    /// Resolve one named definition as portable verified code.
+    fn call_codeof(
+        &mut self,
+        ctx: &mut Ctx,
+        type_args: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if !type_args.is_empty() {
+            return Err(Diagnostic::new(
+                "E1024",
+                "`codeof` does not take type arguments",
+                span,
+            ));
+        }
+        if args.len() != 1 {
+            return Err(Diagnostic::new(
+                "E1006",
+                format!("`codeof` expects 1 argument, found {}", args.len()),
+                span,
+            ));
+        }
+        let ExprKind::Name(name) = &args[0].kind else {
+            return Err(Diagnostic::new(
+                "E1026",
+                "`codeof` needs a named function or class",
+                args[0].span,
+            ));
+        };
+        if self.lookup_slot(name).is_some() {
+            return Err(Diagnostic::new(
+                "E1026",
+                "`codeof` cannot reify a local function value",
+                args[0].span,
+            ));
+        }
+        if let Some(func) = self.module_func(ctx, name) {
+            let sig = &ctx.sigs[func as usize];
+            if !sig.type_params.is_empty() || !sig.effect_params.is_empty() {
+                return Err(Diagnostic::new(
+                    "E1026",
+                    "`codeof` needs a monomorphic function",
+                    args[0].span,
+                ));
+            }
+            if sig.param_muts.iter().any(|marker| *marker) {
+                return Err(Diagnostic::new(
+                    "E1026",
+                    "`codeof` cannot reify a function with a mut parameter",
+                    args[0].span,
+                ));
+            }
+            let input = if sig.params.is_empty() {
+                UNIT
+            } else {
+                ctx.store.intern(Type::Tuple(sig.params.clone()))
+            };
+            let ty = Self::core_inst(ctx, "FunctionCode", vec![input, sig.ret]);
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::FunctionCode { func },
+            });
+        }
+        if let Some(class) = ctx.lookup_type(name, &self.env) {
+            let ty = Self::core_class(ctx, "ClassCode");
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::ClassCode { class },
+            });
+        }
+        Err(Diagnostic::new(
+            "E1001",
+            format!("unknown definition `{name}`"),
+            args[0].span,
+        ))
     }
 
     /// Check one named intrinsic inside the core image.

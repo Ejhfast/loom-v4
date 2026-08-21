@@ -423,6 +423,8 @@ impl<'m> Oracle<'m> {
                 | NativeRepr::TlsStream
                 | NativeRepr::Artifact
                 | NativeRepr::VerifiedModule
+                | NativeRepr::FunctionCode
+                | NativeRepr::ClassCode
                 | NativeRepr::SlotSpec
                 | NativeRepr::CodeInstance
                 | NativeRepr::Slot
@@ -685,6 +687,8 @@ impl<'m> Oracle<'m> {
             }
             HExprKind::Perform { .. }
             | HExprKind::Spawn { .. }
+            | HExprKind::FunctionCode { .. }
+            | HExprKind::ClassCode { .. }
             | HExprKind::OpConst(_)
             | HExprKind::TableEdit { .. }
             | HExprKind::CallArgs { .. }

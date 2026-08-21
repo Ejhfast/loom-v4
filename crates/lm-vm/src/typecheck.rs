@@ -142,6 +142,8 @@ enum Kind {
     TlsStream,
     Artifact,
     VerifiedModule,
+    FunctionCode,
+    ClassCode,
     SlotSpec,
     CodeInstance,
     Slot,
@@ -288,6 +290,8 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::Artifact)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_VERIFIED_MODULE] == *class {
                 Node::Heap(Kind::VerifiedModule)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_CLASS_CODE] == *class {
+                Node::Heap(Kind::ClassCode)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_SLOT_SPEC] == *class {
                 Node::Heap(Kind::SlotSpec)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_INSTANCE] == *class {
@@ -332,6 +336,12 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
         }
         ClosedType::Inst(class, args)
             if args.len() == 2
+                && *class == module.core_roles[lm_bytecode::corepin::ROLE_FUNCTION_CODE] =>
+        {
+            Node::Heap(Kind::FunctionCode)
+        }
+        ClosedType::Inst(class, args)
+            if args.len() == 2
                 && *class == module.core_roles[lm_bytecode::corepin::ROLE_FUNCTION_DEF] =>
         {
             Node::Heap(Kind::FunctionDef)
@@ -371,6 +381,8 @@ fn kind_of(object: &Object) -> Kind {
             lm_heap::PortableCodeKind::Artifact => Kind::Artifact,
             lm_heap::PortableCodeKind::VerifiedModule => Kind::VerifiedModule,
             lm_heap::PortableCodeKind::SlotSpec => Kind::SlotSpec,
+            lm_heap::PortableCodeKind::Function => Kind::FunctionCode,
+            lm_heap::PortableCodeKind::Class => Kind::ClassCode,
         },
         Object::NativeCodeHandle { kind, .. } => match kind {
             lm_heap::CodeHandleKind::Instance => Kind::CodeInstance,

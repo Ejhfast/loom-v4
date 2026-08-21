@@ -271,7 +271,11 @@ links = LinkEnv([provider_instance])
 program_instance = image.install(program_module, links)?
 ```
 
-`Vm.install` returns `Result[Instance,CodeError]`. `LinkEnv` contains installed provider instances from the same VM.
+Module installation returns `Result[Instance,CodeError]`.
+
+Definition installation returns a typed installed definition.
+
+`LinkEnv` contains installed provider instances from the same VM.
 
 Installation validates imports, signatures, pinned hashes, slot contracts, and class identities.
 
@@ -443,6 +447,12 @@ The type universe has four strata.
 | `Operation` / `OperationGroup` | Exact-operation and group policy descriptors; both subtype `PolicyTarget` |
 | `DynValue` | Explicit type/value package for dynamic APIs |
 | `ValueView` | Opaque frozen diagnostic view of a value |
+| `Artifact` | Opaque untrusted bytecode container |
+| `VerifiedModule` | Portable verified module revision |
+| `FunctionCode[A,T]` | Portable verified function code |
+| `ClassCode` | Portable verified class code |
+| `FunctionDef[A,T]` | Installed function definition |
+| `ClassDef` | Installed class definition |
 
 **Core-image nominal types** are ordinary source definitions with pinned hashes.
 
@@ -2231,7 +2241,29 @@ in Err(_)
 end
 ```
 
-`Vm.install` returns an `Instance`. The optional `LinkEnv` contains provider instances from that VM.
+`Vm.install(module)` returns an `Instance`.
+
+`Vm.install(code)` returns the installed definition selected by that code value.
+
+`Vm.install(function)` is convenience syntax for `Vm.install(codeof(function))`.
+
+The optional `LinkEnv` contains provider instances from that VM.
+
+`FunctionCode[A,T]` and `ClassCode` are portable views into shared verified bytes.
+
+`codeof(function)` creates `FunctionCode[A,T]` for a named monomorphic function.
+
+`codeof(Class)` creates `ClassCode` for a class definition.
+
+`codeof` does not install code and does not require a `Vm`.
+
+Capturing closures cannot become portable code values.
+
+`VerifiedModule.entry_code[A,T]()` returns portable code for the entry function.
+
+`VerifiedModule.function_code[A,T](name)` returns portable code for a named function.
+
+`VerifiedModule.class_code(name)` returns portable code for a named class.
 
 `Instance.entry[A,T]()` and `Instance.function[A,T](name)` return typed `FunctionDef[A,T]` results.
 
@@ -2675,8 +2707,8 @@ Vm.ServeTcpListener[T]         (Run[T], PendingCall[SocketAddress,
                                 -> ResourceHandle
 Vm.ServeTlsStream[T]           (Run[T], PendingCall) -> ResourceHandle
 Vm.Artifact                    (Bytes) -> Artifact
-Vm.Install                     (Vm, VerifiedModule)
-                                -> Result[Instance, CodeError]
+Vm.Install[X]                  (Vm, X)
+                                -> Result[Installed[X], CodeError]
 Vm.InstanceEntry[A,T]          (Instance)
                                 -> Result[FunctionDef[A,T], CodeError]
 Vm.InstanceFunction[A,T]       (Instance, String)
@@ -2689,8 +2721,8 @@ Vm.ActivateDef[A,T]            (Vm, FunctionDef[A,T], control A)
                                 -> Result[Run[T], CodeError]
 Vm.ReplaceFunction[A,T]        (Vm, Slot, FunctionDef[A,T])
                                 -> Result[(), CodeError]
-Vm.InstallWith                 (Vm, VerifiedModule, LinkEnv)
-                                -> Result[Instance, CodeError]
+Vm.InstallWith[X]              (Vm, X, LinkEnv)
+                                -> Result[Installed[X], CodeError]
 Vm.InstanceClass               (Instance, String)
                                 -> Result[ClassDef, CodeError]
 Vm.ReplaceClass                (Vm, Slot, ClassDef)
@@ -2701,9 +2733,23 @@ Vm.ReplaceProcess[M,R]         (Vm, Slot, Handle[M,R])
 Vm.SnapshotVm                  (Vm)
                                 -> Result[VmSnapshot, SnapshotError]
 Vm.RestoreVm                   (VmSnapshot) -> Result[Vm, RestoreError]
+Vm.ModuleEntryCode[A,T]        (VerifiedModule)
+                                -> Result[FunctionCode[A,T], CodeError]
+Vm.ModuleFunctionCode[A,T]     (VerifiedModule, String)
+                                -> Result[FunctionCode[A,T], CodeError]
+Vm.ModuleClassCode             (VerifiedModule, String)
+                                -> Result[ClassCode, CodeError]
 ```
 
 This table is the complete public `Vm` operation set for version 0.2.
+
+`Installed[VerifiedModule]` is `Instance`.
+
+`Installed[FunctionCode[A,T]]` is `FunctionDef[A,T]`.
+
+`Installed[ClassCode]` is `ClassDef`.
+
+The function convenience form uses the corresponding `FunctionCode` result.
 
 `Instance.slot_spec(name)` returns one portable stable slot identity.
 

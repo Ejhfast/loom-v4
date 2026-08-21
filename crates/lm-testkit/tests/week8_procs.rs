@@ -382,6 +382,43 @@ fn a_quantum_boundary_accepts_a_pause() {
     assert_eq!(world.active_of(1), 0);
 }
 
+/// A proc can pause after it handles one message and blocks on receive again.
+#[test]
+fn a_proc_can_pause_after_one_receive_cycle() {
+    let source = "enum Work\n\
+                  \x20 Job(value: Int, reply: Handle[Int, Int])\n\
+                  end\n\
+                  class Worker < Proc[Work]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   loop do\n\
+                  \x20     case self.receive()\n\
+                  \x20     in Msg(Job(value, reply))\n\
+                  \x20       reply.send(value * 2)\n\
+                  \x20     in Closed\n\
+                  \x20       return 0\n\
+                  \x20     end\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  class Collector < Proc[Int]\n\
+                  \x20 def on_spawn(self): Int with Proc\n\
+                  \x20   case self.receive()\n\
+                  \x20   in Msg(value) then value\n\
+                  \x20   in Closed then -1\n\
+                  \x20   end\n\
+                  \x20 end\n\
+                  end\n\
+                  worker = Worker.spawn()\n\
+                  fresh = worker.pause()\n\
+                  worker.resume()\n\
+                  collector = Collector.spawn()\n\
+                  worker.send(Job(10, collector))\n\
+                  answer = collector.done()\n\
+                  after = worker.pause()\n\
+                  (fresh.is_ok(), answer, after.is_ok())\n";
+    assert_eq!(run(source), "Done((true, Done(20), true))");
+}
+
 // ---------------------------------------------------------------
 // Parent lifetime and revocation.
 // ---------------------------------------------------------------

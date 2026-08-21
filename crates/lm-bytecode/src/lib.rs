@@ -34,7 +34,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 133;
+pub const CORE_ROLE_COUNT: usize = 135;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -614,6 +614,10 @@ pub enum ExtendedInstr {
     SyntaxBuildNode,
     /// Convert one immutable syntax node into a syntax tree.
     SyntaxToTree,
+    /// Push one portable view of a named function definition.
+    FunctionCode { func: u32 },
+    /// Push one portable view of a named class definition.
+    ClassCode { class: u32 },
 }
 
 /// One native value instruction.
@@ -1286,6 +1290,8 @@ const OP_SYNTAX_BUILD_TOKEN: u8 = 0xe1;
 const OP_SYNTAX_BUILD_TRIVIA: u8 = 0xe2;
 const OP_SYNTAX_BUILD_NODE: u8 = 0xe3;
 const OP_SYNTAX_TO_TREE: u8 = 0xe4;
+const OP_FUNCTION_CODE: u8 = 0xe5;
+const OP_CLASS_CODE: u8 = 0xe6;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -2154,6 +2160,14 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
         ExtendedInstr::SyntaxBuildTrivia => out.push(OP_SYNTAX_BUILD_TRIVIA),
         ExtendedInstr::SyntaxBuildNode => out.push(OP_SYNTAX_BUILD_NODE),
         ExtendedInstr::SyntaxToTree => out.push(OP_SYNTAX_TO_TREE),
+        ExtendedInstr::FunctionCode { func } => {
+            out.push(OP_FUNCTION_CODE);
+            write_u32(out, func);
+        }
+        ExtendedInstr::ClassCode { class } => {
+            out.push(OP_CLASS_CODE);
+            write_u32(out, class);
+        }
     }
 }
 
@@ -3155,6 +3169,8 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_SYNTAX_BUILD_TRIVIA => Instr::Extended(ExtendedInstr::SyntaxBuildTrivia),
         OP_SYNTAX_BUILD_NODE => Instr::Extended(ExtendedInstr::SyntaxBuildNode),
         OP_SYNTAX_TO_TREE => Instr::Extended(ExtendedInstr::SyntaxToTree),
+        OP_FUNCTION_CODE => Instr::Extended(ExtendedInstr::FunctionCode { func: cur.u32()? }),
+        OP_CLASS_CODE => Instr::Extended(ExtendedInstr::ClassCode { class: cur.u32()? }),
         OP_SB_NEW => Instr::Native(NativeInstr::SbNew),
         OP_SB_APPEND_STR => Instr::Native(NativeInstr::SbAppendStr),
         OP_SB_APPEND_INT => Instr::Native(NativeInstr::SbAppendInt),

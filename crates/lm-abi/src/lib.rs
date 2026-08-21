@@ -1622,9 +1622,12 @@ pub const OP_VM_REPLACE_PROCESS: OpSlot = 86;
 pub const OP_VM_SNAPSHOT_VM: OpSlot = 87;
 pub const OP_VM_RESTORE_VM: OpSlot = 88;
 pub const OP_VM_ACTIVATE_OR_FAULT: OpSlot = 89;
+pub const OP_VM_MODULE_ENTRY_CODE: OpSlot = 90;
+pub const OP_VM_MODULE_FUNCTION_CODE: OpSlot = 91;
+pub const OP_VM_MODULE_CLASS_CODE: OpSlot = 92;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 90] = [
+pub const OPS: [OpDef; 93] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -2473,6 +2476,33 @@ pub const OPS: [OpDef; 90] = [
         params: &[],
         reply: AbiType::UNIT,
         schema: "[A,T,e](Vm, Fn[A,T,e], control A) -> Run[T]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ModuleEntryCode",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](VerifiedModule) -> Result[FunctionCode[A,T], CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ModuleFunctionCode",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](VerifiedModule, String) -> Result[FunctionCode[A,T], CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ModuleClassCode",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(VerifiedModule, String) -> Result[ClassCode, CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
 ];

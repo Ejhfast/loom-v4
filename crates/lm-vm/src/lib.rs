@@ -248,6 +248,8 @@ pub struct LoadedModule {
     /// the first digest of the process.
     identity:
         std::sync::Arc<std::sync::OnceLock<Result<lm_bytecode::identity::ModuleIdentity, String>>>,
+    /// Canonical artifact bytes, created only when code reification needs them.
+    artifact: std::sync::Arc<std::sync::OnceLock<SharedBytes>>,
 }
 
 impl LoadedModule {
@@ -276,6 +278,13 @@ impl LoadedModule {
 
     pub(crate) fn dispatch_store(&self) -> std::sync::Arc<[DispatchRow]> {
         self.dispatch.clone()
+    }
+
+    /// Return the canonical verified bytes that supplied this module.
+    pub(crate) fn artifact_bytes(&self) -> SharedBytes {
+        self.artifact
+            .get_or_init(|| SharedBytes::from(lm_bytecode::encode(&self.module)))
+            .clone()
     }
 
     /// The core layout the artifact declares and the verifier proved.
@@ -492,6 +501,7 @@ fn admit(module: Module) -> LoadedModule {
         core,
         verification,
         identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+        artifact: std::sync::Arc::new(std::sync::OnceLock::new()),
     }
 }
 

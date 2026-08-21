@@ -6,6 +6,12 @@ end
 final class VerifiedModule
 end
 
+final class FunctionCode[A, T]
+end
+
+final class ClassCode
+end
+
 final class SlotSpec
 end
 

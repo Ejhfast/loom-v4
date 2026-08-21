@@ -596,6 +596,7 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_TLS_STREAM, "TlsStream"),
         (lm_bytecode::corepin::ROLE_ARTIFACT, "Artifact"),
         (lm_bytecode::corepin::ROLE_VERIFIED_MODULE, "VerifiedModule"),
+        (lm_bytecode::corepin::ROLE_CLASS_CODE, "ClassCode"),
         (lm_bytecode::corepin::ROLE_SLOT_SPEC, "SlotSpec"),
         (lm_bytecode::corepin::ROLE_INSTANCE, "Instance"),
         (lm_bytecode::corepin::ROLE_SLOT, "Slot"),
@@ -620,6 +621,7 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_LIST, "List", 1),
         (lm_bytecode::corepin::ROLE_MAP, "Map", 2),
         (lm_bytecode::corepin::ROLE_FUNCTION_DEF, "FunctionDef", 2),
+        (lm_bytecode::corepin::ROLE_FUNCTION_CODE, "FunctionCode", 2),
     ] {
         let Some(idx) = slot(role) else { continue };
         let class = &module.classes[idx as usize];

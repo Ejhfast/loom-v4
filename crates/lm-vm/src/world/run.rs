@@ -700,9 +700,14 @@ impl World {
                         );
                         continue;
                     };
-                    // The whole stack stops. Every activation keeps
-                    // its execution reference, so no control call can
-                    // reach a machine of the stopped stack.
+                    // A base machine keeps its continuation in its frames.
+                    // Release its activation at this scheduler safe point.
+                    if stack.len() == 1 {
+                        let activation = stack.pop().expect("the stack has one activation");
+                        self.release_activation(activation);
+                        return RootEvent::Blocked;
+                    }
+                    // A nested stack keeps its reply chain until its wake.
                     let base = stack[0].vm;
                     self.park_stack(stack);
                     self.suspended.insert(
@@ -938,6 +943,12 @@ impl World {
                         }
                         Ok(Some(ExecOutcome::DynamicRender { value, ty })) => {
                             self.handle_dynamic_render(act.vm, value, ty)
+                        }
+                        Ok(Some(ExecOutcome::FunctionCode { function })) => {
+                            self.handle_function_code(act.vm, function)
+                        }
+                        Ok(Some(ExecOutcome::ClassCode { class })) => {
+                            self.handle_class_code(act.vm, class)
                         }
                     }
                 }

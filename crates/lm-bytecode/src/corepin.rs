@@ -153,6 +153,8 @@ pub struct CoreLayout {
     pub map: Option<u32>,
     pub artifact: Option<u32>,
     pub verified_module: Option<u32>,
+    pub function_code: Option<u32>,
+    pub class_code: Option<u32>,
     pub slot_spec: Option<u32>,
     pub instance: Option<u32>,
     pub slot: Option<u32>,
@@ -179,7 +181,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 133] = [
+pub const PINNED_LABELS: [&str; 135] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -313,6 +315,8 @@ pub const PINNED_LABELS: [&str; 133] = [
     "SyntaxParse",
     "DynValue",
     "ClassDef",
+    "FunctionCode",
+    "ClassCode",
 ];
 
 /// The core role of immediate integer values.
@@ -416,6 +420,8 @@ pub const ROLE_SYNTAX_DIAGNOSTIC: usize = 129;
 pub const ROLE_SYNTAX_PARSE: usize = 130;
 pub const ROLE_DYN_VALUE: usize = 131;
 pub const ROLE_CLASS_DEF: usize = 132;
+pub const ROLE_FUNCTION_CODE: usize = 133;
+pub const ROLE_CLASS_CODE: usize = 134;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -576,6 +582,8 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Map" => &mut layout.map,
         "Artifact" => &mut layout.artifact,
         "VerifiedModule" => &mut layout.verified_module,
+        "FunctionCode" => &mut layout.function_code,
+        "ClassCode" => &mut layout.class_code,
         "SlotSpec" => &mut layout.slot_spec,
         "Instance" => &mut layout.instance,
         "Slot" => &mut layout.slot,

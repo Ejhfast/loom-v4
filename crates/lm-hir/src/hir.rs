@@ -157,6 +157,8 @@ pub enum NativeRepr {
     TlsStream,
     Artifact,
     VerifiedModule,
+    FunctionCode,
+    ClassCode,
     SlotSpec,
     CodeInstance,
     Slot,
@@ -498,6 +500,14 @@ pub enum HExprKind {
     MakeClosure {
         func: u32,
         captures: Vec<HExpr>,
+    },
+    /// A portable view of one named function definition.
+    FunctionCode {
+        func: u32,
+    },
+    /// A portable view of one named class definition.
+    ClassCode {
+        class: u32,
     },
     /// A stack callback descriptor with a bounded lifetime.
     MakeCallback {

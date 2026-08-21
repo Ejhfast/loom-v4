@@ -602,6 +602,27 @@ pub(crate) fn step(
             })?;
             push(state, idx)?;
         }
+        Instr::Extended(ExtendedInstr::FunctionCode { func: target }) => {
+            let target = &module.funcs[*target as usize];
+            let input = if target.params.is_empty() {
+                TY_UNIT
+            } else {
+                ctx.intern(BcType::Tuple(target.params.clone()))
+            };
+            let function_code = ctx.core.function_code.ok_or_else(|| {
+                fail(
+                    "the module does not carry the pinned core FunctionCode definition".to_string(),
+                )
+            })?;
+            let result = ctx.intern(BcType::Inst(function_code, vec![input, target.ret]));
+            push(state, result)?;
+        }
+        Instr::Extended(ExtendedInstr::ClassCode { .. }) => {
+            let class_code = ctx
+                .plain_inst(ctx.core.class_code, "ClassCode")
+                .map_err(&fail)?;
+            push(state, class_code)?;
+        }
         Instr::Extended(ExtendedInstr::AsCallback) => {
             let function = pop(state)?;
             let BcType::Fn(params, muts, ret, row) = ctx.ty(function) else {
@@ -1528,19 +1549,155 @@ pub(crate) fn step(
                                     .map_err(&fail)?;
                                 pop_expect(state, links)?;
                             }
+                            let code = pop(state)?;
+                            let code_ty = ctx.ty(code);
+                            let installed = if code
+                                == ctx
+                                    .plain_inst(ctx.core.verified_module, "VerifiedModule")
+                                    .map_err(&fail)?
+                            {
+                                ctx.plain_inst(ctx.core.instance, "Instance")
+                                    .map_err(&fail)?
+                            } else if let BcType::Inst(class, args) = code_ty.clone() {
+                                let function_code = ctx.core.function_code.ok_or_else(|| {
+                                    fail(
+                                        "the module does not carry the pinned core FunctionCode definition"
+                                            .to_string(),
+                                    )
+                                })?;
+                                if class != function_code || args.len() != 2 {
+                                    return Err(fail(
+                                        "`Vm.Install` has invalid code input".to_string(),
+                                    ));
+                                }
+                                let function_def = ctx.core.function_def.ok_or_else(|| {
+                                    fail(
+                                        "the module does not carry the pinned core FunctionDef definition"
+                                            .to_string(),
+                                    )
+                                })?;
+                                ctx.intern(BcType::Inst(function_def, args))
+                            } else if code
+                                == ctx
+                                    .plain_inst(ctx.core.class_code, "ClassCode")
+                                    .map_err(&fail)?
+                            {
+                                ctx.plain_inst(ctx.core.class_def, "ClassDef")
+                                    .map_err(&fail)?
+                            } else if let BcType::Fn(params, muts, ret, _) = code_ty {
+                                if muts.iter().any(|marker| *marker) {
+                                    return Err(fail(
+                                        "`Vm.Install` cannot install a function with a mut parameter"
+                                            .to_string(),
+                                    ));
+                                }
+                                let input = if params.is_empty() {
+                                    TY_UNIT
+                                } else {
+                                    ctx.intern(BcType::Tuple(params))
+                                };
+                                let function_def = ctx.core.function_def.ok_or_else(|| {
+                                    fail(
+                                        "the module does not carry the pinned core FunctionDef definition"
+                                            .to_string(),
+                                    )
+                                })?;
+                                ctx.intern(BcType::Inst(function_def, vec![input, ret]))
+                            } else {
+                                return Err(fail(
+                                    "`Vm.Install` has invalid code input".to_string(),
+                                ));
+                            };
+                            pop_expect(state, ctx.intern(BcType::Vm))?;
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(installed, error).map_err(&fail)?;
+                            if reply_ty != result {
+                                return Err(fail(
+                                    "`Vm.Install` has the wrong result type".to_string(),
+                                ));
+                            }
+                            push(state, reply_ty)?;
+                        }
+                        lm_abi::OP_VM_MODULE_ENTRY_CODE | lm_abi::OP_VM_MODULE_FUNCTION_CODE => {
+                            if op == lm_abi::OP_VM_MODULE_FUNCTION_CODE {
+                                pop_expect(state, TY_STR)?;
+                            }
                             let verified = ctx
                                 .plain_inst(ctx.core.verified_module, "VerifiedModule")
                                 .map_err(&fail)?;
                             pop_expect(state, verified)?;
-                            pop_expect(state, ctx.intern(BcType::Vm))?;
-                            let instance = ctx
-                                .plain_inst(ctx.core.instance, "Instance")
+                            let result_class = ctx.core.result.ok_or_else(|| {
+                                fail(
+                                    "the module does not carry the pinned core Result definition"
+                                        .to_string(),
+                                )
+                            })?;
+                            let function_code = ctx.core.function_code.ok_or_else(|| {
+                                fail(
+                                    "the module does not carry the pinned core FunctionCode definition"
+                                        .to_string(),
+                                )
+                            })?;
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let BcType::Inst(found_result, result_args) = ctx.ty(reply_ty) else {
+                                return Err(fail(
+                                    "a module function lookup needs a Result reply".to_string(),
+                                ));
+                            };
+                            if found_result != result_class
+                                || result_args.len() != 2
+                                || result_args[1] != error
+                            {
+                                return Err(fail(
+                                    "a module function lookup has the wrong error type".to_string(),
+                                ));
+                            }
+                            let BcType::Inst(found_function, function_args) =
+                                ctx.ty(result_args[0])
+                            else {
+                                return Err(fail(
+                                    "a module function lookup needs a FunctionCode result"
+                                        .to_string(),
+                                ));
+                            };
+                            if found_function != function_code || function_args.len() != 2 {
+                                return Err(fail(
+                                    "a module function lookup has the wrong function type"
+                                        .to_string(),
+                                ));
+                            }
+                            if !matches!(ctx.ty(function_args[0]), BcType::Unit | BcType::Tuple(_))
+                            {
+                                return Err(fail(
+                                    "a FunctionCode argument view must be unit or a tuple"
+                                        .to_string(),
+                                ));
+                            }
+                            push(state, reply_ty)?;
+                        }
+                        lm_abi::OP_VM_MODULE_CLASS_CODE => {
+                            pop_expect(state, TY_STR)?;
+                            let verified = ctx
+                                .plain_inst(ctx.core.verified_module, "VerifiedModule")
+                                .map_err(&fail)?;
+                            pop_expect(state, verified)?;
+                            let class_code = ctx
+                                .plain_inst(ctx.core.class_code, "ClassCode")
                                 .map_err(&fail)?;
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")
                                 .map_err(&fail)?;
-                            let result = ctx.result_inst(instance, error).map_err(&fail)?;
-                            push(state, result)?;
+                            let result = ctx.result_inst(class_code, error).map_err(&fail)?;
+                            if reply_ty != result {
+                                return Err(fail(
+                                    "a module class lookup has the wrong result type".to_string(),
+                                ));
+                            }
+                            push(state, reply_ty)?;
                         }
                         lm_abi::OP_VM_INSTANCE_ENTRY | lm_abi::OP_VM_INSTANCE_FUNCTION => {
                             if op == lm_abi::OP_VM_INSTANCE_FUNCTION {
@@ -1739,10 +1896,20 @@ pub(crate) fn step(
                                         .to_string(),
                                 )
                             })?;
-                            if !matches!(ctx.ty(definition), BcType::Inst(class, args) if class == function_def && args.len() == 2)
-                            {
+                            let definition_ty = ctx.ty(definition);
+                            let valid = matches!(
+                                &definition_ty,
+                                BcType::Inst(class, args)
+                                    if *class == function_def && args.len() == 2
+                            ) || matches!(
+                                &definition_ty,
+                                BcType::Fn(_, muts, _, _)
+                                    if !muts.iter().any(|marker| *marker)
+                            );
+                            if !valid {
                                 return Err(fail(
-                                    "`Vm.ReplaceFunction` needs a FunctionDef".to_string(),
+                                    "`Vm.ReplaceFunction` needs a FunctionDef or function"
+                                        .to_string(),
                                 ));
                             }
                             let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;

@@ -177,13 +177,18 @@ impl<'o> FnChecker<'o> {
                 Some(
                     NativeRepr::Artifact
                         | NativeRepr::VerifiedModule
+                        | NativeRepr::FunctionCode
+                        | NativeRepr::ClassCode
                         | NativeRepr::SlotSpec
                         | NativeRepr::CodeInstance
                         | NativeRepr::Slot
                 )
             ),
             Type::Inst(class, _) => {
-                ctx.classes[class.0 as usize].native_repr == Some(NativeRepr::FunctionDef)
+                matches!(
+                    ctx.classes[class.0 as usize].native_repr,
+                    Some(NativeRepr::FunctionCode | NativeRepr::FunctionDef)
+                )
             }
             _ => false,
         };

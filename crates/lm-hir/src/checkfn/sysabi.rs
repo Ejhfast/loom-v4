@@ -682,6 +682,7 @@ impl<'o> FnChecker<'o> {
             Type::Class(class) => [
                 "Artifact",
                 "VerifiedModule",
+                "ClassCode",
                 "SlotSpec",
                 "Instance",
                 "Slot",
@@ -690,6 +691,9 @@ impl<'o> FnChecker<'o> {
             ]
             .into_iter()
             .find(|name| ctx.core_types.get(*name) == Some(&class.0)),
+            Type::Inst(class, _) if ctx.core_types.get("FunctionCode") == Some(&class.0) => {
+                Some("FunctionCode")
+            }
             Type::Inst(class, _) if ctx.core_types.get("FunctionDef") == Some(&class.0) => {
                 Some("FunctionDef")
             }
@@ -710,8 +714,11 @@ impl<'o> FnChecker<'o> {
         {
             return Ok(None);
         }
-        let code_takes_types =
-            code_class == Some("Instance") && matches!(name, "entry" | "function");
+        let code_takes_types = matches!(
+            (code_class, name),
+            (Some("Instance"), "entry" | "function")
+                | (Some("VerifiedModule"), "entry_code" | "function_code")
+        );
         if !type_args.is_empty() && !code_takes_types {
             return Err(Diagnostic::new(
                 "E1024",
@@ -768,6 +775,66 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform {
                         op: lm_abi::OP_COMPILER_VERIFY,
                         args: vec![recv_h],
+                    },
+                })
+            }
+            ("VerifiedModule", "entry_code") | ("VerifiedModule", "function_code") => {
+                if type_args.len() != 2 {
+                    return Err(Diagnostic::new(
+                        "E1024",
+                        format!("`{name}` needs argument and result type arguments"),
+                        name_span,
+                    ));
+                }
+                let env = self.env.clone();
+                let input = resolve_type(ctx, &env, &type_args[0])?;
+                let output = resolve_type(ctx, &env, &type_args[1])?;
+                if !matches!(ctx.store.get(input), Type::Unit | Type::Tuple(_)) {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "a function code argument view must be () or a tuple",
+                        type_args[0].span,
+                    ));
+                }
+                let function = Self::core_inst(ctx, "FunctionCode", vec![input, output]);
+                let (op, values) = if name == "entry_code" {
+                    Self::expect_no_args(name, args, span)?;
+                    (lm_abi::OP_VM_MODULE_ENTRY_CODE, vec![recv_h])
+                } else {
+                    if args.len() != 1 {
+                        return Err(Diagnostic::new(
+                            "E1006",
+                            format!("`function_code` expects 1 argument, found {}", args.len()),
+                            span,
+                        ));
+                    }
+                    let binding = self.check_expr(ctx, &args[0], STRING)?;
+                    (lm_abi::OP_VM_MODULE_FUNCTION_CODE, vec![recv_h, binding])
+                };
+                self.charge_op(ctx, op, span)?;
+                Ok(HExpr {
+                    ty: result(ctx, function),
+                    mutable: true,
+                    kind: HExprKind::Perform { op, args: values },
+                })
+            }
+            ("VerifiedModule", "class_code") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`class_code` expects 1 argument, found {}", args.len()),
+                        span,
+                    ));
+                }
+                let binding = self.check_expr(ctx, &args[0], STRING)?;
+                self.charge_op(ctx, lm_abi::OP_VM_MODULE_CLASS_CODE, span)?;
+                let class_code = Self::core_class(ctx, "ClassCode");
+                Ok(HExpr {
+                    ty: result(ctx, class_code),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_MODULE_CLASS_CODE,
+                        args: vec![recv_h, binding],
                     },
                 })
             }
@@ -992,22 +1059,58 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let module = Self::core_class(ctx, "VerifiedModule");
-                let module = self.check_expr(ctx, &args[0], module)?;
+                let code = self.synth_expr(ctx, &args[0])?;
+                let installed = match ctx.store.get(code.ty).clone() {
+                    Type::Class(class)
+                        if ctx.core_types.get("VerifiedModule") == Some(&class.0) =>
+                    {
+                        Self::core_class(ctx, "Instance")
+                    }
+                    Type::Inst(class, values)
+                        if ctx.core_types.get("FunctionCode") == Some(&class.0)
+                            && values.len() == 2 =>
+                    {
+                        Self::core_inst(ctx, "FunctionDef", values)
+                    }
+                    Type::Class(class) if ctx.core_types.get("ClassCode") == Some(&class.0) => {
+                        Self::core_class(ctx, "ClassDef")
+                    }
+                    Type::Fn(params, muts, ret, _) if !muts.iter().any(|marker| *marker) => {
+                        let input = if params.is_empty() {
+                            UNIT
+                        } else {
+                            ctx.store.intern(Type::Tuple(params))
+                        };
+                        Self::core_inst(ctx, "FunctionDef", vec![input, ret])
+                    }
+                    Type::Fn(_, _, _, _) => {
+                        return Err(Diagnostic::new(
+                            "E1004",
+                            "`install` cannot install a function with a mut parameter",
+                            args[0].span,
+                        ));
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "E1004",
+                            "`install` needs verified module, function code, class code, or function",
+                            args[0].span,
+                        ));
+                    }
+                };
                 let op = if args.len() == 2 {
                     lm_abi::OP_VM_INSTALL_WITH
                 } else {
                     lm_abi::OP_VM_INSTALL
                 };
-                let mut values = vec![recv_h, module];
+                let mut values = vec![recv_h, code];
                 if let Some(links) = args.get(1) {
                     let links_ty = Self::core_class(ctx, "LinkEnv");
                     values.push(self.check_expr(ctx, links, links_ty)?);
                 }
                 self.charge_op(ctx, op, span)?;
-                let instance = Self::core_class(ctx, "Instance");
                 let error = Self::core_class(ctx, "CodeError");
-                let ty = Self::core_inst(ctx, "Result", vec![instance, error]);
+                let ty = Self::core_inst(ctx, "Result", vec![installed, error]);
                 HExpr {
                     ty,
                     mutable: true,
@@ -1034,7 +1137,7 @@ impl<'o> FnChecker<'o> {
                     Type::Inst(class, values)
                         if ctx.core_types.get("FunctionDef") == Some(&class.0)
                             && values.len() == 2
-                );
+                ) || matches!(ctx.store.get(target.ty), Type::Fn(_, muts, _, _) if !muts.iter().any(|marker| *marker));
                 let is_class = matches!(
                     ctx.store.get(target.ty),
                     Type::Class(class) if ctx.core_types.get("ClassDef") == Some(&class.0)
@@ -1048,7 +1151,7 @@ impl<'o> FnChecker<'o> {
                     "replace" | "replace_function" => {
                         return Err(Diagnostic::new(
                             "E1004",
-                            "`replace_function` needs a FunctionDef target",
+                            "`replace_function` needs a FunctionDef or function target",
                             args[1].span,
                         ));
                     }

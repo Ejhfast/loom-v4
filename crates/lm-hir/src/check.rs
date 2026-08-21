@@ -63,7 +63,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 78] = [
+pub const PRELUDE_TYPES: [&str; 80] = [
     "Option",
     "Result",
     "Ordering",
@@ -82,6 +82,8 @@ pub const PRELUDE_TYPES: [&str; 78] = [
     "RestoreError",
     "Artifact",
     "VerifiedModule",
+    "FunctionCode",
+    "ClassCode",
     "SlotSpec",
     "Instance",
     "Slot",
@@ -3038,6 +3040,8 @@ fn resolve_class(
         (true, "TlsStream") => Some(NativeRepr::TlsStream),
         (true, "Artifact") => Some(NativeRepr::Artifact),
         (true, "VerifiedModule") => Some(NativeRepr::VerifiedModule),
+        (true, "FunctionCode") => Some(NativeRepr::FunctionCode),
+        (true, "ClassCode") => Some(NativeRepr::ClassCode),
         (true, "SlotSpec") => Some(NativeRepr::SlotSpec),
         (true, "Instance") => Some(NativeRepr::CodeInstance),
         (true, "Slot") => Some(NativeRepr::Slot),
@@ -3061,7 +3065,9 @@ fn resolve_class(
     };
     let valid_native_arity = match native_repr {
         Some(NativeRepr::List) => type_names.len() == 1,
-        Some(NativeRepr::Map | NativeRepr::FunctionDef) => type_names.len() == 2,
+        Some(NativeRepr::Map | NativeRepr::FunctionCode | NativeRepr::FunctionDef) => {
+            type_names.len() == 2
+        }
         Some(_) => type_names.is_empty(),
         None => true,
     };
@@ -3094,7 +3100,7 @@ fn resolve_class(
             let value = ctx.store.intern(Type::Var(1));
             ctx.store.intern(Type::Map(key, value))
         }
-        Some(NativeRepr::FunctionDef) => {
+        Some(NativeRepr::FunctionCode | NativeRepr::FunctionDef) => {
             let args = vec![
                 ctx.store.intern(Type::Var(0)),
                 ctx.store.intern(Type::Var(1)),
@@ -3113,6 +3119,7 @@ fn resolve_class(
             | NativeRepr::TlsStream
             | NativeRepr::Artifact
             | NativeRepr::VerifiedModule
+            | NativeRepr::ClassCode
             | NativeRepr::SlotSpec
             | NativeRepr::CodeInstance
             | NativeRepr::Slot

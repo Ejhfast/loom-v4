@@ -433,6 +433,10 @@ pub enum ExecOutcome {
     },
     /// Render one value through its stored closed static type.
     DynamicRender { value: Value, ty: u32 },
+    /// Reify one named function as portable verified code.
+    FunctionCode { function: u32 },
+    /// Reify one named class as portable verified code.
+    ClassCode { class: u32 },
 }
 
 /// The serializable state of one machine.
@@ -671,6 +675,10 @@ impl Machine {
                             lm_bytecode::corepin::ROLE_VERIFIED_MODULE
                         }
                         lm_heap::PortableCodeKind::SlotSpec => lm_bytecode::corepin::ROLE_SLOT_SPEC,
+                        lm_heap::PortableCodeKind::Function => {
+                            lm_bytecode::corepin::ROLE_FUNCTION_CODE
+                        }
+                        lm_heap::PortableCodeKind::Class => lm_bytecode::corepin::ROLE_CLASS_CODE,
                     };
                     let class = module.core_roles[role];
                     if class == lm_bytecode::NO_ROLE {
@@ -3443,6 +3451,12 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 };
                 return Ok(ExecOutcome::DynamicRender { value, ty });
+            }
+            ExtendedInstr::FunctionCode { func } => {
+                return Ok(ExecOutcome::FunctionCode { function: func });
+            }
+            ExtendedInstr::ClassCode { class } => {
+                return Ok(ExecOutcome::ClassCode { class });
             }
         }
         Ok(ExecOutcome::Continue)

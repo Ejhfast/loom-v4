@@ -44,7 +44,8 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_PROC_RECV
             | lm_abi::OP_PROC_RECV_WAIT
             | lm_abi::OP_WAIT_WAIT
-            | lm_abi::OP_WAIT_CANCEL => 1,
+            | lm_abi::OP_WAIT_CANCEL
+            | lm_abi::OP_VM_MODULE_ENTRY_CODE => 1,
             lm_abi::OP_PROC_SEND => 2,
             lm_abi::OP_PROC_SPAWN => 3,
             lm_abi::OP_VM_SNAPSHOT_SELF => 0,
@@ -67,6 +68,7 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_INSTANCE_CLASS
             | lm_abi::OP_VM_INSTANCE_SLOT_FOR
             | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => 2,
+            lm_abi::OP_VM_MODULE_FUNCTION_CODE | lm_abi::OP_VM_MODULE_CLASS_CODE => 2,
             lm_abi::OP_VM_INSTALL_WITH => 3,
             _ => unreachable!("every VmControl slot has an arity"),
         },
@@ -413,6 +415,23 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                                 fidx,
                                 at("a closure body must keep the enclosing generic arity"),
                             ));
+                        }
+                    }
+                    ExtendedInstr::FunctionCode { func: target } => {
+                        let Some(target) = module.funcs.get(*target as usize) else {
+                            return Err(err(fidx, at("function code target out of range")));
+                        };
+                        if target.type_params != 0
+                            || target.effect_params != 0
+                            || !target.captures.is_empty()
+                            || target.param_muts.iter().any(|marker| *marker)
+                        {
+                            return Err(err(fidx, at("function code target is not portable")));
+                        }
+                    }
+                    ExtendedInstr::ClassCode { class } => {
+                        if module.classes.get(*class as usize).is_none() {
+                            return Err(err(fidx, at("class code target out of range")));
                         }
                     }
                     ExtendedInstr::OptionSome { ty }

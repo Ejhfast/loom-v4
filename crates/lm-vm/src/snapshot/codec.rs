@@ -534,6 +534,8 @@ fn encode_object(out: &mut Out, object: &Object) {
                 PortableCodeKind::Artifact => 0,
                 PortableCodeKind::VerifiedModule => 1,
                 PortableCodeKind::SlotSpec => 2,
+                PortableCodeKind::Function => 3,
+                PortableCodeKind::Class => 4,
             });
             out.leb(code.index as u64);
             match &code.interface {
@@ -2052,6 +2054,8 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 0 => PortableCodeKind::Artifact,
                 1 => PortableCodeKind::VerifiedModule,
                 2 => PortableCodeKind::SlotSpec,
+                3 => PortableCodeKind::Function,
+                4 => PortableCodeKind::Class,
                 _ => {
                     return err(
                         ImageReason::Layout,

@@ -94,7 +94,8 @@ use std::collections::{BTreeSet, HashMap};
 /// adds complete code slot and VM image controls. Version 30 adds
 /// contract-bound slot identities and Result propagation.
 /// Version 31 binds class slots to constructor contracts and versions.
-pub const COMPILER_ABI_VERSION: u32 = 31;
+/// Version 32 adds portable function and class code instructions.
+pub const COMPILER_ABI_VERSION: u32 = 32;
 
 /// The refinement work budget of one component.
 ///
@@ -878,6 +879,16 @@ fn preflight_extended(
                 return Err(bad("closure function"));
             }
         }
+        ExtendedInstr::FunctionCode { func } => {
+            if *func as usize >= s.funcs {
+                return Err(bad("function code target"));
+            }
+        }
+        ExtendedInstr::ClassCode { class } => {
+            if *class as usize >= module.classes.len() {
+                return Err(bad("class code target"));
+            }
+        }
         ExtendedInstr::OptionSome { ty }
         | ExtendedInstr::OptionNone { ty }
         | ExtendedInstr::OptionPayload { ty }
@@ -1149,6 +1160,9 @@ impl Graph {
                             ExtendedInstr::MakeCallback { func: f, .. } => {
                                 list.push(s.func_node(*f));
                                 made_closure[*f as usize] = true;
+                            }
+                            ExtendedInstr::FunctionCode { func } => {
+                                list.push(s.func_node(*func));
                             }
                             ExtendedInstr::OptionSome { ty }
                             | ExtendedInstr::OptionNone { ty }
@@ -1961,6 +1975,8 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::SyntaxBuildTrivia => 0xe2,
             ExtendedInstr::SyntaxBuildNode => 0xe3,
             ExtendedInstr::SyntaxToTree => 0xe4,
+            ExtendedInstr::FunctionCode { .. } => 0xe5,
+            ExtendedInstr::ClassCode { .. } => 0xe6,
         }
     }
 
@@ -2254,6 +2270,12 @@ impl<'a> Resolver<'a> {
         match instr {
             ExtendedInstr::MakeCallback { func, captures } => {
                 self.closure_instr_bytes(out, *func, *captures);
+            }
+            ExtendedInstr::FunctionCode { func } => {
+                write_ident(out, &self.func_ident(*func));
+            }
+            ExtendedInstr::ClassCode { class } => {
+                write_str(out, self.class_key(*class));
             }
             ExtendedInstr::OptionSome { ty }
             | ExtendedInstr::OptionNone { ty }

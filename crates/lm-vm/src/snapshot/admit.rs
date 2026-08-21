@@ -868,6 +868,15 @@ impl Admit<'_> {
                 "a portable slot specification names no source slot",
             );
         }
+        if kind == PortableCodeKind::Function && index as usize >= module.funcs.len() {
+            return fail(
+                ImageReason::Code,
+                "a portable function names no source function",
+            );
+        }
+        if kind == PortableCodeKind::Class && index as usize >= module.classes.len() {
+            return fail(ImageReason::Code, "a portable class names no source class");
+        }
         if kind == PortableCodeKind::VerifiedModule && index != u32::MAX {
             return fail(
                 ImageReason::Code,
