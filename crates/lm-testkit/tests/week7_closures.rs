@@ -1,7 +1,7 @@
 //! Week-7 closure suites: the brace spelling, trailing closure
 //! arguments, and the brace/pipe disambiguation.
 
-use lm_testkit::{compile_text, compile_to_bytes, run_text};
+use lm_testkit::{compile_text, run_text};
 use lm_vm::VmConfig;
 
 fn runs(source: &str) -> String {
@@ -13,12 +13,17 @@ fn code_of(source: &str) -> String {
     rendered[6..11].to_string()
 }
 
+fn code_hash(source: &str) -> [u8; 32] {
+    let module = compile_text("t.lm", source).expect("the program compiles");
+    lm_bytecode::identity::verification_hash(&module)
+}
+
 // ---------------------------------------------------------------
 // One node and one bytecode form for both spellings.
 // ---------------------------------------------------------------
 
-/// The two spellings differ only in the source text. The typed HIR
-/// dump and the encoded bytecode must be identical.
+/// The two spellings differ in source text.
+/// Their verified bytecode region is identical.
 #[test]
 fn both_closure_spellings_produce_one_bytecode_form() {
     let with_do = "\
@@ -37,9 +42,11 @@ increment(41)
 ";
     assert_eq!(runs(with_do), "Done(42)");
     assert_eq!(runs(with_brace), "Done(42)");
-    let a = compile_to_bytes("t.lm", with_do).expect("the do form compiles");
-    let b = compile_to_bytes("t.lm", with_brace).expect("the brace form compiles");
-    assert_eq!(a, b, "the two spellings must encode identically");
+    assert_eq!(
+        code_hash(with_do),
+        code_hash(with_brace),
+        "the two spellings must share one bytecode form"
+    );
 }
 
 #[test]
@@ -85,8 +92,8 @@ function
     assert_eq!(code_of(source), "E1024");
 }
 
-/// A trailing closure is the final call argument in either spelling,
-/// and the two forms encode identically.
+/// A trailing closure is the final call argument in either spelling.
+/// Each spelling has the same verified bytecode region.
 #[test]
 fn both_trailing_spellings_produce_one_bytecode_form() {
     let with_do = "\
@@ -119,9 +126,9 @@ end)
     assert_eq!(runs(with_do), "Done(42)");
     assert_eq!(runs(with_brace), "Done(42)");
     assert_eq!(runs(plain), "Done(42)");
-    let a = compile_to_bytes("t.lm", with_do).expect("the do form compiles");
-    let b = compile_to_bytes("t.lm", with_brace).expect("the brace form compiles");
-    let c = compile_to_bytes("t.lm", plain).expect("the plain form compiles");
+    let a = code_hash(with_do);
+    let b = code_hash(with_brace);
+    let c = code_hash(plain);
     assert_eq!(a, b);
     assert_eq!(a, c, "a trailing closure is the final ordinary argument");
 }

@@ -350,7 +350,7 @@ fn week7_examples_have_checked_output() {
             "cycle-digest.lm",
             &read("examples/06-graphs/cycle-digest.lm")
         ),
-        "Done(e8290822920e16bf373a6d764657c29c51e66ea70fc69fa6559008b73ef61ca2)"
+        "Done(9486f65b282872f2586c29ea3a57328dffc56fd633dd7898a002a702775316df)"
     );
     assert_eq!(
         run(

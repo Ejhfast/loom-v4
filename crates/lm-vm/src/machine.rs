@@ -5046,9 +5046,9 @@ mod tests {
     fn the_witness_costs_one_index_and_no_object_growth() {
         assert_eq!(std::mem::size_of::<Witness>(), 4);
         assert_eq!(std::mem::size_of::<Frame>(), 36);
-        // The compact map index fixes the largest payload size. The
-        // two witness fields fit without increasing that size.
-        assert_eq!(std::mem::size_of::<Object>(), 56);
+        // The native fault record fixes the largest payload size.
+        // The two witness fields fit without increasing that size.
+        assert_eq!(std::mem::size_of::<Object>(), 64);
     }
 
     /// A fallible operand reader costs no register.

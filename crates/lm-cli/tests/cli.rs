@@ -161,7 +161,10 @@ fn inspect_without_live_is_rejected() {
 fn run_reports_a_fault_with_a_stable_code() {
     let out = lm(&["run", "--show-result", "tests/run-fault/divide-by-zero.lm"]);
     assert!(!out.status.success());
-    assert_eq!(stdout(&out), "Fault(DivideByZero)\n");
+    assert_eq!(
+        stdout(&out),
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 1242c7f7)\n"
+    );
 }
 
 #[test]
@@ -174,7 +177,10 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
         "examples/01-basics/control.lm",
     ]);
     assert!(!out.status.success());
-    assert_eq!(stdout(&out), "Fault(OutOfFuel)\n");
+    assert_eq!(
+        stdout(&out),
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 24cbb95d)\n"
+    );
 }
 
 #[test]

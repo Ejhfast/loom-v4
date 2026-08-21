@@ -43,19 +43,21 @@ fn building_twice_is_byte_identical() {
 }
 
 #[test]
-fn a_comment_edit_changes_no_hash_and_no_byte() {
+fn a_comment_edit_changes_only_source_bytes() {
     let plain = "def f(n: Int): Int\n  n + 1\nend\nf(41)\n";
     let commented = "# a leading comment\ndef f(n: Int): Int\n  # inside\n  n + 1\nend\n\nf(41)\n";
     let a = compile_to_bytes("t.lm", plain).unwrap();
     let b = compile_to_bytes("t.lm", commented).unwrap();
-    // With an empty debug section the container bytes are identical,
-    // so the container hash may only change when debug content
-    // changes.
-    assert_eq!(a, b);
+    // The source attachment preserves comments and changes exact bytes.
+    assert_ne!(a, b);
     let (ma, ia) = identity_of(plain);
     let (mb, ib) = identity_of(commented);
     assert_eq!(ia.semantic_hash, ib.semantic_hash);
     assert_eq!(func_hash(&ma, &ia, "f"), func_hash(&mb, &ib, "f"));
+    assert_eq!(
+        lm_bytecode::identity::verification_hash(&ma),
+        lm_bytecode::identity::verification_hash(&mb)
+    );
 }
 
 #[test]
