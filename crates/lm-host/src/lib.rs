@@ -658,11 +658,12 @@ impl Host for CliHost {
                 self.start_tls(key, TlsRequest::Close { stream: *stream })
             }
             lm_abi::OP_COMPILER_COMPILE => {
-                let [HostArg::Str(path), HostArg::Str(source), HostArg::CompileEnv(env), HostArg::CompileOptions(options)] =
+                let [HostArg::Str(module_name), HostArg::Str(source_name), HostArg::Str(source), HostArg::CompileEnv(env), HostArg::CompileOptions(options)] =
                     args.as_slice()
                 else {
                     return HostStart::Failed(
-                        "Compiler.Compile needs source, environment, and options".to_string(),
+                        "Compiler.Compile needs a module name, source name, source, environment, and options"
+                            .to_string(),
                     );
                 };
                 let Some(token) = self.take_token() else {
@@ -671,7 +672,8 @@ impl Host for CliHost {
                     );
                 };
                 let request = CompileRequest {
-                    path: path.clone(),
+                    module_name: module_name.clone(),
+                    source_name: source_name.clone(),
                     source: source.clone(),
                     env: env.clone(),
                     options: options.clone(),
@@ -683,14 +685,15 @@ impl Host for CliHost {
                 }
             }
             lm_abi::OP_COMPILER_COMPILE_SYNTAX => {
-                let [HostArg::Syntax {
+                let [HostArg::Str(module_name), HostArg::Str(source_name), HostArg::Syntax {
                     source,
                     records,
                     index,
                 }, HostArg::CompileEnv(env), HostArg::CompileOptions(options)] = args.as_slice()
                 else {
                     return HostStart::Failed(
-                        "Compiler.CompileSyntax needs syntax, environment, and options".to_string(),
+                        "Compiler.CompileSyntax needs a module name, source name, syntax, environment, and options"
+                            .to_string(),
                     );
                 };
                 let view = match lm_abi::syntax::SyntaxView::new(records.as_slice(), source.len()) {
@@ -726,7 +729,8 @@ impl Host for CliHost {
                     );
                 };
                 let request = CompileRequest {
-                    path: "<syntax>".into(),
+                    module_name: module_name.clone(),
+                    source_name: source_name.clone(),
                     source,
                     env: env.clone(),
                     options: options.clone(),

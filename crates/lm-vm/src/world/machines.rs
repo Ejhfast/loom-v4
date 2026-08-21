@@ -299,6 +299,7 @@ impl World {
             record.live = true;
             record.config = config;
             record.slots = slots;
+            record.slot_versions = vec![0; record.slots.len()];
             record.heap = Heap::with_budget(config.heap_bytes, self.budget.heap.clone());
             record.instances.clear();
             return Some(VmImageKey {
@@ -312,6 +313,7 @@ impl World {
             generation: 0,
             live: true,
             config,
+            slot_versions: vec![0; slots.len()],
             slots,
             heap: Heap::with_budget(config.heap_bytes, self.budget.heap.clone()),
             instances: Vec::new(),
@@ -333,6 +335,7 @@ impl World {
         record.live = false;
         record.generation = record.generation.wrapping_add(1);
         record.heap = Heap::with_budget(record.config.heap_bytes, self.budget.heap.clone());
+        record.slot_versions.clear();
         record.instances.clear();
         self.vm_image_free.push(key.image);
     }
@@ -375,6 +378,10 @@ impl World {
                     .slots
                     .try_reserve_exact(slot_count - image.slots.len())
                     .map_err(|_| "the VM image has no slot capacity".to_string())?;
+                image
+                    .slot_versions
+                    .try_reserve_exact(slot_count - image.slot_versions.len())
+                    .map_err(|_| "the VM image has no slot version capacity".to_string())?;
             }
         }
         self.vm_images[target_index]
@@ -403,6 +410,7 @@ impl World {
         for image in &mut self.vm_images {
             if image.live {
                 image.slots.resize(slot_count, ImageSlotTarget::Empty);
+                image.slot_versions.resize(slot_count, 0);
             }
         }
         let target = &mut self.vm_images[target_index];
@@ -450,20 +458,19 @@ impl World {
         slot: u32,
         target: u32,
     ) -> Result<(), FaultCode> {
-        let live = self
-            .vm_images
-            .get(key.image as usize)
-            .is_some_and(|image| image.live && image.generation == key.generation);
-        if !live {
-            return Err(FaultCode::InvalidVmState);
-        }
-        if self
-            .machines
-            .iter()
-            .any(|machine| machine.image == Some(key) && machine.active > 0)
-        {
-            return Err(FaultCode::InvalidVmState);
-        }
+        self.check_slot_safepoint(key)?;
+        self.validate_function_slot(key, slot, target)?;
+        let version = self.slot_version(key, slot)?;
+        self.commit_slot_targets(key, &[(slot, version, ImageSlotTarget::Function(target))])
+    }
+
+    /// Validate one callable target without changing a slot.
+    pub(crate) fn validate_function_slot(
+        &self,
+        key: VmImageKey,
+        slot: u32,
+        target: u32,
+    ) -> Result<(), FaultCode> {
         let spec = self
             .module
             .slots
@@ -490,19 +497,33 @@ impl World {
                 .classes
                 .iter()
                 .any(|class| class.methods.iter().any(|(_, func)| *func == target));
-        if !method_ok
-            || !func.captures.is_empty()
-            || func.type_params != contract.type_params
-            || func.effect_params != contract.effect_params
-            || bounds != &contract.type_bounds
-            || func.params != contract.params
-            || func.param_muts != contract.param_muts
-            || func.ret != contract.ret
-            || func.row != contract.row
-        {
+        let exact_contract = method_ok
+            && func.captures.is_empty()
+            && func.type_params == contract.type_params
+            && func.effect_params == contract.effect_params
+            && bounds == &contract.type_bounds
+            && func.params == contract.params
+            && func.param_muts == contract.param_muts
+            && func.ret == contract.ret
+            && func.row == contract.row;
+        let installed_contract = method_ok
+            && self
+                .vm_images
+                .get(key.image as usize)
+                .filter(|image| image.live && image.generation == key.generation)
+                .is_some_and(|image| {
+                    image.instances.iter().any(|instance| {
+                        instance.binding_targets.iter().enumerate().any(
+                            |(source_slot, candidate)| {
+                                *candidate == ImageSlotTarget::Function(target)
+                                    && instance.slots.get(source_slot).copied() == Some(slot)
+                            },
+                        )
+                    })
+                });
+        if !exact_contract && !installed_contract {
             return Err(FaultCode::TypeMismatch);
         }
-        self.vm_images[key.image as usize].slots[slot as usize] = ImageSlotTarget::Function(target);
         Ok(())
     }
 
@@ -516,6 +537,29 @@ impl World {
         target_constructor: u32,
     ) -> Result<(), FaultCode> {
         self.check_slot_safepoint(key)?;
+        self.validate_class_slot(key, slot, target, target_constructor)?;
+        let version = self.slot_version(key, slot)?;
+        self.commit_slot_targets(
+            key,
+            &[(
+                slot,
+                version,
+                ImageSlotTarget::Class {
+                    class: target,
+                    constructor: target_constructor,
+                },
+            )],
+        )
+    }
+
+    /// Validate one class target without changing a slot.
+    pub(crate) fn validate_class_slot(
+        &self,
+        key: VmImageKey,
+        slot: u32,
+        target: u32,
+        target_constructor: u32,
+    ) -> Result<(), FaultCode> {
         let spec = self
             .module
             .slots
@@ -541,7 +585,13 @@ impl World {
             }
             _ => return Err(FaultCode::TypeMismatch),
         };
-        if class.type_params != *type_params || target != contract_class {
+        let exact_class = target == contract_class;
+        let contract_class = self
+            .module
+            .classes
+            .get(contract_class as usize)
+            .ok_or(FaultCode::TypeMismatch)?;
+        if class.type_params != *type_params || class.key != contract_class.key {
             return Err(FaultCode::TypeMismatch);
         }
         let function = self
@@ -554,21 +604,36 @@ impl World {
             .func_bounds
             .get(target_constructor as usize)
             .ok_or(FaultCode::TypeMismatch)?;
-        if !function.captures.is_empty()
-            || function.type_params != constructor.type_params
-            || function.effect_params != constructor.effect_params
-            || bounds != &constructor.type_bounds
-            || function.params != constructor.params
-            || function.param_muts != constructor.param_muts
-            || function.ret != constructor.ret
-            || function.row != constructor.row
-        {
+        let exact_contract = exact_class
+            && function.captures.is_empty()
+            && function.type_params == constructor.type_params
+            && function.effect_params == constructor.effect_params
+            && bounds == &constructor.type_bounds
+            && function.params == constructor.params
+            && function.param_muts == constructor.param_muts
+            && function.ret == constructor.ret
+            && function.row == constructor.row;
+        let installed_contract =
+            self.vm_images
+                .get(key.image as usize)
+                .filter(|image| image.live && image.generation == key.generation)
+                .is_some_and(|image| {
+                    image.instances.iter().any(|instance| {
+                        instance.binding_targets.iter().enumerate().any(
+                            |(source_slot, candidate)| {
+                                *candidate
+                                    == ImageSlotTarget::Class {
+                                        class: target,
+                                        constructor: target_constructor,
+                                    }
+                                    && instance.slots.get(source_slot).copied() == Some(slot)
+                            },
+                        )
+                    })
+                });
+        if !exact_contract && !installed_contract {
             return Err(FaultCode::TypeMismatch);
         }
-        self.vm_images[key.image as usize].slots[slot as usize] = ImageSlotTarget::Class {
-            class: target,
-            constructor: target_constructor,
-        };
         Ok(())
     }
 
@@ -582,6 +647,19 @@ impl World {
         value: Value,
     ) -> Result<(), FaultCode> {
         self.check_slot_safepoint(key)?;
+        self.validate_value_slot(slot, source, value)?;
+        let version = self.slot_version(key, slot)?;
+        let moved = self.stage_value_target(key, source, value, &[])?;
+        self.commit_slot_targets(key, &[(slot, version, ImageSlotTarget::Value(moved))])
+    }
+
+    /// Validate one value target without changing a slot.
+    pub(crate) fn validate_value_slot(
+        &mut self,
+        slot: u32,
+        source: VmId,
+        value: Value,
+    ) -> Result<(), FaultCode> {
         let ty = match self.module.slots.get(slot as usize) {
             Some(lm_bytecode::SlotSpec {
                 contract: lm_bytecode::SlotContract::Value { ty },
@@ -603,8 +681,18 @@ impl World {
             value,
             ty,
             lm_value::TypeEnvId::EMPTY,
-        )?;
-        let roots: Vec<lm_value::ObjRef> = self.vm_images[key.image as usize]
+        )
+    }
+
+    /// Copy one validated value into an image heap.
+    pub(crate) fn stage_value_target(
+        &mut self,
+        key: VmImageKey,
+        source: VmId,
+        value: Value,
+        extra_roots: &[lm_value::ObjRef],
+    ) -> Result<Value, FaultCode> {
+        let mut roots: Vec<lm_value::ObjRef> = self.vm_images[key.image as usize]
             .slots
             .iter()
             .filter_map(|target| match target {
@@ -612,16 +700,15 @@ impl World {
                 _ => None,
             })
             .collect();
+        roots.extend_from_slice(extra_roots);
         let limits = self.vm_images[key.image as usize].config.graph;
-        let moved = lm_graph::detach(
+        lm_graph::detach(
             &mut self.machines[source as usize].vm.heap,
             &mut self.vm_images[key.image as usize].heap,
             &roots,
             value,
             &limits,
-        )?;
-        self.vm_images[key.image as usize].slots[slot as usize] = ImageSlotTarget::Value(moved);
-        Ok(())
+        )
     }
 
     /// Replace one process slot with a compatible live handle.
@@ -634,6 +721,18 @@ impl World {
         handle: Value,
     ) -> Result<(), FaultCode> {
         self.check_slot_safepoint(key)?;
+        let target = self.validate_process_slot(slot, holder, handle)?;
+        let version = self.slot_version(key, slot)?;
+        self.commit_slot_targets(key, &[(slot, version, target)])
+    }
+
+    /// Validate one process target without changing a slot.
+    pub(crate) fn validate_process_slot(
+        &mut self,
+        slot: u32,
+        holder: VmId,
+        handle: Value,
+    ) -> Result<ImageSlotTarget, FaultCode> {
         let (message, result) = match self.module.slots.get(slot as usize) {
             Some(lm_bytecode::SlotSpec {
                 contract: lm_bytecode::SlotContract::Process { message, result },
@@ -647,8 +746,42 @@ impl World {
         if !self.process_matches_contract(proc, generation, message, result)? {
             return Err(FaultCode::TypeMismatch);
         }
-        self.vm_images[key.image as usize].slots[slot as usize] =
-            ImageSlotTarget::Process { proc, generation };
+        Ok(ImageSlotTarget::Process { proc, generation })
+    }
+
+    /// Return one current slot version.
+    pub(crate) fn slot_version(&self, key: VmImageKey, slot: u32) -> Result<u64, FaultCode> {
+        self.vm_images
+            .get(key.image as usize)
+            .filter(|image| image.live && image.generation == key.generation)
+            .and_then(|image| image.slot_versions.get(slot as usize))
+            .copied()
+            .ok_or(FaultCode::InvalidVmState)
+    }
+
+    /// Publish validated slot targets together.
+    pub(crate) fn commit_slot_targets(
+        &mut self,
+        key: VmImageKey,
+        targets: &[(u32, u64, ImageSlotTarget)],
+    ) -> Result<(), FaultCode> {
+        let image = self
+            .vm_images
+            .get(key.image as usize)
+            .filter(|image| image.live && image.generation == key.generation)
+            .ok_or(FaultCode::InvalidVmState)?;
+        for (slot, version, _) in targets {
+            if image.slot_versions.get(*slot as usize) != Some(version)
+                || version.checked_add(1).is_none()
+            {
+                return Err(FaultCode::InvalidVmState);
+            }
+        }
+        let image = &mut self.vm_images[key.image as usize];
+        for (slot, version, target) in targets {
+            image.slots[*slot as usize] = *target;
+            image.slot_versions[*slot as usize] = version + 1;
+        }
         Ok(())
     }
 
@@ -701,7 +834,7 @@ impl World {
     }
 
     /// Prove that an image exists and no owned run executes.
-    fn check_slot_safepoint(&self, key: VmImageKey) -> Result<(), FaultCode> {
+    pub(crate) fn check_slot_safepoint(&self, key: VmImageKey) -> Result<(), FaultCode> {
         let live = self
             .vm_images
             .get(key.image as usize)
@@ -1059,7 +1192,12 @@ impl World {
             | lm_abi::OP_VM_REPLACE_FUNCTION
             | lm_abi::OP_VM_REPLACE_CLASS
             | lm_abi::OP_VM_REPLACE_VALUE
-            | lm_abi::OP_VM_REPLACE_PROCESS => self.code_exec(vm, op, args),
+            | lm_abi::OP_VM_REPLACE_PROCESS
+            | lm_abi::OP_VM_CHANGE_FUNCTION
+            | lm_abi::OP_VM_CHANGE_CLASS
+            | lm_abi::OP_VM_CHANGE_VALUE
+            | lm_abi::OP_VM_CHANGE_PROCESS
+            | lm_abi::OP_VM_REPLACE_ALL => self.code_exec(vm, op, args),
             lm_abi::OP_VM_ACTIVATE | lm_abi::OP_VM_ACTIVATE_OR_FAULT => {
                 let image = match self.handle_vm(vm, args[0]) {
                     Some(key)

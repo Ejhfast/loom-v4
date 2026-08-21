@@ -5,6 +5,7 @@
 
 use super::*;
 use lm_heap::{CodeHandleKind, PortableCode, PortableCodeKind};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy)]
 struct CodeHandle {
@@ -35,6 +36,11 @@ struct CodeProvider {
 enum InstalledBindingTarget {
     Function(u32),
     Class { class: u32, constructor: u32 },
+}
+
+enum PreparedSlotTarget {
+    Ready(ImageSlotTarget),
+    Value(Value),
 }
 
 fn source_binding_slot(
@@ -170,9 +176,35 @@ fn closed_classes_match(
     let Some(right_class) = right_space.module.classes.get(right as usize) else {
         return false;
     };
-    left_class.key == right_class.key
-        && left_space.identity.class_hashes.get(left as usize)
-            == right_space.identity.class_hashes.get(right as usize)
+    if left_class.key != right_class.key {
+        return false;
+    }
+    match (
+        class_slot_abi(left_space.module, left),
+        class_slot_abi(right_space.module, right),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => {
+            left_space.identity.class_hashes.get(left as usize)
+                == right_space.identity.class_hashes.get(right as usize)
+        }
+    }
+}
+
+fn class_slot_abi(module: &lm_bytecode::Module, class: u32) -> Option<[u8; 32]> {
+    let key = &module.classes.get(class as usize)?.key;
+    module.slots.iter().find_map(|slot| {
+        let lm_bytecode::SlotContract::Class { abi, ty, .. } = &slot.contract else {
+            return None;
+        };
+        let candidate = match module.types.get(*ty as usize)? {
+            lm_bytecode::BcType::Class(candidate) | lm_bytecode::BcType::Inst(candidate, _) => {
+                *candidate
+            }
+            _ => return None,
+        };
+        (module.classes.get(candidate as usize)?.key == key.as_str()).then_some(*abi)
+    })
 }
 
 fn closed_types_match(
@@ -418,6 +450,11 @@ impl World {
             | lm_abi::OP_VM_REPLACE_CLASS
             | lm_abi::OP_VM_REPLACE_VALUE
             | lm_abi::OP_VM_REPLACE_PROCESS => self.code_replace(vm, op, args[0], args[1], args[2]),
+            lm_abi::OP_VM_CHANGE_FUNCTION
+            | lm_abi::OP_VM_CHANGE_CLASS
+            | lm_abi::OP_VM_CHANGE_VALUE
+            | lm_abi::OP_VM_CHANGE_PROCESS => self.code_change(vm, op, args[0], args[1], args[2]),
+            lm_abi::OP_VM_REPLACE_ALL => self.code_replace_all(vm, op, args[0], args[1]),
             _ => self.fault_caller(
                 vm,
                 op,
@@ -1266,10 +1303,25 @@ impl World {
         };
         let binding = self.live_instance(handle).and_then(|instance| {
             let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
-            let export = source.exports.iter().find(|export| {
-                export.name == name && export.kind == lm_bytecode::ExportKind::Function
-            })?;
-            installed_binding(instance, PortableCodeKind::Function, export.def)
+            let suffix = format!(".{name}");
+            let mut source_slots: Vec<u32> = source
+                .bindings
+                .iter()
+                .filter(|binding| {
+                    binding.class == lm_bytecode::NO_CLASS
+                        && (binding.key == name || binding.key.ends_with(&suffix))
+                })
+                .filter_map(|binding| {
+                    source_binding_slot(&source, PortableCodeKind::Function, binding.func)
+                })
+                .collect();
+            source_slots.sort_unstable();
+            source_slots.dedup();
+            let [source_slot] = source_slots.as_slice() else {
+                return None;
+            };
+            let target = cached_binding_target(instance, *source_slot)?;
+            Some((*source_slot, target))
         });
         let Some((slot, InstalledBindingTarget::Function(function))) = binding else {
             self.finish_code_error(
@@ -1863,6 +1915,336 @@ impl World {
         self.finish_code_result(vm, op, result);
     }
 
+    fn replacement_address(
+        &self,
+        vm: VmId,
+        key: VmImageKey,
+        value: Value,
+    ) -> Result<u32, &'static str> {
+        let slot = self
+            .code_handle(vm, value, CodeHandleKind::Slot)
+            .or_else(|_| self.binding_handle(vm, value))
+            .map_err(|_| "the replacement address is not a binding")?;
+        if slot.image_key() != key {
+            return Err("the slot does not belong to this VM image");
+        }
+        if slot.kind == CodeHandleKind::Slot {
+            self.live_slot(slot)
+                .then_some(slot.index)
+                .ok_or("the slot does not belong to this VM image")
+        } else {
+            self.live_binding_slot(slot)
+                .ok_or("the slot does not belong to this VM image")
+        }
+    }
+
+    fn replacement_function(
+        &self,
+        vm: VmId,
+        key: VmImageKey,
+        target: Value,
+    ) -> Result<u32, String> {
+        match self
+            .code_handle(vm, target, CodeHandleKind::Function)
+            .or_else(|_| self.code_handle(vm, target, CodeHandleKind::FunctionBinding))
+        {
+            Ok(handle) => {
+                if handle.image_key() != key {
+                    return Err("the function does not belong to this VM image".to_string());
+                }
+                if handle.kind == CodeHandleKind::Function {
+                    self.live_function(handle)
+                        .then_some(handle.index)
+                        .ok_or_else(|| "the function does not belong to this VM image".to_string())
+                } else {
+                    match self.live_binding_target(handle) {
+                        Some(InstalledBindingTarget::Function(function)) => Ok(function),
+                        _ => Err("the function binding is not live".to_string()),
+                    }
+                }
+            }
+            Err(_) => self.function_value_target(vm, target),
+        }
+    }
+
+    fn replacement_class(
+        &self,
+        vm: VmId,
+        key: VmImageKey,
+        target: Value,
+    ) -> Result<(u32, u32), &'static str> {
+        let target = self
+            .code_handle(vm, target, CodeHandleKind::Class)
+            .or_else(|_| self.code_handle(vm, target, CodeHandleKind::ClassBinding))
+            .map_err(|_| "the replacement target is not a class")?;
+        if target.image_key() != key {
+            return Err("the class does not belong to this VM image");
+        }
+        if target.kind == CodeHandleKind::Class {
+            if !self.live_class(target) {
+                return Err("the class does not belong to this VM image");
+            }
+            self.live_class_constructor(target)
+                .map(|constructor| (target.index, constructor))
+                .ok_or("the class has no live constructor")
+        } else {
+            match self.live_binding_target(target) {
+                Some(InstalledBindingTarget::Class { class, constructor }) => {
+                    Ok((class, constructor))
+                }
+                _ => Err("the class binding is not live"),
+            }
+        }
+    }
+
+    fn code_change(&mut self, vm: VmId, op: u32, image: Value, slot: Value, target: Value) {
+        let Some(key) = self.image_arg(vm, op, image) else {
+            return;
+        };
+        let slot = match self.replacement_address(vm, key, slot) {
+            Ok(slot) => slot,
+            Err(message) => {
+                self.finish_code_error(vm, op, message);
+                return;
+            }
+        };
+        let kind = match op {
+            lm_abi::OP_VM_CHANGE_FUNCTION => {
+                let function = match self.replacement_function(vm, key, target) {
+                    Ok(function) => function,
+                    Err(message) => {
+                        self.finish_code_error(vm, op, &message);
+                        return;
+                    }
+                };
+                if self.validate_function_slot(key, slot, function).is_err() {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        "the replacement target does not match the slot contract",
+                    );
+                    return;
+                }
+                lm_heap::SlotChangeKind::Function
+            }
+            lm_abi::OP_VM_CHANGE_CLASS => {
+                let (class, constructor) = match self.replacement_class(vm, key, target) {
+                    Ok(target) => target,
+                    Err(message) => {
+                        self.finish_code_error(vm, op, message);
+                        return;
+                    }
+                };
+                if self
+                    .validate_class_slot(key, slot, class, constructor)
+                    .is_err()
+                {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        "the replacement target does not match the slot contract",
+                    );
+                    return;
+                }
+                lm_heap::SlotChangeKind::Class
+            }
+            lm_abi::OP_VM_CHANGE_VALUE => {
+                if self.validate_value_slot(slot, vm, target).is_err() {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        "the replacement target does not match the slot contract",
+                    );
+                    return;
+                }
+                lm_heap::SlotChangeKind::Value
+            }
+            lm_abi::OP_VM_CHANGE_PROCESS => {
+                if self.validate_process_slot(slot, vm, target).is_err() {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        "the replacement target does not match the slot contract",
+                    );
+                    return;
+                }
+                lm_heap::SlotChangeKind::Process
+            }
+            _ => {
+                self.machines[vm as usize].set_fault(FaultCode::MalformedState, "", Some(op));
+                return;
+            }
+        };
+        let version = match self.slot_version(key, slot) {
+            Ok(version) if version.checked_add(1).is_some() => version,
+            _ => {
+                self.finish_code_error(vm, op, "the slot version is exhausted");
+                return;
+            }
+        };
+        let value = self.machines[vm as usize]
+            .alloc(Object::NativeSlotChange {
+                image: key.image,
+                generation: key.generation,
+                slot,
+                version,
+                kind,
+                target,
+            })
+            .and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, value);
+    }
+
+    fn code_replace_all(&mut self, vm: VmId, op: u32, image: Value, values: Value) {
+        let Some(key) = self.image_arg(vm, op, image) else {
+            return;
+        };
+        let values = match values
+            .as_obj()
+            .map(|reference| self.machines[vm as usize].vm.heap.get(reference))
+        {
+            Some(Object::List { items, .. }) => items.clone(),
+            _ => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the changes are not a List",
+                );
+                return;
+            }
+        };
+        let mut changes = Vec::new();
+        if changes.try_reserve_exact(values.len()).is_err() {
+            self.machines[vm as usize].set_fault(FaultCode::HeapLimit, "", Some(op));
+            return;
+        }
+        let mut seen = BTreeSet::new();
+        for value in values {
+            let change = value
+                .as_obj()
+                .map(|reference| self.machines[vm as usize].vm.heap.get(reference));
+            let Some(Object::NativeSlotChange {
+                image,
+                generation,
+                slot,
+                version,
+                kind,
+                target,
+            }) = change
+            else {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the change list contains another value",
+                );
+                return;
+            };
+            if *image != key.image || *generation != key.generation {
+                self.finish_code_error(vm, op, "a change belongs to another VM image");
+                return;
+            }
+            if !seen.insert(*slot) {
+                self.finish_code_error(vm, op, "the batch changes one slot twice");
+                return;
+            }
+            if self.slot_version(key, *slot) != Ok(*version) {
+                self.finish_code_error(vm, op, "a slot change is stale");
+                return;
+            }
+            changes.push((*slot, *version, *kind, *target));
+        }
+        if changes.is_empty() {
+            let value = self.code_ok(vm, Value::Unit);
+            self.finish_code_result(vm, op, value);
+            return;
+        }
+        if self.check_slot_safepoint(key).is_err() {
+            self.finish_code_error(vm, op, "the VM image is not at a safe replacement point");
+            return;
+        }
+
+        let mut prepared = Vec::new();
+        if prepared.try_reserve_exact(changes.len()).is_err() {
+            self.machines[vm as usize].set_fault(FaultCode::HeapLimit, "", Some(op));
+            return;
+        }
+        for (slot, version, kind, target) in &changes {
+            let result = match kind {
+                lm_heap::SlotChangeKind::Function => self
+                    .replacement_function(vm, key, *target)
+                    .map_err(|_| FaultCode::TypeMismatch)
+                    .and_then(|function| {
+                        self.validate_function_slot(key, *slot, function)?;
+                        Ok(PreparedSlotTarget::Ready(ImageSlotTarget::Function(
+                            function,
+                        )))
+                    }),
+                lm_heap::SlotChangeKind::Class => self
+                    .replacement_class(vm, key, *target)
+                    .map_err(|_| FaultCode::TypeMismatch)
+                    .and_then(|(class, constructor)| {
+                        self.validate_class_slot(key, *slot, class, constructor)?;
+                        Ok(PreparedSlotTarget::Ready(ImageSlotTarget::Class {
+                            class,
+                            constructor,
+                        }))
+                    }),
+                lm_heap::SlotChangeKind::Value => self
+                    .validate_value_slot(*slot, vm, *target)
+                    .map(|()| PreparedSlotTarget::Value(*target)),
+                lm_heap::SlotChangeKind::Process => self
+                    .validate_process_slot(*slot, vm, *target)
+                    .map(PreparedSlotTarget::Ready),
+            };
+            match result {
+                Ok(target) => prepared.push((*slot, *version, target)),
+                Err(_) => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        "a replacement target does not match its slot contract",
+                    );
+                    return;
+                }
+            }
+        }
+
+        let mut staged_roots = Vec::new();
+        let mut committed = Vec::new();
+        for (slot, version, target) in prepared {
+            let target = match target {
+                PreparedSlotTarget::Ready(target) => target,
+                PreparedSlotTarget::Value(value) => {
+                    let moved = match self.stage_value_target(key, vm, value, &staged_roots) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            self.finish_code_error(
+                                vm,
+                                op,
+                                "a replacement value cannot enter the VM image",
+                            );
+                            return;
+                        }
+                    };
+                    if let Value::Obj(reference) = moved {
+                        staged_roots.push(reference);
+                    }
+                    ImageSlotTarget::Value(moved)
+                }
+            };
+            committed.push((slot, version, target));
+        }
+        match self.commit_slot_targets(key, &committed) {
+            Ok(()) => {
+                let value = self.code_ok(vm, Value::Unit);
+                self.finish_code_result(vm, op, value);
+            }
+            Err(_) => self.finish_code_error(vm, op, "a slot change became stale"),
+        }
+    }
+
     fn code_replace(&mut self, vm: VmId, op: u32, image: Value, slot: Value, target: Value) {
         let Some(key) = self.image_arg(vm, op, image) else {
             return;
@@ -2209,7 +2591,14 @@ impl World {
             .envs
             .close(&self.module, code.ret, lm_value::TypeEnvId::EMPTY)
             .map_err(|_| FaultCode::BoundaryLimit)?;
-        Ok(actual_input == input && actual_output == output)
+        let identity = self.identity()?.clone();
+        let space = ClosedTypeSpace {
+            module: &self.module,
+            types: &self.envs,
+            identity: &identity,
+        };
+        Ok(closed_types_match(space, actual_input, space, input)
+            && closed_types_match(space, actual_output, space, output))
     }
 
     fn portable_function_matches_contract(

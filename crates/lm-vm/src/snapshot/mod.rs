@@ -77,7 +77,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 23 stores optional portable source origins.
 /// Version 24 stores bounded fault execution traces.
 /// Version 25 stores installed function and class binding handles.
-pub const FORMAT_VERSION: u32 = 25;
+/// Version 26 stores slot versions and pending slot changes.
+pub const FORMAT_VERSION: u32 = 26;
 
 /// The section kinds, in canonical order.
 ///
@@ -283,6 +284,8 @@ pub struct ImageVm {
     pub limits: ImageLimits,
     /// The current target of each immutable module slot contract.
     pub slots: Vec<ImageSlotTarget>,
+    /// The replacement version of each slot.
+    pub slot_versions: Vec<u64>,
     /// The canonical frozen heap owned by value slots.
     pub objects: Vec<ImageObject>,
     /// Module instances installed into this VM image.

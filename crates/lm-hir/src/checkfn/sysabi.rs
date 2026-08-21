@@ -784,6 +784,16 @@ impl<'o> FnChecker<'o> {
                     },
                 })
             }
+            ("FunctionCode", "definition") | ("ClassCode", "definition") => {
+                Self::expect_no_args(name, args, span)?;
+                Ok(HExpr {
+                    ty: Self::core_class(ctx, "DefinitionSpec"),
+                    mutable: true,
+                    kind: HExprKind::CodeDefinition {
+                        code: Box::new(recv_h),
+                    },
+                })
+            }
             ("Artifact", "verify") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_COMPILER_VERIFY, span)?;
@@ -1246,7 +1256,12 @@ impl<'o> FnChecker<'o> {
             | (Type::Vm, "replace_function")
             | (Type::Vm, "replace_class")
             | (Type::Vm, "replace_value")
-            | (Type::Vm, "replace_process") => {
+            | (Type::Vm, "replace_process")
+            | (Type::Vm, "change")
+            | (Type::Vm, "change_function")
+            | (Type::Vm, "change_class")
+            | (Type::Vm, "change_value")
+            | (Type::Vm, "change_process") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -1287,25 +1302,48 @@ impl<'o> FnChecker<'o> {
                             || ctx.core_types.get("ClassBinding") == Some(&class.0)
                 );
                 let is_process = matches!(ctx.store.get(target.ty), Type::Handle(_, _));
+                let change = name.starts_with("change");
                 let op = match name {
-                    "replace" | "replace_function" if is_function && address_kind != 2 => {
-                        lm_abi::OP_VM_REPLACE_FUNCTION
+                    "replace" | "replace_function" | "change" | "change_function"
+                        if is_function && address_kind != 2 =>
+                    {
+                        if change {
+                            lm_abi::OP_VM_CHANGE_FUNCTION
+                        } else {
+                            lm_abi::OP_VM_REPLACE_FUNCTION
+                        }
                     }
-                    "replace" | "replace_class" if is_class && address_kind != 1 => {
-                        lm_abi::OP_VM_REPLACE_CLASS
+                    "replace" | "replace_class" | "change" | "change_class"
+                        if is_class && address_kind != 1 =>
+                    {
+                        if change {
+                            lm_abi::OP_VM_CHANGE_CLASS
+                        } else {
+                            lm_abi::OP_VM_REPLACE_CLASS
+                        }
                     }
-                    "replace_value" if address_kind == 0 => lm_abi::OP_VM_REPLACE_VALUE,
-                    "replace_process" if is_process && address_kind == 0 => {
-                        lm_abi::OP_VM_REPLACE_PROCESS
+                    "replace_value" | "change_value" if address_kind == 0 => {
+                        if change {
+                            lm_abi::OP_VM_CHANGE_VALUE
+                        } else {
+                            lm_abi::OP_VM_REPLACE_VALUE
+                        }
                     }
-                    "replace" | "replace_function" => {
+                    "replace_process" | "change_process" if is_process && address_kind == 0 => {
+                        if change {
+                            lm_abi::OP_VM_CHANGE_PROCESS
+                        } else {
+                            lm_abi::OP_VM_REPLACE_PROCESS
+                        }
+                    }
+                    "replace" | "replace_function" | "change" | "change_function" => {
                         return Err(Diagnostic::new(
                             "E1004",
                             "`replace_function` needs a function target",
                             args[1].span,
                         ));
                     }
-                    "replace_class" => {
+                    "replace_class" | "change_class" => {
                         return Err(Diagnostic::new(
                             "E1004",
                             "`replace_class` needs a class target",
@@ -1322,13 +1360,40 @@ impl<'o> FnChecker<'o> {
                 };
                 self.charge_op(ctx, op, span)?;
                 let error = Self::core_class(ctx, "CodeError");
-                let ty = Self::core_inst(ctx, "Result", vec![UNIT, error]);
+                let success = if change {
+                    Self::core_class(ctx, "SlotChange")
+                } else {
+                    UNIT
+                };
+                let ty = Self::core_inst(ctx, "Result", vec![success, error]);
                 HExpr {
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
                         op,
                         args: vec![recv_h, address, target],
+                    },
+                }
+            }
+            (Type::Vm, "replace_all") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`replace_all` expects 1 argument, found {}", args.len()),
+                        span,
+                    ));
+                }
+                let change = Self::core_class(ctx, "SlotChange");
+                let changes = ctx.store.intern(Type::List(change));
+                let changes = self.check_expr(ctx, &args[0], changes)?;
+                self.charge_op(ctx, lm_abi::OP_VM_REPLACE_ALL, span)?;
+                let error = Self::core_class(ctx, "CodeError");
+                HExpr {
+                    ty: Self::core_inst(ctx, "Result", vec![UNIT, error]),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_REPLACE_ALL,
+                        args: vec![recv_h, changes],
                     },
                 }
             }

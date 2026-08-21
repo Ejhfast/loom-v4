@@ -1634,9 +1634,14 @@ pub const OP_VM_BINDING_SPEC: OpSlot = 97;
 pub const OP_VM_BINDING_INSTANCE: OpSlot = 98;
 pub const OP_VM_BINDING_FUNCTION_TARGET: OpSlot = 99;
 pub const OP_VM_BINDING_CLASS_TARGET: OpSlot = 100;
+pub const OP_VM_CHANGE_FUNCTION: OpSlot = 101;
+pub const OP_VM_CHANGE_CLASS: OpSlot = 102;
+pub const OP_VM_CHANGE_VALUE: OpSlot = 103;
+pub const OP_VM_CHANGE_PROCESS: OpSlot = 104;
+pub const OP_VM_REPLACE_ALL: OpSlot = 105;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 101] = [
+pub const OPS: [OpDef; 106] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -2395,6 +2400,7 @@ pub const OPS: [OpDef; 101] = [
         params: &[
             AbiType::STR,
             AbiType::STR,
+            AbiType::STR,
             AbiType::COMPILE_ENV,
             AbiType::COMPILE_OPTIONS,
         ],
@@ -2407,6 +2413,8 @@ pub const OPS: [OpDef; 101] = [
         member: "CompileSyntax",
         kind: OpKind::Fixed,
         params: &[
+            AbiType::STR,
+            AbiType::STR,
             AbiType::SYNTAX_NODE,
             AbiType::COMPILE_ENV,
             AbiType::COMPILE_OPTIONS,
@@ -2584,6 +2592,51 @@ pub const OPS: [OpDef; 101] = [
         params: &[],
         reply: AbiType::UNIT,
         schema: "(ClassBinding) -> Result[ClassDef, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ChangeFunction",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T,e](Vm, Slot | FunctionBinding[A,T], FunctionDef[A,T] | FunctionBinding[A,T] | Fn[A,T,e]) -> Result[SlotChange, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ChangeClass",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Vm, Slot | ClassBinding, ClassDef | ClassBinding) -> Result[SlotChange, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ChangeValue",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T](Vm, Slot, T) -> Result[SlotChange, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ChangeProcess",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[M,R](Vm, Slot, Handle[M,R]) -> Result[SlotChange, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ReplaceAll",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Vm, List[SlotChange]) -> Result[(), CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
 ];

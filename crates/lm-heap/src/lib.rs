@@ -19,7 +19,7 @@ use lm_value::ObjRef;
 use lm_value::Value;
 pub use shape::{
     dump_shapes, BoundaryPolicy, CodeHandleKind, FaultSite, MapIndex, Object, PortableCode,
-    PortableCodeKind, ShapeDesc, StructuralEpoch, MIN_OBJECT_COST, SHAPES,
+    PortableCodeKind, ShapeDesc, SlotChangeKind, StructuralEpoch, MIN_OBJECT_COST, SHAPES,
 };
 pub use shared::{
     process_lookup_hash, NativeByteBuffer, NativeStringBuilder, SharedBytes, SharedText,

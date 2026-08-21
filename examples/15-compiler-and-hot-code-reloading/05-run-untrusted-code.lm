@@ -15,7 +15,11 @@
 def build(text: String): Result[VerifiedModule, CodeError] with Compiler
   # An empty compile environment. The guest can name no module, so
   # it cannot reach any definition this program holds.
-  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
   options = CompileOptions(
     is_main: true,
     dynamic_result: false,
@@ -23,7 +27,7 @@ def build(text: String): Result[VerifiedModule, CodeError] with Compiler
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  artifact = case sys.compiler.compile("guest", text, env, options)
+  artifact = case sys.compiler.compile("guest", "guest.lm", text, env, options)
   in Ok(value) then value
   in Err(problem) then return Err(CodeError(problem.message))
   end

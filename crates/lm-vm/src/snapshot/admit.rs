@@ -546,6 +546,7 @@ fn image_object_values(object: &Object, out: &mut Vec<Value>) {
         }
         Object::Closure { captures, .. } => out.extend(captures.iter().copied()),
         Object::DynValue { value, .. } => out.push(*value),
+        Object::NativeSlotChange { target, .. } => out.push(*target),
         _ => {}
     }
 }
@@ -1088,10 +1089,11 @@ impl Admit<'_> {
     /// Prove each captured target against its immutable module contract.
     fn check_slot_state(&self) -> Result<(), ImageError> {
         for (image, vm) in self.image.vm_images.iter().enumerate() {
-            if vm.slots.len() != self.module.slots.len() {
+            if vm.slots.len() != self.module.slots.len() || vm.slot_versions.len() != vm.slots.len()
+            {
                 return fail(
                     ImageReason::Code,
-                    format!("VM image {image} has a different slot-table length"),
+                    format!("VM image {image} has a different slot table length"),
                 );
             }
             for (slot, target) in vm.slots.iter().enumerate() {
@@ -1459,9 +1461,9 @@ impl Admit<'_> {
             }
             for entry in &machine.objects {
                 match entry.object {
-                    Object::NativeVm { image, .. } | Object::NativeCodeHandle { image, .. } => {
-                        visit(image)?
-                    }
+                    Object::NativeVm { image, .. }
+                    | Object::NativeCodeHandle { image, .. }
+                    | Object::NativeSlotChange { image, .. } => visit(image)?,
                     _ => {}
                 }
             }
@@ -1721,6 +1723,32 @@ impl Admit<'_> {
                         at(&format!(
                             "object {ordinal} holds an invalid installed code handle"
                         )),
+                    );
+                }
+            }
+            if let Object::NativeSlotChange {
+                image,
+                generation,
+                slot,
+                ..
+            } = entry.object
+            {
+                if generation != 0 || image >= images {
+                    return fail(
+                        ImageReason::Reference,
+                        at(&format!(
+                            "object {ordinal} holds an invalid slot change image"
+                        )),
+                    );
+                }
+                if self.image.vm_images[image as usize]
+                    .slots
+                    .get(slot as usize)
+                    .is_none()
+                {
+                    return fail(
+                        ImageReason::Reference,
+                        at(&format!("object {ordinal} names no image slot")),
                     );
                 }
             }

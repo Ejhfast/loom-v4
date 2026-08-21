@@ -525,6 +525,10 @@ pub enum HExprKind {
         code: Box<HExpr>,
         element: TypeId,
     },
+    /// Read stable binding data from portable definition code.
+    CodeDefinition {
+        code: Box<HExpr>,
+    },
     /// A stack callback descriptor with a bounded lifetime.
     MakeCallback {
         func: u32,

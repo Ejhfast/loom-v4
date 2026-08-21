@@ -33,7 +33,10 @@ The implementation uses these decisions:
 - Module installation returns an `Instance`.
 - Definition installation returns an installed binding.
 - Each binding retains an immutable definition target.
+- `DefinitionSpec` binds new source to one verified definition contract.
 - A `Slot` provides optional late binding under one immutable contract.
+- `SlotChange` prepares one checked slot update without publishing it.
+- `Vm.replace_all` publishes one checked set of slot changes atomically.
 - Active frames pin exact function versions.
 - Future slot operations read the current slot target.
 - Static operations keep direct calls and current inlining.
@@ -85,7 +88,7 @@ The complete pipeline has these phases:
 Source or SyntaxTree
         |
         v
-Compiler.Compile with path, source, CompileEnv, and CompileOptions
+Compiler.Compile with module name, source name, source, CompileEnv, and CompileOptions
         |
         v
 Artifact
@@ -253,6 +256,22 @@ They are not portable slot targets because they contain environment state.
 
 Generic definitions require an explicit type application in version 0.2.
 
+`FunctionCode.definition()` returns one frozen `DefinitionSpec`.
+
+`ClassCode.definition()` returns one frozen `DefinitionSpec`.
+
+The specification contains a logical module name, qualified key, definition identity, and verified slot specifications.
+
+The logical module name creates qualified declaration keys.
+
+The diagnostic source name does not enter these keys.
+
+The VM derives this value from verified portable code.
+
+The compiler host re-verifies every supplied slot artifact before it binds the specification.
+
+Source attachments are not required for this operation.
+
 ### 6.4 `Instance`
 
 `Instance` names one module installation inside one VM.
@@ -266,6 +285,12 @@ An instance cannot move to another VM. A second VM must install the verified mod
 `Instance.function_binding[A,R](name)` returns one installed function binding.
 
 `Instance.class_binding(name)` returns one installed class binding.
+
+Function lookup accepts an exact qualified binding key.
+
+It also accepts an unambiguous qualified-key suffix.
+
+This suffix form exposes published class methods such as `Box.amount`.
 
 ### 6.5 `FunctionDef`
 
@@ -372,6 +397,14 @@ The convenience forms reject capturing closures and unsupported generic values.
 Static callers still use their immutable targets after direct installation.
 
 Only slot instructions observe a later replacement.
+
+New source and syntax can use an existing `DefinitionSpec` without retained source text.
+
+The compiler binds one local declaration name to that verified specification through `CompileEnv`.
+
+The new declaration must reproduce the same qualified key and slot contracts.
+
+The diagnostic source name can differ across revisions.
 
 ### 6.9 Activation errors
 
@@ -536,6 +569,42 @@ A failed replacement changes no VM state.
 
 The operation never edits a frame, closure, object, or immutable definition.
 
+Each live slot has one monotonic version number.
+
+Every successful single replacement increments that version.
+
+The checked preparation methods return an opaque `SlotChange`.
+
+```text
+Vm.change_function(Slot | FunctionBinding[A,T], FunctionDef[A,T] | FunctionBinding[A,T])
+  -> Result[SlotChange, CodeError]
+Vm.change_class(Slot | ClassBinding, ClassDef | ClassBinding)
+  -> Result[SlotChange, CodeError]
+Vm.change_value(Slot, T) -> Result[SlotChange, CodeError]
+Vm.change_process(Slot, Handle[M,R]) -> Result[SlotChange, CodeError]
+Vm.replace_all(List[SlotChange]) -> Result[(), CodeError]
+```
+
+`Vm.change` selects function or class preparation from its typed arguments.
+
+A prepared change captures its VM image, slot, target kind, target, and current slot version.
+
+Preparation validates the target contract. It does not publish the target.
+
+`Vm.replace_all` requires changes from one live image.
+
+It rejects duplicate slots, stale versions, invalid targets, and unsafe replacement points.
+
+The VM validates the complete list before it publishes any target.
+
+A failure publishes no target and increments no version.
+
+A success publishes every target and increments every changed slot version.
+
+An empty list succeeds and changes no state.
+
+Another successful update makes an older prepared change for that slot stale.
+
 ### 8.4 Function contracts
 
 A function contract contains the full type scheme, mutability markers, result type, and effect row.
@@ -584,6 +653,14 @@ A successful class replacement affects future `NEW_SLOT` operations only.
 Future proc spawning also uses the current constructor target.
 
 Existing objects keep their class identity and initialized state.
+
+A class revision can change constructor code, field defaults, and method bodies.
+
+The holder prepares the class slot and each changed method slot.
+
+One `replace_all` call publishes that complete compatible revision.
+
+No caller can observe a new constructor with old changed methods from that batch.
 
 ### 8.6 Value contracts
 
@@ -638,6 +715,10 @@ This rule gives a clear mixed-version boundary.
 The VM retains old code while any frame, closure, slot, or snapshot references it.
 
 The VM can reclaim an old version after the final reference disappears.
+
+A batch does not alter active frames.
+
+Future late calls and constructions read the targets from the published batch.
 
 ### 9.1 Hash rules
 
@@ -707,15 +788,21 @@ The binding exposes its `SlotSpec` and owning `Instance` for batch operations.
 
 ### 11.2 Compatible redefinition
 
-The compiler receives the existing `SlotSpec` through `CompileEnv`.
+The compiler receives the existing `DefinitionSpec` through `CompileEnv`.
 
-It emits a new immutable definition with the same contract.
+The compile environment maps a local declaration name to that specification.
+
+The compiler emits a new immutable definition with the same qualified key and contracts.
 
 The library installs the new `FunctionCode` or `ClassCode`.
 
-It then calls `Vm.replace(old_binding, new_binding)`.
+It then prepares the affected slot changes.
+
+One `Vm.replace_all` call publishes a coordinated revision.
 
 Old compiled callers use the same slot and see the new target on their next late call.
+
+The source and syntax paths use this same binding rule.
 
 ### 11.3 Incompatible redefinition
 
@@ -750,10 +837,10 @@ The VM packages a value at the declared boundary. It does not erase internal ope
 The compiler accepts source or one public syntax unit.
 
 ```text
-Compiler.Compile(String, String, CompileEnv, CompileOptions)
+Compiler.Compile(String, String, String, CompileEnv, CompileOptions)
   -> Result[Artifact, CompileErrors]
 
-Compiler.CompileSyntax(SyntaxNode, CompileEnv, CompileOptions)
+Compiler.CompileSyntax(String, String, SyntaxNode, CompileEnv, CompileOptions)
   -> Result[Artifact, CompileErrors]
 
 Compiler.Verify(Artifact)
@@ -762,7 +849,25 @@ Compiler.Verify(Artifact)
 
 `CompileSyntax` treats the selected node as compiler input.
 
-The first `Compile` string is the logical source path. The second string is the source text.
+The first string is the logical module name.
+
+The second string is the diagnostic source name.
+
+The third `Compile` string is the source text.
+
+`CompileSyntax` receives the syntax node as its third argument.
+
+The logical module name creates every `QualifiedKey` in the new artifact.
+
+It is not a filesystem path.
+
+The source name identifies diagnostic spans and debug source records.
+
+It never affects definition identity, slot identity, or compatibility.
+
+`CompileEnv.definitions` maps local declaration names to verified `DefinitionSpec` values.
+
+The compiler rejects a mapped declaration when its qualified key or slot contract changes.
 
 The compiler validates the selected source before it creates an artifact.
 
@@ -818,6 +923,10 @@ Dense installed indices and holder-local handles can differ between installation
 
 Slot keys and contracts remain stable across these paths.
 
+Both paths accept the same logical module name and diagnostic source name.
+
+Both paths apply the same `CompileEnv.definitions` bindings.
+
 ### 12.2 Definition source records
 
 An artifact can carry an optional source attachment in its debug section.
@@ -840,13 +949,17 @@ It does affect the exact container hash.
 
 The selected node is one definition or one required recursive definition group.
 
-It also contains the logical path, slot specifications, and declared contract identity.
+It also contains the diagnostic source name, slot specifications, and declared contract identity.
 
 Tools can inspect or transform that node with the public syntax API.
 
 They can pass the result to `Compiler.CompileSyntax`.
 
 The compiler checks the edited definition against supplied compile bindings.
+
+`DefinitionSource` is an editing convenience. It is not the compatibility authority.
+
+`DefinitionSpec` supplies that authority without source text.
 
 Code without source attachment still installs and executes normally.
 
@@ -1097,6 +1210,12 @@ Both snapshot forms record these items:
 - selected process state and resource blockers.
 
 Slot targets are code state. A snapshot records their exact versions.
+
+Snapshots also retain reachable prepared `SlotChange` values.
+
+A restored change keeps its captured version.
+
+A restored stale change remains stale and fails during publication.
 
 A class slot records both its nominal class identity and constructor version.
 

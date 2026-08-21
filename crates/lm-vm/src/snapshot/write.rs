@@ -479,6 +479,9 @@ impl World {
                     Object::NativeVm { image, generation }
                     | Object::NativeCodeHandle {
                         image, generation, ..
+                    }
+                    | Object::NativeSlotChange {
+                        image, generation, ..
                     } => {
                         self.append_image_key(
                             VmImageKey {
@@ -821,6 +824,7 @@ impl World {
         Ok(ImageVm {
             limits: image_limits(record.config),
             slots,
+            slot_versions: record.slot_versions.clone(),
             objects,
             instances,
         })
@@ -1105,6 +1109,32 @@ impl World {
                         instance: *instance,
                         kind: *kind,
                         index: *index,
+                    }
+                }
+                Object::NativeSlotChange {
+                    image,
+                    generation,
+                    slot,
+                    version,
+                    kind,
+                    target,
+                } => {
+                    let key = VmImageKey {
+                        image: *image,
+                        generation: *generation,
+                    };
+                    Object::NativeSlotChange {
+                        image: image_ordinal(key).ok_or_else(|| {
+                            SnapshotFail::Fault(
+                                FaultCode::BoundaryViolation,
+                                "a slot change has no VM image ordinal".to_string(),
+                            )
+                        })?,
+                        generation: 0,
+                        slot: *slot,
+                        version: *version,
+                        kind: *kind,
+                        target: map_value(*target),
                     }
                 }
                 Object::NativeRun { vm: target } => Object::NativeRun {

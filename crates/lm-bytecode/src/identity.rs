@@ -910,6 +910,7 @@ fn preflight_extended(
             }
         }
         ExtendedInstr::AsCallback
+        | ExtendedInstr::CodeDefinition
         | ExtendedInstr::ListEpoch
         | ExtendedInstr::ListIterLen
         | ExtendedInstr::MapEpoch
@@ -2006,6 +2007,7 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::CodeSource { .. } => 0xe7,
             ExtendedInstr::FaultSite { .. } => 0xe8,
             ExtendedInstr::FaultTrace { .. } => 0xe9,
+            ExtendedInstr::CodeDefinition => 0xea,
         }
     }
 
@@ -2320,6 +2322,7 @@ impl<'a> Resolver<'a> {
                 out.extend_from_slice(&self.type_digest(*ty));
             }
             ExtendedInstr::AsCallback
+            | ExtendedInstr::CodeDefinition
             | ExtendedInstr::ListEpoch
             | ExtendedInstr::ListIterLen
             | ExtendedInstr::MapEpoch

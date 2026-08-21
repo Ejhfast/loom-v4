@@ -11,14 +11,17 @@ end
 final class CompileEnv
   modules: List[VerifiedModule]
   roots: List[(String, String)]
+  definitions: List[(String, DefinitionSpec)]
 
   def init(
     mut self,
     modules: List[VerifiedModule],
-    roots: List[(String, String)]
+    roots: List[(String, String)],
+    definitions: List[(String, DefinitionSpec)]
   )
     self.modules = modules
     self.roots = roots
+    self.definitions = definitions
   end
 end
 

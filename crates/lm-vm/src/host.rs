@@ -44,6 +44,25 @@ pub struct HostCompileModule {
 pub struct HostCompileEnv {
     pub modules: Vec<HostCompileModule>,
     pub roots: Vec<(SharedText, SharedText)>,
+    pub definitions: Vec<HostCompileDefinition>,
+}
+
+/// One stable definition binding for runtime compilation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostCompileDefinition {
+    pub local_name: SharedText,
+    pub module_name: SharedText,
+    pub qualified_key: SharedText,
+    pub contract: [u8; 32],
+    pub slots: Vec<HostCompileSlot>,
+}
+
+/// One verified slot contract for runtime compilation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostCompileSlot {
+    pub artifact: SharedBytes,
+    pub interface: Option<SharedBytes>,
+    pub index: u32,
 }
 
 /// One explicit runtime compiler option set.

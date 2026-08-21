@@ -692,6 +692,7 @@ impl<'m> Oracle<'m> {
             | HExprKind::FunctionCode { .. }
             | HExprKind::ClassCode { .. }
             | HExprKind::CodeSource { .. }
+            | HExprKind::CodeDefinition { .. }
             | HExprKind::OpConst(_)
             | HExprKind::TableEdit { .. }
             | HExprKind::CallArgs { .. }

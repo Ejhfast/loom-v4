@@ -721,7 +721,7 @@ impl World {
     }
 
     fn host_compile_env(&self, vm: VmId, fields: &[Value]) -> Result<HostArg, FaultCode> {
-        let [modules, roots] = fields else {
+        let [modules, roots, definitions] = fields else {
             return Err(FaultCode::TypeMismatch);
         };
         let heap = &self.machines[vm as usize].vm.heap;
@@ -772,9 +772,88 @@ impl World {
             };
             host_roots.push((name.clone(), prefix.clone()));
         }
+
+        let definitions = definitions.as_obj().ok_or(FaultCode::TypeMismatch)?;
+        let Object::List {
+            items: definitions, ..
+        } = heap.get(definitions)
+        else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let mut host_definitions = Vec::new();
+        host_definitions
+            .try_reserve_exact(definitions.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
+        for definition in definitions {
+            let pair = definition.as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let Object::Tuple { items } = heap.get(pair) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let [local_name, definition] = items.as_slice() else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let local_name = local_name.as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let definition = definition.as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let Object::Str(local_name) = heap.get(local_name) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let Object::Instance { class, fields, .. } = heap.get(definition) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            if Some(*class) != self.core.definition_spec || fields.len() != 4 {
+                return Err(FaultCode::TypeMismatch);
+            }
+            let module_name = fields[0].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let qualified_key = fields[1].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let contract = fields[2].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let slots = fields[3].as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let Object::Str(module_name) = heap.get(module_name) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let Object::Str(qualified_key) = heap.get(qualified_key) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let Object::NativeDigest(contract) = heap.get(contract) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let Object::List { items: slots, .. } = heap.get(slots) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let mut host_slots = Vec::new();
+            host_slots
+                .try_reserve_exact(slots.len())
+                .map_err(|_| FaultCode::HeapLimit)?;
+            for slot in slots {
+                let slot = slot.as_obj().ok_or(FaultCode::TypeMismatch)?;
+                let Object::NativeCode(code) = heap.get(slot) else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                if code.kind != lm_heap::PortableCodeKind::SlotSpec {
+                    return Err(FaultCode::TypeMismatch);
+                }
+                host_slots.push(HostCompileSlot {
+                    artifact: code.bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
+                    interface: code
+                        .interface
+                        .as_ref()
+                        .map(|bytes| bytes.try_bounded())
+                        .transpose()
+                        .map_err(|_| FaultCode::HeapLimit)?,
+                    index: code.index,
+                });
+            }
+            host_definitions.push(HostCompileDefinition {
+                local_name: local_name.clone(),
+                module_name: module_name.clone(),
+                qualified_key: qualified_key.clone(),
+                contract: *contract,
+                slots: host_slots,
+            });
+        }
         Ok(HostArg::CompileEnv(HostCompileEnv {
             modules: host_modules,
             roots: host_roots,
+            definitions: host_definitions,
         }))
     }
 

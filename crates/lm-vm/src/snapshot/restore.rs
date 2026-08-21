@@ -579,6 +579,7 @@ impl World {
                 live: true,
                 config,
                 slots,
+                slot_versions: source.slot_versions.clone(),
                 heap,
                 instances,
             };
@@ -1060,6 +1061,7 @@ fn relocate_metadata(
             remap(value);
             *ty = type_map[*ty as usize];
         }
+        Object::NativeSlotChange { target, .. } => remap(target),
         _ => {}
     }
     match object {
@@ -1072,6 +1074,9 @@ fn relocate_metadata(
             *generation = key.generation;
         }
         Object::NativeCodeHandle {
+            image, generation, ..
+        }
+        | Object::NativeSlotChange {
             image, generation, ..
         } => {
             let key = image_keys[*image as usize];

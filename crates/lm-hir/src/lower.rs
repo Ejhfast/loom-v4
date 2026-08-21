@@ -1339,6 +1339,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 let ty = self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::CodeSource { ty }));
             }
+            HExprKind::CodeDefinition { code } => {
+                self.lower_expr(code);
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::CodeDefinition));
+            }
             HExprKind::MakeCallback { func, captures } => {
                 for capture in captures {
                     self.lower_expr(capture);
@@ -2193,7 +2198,9 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         | HExprKind::Capture(_)
         | HExprKind::FunctionCode { .. }
         | HExprKind::ClassCode { .. } => {}
-        HExprKind::CodeSource { code, .. } => shift_expr_in_place(code, base, max),
+        HExprKind::CodeSource { code, .. } | HExprKind::CodeDefinition { code } => {
+            shift_expr_in_place(code, base, max)
+        }
         HExprKind::Not(inner) | HExprKind::Neg(inner) => shift_expr_in_place(inner, base, max),
         HExprKind::Binary { left, right, .. }
         | HExprKind::And(left, right)
@@ -3126,6 +3133,7 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
         ExtendedInstr::MakeCallback { captures, .. } => (*captures as usize, 1),
         ExtendedInstr::FunctionCode { .. } | ExtendedInstr::ClassCode { .. } => (0, 1),
         ExtendedInstr::CodeSource { .. }
+        | ExtendedInstr::CodeDefinition
         | ExtendedInstr::FaultSite { .. }
         | ExtendedInstr::FaultTrace { .. } => (1, 1),
         ExtendedInstr::CallSlot { slot, .. } => {
@@ -3371,6 +3379,7 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::FunctionCode { func } => format!("FunctionCode fn{func}"),
         ExtendedInstr::ClassCode { class } => format!("ClassCode class{class}"),
         ExtendedInstr::CodeSource { ty } => format!("CodeSource ty{ty}"),
+        ExtendedInstr::CodeDefinition => "CodeDefinition".to_string(),
         ExtendedInstr::FaultSite { ty } => format!("FaultSite ty{ty}"),
         ExtendedInstr::FaultTrace { ty } => format!("FaultTrace ty{ty}"),
         ExtendedInstr::AsCallback => "AsCallback".to_string(),

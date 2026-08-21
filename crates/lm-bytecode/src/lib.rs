@@ -35,7 +35,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 140;
+pub const CORE_ROLE_COUNT: usize = 142;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -621,6 +621,8 @@ pub enum ExtendedInstr {
     ClassCode { class: u32 },
     /// Read optional source data from portable definition code.
     CodeSource { ty: u32 },
+    /// Read the stable binding data from portable definition code.
+    CodeDefinition,
     /// Pop a fault and push its primary optional source location.
     FaultSite { ty: u32 },
     /// Pop a fault and push its bounded source trace.
@@ -1308,6 +1310,7 @@ const OP_CLASS_CODE: u8 = 0xe6;
 const OP_CODE_SOURCE: u8 = 0xe7;
 const OP_FAULT_SITE: u8 = 0xe8;
 const OP_FAULT_TRACE: u8 = 0xe9;
+const OP_CODE_DEFINITION: u8 = 0xea;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -2188,6 +2191,7 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
             out.push(OP_CODE_SOURCE);
             write_u32(out, ty);
         }
+        ExtendedInstr::CodeDefinition => out.push(OP_CODE_DEFINITION),
         ExtendedInstr::FaultSite { ty } => {
             out.push(OP_FAULT_SITE);
             write_u32(out, ty);
@@ -3211,6 +3215,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_FUNCTION_CODE => Instr::Extended(ExtendedInstr::FunctionCode { func: cur.u32()? }),
         OP_CLASS_CODE => Instr::Extended(ExtendedInstr::ClassCode { class: cur.u32()? }),
         OP_CODE_SOURCE => Instr::Extended(ExtendedInstr::CodeSource { ty: cur.u32()? }),
+        OP_CODE_DEFINITION => Instr::Extended(ExtendedInstr::CodeDefinition),
         OP_FAULT_SITE => Instr::Extended(ExtendedInstr::FaultSite { ty: cur.u32()? }),
         OP_FAULT_TRACE => Instr::Extended(ExtendedInstr::FaultTrace { ty: cur.u32()? }),
         OP_SB_NEW => Instr::Native(NativeInstr::SbNew),
@@ -3691,6 +3696,7 @@ mod tests {
             Instr::Extended(ExtendedInstr::FunctionCode { func: 0 }),
             Instr::Extended(ExtendedInstr::ClassCode { class: 0 }),
             Instr::Extended(ExtendedInstr::CodeSource { ty: 0 }),
+            Instr::Extended(ExtendedInstr::CodeDefinition),
             Instr::Extended(ExtendedInstr::FaultSite { ty: 0 }),
             Instr::Extended(ExtendedInstr::FaultTrace { ty: 0 }),
             Instr::Native(NativeInstr::SbNew),

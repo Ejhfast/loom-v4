@@ -755,7 +755,9 @@ fn portable_dependency_closure(
             if definition.imported {
                 continue;
             }
-            pending_functions.extend(definition.methods.iter().map(|(_, function)| *function));
+            let methods = definition.methods.iter().map(|(_, function)| *function);
+            out.functions.extend(methods.clone());
+            pending_functions.extend(methods);
             pending_functions.extend(definition.init);
             let mut references = DependencyReferences::default();
             for value in definition.defaults.iter().flatten() {
@@ -872,6 +874,7 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
         | HExprKind::IsType { value, .. }
         | HExprKind::CastType { value, .. }
         | HExprKind::CodeSource { code: value, .. }
+        | HExprKind::CodeDefinition { code: value }
         | HExprKind::CallArgs { call: value }
         | HExprKind::FaultCodeGet { fault: value }
         | HExprKind::FaultSiteGet { fault: value }
@@ -1231,8 +1234,19 @@ pub(crate) fn select_linkage(
             if binding == entry_binding && options.dynamic_result {
                 contract_hash = lm_bytecode::hash::sha256(b"lm-dynamic-entry-contract-v1\0");
             }
+            let key = lm_bytecode::slot_key(&binding, &contract_hash);
+            if spec.contract_hash != [0; 32] && spec.contract_hash != contract_hash {
+                return Err(format!(
+                    "error: `{binding}` does not match its bound slot contract\n"
+                ));
+            }
+            if spec.key != [0; 32] && spec.key != key {
+                return Err(format!(
+                    "error: `{binding}` does not match its bound slot key\n"
+                ));
+            }
             spec.contract_hash = contract_hash;
-            spec.key = lm_bytecode::slot_key(&binding, &contract_hash);
+            spec.key = key;
         }
         if let Some(old) = used_keys.insert(spec.key, binding.clone()) {
             return Err(format!(

@@ -254,6 +254,15 @@ pub enum CodeHandleKind {
     ClassBinding,
 }
 
+/// One pending slot replacement kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotChangeKind {
+    Function,
+    Class,
+    Value,
+    Process,
+}
+
 /// One immutable portable code payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PortableCode {
@@ -324,6 +333,15 @@ pub enum Object {
         instance: u32,
         kind: CodeHandleKind,
         index: u32,
+    },
+    /// One validated replacement plan for an image slot.
+    NativeSlotChange {
+        image: u32,
+        generation: u32,
+        slot: u32,
+        version: u64,
+        kind: SlotChangeKind,
+        target: Value,
     },
     /// A holder-local handle to the policy table of one machine.
     NativeTable { vm: u32 },
@@ -700,9 +718,19 @@ const SHAPE_DYN_VALUE: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_SLOT_CHANGE: ShapeDesc = ShapeDesc {
+    name: "SlotChange",
+    has_refs: true,
+    born_frozen: true,
+    child_order: "the replacement target",
+    boundary: BoundaryPolicy::HolderLocal,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 29] = [
+pub const SHAPES: [&ShapeDesc; 30] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -732,6 +760,7 @@ pub const SHAPES: [&ShapeDesc; 29] = [
     &SHAPE_CODE,
     &SHAPE_CODE_HANDLE,
     &SHAPE_DYN_VALUE,
+    &SHAPE_SLOT_CHANGE,
 ];
 
 impl Object {
@@ -835,6 +864,24 @@ impl Object {
                 kind: *kind,
                 index: *index,
             },
+            Object::NativeSlotChange {
+                image,
+                generation,
+                slot,
+                version,
+                kind,
+                target,
+            } => Object::NativeSlotChange {
+                image: *image,
+                generation: *generation,
+                slot: *slot,
+                version: *version,
+                kind: *kind,
+                target: match target {
+                    Value::Obj(reference) => Value::Obj(map(*reference)),
+                    other => *other,
+                },
+            },
             Object::NativeTable { vm } => Object::NativeTable { vm: *vm },
             Object::NativeRequest { vm, ordinal } => Object::NativeRequest {
                 vm: *vm,
@@ -928,6 +975,7 @@ impl Object {
             Object::NativeCode(_) => 26,
             Object::NativeCodeHandle { .. } => 27,
             Object::DynValue { .. } => 28,
+            Object::NativeSlotChange { .. } => 29,
         }
     }
 
@@ -960,6 +1008,7 @@ impl Object {
                 Object::NativeVm { .. }
                 | Object::NativeRun { .. }
                 | Object::NativeCodeHandle { .. }
+                | Object::NativeSlotChange { .. }
                 | Object::NativeTable { .. }
                 | Object::NativeRequest { .. }
                 | Object::NativeCall { .. }
@@ -1045,6 +1094,7 @@ impl Object {
             Object::NativeTlsStream { .. } => {}
             Object::Substring(_) => {}
             Object::DynValue { value, .. } => visit(value),
+            Object::NativeSlotChange { target, .. } => visit(target),
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items, .. } | Object::Tuple { items } => {
                 items.iter().for_each(&mut visit)
@@ -1211,6 +1261,21 @@ impl Object {
                 value: value(*held),
                 ty: *ty,
             },
+            Object::NativeSlotChange {
+                image,
+                generation,
+                slot,
+                version,
+                kind,
+                target,
+            } => Object::NativeSlotChange {
+                image: *image,
+                generation: *generation,
+                slot: *slot,
+                version: *version,
+                kind: *kind,
+                target: value(*target),
+            },
             _ => return None,
         };
         Some(out)
@@ -1364,6 +1429,14 @@ mod tests {
             Object::DynValue {
                 value: Value::Obj(a),
                 ty: 4,
+            },
+            Object::NativeSlotChange {
+                image: 1,
+                generation: 2,
+                slot: 3,
+                version: 4,
+                kind: SlotChangeKind::Function,
+                target: Value::Obj(b),
             },
         ]
     }
@@ -1553,6 +1626,14 @@ mod tests {
                 value: Value::Unit,
                 ty: 0,
             },
+            Object::NativeSlotChange {
+                image: 0,
+                generation: 0,
+                slot: 0,
+                version: 0,
+                kind: SlotChangeKind::Value,
+                target: Value::Unit,
+            },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1699,6 +1780,7 @@ mod tests {
                 "Wait",
                 "Run",
                 "CodeHandle",
+                "SlotChange",
             ]
         );
     }

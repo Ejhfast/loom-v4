@@ -646,6 +646,21 @@ pub(crate) fn step(
             }
             push(state, *ty)?;
         }
+        Instr::Extended(ExtendedInstr::CodeDefinition) => {
+            let code = pop(state)?;
+            let Some((class, _)) = ctx.as_instance(code) else {
+                return Err(fail("code definition needs portable code".to_string()));
+            };
+            if Some(class) != ctx.core.function_code && Some(class) != ctx.core.class_code {
+                return Err(fail(
+                    "code definition needs FunctionCode or ClassCode".to_string(),
+                ));
+            }
+            let definition = ctx
+                .plain_inst(ctx.core.definition_spec, "DefinitionSpec")
+                .map_err(&fail)?;
+            push(state, definition)?;
+        }
         Instr::Extended(ExtendedInstr::FaultSite { ty }) => {
             let fault = pop(state)?;
             if ctx.ty(fault) != BcType::Fault {
@@ -2041,7 +2056,7 @@ pub(crate) fn step(
                             }
                             push(state, result)?;
                         }
-                        lm_abi::OP_VM_REPLACE_FUNCTION => {
+                        lm_abi::OP_VM_REPLACE_FUNCTION | lm_abi::OP_VM_CHANGE_FUNCTION => {
                             let definition = pop(state)?;
                             let slot = pop(state)?;
                             pop_expect(state, ctx.intern(BcType::Vm))?;
@@ -2087,10 +2102,16 @@ pub(crate) fn step(
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")
                                 .map_err(&fail)?;
-                            let result = ctx.result_inst(TY_UNIT, error).map_err(&fail)?;
+                            let success = if op == lm_abi::OP_VM_CHANGE_FUNCTION {
+                                ctx.plain_inst(ctx.core.slot_change, "SlotChange")
+                                    .map_err(&fail)?
+                            } else {
+                                TY_UNIT
+                            };
+                            let result = ctx.result_inst(success, error).map_err(&fail)?;
                             push(state, result)?;
                         }
-                        lm_abi::OP_VM_REPLACE_CLASS => {
+                        lm_abi::OP_VM_REPLACE_CLASS | lm_abi::OP_VM_CHANGE_CLASS => {
                             let definition = pop(state)?;
                             let slot = pop(state)?;
                             pop_expect(state, ctx.intern(BcType::Vm))?;
@@ -2114,10 +2135,16 @@ pub(crate) fn step(
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")
                                 .map_err(&fail)?;
-                            let result = ctx.result_inst(TY_UNIT, error).map_err(&fail)?;
+                            let success = if op == lm_abi::OP_VM_CHANGE_CLASS {
+                                ctx.plain_inst(ctx.core.slot_change, "SlotChange")
+                                    .map_err(&fail)?
+                            } else {
+                                TY_UNIT
+                            };
+                            let result = ctx.result_inst(success, error).map_err(&fail)?;
                             push(state, result)?;
                         }
-                        lm_abi::OP_VM_REPLACE_VALUE => {
+                        lm_abi::OP_VM_REPLACE_VALUE | lm_abi::OP_VM_CHANGE_VALUE => {
                             pop(state)?;
                             let slot = pop(state)?;
                             pop_expect(state, ctx.intern(BcType::Vm))?;
@@ -2128,10 +2155,16 @@ pub(crate) fn step(
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")
                                 .map_err(&fail)?;
-                            let result = ctx.result_inst(TY_UNIT, error).map_err(&fail)?;
+                            let success = if op == lm_abi::OP_VM_CHANGE_VALUE {
+                                ctx.plain_inst(ctx.core.slot_change, "SlotChange")
+                                    .map_err(&fail)?
+                            } else {
+                                TY_UNIT
+                            };
+                            let result = ctx.result_inst(success, error).map_err(&fail)?;
                             push(state, result)?;
                         }
-                        lm_abi::OP_VM_REPLACE_PROCESS => {
+                        lm_abi::OP_VM_REPLACE_PROCESS | lm_abi::OP_VM_CHANGE_PROCESS => {
                             let process = pop(state)?;
                             if !matches!(ctx.ty(process), BcType::Handle(_, _)) {
                                 return Err(fail(
@@ -2143,6 +2176,29 @@ pub(crate) fn step(
                             let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
                             if slot != slot_ty {
                                 return Err(fail("`Vm.ReplaceProcess` needs a Slot".to_string()));
+                            }
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let success = if op == lm_abi::OP_VM_CHANGE_PROCESS {
+                                ctx.plain_inst(ctx.core.slot_change, "SlotChange")
+                                    .map_err(&fail)?
+                            } else {
+                                TY_UNIT
+                            };
+                            let result = ctx.result_inst(success, error).map_err(&fail)?;
+                            push(state, result)?;
+                        }
+                        lm_abi::OP_VM_REPLACE_ALL => {
+                            let changes = pop(state)?;
+                            pop_expect(state, ctx.intern(BcType::Vm))?;
+                            let change = ctx
+                                .plain_inst(ctx.core.slot_change, "SlotChange")
+                                .map_err(&fail)?;
+                            if ctx.ty(changes) != BcType::List(change) {
+                                return Err(fail(
+                                    "`Vm.ReplaceAll` needs a SlotChange list".to_string(),
+                                ));
                             }
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")

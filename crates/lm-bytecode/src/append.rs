@@ -9,7 +9,7 @@ use crate::{
     BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Instr, Module, SlotContract, SlotSpec,
     SlotTarget, TypeApp, NO_PARENT, NO_ROLE,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The table relocation of one appended module.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,7 +290,11 @@ pub fn append_resolved(
         let contract = reloc_slot_contract(&slot.contract, &reloc);
         let initial = slot.initial.map(|target| reloc_slot_target(target, &reloc));
         let target = if let Some(existing) = slot_index.get(&slot.key).copied() {
-            if merged.slots[existing as usize].contract != contract {
+            if !slot_contracts_match(
+                &merged,
+                &merged.slots[existing as usize].contract,
+                &contract,
+            ) {
                 return Err(fail(format!(
                     "slot {index} has a contract that conflicts with its key"
                 )));
@@ -563,6 +567,189 @@ fn reloc_slot_contract(source: &SlotContract, reloc: &AppendReloc) -> SlotContra
             message: reloc.types[*message as usize],
             result: reloc.types[*result as usize],
         },
+    }
+}
+
+/// Compare two relocated slot contracts by nominal type identity.
+fn slot_contracts_match(module: &Module, left: &SlotContract, right: &SlotContract) -> bool {
+    let mut seen = HashSet::new();
+    match (left, right) {
+        (SlotContract::Function(left), SlotContract::Function(right))
+        | (SlotContract::Method(left), SlotContract::Method(right)) => {
+            callable_contracts_match(module, left, right, &mut seen)
+        }
+        (
+            SlotContract::Class {
+                type_params: left_params,
+                abi: left_abi,
+                ty: left_ty,
+                constructor: left_constructor,
+            },
+            SlotContract::Class {
+                type_params: right_params,
+                abi: right_abi,
+                ty: right_ty,
+                constructor: right_constructor,
+            },
+        ) => {
+            left_params == right_params
+                && left_abi == right_abi
+                && type_refs_match(module, *left_ty, *right_ty, &mut seen)
+                && callable_contracts_match(module, left_constructor, right_constructor, &mut seen)
+        }
+        (SlotContract::Value { ty: left }, SlotContract::Value { ty: right }) => {
+            type_refs_match(module, *left, *right, &mut seen)
+        }
+        (
+            SlotContract::Process {
+                message: left_message,
+                result: left_result,
+            },
+            SlotContract::Process {
+                message: right_message,
+                result: right_result,
+            },
+        ) => {
+            type_refs_match(module, *left_message, *right_message, &mut seen)
+                && type_refs_match(module, *left_result, *right_result, &mut seen)
+        }
+        _ => false,
+    }
+}
+
+fn callable_contracts_match(
+    module: &Module,
+    left: &BcCallableContract,
+    right: &BcCallableContract,
+    seen: &mut HashSet<(u32, u32)>,
+) -> bool {
+    left.type_params == right.type_params
+        && left.effect_params == right.effect_params
+        && left.param_muts == right.param_muts
+        && left.row == right.row
+        && type_bounds_match(module, &left.type_bounds, &right.type_bounds, seen)
+        && type_lists_match(module, &left.params, &right.params, seen)
+        && type_refs_match(module, left.ret, right.ret, seen)
+}
+
+fn type_bounds_match(
+    module: &Module,
+    left: &[Vec<BcInterfaceUse>],
+    right: &[Vec<BcInterfaceUse>],
+    seen: &mut HashSet<(u32, u32)>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| interface_uses_match(module, left, right, seen))
+        })
+}
+
+fn interface_uses_match(
+    module: &Module,
+    left: &BcInterfaceUse,
+    right: &BcInterfaceUse,
+    seen: &mut HashSet<(u32, u32)>,
+) -> bool {
+    left.interface == right.interface
+        && left.rows == right.rows
+        && type_lists_match(module, &left.types, &right.types, seen)
+}
+
+fn type_lists_match(
+    module: &Module,
+    left: &[u32],
+    right: &[u32],
+    seen: &mut HashSet<(u32, u32)>,
+) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| type_refs_match(module, *left, *right, seen))
+}
+
+fn class_refs_match(module: &Module, left: u32, right: u32) -> bool {
+    let Some(left) = module.classes.get(left as usize) else {
+        return false;
+    };
+    let Some(right) = module.classes.get(right as usize) else {
+        return false;
+    };
+    left.key == right.key
+}
+
+fn type_refs_match(module: &Module, left: u32, right: u32, seen: &mut HashSet<(u32, u32)>) -> bool {
+    if left == right {
+        return true;
+    }
+    if !seen.insert((left, right)) {
+        return true;
+    }
+    let Some(left_ty) = module.types.get(left as usize) else {
+        return false;
+    };
+    let Some(right_ty) = module.types.get(right as usize) else {
+        return false;
+    };
+    match (left_ty, right_ty) {
+        (BcType::Class(left), BcType::Class(right)) => class_refs_match(module, *left, *right),
+        (BcType::Inst(left, left_args), BcType::Inst(right, right_args)) => {
+            class_refs_match(module, *left, *right)
+                && type_lists_match(module, left_args, right_args, seen)
+        }
+        (BcType::List(left), BcType::List(right))
+        | (BcType::Run(left), BcType::Run(right))
+        | (BcType::Wait(left), BcType::Wait(right))
+        | (BcType::RunSnapshot(left), BcType::RunSnapshot(right)) => {
+            type_refs_match(module, *left, *right, seen)
+        }
+        (BcType::Map(left_key, left_value), BcType::Map(right_key, right_value))
+        | (
+            BcType::PendingCall(left_key, left_value),
+            BcType::PendingCall(right_key, right_value),
+        )
+        | (BcType::Handle(left_key, left_value), BcType::Handle(right_key, right_value)) => {
+            type_refs_match(module, *left_key, *right_key, seen)
+                && type_refs_match(module, *left_value, *right_value, seen)
+        }
+        (BcType::Tuple(left), BcType::Tuple(right)) => type_lists_match(module, left, right, seen),
+        (
+            BcType::Fn(left_params, left_muts, left_result, left_row),
+            BcType::Fn(right_params, right_muts, right_result, right_row),
+        )
+        | (
+            BcType::Callback(left_params, left_muts, left_result, left_row),
+            BcType::Callback(right_params, right_muts, right_result, right_row),
+        ) => {
+            left_muts == right_muts
+                && left_row == right_row
+                && type_lists_match(module, left_params, right_params, seen)
+                && type_refs_match(module, *left_result, *right_result, seen)
+        }
+        (
+            BcType::Projection {
+                base: left_base,
+                interface: left_interface,
+                assoc: left_assoc,
+            },
+            BcType::Projection {
+                base: right_base,
+                interface: right_interface,
+                assoc: right_assoc,
+            },
+        ) => {
+            left_interface == right_interface
+                && left_assoc == right_assoc
+                && type_refs_match(module, *left_base, *right_base, seen)
+        }
+        (BcType::Op(left_op, left_fn), BcType::Op(right_op, right_fn)) => {
+            left_op == right_op && type_refs_match(module, *left_fn, *right_fn, seen)
+        }
+        _ => false,
     }
 }
 
@@ -839,6 +1026,7 @@ fn reloc_extended(instruction: &ExtendedInstr, reloc: &AppendReloc) -> ExtendedI
         ExtendedInstr::CodeSource { ty } => ExtendedInstr::CodeSource {
             ty: reloc.types[*ty as usize],
         },
+        ExtendedInstr::CodeDefinition => ExtendedInstr::CodeDefinition,
         ExtendedInstr::FaultSite { ty } => ExtendedInstr::FaultSite {
             ty: reloc.types[*ty as usize],
         },

@@ -35,7 +35,11 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_REPLACE_FUNCTION
             | lm_abi::OP_VM_REPLACE_CLASS
             | lm_abi::OP_VM_REPLACE_VALUE
-            | lm_abi::OP_VM_REPLACE_PROCESS => 3,
+            | lm_abi::OP_VM_REPLACE_PROCESS
+            | lm_abi::OP_VM_CHANGE_FUNCTION
+            | lm_abi::OP_VM_CHANGE_CLASS
+            | lm_abi::OP_VM_CHANGE_VALUE
+            | lm_abi::OP_VM_CHANGE_PROCESS => 3,
             lm_abi::OP_PROC_RUN
             | lm_abi::OP_PROC_CLOSE
             | lm_abi::OP_PROC_DONE
@@ -68,6 +72,7 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_SNAPSHOT_WAIT_HELD
             | lm_abi::OP_PROC_SNAPSHOT_WAIT
             | lm_abi::OP_VM_RESOURCE_SAME
+            | lm_abi::OP_VM_REPLACE_ALL
             | lm_abi::OP_WAIT_CHOOSE => 2,
             lm_abi::OP_VM_INSTALL
             | lm_abi::OP_VM_INSTANCE_FUNCTION

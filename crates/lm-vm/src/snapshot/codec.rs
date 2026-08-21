@@ -37,7 +37,7 @@ use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
 use lm_heap::{
     CodeHandleKind, FaultSite, MapIndex, NativeByteBuffer, NativeStringBuilder, Object,
-    PortableCode, PortableCodeKind, StructuralEpoch,
+    PortableCode, PortableCodeKind, SlotChangeKind, StructuralEpoch,
 };
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::cell::Cell;
@@ -580,6 +580,26 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.leb(*ty as u64);
             out.value(*value);
         }
+        Object::NativeSlotChange {
+            image,
+            generation,
+            slot,
+            version,
+            kind,
+            target,
+        } => {
+            out.leb(*image as u64);
+            out.u32(*generation);
+            out.leb(*slot as u64);
+            out.u64(*version);
+            out.u8(match kind {
+                SlotChangeKind::Function => 0,
+                SlotChangeKind::Class => 1,
+                SlotChangeKind::Value => 2,
+                SlotChangeKind::Process => 3,
+            });
+            out.value(*target);
+        }
         Object::NativeRequest { vm, ordinal } => {
             out.leb(*vm as u64);
             out.u64(*ordinal);
@@ -635,8 +655,14 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
     };
     for image in &image.vm_images {
         encode_limits(&mut out, &image.limits);
+        if image.slots.len() != image.slot_versions.len() {
+            return Err(SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "a VM image has another slot version count".to_string(),
+            ));
+        }
         out.leb(image.slots.len() as u64);
-        for target in &image.slots {
+        for (target, version) in image.slots.iter().zip(&image.slot_versions) {
             match target {
                 ImageSlotTarget::Empty => out.u8(0),
                 ImageSlotTarget::Function(func) => {
@@ -658,6 +684,7 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
                     out.u32(*generation);
                 }
             }
+            out.u64(*version);
         }
         out.leb(image.instances.len() as u64);
         for instance in &image.instances {
@@ -1489,6 +1516,7 @@ fn decode_inner(
         let limits = decode_limits(&mut records)?;
         let slot_count = records.count(ctx.limits.max_code_slots as u64, "VM slot")?;
         let mut slots = records.vector(slot_count, "VM slot table")?;
+        let mut slot_versions = records.vector(slot_count, "VM slot version table")?;
         for _ in 0..slot_count {
             let target = match records.u8()? {
                 0 => ImageSlotTarget::Empty,
@@ -1525,6 +1553,7 @@ fn decode_inner(
                 }
             };
             slots.push(target);
+            slot_versions.push(records.u64()?);
         }
         let instance_count = records.count(ctx.limits.max_code_slots as u64, "module instance")?;
         let mut instances = records.vector(instance_count, "module instance table")?;
@@ -1576,6 +1605,7 @@ fn decode_inner(
         vm_images.push(ImageVm {
             limits,
             slots,
+            slot_versions,
             objects,
             instances,
         });
@@ -2213,6 +2243,35 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             ty: closed_ref(cur, ctx.type_count)?,
             value: decode_value(cur, objects, 0)?,
         },
+        29 => {
+            let image = image_ref(cur, ctx)?;
+            let generation = cur.u32()?;
+            let slot = u32::try_from(cur.leb()?).map_err(|_| {
+                ImageError::new(ImageReason::Reference, "a slot index is too large")
+            })?;
+            let version = cur.u64()?;
+            let kind = match cur.u8()? {
+                0 => SlotChangeKind::Function,
+                1 => SlotChangeKind::Class,
+                2 => SlotChangeKind::Value,
+                3 => SlotChangeKind::Process,
+                _ => {
+                    return err(
+                        ImageReason::Layout,
+                        "a slot change kind is invalid".to_string(),
+                    )
+                }
+            };
+            let target = decode_value(cur, objects, 0)?;
+            Object::NativeSlotChange {
+                image,
+                generation,
+                slot,
+                version,
+                kind,
+                target,
+            }
+        }
         other => {
             return err(
                 ImageReason::Layout,

@@ -565,6 +565,9 @@ impl World {
                     } => format!(
                         "<{kind:?} {index} in instance {instance} of VM {image}:{generation}>"
                     ),
+                    Object::NativeSlotChange { slot, kind, .. } => {
+                        format!("<{kind:?} change for slot {slot}>")
+                    }
                     Object::NativeTable { vm } => format!("<table {vm}>"),
                     Object::NativeRequest { .. } => "<request>".to_string(),
                     Object::NativeCall { op, .. } => {

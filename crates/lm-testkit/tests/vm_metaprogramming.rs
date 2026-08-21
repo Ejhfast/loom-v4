@@ -223,7 +223,11 @@ execute()
 fn portable_function_code_installs_without_a_module_handle() {
     let source = r#"
 def execute(): Result[Int, String] with Compiler.Compile, Compiler.Verify, Vm
-  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
   options = CompileOptions(
     is_main: true,
     dynamic_result: false,
@@ -232,6 +236,7 @@ def execute(): Result[Int, String] with Compiler.Compile, Compiler.Verify, Vm
     late_classes: List[String]()
   )
   artifact = sys.compiler.compile(
+    "portable-function.lm",
     "portable-function.lm",
     "def add(value: Int): Int\n  value + 1\nend\n0\n",
     env,
@@ -381,7 +386,7 @@ def second(): Int
   1
 end
 
-def execute(): (Bool, Bool)
+def execute(): (Bool, Bool, Bool, Bool)
   first_source = case codeof(first).source()
   in Some(source) then source.syntax.text().contains("def first")
   in None then false
@@ -390,25 +395,48 @@ def execute(): (Bool, Bool)
   in Some(source) then source.syntax.text().contains("def second")
   in None then false
   end
-  (first_source, second_source)
+  (
+    first_source,
+    second_source,
+    codeof(first).definition().qualified_key == "first",
+    codeof(second).definition().qualified_key == "second"
+  )
 end
 
 execute()
 "#;
-    assert_eq!(run_with_files(source, &[]), "Done((true, true))");
+    assert_eq!(
+        run_with_files(source, &[]),
+        "Done((true, true, true, true))"
+    );
 }
 
 #[test]
-fn loom_edits_named_code_syntax_then_installs_the_result() {
+fn loom_edits_named_code_syntax_then_replaces_its_binding() {
     let source = r#"
 def add(value: Int): Int
   value + 1
 end
 
-def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
-  original = case codeof(add).source()
+def call_add(
+  image: Vm,
+  function: FunctionBinding[(Int,), Int]
+): Result[Int, String] with Vm
+  run = image.activate(function, args: (1,)).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Done(value) then Ok(value)
+  in Fault(_) then Err("the edited function faulted")
+  end
+end
+
+def execute(): Result[(Int, Int), String] with Compiler.CompileSyntax, Compiler.Verify, Vm
+  portable = codeof(add)
+  definition = portable.definition()
+  original = case portable.source()
   in Some(source) then source.syntax
-  in None then return -1
+  in None then return Err("the function has no syntax")
   end
   children = original.children()
   builder = SyntaxBuilder()
@@ -420,7 +448,13 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
     index = index + 1
   end
   edited = original.with_children(children)
-  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  definitions = List[(String, DefinitionSpec)]()
+  definitions.push(("add", definition))
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    definitions
+  )
   options = CompileOptions(
     is_main: false,
     dynamic_result: false,
@@ -428,36 +462,34 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  artifact = case sys.compiler.compile_syntax(edited, env, options)
-  in Ok(value) then value
-  in Err(_) then return -2
-  end
-  module = case artifact.verify()
-  in Ok(value) then value
-  in Err(_) then return -3
-  end
-  code = case module.function_code[(Int,), Int]("add")
-  in Ok(value) then value
-  in Err(_) then return -4
-  end
+  artifact = sys.compiler.compile_syntax(
+    definition.module_name,
+    "edited-add.lm",
+    edited,
+    env,
+    options
+  ).map_error() { |error: CompileErrors| error.message }?
+  module = artifact.verify().map_error() { |error: CodeError| error.message }?
+  code = module.function_code[(Int,), Int]("add").map_error() {
+    |error: CodeError| error.message
+  }?
   image = sys.vm.Vm()
-  definition = case image.install(code)
-  in Ok(value) then value
-  in Err(_) then return -5
-  end
-  run = case image.activate(definition, args: (1,))
-  in Ok(value) then value
-  in Err(_) then return -6
-  end
-  case run.run()
-  in Done(value) then value
-  in Fault(_) then -7
-  end
+  original_binding = image.install(portable).map_error() {
+    |error: CodeError| error.message
+  }?
+  replacement = image.install(code).map_error() {
+    |error: CodeError| error.message
+  }?
+  before = call_add(image, original_binding)?
+  image.replace(original_binding, replacement).map_error() {
+    |error: CodeError| error.message
+  }?
+  Ok((before, call_add(image, original_binding)?))
 end
 
 execute()
 "#;
-    assert_eq!(run_with_compiler(source), "Done(42)");
+    assert_eq!(run_with_compiler(source), "Done(Ok((2, 42)))");
 }
 
 #[test]
@@ -503,8 +535,12 @@ def compile_box(source: String): Result[VerifiedModule, String] with Compiler.Co
     late_functions: List[String](),
     late_classes: classes
   )
-  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
-  artifact = sys.compiler.compile("box", source, env, options).map_error() {
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
+  artifact = sys.compiler.compile("box", "box.lm", source, env, options).map_error() {
     |error: CompileErrors| error.message
   }?
   artifact.verify().map_error() { |error: CodeError| error.message }
@@ -556,10 +592,341 @@ execute()
 }
 
 #[test]
+fn direct_class_redefinition_uses_verified_binding_data() {
+    let source = r#"
+final class Box
+  value: Int = 5
+
+  def amount(self): Int
+    self.value + 1
+  end
+end
+
+def read_box(): Int
+  Box().amount()
+end
+
+def run_read(image: Vm, function: FunctionBinding[(), Int]): Result[Int, String] with Vm
+  run = image.activate(function, args: ()).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Done(value) then Ok(value)
+  in Fault(_) then Err("the read faulted")
+  end
+end
+
+def execute(): Result[(Int, Int, String), String] with Compiler.Compile, Compiler.Verify, Vm
+  original_code = codeof(Box)
+  definition = original_code.definition()
+  definitions = List[(String, DefinitionSpec)]()
+  definitions.push(("Box", definition))
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    definitions
+  )
+  options = CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = sys.compiler.compile(
+    definition.module_name,
+    "unrelated-patch-name.lm",
+    "final class Box\n  value: Int = 50\n\n  def amount(self): Int\n    self.value + 10\n  end\nend\n",
+    env,
+    options
+  ).map_error() { |error: CompileErrors| error.message }?
+  module = artifact.verify().map_error() { |error: CodeError| error.message }?
+  replacement_code = module.class_code("Box").map_error() {
+    |error: CodeError| error.message
+  }?
+
+  image = sys.vm.Vm()
+  original = image.install(original_code).map_error() {
+    |error: CodeError| error.message
+  }?
+  reader = image.install(read_box).map_error() { |error: CodeError| error.message }?
+  replacement = image.install(replacement_code).map_error() {
+    |error: CodeError| error.message
+  }?
+  original_instance = original.instance().map_error() {
+    |error: CodeError| error.message
+  }?
+  replacement_instance = replacement.instance().map_error() {
+    |error: CodeError| error.message
+  }?
+  original_amount = original_instance.function_binding[(Box,), Int]("Box.amount").map_error() {
+    |error: CodeError| error.message
+  }?
+  replacement_amount = replacement_instance.function_binding[(Box,), Int]("Box.amount").map_error() {
+    |error: CodeError| error.message
+  }?
+  before = run_read(image, reader)?
+  changes = List[SlotChange]()
+  changes.push(image.change(original, replacement).map_error() {
+    |error: CodeError| error.message
+  }?)
+  changes.push(image.change(original_amount, replacement_amount).map_error() {
+    |error: CodeError| error.message
+  }?)
+  image.replace_all(changes).map_error() { |error: CodeError| error.message }?
+  after = run_read(image, reader)?
+  Ok((before, after, definition.qualified_key))
+end
+
+execute()
+"#;
+    assert_eq!(run_with_compiler(source), "Done(Ok((6, 60, \"Box\")))");
+}
+
+#[test]
+fn direct_class_redefinition_rejects_an_abi_change() {
+    let source = r#"
+final class Box
+  value: Int = 5
+end
+
+def execute(): Bool with Compiler.Compile
+  definition = codeof(Box).definition()
+  definitions = List[(String, DefinitionSpec)]()
+  definitions.push(("Box", definition))
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    definitions
+  )
+  options = CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  case sys.compiler.compile(
+    definition.module_name,
+    "incompatible-box.lm",
+    "final class Box\n  value: Int = 5\n  label: String = \"new\"\nend\n",
+    env,
+    options
+  )
+  in Ok(_) then false
+  in Err(error) then error.message.len() > 0
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_compiler(source), "Done(true)");
+}
+
+#[test]
+fn batch_replacement_is_atomic_and_rejects_stale_changes() {
+    let source = r#"
+def first(value: Int): Int
+  value + 1
+end
+
+def second(value: Int): Int
+  value * 2
+end
+
+def next_first(value: Int): Int
+  value + 10
+end
+
+def next_second(value: Int): Int
+  value * 3
+end
+
+def total(value: Int): Int
+  first(value) + second(value)
+end
+
+def call_total(
+  image: Vm,
+  function: FunctionBinding[(Int,), Int],
+  value: Int
+): Result[Int, String] with Vm
+  run = image.activate(function, args: (value,)).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Done(result) then Ok(result)
+  in Fault(_) then Err("the total faulted")
+  end
+end
+
+def execute(): Result[(Int, Int, Bool, Bool, Int), String] with Vm
+  image = sys.vm.Vm()
+  total_binding = image.install(total).map_error() { |error: CodeError| error.message }?
+  first_binding = image.install(first).map_error() { |error: CodeError| error.message }?
+  second_binding = image.install(second).map_error() { |error: CodeError| error.message }?
+  next_first_binding = image.install(next_first).map_error() {
+    |error: CodeError| error.message
+  }?
+  next_second_binding = image.install(next_second).map_error() {
+    |error: CodeError| error.message
+  }?
+  before = call_total(image, total_binding, 5)?
+
+  stale_first = image.change(first_binding, next_first_binding).map_error() {
+    |error: CodeError| error.message
+  }?
+  pending_second = image.change(second_binding, next_second_binding).map_error() {
+    |error: CodeError| error.message
+  }?
+  image.replace(first_binding, next_first_binding).map_error() {
+    |error: CodeError| error.message
+  }?
+  changes = List[SlotChange]()
+  changes.push(pending_second)
+  changes.push(stale_first)
+  stale_rejected = case image.replace_all(changes)
+  in Ok(_) then false
+  in Err(_) then true
+  end
+  after_failed_batch = call_total(image, total_binding, 5)?
+
+  duplicate_second = image.change(second_binding, next_second_binding).map_error() {
+    |error: CodeError| error.message
+  }?
+  duplicates = List[SlotChange]()
+  duplicates.push(duplicate_second)
+  duplicates.push(duplicate_second)
+  duplicate_rejected = case image.replace_all(duplicates)
+  in Ok(_) then false
+  in Err(_) then true
+  end
+
+  fresh_first = image.change(first_binding, next_first_binding).map_error() {
+    |error: CodeError| error.message
+  }?
+  fresh_second = image.change(second_binding, next_second_binding).map_error() {
+    |error: CodeError| error.message
+  }?
+  fresh = List[SlotChange]()
+  fresh.push(fresh_first)
+  fresh.push(fresh_second)
+  image.replace_all(fresh).map_error() { |error: CodeError| error.message }?
+  after_batch = call_total(image, total_binding, 5)?
+  Ok((before, after_failed_batch, stale_rejected, duplicate_rejected, after_batch))
+end
+
+execute()
+"#;
+    assert_eq!(
+        run_with_compiler(source),
+        "Done(Ok((16, 25, true, true, 30)))"
+    );
+}
+
+#[test]
+fn batch_replacement_publishes_function_and_class_targets_together() {
+    let source = r#"
+final class Box
+  value: Int = 5
+end
+
+def fee(value: Int): Int
+  value + 1
+end
+
+def next_fee(value: Int): Int
+  value + 10
+end
+
+def price(): Int
+  Box().value + fee(0)
+end
+
+def run_price(
+  image: Vm,
+  function: FunctionBinding[(), Int]
+): Result[Int, String] with Vm
+  run = image.activate(function, args: ()).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Done(value) then Ok(value)
+  in Fault(_) then Err("the price function faulted")
+  end
+end
+
+def execute(): Result[(Int, Int), String] with Compiler.Compile, Compiler.Verify, Vm
+  portable_box = codeof(Box)
+  definition = portable_box.definition()
+  definitions = List[(String, DefinitionSpec)]()
+  definitions.push(("Box", definition))
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    definitions
+  )
+  options = CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = sys.compiler.compile(
+    definition.module_name,
+    "box-batch-revision.lm",
+    "final class Box\n  value: Int = 50\nend\n",
+    env,
+    options
+  ).map_error() { |error: CompileErrors| error.message }?
+  module = artifact.verify().map_error() { |error: CodeError| error.message }?
+  replacement_code = module.class_code("Box").map_error() {
+    |error: CodeError| error.message
+  }?
+
+  image = sys.vm.Vm()
+  price_binding = image.install(price).map_error() {
+    |error: CodeError| error.message
+  }?
+  box_binding = image.install(portable_box).map_error() {
+    |error: CodeError| error.message
+  }?
+  fee_binding = image.install(fee).map_error() {
+    |error: CodeError| error.message
+  }?
+  next_fee_binding = image.install(next_fee).map_error() {
+    |error: CodeError| error.message
+  }?
+  replacement_box = image.install(replacement_code).map_error() {
+    |error: CodeError| error.message
+  }?
+  before = run_price(image, price_binding)?
+  changes = List[SlotChange]()
+  changes.push(image.change(box_binding, replacement_box).map_error() {
+    |error: CodeError| error.message
+  }?)
+  changes.push(image.change(fee_binding, next_fee_binding).map_error() {
+    |error: CodeError| error.message
+  }?)
+  image.replace_all(changes).map_error() { |error: CodeError| error.message }?
+  Ok((before, run_price(image, price_binding)?))
+end
+
+execute()
+"#;
+    assert_eq!(run_with_compiler(source), "Done(Ok((6, 60)))");
+}
+
+#[test]
 fn an_enum_case_keeps_its_shared_definition_source() {
     let source = r#"
 def execute(): Bool with Compiler.Compile, Compiler.Verify, Vm
-  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
   options = CompileOptions(
     is_main: false,
     dynamic_result: false,
@@ -568,6 +935,7 @@ def execute(): Bool with Compiler.Compile, Compiler.Verify, Vm
     late_classes: List[String]()
   )
   artifact = case sys.compiler.compile(
+    "choice.lm",
     "choice.lm",
     "enum Choice\n  First(value: Int)\n  Second(value: Int)\nend\n",
     env,
@@ -727,7 +1095,8 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
 
   env = CompileEnv(
     List[VerifiedModule](),
-    List[(String, String)]()
+    List[(String, String)](),
+  List[(String, DefinitionSpec)]()
   )
   options = CompileOptions(
     is_main: true,
@@ -736,7 +1105,7 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  artifact = case sys.compiler.compile_syntax(syntax, env, options)
+  artifact = case sys.compiler.compile_syntax("syntax", "syntax.lm", syntax, env, options)
   in Ok(value) then value
   in Err(_)
     return -1
@@ -782,7 +1151,8 @@ def execute(): Bool with Compiler.CompileSyntax
   syntax = builder.invalid(items)
   env = CompileEnv(
     List[VerifiedModule](),
-    List[(String, String)]()
+    List[(String, String)](),
+  List[(String, DefinitionSpec)]()
   )
   options = CompileOptions(
     is_main: true,
@@ -791,7 +1161,7 @@ def execute(): Bool with Compiler.CompileSyntax
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  case sys.compiler.compile_syntax(syntax, env, options)
+  case sys.compiler.compile_syntax("syntax", "syntax.lm", syntax, env, options)
   in Ok(_) then false
   in Err(error) then error.message.len() > 0
   end
@@ -862,7 +1232,8 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   end
   env = CompileEnv(
     List[VerifiedModule](),
-    List[(String, String)]()
+    List[(String, String)](),
+  List[(String, DefinitionSpec)]()
   )
   options = CompileOptions(
     is_main: true,
@@ -871,7 +1242,7 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  artifact = case sys.compiler.compile_syntax(syntax, env, options)
+  artifact = case sys.compiler.compile_syntax("syntax", "syntax.lm", syntax, env, options)
   in Ok(value) then value
   in Err(_)
     return -4
@@ -921,7 +1292,8 @@ def execute(): Bool with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseS
   end
   env = CompileEnv(
     List[VerifiedModule](),
-    List[(String, String)]()
+    List[(String, String)](),
+  List[(String, DefinitionSpec)]()
   )
   options = CompileOptions(
     is_main: true,
@@ -930,7 +1302,7 @@ def execute(): Bool with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseS
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  artifact = case sys.compiler.compile_syntax(syntax, env, options)
+  artifact = case sys.compiler.compile_syntax("syntax", "syntax.lm", syntax, env, options)
   in Ok(value) then value
   in Err(_)
     return false
@@ -982,7 +1354,8 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   end
   env = CompileEnv(
     List[VerifiedModule](),
-    List[(String, String)]()
+    List[(String, String)](),
+  List[(String, DefinitionSpec)]()
   )
   options = CompileOptions(
     is_main: false,
@@ -991,7 +1364,7 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  artifact = case sys.compiler.compile_syntax(syntax, env, options)
+  artifact = case sys.compiler.compile_syntax("syntax", "syntax.lm", syntax, env, options)
   in Ok(value) then value
   in Err(_)
     return -4
@@ -1033,7 +1406,8 @@ fn loom_compiles_verifies_installs_and_runs_source() {
 def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   env = CompileEnv(
     List[VerifiedModule](),
-    List[(String, String)]()
+    List[(String, String)](),
+  List[(String, DefinitionSpec)]()
   )
   options = CompileOptions(
     is_main: true,
@@ -1042,7 +1416,7 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  artifact = case sys.compiler.compile("runtime", "40 + 2\n", env, options)
+  artifact = case sys.compiler.compile("runtime", "runtime.lm", "40 + 2\n", env, options)
   in Ok(value) then value
   in Err(_)
     return -1
@@ -1087,7 +1461,8 @@ def compile_revision(
 ): Result[VerifiedModule, String] with Compiler.Compile, Compiler.Verify
   env = CompileEnv(
     List[VerifiedModule](),
-    List[(String, String)]()
+    List[(String, String)](),
+  List[(String, DefinitionSpec)]()
   )
   options = CompileOptions(
     is_main: true,
@@ -1096,7 +1471,7 @@ def compile_revision(
     late_functions: functions,
     late_classes: List[String]()
   )
-  artifact = sys.compiler.compile("revision", source, env, options).map_error() {
+  artifact = sys.compiler.compile("revision", "revision.lm", source, env, options).map_error() {
     |error: CompileErrors| error.message
   }?
   artifact.verify().map_error() { |error: CodeError| error.message }
@@ -1189,7 +1564,8 @@ fn runtime_compilation_links_an_explicit_provider_instance() {
 def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   empty_env = CompileEnv(
     List[VerifiedModule](),
-    List[(String, String)]()
+    List[(String, String)](),
+  List[(String, DefinitionSpec)]()
   )
   library_options = CompileOptions(
     is_main: false,
@@ -1200,6 +1576,7 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   )
   library_artifact = case sys.compiler.compile(
     "dep",
+    "dep.lm",
     "def add(value: Int): Int\n  value + 2\nend\n",
     empty_env,
     library_options
@@ -1223,7 +1600,8 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
 
   program_env = CompileEnv(
     [library_module],
-    [("dep", "dep")]
+    [("dep", "dep")],
+  List[(String, DefinitionSpec)]()
   )
   program_options = CompileOptions(
     is_main: true,
@@ -1234,6 +1612,7 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   )
   program_artifact = case sys.compiler.compile(
     "app",
+    "app.lm",
     "use dep\ndep.add(40)\n",
     program_env,
     program_options
@@ -1277,7 +1656,11 @@ execute()
 fn runtime_linked_instances_survive_an_external_snapshot() {
     let source = r#"
 def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
-  empty = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  empty = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
   library_options = CompileOptions(
     is_main: false,
     dynamic_result: false,
@@ -1287,6 +1670,7 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   )
   library_artifact = case sys.compiler.compile(
     "dep",
+    "dep.lm",
     "def add(value: Int): Int\n  value + 2\nend\n",
     empty,
     library_options
@@ -1307,7 +1691,11 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   in Err(_)
     return -3
   end
-  program_env = CompileEnv([library_module], [("dep", "dep")])
+  program_env = CompileEnv(
+    [library_module],
+    [("dep", "dep")],
+    List[(String, DefinitionSpec)]()
+  )
   program_options = CompileOptions(
     is_main: true,
     dynamic_result: false,
@@ -1317,6 +1705,7 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   )
   program_artifact = case sys.compiler.compile(
     "app",
+    "app.lm",
     "use dep\ndep.add(40)\n",
     program_env,
     program_options
@@ -1428,7 +1817,8 @@ fn runtime_compilation_returns_rendered_errors() {
 def execute(): Bool with Compiler.Compile
   env = CompileEnv(
     List[VerifiedModule](),
-    List[(String, String)]()
+    List[(String, String)](),
+  List[(String, DefinitionSpec)]()
   )
   options = CompileOptions(
     is_main: true,
@@ -1437,7 +1827,7 @@ def execute(): Bool with Compiler.Compile
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  case sys.compiler.compile("broken", "def", env, options)
+  case sys.compiler.compile("broken", "broken.lm", "def", env, options)
   in Ok(_) then false
   in Err(errors) then errors.message.len() > 0
   end
@@ -1453,7 +1843,8 @@ fn compiler_policy_blocks_runtime_compilation() {
     let source = r#"
 env = CompileEnv(
   List[VerifiedModule](),
-  List[(String, String)]()
+  List[(String, String)](),
+List[(String, DefinitionSpec)]()
 )
 options = CompileOptions(
   is_main: true,
@@ -1462,7 +1853,7 @@ options = CompileOptions(
   late_functions: List[String](),
   late_classes: List[String]()
 )
-sys.compiler.compile("blocked", "1\n", env, options)
+sys.compiler.compile("blocked", "blocked.lm", "1\n", env, options)
 "#;
     let bytes = compile_to_bytes("blocked-compiler.lm", source).expect("the program compiles");
     let loaded = load_bytes(&bytes).expect("the program loads");
@@ -2972,17 +3363,19 @@ def execute(): Int with Vm
   in Ok(value) then value
   in Err(_) then return -3
   end
-  case image.replace(function, replacement)
+  case image.replace(function, function)
   in Ok(_) then ()
   in Err(_) then return -4
   end
+  pending = case image.change(function, replacement)
+  in Ok(value) then value
+  in Err(_) then return -5
+  end
+  changes = List[SlotChange]()
+  changes.push(pending)
   count = 0
   for _ in Range(0, 1000)
     count = count + 1
-  end
-  case image.replace(function, function)
-  in Ok(_) then ()
-  in Err(_) then return -5
   end
   case function.slot()
   in Ok(_) then ()
@@ -2992,13 +3385,17 @@ def execute(): Int with Vm
   in Ok(_) then ()
   in Err(_) then return -7
   end
+  case image.replace_all(changes)
+  in Ok(_) then ()
+  in Err(_) then return -8
+  end
   run = case image.activate(function, args: (41,))
   in Ok(value) then value
-  in Err(_) then return -8
+  in Err(_) then return -9
   end
   case run.run()
   in Done(value) then value
-  in Fault(_) then -9
+  in Fault(_) then -10
   end
 end
 
@@ -3022,52 +3419,18 @@ execute()
         let gate = world.next_gate();
         match world.capture_snapshot(gate, 0, false) {
             Ok(image) => {
-                let handles: Vec<_> = image
+                let has_change = image
                     .world()
                     .machines
                     .iter()
                     .flat_map(|machine| &machine.objects)
-                    .filter_map(|entry| match &entry.object {
-                        lm_heap::Object::NativeCodeHandle {
-                            image,
-                            instance,
-                            kind: lm_heap::CodeHandleKind::FunctionBinding,
-                            index,
-                            ..
-                        } => Some((*image, *instance, *index)),
-                        _ => None,
-                    })
-                    .collect();
-                let replaced = handles.iter().enumerate().any(|(left_index, left)| {
-                    handles.iter().skip(left_index + 1).any(|right| {
-                        if left.0 != right.0 || left.1 != right.1 || left.2 == right.2 {
-                            return false;
-                        }
-                        let Some(record) = image
-                            .world()
-                            .vm_images
-                            .get(left.0 as usize)
-                            .and_then(|image| image.instances.get(left.1 as usize))
-                        else {
-                            return false;
-                        };
-                        let Some(left_slot) = record.slots.get(left.2 as usize) else {
-                            return false;
-                        };
-                        let Some(right_slot) = record.slots.get(right.2 as usize) else {
-                            return false;
-                        };
-                        let slots = &image.world().vm_images[left.0 as usize].slots;
-                        matches!(
-                            (slots.get(*left_slot as usize), slots.get(*right_slot as usize)),
-                            (
-                                Some(lm_vm::snapshot::ImageSlotTarget::Function(left_target)),
-                                Some(lm_vm::snapshot::ImageSlotTarget::Function(right_target))
-                            ) if left_target == right_target
-                        )
-                    })
-                });
-                if replaced {
+                    .any(|entry| matches!(&entry.object, lm_heap::Object::NativeSlotChange { .. }));
+                let has_version = image
+                    .world()
+                    .vm_images
+                    .iter()
+                    .any(|record| record.slot_versions.iter().any(|version| *version > 0));
+                if has_change && has_version {
                     captured = Some(image);
                     break;
                 }
@@ -3089,6 +3452,12 @@ execute()
         .collect();
     assert!(kinds.contains(&lm_heap::CodeHandleKind::FunctionBinding));
     assert!(kinds.contains(&lm_heap::CodeHandleKind::ClassBinding));
+    assert!(captured
+        .world()
+        .machines
+        .iter()
+        .flat_map(|machine| &machine.objects)
+        .any(|entry| matches!(&entry.object, lm_heap::Object::NativeSlotChange { .. })));
 
     let admitted = codec::load_external(
         captured.bytes().expect("the snapshot encodes"),
@@ -3110,7 +3479,7 @@ execute()
     loop {
         match restored.run_machine(root) {
             RootEvent::Done(value) => {
-                assert_eq!(restored.show_result_of(root, value), "42");
+                assert_eq!(restored.show_result_of(root, value), "82");
                 break;
             }
             RootEvent::Ran => {}

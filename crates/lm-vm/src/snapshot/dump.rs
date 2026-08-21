@@ -357,6 +357,17 @@ fn payload(object: &Object) -> String {
         Object::DynValue { value, ty } => {
             format!("dynamic type {ty} value {}", show(*value))
         }
+        Object::NativeSlotChange {
+            image,
+            generation,
+            slot,
+            version,
+            kind,
+            target,
+        } => format!(
+            "{kind:?} change for slot {slot} version {version} in image {image}:{generation} to {}",
+            show(*target)
+        ),
     }
 }
 

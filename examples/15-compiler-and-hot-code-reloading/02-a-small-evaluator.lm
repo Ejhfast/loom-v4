@@ -17,7 +17,11 @@
 # expression prints a value.
 
 def env(): CompileEnv
-  CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
 end
 
 # `dynamic_result` lets the evaluator run source whose result type it
@@ -46,7 +50,7 @@ def holds_only_definitions(root: SyntaxNode): Bool
 end
 
 def evaluate(tree: SyntaxNode): Result[String, CodeError] with Compiler, Vm
-  raw = sys.compiler.compile_syntax(tree, env(), options())
+  raw = sys.compiler.compile_syntax("syntax", "syntax.lm", tree, env(), options())
   artifact = case raw
   in Ok(value) then value
   in Err(problem) then return Err(CodeError(problem.message))

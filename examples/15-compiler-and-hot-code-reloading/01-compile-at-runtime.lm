@@ -19,7 +19,11 @@
 def build(text: String): Result[VerifiedModule, CodeError] with Compiler
   # `CompileEnv` names every outside definition the source may use.
   # These programs use none, so the environment is empty.
-  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
   options = CompileOptions(
     is_main: true,
     dynamic_result: false,
@@ -30,7 +34,7 @@ def build(text: String): Result[VerifiedModule, CodeError] with Compiler
   # A compile error and a code error are different types, so this
   # arm states the conversion. Every later step already answers
   # `CodeError`, so `?` carries those out on its own.
-  artifact = case sys.compiler.compile("formula", text, env, options)
+  artifact = case sys.compiler.compile("formula", "formula.lm", text, env, options)
   in Ok(value) then value
   in Err(problem) then return Err(CodeError(problem.message))
   end

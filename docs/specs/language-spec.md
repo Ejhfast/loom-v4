@@ -216,12 +216,13 @@ One import slot names the providing module, the exported name, the kind, and the
 
 ### 3.4 Primitive compile operation
 
-`CompileEnv` contains verified provider modules and explicit source-root mappings:
+`CompileEnv` contains provider modules, source-root mappings, and verified definition bindings:
 
 ```lm
 env = CompileEnv(
   List[VerifiedModule](),
-  List[(String, String)]()
+  List[(String, String)](),
+  List[(String, DefinitionSpec)]()
 )
 options = CompileOptions(
   is_main: true,
@@ -230,17 +231,21 @@ options = CompileOptions(
   late_functions: List[String](),
   late_classes: List[String]()
 )
-result = sys.compiler.compile("interaction", source, env, options)
+result = sys.compiler.compile("interaction", "interaction.lm", source, env, options)
 ```
 
 Conceptually:
 
 ```text
-Compiler.Compile(String, String, CompileEnv, CompileOptions)
+Compiler.Compile(String, String, String, CompileEnv, CompileOptions)
   -> Result[Artifact, CompileErrors]
 ```
 
-The first string is the logical source path. The second string is the source text.
+The first string is the logical module name.
+
+The second string is the diagnostic source name.
+
+The third string is the source text.
 
 Each provider is a `VerifiedModule` with validated compiler interface metadata.
 
@@ -453,11 +458,13 @@ The type universe has four strata.
 | `VerifiedModule` | Portable verified module revision |
 | `FunctionCode[A,T]` | Portable verified function code |
 | `ClassCode` | Portable verified class code |
+| `DefinitionSpec` | Verified identity and slot contracts for one definition |
 | `DefinitionSource` | Optional syntax and contract data for portable code |
 | `SourceRange` | Half-open byte range in one source text |
 | `CodeLocation` | Function identity, bytecode offset, and optional source location |
 | `FunctionDef[A,T]` | Installed function definition |
 | `ClassDef` | Installed class definition |
+| `SlotChange` | Opaque checked update for one live slot |
 
 **Core-image nominal types** are ordinary source definitions with pinned hashes.
 
@@ -2225,7 +2232,8 @@ end
 
 env = CompileEnv(
   List[VerifiedModule](),
-  List[(String, String)]()
+  List[(String, String)](),
+  List[(String, DefinitionSpec)]()
 )
 options = CompileOptions(
   is_main: true,
@@ -2234,10 +2242,14 @@ options = CompileOptions(
   late_functions: List[String](),
   late_classes: List[String]()
 )
-result = sys.compiler.compile("greeter", src, env, options)
+result = sys.compiler.compile("greeter", "greeter.lm", src, env, options)
 ```
 
-`Compiler.Compile` is one deterministic operation whose ordinary result is `Result[Artifact, CompileErrors]`. It depends only on source bytes, compile-environment interfaces/hashes, options, compiler semantic hash, core-image hash, and operation/intrinsic ABI versions. Blocking it prevents runtime code minting.
+`Compiler.Compile` is deterministic under its explicit inputs.
+
+These inputs include names, source bytes, compile bindings, options, compiler identity, core identity, and ABI versions.
+
+Blocking this operation prevents runtime code creation.
 
 ### 20.2 Artifact API
 
@@ -2309,6 +2321,16 @@ Definitions outside the closure remain static.
 
 `ClassCode.source()` returns `Option[DefinitionSource]`.
 
+`FunctionCode[A,T].definition()` returns `DefinitionSpec`.
+
+`ClassCode.definition()` returns `DefinitionSpec`.
+
+`DefinitionSpec` contains `module_name`, `qualified_key`, `contract`, and `slots` fields.
+
+The module name is a logical namespace. It is not a filesystem path.
+
+The compiler uses `CompileEnv.definitions` to bind local declarations to these verified contracts.
+
 `DefinitionSource` contains `path`, `syntax`, `contract`, and `slots` fields.
 
 The source attachment does not affect semantic or verification hashes.
@@ -2340,6 +2362,16 @@ An installed binding retains both a live slot address and its installation's imm
 Activation through a function binding reads its current slot target.
 
 Replacement through two bindings uses the address binding's slot and the target binding's immutable target.
+
+`Vm.change` prepares one checked function or class update without publishing it.
+
+The typed `change_*` methods also cover values and processes.
+
+`Vm.replace_all` validates one list of prepared changes and publishes it atomically.
+
+The operation rejects duplicate slots and stale slot versions.
+
+The metaprogramming sidecar defines source binding, batch replacement, and class revision rules.
 
 Installation validates and commits code atomically. It does not execute the entry function.
 
@@ -2807,6 +2839,18 @@ Vm.ReplaceClass                (Vm, Slot | ClassBinding,
 Vm.ReplaceValue[T]             (Vm, Slot, T) -> Result[(), CodeError]
 Vm.ReplaceProcess[M,R]         (Vm, Slot, Handle[M,R])
                                 -> Result[(), CodeError]
+Vm.ChangeFunction[A,T]         (Vm, Slot | FunctionBinding[A,T],
+                                FunctionDef[A,T] | FunctionBinding[A,T])
+                                -> Result[SlotChange, CodeError]
+Vm.ChangeClass                 (Vm, Slot | ClassBinding,
+                                ClassDef | ClassBinding)
+                                -> Result[SlotChange, CodeError]
+Vm.ChangeValue[T]              (Vm, Slot, T)
+                                -> Result[SlotChange, CodeError]
+Vm.ChangeProcess[M,R]          (Vm, Slot, Handle[M,R])
+                                -> Result[SlotChange, CodeError]
+Vm.ReplaceAll                  (Vm, List[SlotChange])
+                                -> Result[(), CodeError]
 Vm.SnapshotVm                  (Vm)
                                 -> Result[VmSnapshot, SnapshotError]
 Vm.RestoreVm                   (VmSnapshot) -> Result[Vm, RestoreError]
@@ -2859,6 +2903,12 @@ Dense slot indices remain internal. No public method accepts one.
 A class slot target contains one nominal class identity and one constructor version.
 
 `Vm.ReplaceClass` changes future construction. It does not change existing objects.
+
+Each successful replacement increments the changed slot version.
+
+Each `Vm.Change*` operation captures the current slot version without publishing a target.
+
+`Vm.ReplaceAll` publishes all valid changes together or publishes none.
 
 The metaprogramming sidecar defines the complete slot contracts and replacement rules.
 
@@ -2917,16 +2967,24 @@ Wait tokens are holder-local and one-shot. Section 7.4 defines select syntax.
 ### 23.8 Compiler and reflection
 
 ```text
-Compiler.Compile       (String, String, CompileEnv, CompileOptions)
+Compiler.Compile       (String, String, String, CompileEnv, CompileOptions)
                        -> Result[Artifact, CompileErrors]
-Compiler.CompileSyntax (SyntaxNode, CompileEnv, CompileOptions)
+Compiler.CompileSyntax (String, String, SyntaxNode, CompileEnv, CompileOptions)
                        -> Result[Artifact, CompileErrors]
 Compiler.Verify        (Artifact)
                        -> Result[VerifiedModule, CodeError]
 Reflect.ParseSyntax    (String) -> SyntaxParse
 ```
 
-`Compiler.Compile` receives a logical path before the source text.
+Both compile operations receive a logical module name and a diagnostic source name.
+
+`Compiler.Compile` then receives source text.
+
+`Compiler.CompileSyntax` instead receives one syntax node.
+
+The logical module name creates qualified declaration keys.
+
+The diagnostic source name affects only diagnostics and debug records.
 
 `Compiler.Verify` performs independent bytecode verification. The compiler cannot mint `VerifiedModule` values directly.
 

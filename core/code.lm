@@ -12,6 +12,26 @@ end
 final class ClassCode
 end
 
+final class DefinitionSpec
+  module_name: String
+  qualified_key: String
+  contract: Digest
+  slots: List[SlotSpec]
+
+  def init(
+    mut self,
+    module_name: String,
+    qualified_key: String,
+    contract: Digest,
+    slots: List[SlotSpec]
+  )
+    self.module_name = module_name
+    self.qualified_key = qualified_key
+    self.contract = contract
+    self.slots = slots
+  end
+end
+
 final class DefinitionSource
   path: String
   syntax: SyntaxNode
@@ -39,6 +59,9 @@ final class Instance
 end
 
 final class Slot
+end
+
+final class SlotChange
 end
 
 final class FunctionDef[A, T]

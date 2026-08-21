@@ -151,6 +151,7 @@ enum Kind {
     ClassDef,
     FunctionBinding,
     ClassBinding,
+    SlotChange,
     DynValue,
 }
 
@@ -304,6 +305,8 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::ClassDef)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_CLASS_BINDING] == *class {
                 Node::Heap(Kind::ClassBinding)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_SLOT_CHANGE] == *class {
+                Node::Heap(Kind::SlotChange)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_DYN_VALUE] == *class {
                 Node::Heap(Kind::DynValue)
             } else {
@@ -402,6 +405,7 @@ fn kind_of(object: &Object) -> Kind {
             lm_heap::CodeHandleKind::FunctionBinding => Kind::FunctionBinding,
             lm_heap::CodeHandleKind::ClassBinding => Kind::ClassBinding,
         },
+        Object::NativeSlotChange { .. } => Kind::SlotChange,
         Object::DynValue { .. } => Kind::DynValue,
     }
 }

@@ -28,7 +28,11 @@ end
 def build(name: String, text: String): Result[VerifiedModule, CodeError] with Compiler
   names = List[String]()
   names.push("price")
-  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
   options = CompileOptions(
     is_main: true,
     dynamic_result: false,
@@ -36,7 +40,7 @@ def build(name: String, text: String): Result[VerifiedModule, CodeError] with Co
     late_functions: names,
     late_classes: List[String]()
   )
-  artifact = case sys.compiler.compile(name, text, env, options)
+  artifact = case sys.compiler.compile(name, name, text, env, options)
   in Ok(value) then value
   in Err(problem) then return Err(CodeError(problem.message))
   end

@@ -600,6 +600,7 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_SLOT_SPEC, "SlotSpec"),
         (lm_bytecode::corepin::ROLE_INSTANCE, "Instance"),
         (lm_bytecode::corepin::ROLE_SLOT, "Slot"),
+        (lm_bytecode::corepin::ROLE_SLOT_CHANGE, "SlotChange"),
         (lm_bytecode::corepin::ROLE_CLASS_DEF, "ClassDef"),
     ];
     for (role, name) in native_roles {
@@ -658,6 +659,28 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         {
             return Err(terr(
                 "the DefinitionSource role has an invalid layout".to_string(),
+            ));
+        }
+    }
+    if let Some(definition) = slot(lm_bytecode::corepin::ROLE_DEFINITION_SPEC) {
+        let class = &module.classes[definition as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        let slot_spec = slot(lm_bytecode::corepin::ROLE_SLOT_SPEC);
+        let valid_fields = matches!(fields.as_slice(), [BcType::Str, BcType::Str, BcType::Digest, BcType::List(item)]
+            if matches!(module.types.get(*item as usize), Some(BcType::Class(found)) if Some(*found) == slot_spec));
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !valid_fields
+        {
+            return Err(terr(
+                "the DefinitionSpec role has an invalid layout".to_string(),
             ));
         }
     }
@@ -763,14 +786,26 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             },
             _ => false,
         });
+        let definition = slot(lm_bytecode::corepin::ROLE_DEFINITION_SPEC);
+        let definitions_ok = fields.get(2).is_some_and(|field| match field {
+            BcType::List(element) => match module.types.get(*element as usize) {
+                Some(BcType::Tuple(parts)) if parts.len() == 2 => {
+                    module.types.get(parts[0] as usize) == Some(&BcType::Str)
+                        && matches!(module.types.get(parts[1] as usize), Some(BcType::Class(found)) if Some(*found) == definition)
+                }
+                _ => false,
+            },
+            _ => false,
+        });
         if class.kind != BcClassKind::Normal
             || !class.is_final
             || class.type_params != 0
             || class.parent().is_some()
             || !class.parent_args.is_empty()
-            || fields.len() != 2
+            || fields.len() != 3
             || !modules_ok
             || !roots_ok
+            || !definitions_ok
         {
             return Err(terr(
                 "the CompileEnv role does not name its final environment class".to_string(),

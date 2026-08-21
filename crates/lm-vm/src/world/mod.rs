@@ -22,8 +22,9 @@ use resources::{handle_op_errors, ResourceErrors};
 pub(crate) use show::show_trace_event;
 
 use crate::host::{
-    CoreCtor, Host, HostArg, HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompletion,
-    HostOpenOptions, HostParseStatus, HostSeekFrom, HostStart, HostSyntaxDiagnostic, HostValue,
+    CoreCtor, Host, HostArg, HostCompileDefinition, HostCompileEnv, HostCompileModule,
+    HostCompileOptions, HostCompileSlot, HostCompletion, HostOpenOptions, HostParseStatus,
+    HostSeekFrom, HostStart, HostSyntaxDiagnostic, HostValue,
 };
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, ImageSlotTarget, Machine, MachineState, Mailbox,
@@ -217,6 +218,8 @@ pub(crate) struct VmImageRecord {
     pub(crate) config: VmConfig,
     /// The current targets of the image's late-bound slots.
     pub(crate) slots: Vec<ImageSlotTarget>,
+    /// The replacement version of each late-bound slot.
+    pub(crate) slot_versions: Vec<u64>,
     /// Frozen values owned by value slots in this image.
     pub(crate) heap: Heap,
     /// Module installations owned by this image.

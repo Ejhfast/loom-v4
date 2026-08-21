@@ -1573,6 +1573,7 @@ fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
         ExtendedInstr::CodeSource { ty } => ExtendedInstr::CodeSource {
             ty: reloc.types[*ty as usize],
         },
+        ExtendedInstr::CodeDefinition => ExtendedInstr::CodeDefinition,
         ExtendedInstr::FaultSite { ty } => ExtendedInstr::FaultSite {
             ty: reloc.types[*ty as usize],
         },

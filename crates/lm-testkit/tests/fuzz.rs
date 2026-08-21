@@ -968,6 +968,13 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   image.replace_class(class_slot, class_def)
   image.replace_value(value_slot, 41)
   image.replace_process(process_slot, Worker.spawn())
+  pending = case image.change(function_binding, function_binding)
+  in Ok(value) then value
+  in Err(_)
+    return -9
+  end
+  changes = List[SlotChange]()
+  changes.push(pending)
   xs = [1, 2]
   ys = ["a", "b"]
   total = 0
@@ -976,7 +983,7 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   end
   function_binding.target()
   class_binding.target()
-  total
+  total + changes.len()
 end
 
 go()
@@ -1016,9 +1023,20 @@ go()
                         _ => None,
                     })
                     .collect::<Vec<_>>();
+                let has_change = image.world().machines[0]
+                    .objects
+                    .iter()
+                    .any(|entry| matches!(&entry.object, lm_heap::Object::NativeSlotChange { .. }));
+                let has_version = image
+                    .world()
+                    .vm_images
+                    .iter()
+                    .any(|vm| vm.slot_versions.iter().any(|version| *version > 0));
                 if rich
                     && bindings.contains(&lm_heap::CodeHandleKind::FunctionBinding)
                     && bindings.contains(&lm_heap::CodeHandleKind::ClassBinding)
+                    && has_change
+                    && has_version
                 {
                     best = Some(image.bytes().expect("the image encodes").to_vec());
                     break;

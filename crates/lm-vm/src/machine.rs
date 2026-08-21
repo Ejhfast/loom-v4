@@ -3181,6 +3181,141 @@ impl Machine {
         Ok(())
     }
 
+    /// Read stable binding data from one portable definition.
+    #[inline(never)]
+    fn exec_code_definition(&mut self, module: &Module) -> Result<(), FaultCode> {
+        let reference = self.pop_obj()?;
+        let code = match self.vm.heap.get(reference) {
+            Object::NativeCode(code)
+                if matches!(
+                    code.kind,
+                    lm_heap::PortableCodeKind::Function | lm_heap::PortableCodeKind::Class
+                ) =>
+            {
+                (**code).clone()
+            }
+            _ => return Err(BAD_TYPE),
+        };
+        let decoded = lm_bytecode::decode(code.bytes.as_slice()).map_err(|_| BAD_STATE)?;
+        let identity = lm_bytecode::identity::module_identity(&decoded).map_err(|_| BAD_STATE)?;
+        let (qualified_key, module_name, contract, related_functions) = match code.kind {
+            lm_heap::PortableCodeKind::Function => {
+                let binding = decoded
+                    .bindings
+                    .iter()
+                    .filter(|binding| {
+                        binding.func == code.index && binding.class == lm_bytecode::NO_CLASS
+                    })
+                    .min_by(|left, right| left.key.cmp(&right.key))
+                    .ok_or(BAD_STATE)?;
+                let module_name = binding
+                    .key
+                    .rsplit_once('.')
+                    .map_or("", |(prefix, _)| prefix)
+                    .to_string();
+                let contract = *identity
+                    .func_hashes
+                    .get(code.index as usize)
+                    .ok_or(BAD_STATE)?;
+                (binding.key.clone(), module_name, contract, vec![code.index])
+            }
+            lm_heap::PortableCodeKind::Class => {
+                let class = decoded.classes.get(code.index as usize).ok_or(BAD_STATE)?;
+                let suffix = format!(".{}", class.name);
+                let module_name = if class.key == class.name {
+                    String::new()
+                } else {
+                    class
+                        .key
+                        .strip_suffix(&suffix)
+                        .ok_or(BAD_STATE)?
+                        .to_string()
+                };
+                let contract = *identity
+                    .class_hashes
+                    .get(code.index as usize)
+                    .ok_or(BAD_STATE)?;
+                let related = class
+                    .methods
+                    .iter()
+                    .map(|(_, function)| *function)
+                    .collect();
+                (class.key.clone(), module_name, contract, related)
+            }
+            _ => return Err(BAD_TYPE),
+        };
+        let definition_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_SPEC];
+        if definition_class == lm_bytecode::NO_ROLE {
+            return Err(BAD_STATE);
+        }
+
+        let root = self.vm.operands.len();
+        let module_name =
+            SharedText::try_from_string(module_name).map_err(|_| FaultCode::HeapLimit)?;
+        let module_name = self.alloc(Object::Str(module_name))?;
+        self.push(module_name)?;
+        let qualified_key =
+            SharedText::try_from_string(qualified_key).map_err(|_| FaultCode::HeapLimit)?;
+        let qualified_key = self.alloc(Object::Str(qualified_key))?;
+        self.push(qualified_key)?;
+        let contract = self.alloc(Object::NativeDigest(contract))?;
+        self.push(contract)?;
+
+        let mut slot_values = Vec::new();
+        slot_values
+            .try_reserve_exact(decoded.slots.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
+        for (index, slot) in decoded.slots.iter().enumerate() {
+            let matches = match (code.kind, slot.initial) {
+                (
+                    lm_heap::PortableCodeKind::Function,
+                    Some(lm_bytecode::SlotTarget::Function(target)),
+                ) => target == code.index,
+                (
+                    lm_heap::PortableCodeKind::Class,
+                    Some(lm_bytecode::SlotTarget::Class { class, .. }),
+                ) => class == code.index,
+                (
+                    lm_heap::PortableCodeKind::Class,
+                    Some(lm_bytecode::SlotTarget::Function(target)),
+                ) => related_functions.contains(&target),
+                _ => false,
+            };
+            if !matches {
+                continue;
+            }
+            let index = u32::try_from(index).map_err(|_| BAD_STATE)?;
+            let value = self.alloc(Object::NativeCode(Box::new(lm_heap::PortableCode {
+                kind: lm_heap::PortableCodeKind::SlotSpec,
+                bytes: code.bytes.clone(),
+                interface: code.interface.clone(),
+                index,
+                origin: None,
+            })))?;
+            self.push(value)?;
+            slot_values.push(value);
+        }
+        if slot_values.is_empty() {
+            return Err(BAD_STATE);
+        }
+        let slots = self.alloc(Object::List {
+            items: slot_values,
+            epoch: StructuralEpoch::default(),
+        })?;
+        let slots_reference = slots.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(slots_reference);
+        self.push(slots)?;
+        let value = self.alloc(Object::Instance {
+            class: definition_class,
+            fields: vec![module_name, qualified_key, contract, slots],
+            env: Witness::EMPTY,
+        })?;
+        let definition_reference = value.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(definition_reference);
+        self.vm.operands.truncate(root);
+        self.push(value)
+    }
+
     /// Build one public source location for a compact fault coordinate.
     fn alloc_fault_location(
         &mut self,
@@ -3796,6 +3931,9 @@ impl Machine {
             }
             ExtendedInstr::CodeSource { ty } => {
                 self.exec_code_source(module, envs, ty)?;
+            }
+            ExtendedInstr::CodeDefinition => {
+                self.exec_code_definition(module)?;
             }
             ExtendedInstr::FaultSite { ty } => {
                 self.exec_fault_locations(module, envs, ty, true)?;
