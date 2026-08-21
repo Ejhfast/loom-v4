@@ -518,7 +518,7 @@ impl World {
 
     /// The stored fault record of one machine.
     pub fn fault_of(&self, vm: VmId) -> Option<&FaultRec> {
-        match &self.machines[vm as usize].vm.terminal {
+        match &self.machines.get(vm as usize)?.vm.terminal {
             Some(Terminal::Fault(rec)) => Some(rec),
             _ => None,
         }

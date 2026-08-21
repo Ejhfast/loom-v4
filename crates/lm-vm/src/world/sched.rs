@@ -743,6 +743,16 @@ impl World {
             && !self.suspended.contains_key(&key.vm)
         {
             self.complete_blocked_machine(key.vm);
+            // A completed operation can install another block.
+            // Report that block before a new activation starts.
+            match self.task_status(key) {
+                TaskStatus::Dormant => return None,
+                TaskStatus::Terminal => return Some(SliceExit::Terminal),
+                TaskStatus::Blocked(wake) => return Some(SliceExit::Blocked(wake)),
+                TaskStatus::Waiting(completion) => return Some(SliceExit::Waiting(completion)),
+                TaskStatus::Parked(wait) => return Some(SliceExit::Parked(wait)),
+                TaskStatus::Ready => {}
+            }
         }
         let event = if self.suspended.contains_key(&key.vm) {
             self.resume_stack_with_quantum(key.vm, Some(quantum.max(1)))
