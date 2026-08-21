@@ -30,8 +30,8 @@ pub mod dump;
 pub mod restore;
 pub mod write;
 
-pub use admit::{admit, AdmissionBudget};
-pub use codec::{load_external, DecodeBudget};
+pub use admit::{admit, AdmissionBudget, AdmissionCache};
+pub use codec::{load_external, load_external_cached, DecodeBudget};
 pub use write::{CutError, CutReport};
 
 use crate::machine::VmId;

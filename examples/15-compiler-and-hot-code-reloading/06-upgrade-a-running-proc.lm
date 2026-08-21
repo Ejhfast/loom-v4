@@ -1,0 +1,126 @@
+# Change the code of a running process, and keep the process.
+#
+# Run with `--allow Vm,Proc`. No compiler, and no source text: every
+# definition below is ordinary Loom, written the way any program
+# writes one.
+#
+# `codeof` reifies a named definition. `Vm.install` puts one into a
+# VM and answers a binding, which is the definition together with the
+# slot it now occupies. A binding is both a place to replace and a
+# thing to replace with, so an upgrade names two of them.
+#
+# `Worker` calls `rate` through that slot. Replacing the slot changes
+# what the next call reaches. The worker keeps its mailbox, its
+# frame, and its place in the loop.
+#
+# The pause is the safe point. A running process may sit between any
+# two instructions, so the VM refuses a replacement until the process
+# stops. `pause` makes that moment explicit, and `resume` gives the
+# process back to the scheduler.
+
+class Collector < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(value) then value
+    in Closed then -1
+    end
+  end
+end
+
+# The rule in service, and the rule that replaces it. Both are plain
+# definitions with the same shape.
+def rate(value: Int): Int
+  value * 2
+end
+
+def with_fee(value: Int): Int
+  value * 2 + 10
+end
+
+# The service. It prices each order through `rate` and answers on the
+# reply handle the order carries.
+class Worker < Proc[(Int, Handle[Int, Int])]
+  def on_spawn(self): Int with Proc
+    served = 0
+    loop do
+      case self.receive()
+      in Msg((amount, reply))
+        reply.send(rate(amount))
+        served = served + 1
+      in Closed
+        return served
+      end
+    end
+  end
+end
+
+# The worker starts inside the VM, so its calls read that VM's slots.
+# It starts paused, and the holder resumes it.
+def launch(): Handle[(Int, Handle[Int, Int]), Int] with Proc
+  worker = Worker.spawn()
+  worker.pause()
+  worker
+end
+
+# One request and one reply. The order carries a fresh mailbox for
+# its answer.
+def ask(
+  worker: Handle[(Int, Handle[Int, Int]), Int],
+  amount: Int
+): Result[Int, String] with Proc
+  reply = Collector.spawn()
+  case worker.send((amount, reply))
+  in Sent then ()
+  in Closed then return Err("the worker mailbox closed")
+  in Fault(_) then return Err("the worker send faulted")
+  end
+  case reply.done()
+  in Done(answer) then Ok(answer)
+  in Fault(_) then Err("the collector faulted")
+  end
+end
+
+def serve(): Result[(Int, Int, Int), String] with Vm, Proc
+  image = sys.vm.Vm()
+
+  # Installing the class also installs its dependency closure. Read
+  # `rate` from that installation, because the worker uses its slot.
+  worker_class = image.install(codeof(Worker)).map_error() {
+    |e: CodeError| e.message
+  }?
+  service = worker_class.instance().map_error() { |e: CodeError| e.message }?
+  launcher = image.install(launch).map_error() { |e: CodeError| e.message }?
+  original = service.function_binding[(Int,), Int]("rate").map_error() {
+    |e: CodeError| e.message
+  }?
+  upgrade = image.install(with_fee).map_error() { |e: CodeError| e.message }?
+
+  run = image.activate(launcher, args: ()).map_error() {
+    |e: CodeError| e.message
+  }?
+  run.table().pass(Proc)
+  worker = case run.run()
+  in Done(handle) then handle
+  in Fault(_) then return Err("the launcher faulted")
+  end
+
+  worker.resume().map_error() { |_: ProcError| "the worker did not start" }?
+  before = ask(worker, 10)?
+
+  # The process is mid-service here. Stop it, move the slot, start it.
+  worker.pause().map_error() { |_: ProcError| "the worker did not pause" }?
+  image.replace(original, upgrade).map_error() { |e: CodeError| e.message }?
+  worker.resume().map_error() { |_: ProcError| "the worker did not resume" }?
+
+  after = ask(worker, 10)?
+  worker.close()
+  served = case worker.done()
+  in Done(count) then count
+  in Fault(_) then 0
+  end
+  Ok((before, after, served))
+end
+
+# The first order priced at twice the amount, the second added the
+# ten unit fee, and one worker served both.
+serve()

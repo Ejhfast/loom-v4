@@ -229,11 +229,21 @@ The compiler also provides `codeof` for definitions known at compile time.
 
 `codeof(Class)` returns `ClassCode` for a class definition.
 
-Reification publishes the selected definition as a slot binding.
+Reification publishes the selected definition and its local dependency closure.
 
-It also gives references to that definition late linkage in the same compilation.
+The scan starts with the selected function body or all selected class bodies.
 
-Other calls and constructions keep static linkage.
+Class bodies include methods, `init`, and field default expressions.
+
+The scan follows direct calls to named local functions.
+
+It also follows construction and spawning of named local classes.
+
+The scan examines nested closure and process bodies for further named dependencies.
+
+Each named dependency uses its published slot for direct calls or construction.
+
+Definitions outside this closure keep static linkage.
 
 Reflection can recover code for a named capture-free function value.
 
@@ -317,6 +327,12 @@ Direct installation installs the retained module revision as needed.
 
 It returns the binding selected by the portable code value.
 
+A self-contained definition install reuses an exact installed artifact in the same VM image.
+
+The repeated install returns a binding from the existing module instance.
+
+It does not append duplicate code or another module instance.
+
 The installation retains all verified definitions and published slots from that module.
 
 It never rewrites an existing slot.
@@ -328,6 +344,16 @@ Its immutable target can resolve required slots through that instance.
 `Vm.install(function)` is convenience syntax for a portable named function.
 
 It returns the same binding type as `Vm.install(codeof(function))`.
+
+The owning instance exposes each published dependency binding used by the installed closure.
+
+```lm
+worker = image.install(codeof(Worker))?
+service = worker.instance()?
+rate = service.function_binding[(Int,), Int]("rate")?
+```
+
+Calls from `Worker` to `rate` use the binding returned by this lookup.
 
 ```lm
 original = image.install(rate)?
@@ -425,7 +451,7 @@ Publication alone does not change call or construction instructions.
 
 The interface records a separate late-linkage bit for each published binding.
 
-`codeof` and direct named installation set that bit for the selected local definition.
+`codeof` and direct named installation set that bit for each named dependency in the local closure.
 
 Normal package builds use static linkage by default.
 
@@ -655,9 +681,11 @@ The installer assigns dense VM-local indices after all checks succeed.
 
 Installation is atomic. A failed installation adds no definition, class, slot, or value.
 
-Two installations of one verified module create distinct `Instance` values.
+Two explicit installations of one `VerifiedModule` create distinct `Instance` values.
 
 They can share immutable code storage inside one VM.
+
+Repeated direct definition installs can reuse one exact self-contained module instance.
 
 ## 11. Interactive compilation
 
@@ -773,6 +801,8 @@ An existing named Loom function can also recover its verified definition origin.
 That origin identifies the same shared verified module bytes and local definition index.
 
 Both paths therefore install the same portable definition form.
+
+Both paths compute the same local dependency closure before linkage selection.
 
 `codeof` creates this portable form without a VM.
 
@@ -1060,6 +1090,7 @@ Both snapshot forms record these items:
 - installed module semantic hashes;
 - instance identities and relocation tables;
 - slot keys, contracts, and current targets;
+- immutable targets retained by live installed bindings;
 - active function version identities;
 - class and type identities;
 - selected runs, frames, heaps, and pending operations;
@@ -1110,6 +1141,14 @@ Installation performs all contract checks before execution.
 Ordinary execution does not repeat contract comparison.
 
 Immutable code can share storage across instances inside one VM.
+
+A host can cache the latest verified installed-code aggregate during repeated external admissions.
+
+The cache key includes the base verification hash, artifact bytes, and provider relocation maps.
+
+Each load still decodes and admits all mutable image state.
+
+The cache retains only one aggregate.
 
 Scalar syntax reads share source storage.
 

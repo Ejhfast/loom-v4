@@ -6,7 +6,9 @@
 use crate::env::FrozenCompileEnv;
 use lm_bytecode::interface::{IfaceItem, IfaceSlotKind, IfaceSlotSpec, Interface};
 use lm_bytecode::{BcType, ExtendedInstr, Instr, Module};
-use lm_hir::hir::{HirClass, HirInterfaceUse};
+use lm_hir::hir::{
+    HExpr, HExprKind, HForKind, HInterpPart, HStmt, HirClass, HirInterfaceUse, HirModule,
+};
 use lm_hir::{LateCallable, LateCallableKind, LowerLinkage};
 use lm_source::SourceFile;
 use lm_types::{RowElem, Type, TypeId};
@@ -703,6 +705,268 @@ fn out_class_contract(
     Ok(())
 }
 
+#[derive(Default)]
+struct PortableDependencies {
+    functions: BTreeSet<u32>,
+    classes: BTreeSet<u32>,
+}
+
+/// References found while one portable definition body is scanned.
+#[derive(Default)]
+struct DependencyReferences {
+    functions: BTreeSet<u32>,
+    classes: BTreeSet<u32>,
+    nested_functions: BTreeSet<u32>,
+}
+
+/// Find each named local definition reachable through direct code references.
+///
+/// Anonymous nested bodies join the scan. They do not publish their own slots.
+fn portable_dependency_closure(
+    hir: &HirModule,
+    functions: &BTreeMap<String, (u32, IfaceSlotKind)>,
+    classes: &BTreeMap<String, u32>,
+) -> PortableDependencies {
+    let bindable_functions: BTreeSet<u32> = functions
+        .iter()
+        .filter_map(|(binding, (function, _))| (!binding.starts_with("core.")).then_some(*function))
+        .collect();
+    let bindable_classes: BTreeSet<u32> = classes
+        .iter()
+        .filter_map(|(binding, class)| (!binding.starts_with("core.")).then_some(*class))
+        .collect();
+    let mut out = PortableDependencies {
+        functions: hir.reified_functions.clone(),
+        classes: hir.reified_classes.clone(),
+    };
+    let mut pending_functions = out.functions.clone();
+    let mut pending_classes = out.classes.clone();
+    let mut scanned_functions = BTreeSet::new();
+    let mut scanned_classes = BTreeSet::new();
+
+    while !pending_functions.is_empty() || !pending_classes.is_empty() {
+        while let Some(class) = pending_classes.pop_first() {
+            if !scanned_classes.insert(class) {
+                continue;
+            }
+            let Some(definition) = hir.classes.get(class as usize) else {
+                continue;
+            };
+            if definition.imported {
+                continue;
+            }
+            pending_functions.extend(definition.methods.iter().map(|(_, function)| *function));
+            pending_functions.extend(definition.init);
+            let mut references = DependencyReferences::default();
+            for value in definition.defaults.iter().flatten() {
+                collect_dependency_expr(value, &mut references);
+            }
+            add_dependency_references(
+                references,
+                &bindable_functions,
+                &bindable_classes,
+                &mut out,
+                &mut pending_functions,
+                &mut pending_classes,
+            );
+        }
+
+        while let Some(function) = pending_functions.pop_first() {
+            if !scanned_functions.insert(function) {
+                continue;
+            }
+            let Some(definition) = hir.funcs.get(function as usize) else {
+                continue;
+            };
+            if definition.imported {
+                continue;
+            }
+            let mut references = DependencyReferences::default();
+            collect_dependency_block(&definition.body, &mut references);
+            add_dependency_references(
+                references,
+                &bindable_functions,
+                &bindable_classes,
+                &mut out,
+                &mut pending_functions,
+                &mut pending_classes,
+            );
+        }
+    }
+    out
+}
+
+fn add_dependency_references(
+    references: DependencyReferences,
+    bindable_functions: &BTreeSet<u32>,
+    bindable_classes: &BTreeSet<u32>,
+    out: &mut PortableDependencies,
+    pending_functions: &mut BTreeSet<u32>,
+    pending_classes: &mut BTreeSet<u32>,
+) {
+    for function in references.functions {
+        pending_functions.insert(function);
+        if bindable_functions.contains(&function) {
+            out.functions.insert(function);
+        }
+    }
+    pending_functions.extend(references.nested_functions);
+    for class in references.classes {
+        pending_classes.insert(class);
+        if bindable_classes.contains(&class) {
+            out.classes.insert(class);
+        }
+    }
+}
+
+fn collect_dependency_block(body: &[HStmt], out: &mut DependencyReferences) {
+    for statement in body {
+        collect_dependency_stmt(statement, out);
+    }
+}
+
+fn collect_dependency_stmt(statement: &HStmt, out: &mut DependencyReferences) {
+    match statement {
+        HStmt::Assign { value, .. } => collect_dependency_expr(value, out),
+        HStmt::AssignField { recv, value, .. } => {
+            collect_dependency_expr(recv, out);
+            collect_dependency_expr(value, out);
+        }
+        HStmt::While { cond, body } => {
+            collect_dependency_expr(cond, out);
+            collect_dependency_block(body, out);
+        }
+        HStmt::For {
+            source, kind, body, ..
+        } => {
+            collect_dependency_expr(source, out);
+            if let HForKind::Generic { iterator, next, .. } = kind {
+                collect_dependency_expr(iterator, out);
+                collect_dependency_expr(next, out);
+            }
+            collect_dependency_block(body, out);
+        }
+        HStmt::Return { value } => {
+            if let Some(value) = value {
+                collect_dependency_expr(value, out);
+            }
+        }
+        HStmt::Expr(value) => collect_dependency_expr(value, out),
+        HStmt::Break | HStmt::Continue => {}
+    }
+}
+
+fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
+    match &expr.kind {
+        HExprKind::Unit
+        | HExprKind::Int(_)
+        | HExprKind::Str(_)
+        | HExprKind::Bool(_)
+        | HExprKind::Local(_)
+        | HExprKind::Capture(_)
+        | HExprKind::OpConst(_) => {}
+        HExprKind::Not(value)
+        | HExprKind::Neg(value)
+        | HExprKind::AsCallback(value)
+        | HExprKind::TupleGet { tuple: value, .. }
+        | HExprKind::IsType { value, .. }
+        | HExprKind::CastType { value, .. }
+        | HExprKind::CodeSource { code: value, .. }
+        | HExprKind::CallArgs { call: value }
+        | HExprKind::FaultCodeGet { fault: value }
+        | HExprKind::FaultSiteGet { fault: value }
+        | HExprKind::FaultTraceGet { fault: value }
+        | HExprKind::RequestOpName { request: value }
+        | HExprKind::FaultDenied { reason: value } => collect_dependency_expr(value, out),
+        HExprKind::Binary { left, right, .. }
+        | HExprKind::And(left, right)
+        | HExprKind::Or(left, right) => {
+            collect_dependency_expr(left, out);
+            collect_dependency_expr(right, out);
+        }
+        HExprKind::Call { func, args, .. } => {
+            out.functions.insert(*func);
+            collect_dependency_exprs(args, out);
+        }
+        HExprKind::Construct { class, args, .. } => {
+            out.classes.insert(*class);
+            collect_dependency_exprs(args, out);
+        }
+        HExprKind::MethodCall { recv, args, .. } | HExprKind::InterfaceCall { recv, args, .. } => {
+            collect_dependency_expr(recv, out);
+            collect_dependency_exprs(args, out);
+        }
+        HExprKind::FieldGet { recv, .. } => collect_dependency_expr(recv, out),
+        HExprKind::Spawn {
+            class, body, args, ..
+        } => {
+            out.classes.insert(*class);
+            out.nested_functions.insert(*body);
+            collect_dependency_exprs(args, out);
+        }
+        HExprKind::MakeClosure { func, captures } | HExprKind::MakeCallback { func, captures } => {
+            out.nested_functions.insert(*func);
+            collect_dependency_exprs(captures, out);
+        }
+        HExprKind::FunctionCode { func } => {
+            out.functions.insert(*func);
+        }
+        HExprKind::ClassCode { class } => {
+            out.classes.insert(*class);
+        }
+        HExprKind::CallValue { callee, args } => {
+            collect_dependency_expr(callee, out);
+            collect_dependency_exprs(args, out);
+        }
+        HExprKind::TupleLit(items) | HExprKind::ListLit(items) => {
+            collect_dependency_exprs(items, out);
+        }
+        HExprKind::MapLit(entries) => {
+            for (key, value) in entries {
+                collect_dependency_expr(key, out);
+                collect_dependency_expr(value, out);
+            }
+        }
+        HExprKind::Native { args, .. }
+        | HExprKind::Intrinsic { args, .. }
+        | HExprKind::Perform { args, .. } => collect_dependency_exprs(args, out),
+        HExprKind::Interp(parts) => {
+            for part in parts {
+                if let HInterpPart::Expr(value) = part {
+                    collect_dependency_expr(value, out);
+                }
+            }
+        }
+        HExprKind::If { arms, else_body } => {
+            for (condition, body) in arms {
+                collect_dependency_expr(condition, out);
+                collect_dependency_block(body, out);
+            }
+            if let Some(body) = else_body {
+                collect_dependency_block(body, out);
+            }
+        }
+        HExprKind::Case { scrut, arms, .. } => {
+            collect_dependency_expr(scrut, out);
+            for arm in arms {
+                collect_dependency_block(&arm.body, out);
+            }
+        }
+        HExprKind::TableEdit { table, mock, .. } => {
+            collect_dependency_expr(table, out);
+            if let Some(mock) = mock {
+                collect_dependency_expr(mock, out);
+            }
+        }
+    }
+}
+
+fn collect_dependency_exprs(values: &[HExpr], out: &mut DependencyReferences) {
+    for value in values {
+        collect_dependency_expr(value, out);
+    }
+}
+
 pub(crate) fn select_linkage(
     path: &str,
     hir: &lm_hir::HirModule,
@@ -741,6 +1005,7 @@ pub(crate) fn select_linkage(
         .enumerate()
         .map(|(index, class)| (class.key.clone(), index as u32))
         .collect();
+    let portable = portable_dependency_closure(hir, &functions, &classes);
 
     let mut selected: BTreeMap<String, IfaceSlotSpec> = BTreeMap::new();
     let entry_binding = lm_bytecode::qualified_key(path, "<entry>");
@@ -801,7 +1066,7 @@ pub(crate) fn select_linkage(
                 .or_insert_with(|| spec.clone());
         }
     }
-    for function in &hir.reified_functions {
+    for function in &portable.functions {
         if let Some((binding, (_, kind))) = functions
             .iter()
             .find(|(_, (candidate, _))| candidate == function)
@@ -823,7 +1088,7 @@ pub(crate) fn select_linkage(
                 .or_insert(published);
         }
     }
-    for class in &hir.reified_classes {
+    for class in &portable.classes {
         if let Some((binding, _)) = classes.iter().find(|(_, candidate)| candidate == &class) {
             let definition = &hir.classes[*class as usize];
             if definition.native_repr.is_none()
@@ -1330,6 +1595,52 @@ mod tests {
             instruction,
             Instr::Extended(ExtendedInstr::CallSlot { slot, .. })
                 if program.module.slots[*slot as usize].key == published.key
+        )));
+    }
+
+    #[test]
+    fn reified_class_dependencies_use_published_slots() {
+        let compiled = compile(
+            "def rate(value: Int): Int\n  value * 2\nend\ndef quote(value: Int): Int\n  rate(value)\nend\ndef unused(value: Int): Int\n  value + 1\nend\nfinal class Worker\n  def price(self, value: Int): Int\n    quote(value)\n  end\nend\ncodeof(Worker)\n",
+            &CompileOptions::new(),
+        );
+        let rate = compiled
+            .interface
+            .slots
+            .iter()
+            .find(|slot| slot.binding == "probe.rate")
+            .expect("the dependency has a published slot");
+        let quote = compiled
+            .interface
+            .slots
+            .iter()
+            .find(|slot| slot.binding == "probe.quote")
+            .expect("the direct dependency has a published slot");
+        let unused = compiled
+            .interface
+            .slots
+            .iter()
+            .find(|slot| slot.binding == "probe.unused")
+            .expect("the unrelated function stays published");
+        let worker = compiled
+            .interface
+            .slots
+            .iter()
+            .find(|slot| slot.binding == "probe.Worker")
+            .expect("the class has a published slot");
+        assert!(rate.late);
+        assert!(quote.late);
+        assert!(worker.late);
+        assert!(!unused.late);
+        assert!(instructions(&compiled.module).any(|instruction| matches!(
+            instruction,
+            Instr::Extended(ExtendedInstr::CallSlot { slot, .. })
+                if compiled.module.slots[*slot as usize].key == rate.key
+        )));
+        assert!(instructions(&compiled.module).any(|instruction| matches!(
+            instruction,
+            Instr::Extended(ExtendedInstr::CallSlot { slot, .. })
+                if compiled.module.slots[*slot as usize].key == quote.key
         )));
     }
 

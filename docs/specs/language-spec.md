@@ -1889,6 +1889,8 @@ A full VM image stores a separate VM-image selector. Machine ordinal zero has no
 
 A snapshot contains format and ABI versions, code manifests, type tables, heaps, frames, limits, fuel, and machine states.
 
+Code manifests include current slot targets and immutable targets retained by installed bindings.
+
 It also contains pending requests, nested control edges, routed requests, mailboxes, terminal results, machine references, and a container hash.
 
 It excludes policy tables, root grants, live host callbacks, host thread identity, executor tasks, mutex/channel storage, wake objects, and live OS handles. It can include closed resource handles.
@@ -2007,6 +2009,12 @@ Admission proves no other property. It does not prove termination, useful contro
 Restore accepts admitted host image backing alone. It never accepts editable image data.
 
 Execution and later snapshots repeat no admission check.
+
+A host can cache one verified installed-code aggregate across repeated external loads.
+
+The cache key covers the base verification hash, artifact bytes, and provider relocations.
+
+Each load still decodes and admits all mutable image state.
 
 The write barrier and dynamic checks still enforce runtime semantics.
 
@@ -2289,7 +2297,13 @@ Every exported function and class publishes stable slot metadata.
 
 Publication does not make a static call late.
 
-Reifying a local definition makes references to that definition late in the same compilation.
+Reifying a local definition also finds its local dependency closure.
+
+The closure follows named direct calls, construction, spawning, and nested bodies.
+
+Direct references to each named closure dependency become late in the same compilation.
+
+Definitions outside the closure remain static.
 
 `FunctionCode[A,T].source()` returns `Option[DefinitionSource]`.
 
@@ -2328,6 +2342,10 @@ Activation through a function binding reads its current slot target.
 Replacement through two bindings uses the address binding's slot and the target binding's immutable target.
 
 Installation validates and commits code atomically. It does not execute the entry function.
+
+Repeated direct installs reuse an exact self-contained artifact instance in one VM image.
+
+An explicit `VerifiedModule` install remains a distinct module installation request.
 
 ### 20.5 Rows as verified theorems
 

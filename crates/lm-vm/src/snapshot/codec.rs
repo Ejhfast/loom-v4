@@ -1070,6 +1070,28 @@ pub fn load_external(
     loaded: &LoadedModule,
     limits: LoadLimits,
 ) -> Result<SnapshotImage, ImageError> {
+    load_external_inner(bytes, loaded, limits, None)
+}
+
+/// Load one external container with a bounded verified-code cache.
+///
+/// Each call still decodes and admits all mutable state. The cache
+/// reuses only the latest unchanged installed code aggregate.
+pub fn load_external_cached(
+    bytes: &[u8],
+    loaded: &LoadedModule,
+    limits: LoadLimits,
+    cache: &mut super::AdmissionCache,
+) -> Result<SnapshotImage, ImageError> {
+    load_external_inner(bytes, loaded, limits, Some(cache))
+}
+
+fn load_external_inner(
+    bytes: &[u8],
+    loaded: &LoadedModule,
+    limits: LoadLimits,
+    cache: Option<&mut super::AdmissionCache>,
+) -> Result<SnapshotImage, ImageError> {
     if bytes.len() > limits.max_bytes {
         return err(
             ImageReason::LimitExceeded,
@@ -1084,7 +1106,10 @@ pub fn load_external(
     let (image, hash) = decode_inner(bytes, limits, &decode_budget)?;
     decode_budget.charge(bytes.len(), "container copy")?;
     let mut admission_budget = AdmissionBudget::default();
-    let proof = super::admit::prove(&image, loaded, &mut admission_budget)?;
+    let proof = match cache {
+        Some(cache) => super::admit::prove_cached(&image, loaded, &mut admission_budget, cache)?,
+        None => super::admit::prove(&image, loaded, &mut admission_budget)?,
+    };
     // The decoder accepts one byte string for one image, so the bytes
     // it received are the canonical bytes of the admitted image.
     let mut owned = Vec::new();

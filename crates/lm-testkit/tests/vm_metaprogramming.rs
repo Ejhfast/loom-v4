@@ -2407,10 +2407,13 @@ def execute(): Result[(Int, Int), String] with Vm, Proc
     |error: CodeError| error.message
   }?
   worker_class.slot().map_error() { |error: CodeError| error.message }?
+  service = worker_class.instance().map_error() {
+    |error: CodeError| error.message
+  }?
   launcher = image.install(launch).map_error() {
     |error: CodeError| error.message
   }?
-  original = image.install(rate).map_error() {
+  original = service.function_binding[(Int,), Int]("rate").map_error() {
     |error: CodeError| error.message
   }?
   replacement = image.install(with_fee).map_error() {
@@ -2951,6 +2954,10 @@ def add(value: Int): Int
   value + 1
 end
 
+def double(value: Int): Int
+  value * 2
+end
+
 def execute(): Int with Vm
   image = sys.vm.Vm()
   function = case image.install(add)
@@ -2961,25 +2968,37 @@ def execute(): Int with Vm
   in Ok(value) then value
   in Err(_) then return -2
   end
+  replacement = case image.install(double)
+  in Ok(value) then value
+  in Err(_) then return -3
+  end
+  case image.replace(function, replacement)
+  in Ok(_) then ()
+  in Err(_) then return -4
+  end
   count = 0
   for _ in Range(0, 1000)
     count = count + 1
   end
+  case image.replace(function, function)
+  in Ok(_) then ()
+  in Err(_) then return -5
+  end
   case function.slot()
   in Ok(_) then ()
-  in Err(_) then return -3
+  in Err(_) then return -6
   end
   case class_binding.slot()
   in Ok(_) then ()
-  in Err(_) then return -4
+  in Err(_) then return -7
   end
   run = case image.activate(function, args: (41,))
   in Ok(value) then value
-  in Err(_) then return -5
+  in Err(_) then return -8
   end
   case run.run()
   in Done(value) then value
-  in Fault(_) then -6
+  in Fault(_) then -9
   end
 end
 
@@ -3002,15 +3021,62 @@ execute()
         }
         let gate = world.next_gate();
         match world.capture_snapshot(gate, 0, false) {
-            Ok(image) if image.world().installations.len() == 2 => {
-                captured = Some(image);
-                break;
+            Ok(image) => {
+                let handles: Vec<_> = image
+                    .world()
+                    .machines
+                    .iter()
+                    .flat_map(|machine| &machine.objects)
+                    .filter_map(|entry| match &entry.object {
+                        lm_heap::Object::NativeCodeHandle {
+                            image,
+                            instance,
+                            kind: lm_heap::CodeHandleKind::FunctionBinding,
+                            index,
+                            ..
+                        } => Some((*image, *instance, *index)),
+                        _ => None,
+                    })
+                    .collect();
+                let replaced = handles.iter().enumerate().any(|(left_index, left)| {
+                    handles.iter().skip(left_index + 1).any(|right| {
+                        if left.0 != right.0 || left.1 != right.1 || left.2 == right.2 {
+                            return false;
+                        }
+                        let Some(record) = image
+                            .world()
+                            .vm_images
+                            .get(left.0 as usize)
+                            .and_then(|image| image.instances.get(left.1 as usize))
+                        else {
+                            return false;
+                        };
+                        let Some(left_slot) = record.slots.get(left.2 as usize) else {
+                            return false;
+                        };
+                        let Some(right_slot) = record.slots.get(right.2 as usize) else {
+                            return false;
+                        };
+                        let slots = &image.world().vm_images[left.0 as usize].slots;
+                        matches!(
+                            (slots.get(*left_slot as usize), slots.get(*right_slot as usize)),
+                            (
+                                Some(lm_vm::snapshot::ImageSlotTarget::Function(left_target)),
+                                Some(lm_vm::snapshot::ImageSlotTarget::Function(right_target))
+                            ) if left_target == right_target
+                        )
+                    })
+                });
+                if replaced {
+                    captured = Some(image);
+                    break;
+                }
             }
-            Ok(_) => {}
             Err(error) => panic!("the snapshot failed: {error:?}"),
         }
     }
-    let captured = captured.expect("a boundary follows both binding installations");
+    let captured = captured.expect("a boundary follows the binding replacement");
+    assert_eq!(captured.world().installations.len(), 1);
     let kinds: Vec<_> = captured
         .world()
         .machines

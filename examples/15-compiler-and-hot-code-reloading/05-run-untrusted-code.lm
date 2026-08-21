@@ -58,7 +58,9 @@ def report(): [Result[Int, CodeError]] with Compiler, Vm
   # A rule that tries to print. It compiles and it verifies, because
   # printing is a legal thing for a program to declare. The run
   # policy is what stops it.
-  out.push(score("def rule(): Int with Io.Print\n  sys.io.print(\"out\\n\")\n  1\nend\nrule()\n"))
+  printing = "def rule(): Int with Io.Print\n" +
+    "  sys.io.print(\"out\\n\")\n  1\nend\nrule()\n"
+  out.push(score(printing))
   out.freeze()
 end
 

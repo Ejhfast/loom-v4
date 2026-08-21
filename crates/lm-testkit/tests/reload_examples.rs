@@ -71,7 +71,7 @@ fn the_open_request_keeps_its_own_version() {
     assert_eq!(
         run_example(
             "examples/15-compiler-and-hot-code-reloading/04-finish-the-open-request.lm",
-            &["Compiler", "Vm"],
+            &["Vm", "Io.ReadLine"],
         ),
         "Done(Ok([30, 1030]))"
     );
@@ -115,5 +115,21 @@ fn a_rewrite_keeps_every_other_byte() {
             &["Reflect", "Compiler", "Vm"],
         ),
         "Done((true, true, [Ok(10), Ok(25)]))"
+    );
+}
+
+#[test]
+fn the_proc_example_upgrades_a_live_process() {
+    // Every definition is ordinary Loom. Installing them binds the
+    // worker's call to `rate`, so moving that binding changes what
+    // the running worker reaches next. The first order priced at
+    // twice the amount, the second added the fee, and one worker
+    // served both.
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/06-upgrade-a-running-proc.lm",
+            &["Vm", "Proc"],
+        ),
+        "Done(Ok((20, 30, 2)))"
     );
 }

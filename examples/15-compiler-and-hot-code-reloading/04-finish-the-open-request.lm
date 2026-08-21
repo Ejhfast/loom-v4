@@ -1,123 +1,89 @@
 # An upgrade never changes a call that already started.
 #
-# Run with `--allow Compiler,Vm`.
+# Run with `--allow Vm,Io.ReadLine`.
 #
-# Example 03 replaced code between requests. This one replaces code
+# Example 06 replaces code between requests. This one replaces code
 # during a request, which is the harder case.
 #
-# `convert` asks for today's factor in the middle of its own body.
-# The holder answers that question and replaces the slot in the same
-# turn. At that moment one `convert` frame is live.
+# `convert` asks the holder for today's factor in the middle of its
+# own body. The holder answers that question and replaces the slot in
+# the same turn. At that moment one `convert` frame is open.
 #
-# The rule is that a frame pins the exact version that created it. So
-# the open call finishes with the old rule, and the next call reads
-# the new target. No request runs half of one release and half of
-# another.
-#
-# Both rules ship in one module here, because the subject is the
-# boundary rather than the delivery. Example 03 shows the same
-# replacement across two separately compiled releases.
+# A frame pins the exact version that created it. So the open call
+# finishes with the old rule, and the next call reads the new target.
+# No request runs half of one release and half of another.
 
-def source(lines: [String]): String
-  text = ""
-  for line in lines
-    text = text + line + "\n"
+def factor(): Int with Io.ReadLine
+  line = case sys.io.read_line()
+  in Ok(Some(text)) then text
+  in _ then "1"
   end
-  text
-end
-
-def build(text: String): Result[VerifiedModule, CodeError] with Compiler
-  names = List[String]()
-  names.push("convert")
-  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
-  options = CompileOptions(
-    is_main: true,
-    dynamic_result: false,
-    late_definitions: false,
-    late_functions: names,
-    late_classes: List[String]()
-  )
-  artifact = case sys.compiler.compile("rates", text, env, options)
+  case line.parse_int(10)
   in Ok(value) then value
-  in Err(problem) then return Err(CodeError(problem.message))
+  in Err(_) then 1
   end
-  artifact.verify()
 end
 
-# `convert` suspends inside its own body, so a replacement can land
-# while one of its frames is open. `with_fee` is the same shape, and
-# it is the target of the replacement.
-def rates(): String
-  source([
-    "def factor(): Int with Io.ReadLine",
-    "  line = case sys.io.read_line()",
-    "  in Ok(Some(text)) then text",
-    "  in _ then \"1\"",
-    "  end",
-    "  case line.parse_int(10)",
-    "  in Ok(value) then value",
-    "  in Err(_) then 1",
-    "  end",
-    "end",
-    "def convert(amount: Int): Int with Io.ReadLine",
-    "  amount * factor()",
-    "end",
-    "def with_fee(amount: Int): Int with Io.ReadLine",
-    "  amount * factor() + 1000",
-    "end",
-    "def report(): [Int] with Io.ReadLine",
-    "  out: [Int] = []",
-    "  out.push(convert(10))",
-    "  out.push(convert(10))",
-    "  out.freeze()",
-    "end",
-    "report()"
-  ])
+# The rule in service, and its replacement. Both suspend part way,
+# so a replacement can land while one of their frames is open.
+def convert(amount: Int): Int with Io.ReadLine
+  amount * factor()
 end
 
-final class Patch
-  slot: Slot
-  target: FunctionDef[(Int,), Int]
+def with_fee(amount: Int): Int with Io.ReadLine
+  amount * factor() + 1000
+end
 
-  def init(mut self, slot: Slot, target: FunctionDef[(Int,), Int])
-    self.slot = slot
-    self.target = target
-  end
+# Two conversions in order. The first is still open when the holder
+# moves the slot.
+def report(): [Int] with Io.ReadLine
+  out: [Int] = []
+  out.push(convert(10))
+  out.push(convert(10))
+  out.freeze()
+end
 
-  # Answer every question with the same factor. Replace the slot on
-  # the first question only, while the first frame is live.
-  def apply_during(self, image: Vm, run: Run[[Int]]): Result[[Int], CodeError] with Vm
-    upgraded = false
-    loop do
-      case run.drive()
-      in Asked(question)
-        case question
-        in Call(Io.ReadLine, call, ())
-          if not upgraded
-            image.replace(self.slot, self.target)?
-            upgraded = true
-          end
-          run.answer(call, Ok(Some("3")))
-        in _
-          run.dispatch(question)
+# Answer every question with the same factor. Replace on the first
+# question only, while the first `convert` frame is open.
+def drive(
+  image: Vm,
+  run: Run[[Int]],
+  original: FunctionBinding[(Int,), Int],
+  upgrade: FunctionBinding[(Int,), Int]
+): Result[[Int], String] with Vm
+  upgraded = false
+  loop do
+    case run.drive()
+    in Asked(question)
+      case question
+      in Call(Io.ReadLine, call, ())
+        if not upgraded
+          image.replace(original, upgrade).map_error() {
+            |e: CodeError| e.message
+          }?
+          upgraded = true
         end
-      in Done(values)
-        return Ok(values)
-      in Fault(problem)
-        return Err(CodeError(problem.code()))
+        run.answer(call, Ok(Some("3")))
+      in _
+        run.dispatch(question)
       end
+    in Done(values)
+      return Ok(values)
+    in Fault(_)
+      return Err("the report faulted")
     end
   end
 end
 
-def show_boundary(): Result[[Int], CodeError] with Compiler, Vm
+def show_boundary(): Result[[Int], String] with Vm, Io.ReadLine
   image = sys.vm.Vm()
-  instance = image.install(build(rates())?)?
-  slot = instance.slot_for(instance.slot_spec("convert")?)?
-  target = instance.function[(Int,), Int]("with_fee")?
-  entry = instance.entry[(), [Int]]()?
-  run = image.activate(entry, args: ())?
-  Patch(slot, target).apply_during(image, run)
+  image.install(factor).map_error() { |e: CodeError| e.message }?
+  original = image.install(convert).map_error() { |e: CodeError| e.message }?
+  upgrade = image.install(with_fee).map_error() { |e: CodeError| e.message }?
+  entry = image.install(report).map_error() { |e: CodeError| e.message }?
+  run = image.activate(entry, args: ()).map_error() { |e: CodeError| e.message }?
+  run.table().pass(Io.ReadLine)
+  drive(image, run, original, upgrade)
 end
 
 # The open call answers 10 * 3. The next call answers 10 * 3 + 1000.

@@ -45,7 +45,7 @@ def holds_only_definitions(root: SyntaxNode): Bool
   found
 end
 
-def evaluate(tree: SyntaxNode): Result[String, CodeError] with Compiler.CompileSyntax, Compiler.Verify, Vm
+def evaluate(tree: SyntaxNode): Result[String, CodeError] with Compiler, Vm
   raw = sys.compiler.compile_syntax(tree, env(), options())
   artifact = case raw
   in Ok(value) then value
@@ -63,7 +63,7 @@ end
 
 # One interaction turn. `pending` is the text the evaluator already
 # holds. The reply states what to show and what text to keep.
-def turn(pending: String, line: String): (String, String) with Reflect.ParseSyntax, Compiler.CompileSyntax, Compiler.Verify, Vm
+def turn(pending: String, line: String): (String, String) with Reflect, Compiler, Vm
   text = pending + line + "\n"
   parse = sys.reflect.parse_syntax(text)
   case parse.status
@@ -88,7 +88,7 @@ def turn(pending: String, line: String): (String, String) with Reflect.ParseSynt
   end
 end
 
-def session(lines: [String]): [String] with Reflect.ParseSyntax, Compiler.CompileSyntax, Compiler.Verify, Vm
+def session(lines: [String]): [String] with Reflect, Compiler, Vm
   shown: [String] = []
   pending = ""
   for line in lines

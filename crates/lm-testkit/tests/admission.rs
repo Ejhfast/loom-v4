@@ -16,6 +16,7 @@
 //! canonical-order rule never fires in place of the rule under test.
 
 use lm_heap::Object;
+use lm_host::CliHost;
 use lm_testkit::compile_to_bytes;
 use lm_value::{ObjRef, Value};
 use lm_vm::snapshot::{codec, Image, ImageMachine, ImageObject, ImageReason, ImageTerminal};
@@ -68,6 +69,33 @@ fn admit(loaded: &LoadedModule, image: &Image) -> Option<ImageReason> {
         Ok(_) => None,
         Err(error) => Some(error.reason),
     }
+}
+
+#[test]
+fn repeated_code_admission_rechecks_mutable_image_state() {
+    let loaded = program(
+        "def add(value: Int): Int\n  value + 1\nend\ndef go(): Int with Vm\n  image = sys.vm.Vm()\n  case image.install(add)\n  in Ok(_) then 42\n  in Err(_) then 0\n  end\nend\ngo()\n",
+    );
+    let images = boundaries(&loaded, &["Vm"], 200);
+    let image = pick(&images, "one installed definition", |image| {
+        image.installations.len() == 1
+            && image.vm_images.len() == 1
+            && image.vm_images[0].instances.len() == 1
+    });
+    let bytes = codec::encode(&image, usize::MAX).expect("the image encodes");
+    let limits = lm_vm::snapshot::LoadLimits::default();
+    let mut cache = lm_vm::snapshot::AdmissionCache::default();
+    codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
+        .expect("the first image admits");
+    codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
+        .expect("the repeated image admits");
+
+    let mut broken = image;
+    broken.vm_images[0].instances[0].semantic_hash[0] ^= 1;
+    let bytes = codec::encode(&broken, usize::MAX).expect("the changed image encodes");
+    let error = codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
+        .expect_err("the cache must not hide changed instance state");
+    assert_eq!(error.reason, ImageReason::Code);
 }
 
 /// Restore one container into a fresh world and drive the restored
@@ -2007,7 +2035,7 @@ fn a_nonzero_image_reference_generation_rejects() {
 ///
 /// A grant widens what one program reaches, so one list serves the
 /// whole corpus and a new program needs no entry here.
-const GATE_GRANTS: [&str; 5] = ["Vm", "Io", "Proc", "Clock", "Rand"];
+const GATE_GRANTS: [&str; 7] = ["Vm", "Io", "Proc", "Clock", "Rand", "Compiler", "Reflect"];
 
 /// The bytecode boundaries the gate drives for one program.
 const GATE_BOUNDARIES: usize = 400;
@@ -2155,8 +2183,7 @@ depth(1, 3)
 fn gate_corpus() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     // The shipped examples. `examples/05-modules` holds package
-    // projects, and those need the compiler driver instead of one
-    // source file, so the walk skips that tree.
+    // projects. Those projects need the package compiler driver.
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_lm(&lm_testkit::repo_root().join("examples"), &mut files);
     files.sort();
@@ -2231,24 +2258,28 @@ fn gate_sweep(label: &str, source: &str) -> Vec<String> {
     let bytes = compile_to_bytes("gate.lm", source)
         .unwrap_or_else(|e| panic!("{label} does not compile: {e}"));
     let loaded = load_bytes(&bytes).unwrap_or_else(|e| panic!("{label} does not load: {e}"));
-    let mut world = World::new(
-        &loaded,
-        VmConfig::default(),
-        Box::new(RecordingHost::new(1)),
-    );
+    let uses_compiler_host = source.contains("sys.compiler.") || source.contains("sys.reflect.");
+    let host: Box<dyn lm_vm::Host> = if uses_compiler_host {
+        Box::new(CliHost::new(1))
+    } else {
+        Box::new(RecordingHost::new(1))
+    };
+    let mut world = World::new(&loaded, VmConfig::default(), host);
     for grant in GATE_GRANTS {
         world.allow(grant).expect("the grant names a group");
     }
     let mut out: Vec<String> = Vec::new();
     let mut captures = 0usize;
+    let mut admission_cache = lm_vm::snapshot::AdmissionCache::default();
     for boundary in 0..GATE_BOUNDARIES {
         let gate = world.next_gate();
         if let Ok(image) = world.capture_snapshot(gate, 0, false) {
             captures += 1;
-            if let Err(e) = codec::load_external(
+            if let Err(e) = codec::load_external_cached(
                 image.bytes().expect("the image encodes"),
                 &loaded,
                 lm_vm::snapshot::LoadLimits::default(),
+                &mut admission_cache,
             ) {
                 out.push(format!("{label} boundary {boundary}: {e}"));
             }
@@ -2264,7 +2295,11 @@ fn gate_sweep(label: &str, source: &str) -> Vec<String> {
                         Some(proc) => {
                             world.drive_proc(proc);
                         }
-                        None => break,
+                        None => {
+                            if world.wait_host_completion(|_| true).is_none() {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -2291,13 +2326,13 @@ fn every_capture_of_every_shipped_program_admits() {
     const WORKERS: usize = 4;
     let corpus = gate_corpus();
     let worker_count = WORKERS.min(corpus.len());
-    let chunk_size = corpus.len().div_ceil(worker_count);
     let fails = std::thread::scope(|scope| {
         let mut workers = Vec::with_capacity(worker_count);
-        for chunk in corpus.chunks(chunk_size) {
+        for offset in 0..worker_count {
+            let corpus = &corpus;
             workers.push(scope.spawn(move || {
                 let mut failures = Vec::new();
-                for (label, source) in chunk {
+                for (label, source) in corpus.iter().skip(offset).step_by(worker_count) {
                     failures.extend(gate_sweep(label, source));
                 }
                 failures

@@ -98,6 +98,33 @@ fn installed_binding_target(
     }
 }
 
+fn reusable_definition_instance(
+    image: &VmImageRecord,
+    artifact: &[u8],
+    interface: Option<&[u8]>,
+    kind: CodeHandleKind,
+    source_slot: u32,
+) -> Option<u32> {
+    image
+        .instances
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, instance)| {
+            if instance.artifact.as_slice() != artifact {
+                return None;
+            }
+            if let Some(interface) = interface {
+                let retained = instance.interface.as_ref()?.as_slice();
+                if retained != interface {
+                    return None;
+                }
+            }
+            installed_binding_target(instance, kind, source_slot)?;
+            u32::try_from(index).ok()
+        })
+}
+
 fn source_origin(
     module: &lm_bytecode::Module,
     kind: lm_bytecode::debug::DefinitionKind,
@@ -709,6 +736,38 @@ impl World {
                 }
             }
         }
+        let kind = code.kind;
+        if matches!(kind, PortableCodeKind::Function | PortableCodeKind::Class)
+            && source
+                .as_ref()
+                .is_some_and(|source| source.imports.is_empty())
+        {
+            let source_slot = source_slot.expect("portable definition has one source slot");
+            let handle_kind = if kind == PortableCodeKind::Function {
+                CodeHandleKind::FunctionBinding
+            } else {
+                CodeHandleKind::ClassBinding
+            };
+            let existing = reusable_definition_instance(
+                &self.vm_images[key.image as usize],
+                code.bytes.as_slice(),
+                code.interface.as_ref().map(|bytes| bytes.as_slice()),
+                handle_kind,
+                source_slot,
+            );
+            if let Some(instance) = existing {
+                let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
+                    image: key.image,
+                    generation: key.generation,
+                    instance,
+                    kind: handle_kind,
+                    index: source_slot,
+                });
+                let result = value.and_then(|value| self.code_ok(vm, value));
+                self.finish_code_result(vm, op, result);
+                return;
+            }
+        }
         let imports = match links {
             Some(links) => match self.resolve_code_imports(vm, key, links, code.bytes.as_slice()) {
                 Ok(imports) => imports,
@@ -720,7 +779,6 @@ impl World {
             },
             None => Vec::new(),
         };
-        let kind = code.kind;
         match self.install_artifact(key, code.bytes, code.interface, &imports) {
             Ok(instance) => {
                 let selected = self.vm_images[key.image as usize]

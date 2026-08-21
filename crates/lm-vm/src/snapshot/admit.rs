@@ -50,6 +50,49 @@ pub struct AdmissionBudget {
     byte_limit: usize,
 }
 
+/// One bounded cache for repeated admissions with the same code.
+///
+/// The cache retains only the latest verified aggregate. It never
+/// caches machine state, heaps, policies, or slot targets.
+#[derive(Default)]
+pub struct AdmissionCache {
+    code: Option<CachedCode>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct CodeCacheKey {
+    base_verification: [u8; 32],
+    artifacts: Vec<[u8; 32]>,
+    providers: Vec<(Vec<u32>, Vec<u32>)>,
+}
+
+struct CachedCode {
+    key: CodeCacheKey,
+    aggregate: LoadedModule,
+    installations: Vec<InstallationProof>,
+}
+
+enum CodeProof<'a> {
+    Owned(Box<LoadedModule>, Vec<InstallationProof>),
+    Cached(&'a CachedCode),
+}
+
+impl CodeProof<'_> {
+    fn aggregate(&self) -> &LoadedModule {
+        match self {
+            CodeProof::Owned(aggregate, _) => aggregate.as_ref(),
+            CodeProof::Cached(cached) => &cached.aggregate,
+        }
+    }
+
+    fn installations(&self) -> &[InstallationProof] {
+        match self {
+            CodeProof::Owned(_, installations) => installations,
+            CodeProof::Cached(cached) => &cached.installations,
+        }
+    }
+}
+
 /// The default aggregate admission work limit, in units.
 ///
 /// One unit covers one table entry, stored record, or graph edge.
@@ -142,11 +185,39 @@ pub(super) fn prove(
     loaded: &LoadedModule,
     budget: &mut AdmissionBudget,
 ) -> Result<AdmissionProof, ImageError> {
+    prove_inner(image, loaded, budget, None)
+}
+
+pub(super) fn prove_cached(
+    image: &Image,
+    loaded: &LoadedModule,
+    budget: &mut AdmissionBudget,
+    cache: &mut AdmissionCache,
+) -> Result<AdmissionProof, ImageError> {
+    prove_inner(image, loaded, budget, Some(cache))
+}
+
+fn prove_inner(
+    image: &Image,
+    loaded: &LoadedModule,
+    budget: &mut AdmissionBudget,
+    cache: Option<&mut AdmissionCache>,
+) -> Result<AdmissionProof, ImageError> {
     budget.charge(admission_cost(image)?)?;
     let base_identity = loaded.identity().map_err(|_| {
         ImageError::admission(ImageReason::Code, "the program has no verified identity")
     })?;
-    let (aggregate, installations) = rebuild_aggregate(image, loaded)?;
+    let code = match cache {
+        Some(cache) if !image.installations.is_empty() => {
+            CodeProof::Cached(cache.prepare(image, loaded)?)
+        }
+        _ => {
+            let (aggregate, installations) = rebuild_aggregate(image, loaded)?;
+            CodeProof::Owned(Box::new(aggregate), installations)
+        }
+    };
+    let aggregate = code.aggregate();
+    let installations = code.installations();
     let identity = aggregate.identity().map_err(|_| {
         ImageError::admission(
             ImageReason::Code,
@@ -160,7 +231,7 @@ pub(super) fn prove(
         image,
         module,
         identity,
-        installations: &installations,
+        installations,
         witness: tables,
     };
     admit.run()?;
@@ -175,7 +246,79 @@ pub(super) fn prove(
             compiler_abi: image.compiler_abi,
             verifier_version: image.verifier_version,
         },
-        loaded: aggregate,
+        loaded: aggregate.clone(),
+    })
+}
+
+impl AdmissionCache {
+    fn prepare(&mut self, image: &Image, base: &LoadedModule) -> Result<&CachedCode, ImageError> {
+        let key = code_cache_key(image, base)?;
+        if let Some(cached) = &self.code {
+            if cached.key == key {
+                return Ok(self.code.as_ref().expect("the cached code exists"));
+            }
+        }
+        let (aggregate, installations) = rebuild_aggregate(image, base)?;
+        self.code = Some(CachedCode {
+            key,
+            aggregate,
+            installations,
+        });
+        Ok(self.code.as_ref().expect("the cached code exists"))
+    }
+}
+
+fn code_cache_key(image: &Image, base: &LoadedModule) -> Result<CodeCacheKey, ImageError> {
+    let mut artifacts = Vec::new();
+    artifacts
+        .try_reserve_exact(image.installations.len())
+        .map_err(|_| {
+            ImageError::admission(ImageReason::Budget, "the code cache allocation failed")
+        })?;
+    artifacts.extend(
+        image
+            .installations
+            .iter()
+            .map(|artifact| lm_bytecode::hash::sha256(artifact)),
+    );
+    let mut providers = Vec::new();
+    providers
+        .try_reserve_exact(image.installations.len())
+        .map_err(|_| {
+            ImageError::admission(ImageReason::Budget, "the code cache allocation failed")
+        })?;
+    for installation in 0..image.installations.len() {
+        let instance = image
+            .vm_images
+            .iter()
+            .flat_map(|image| &image.instances)
+            .find(|instance| instance.installation as usize == installation);
+        let instance = instance.ok_or_else(|| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("installed artifact {installation} has no module instance"),
+            )
+        })?;
+        let mut functions = Vec::new();
+        functions
+            .try_reserve_exact(instance.funcs.len())
+            .map_err(|_| {
+                ImageError::admission(ImageReason::Budget, "the code cache allocation failed")
+            })?;
+        functions.extend_from_slice(&instance.funcs);
+        let mut classes = Vec::new();
+        classes
+            .try_reserve_exact(instance.classes.len())
+            .map_err(|_| {
+                ImageError::admission(ImageReason::Budget, "the code cache allocation failed")
+            })?;
+        classes.extend_from_slice(&instance.classes);
+        providers.push((functions, classes));
+    }
+    Ok(CodeCacheKey {
+        base_verification: base.verification_hash(),
+        artifacts,
+        providers,
     })
 }
 

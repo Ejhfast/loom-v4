@@ -504,6 +504,31 @@ impl World {
         }
         let mut funcs: Vec<u32> = Vec::new();
         let mut classes: Vec<u32> = Vec::new();
+        // A binding keeps its original target after its slot moves.
+        // Admission needs that immutable target in the code manifest.
+        for key in &image_order {
+            let record = &self.vm_images[key.image as usize];
+            for instance in &record.instances {
+                for target in &instance.binding_targets {
+                    match target {
+                        crate::machine::ImageSlotTarget::Function(func)
+                            if !funcs.contains(func) =>
+                        {
+                            funcs.push(*func);
+                        }
+                        crate::machine::ImageSlotTarget::Class { class, constructor } => {
+                            if !classes.contains(class) {
+                                classes.push(*class);
+                            }
+                            if !funcs.contains(constructor) {
+                                funcs.push(*constructor);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         for image in &vm_images {
             for target in &image.slots {
                 match target {
