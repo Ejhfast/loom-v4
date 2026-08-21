@@ -1917,7 +1917,7 @@ impl World {
                                 code: *code,
                                 message: message.clone(),
                                 op: *op,
-                                trace: trace.clone(),
+                                trace: trace.to_vec(),
                             }),
                             _ => None,
                         }

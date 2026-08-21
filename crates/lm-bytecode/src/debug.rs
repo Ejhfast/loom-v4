@@ -3,6 +3,7 @@
 //! This data stays outside the semantic and verification regions.
 
 use crate::Module;
+use std::collections::{HashMap, HashSet};
 
 const MAGIC: &[u8; 4] = b"LMDB";
 const VERSION: u16 = 2;
@@ -16,7 +17,7 @@ pub struct DebugSource {
 }
 
 /// The target table used by one definition record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefinitionKind {
     Function,
     Class,
@@ -314,10 +315,16 @@ pub fn definition_origin(
 
 /// Validate metadata against its decoded module.
 pub fn validate(info: &DebugInfo, module: &Module) -> Result<(), DebugError> {
-    for source in &info.sources {
-        lm_abi::syntax::SyntaxView::new(&source.syntax, source.text.len())
-            .map_err(|_| DebugError::BadSyntax)?;
-    }
+    let views = info
+        .sources
+        .iter()
+        .map(|source| {
+            lm_abi::syntax::SyntaxView::new(&source.syntax, source.text.len())
+                .map_err(|_| DebugError::BadSyntax)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut origins = HashMap::new();
+    let mut definition_keys = HashSet::new();
     for definition in &info.definitions {
         let source = info
             .sources
@@ -326,23 +333,36 @@ pub fn validate(info: &DebugInfo, module: &Module) -> Result<(), DebugError> {
         if definition.lo > definition.hi || definition.hi as usize > source.text.len() {
             return Err(DebugError::BadRange);
         }
-        let view = lm_abi::syntax::SyntaxView::new(&source.syntax, source.text.len())
-            .map_err(|_| DebugError::BadSyntax)?;
+        let view = views
+            .get(definition.source as usize)
+            .ok_or(DebugError::BadIndex)?;
         let record = view
             .record(definition.syntax)
             .map_err(|_| DebugError::BadIndex)?;
         if record.lo != definition.lo || record.hi != definition.hi {
             return Err(DebugError::BadRange);
         }
-        if definition.origin
-            != definition_origin(
-                &source.path,
-                &source.text,
-                definition.kind,
-                definition.lo,
-                definition.hi,
-            )?
-        {
+        let origin_key = (
+            definition.source,
+            definition.kind,
+            definition.lo,
+            definition.hi,
+        );
+        let expected = match origins.get(&origin_key) {
+            Some(origin) => *origin,
+            None => {
+                let origin = definition_origin(
+                    &source.path,
+                    &source.text,
+                    definition.kind,
+                    definition.lo,
+                    definition.hi,
+                )?;
+                origins.insert(origin_key, origin);
+                origin
+            }
+        };
+        if definition.origin != expected {
             return Err(DebugError::BadIndex);
         }
         let valid_target = match definition.kind {
@@ -352,6 +372,7 @@ pub fn validate(info: &DebugInfo, module: &Module) -> Result<(), DebugError> {
         if !valid_target {
             return Err(DebugError::BadIndex);
         }
+        definition_keys.insert((definition.origin, definition.kind, definition.target));
     }
     for function in &info.functions {
         let source = info
@@ -377,23 +398,16 @@ pub fn validate(info: &DebugInfo, module: &Module) -> Result<(), DebugError> {
         let instruction = block
             .get(origin.instruction as usize)
             .ok_or(DebugError::BadIndex)?;
-        let definition = info
-            .definitions
-            .iter()
-            .find(|definition| definition.origin == origin.origin)
-            .ok_or(DebugError::BadIndex)?;
-        let matches = match (instruction, definition.kind) {
-            (
-                crate::Instr::Extended(crate::ExtendedInstr::FunctionCode { func }),
-                DefinitionKind::Function,
-            ) => *func == definition.target,
-            (
-                crate::Instr::Extended(crate::ExtendedInstr::ClassCode { class }),
-                DefinitionKind::Class,
-            ) => *class == definition.target,
-            _ => false,
+        let key = match instruction {
+            crate::Instr::Extended(crate::ExtendedInstr::FunctionCode { func }) => {
+                (origin.origin, DefinitionKind::Function, *func)
+            }
+            crate::Instr::Extended(crate::ExtendedInstr::ClassCode { class }) => {
+                (origin.origin, DefinitionKind::Class, *class)
+            }
+            _ => return Err(DebugError::BadIndex),
         };
-        if !matches {
+        if !definition_keys.contains(&key) {
             return Err(DebugError::BadIndex);
         }
     }

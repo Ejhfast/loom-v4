@@ -335,7 +335,7 @@ pub enum Object {
         code: FaultCode,
         message: String,
         op: Option<u32>,
-        trace: Vec<FaultSite>,
+        trace: Box<[FaultSite]>,
     },
     /// A frozen canonical graph digest. Born frozen.
     NativeDigest([u8; 32]),
@@ -1243,6 +1243,12 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn the_object_payload_stays_compact() {
+        assert!(std::mem::size_of::<Object>() <= 64);
+    }
+
+    #[test]
     fn the_map_index_keeps_all_equal_hash_candidates() {
         let mut index = MapIndex::default();
         index.insert(7, 0);
@@ -1318,7 +1324,7 @@ mod tests {
                 code: FaultCode::HostFault,
                 message: "message".to_string(),
                 op: Some(1),
-                trace: Vec::new(),
+                trace: Box::default(),
             },
             Object::NativeDigest([9; 32]),
             Object::NativeHandle {
@@ -1506,7 +1512,7 @@ mod tests {
                 code: FaultCode::HostFault,
                 message: String::new(),
                 op: None,
-                trace: Vec::new(),
+                trace: Box::default(),
             },
             Object::NativeDigest([0; 32]),
             Object::NativeHandle {

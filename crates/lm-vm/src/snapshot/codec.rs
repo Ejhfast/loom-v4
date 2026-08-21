@@ -2044,7 +2044,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 code: rec.code,
                 message: rec.message,
                 op: rec.op,
-                trace: rec.trace,
+                trace: rec.trace.into_boxed_slice(),
             }
         }
         13 => Object::NativeDigest(cur.hash()?),

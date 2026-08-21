@@ -24,6 +24,14 @@ pub struct PublicSyntax {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Parse one complete module and build its public syntax in one scan.
+pub fn parse_complete(text: &str) -> Result<(Module, PublicSyntax), Diagnostic> {
+    let tokens = scan(text)?;
+    let module = parse_tokens(text, &tokens)?;
+    let syntax = build_valid(text, &tokens, &module);
+    Ok((module, syntax))
+}
+
 /// Parse source into the portable public syntax format.
 pub fn parse_public_syntax(text: &str) -> PublicSyntax {
     match scan(text) {
@@ -373,6 +381,17 @@ mod tests {
         let syntax = parse_public_syntax(text);
         assert_eq!(syntax.status, ParseStatus::Complete);
         assert_eq!(concatenated_children(text, &syntax), text);
+    }
+
+    #[test]
+    fn combined_parse_produces_the_public_syntax() {
+        let text = "def value(): Int\n  3\nend\nvalue()\n";
+        let (module, syntax) = parse_complete(text).expect("the source parses");
+        assert_eq!(
+            module,
+            crate::parse::parse(text).expect("the source parses")
+        );
+        assert_eq!(syntax, parse_public_syntax(text));
     }
 
     #[test]

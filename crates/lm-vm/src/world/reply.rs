@@ -361,7 +361,7 @@ impl World {
             code: rec.code,
             message: rec.message.clone(),
             op: rec.op,
-            trace: rec.trace.clone(),
+            trace: rec.trace.clone().into_boxed_slice(),
         })?;
         let class = self.fault_arm(family);
         self.make_instance(parent, class, vec![fault])

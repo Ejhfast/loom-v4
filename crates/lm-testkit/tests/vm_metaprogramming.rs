@@ -427,6 +427,47 @@ execute()
 }
 
 #[test]
+fn an_enum_case_keeps_its_shared_definition_source() {
+    let source = r#"
+def execute(): Bool with Compiler.Compile, Compiler.Verify, Vm
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  options = CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = case sys.compiler.compile(
+    "choice.lm",
+    "enum Choice\n  First(value: Int)\n  Second(value: Int)\nend\n",
+    env,
+    options
+  )
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  module = case artifact.verify()
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  code = case module.class_code("Choice.Second")
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  case code.source()
+  in Some(source)
+    source.syntax.kind() == 5 and source.syntax.text().contains("Second(value: Int)")
+  in None then false
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_compiler(source), "Done(true)");
+}
+
+#[test]
 fn codeof_rejects_a_local_function_value() {
     let source = r#"
 value = { |x: Int| x + 1 }

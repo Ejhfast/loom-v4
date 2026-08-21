@@ -3074,10 +3074,11 @@ impl Machine {
             _ => return Err(BAD_TYPE),
         };
         let definition = match code.origin {
-            Some(origin) => debug
-                .definitions
-                .iter()
-                .find(|definition| definition.origin == origin),
+            Some(origin) => debug.definitions.iter().find(|definition| {
+                definition.origin == origin
+                    && definition.kind == kind
+                    && definition.target == code.index
+            }),
             None => debug
                 .definitions
                 .iter()
@@ -3281,7 +3282,7 @@ impl Machine {
     ) -> Result<(), FaultCode> {
         let reference = self.pop_obj()?;
         let trace = match self.vm.heap.get(reference) {
-            Object::NativeFault { trace, .. } => trace.clone(),
+            Object::NativeFault { trace, .. } => trace.to_vec(),
             _ => return Err(BAD_TYPE),
         };
         let debug = lm_bytecode::debug::decode(&module.debug).map_err(|_| BAD_STATE)?;
@@ -4348,7 +4349,7 @@ impl Machine {
                     code: FaultCode::PolicyDenied,
                     message: reason.to_string(),
                     op: None,
-                    trace: Vec::new(),
+                    trace: Box::default(),
                 })?;
                 self.push(value)?;
             }

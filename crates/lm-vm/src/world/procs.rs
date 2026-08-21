@@ -63,7 +63,7 @@ impl World {
             code,
             message: message.to_string(),
             op: None,
-            trace,
+            trace: trace.into_boxed_slice(),
         })
     }
 
@@ -674,7 +674,7 @@ impl World {
                     code: rec.code,
                     message: rec.message.clone(),
                     op: rec.op,
-                    trace: rec.trace.clone(),
+                    trace: rec.trace.clone().into_boxed_slice(),
                 })
                 .and_then(|fault| self.make_instance(vm, self.core.proc_fault, vec![fault])),
         };

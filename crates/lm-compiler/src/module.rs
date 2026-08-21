@@ -10,7 +10,7 @@ use lm_hir::hir::{HirClass, HirInterfaceUse};
 use lm_hir::{LateCallable, LateCallableKind, LowerLinkage};
 use lm_source::SourceFile;
 use lm_types::{RowElem, Type, TypeId};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Linkage choices for one compiler invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -89,7 +89,8 @@ pub fn compile_module_with_options(
     if options.dynamic_result && !is_main {
         return Err("error: a dynamic result needs a main module\n".to_string());
     }
-    let ast = lm_source::parse::parse(&source.text).map_err(|d| d.render(source))?;
+    let (ast, syntax) =
+        lm_source::syntax::parse_complete(&source.text).map_err(|d| d.render(source))?;
     if !is_main && !ast.entry.is_empty() {
         let span = ast.entry[0].span;
         let diagnostic = lm_source::diag::Diagnostic::new(
@@ -121,7 +122,7 @@ pub fn compile_module_with_options(
         .map_err(|e| format!("error: the verifier rejected `{path}`: {e}\n"))?;
     let identity = lm_bytecode::identity::module_identity(&module)
         .map_err(|e| format!("error: `{path}`: {e}\n"))?;
-    attach_source_debug(&mut module, source, &ast, &hir, &linkage)?;
+    attach_source_debug(&mut module, source, syntax, &ast, &hir, &linkage)?;
     let items: Vec<IfaceItem> = hir.exports.iter().map(|e| e.item.clone()).collect();
     let mut interface = lm_bytecode::interface::build_interface(&module, &identity, path, &items)
         .map_err(|e| format!("error: `{path}`: {e}\n"))?;
@@ -143,6 +144,7 @@ pub fn compile_module_with_options(
 pub(crate) fn attach_source_debug(
     module: &mut Module,
     source: &SourceFile,
+    parsed: lm_source::syntax::PublicSyntax,
     ast: &lm_source::ast::Module,
     hir: &lm_hir::HirModule,
     linkage: &LowerLinkage,
@@ -152,13 +154,6 @@ pub(crate) fn attach_source_debug(
     };
     use lm_source::Span;
 
-    let parsed = lm_source::syntax::parse_public_syntax(&source.text);
-    if parsed.status != lm_source::syntax::ParseStatus::Complete {
-        return Err(format!(
-            "error: `{}` did not produce complete public syntax\n",
-            source.name
-        ));
-    }
     let view =
         lm_abi::syntax::SyntaxView::new(&parsed.records, source.text.len()).map_err(|error| {
             format!(
@@ -166,63 +161,107 @@ pub(crate) fn attach_source_debug(
                 source.name
             )
         })?;
-    let syntax_index = |kind: u16, span: Span| -> Result<u32, String> {
-        for index in 0..view.item_count() {
-            let record = view.record(index).map_err(|error| {
+    let root = view.record(view.root()).map_err(|error| {
+        format!(
+            "error: `{}` has invalid public syntax: {error}\n",
+            source.name
+        )
+    })?;
+    let mut syntax_records = HashMap::with_capacity(root.child_len as usize);
+    for offset in 0..root.child_len {
+        let index = view.child(root, offset).map_err(|error| {
+            format!(
+                "error: `{}` has invalid public syntax: {error}\n",
+                source.name
+            )
+        })?;
+        let record = view.record(index).map_err(|error| {
+            format!(
+                "error: `{}` has invalid public syntax: {error}\n",
+                source.name
+            )
+        })?;
+        syntax_records
+            .entry((record.kind, record.lo, record.hi))
+            .or_insert(index);
+    }
+    let syntax_index = |kind: u16, span: Span| {
+        syntax_records
+            .get(&(kind, span.lo, span.hi))
+            .copied()
+            .ok_or_else(|| {
                 format!(
-                    "error: `{}` has invalid public syntax: {error}\n",
+                    "error: `{}` has no syntax record for a definition\n",
                     source.name
                 )
-            })?;
-            if record.kind == kind && record.lo == span.lo && record.hi == span.hi {
-                return Ok(index);
-            }
-        }
-        Err(format!(
-            "error: `{}` has no syntax record for a definition\n",
-            source.name
-        ))
+            })
     };
+
+    let function_spans: HashMap<&str, Span> = ast
+        .funcs
+        .iter()
+        .map(|item| (item.name.as_str(), item.span))
+        .collect();
+    let class_spans: HashMap<&str, Span> = ast
+        .classes
+        .iter()
+        .map(|item| (item.name.as_str(), item.span))
+        .collect();
+    let enum_spans: HashMap<&str, Span> = ast
+        .enums
+        .iter()
+        .map(|item| (item.name.as_str(), item.span))
+        .collect();
+    let mut origins = HashMap::new();
 
     let mut definitions = Vec::new();
     for export in &module.exports {
         let (kind, span, syntax_kind) = match export.kind {
             lm_bytecode::ExportKind::Function => {
-                let item = ast
-                    .funcs
-                    .iter()
-                    .find(|item| item.name == export.name)
-                    .ok_or_else(|| {
-                        format!("error: `{}` has no exported function source\n", source.name)
-                    })?;
+                let span = function_spans.get(export.name.as_str()).ok_or_else(|| {
+                    format!("error: `{}` has no exported function source\n", source.name)
+                })?;
                 (
                     DefinitionKind::Function,
-                    item.span,
+                    *span,
                     lm_abi::syntax::KIND_FUNCTION,
                 )
             }
             lm_bytecode::ExportKind::Class => {
-                let item = ast
-                    .classes
-                    .iter()
-                    .find(|item| item.name == export.name)
-                    .ok_or_else(|| {
-                        format!("error: `{}` has no exported class source\n", source.name)
-                    })?;
-                (DefinitionKind::Class, item.span, lm_abi::syntax::KIND_CLASS)
+                let span = class_spans.get(export.name.as_str()).ok_or_else(|| {
+                    format!("error: `{}` has no exported class source\n", source.name)
+                })?;
+                (DefinitionKind::Class, *span, lm_abi::syntax::KIND_CLASS)
             }
             lm_bytecode::ExportKind::Enum | lm_bytecode::ExportKind::EnumCase => {
                 let family = export.name.split('.').next().unwrap_or(&export.name);
-                let item = ast
-                    .enums
-                    .iter()
-                    .find(|item| item.name == family)
-                    .ok_or_else(|| {
-                        format!("error: `{}` has no exported enum source\n", source.name)
-                    })?;
-                (DefinitionKind::Class, item.span, lm_abi::syntax::KIND_ENUM)
+                let span = enum_spans.get(family).ok_or_else(|| {
+                    format!("error: `{}` has no exported enum source\n", source.name)
+                })?;
+                (DefinitionKind::Class, *span, lm_abi::syntax::KIND_ENUM)
             }
             lm_bytecode::ExportKind::Interface => continue,
+        };
+        let origin_key = (kind, span.lo, span.hi);
+        let origin = match origins.get(&origin_key) {
+            Some(origin) => *origin,
+            None => {
+                let origin = lm_bytecode::debug::definition_origin(
+                    &source.name,
+                    &source.text,
+                    kind,
+                    span.lo,
+                    span.hi,
+                )
+                .map_err(|error| {
+                    format!(
+                        "error: `{}` has invalid source origin: {error}\n",
+                        source.name
+                    )
+                })?;
+                origins.insert(origin_key, origin);
+                origin
+            }
         };
         definitions.push(DebugDefinition {
             kind,
@@ -231,19 +270,7 @@ pub(crate) fn attach_source_debug(
             lo: span.lo,
             hi: span.hi,
             syntax: syntax_index(syntax_kind, span)?,
-            origin: lm_bytecode::debug::definition_origin(
-                &source.name,
-                &source.text,
-                kind,
-                span.lo,
-                span.hi,
-            )
-            .map_err(|error| {
-                format!(
-                    "error: `{}` has invalid source origin: {error}\n",
-                    source.name
-                )
-            })?,
+            origin,
         });
     }
 
@@ -280,25 +307,24 @@ pub(crate) fn attach_source_debug(
             });
         }
     }
+    let definition_origins: HashMap<(DefinitionKind, u32), [u8; 32]> = definitions
+        .iter()
+        .map(|definition| ((definition.kind, definition.target), definition.origin))
+        .collect();
     let mut code_origins = Vec::new();
     for (function, body) in module.funcs.iter().enumerate() {
         for (block, instructions) in body.blocks.iter().enumerate() {
             for (instruction, item) in instructions.iter().enumerate() {
-                let selected = match item {
+                let origin = match item {
                     Instr::Extended(ExtendedInstr::FunctionCode { func }) => {
-                        definitions.iter().find(|definition| {
-                            definition.kind == DefinitionKind::Function
-                                && definition.target == *func
-                        })
+                        definition_origins.get(&(DefinitionKind::Function, *func))
                     }
                     Instr::Extended(ExtendedInstr::ClassCode { class }) => {
-                        definitions.iter().find(|definition| {
-                            definition.kind == DefinitionKind::Class && definition.target == *class
-                        })
+                        definition_origins.get(&(DefinitionKind::Class, *class))
                     }
                     _ => None,
                 };
-                let Some(selected) = selected else { continue };
+                let Some(origin) = origin else { continue };
                 code_origins.push(DebugCodeOrigin {
                     function: u32::try_from(function).map_err(|_| {
                         format!("error: `{}` has too many functions\n", source.name)
@@ -308,7 +334,7 @@ pub(crate) fn attach_source_debug(
                     instruction: u32::try_from(instruction).map_err(|_| {
                         format!("error: `{}` has too many instructions\n", source.name)
                     })?,
-                    origin: selected.origin,
+                    origin: *origin,
                 });
             }
         }

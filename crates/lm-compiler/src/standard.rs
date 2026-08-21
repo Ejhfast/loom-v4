@@ -211,7 +211,8 @@ pub fn compile_source(
 /// A source without a `std` import keeps the direct checker path. A
 /// source with a `std` import uses the literal module linker.
 pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String> {
-    let ast = lm_source::parse::parse(&source.text).map_err(|error| error.render(source))?;
+    let (ast, syntax) =
+        lm_source::syntax::parse_complete(&source.text).map_err(|error| error.render(source))?;
     let uses_standard = ast
         .uses
         .iter()
@@ -231,6 +232,7 @@ pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String
     crate::module::attach_source_debug(
         &mut module,
         source,
+        syntax,
         &ast,
         &hir,
         &lm_hir::LowerLinkage::default(),
