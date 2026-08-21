@@ -2288,10 +2288,27 @@ fn gate_sweep(label: &str, source: &str) -> Vec<String> {
 /// and a machine whose entry function is generic.
 #[test]
 fn every_capture_of_every_shipped_program_admits() {
-    let mut fails: Vec<String> = Vec::new();
-    for (label, source) in gate_corpus() {
-        fails.extend(gate_sweep(&label, &source));
-    }
+    const WORKERS: usize = 4;
+    let corpus = gate_corpus();
+    let worker_count = WORKERS.min(corpus.len());
+    let chunk_size = corpus.len().div_ceil(worker_count);
+    let fails = std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(worker_count);
+        for chunk in corpus.chunks(chunk_size) {
+            workers.push(scope.spawn(move || {
+                let mut failures = Vec::new();
+                for (label, source) in chunk {
+                    failures.extend(gate_sweep(label, source));
+                }
+                failures
+            }));
+        }
+        let mut failures = Vec::new();
+        for worker in workers {
+            failures.extend(worker.join().expect("an admission worker does not panic"));
+        }
+        failures
+    });
     assert!(
         fails.is_empty(),
         "{} capture(s) of a legal world did not admit:\n{}",

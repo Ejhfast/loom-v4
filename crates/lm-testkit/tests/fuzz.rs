@@ -30,6 +30,34 @@ fn on_supported_stack(f: impl FnOnce() + Send + 'static) {
         .expect("no panic in the harness");
 }
 
+/// Process independent cases on four bounded worker stacks.
+fn run_parallel_cases<T: Send>(cases: Vec<T>, exercise: impl Fn(T) + Sync) {
+    const WORKERS: usize = 4;
+    let cases = std::sync::Mutex::new(cases);
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(WORKERS);
+        for _ in 0..WORKERS {
+            let cases = &cases;
+            let exercise = &exercise;
+            workers.push(
+                std::thread::Builder::new()
+                    .stack_size(8 << 20)
+                    .spawn_scoped(scope, move || loop {
+                        let next = cases.lock().expect("the case queue is live").pop();
+                        match next {
+                            Some(case) => exercise(case),
+                            None => break,
+                        }
+                    })
+                    .expect("a case worker starts"),
+            );
+        }
+        for worker in workers {
+            worker.join().expect("a case worker does not panic");
+        }
+    });
+}
+
 /// A deterministic xorshift64* PRNG.
 struct Prng(u64);
 
@@ -147,17 +175,18 @@ fn mutated_modules_never_panic_the_decoder_verifier_or_vm() {
         let mut prng = Prng(SEED);
         for (name, text) in seed_sources() {
             let base = compile_to_bytes(&name, &text).expect("examples compile");
+            let mut cases = Vec::with_capacity(ROUNDS);
             for round in 0..ROUNDS {
                 let mut bytes = base.clone();
-                // One to three stacked mutations.
+                // Apply one to three mutations.
                 for _ in 0..=prng.below(3) {
                     mutate(&mut bytes, &mut prng);
                 }
-                // A panic here fails the test with the (name, round) pair
-                // in the harness output.
+                // The generation order keeps each case reproducible.
                 let _ = round;
-                exercise_module(&bytes);
+                cases.push(bytes);
             }
+            run_parallel_cases(cases, |bytes| exercise_module(&bytes));
         }
     });
 }
@@ -1063,6 +1092,7 @@ fn mutated_sources_never_panic_the_scanner_checker_or_lowering() {
         let mut prng = Prng(SEED ^ 0x5eed);
         for (name, text) in seed_sources() {
             let base = text.into_bytes();
+            let mut cases = Vec::with_capacity(ROUNDS);
             for _round in 0..ROUNDS {
                 let mut bytes = base.clone();
                 for _ in 0..=prng.below(3) {
@@ -1070,9 +1100,12 @@ fn mutated_sources_never_panic_the_scanner_checker_or_lowering() {
                 }
                 assert!(bytes.len() <= MAX_CASE_BYTES, "a mutation grew the input");
                 let source = String::from_utf8_lossy(&bytes).into_owned();
+                cases.push((name.clone(), source));
+            }
+            run_parallel_cases(cases, |(name, source)| {
                 // Compile errors are fine; a panic is a failure.
                 let _ = lm_testkit::compile_text(&name, &source);
-            }
+            });
         }
     });
 }
