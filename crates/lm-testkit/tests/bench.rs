@@ -1,7 +1,6 @@
 //! The benchmark suite.
 //!
-//! Four groups run here: language operations, collection operations,
-//! type checking, and artifact verification. Every case is `#[ignore]`, so the
+//! The benchmark groups run here. Every case is `#[ignore]`, so the
 //! ordinary suite never pays for them. Run them with:
 //!
 //! ```text
@@ -715,6 +714,108 @@ fn bench_core_compilation() {
         bytes.len(),
         module.funcs.len(),
         median(load_runs).as_secs_f64() * 1e3
+    );
+}
+
+#[test]
+#[ignore]
+fn bench_public_syntax() {
+    let mut source = String::from("value = 0\n");
+    for _ in 1..5000 {
+        source.push_str("value = value + 1\n");
+    }
+
+    let mut parse_runs = Vec::with_capacity(ROUNDS);
+    let mut parsed = None;
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let result = lm_source::syntax::parse_public_syntax(&source);
+        let elapsed = start.elapsed();
+        assert_eq!(result.status, lm_source::syntax::ParseStatus::Complete);
+        if round > 0 {
+            parse_runs.push(elapsed);
+        }
+        parsed = Some(result);
+    }
+    let parsed = parsed.expect("one syntax parse completes");
+    let view = lm_abi::syntax::SyntaxView::new(&parsed.records, source.len())
+        .expect("the syntax records are valid");
+
+    let part_source = "value = value + 1\n";
+    let part = lm_source::syntax::parse_public_syntax(part_source);
+    let part_view = lm_abi::syntax::SyntaxView::new(&part.records, part_source.len())
+        .expect("the syntax records are valid");
+    let part_root = part_view
+        .record(part_view.root())
+        .expect("the syntax root is valid");
+    let statement = part_view.child(part_root, 0).expect("the statement exists");
+    let parts: Vec<_> = (0..5000)
+        .map(|_| lm_abi::syntax::SyntaxPart {
+            source: part_source,
+            records: &part.records,
+            index: statement,
+        })
+        .collect();
+    let mut construction_runs = Vec::with_capacity(ROUNDS);
+    let mut built_count = 0u64;
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let built = lm_abi::syntax::build_syntax_node(lm_abi::syntax::KIND_MODULE, &parts)
+            .expect("the syntax build completes");
+        let elapsed = start.elapsed();
+        let built_view = lm_abi::syntax::SyntaxView::new(&built.records, built.source.len())
+            .expect("the built syntax records are valid");
+        built_count = u64::from(built_view.item_count());
+        std::hint::black_box(built);
+        if round > 0 {
+            construction_runs.push(elapsed);
+        }
+    }
+
+    let mut traversal_runs = Vec::with_capacity(ROUNDS);
+    let mut item_count = 0u64;
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let mut stack = vec![view.root()];
+        let mut visited = 0u64;
+        while let Some(index) = stack.pop() {
+            let record = view.record(index).expect("the syntax item is valid");
+            visited += 1;
+            for offset in 0..record.child_len {
+                stack.push(
+                    view.child(record, offset)
+                        .expect("the syntax child is valid"),
+                );
+            }
+        }
+        let elapsed = start.elapsed();
+        std::hint::black_box(visited);
+        item_count = visited;
+        if round > 0 {
+            traversal_runs.push(elapsed);
+        }
+    }
+
+    let parse = median(parse_runs);
+    let construction = median(construction_runs);
+    let traversal = median(traversal_runs);
+    println!(
+        "LOOM\tsyntax_parse\t{}\t{:.1}\t{:.3}",
+        item_count,
+        parse.as_nanos() as f64 / item_count as f64,
+        parse.as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tsyntax_construct\t{}\t{:.1}\t{:.3}",
+        built_count,
+        construction.as_nanos() as f64 / built_count as f64,
+        construction.as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tsyntax_traverse\t{}\t{:.1}\t{:.3}",
+        item_count,
+        traversal.as_nanos() as f64 / item_count as f64,
+        traversal.as_secs_f64() * 1e3
     );
 }
 

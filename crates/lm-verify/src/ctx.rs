@@ -14,6 +14,34 @@ impl<'m> Ctx<'m> {
         self.uni.borrow_mut().intern(ty)
     }
 
+    /// True when one class uses a VM-owned native representation.
+    pub(crate) fn is_native_core_class(&self, class: u32) -> bool {
+        [
+            self.core.int,
+            self.core.boolean,
+            self.core.string,
+            self.core.substring,
+            self.core.char_value,
+            self.core.bytes,
+            self.core.string_builder,
+            self.core.byte_buffer,
+            self.core.list,
+            self.core.map,
+            self.core.tcp_resource,
+            self.core.tcp_stream,
+            self.core.tcp_listener,
+            self.core.tls_stream,
+            self.core.artifact,
+            self.core.verified_module,
+            self.core.slot_spec,
+            self.core.instance,
+            self.core.slot,
+            self.core.function_def,
+            self.core.dyn_value,
+        ]
+        .contains(&Some(class))
+    }
+
     /// Return the canonical self type of one class.
     pub(crate) fn class_self_type(&self, class: u32) -> Option<u32> {
         if self.core.int == Some(class) {
@@ -901,6 +929,20 @@ impl<'m> Ctx<'m> {
                     lm_abi::AbiCore::TcpRead => (self.core.tcp_read, "TcpRead"),
                     lm_abi::AbiCore::Shutdown => (self.core.shutdown, "Shutdown"),
                     lm_abi::AbiCore::TlsError => (self.core.tls_error, "TlsError"),
+                    lm_abi::AbiCore::Artifact => (self.core.artifact, "Artifact"),
+                    lm_abi::AbiCore::CompileEnv => (self.core.compile_env, "CompileEnv"),
+                    lm_abi::AbiCore::CompileOptions => {
+                        (self.core.compile_options, "CompileOptions")
+                    }
+                    lm_abi::AbiCore::CompileErrors => (self.core.compile_errors, "CompileErrors"),
+                    lm_abi::AbiCore::DynValue => (self.core.dyn_value, "DynValue"),
+                    lm_abi::AbiCore::SyntaxTree => (self.core.syntax_tree, "SyntaxTree"),
+                    lm_abi::AbiCore::SyntaxElement => (self.core.syntax_element, "SyntaxElement"),
+                    lm_abi::AbiCore::SyntaxNode => (self.core.syntax_node, "SyntaxNode"),
+                    lm_abi::AbiCore::SyntaxToken => (self.core.syntax_token, "SyntaxToken"),
+                    lm_abi::AbiCore::SyntaxTrivia => (self.core.syntax_trivia, "SyntaxTrivia"),
+                    lm_abi::AbiCore::SyntaxBuilder => (self.core.syntax_builder, "SyntaxBuilder"),
+                    lm_abi::AbiCore::SyntaxParse => (self.core.syntax_parse, "SyntaxParse"),
                 };
                 self.plain_inst(slot, name)
             }

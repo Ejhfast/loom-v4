@@ -81,6 +81,7 @@ pub trait CodeIdentity {
             Object::List { items, .. } | Object::Tuple { items } => items.len(),
             Object::Map { entries, .. } => entries.len().saturating_mul(2),
             Object::Closure { captures, .. } => captures.len(),
+            Object::DynValue { .. } => 1,
             _ => 0,
         };
         Ok(vec![None; count])
@@ -381,6 +382,10 @@ fn encode_object(
         Object::Bytes(bytes) => {
             count(out, bytes.len())?;
             out.extend_from_slice(bytes);
+        }
+        Object::DynValue { value, ty } => {
+            out.extend_from_slice(&codes.type_hash(*ty)?);
+            encode_value(out, *value, Some(*ty), expected_by_slot, scratch, codes)?;
         }
         // The walk rejected every other shape as nondigestible.
         _ => return Err(FaultCode::BoundaryViolation),

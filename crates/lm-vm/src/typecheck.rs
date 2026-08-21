@@ -146,6 +146,7 @@ enum Kind {
     CodeInstance,
     Slot,
     FunctionDef,
+    DynValue,
 }
 
 enum Node {
@@ -196,6 +197,7 @@ fn check_one(
                 Object::List { items, .. } | Object::Tuple { items } => items.len(),
                 Object::Map { entries, .. } => entries.len(),
                 Object::Instance { fields, .. } => fields.len(),
+                Object::DynValue { .. } => 1,
                 _ => 0,
             };
             if children > 0 && !scratch.mark((reference.slot, expect)) {
@@ -291,6 +293,8 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::CodeInstance)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_SLOT] == *class {
                 Node::Heap(Kind::Slot)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_DYN_VALUE] == *class {
+                Node::Heap(Kind::DynValue)
             } else {
                 Node::Heap(Kind::Instance)
             }
@@ -370,6 +374,7 @@ fn kind_of(object: &Object) -> Kind {
             lm_heap::CodeHandleKind::Slot => Kind::Slot,
             lm_heap::CodeHandleKind::Function => Kind::FunctionDef,
         },
+        Object::DynValue { .. } => Kind::DynValue,
     }
 }
 
@@ -417,6 +422,13 @@ fn check_object(
         }
         (Object::Closure { func, env, .. }, Kind::Closure) => {
             check_closure(module, envs, scratch, *func, env.env(), expect)
+        }
+        (Object::DynValue { value, ty }, Kind::DynValue) => {
+            if envs.ty(*ty).is_none() {
+                return Err(FaultCode::MalformedState);
+            }
+            scratch.work.push((*value, *ty));
+            Ok(())
         }
         _ => Ok(()),
     }

@@ -6,6 +6,10 @@ license.workspace = true
 
 [dependencies]
 lm-abi = { path = "../lm-abi" }
+lm-bytecode = { path = "../lm-bytecode" }
+lm-compiler = { path = "../lm-compiler" }
+lm-source = { path = "../lm-source" }
+lm-verify = { path = "../lm-verify" }
 lm-vm = { path = "../lm-vm" }
 mio = { version = "1.0", features = ["net", "os-poll"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }

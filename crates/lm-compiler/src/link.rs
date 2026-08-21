@@ -1564,6 +1564,9 @@ fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
         ExtendedInstr::MapRemove { ty } => ExtendedInstr::MapRemove {
             ty: reloc.types[*ty as usize],
         },
+        ExtendedInstr::DynPack { ty } => ExtendedInstr::DynPack {
+            ty: reloc.types[*ty as usize],
+        },
         ExtendedInstr::CallSlot { slot, app } => ExtendedInstr::CallSlot {
             slot: reloc.slots[*slot as usize],
             app: if *app == lm_bytecode::NO_APP {
@@ -1603,6 +1606,19 @@ fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
         | ExtendedInstr::ListContains
         | ExtendedInstr::ListReorder
         | ExtendedInstr::MapClear
-        | ExtendedInstr::MapReserve => *instr,
+        | ExtendedInstr::MapReserve
+        | ExtendedInstr::SyntaxTreeRoot
+        | ExtendedInstr::SyntaxKind
+        | ExtendedInstr::SyntaxCategory
+        | ExtendedInstr::SyntaxRangeStart
+        | ExtendedInstr::SyntaxRangeEnd
+        | ExtendedInstr::SyntaxText
+        | ExtendedInstr::SyntaxChildren
+        | ExtendedInstr::SyntaxDetach
+        | ExtendedInstr::DynRender
+        | ExtendedInstr::SyntaxBuildToken
+        | ExtendedInstr::SyntaxBuildTrivia
+        | ExtendedInstr::SyntaxBuildNode
+        | ExtendedInstr::SyntaxToTree => *instr,
     }
 }

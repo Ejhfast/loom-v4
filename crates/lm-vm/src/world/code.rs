@@ -24,13 +24,120 @@ impl CodeHandle {
     }
 }
 
+struct CodeProvider {
+    source: lm_bytecode::Module,
+    interface: lm_bytecode::interface::Interface,
+    funcs: Vec<u32>,
+    classes: Vec<u32>,
+}
+
+impl CodeProvider {
+    fn resolve(
+        &self,
+        import: &lm_bytecode::Import,
+    ) -> Result<lm_bytecode::append::ResolvedImport, String> {
+        let export_name = if import.kind == lm_bytecode::ImportKind::Method {
+            import
+                .name
+                .rsplit_once('.')
+                .map_or(import.name.as_str(), |(class, _)| class)
+        } else {
+            import.name.as_str()
+        };
+        let interface = self.interface.find(export_name).ok_or_else(|| {
+            format!(
+                "the module `{}` does not export `{export_name}`",
+                import.module
+            )
+        })?;
+        if interface.iface_hash != import.hash {
+            return Err(format!(
+                "the import `{}` pins another interface",
+                import.name
+            ));
+        }
+        let export = self
+            .source
+            .exports
+            .iter()
+            .find(|export| export.name == export_name)
+            .ok_or_else(|| format!("the module does not export `{export_name}`"))?;
+        match import.kind {
+            lm_bytecode::ImportKind::Class => {
+                if !export.kind.is_class() {
+                    return Err(format!("the export `{export_name}` is not a class"));
+                }
+                self.classes
+                    .get(export.def as usize)
+                    .copied()
+                    .map(lm_bytecode::append::ResolvedImport::Class)
+                    .ok_or_else(|| format!("the class export `{export_name}` has no target"))
+            }
+            lm_bytecode::ImportKind::Func => {
+                if export.kind != lm_bytecode::ExportKind::Function {
+                    return Err(format!("the export `{export_name}` is not a function"));
+                }
+                self.function(export.def, export_name)
+            }
+            lm_bytecode::ImportKind::Ctor => {
+                if !export.kind.is_class() || export.ctor == lm_bytecode::NO_CTOR {
+                    return Err(format!("the class `{export_name}` has no constructor"));
+                }
+                self.function(export.ctor, export_name)
+            }
+            lm_bytecode::ImportKind::Method => {
+                let (_, method) = import
+                    .name
+                    .rsplit_once('.')
+                    .ok_or_else(|| format!("the import `{}` has no class name", import.name))?;
+                if !export.kind.is_class() {
+                    return Err(format!("the export `{export_name}` is not a class"));
+                }
+                let class = self
+                    .source
+                    .classes
+                    .get(export.def as usize)
+                    .ok_or_else(|| format!("the class `{export_name}` has no definition"))?;
+                let selector = self
+                    .source
+                    .selectors
+                    .iter()
+                    .position(|name| name == method)
+                    .ok_or_else(|| format!("the class `{export_name}` has no `{method}` method"))?;
+                let function = class
+                    .methods
+                    .iter()
+                    .find(|(found, _)| *found as usize == selector)
+                    .map(|(_, function)| *function)
+                    .ok_or_else(|| format!("the class `{export_name}` has no `{method}` method"))?;
+                self.function(function, method)
+            }
+        }
+    }
+
+    fn function(
+        &self,
+        source: u32,
+        name: &str,
+    ) -> Result<lm_bytecode::append::ResolvedImport, String> {
+        self.funcs
+            .get(source as usize)
+            .copied()
+            .map(lm_bytecode::append::ResolvedImport::Function)
+            .ok_or_else(|| format!("the function `{name}` has no target"))
+    }
+}
+
 impl World {
     /// Execute one portable-code kernel operation.
     pub(super) fn code_exec(&mut self, vm: VmId, op: u32, args: Args<'_>) {
         match op {
             lm_abi::OP_VM_ARTIFACT => self.code_artifact(vm, op, args[0]),
             lm_abi::OP_VM_VERIFY => self.code_verify(vm, op, args[0]),
-            lm_abi::OP_VM_INSTALL => self.code_install(vm, op, args[0], args[1]),
+            lm_abi::OP_VM_INSTALL => self.code_install(vm, op, args[0], args[1], None),
+            lm_abi::OP_VM_INSTALL_WITH => {
+                self.code_install(vm, op, args[0], args[1], Some(args[2]))
+            }
             lm_abi::OP_VM_INSTANCE_ENTRY => self.code_entry(vm, op, args[0]),
             lm_abi::OP_VM_INSTANCE_FUNCTION => self.code_function(vm, op, args[0], args[1]),
             lm_abi::OP_VM_INSTANCE_SLOT | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => {
@@ -66,6 +173,7 @@ impl World {
         let object = Object::NativeCode(Box::new(PortableCode {
             kind: PortableCodeKind::Artifact,
             bytes,
+            interface: None,
             index: u32::MAX,
         }));
         match self.machines[vm as usize].alloc(object) {
@@ -75,26 +183,38 @@ impl World {
     }
 
     fn code_verify(&mut self, vm: VmId, op: u32, value: Value) {
-        let bytes = match self.portable_code(vm, value, PortableCodeKind::Artifact) {
-            Ok((bytes, _)) => bytes,
+        let code = match self.portable_code(vm, value, PortableCodeKind::Artifact) {
+            Ok(code) => code,
             Err(code) => {
                 self.fault_caller(vm, op, code, "the verify receiver is not an Artifact");
                 return;
             }
         };
-        let verified = lm_bytecode::decode(bytes.as_slice())
+        let verified = lm_bytecode::decode(code.bytes.as_slice())
             .map_err(|error| format!("the artifact did not decode: {error}"))
             .and_then(|module| {
-                crate::load(module)
-                    .map(|_| ())
-                    .map_err(|error| format!("the artifact did not verify: {error}"))
+                lm_verify::verify_module(&module)
+                    .map_err(|error| format!("the artifact did not verify: {error}"))?;
+                let identity = lm_bytecode::identity::module_identity(&module)
+                    .map_err(|error| format!("the artifact has no identity: {error}"))?;
+                if let Some(bytes) = &code.interface {
+                    let interface = lm_bytecode::interface::decode_interface(bytes.as_slice())
+                        .map_err(|error| format!("the interface did not decode: {error}"))?;
+                    if lm_bytecode::interface::encode_interface(&interface) != bytes.as_slice() {
+                        return Err("the interface bytes are not canonical".to_string());
+                    }
+                    lm_bytecode::interface::validate_interface(&module, &identity, &interface)
+                        .map_err(|error| format!("the interface is invalid: {error}"))?;
+                }
+                Ok(())
             });
         match verified {
             Ok(()) => {
                 let value =
                     self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
                         kind: PortableCodeKind::VerifiedModule,
-                        bytes,
+                        bytes: code.bytes,
+                        interface: code.interface,
                         index: u32::MAX,
                     })));
                 let result = value.and_then(|value| self.code_ok(vm, value));
@@ -107,18 +227,36 @@ impl World {
         }
     }
 
-    fn code_install(&mut self, vm: VmId, op: u32, image: Value, module: Value) {
+    fn code_install(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        image: Value,
+        module: Value,
+        links: Option<Value>,
+    ) {
         let Some(key) = self.image_arg(vm, op, image) else {
             return;
         };
-        let bytes = match self.portable_code(vm, module, PortableCodeKind::VerifiedModule) {
-            Ok((bytes, _)) => bytes,
+        let code = match self.portable_code(vm, module, PortableCodeKind::VerifiedModule) {
+            Ok(code) => code,
             Err(code) => {
                 self.fault_caller(vm, op, code, "the install input is not a VerifiedModule");
                 return;
             }
         };
-        match self.install_artifact(key, bytes) {
+        let imports = match links {
+            Some(links) => match self.resolve_code_imports(vm, key, links, code.bytes.as_slice()) {
+                Ok(imports) => imports,
+                Err(message) => {
+                    let value = self.code_error(vm, &message);
+                    self.finish_code_result(vm, op, value);
+                    return;
+                }
+            },
+            None => Vec::new(),
+        };
+        match self.install_artifact(key, code.bytes, code.interface, &imports) {
             Ok(instance) => {
                 let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
                     image: key.image,
@@ -135,6 +273,85 @@ impl World {
                 self.finish_code_result(vm, op, value);
             }
         }
+    }
+
+    fn resolve_code_imports(
+        &self,
+        vm: VmId,
+        key: VmImageKey,
+        links: Value,
+        artifact: &[u8],
+    ) -> Result<Vec<lm_bytecode::append::ResolvedImport>, String> {
+        let module = lm_bytecode::decode(artifact)
+            .map_err(|error| format!("the artifact did not decode: {error}"))?;
+        let reference = links
+            .as_obj()
+            .ok_or_else(|| "the link environment has another shape".to_string())?;
+        let fields = match self.machines[vm as usize].vm.heap.get(reference) {
+            Object::Instance { class, fields, .. }
+                if Some(*class) == self.core.link_env && fields.len() == 1 =>
+            {
+                fields
+            }
+            _ => return Err("the link environment has another shape".to_string()),
+        };
+        let list = fields[0]
+            .as_obj()
+            .ok_or_else(|| "the link environment instance list has another shape".to_string())?;
+        let values = match self.machines[vm as usize].vm.heap.get(list) {
+            Object::List { items, .. } => items.clone(),
+            _ => return Err("the link environment instance list has another shape".to_string()),
+        };
+        let mut providers = Vec::new();
+        providers
+            .try_reserve_exact(values.len())
+            .map_err(|_| "the link environment is too large".to_string())?;
+        for value in values {
+            let handle = self
+                .code_handle(vm, value, CodeHandleKind::Instance)
+                .map_err(|_| "the link environment contains another value".to_string())?;
+            if handle.image_key() != key {
+                return Err("a link provider belongs to another VM image".to_string());
+            }
+            let instance = self
+                .live_instance(handle)
+                .ok_or_else(|| "the link environment contains a stale instance".to_string())?;
+            let bytes = instance
+                .interface
+                .as_ref()
+                .ok_or_else(|| "a link provider has no compiler interface".to_string())?;
+            let interface = lm_bytecode::interface::decode_interface(bytes.as_slice())
+                .map_err(|error| format!("a link provider interface did not decode: {error}"))?;
+            if providers.iter().any(|provider: &CodeProvider| {
+                provider.interface.module_path == interface.module_path
+            }) {
+                return Err(format!(
+                    "the link environment binds `{}` twice",
+                    interface.module_path
+                ));
+            }
+            let source = lm_bytecode::decode(instance.artifact.as_slice())
+                .map_err(|error| format!("a link provider did not decode: {error}"))?;
+            providers.push(CodeProvider {
+                source,
+                interface,
+                funcs: instance.funcs.clone(),
+                classes: instance.classes.clone(),
+            });
+        }
+
+        let mut resolved = Vec::new();
+        resolved
+            .try_reserve_exact(module.imports.len())
+            .map_err(|_| "the import table is too large".to_string())?;
+        for import in &module.imports {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.interface.module_path == import.module)
+                .ok_or_else(|| format!("the link environment has no `{}` module", import.module))?;
+            resolved.push(provider.resolve(import)?);
+        }
+        Ok(resolved)
     }
 
     fn code_entry(&mut self, vm: VmId, op: u32, value: Value) {
@@ -262,6 +479,7 @@ impl World {
                 self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
                     kind: PortableCodeKind::SlotSpec,
                     bytes,
+                    interface: None,
                     index: index as u32,
                 })))
             })
@@ -412,12 +630,10 @@ impl World {
         vm: VmId,
         value: Value,
         expected: PortableCodeKind,
-    ) -> Result<(SharedBytes, u32), FaultCode> {
+    ) -> Result<PortableCode, FaultCode> {
         let reference = value.as_obj().ok_or(FaultCode::TypeMismatch)?;
         match self.machines[vm as usize].vm.heap.get(reference) {
-            Object::NativeCode(code) if code.kind == expected => {
-                Ok((code.bytes.clone(), code.index))
-            }
+            Object::NativeCode(code) if code.kind == expected => Ok((**code).clone()),
             _ => Err(FaultCode::TypeMismatch),
         }
     }

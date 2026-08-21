@@ -431,6 +431,8 @@ pub enum ExecOutcome {
         ty: u32,
         env: TypeEnvId,
     },
+    /// Render one value through its stored closed static type.
+    DynamicRender { value: Value, ty: u32 },
 }
 
 /// The serializable state of one machine.
@@ -686,6 +688,14 @@ impl Machine {
                         }
                     };
                     let class = module.core_roles[role];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::DynValue { .. } => {
+                    let class = module.core_roles[lm_bytecode::corepin::ROLE_DYN_VALUE];
                     if class == lm_bytecode::NO_ROLE {
                         Err(BAD_TYPE)
                     } else {
@@ -2894,6 +2904,352 @@ impl Machine {
         self.call_interface(module, dispatch, envs, selector, argc, recv_ty)
     }
 
+    /// Read and validate one syntax tree value.
+    fn syntax_tree_parts(
+        &self,
+        reference: ObjRef,
+        tree_class: u32,
+    ) -> Result<(Value, Value, SharedText, SharedBytes), FaultCode> {
+        let Object::Instance { class, fields, .. } = self.vm.heap.get(reference) else {
+            return Err(BAD_TYPE);
+        };
+        if *class != tree_class {
+            return Err(BAD_TYPE);
+        }
+        let [source, records] = fields.as_slice() else {
+            return Err(BAD_TYPE);
+        };
+        let source_ref = source.as_obj().ok_or(BAD_TYPE)?;
+        let records_ref = records.as_obj().ok_or(BAD_TYPE)?;
+        let Object::Str(text) = self.vm.heap.get(source_ref) else {
+            return Err(BAD_TYPE);
+        };
+        let Object::Bytes(bytes) = self.vm.heap.get(records_ref) else {
+            return Err(BAD_TYPE);
+        };
+        Ok((*source, *records, text.clone(), bytes.clone()))
+    }
+
+    /// Read and validate one syntax element value.
+    fn syntax_element_parts(
+        &self,
+        reference: ObjRef,
+        node: u32,
+        token: u32,
+        trivia: u32,
+    ) -> Result<(Value, Value, SharedText, SharedBytes, u32), FaultCode> {
+        let Object::Instance { class, fields, .. } = self.vm.heap.get(reference) else {
+            return Err(BAD_TYPE);
+        };
+        if *class != node && *class != token && *class != trivia {
+            return Err(BAD_TYPE);
+        }
+        let [source, records, Value::Int(index)] = fields.as_slice() else {
+            return Err(BAD_TYPE);
+        };
+        let index = u32::try_from(*index).map_err(|_| BAD_TYPE)?;
+        let source_ref = source.as_obj().ok_or(BAD_TYPE)?;
+        let records_ref = records.as_obj().ok_or(BAD_TYPE)?;
+        let Object::Str(text) = self.vm.heap.get(source_ref) else {
+            return Err(BAD_TYPE);
+        };
+        let Object::Bytes(bytes) = self.vm.heap.get(records_ref) else {
+            return Err(BAD_TYPE);
+        };
+        Ok((*source, *records, text.clone(), bytes.clone(), index))
+    }
+
+    /// Allocate one syntax view with shared immutable backing.
+    fn alloc_syntax_view(
+        &mut self,
+        class: u32,
+        source: Value,
+        records: Value,
+        index: u32,
+    ) -> Result<Value, FaultCode> {
+        let value = self.alloc(Object::Instance {
+            class,
+            fields: vec![source, records, Value::Int(i64::from(index))],
+            env: Witness::EMPTY,
+        })?;
+        let reference = value.as_obj().ok_or(FaultCode::MalformedState)?;
+        self.vm.heap.set_frozen(reference);
+        Ok(value)
+    }
+
+    /// Allocate one frozen syntax tree with immutable backing.
+    fn alloc_syntax_tree(
+        &mut self,
+        class: u32,
+        source: Value,
+        records: Value,
+    ) -> Result<Value, FaultCode> {
+        let value = self.alloc(Object::Instance {
+            class,
+            fields: vec![source, records],
+            env: Witness::EMPTY,
+        })?;
+        let reference = value.as_obj().ok_or(FaultCode::MalformedState)?;
+        self.vm.heap.set_frozen(reference);
+        Ok(value)
+    }
+
+    fn syntax_view_class(
+        class: lm_abi::syntax::SyntaxClass,
+        node: u32,
+        token: u32,
+        trivia: u32,
+    ) -> u32 {
+        match class {
+            lm_abi::syntax::SyntaxClass::Node | lm_abi::syntax::SyntaxClass::Invalid => node,
+            lm_abi::syntax::SyntaxClass::Token => token,
+            lm_abi::syntax::SyntaxClass::Trivia => trivia,
+        }
+    }
+
+    /// Execute one public syntax instruction.
+    #[inline(never)]
+    fn exec_syntax(
+        &mut self,
+        instr: ExtendedInstr,
+        tree: u32,
+        node: u32,
+        token: u32,
+        trivia: u32,
+        builder: u32,
+    ) -> Result<(), FaultCode> {
+        match instr {
+            ExtendedInstr::SyntaxTreeRoot => {
+                let tree_ref = self.pop_obj()?;
+                let (source, records, text, data) = self.syntax_tree_parts(tree_ref, tree)?;
+                let view = lm_abi::syntax::SyntaxView::new(data.as_slice(), text.len())
+                    .map_err(|_| FaultCode::BadCast)?;
+                let root = view.record(view.root()).map_err(|_| FaultCode::BadCast)?;
+                if !matches!(
+                    root.class,
+                    lm_abi::syntax::SyntaxClass::Node | lm_abi::syntax::SyntaxClass::Invalid
+                ) {
+                    return Err(FaultCode::BadCast);
+                }
+                if root.lo != 0 || root.hi as usize != text.len() {
+                    return Err(FaultCode::BadCast);
+                }
+                let value = self.alloc_syntax_view(node, source, records, view.root())?;
+                self.push(value)?;
+            }
+            ExtendedInstr::SyntaxKind
+            | ExtendedInstr::SyntaxCategory
+            | ExtendedInstr::SyntaxRangeStart
+            | ExtendedInstr::SyntaxRangeEnd
+            | ExtendedInstr::SyntaxText => {
+                let element = self.pop_obj()?;
+                let (_, _, text, data, index) =
+                    self.syntax_element_parts(element, node, token, trivia)?;
+                let view = lm_abi::syntax::SyntaxView::new(data.as_slice(), text.len())
+                    .map_err(|_| FaultCode::BadCast)?;
+                let record = view.record(index).map_err(|_| FaultCode::BadCast)?;
+                match instr {
+                    ExtendedInstr::SyntaxKind => self.push(Value::Int(i64::from(record.kind)))?,
+                    ExtendedInstr::SyntaxCategory => {
+                        self.push(Value::Int(i64::from(record.class as u8)))?
+                    }
+                    ExtendedInstr::SyntaxRangeStart => {
+                        self.push(Value::Int(i64::from(record.lo)))?
+                    }
+                    ExtendedInstr::SyntaxRangeEnd => self.push(Value::Int(i64::from(record.hi)))?,
+                    ExtendedInstr::SyntaxText => {
+                        let slice = text
+                            .slice(record.lo as usize, record.hi as usize)
+                            .ok_or(FaultCode::BadCast)?;
+                        let value = self.alloc(Object::Substring(slice))?;
+                        self.push(value)?;
+                    }
+                    _ => unreachable!("the syntax scalar dispatcher receives a scalar operation"),
+                }
+            }
+            ExtendedInstr::SyntaxChildren => {
+                let element = self.pop_obj()?;
+                let (source, records, text, data, index) =
+                    self.syntax_element_parts(element, node, token, trivia)?;
+                let view = lm_abi::syntax::SyntaxView::new(data.as_slice(), text.len())
+                    .map_err(|_| FaultCode::BadCast)?;
+                let record = view.record(index).map_err(|_| FaultCode::BadCast)?;
+                let mut descriptors = Vec::new();
+                descriptors
+                    .try_reserve_exact(record.child_len as usize)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                for offset in 0..record.child_len {
+                    let index = view.child(record, offset).map_err(|_| FaultCode::BadCast)?;
+                    let child = view.record(index).map_err(|_| FaultCode::BadCast)?;
+                    descriptors.push((
+                        Self::syntax_view_class(child.class, node, token, trivia),
+                        index,
+                    ));
+                }
+                let base = self.vm.operands.len();
+                for (class, index) in descriptors {
+                    let child = self.alloc_syntax_view(class, source, records, index)?;
+                    self.push(child)?;
+                }
+                let items = self.vm.operands.split_off(base);
+                let list = self.alloc(Object::List {
+                    items,
+                    epoch: StructuralEpoch::default(),
+                })?;
+                self.push(list)?;
+            }
+            ExtendedInstr::SyntaxDetach => {
+                let element = self.pop_obj()?;
+                let (_, _, text, data, index) =
+                    self.syntax_element_parts(element, node, token, trivia)?;
+                let detached = lm_abi::syntax::detach_syntax(data.as_slice(), text.len(), index)
+                    .map_err(|_| FaultCode::BadCast)?;
+                let source = text
+                    .slice(detached.source_start as usize, detached.source_end as usize)
+                    .ok_or(FaultCode::BadCast)?
+                    .try_compact()
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                let records = SharedBytes::try_from_slice(&detached.records)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                let view = lm_abi::syntax::SyntaxView::new(records.as_slice(), source.len())
+                    .map_err(|_| FaultCode::BadCast)?;
+                let record = view.record(detached.root).map_err(|_| FaultCode::BadCast)?;
+                let class = Self::syntax_view_class(record.class, node, token, trivia);
+                let source = self.alloc(Object::Str(source))?;
+                self.push(source)?;
+                let records = self.alloc(Object::Bytes(records))?;
+                self.push(records)?;
+                let value = self.alloc_syntax_view(class, source, records, detached.root)?;
+                self.vm.operands.truncate(self.vm.operands.len() - 2);
+                self.push(value)?;
+            }
+            ExtendedInstr::SyntaxBuildToken | ExtendedInstr::SyntaxBuildTrivia => {
+                let text_ref = self.pop_obj()?;
+                let kind = u16::try_from(self.pop_int()?).map_err(|_| FaultCode::BadCast)?;
+                let builder_ref = self.pop_obj()?;
+                match self.vm.heap.get(builder_ref) {
+                    Object::Instance { class, fields, .. }
+                        if *class == builder && fields.is_empty() => {}
+                    _ => return Err(BAD_TYPE),
+                }
+                let text = match self.vm.heap.get(text_ref) {
+                    Object::Str(text) => text.clone(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let (class, syntax_class) = if matches!(instr, ExtendedInstr::SyntaxBuildToken) {
+                    (token, lm_abi::syntax::SyntaxClass::Token)
+                } else {
+                    (trivia, lm_abi::syntax::SyntaxClass::Trivia)
+                };
+                let encoded = lm_abi::syntax::build_syntax_leaf(syntax_class, kind, text.as_str())
+                    .map_err(|_| FaultCode::BadCast)?;
+                let records =
+                    SharedBytes::try_from_slice(&encoded).map_err(|_| FaultCode::HeapLimit)?;
+                let source = Value::Obj(text_ref);
+                self.push(source)?;
+                let records = self.alloc(Object::Bytes(records))?;
+                self.push(records)?;
+                let value = self.alloc_syntax_view(class, source, records, 0)?;
+                self.vm.operands.truncate(self.vm.operands.len() - 2);
+                self.push(value)?;
+            }
+            ExtendedInstr::SyntaxBuildNode => {
+                let children_ref = self.pop_obj()?;
+                let kind = u16::try_from(self.pop_int()?).map_err(|_| FaultCode::BadCast)?;
+                let builder_ref = self.pop_obj()?;
+                match self.vm.heap.get(builder_ref) {
+                    Object::Instance { class, fields, .. }
+                        if *class == builder && fields.is_empty() => {}
+                    _ => return Err(BAD_TYPE),
+                }
+                let child_values = match self.vm.heap.get(children_ref) {
+                    Object::List { items, .. } => {
+                        let mut copy = Vec::new();
+                        copy.try_reserve_exact(items.len())
+                            .map_err(|_| FaultCode::HeapLimit)?;
+                        copy.extend_from_slice(items);
+                        copy
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                let mut owned = Vec::new();
+                owned
+                    .try_reserve_exact(child_values.len())
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                for child in child_values {
+                    let child = child.as_obj().ok_or(BAD_TYPE)?;
+                    let (_, _, source, records, index) =
+                        self.syntax_element_parts(child, node, token, trivia)?;
+                    owned.push((source, records, index));
+                }
+                let mut parts = Vec::new();
+                parts
+                    .try_reserve_exact(owned.len())
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                for (source, records, index) in &owned {
+                    parts.push(lm_abi::syntax::SyntaxPart {
+                        source: source.as_str(),
+                        records: records.as_slice(),
+                        index: *index,
+                    });
+                }
+                let built = lm_abi::syntax::build_syntax_node(kind, &parts)
+                    .map_err(|_| FaultCode::BadCast)?;
+                let source =
+                    SharedText::try_from_string(built.source).map_err(|_| FaultCode::HeapLimit)?;
+                let records = SharedBytes::try_from_slice(&built.records)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                let view = lm_abi::syntax::SyntaxView::new(records.as_slice(), source.len())
+                    .map_err(|_| FaultCode::BadCast)?;
+                let root = view.root();
+                let source = self.alloc(Object::Str(source))?;
+                self.push(source)?;
+                let records = self.alloc(Object::Bytes(records))?;
+                self.push(records)?;
+                let value = self.alloc_syntax_view(node, source, records, root)?;
+                self.vm.operands.truncate(self.vm.operands.len() - 2);
+                self.push(value)?;
+            }
+            ExtendedInstr::SyntaxToTree => {
+                let element = self.pop_obj()?;
+                let (source, records, text, data, index) =
+                    self.syntax_element_parts(element, node, token, trivia)?;
+                let view = lm_abi::syntax::SyntaxView::new(data.as_slice(), text.len())
+                    .map_err(|_| FaultCode::BadCast)?;
+                let record = view.record(index).map_err(|_| FaultCode::BadCast)?;
+                if !matches!(
+                    record.class,
+                    lm_abi::syntax::SyntaxClass::Node | lm_abi::syntax::SyntaxClass::Invalid
+                ) {
+                    return Err(FaultCode::BadCast);
+                }
+                if index == view.root() && record.lo == 0 && record.hi as usize == text.len() {
+                    let value = self.alloc_syntax_tree(tree, source, records)?;
+                    self.push(value)?;
+                    return Ok(());
+                }
+                let detached = lm_abi::syntax::detach_syntax(data.as_slice(), text.len(), index)
+                    .map_err(|_| FaultCode::BadCast)?;
+                let source = text
+                    .slice(detached.source_start as usize, detached.source_end as usize)
+                    .ok_or(FaultCode::BadCast)?
+                    .try_compact()
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                let records = SharedBytes::try_from_slice(&detached.records)
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                let source = self.alloc(Object::Str(source))?;
+                self.push(source)?;
+                let records = self.alloc(Object::Bytes(records))?;
+                self.push(records)?;
+                let value = self.alloc_syntax_tree(tree, source, records)?;
+                self.vm.operands.truncate(self.vm.operands.len() - 2);
+                self.push(value)?;
+            }
+            _ => unreachable!("the syntax dispatcher receives one syntax instruction"),
+        }
+        Ok(())
+    }
+
     /// Execute one added instruction outside the base dispatch body.
     #[inline(never)]
     fn exec_extended(
@@ -3048,6 +3404,41 @@ impl Machine {
                     op: lm_abi::OP_PROC_SEND,
                     args: vec![handle, message],
                 });
+            }
+            ExtendedInstr::SyntaxTreeRoot
+            | ExtendedInstr::SyntaxKind
+            | ExtendedInstr::SyntaxCategory
+            | ExtendedInstr::SyntaxRangeStart
+            | ExtendedInstr::SyntaxRangeEnd
+            | ExtendedInstr::SyntaxText
+            | ExtendedInstr::SyntaxChildren
+            | ExtendedInstr::SyntaxDetach
+            | ExtendedInstr::SyntaxBuildToken
+            | ExtendedInstr::SyntaxBuildTrivia
+            | ExtendedInstr::SyntaxBuildNode
+            | ExtendedInstr::SyntaxToTree => {
+                let tree = module.core_roles[lm_bytecode::corepin::ROLE_SYNTAX_TREE];
+                let node = module.core_roles[lm_bytecode::corepin::ROLE_SYNTAX_NODE];
+                let token = module.core_roles[lm_bytecode::corepin::ROLE_SYNTAX_TOKEN];
+                let trivia = module.core_roles[lm_bytecode::corepin::ROLE_SYNTAX_TRIVIA];
+                let builder = module.core_roles[lm_bytecode::corepin::ROLE_SYNTAX_BUILDER];
+                self.exec_syntax(instr, tree, node, token, trivia, builder)?;
+            }
+            ExtendedInstr::DynPack { ty } => {
+                let closed = envs
+                    .close(module, ty, self.frame_env())
+                    .map_err(env_fault)?;
+                let value = self.pop()?;
+                let package = self.alloc(Object::DynValue { value, ty: closed })?;
+                self.push(package)?;
+            }
+            ExtendedInstr::DynRender => {
+                let package = self.pop_obj()?;
+                let (value, ty) = match self.vm.heap.get(package) {
+                    Object::DynValue { value, ty } => (*value, *ty),
+                    _ => return Err(BAD_TYPE),
+                };
+                return Ok(ExecOutcome::DynamicRender { value, ty });
             }
         }
         Ok(ExecOutcome::Continue)

@@ -71,7 +71,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 15 stores VM images apart from run machine records.
 /// Version 16 stores current late-bound slot targets in VM images.
 /// Version 18 stores installed code and module instances.
-pub const FORMAT_VERSION: u32 = 18;
+/// Version 19 stores compiler interfaces with portable code.
+pub const FORMAT_VERSION: u32 = 20;
 
 /// The section kinds, in canonical order.
 ///
@@ -288,6 +289,8 @@ pub struct ImageVm {
 pub struct ImageInstance {
     /// The artifact ordinal in `Image::installations`.
     pub installation: u32,
+    /// Canonical interface bytes, when the compiler supplied them.
+    pub interface: Option<Vec<u8>>,
     /// The source module semantic hash.
     pub semantic_hash: [u8; 32],
     /// The relocated entry function.
@@ -477,6 +480,7 @@ impl Image {
             bytes =
                 bytes.saturating_add(image.instances.len() * std::mem::size_of::<ImageInstance>());
             for instance in &image.instances {
+                bytes = bytes.saturating_add(instance.interface.as_ref().map_or(0, Vec::len));
                 bytes = bytes.saturating_add(instance.funcs.len() * std::mem::size_of::<u32>());
                 bytes = bytes.saturating_add(instance.classes.len() * std::mem::size_of::<u32>());
                 bytes = bytes.saturating_add(instance.slots.len() * std::mem::size_of::<u32>());

@@ -42,6 +42,10 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/code.lm"),
     "\n",
+    include_str!("../../../core/syntax.lm"),
+    "\n",
+    include_str!("../../../core/compiler.lm"),
+    "\n",
     include_str!("../../../core/proc.lm"),
     "\n",
     include_str!("../../../core/wait.lm"),
@@ -59,7 +63,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 61] = [
+pub const PRELUDE_TYPES: [&str; 77] = [
     "Option",
     "Result",
     "Ordering",
@@ -83,6 +87,22 @@ pub const PRELUDE_TYPES: [&str; 61] = [
     "Slot",
     "FunctionDef",
     "CodeError",
+    "GrammarVersion",
+    "SourceRange",
+    "SyntaxTree",
+    "SyntaxElement",
+    "SyntaxNode",
+    "SyntaxToken",
+    "SyntaxTrivia",
+    "SyntaxBuilder",
+    "ParseStatus",
+    "SyntaxDiagnostic",
+    "SyntaxParse",
+    "LinkEnv",
+    "CompileEnv",
+    "CompileOptions",
+    "CompileErrors",
+    "DynValue",
     "FsError",
     "OpenOptions",
     "SeekFrom",
@@ -124,7 +144,7 @@ pub const PRELUDE_TYPES: [&str; 61] = [
 ];
 
 /// The constructor names the prelude places into unqualified scope.
-pub const PRELUDE_CTORS: [&str; 13] = [
+pub const PRELUDE_CTORS: [&str; 17] = [
     "Some",
     "None",
     "Ok",
@@ -138,6 +158,10 @@ pub const PRELUDE_CTORS: [&str; 13] = [
     "Start",
     "Current",
     "End",
+    "InteractionExpression",
+    "InteractionDefinitions",
+    "InteractionIncomplete",
+    "InteractionInvalid",
 ];
 
 /// Checker options. `prelude` controls only unqualified name
@@ -2520,6 +2544,16 @@ fn link_class_parents(
                     *pspan,
                 ));
             }
+            let opaque_syntax_parent = ["SyntaxElement", "SyntaxNode"]
+                .iter()
+                .any(|name| ctx.core_types.get(*name) == Some(&parent));
+            if !is_core && opaque_syntax_parent {
+                return Err(Diagnostic::new(
+                    "E1040",
+                    format!("`{pname}` is sealed and permits only core syntax classes"),
+                    *pspan,
+                ));
+            }
             if parent_meta.is_final {
                 return Err(Diagnostic::new(
                     "E1040",
@@ -3007,6 +3041,7 @@ fn resolve_class(
         (true, "Instance") => Some(NativeRepr::CodeInstance),
         (true, "Slot") => Some(NativeRepr::Slot),
         (true, "FunctionDef") => Some(NativeRepr::FunctionDef),
+        (true, "DynValue") => Some(NativeRepr::DynValue),
         _ => None,
     };
     let text_parent = ctx.core_types.get("Text").copied();
@@ -3078,7 +3113,8 @@ fn resolve_class(
             | NativeRepr::VerifiedModule
             | NativeRepr::SlotSpec
             | NativeRepr::CodeInstance
-            | NativeRepr::Slot,
+            | NativeRepr::Slot
+            | NativeRepr::DynValue,
         ) => ctx.store.intern(Type::Class(ClassId(idx))),
         None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),
         None => {

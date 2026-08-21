@@ -624,19 +624,7 @@ pub(crate) fn step(
             push(state, ty)?;
         }
         Instr::New(class) => {
-            let native = [
-                ctx.core.int,
-                ctx.core.boolean,
-                ctx.core.string,
-                ctx.core.substring,
-                ctx.core.char_value,
-                ctx.core.bytes,
-                ctx.core.string_builder,
-                ctx.core.byte_buffer,
-                ctx.core.list,
-                ctx.core.map,
-            ];
-            if native.contains(&Some(*class)) {
+            if ctx.is_native_core_class(*class) {
                 return Err(fail("New cannot allocate a native core class".to_string()));
             }
             let ty = ctx.class_ty[*class as usize]
@@ -644,19 +632,7 @@ pub(crate) fn step(
             push(state, ty)?;
         }
         Instr::NewG { class, app } => {
-            let native = [
-                ctx.core.int,
-                ctx.core.boolean,
-                ctx.core.string,
-                ctx.core.substring,
-                ctx.core.char_value,
-                ctx.core.bytes,
-                ctx.core.string_builder,
-                ctx.core.byte_buffer,
-                ctx.core.list,
-                ctx.core.map,
-            ];
-            if native.contains(&Some(*class)) {
+            if ctx.is_native_core_class(*class) {
                 return Err(fail("NewG cannot allocate a native core class".to_string()));
             }
             let app = &module.apps[*app as usize];
@@ -1071,6 +1047,110 @@ pub(crate) fn step(
                 .map_err(&fail)?;
             push(state, result)?;
         }
+        Instr::Extended(ExtendedInstr::SyntaxTreeRoot) => {
+            let tree = ctx
+                .plain_inst(ctx.core.syntax_tree, "SyntaxTree")
+                .map_err(&fail)?;
+            let result = ctx
+                .plain_inst(ctx.core.syntax_node, "SyntaxNode")
+                .map_err(&fail)?;
+            pop_expect(state, tree)?;
+            push(state, result)?;
+        }
+        Instr::Extended(ExtendedInstr::SyntaxKind)
+        | Instr::Extended(ExtendedInstr::SyntaxCategory)
+        | Instr::Extended(ExtendedInstr::SyntaxRangeStart)
+        | Instr::Extended(ExtendedInstr::SyntaxRangeEnd) => {
+            let element = ctx
+                .plain_inst(ctx.core.syntax_element, "SyntaxElement")
+                .map_err(&fail)?;
+            pop_expect(state, element)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::SyntaxText) => {
+            let element = ctx
+                .plain_inst(ctx.core.syntax_element, "SyntaxElement")
+                .map_err(&fail)?;
+            let text = ctx
+                .plain_inst(ctx.core.substring, "Substring")
+                .map_err(&fail)?;
+            pop_expect(state, element)?;
+            push(state, text)?;
+        }
+        Instr::Extended(ExtendedInstr::SyntaxChildren)
+        | Instr::Extended(ExtendedInstr::SyntaxDetach) => {
+            let element = ctx
+                .plain_inst(ctx.core.syntax_element, "SyntaxElement")
+                .map_err(&fail)?;
+            pop_expect(state, element)?;
+            if matches!(instr, Instr::Extended(ExtendedInstr::SyntaxChildren)) {
+                push(state, ctx.intern(BcType::List(element)))?;
+            } else {
+                push(state, element)?;
+            }
+        }
+        Instr::Extended(ExtendedInstr::DynPack { ty }) => {
+            let value = pop(state)?;
+            if !ctx.is_subtype(value, *ty) {
+                return Err(fail(format!(
+                    "dynamic package expects type {ty}, found type {value}"
+                )));
+            }
+            let package = ctx
+                .plain_inst(ctx.core.dyn_value, "DynValue")
+                .map_err(&fail)?;
+            push(state, package)?;
+        }
+        Instr::Extended(ExtendedInstr::DynRender) => {
+            let package = ctx
+                .plain_inst(ctx.core.dyn_value, "DynValue")
+                .map_err(&fail)?;
+            pop_expect(state, package)?;
+            push(state, TY_STR)?;
+        }
+        Instr::Extended(ExtendedInstr::SyntaxBuildToken)
+        | Instr::Extended(ExtendedInstr::SyntaxBuildTrivia) => {
+            let builder = ctx
+                .plain_inst(ctx.core.syntax_builder, "SyntaxBuilder")
+                .map_err(&fail)?;
+            let result = if matches!(instr, Instr::Extended(ExtendedInstr::SyntaxBuildToken)) {
+                ctx.plain_inst(ctx.core.syntax_token, "SyntaxToken")
+                    .map_err(&fail)?
+            } else {
+                ctx.plain_inst(ctx.core.syntax_trivia, "SyntaxTrivia")
+                    .map_err(&fail)?
+            };
+            pop_expect(state, TY_STR)?;
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, builder)?;
+            push(state, result)?;
+        }
+        Instr::Extended(ExtendedInstr::SyntaxBuildNode) => {
+            let builder = ctx
+                .plain_inst(ctx.core.syntax_builder, "SyntaxBuilder")
+                .map_err(&fail)?;
+            let element = ctx
+                .plain_inst(ctx.core.syntax_element, "SyntaxElement")
+                .map_err(&fail)?;
+            let result = ctx
+                .plain_inst(ctx.core.syntax_node, "SyntaxNode")
+                .map_err(&fail)?;
+            let children = ctx.intern(BcType::List(element));
+            pop_expect(state, children)?;
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, builder)?;
+            push(state, result)?;
+        }
+        Instr::Extended(ExtendedInstr::SyntaxToTree) => {
+            let node = ctx
+                .plain_inst(ctx.core.syntax_node, "SyntaxNode")
+                .map_err(&fail)?;
+            let tree = ctx
+                .plain_inst(ctx.core.syntax_tree, "SyntaxTree")
+                .map_err(&fail)?;
+            pop_expect(state, node)?;
+            push(state, tree)?;
+        }
         Instr::Native(lm_bytecode::NativeInstr::SbNew) => {
             let class = ctx
                 .core
@@ -1432,7 +1512,13 @@ pub(crate) fn step(
                             let result = ctx.result_inst(verified, error).map_err(&fail)?;
                             push(state, result)?;
                         }
-                        lm_abi::OP_VM_INSTALL => {
+                        lm_abi::OP_VM_INSTALL | lm_abi::OP_VM_INSTALL_WITH => {
+                            if op == lm_abi::OP_VM_INSTALL_WITH {
+                                let links = ctx
+                                    .plain_inst(ctx.core.link_env, "LinkEnv")
+                                    .map_err(&fail)?;
+                                pop_expect(state, links)?;
+                            }
                             let verified = ctx
                                 .plain_inst(ctx.core.verified_module, "VerifiedModule")
                                 .map_err(&fail)?;

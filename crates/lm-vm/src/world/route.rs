@@ -592,6 +592,21 @@ impl World {
                         .try_bounded()
                         .map(HostArg::Bytes)
                         .map_err(|_| FaultCode::HeapLimit),
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.compile_env =>
+                    {
+                        self.host_compile_env(vm, fields)
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.compile_options =>
+                    {
+                        self.host_compile_options(vm, fields)
+                    }
+                    Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core.syntax_node =>
+                    {
+                        self.host_syntax(vm, fields)
+                    }
                     Object::NativeFileHandle { resource } => {
                         let file = self
                             .bound_resources
@@ -722,6 +737,130 @@ impl World {
                 _ => Err(FaultCode::TypeMismatch),
             })
             .collect()
+    }
+
+    fn host_compile_env(&self, vm: VmId, fields: &[Value]) -> Result<HostArg, FaultCode> {
+        let [modules, roots] = fields else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let heap = &self.machines[vm as usize].vm.heap;
+        let modules = modules.as_obj().ok_or(FaultCode::TypeMismatch)?;
+        let Object::List { items: modules, .. } = heap.get(modules) else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let mut host_modules = Vec::new();
+        host_modules
+            .try_reserve_exact(modules.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
+        for module in modules {
+            let reference = module.as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let Object::NativeCode(code) = heap.get(reference) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            if code.kind != lm_heap::PortableCodeKind::VerifiedModule {
+                return Err(FaultCode::TypeMismatch);
+            }
+            let interface = code.interface.as_ref().ok_or(FaultCode::TypeMismatch)?;
+            host_modules.push(HostCompileModule {
+                artifact: code.bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
+                interface: interface.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
+            });
+        }
+
+        let roots = roots.as_obj().ok_or(FaultCode::TypeMismatch)?;
+        let Object::List { items: roots, .. } = heap.get(roots) else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let mut host_roots = Vec::new();
+        host_roots
+            .try_reserve_exact(roots.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
+        for root in roots {
+            let reference = root.as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let Object::Tuple { items } = heap.get(reference) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let [name, prefix] = items.as_slice() else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            let name = name.as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let prefix = prefix.as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let (Object::Str(name), Object::Str(prefix)) = (heap.get(name), heap.get(prefix))
+            else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            host_roots.push((name.clone(), prefix.clone()));
+        }
+        Ok(HostArg::CompileEnv(HostCompileEnv {
+            modules: host_modules,
+            roots: host_roots,
+        }))
+    }
+
+    fn host_compile_options(&self, vm: VmId, fields: &[Value]) -> Result<HostArg, FaultCode> {
+        let [Value::Bool(is_main), Value::Bool(dynamic_result), Value::Bool(late_definitions), late_functions, late_classes] =
+            fields
+        else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        Ok(HostArg::CompileOptions(HostCompileOptions {
+            is_main: *is_main,
+            dynamic_result: *dynamic_result,
+            late_definitions: *late_definitions,
+            late_functions: self.host_string_list(vm, *late_functions)?,
+            late_classes: self.host_string_list(vm, *late_classes)?,
+        }))
+    }
+
+    fn host_syntax(&self, vm: VmId, fields: &[Value]) -> Result<HostArg, FaultCode> {
+        let [source, records, Value::Int(index)] = fields else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let index = u32::try_from(*index).map_err(|_| FaultCode::TypeMismatch)?;
+        let heap = &self.machines[vm as usize].vm.heap;
+        let source = source.as_obj().ok_or(FaultCode::TypeMismatch)?;
+        let records = records.as_obj().ok_or(FaultCode::TypeMismatch)?;
+        let Object::Str(source) = heap.get(source) else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let Object::Bytes(records) = heap.get(records) else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let records = records.try_bounded().map_err(|_| FaultCode::HeapLimit)?;
+        let view = lm_abi::syntax::SyntaxView::new(records.as_slice(), source.len())
+            .map_err(|_| FaultCode::BadCast)?;
+        let record = view.record(index).map_err(|_| FaultCode::BadCast)?;
+        if !matches!(
+            record.class,
+            lm_abi::syntax::SyntaxClass::Node | lm_abi::syntax::SyntaxClass::Invalid
+        ) {
+            return Err(FaultCode::BadCast);
+        }
+        Ok(HostArg::Syntax {
+            source: source.clone(),
+            records,
+            index,
+        })
+    }
+
+    fn host_string_list(&self, vm: VmId, value: Value) -> Result<Vec<SharedText>, FaultCode> {
+        let heap = &self.machines[vm as usize].vm.heap;
+        let reference = value.as_obj().ok_or(FaultCode::TypeMismatch)?;
+        let Object::List { items, .. } = heap.get(reference) else {
+            return Err(FaultCode::TypeMismatch);
+        };
+        let mut strings = Vec::new();
+        strings
+            .try_reserve_exact(items.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
+        for value in items {
+            let reference = value.as_obj().ok_or(FaultCode::TypeMismatch)?;
+            let Object::Str(text) = heap.get(reference) else {
+                return Err(FaultCode::TypeMismatch);
+            };
+            strings.push(text.clone());
+        }
+        Ok(strings)
     }
 
     /// Convert one live TCP resource to an opaque host token.

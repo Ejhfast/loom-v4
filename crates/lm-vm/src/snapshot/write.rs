@@ -640,8 +640,20 @@ impl World {
                 target.extend_from_slice(source);
                 Ok(target)
             };
+            let interface = match &instance.interface {
+                Some(source) => {
+                    let mut target = Vec::new();
+                    target
+                        .try_reserve_exact(source.len())
+                        .map_err(|_| SnapshotFail::LimitExceeded)?;
+                    target.extend_from_slice(source.as_slice());
+                    Some(target)
+                }
+                None => None,
+            };
             instances.push(ImageInstance {
                 installation: instance.installation,
+                interface,
                 semantic_hash: instance.semantic_hash,
                 entry: instance.entry,
                 funcs: copy(&instance.funcs)?,
@@ -1235,6 +1247,10 @@ fn for_object_values(object: &Object, out: &mut Vec<u32>) {
                 collect_empty_type(*value, out);
             }
         }
+        Object::DynValue { value, ty } => {
+            out.push(*ty);
+            collect_empty_type(*value, out);
+        }
         _ => {}
     }
 }
@@ -1302,6 +1318,12 @@ fn remap_object_empty_types(object: &mut Object, map: &HashMap<u32, u32>) {
             for value in captures {
                 remap_empty_type(value, map);
             }
+        }
+        Object::DynValue { value, ty } => {
+            remap_empty_type(value, map);
+            *ty = *map
+                .get(ty)
+                .expect("a dynamic package has an image type ordinal");
         }
         _ => {}
     }

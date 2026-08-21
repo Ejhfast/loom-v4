@@ -170,8 +170,12 @@ name = "lm-host"
 version = "0.1.0"
 dependencies = [
  "lm-abi",
+ "lm-bytecode",
+ "lm-compiler",
  "lm-proc",
+ "lm-source",
  "lm-testkit",
+ "lm-verify",
  "lm-vm",
  "mio",
  "rcgen",
@@ -195,6 +199,9 @@ version = "0.1.0"
 [[package]]
 name = "lm-source"
 version = "0.1.0"
+dependencies = [
+ "lm-abi",
+]
 
 [[package]]
 name = "lm-testkit"

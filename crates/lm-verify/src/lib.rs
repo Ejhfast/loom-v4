@@ -235,7 +235,8 @@ use tables::verify_tables;
 /// Version 21 separates persistent VMs from typed runs.
 /// Version 23 verifies late-bound slot contracts and instructions.
 /// Version 24 verifies reified code controls.
-pub const VERIFIER_VERSION: u32 = 24;
+/// Version 25 verifies runtime compiler input classes.
+pub const VERIFIER_VERSION: u32 = 25;
 
 /// Verify a full module. Every table and every function must pass.
 ///

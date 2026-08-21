@@ -1806,6 +1806,19 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             }),
             lm_abi::INTRINSIC_MAP_CLEAR => extended(ExtendedInstr::MapClear),
             lm_abi::INTRINSIC_MAP_RESERVE => extended(ExtendedInstr::MapReserve),
+            lm_abi::INTRINSIC_SYNTAX_TREE_ROOT => extended(ExtendedInstr::SyntaxTreeRoot),
+            lm_abi::INTRINSIC_SYNTAX_KIND => extended(ExtendedInstr::SyntaxKind),
+            lm_abi::INTRINSIC_SYNTAX_CATEGORY => extended(ExtendedInstr::SyntaxCategory),
+            lm_abi::INTRINSIC_SYNTAX_RANGE_START => extended(ExtendedInstr::SyntaxRangeStart),
+            lm_abi::INTRINSIC_SYNTAX_RANGE_END => extended(ExtendedInstr::SyntaxRangeEnd),
+            lm_abi::INTRINSIC_SYNTAX_TEXT => extended(ExtendedInstr::SyntaxText),
+            lm_abi::INTRINSIC_SYNTAX_CHILDREN => extended(ExtendedInstr::SyntaxChildren),
+            lm_abi::INTRINSIC_SYNTAX_DETACH => extended(ExtendedInstr::SyntaxDetach),
+            lm_abi::INTRINSIC_DYN_RENDER => extended(ExtendedInstr::DynRender),
+            lm_abi::INTRINSIC_SYNTAX_BUILD_TOKEN => extended(ExtendedInstr::SyntaxBuildToken),
+            lm_abi::INTRINSIC_SYNTAX_BUILD_TRIVIA => extended(ExtendedInstr::SyntaxBuildTrivia),
+            lm_abi::INTRINSIC_SYNTAX_BUILD_NODE => extended(ExtendedInstr::SyntaxBuildNode),
+            lm_abi::INTRINSIC_SYNTAX_TO_TREE => extended(ExtendedInstr::SyntaxToTree),
             _ => unreachable!("the checker accepts only manifest intrinsics"),
         };
         self.emit(instr);
@@ -2462,6 +2475,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 | NativeRepr::CodeInstance
                 | NativeRepr::Slot
                 | NativeRepr::FunctionDef
+                | NativeRepr::DynValue
         )
     ) {
         let ret = if class.type_params == 0 {
@@ -2993,7 +3007,20 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
             (count, 1)
         }
         ExtendedInstr::NewSlot { .. } | ExtendedInstr::LoadSlot { .. } => (0, 1),
-        ExtendedInstr::SendSlot { .. } => (1, 1),
+        ExtendedInstr::SendSlot { .. }
+        | ExtendedInstr::SyntaxTreeRoot
+        | ExtendedInstr::SyntaxKind
+        | ExtendedInstr::SyntaxCategory
+        | ExtendedInstr::SyntaxRangeStart
+        | ExtendedInstr::SyntaxRangeEnd
+        | ExtendedInstr::SyntaxText
+        | ExtendedInstr::SyntaxChildren
+        | ExtendedInstr::SyntaxDetach
+        | ExtendedInstr::DynPack { .. }
+        | ExtendedInstr::DynRender
+        | ExtendedInstr::SyntaxToTree => (1, 1),
+        ExtendedInstr::SyntaxBuildToken | ExtendedInstr::SyntaxBuildTrivia => (3, 1),
+        ExtendedInstr::SyntaxBuildNode => (3, 1),
     }
 }
 
@@ -3237,6 +3264,20 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         }
         ExtendedInstr::LoadSlot { slot } => format!("LoadSlot slot{slot}"),
         ExtendedInstr::SendSlot { slot } => format!("SendSlot slot{slot}"),
+        ExtendedInstr::SyntaxTreeRoot => "SyntaxTreeRoot".to_string(),
+        ExtendedInstr::SyntaxKind => "SyntaxKind".to_string(),
+        ExtendedInstr::SyntaxCategory => "SyntaxCategory".to_string(),
+        ExtendedInstr::SyntaxRangeStart => "SyntaxRangeStart".to_string(),
+        ExtendedInstr::SyntaxRangeEnd => "SyntaxRangeEnd".to_string(),
+        ExtendedInstr::SyntaxText => "SyntaxText".to_string(),
+        ExtendedInstr::SyntaxChildren => "SyntaxChildren".to_string(),
+        ExtendedInstr::SyntaxDetach => "SyntaxDetach".to_string(),
+        ExtendedInstr::DynPack { ty } => format!("DynPack ty{ty}"),
+        ExtendedInstr::DynRender => "DynRender".to_string(),
+        ExtendedInstr::SyntaxBuildToken => "SyntaxBuildToken".to_string(),
+        ExtendedInstr::SyntaxBuildTrivia => "SyntaxBuildTrivia".to_string(),
+        ExtendedInstr::SyntaxBuildNode => "SyntaxBuildNode".to_string(),
+        ExtendedInstr::SyntaxToTree => "SyntaxToTree".to_string(),
     }
 }
 

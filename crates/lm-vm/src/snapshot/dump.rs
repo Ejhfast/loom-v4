@@ -92,9 +92,10 @@ pub fn dump_image(world: &Image) -> String {
         for (index, instance) in image.instances.iter().enumerate() {
             let _ = writeln!(
                 out,
-                "  instance {index} installation {} entry {} semantic {}",
+                "  instance {index} installation {} entry {} interface {} semantic {}",
                 instance.installation,
                 instance.entry,
+                instance.interface.as_ref().map_or(0, Vec::len),
                 hex(&instance.semantic_hash)
             );
             let _ = writeln!(out, "    functions {:?}", instance.funcs);
@@ -315,10 +316,11 @@ fn payload(object: &Object) -> String {
         Object::NativeRun { vm } => format!("run {vm}"),
         Object::NativeCode(code) => {
             format!(
-                "portable {:?} index {} bytes {}",
+                "portable {:?} index {} bytes {} interface {}",
                 code.kind,
                 code.index,
-                code.bytes.len()
+                code.bytes.len(),
+                code.interface.as_ref().map_or(0, |bytes| bytes.len())
             )
         }
         Object::NativeCodeHandle {
@@ -348,6 +350,9 @@ fn payload(object: &Object) -> String {
         Object::NativeTcpStream { resource } => format!("TCP stream resource {resource}"),
         Object::NativeTcpListener { resource } => format!("TCP listener resource {resource}"),
         Object::NativeTlsStream { resource } => format!("TLS stream resource {resource}"),
+        Object::DynValue { value, ty } => {
+            format!("dynamic type {ty} value {}", show(*value))
+        }
     }
 }
 

@@ -34,7 +34,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 115;
+pub const CORE_ROLE_COUNT: usize = 132;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -573,6 +573,34 @@ pub enum ExtendedInstr {
     LoadSlot { slot: u32 },
     /// Send through the current process target of one VM slot.
     SendSlot { slot: u32 },
+    /// Pop a SyntaxTree and push its root SyntaxNode.
+    SyntaxTreeRoot,
+    /// Pop a syntax view and push its stable kind number.
+    SyntaxKind,
+    /// Pop a syntax view and push its category number.
+    SyntaxCategory,
+    /// Pop a syntax view and push its first source byte.
+    SyntaxRangeStart,
+    /// Pop a syntax view and push its final source byte.
+    SyntaxRangeEnd,
+    /// Pop a syntax view and push its shared source text.
+    SyntaxText,
+    /// Pop a syntax view and push its immediate child views.
+    SyntaxChildren,
+    /// Pop a syntax view and push one compact independent view.
+    SyntaxDetach,
+    /// Package one value with its closed static type.
+    DynPack { ty: u32 },
+    /// Pop one dynamic package and push its rendered text.
+    DynRender,
+    /// Build one immutable token from a kind and exact text.
+    SyntaxBuildToken,
+    /// Build one immutable trivia item from a kind and exact text.
+    SyntaxBuildTrivia,
+    /// Build one immutable node from a kind and child elements.
+    SyntaxBuildNode,
+    /// Convert one immutable syntax node into a syntax tree.
+    SyntaxToTree,
 }
 
 /// One native value instruction.
@@ -1040,8 +1068,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// splits persistent VM images from typed runs. Version 32 renames the
 /// two guest snapshot types. Version 33 adds late-bound slot tables
 /// and four specialized slot instructions. Version 34 removes the
-/// invalid portable process target form.
-pub const VERSION: u16 = 34;
+/// invalid portable process target form. Version 35 adds dynamic
+/// result and public syntax instructions.
+pub const VERSION: u16 = 35;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1227,6 +1256,20 @@ const OP_CALL_SLOT: u8 = 0xd3;
 const OP_NEW_SLOT: u8 = 0xd4;
 const OP_LOAD_SLOT: u8 = 0xd5;
 const OP_SEND_SLOT: u8 = 0xd6;
+const OP_SYNTAX_TREE_ROOT: u8 = 0xd7;
+const OP_SYNTAX_KIND: u8 = 0xd8;
+const OP_SYNTAX_CATEGORY: u8 = 0xd9;
+const OP_SYNTAX_RANGE_START: u8 = 0xda;
+const OP_SYNTAX_RANGE_END: u8 = 0xdb;
+const OP_SYNTAX_TEXT: u8 = 0xdc;
+const OP_SYNTAX_CHILDREN: u8 = 0xdd;
+const OP_SYNTAX_DETACH: u8 = 0xde;
+const OP_DYN_PACK: u8 = 0xdf;
+const OP_DYN_RENDER: u8 = 0xe0;
+const OP_SYNTAX_BUILD_TOKEN: u8 = 0xe1;
+const OP_SYNTAX_BUILD_TRIVIA: u8 = 0xe2;
+const OP_SYNTAX_BUILD_NODE: u8 = 0xe3;
+const OP_SYNTAX_TO_TREE: u8 = 0xe4;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -2075,6 +2118,23 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
             out.push(OP_SEND_SLOT);
             write_u32(out, slot);
         }
+        ExtendedInstr::SyntaxTreeRoot => out.push(OP_SYNTAX_TREE_ROOT),
+        ExtendedInstr::SyntaxKind => out.push(OP_SYNTAX_KIND),
+        ExtendedInstr::SyntaxCategory => out.push(OP_SYNTAX_CATEGORY),
+        ExtendedInstr::SyntaxRangeStart => out.push(OP_SYNTAX_RANGE_START),
+        ExtendedInstr::SyntaxRangeEnd => out.push(OP_SYNTAX_RANGE_END),
+        ExtendedInstr::SyntaxText => out.push(OP_SYNTAX_TEXT),
+        ExtendedInstr::SyntaxChildren => out.push(OP_SYNTAX_CHILDREN),
+        ExtendedInstr::SyntaxDetach => out.push(OP_SYNTAX_DETACH),
+        ExtendedInstr::DynPack { ty } => {
+            out.push(OP_DYN_PACK);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::DynRender => out.push(OP_DYN_RENDER),
+        ExtendedInstr::SyntaxBuildToken => out.push(OP_SYNTAX_BUILD_TOKEN),
+        ExtendedInstr::SyntaxBuildTrivia => out.push(OP_SYNTAX_BUILD_TRIVIA),
+        ExtendedInstr::SyntaxBuildNode => out.push(OP_SYNTAX_BUILD_NODE),
+        ExtendedInstr::SyntaxToTree => out.push(OP_SYNTAX_TO_TREE),
     }
 }
 
@@ -2716,6 +2776,9 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         // The local-type table count passes the length guard, so the
         // allocation is bounded by the input size.
         let local_count = cur.len()?;
+        if local_count > cur.remaining() / 4 {
+            return Err(DecodeError::BadLength);
+        }
         let mut local_types = Vec::with_capacity(local_count);
         for _ in 0..local_count {
             local_types.push(cur.u32()?);
@@ -3055,6 +3118,20 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         }),
         OP_LOAD_SLOT => Instr::Extended(ExtendedInstr::LoadSlot { slot: cur.u32()? }),
         OP_SEND_SLOT => Instr::Extended(ExtendedInstr::SendSlot { slot: cur.u32()? }),
+        OP_SYNTAX_TREE_ROOT => Instr::Extended(ExtendedInstr::SyntaxTreeRoot),
+        OP_SYNTAX_KIND => Instr::Extended(ExtendedInstr::SyntaxKind),
+        OP_SYNTAX_CATEGORY => Instr::Extended(ExtendedInstr::SyntaxCategory),
+        OP_SYNTAX_RANGE_START => Instr::Extended(ExtendedInstr::SyntaxRangeStart),
+        OP_SYNTAX_RANGE_END => Instr::Extended(ExtendedInstr::SyntaxRangeEnd),
+        OP_SYNTAX_TEXT => Instr::Extended(ExtendedInstr::SyntaxText),
+        OP_SYNTAX_CHILDREN => Instr::Extended(ExtendedInstr::SyntaxChildren),
+        OP_SYNTAX_DETACH => Instr::Extended(ExtendedInstr::SyntaxDetach),
+        OP_DYN_PACK => Instr::Extended(ExtendedInstr::DynPack { ty: cur.u32()? }),
+        OP_DYN_RENDER => Instr::Extended(ExtendedInstr::DynRender),
+        OP_SYNTAX_BUILD_TOKEN => Instr::Extended(ExtendedInstr::SyntaxBuildToken),
+        OP_SYNTAX_BUILD_TRIVIA => Instr::Extended(ExtendedInstr::SyntaxBuildTrivia),
+        OP_SYNTAX_BUILD_NODE => Instr::Extended(ExtendedInstr::SyntaxBuildNode),
+        OP_SYNTAX_TO_TREE => Instr::Extended(ExtendedInstr::SyntaxToTree),
         OP_SB_NEW => Instr::Native(NativeInstr::SbNew),
         OP_SB_APPEND_STR => Instr::Native(NativeInstr::SbAppendStr),
         OP_SB_APPEND_INT => Instr::Native(NativeInstr::SbAppendInt),
@@ -3449,6 +3526,20 @@ mod tests {
             Instr::Extended(ExtendedInstr::NewSlot { slot: 1, app: 0 }),
             Instr::Extended(ExtendedInstr::LoadSlot { slot: 2 }),
             Instr::Extended(ExtendedInstr::SendSlot { slot: 3 }),
+            Instr::Extended(ExtendedInstr::SyntaxTreeRoot),
+            Instr::Extended(ExtendedInstr::SyntaxKind),
+            Instr::Extended(ExtendedInstr::SyntaxCategory),
+            Instr::Extended(ExtendedInstr::SyntaxRangeStart),
+            Instr::Extended(ExtendedInstr::SyntaxRangeEnd),
+            Instr::Extended(ExtendedInstr::SyntaxText),
+            Instr::Extended(ExtendedInstr::SyntaxChildren),
+            Instr::Extended(ExtendedInstr::SyntaxDetach),
+            Instr::Extended(ExtendedInstr::DynPack { ty: 0 }),
+            Instr::Extended(ExtendedInstr::DynRender),
+            Instr::Extended(ExtendedInstr::SyntaxBuildToken),
+            Instr::Extended(ExtendedInstr::SyntaxBuildTrivia),
+            Instr::Extended(ExtendedInstr::SyntaxBuildNode),
+            Instr::Extended(ExtendedInstr::SyntaxToTree),
             Instr::Native(NativeInstr::SbNew),
             Instr::Native(NativeInstr::SbAppendStr),
             Instr::Native(NativeInstr::SbAppendInt),

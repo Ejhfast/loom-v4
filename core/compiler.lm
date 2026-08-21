@@ -1,0 +1,60 @@
+# Core: explicit runtime compiler inputs and errors.
+
+final class LinkEnv
+  instances: List[Instance]
+
+  def init(mut self, instances: List[Instance])
+    self.instances = instances
+  end
+end
+
+final class CompileEnv
+  modules: List[VerifiedModule]
+  roots: List[(String, String)]
+
+  def init(
+    mut self,
+    modules: List[VerifiedModule],
+    roots: List[(String, String)]
+  )
+    self.modules = modules
+    self.roots = roots
+  end
+end
+
+final class DynValue
+  def render(self): String
+    intrinsic("dyn.render", self)
+  end
+end
+
+final class CompileOptions
+  is_main: Bool
+  dynamic_result: Bool
+  late_definitions: Bool
+  late_functions: List[String]
+  late_classes: List[String]
+
+  def init(
+    mut self,
+    is_main: Bool,
+    dynamic_result: Bool,
+    late_definitions: Bool,
+    late_functions: List[String],
+    late_classes: List[String]
+  )
+    self.is_main = is_main
+    self.dynamic_result = dynamic_result
+    self.late_definitions = late_definitions
+    self.late_functions = late_functions
+    self.late_classes = late_classes
+  end
+end
+
+final class CompileErrors
+  message: String
+
+  def init(mut self, message: String)
+    self.message = message
+  end
+end

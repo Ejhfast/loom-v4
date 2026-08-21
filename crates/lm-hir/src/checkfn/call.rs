@@ -77,6 +77,22 @@ impl<'o> FnChecker<'o> {
                         name_span,
                     ));
                 }
+                let opaque_syntax = [
+                    "SyntaxTree",
+                    "SyntaxElement",
+                    "SyntaxNode",
+                    "SyntaxToken",
+                    "SyntaxTrivia",
+                ]
+                .iter()
+                .any(|name| ctx.core_types.get(*name) == Some(&class));
+                if !self.env.core_scope && opaque_syntax {
+                    return Err(Diagnostic::new(
+                        "E1026",
+                        format!("`{name}` values cannot be constructed directly"),
+                        name_span,
+                    ));
+                }
                 if matches!(
                     ctx.classes[class as usize].native_repr,
                     Some(
@@ -93,6 +109,7 @@ impl<'o> FnChecker<'o> {
                             | NativeRepr::CodeInstance
                             | NativeRepr::Slot
                             | NativeRepr::FunctionDef
+                            | NativeRepr::DynValue
                     )
                 ) {
                     return Err(Diagnostic::new(

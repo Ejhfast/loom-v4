@@ -204,28 +204,71 @@ fn rebuild_aggregate(
                 format!("installed artifact {index} did not decode: {error}"),
             )
         })?;
-        let admitted = crate::load(addition.clone()).map_err(|error| {
+        lm_verify::verify_module(&addition).map_err(|error| {
             ImageError::admission(
                 ImageReason::Code,
                 format!("installed artifact {index} did not verify: {error}"),
             )
         })?;
-        let source_identity = admitted.identity().map_err(|_| {
+        let source_identity = lm_bytecode::identity::module_identity(&addition).map_err(|_| {
             ImageError::admission(
                 ImageReason::Code,
                 format!("installed artifact {index} has no semantic identity"),
             )
         })?;
-        let appended = lm_bytecode::append::append_linked(&module, &addition).map_err(|error| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("installed artifact {index} did not link: {error}"),
-            )
-        })?;
+        let instance = image
+            .vm_images
+            .iter()
+            .flat_map(|vm| &vm.instances)
+            .find(|instance| instance.installation as usize == index)
+            .ok_or_else(|| {
+                ImageError::admission(
+                    ImageReason::Code,
+                    format!("installed artifact {index} has no module instance"),
+                )
+            })?;
+        let mut imports = Vec::new();
+        imports
+            .try_reserve_exact(addition.imports.len())
+            .map_err(|_| {
+                ImageError::admission(ImageReason::Budget, "the resolved import allocation failed")
+            })?;
+        for import in &addition.imports {
+            let target = if import.kind == lm_bytecode::ImportKind::Class {
+                instance
+                    .classes
+                    .get(import.def as usize)
+                    .copied()
+                    .map(lm_bytecode::append::ResolvedImport::Class)
+            } else {
+                instance
+                    .funcs
+                    .get(import.def as usize)
+                    .copied()
+                    .map(lm_bytecode::append::ResolvedImport::Function)
+            }
+            .ok_or_else(|| {
+                ImageError::admission(
+                    ImageReason::Code,
+                    format!("installed artifact {index} has an invalid import target"),
+                )
+            })?;
+            imports.push(target);
+        }
+        let appended = lm_bytecode::append::append_resolved(&module, &addition, &imports).map_err(
+            |error| {
+                ImageError::admission(
+                    ImageReason::Code,
+                    format!("installed artifact {index} did not link: {error}"),
+                )
+            },
+        )?;
         proofs.push(InstallationProof {
             semantic_hash: source_identity.semantic_hash,
             entry: appended.reloc.funcs[addition.entry as usize],
             reloc: appended.reloc,
+            source: addition,
+            source_identity,
         });
         module = appended.module;
     }
@@ -242,6 +285,8 @@ struct InstallationProof {
     semantic_hash: [u8; 32],
     entry: u32,
     reloc: lm_bytecode::append::AppendReloc,
+    source: lm_bytecode::Module,
+    source_identity: ModuleIdentity,
 }
 
 fn fail<T>(reason: ImageReason, detail: impl Into<String>) -> Result<T, ImageError> {
@@ -271,6 +316,7 @@ fn admission_cost(image: &Image) -> Result<u64, ImageError> {
         add(image.slots.len())?;
         add(image.instances.len())?;
         for instance in &image.instances {
+            add(instance.interface.as_ref().map_or(0, Vec::len))?;
             add(instance.funcs.len())?;
             add(instance.classes.len())?;
             add(instance.slots.len())?;
@@ -339,6 +385,7 @@ fn object_edges(object: &Object) -> usize {
         Object::List { items, .. } | Object::Tuple { items } => items.len(),
         Object::Map { entries, .. } => entries.len().saturating_mul(2),
         Object::Closure { captures, .. } => captures.len(),
+        Object::DynValue { .. } => 1,
         _ => 0,
     }
 }
@@ -355,6 +402,7 @@ fn image_object_values(object: &Object, out: &mut Vec<Value>) {
             }
         }
         Object::Closure { captures, .. } => out.extend(captures.iter().copied()),
+        Object::DynValue { value, .. } => out.push(*value),
         _ => {}
     }
 }
@@ -737,6 +785,14 @@ impl Admit<'_> {
                         format!("VM image {image} instance {index} has invalid relocation"),
                     );
                 }
+                if let Some(bytes) = &instance.interface {
+                    self.check_interface(
+                        &proof.source,
+                        &proof.source_identity,
+                        bytes,
+                        "a module instance",
+                    )?;
+                }
             }
         }
         Ok(())
@@ -747,6 +803,7 @@ impl Admit<'_> {
         &self,
         kind: PortableCodeKind,
         bytes: &[u8],
+        interface: Option<&[u8]>,
         index: u32,
     ) -> Result<(), ImageError> {
         if kind == PortableCodeKind::Artifact {
@@ -758,12 +815,21 @@ impl Admit<'_> {
                 format!("a portable code value did not decode: {error}"),
             )
         })?;
-        crate::load(module.clone()).map_err(|error| {
+        lm_verify::verify_module(&module).map_err(|error| {
             ImageError::admission(
                 ImageReason::Code,
                 format!("a portable code value did not verify: {error}"),
             )
         })?;
+        let identity = lm_bytecode::identity::module_identity(&module).map_err(|error| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("a portable code value did not hash: {error}"),
+            )
+        })?;
+        if let Some(interface) = interface {
+            self.check_interface(&module, &identity, interface, "a portable code value")?;
+        }
         if kind == PortableCodeKind::SlotSpec && index as usize >= module.slots.len() {
             return fail(
                 ImageReason::Code,
@@ -777,6 +843,33 @@ impl Admit<'_> {
             );
         }
         Ok(())
+    }
+
+    fn check_interface(
+        &self,
+        source: &lm_bytecode::Module,
+        identity: &ModuleIdentity,
+        bytes: &[u8],
+        owner: &str,
+    ) -> Result<(), ImageError> {
+        let interface = lm_bytecode::interface::decode_interface(bytes).map_err(|error| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("{owner} has an interface that did not decode: {error}"),
+            )
+        })?;
+        if lm_bytecode::interface::encode_interface(&interface) != bytes {
+            return fail(
+                ImageReason::Code,
+                format!("{owner} has noncanonical interface bytes"),
+            );
+        }
+        lm_bytecode::interface::validate_interface(source, identity, &interface).map_err(|error| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("{owner} has an invalid interface: {error}"),
+            )
+        })
     }
 
     /// Prove each captured target against its immutable module contract.
@@ -947,6 +1040,13 @@ impl Admit<'_> {
             for value in values {
                 check_value(value, &format!("object {ordinal}"))?;
             }
+            if matches!(entry.object, Object::DynValue { ty, .. } if ty as usize >= self.image.types.len())
+            {
+                return fail(
+                    ImageReason::Reference,
+                    at(&format!("object {ordinal} names no closed type")),
+                );
+            }
             match &entry.object {
                 Object::NativeHandle { proc, generation } => {
                     let Some(target) = self.image.machines.get(*proc as usize) else {
@@ -997,7 +1097,12 @@ impl Admit<'_> {
                     self.env_of(env.env().0)?;
                 }
                 Object::NativeCode(code) => {
-                    self.check_portable_code(code.kind, code.bytes.as_slice(), code.index)?;
+                    self.check_portable_code(
+                        code.kind,
+                        code.bytes.as_slice(),
+                        code.interface.as_ref().map(|bytes| bytes.as_slice()),
+                        code.index,
+                    )?;
                 }
                 _ => {}
             }
@@ -1263,6 +1368,13 @@ impl Admit<'_> {
                     );
                 }
             }
+            if matches!(entry.object, Object::DynValue { ty, .. } if ty as usize >= self.image.types.len())
+            {
+                return fail(
+                    ImageReason::Reference,
+                    at(&format!("object {ordinal} names no closed type")),
+                );
+            }
             if let Object::NativeVm { image, generation } = entry.object {
                 if generation != 0 {
                     return fail(
@@ -1325,7 +1437,12 @@ impl Admit<'_> {
                 }
             }
             if let Object::NativeCode(code) = &entry.object {
-                self.check_portable_code(code.kind, code.bytes.as_slice(), code.index)?;
+                self.check_portable_code(
+                    code.kind,
+                    code.bytes.as_slice(),
+                    code.interface.as_ref().map(|bytes| bytes.as_slice()),
+                    code.index,
+                )?;
             }
             let target = match entry.object {
                 Object::NativeRun { vm } | Object::NativeTable { vm } => Some(vm),

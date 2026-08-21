@@ -1,0 +1,347 @@
+# Core: immutable public syntax views.
+
+final class GrammarVersion
+  major: Int
+  minor: Int
+
+  def init(mut self, major: Int, minor: Int)
+    self.major = major
+    self.minor = minor
+  end
+end
+
+final class SourceRange
+  start: Int
+  stop: Int
+
+  def init(mut self, start: Int, stop: Int)
+    self.start = start
+    self.stop = stop
+  end
+
+  def len(self): Int
+    self.stop - self.start
+  end
+end
+
+final class SyntaxTree
+  backing_source: String
+  backing_records: Bytes
+
+  def init(mut self, source: String, records: Bytes)
+    self.backing_source = source
+    self.backing_records = records
+  end
+
+  def source(self): String
+    self.backing_source
+  end
+
+  def grammar_version(self): GrammarVersion
+    GrammarVersion(1, 0)
+  end
+
+  def root(self): SyntaxNode
+    intrinsic("syntax.tree_root", self)
+  end
+end
+
+class SyntaxElement
+  backing_source: String
+  backing_records: Bytes
+  record_index: Int
+
+  def init(mut self, source: String, records: Bytes, index: Int)
+    self.backing_source = source
+    self.backing_records = records
+    self.record_index = index
+  end
+
+  def kind(self): Int
+    intrinsic("syntax.kind", self)
+  end
+
+  def category(self): Int
+    intrinsic("syntax.category", self)
+  end
+
+  def range_start(self): Int
+    intrinsic("syntax.range_start", self)
+  end
+
+  def range_end(self): Int
+    intrinsic("syntax.range_end", self)
+  end
+
+  def range(self): SourceRange
+    SourceRange(self.range_start(), self.range_end())
+  end
+
+  def text(self): Substring
+    intrinsic("syntax.text", self)
+  end
+
+  def children(self): List[SyntaxElement]
+    intrinsic("syntax.children", self)
+  end
+
+  def detach(self): SyntaxElement
+    intrinsic("syntax.detach", self)
+  end
+
+  def is_node(self): Bool
+    self.category() == 0 or self.category() == 3
+  end
+
+  def is_token(self): Bool
+    self.category() == 1
+  end
+
+  def is_trivia(self): Bool
+    self.category() == 2
+  end
+
+  def is_definition(self): Bool
+    self.is_node() and self.kind() >= 2 and self.kind() <= 6
+  end
+
+  def is_statement(self): Bool
+    self.is_node() and self.kind() == 7
+  end
+
+  def is_invalid(self): Bool
+    self.category() == 3
+  end
+end
+
+class SyntaxNode < SyntaxElement
+  def init(mut self, source: String, records: Bytes, index: Int)
+    super.init(source, records, index)
+  end
+
+  def with_children(self, children: List[SyntaxElement]): SyntaxNode
+    SyntaxBuilder().node(self.kind(), children)
+  end
+
+  def to_tree(self): SyntaxTree
+    intrinsic("syntax.to_tree", self)
+  end
+end
+
+final class SyntaxToken < SyntaxElement
+  def init(mut self, source: String, records: Bytes, index: Int)
+    super.init(source, records, index)
+  end
+end
+
+final class SyntaxTrivia < SyntaxElement
+  def init(mut self, source: String, records: Bytes, index: Int)
+    super.init(source, records, index)
+  end
+end
+
+final class SyntaxBuilder
+  def token(self, kind: Int, text: String): SyntaxToken
+    intrinsic("syntax.build_token", self, kind, text)
+  end
+
+  def trivia(self, kind: Int, text: String): SyntaxTrivia
+    intrinsic("syntax.build_trivia", self, kind, text)
+  end
+
+  def node(self, kind: Int, children: List[SyntaxElement]): SyntaxNode
+    intrinsic("syntax.build_node", self, kind, children)
+  end
+
+  def module(self, children: List[SyntaxElement]): SyntaxNode
+    self.node(1, children)
+  end
+
+  def use_definition(self, children: List[SyntaxElement]): SyntaxNode
+    self.node(2, children)
+  end
+
+  def interface_definition(self, children: List[SyntaxElement]): SyntaxNode
+    self.node(3, children)
+  end
+
+  def class_definition(self, children: List[SyntaxElement]): SyntaxNode
+    self.node(4, children)
+  end
+
+  def enum_definition(self, children: List[SyntaxElement]): SyntaxNode
+    self.node(5, children)
+  end
+
+  def function_definition(self, children: List[SyntaxElement]): SyntaxNode
+    self.node(6, children)
+  end
+
+  def statement(self, children: List[SyntaxElement]): SyntaxNode
+    self.node(7, children)
+  end
+
+  def invalid(self, children: List[SyntaxElement]): SyntaxNode
+    self.node(8, children)
+  end
+
+  def integer(self, text: String): SyntaxToken
+    self.token(100, text)
+  end
+
+  def string_token(self, text: String): SyntaxToken
+    self.token(101, text)
+  end
+
+  def identifier(self, text: String): SyntaxToken
+    self.token(102, text)
+  end
+
+  def keyword(self, text: String): SyntaxToken
+    self.token(103, text)
+  end
+
+  def left_parenthesis(self): SyntaxToken
+    self.token(104, "(")
+  end
+
+  def right_parenthesis(self): SyntaxToken
+    self.token(105, ")")
+  end
+
+  def left_bracket(self): SyntaxToken
+    self.token(106, "[")
+  end
+
+  def right_bracket(self): SyntaxToken
+    self.token(107, "]")
+  end
+
+  def left_brace(self): SyntaxToken
+    self.token(108, "{{")
+  end
+
+  def right_brace(self): SyntaxToken
+    self.token(109, "}}")
+  end
+
+  def comma(self): SyntaxToken
+    self.token(110, ",")
+  end
+
+  def colon(self): SyntaxToken
+    self.token(111, ":")
+  end
+
+  def dot(self): SyntaxToken
+    self.token(112, ".")
+  end
+
+  def pipe(self): SyntaxToken
+    self.token(113, "|")
+  end
+
+  def arrow(self): SyntaxToken
+    self.token(114, "->")
+  end
+
+  def assign(self): SyntaxToken
+    self.token(115, "=")
+  end
+
+  def equal(self): SyntaxToken
+    self.token(116, "==")
+  end
+
+  def not_equal(self): SyntaxToken
+    self.token(117, "!=")
+  end
+
+  def less(self): SyntaxToken
+    self.token(118, "<")
+  end
+
+  def less_equal(self): SyntaxToken
+    self.token(119, "<=")
+  end
+
+  def greater(self): SyntaxToken
+    self.token(120, ">")
+  end
+
+  def greater_equal(self): SyntaxToken
+    self.token(121, ">=")
+  end
+
+  def plus(self): SyntaxToken
+    self.token(122, "+")
+  end
+
+  def minus(self): SyntaxToken
+    self.token(123, "-")
+  end
+
+  def star(self): SyntaxToken
+    self.token(124, "*")
+  end
+
+  def slash(self): SyntaxToken
+    self.token(125, "/")
+  end
+
+  def percent(self): SyntaxToken
+    self.token(126, "%")
+  end
+
+  def newline(self): SyntaxToken
+    self.token(127, "\n")
+  end
+
+  def whitespace(self, text: String): SyntaxTrivia
+    self.trivia(500, text)
+  end
+
+  def comment(self, text: String): SyntaxTrivia
+    self.trivia(501, text)
+  end
+
+end
+
+enum ParseStatus
+  ParseComplete
+  ParseIncomplete
+  ParseInvalid
+end
+
+final class SyntaxDiagnostic
+  start: Int
+  stop: Int
+  message: String
+
+  def init(mut self, start: Int, stop: Int, message: String)
+    self.start = start
+    self.stop = stop
+    self.message = message
+  end
+
+  def range(self): SourceRange
+    SourceRange(self.start, self.stop)
+  end
+end
+
+final class SyntaxParse
+  tree: SyntaxTree
+  status: ParseStatus
+  diagnostics: List[SyntaxDiagnostic]
+
+  def init(
+    mut self,
+    tree: SyntaxTree,
+    status: ParseStatus,
+    diagnostics: List[SyntaxDiagnostic]
+  )
+    self.tree = tree
+    self.status = status
+    self.diagnostics = diagnostics
+  end
+end

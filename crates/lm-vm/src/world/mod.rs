@@ -22,7 +22,8 @@ use resources::{handle_op_errors, ResourceErrors};
 pub(crate) use show::show_trace_event;
 
 use crate::host::{
-    CoreCtor, Host, HostArg, HostCompletion, HostOpenOptions, HostSeekFrom, HostStart, HostValue,
+    CoreCtor, Host, HostArg, HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompletion,
+    HostOpenOptions, HostParseStatus, HostSeekFrom, HostStart, HostSyntaxDiagnostic, HostValue,
 };
 use crate::machine::{
     Action, Block, ExecOutcome, FaultRec, ImageSlotTarget, Machine, MachineState, Mailbox,
@@ -37,7 +38,7 @@ use crate::{FaultCode, LoadedModule, Outcome, VmConfig, WorldLimits};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId};
 use lm_bytecode::corepin::CoreLayout;
 use lm_bytecode::{BcClassKind, BcType, Module};
-use lm_heap::{Heap, HeapBudget, Object, SharedBytes, StructuralEpoch};
+use lm_heap::{Heap, HeapBudget, Object, SharedBytes, SharedText, StructuralEpoch};
 use lm_value::{ObjRef, TypeEnvId, Value};
 
 /// The fuel budget of one mock handler run.
@@ -188,6 +189,8 @@ pub(crate) struct InstalledInstance {
     pub(crate) installation: u32,
     /// Canonical source artifact bytes.
     pub(crate) artifact: SharedBytes,
+    /// Canonical source interface bytes, when the compiler supplied them.
+    pub(crate) interface: Option<SharedBytes>,
     /// The semantic identity of the source module.
     pub(crate) semantic_hash: [u8; 32],
     /// The relocated entry function.
@@ -437,6 +440,14 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
                     types.push(closed);
                 }
                 Ok(typed(types))
+            }
+            Object::DynValue { ty, .. } => {
+                if self.envs.ty(*ty).is_none() {
+                    return Err(FaultCode::BoundaryViolation);
+                }
+                self.envs
+                    .digest(self.module, &self.identity.class_hashes, *ty);
+                Ok(vec![Some(*ty)])
             }
             _ => Ok(Vec::new()),
         }
@@ -814,7 +825,7 @@ mod tests {
         let frame = world.machines[0].vm.frames[0].func;
 
         let first = world
-            .install_artifact(target, installable_artifact(7))
+            .install_artifact(target, installable_artifact(7), None, &[])
             .expect("the artifact installs");
         assert_eq!(first, 0);
         assert_eq!(world.machines[0].vm.frames[0].func, frame);
@@ -842,11 +853,11 @@ mod tests {
         let target = world.new_vm_image(0).expect("the target image fits");
         let artifact = installable_artifact(8);
         let first = world
-            .install_artifact(target, artifact.clone())
+            .install_artifact(target, artifact.clone(), None, &[])
             .expect("the first installation succeeds");
         let functions = world.module.funcs.len();
         let second = world
-            .install_artifact(target, artifact)
+            .install_artifact(target, artifact, None, &[])
             .expect("the second installation succeeds");
         assert_eq!((first, second), (0, 1));
         assert_eq!(world.module.funcs.len(), functions);
@@ -860,7 +871,7 @@ mod tests {
         let target = world.new_vm_image(0).expect("the target image fits");
         let verification = world.loaded.verification_hash();
         let slots = world.vm_images[target.image as usize].slots.clone();
-        let result = world.install_artifact(target, vec![1, 2, 3].into());
+        let result = world.install_artifact(target, vec![1, 2, 3].into(), None, &[]);
         assert!(result.is_err());
         assert_eq!(world.loaded.verification_hash(), verification);
         assert_eq!(world.vm_images[target.image as usize].slots, slots);

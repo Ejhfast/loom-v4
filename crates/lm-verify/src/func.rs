@@ -58,6 +58,7 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_INSTANCE_FUNCTION
             | lm_abi::OP_VM_INSTANCE_SLOT
             | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => 2,
+            lm_abi::OP_VM_INSTALL_WITH => 3,
             _ => unreachable!("every VmControl slot has an arity"),
         },
     }
@@ -288,19 +289,7 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     if c.kind == BcClassKind::Abstract {
                         return Err(err(fidx, at("cannot allocate an abstract enum parent")));
                     }
-                    let native = [
-                        ctx.core.int,
-                        ctx.core.boolean,
-                        ctx.core.string,
-                        ctx.core.substring,
-                        ctx.core.char_value,
-                        ctx.core.bytes,
-                        ctx.core.string_builder,
-                        ctx.core.byte_buffer,
-                        ctx.core.list,
-                        ctx.core.map,
-                    ];
-                    if native.contains(&Some(*class)) {
+                    if ctx.is_native_core_class(*class) {
                         return Err(err(fidx, at("New cannot allocate a native core class")));
                     }
                     if c.type_params != 0 {
@@ -314,19 +303,7 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     if c.kind == BcClassKind::Abstract {
                         return Err(err(fidx, at("cannot allocate an abstract enum parent")));
                     }
-                    let native = [
-                        ctx.core.int,
-                        ctx.core.boolean,
-                        ctx.core.string,
-                        ctx.core.substring,
-                        ctx.core.char_value,
-                        ctx.core.bytes,
-                        ctx.core.string_builder,
-                        ctx.core.byte_buffer,
-                        ctx.core.list,
-                        ctx.core.map,
-                    ];
-                    if native.contains(&Some(*class)) {
+                    if ctx.is_native_core_class(*class) {
                         return Err(err(fidx, at("NewG cannot allocate a native core class")));
                     }
                     if c.type_params == 0 {
@@ -435,7 +412,8 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     | ExtendedInstr::ListGet { ty }
                     | ExtendedInstr::MapGet { ty }
                     | ExtendedInstr::ListPop { ty }
-                    | ExtendedInstr::MapRemove { ty } => {
+                    | ExtendedInstr::MapRemove { ty }
+                    | ExtendedInstr::DynPack { ty } => {
                         if *ty as usize >= module.types.len() {
                             return Err(err(fidx, at("type index out of range")));
                         }

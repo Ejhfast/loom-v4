@@ -56,6 +56,26 @@ impl World {
         self.show_value_inner(&machine.vm.heap, value, expected, 0, &mut visited)
     }
 
+    /// Render one dynamic package payload and resume its machine.
+    pub(super) fn handle_dynamic_render(&mut self, vm: VmId, value: Value, ty: u32) {
+        let text = {
+            let mut visited = Vec::new();
+            self.show_value_inner(
+                &self.machines[vm as usize].vm.heap,
+                value,
+                Some(ShowExpected::Closed(ty)),
+                0,
+                &mut visited,
+            )
+        };
+        let result = self.machines[vm as usize]
+            .alloc(Object::Str(text.into()))
+            .and_then(|value| self.machines[vm as usize].push(value));
+        if let Err(code) = result {
+            self.machines[vm as usize].set_fault(code, "dynamic rendering failed", None);
+        }
+    }
+
     pub(super) fn resolve_show_expected(&self, expected: ShowExpected) -> Option<ShowExpected> {
         let mut current = expected;
         for _ in 0..=self.module.types.len() {
@@ -510,6 +530,18 @@ impl World {
                         } else {
                             format!("<TLS stream {resource}>")
                         }
+                    }
+                    Object::DynValue { value, ty } => {
+                        visited.push(r);
+                        let text = self.show_value_inner(
+                            heap,
+                            *value,
+                            Some(ShowExpected::Closed(*ty)),
+                            depth + 1,
+                            visited,
+                        );
+                        visited.pop();
+                        format!("DynValue({text})")
                     }
                 }
             }

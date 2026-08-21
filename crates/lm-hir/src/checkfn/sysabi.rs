@@ -99,6 +99,18 @@ impl<'o> FnChecker<'o> {
                     lm_abi::AbiCore::TcpRead => "TcpRead",
                     lm_abi::AbiCore::Shutdown => "Shutdown",
                     lm_abi::AbiCore::TlsError => "TlsError",
+                    lm_abi::AbiCore::Artifact => "Artifact",
+                    lm_abi::AbiCore::CompileEnv => "CompileEnv",
+                    lm_abi::AbiCore::CompileOptions => "CompileOptions",
+                    lm_abi::AbiCore::CompileErrors => "CompileErrors",
+                    lm_abi::AbiCore::DynValue => "DynValue",
+                    lm_abi::AbiCore::SyntaxTree => "SyntaxTree",
+                    lm_abi::AbiCore::SyntaxElement => "SyntaxElement",
+                    lm_abi::AbiCore::SyntaxNode => "SyntaxNode",
+                    lm_abi::AbiCore::SyntaxToken => "SyntaxToken",
+                    lm_abi::AbiCore::SyntaxTrivia => "SyntaxTrivia",
+                    lm_abi::AbiCore::SyntaxBuilder => "SyntaxBuilder",
+                    lm_abi::AbiCore::SyntaxParse => "SyntaxParse",
                 };
                 Self::core_class(ctx, name)
             }
@@ -868,26 +880,33 @@ impl<'o> FnChecker<'o> {
                 }
             }
             (Type::Vm, "install") => {
-                if args.len() != 1 {
+                if args.is_empty() || args.len() > 2 {
                     return Err(Diagnostic::new(
                         "E1006",
-                        format!("`install` expects 1 argument(s), found {}", args.len()),
+                        format!("`install` expects 1 or 2 argument(s), found {}", args.len()),
                         span,
                     ));
                 }
                 let module = Self::core_class(ctx, "VerifiedModule");
                 let module = self.check_expr(ctx, &args[0], module)?;
-                self.charge_op(ctx, lm_abi::OP_VM_INSTALL, span)?;
+                let op = if args.len() == 2 {
+                    lm_abi::OP_VM_INSTALL_WITH
+                } else {
+                    lm_abi::OP_VM_INSTALL
+                };
+                let mut values = vec![recv_h, module];
+                if let Some(links) = args.get(1) {
+                    let links_ty = Self::core_class(ctx, "LinkEnv");
+                    values.push(self.check_expr(ctx, links, links_ty)?);
+                }
+                self.charge_op(ctx, op, span)?;
                 let instance = Self::core_class(ctx, "Instance");
                 let error = Self::core_class(ctx, "CodeError");
                 let ty = Self::core_inst(ctx, "Result", vec![instance, error]);
                 HExpr {
                     ty,
                     mutable: true,
-                    kind: HExprKind::Perform {
-                        op: lm_abi::OP_VM_INSTALL,
-                        args: vec![recv_h, module],
-                    },
+                    kind: HExprKind::Perform { op, args: values },
                 }
             }
             (Type::Vm, "replace") => {

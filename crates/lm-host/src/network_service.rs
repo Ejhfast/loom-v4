@@ -872,9 +872,14 @@ fn handle_tls_request(
         TlsRequest::Handshake { stream, settings } => {
             let connection = match make_tls_client(settings) {
                 Ok(connection) => connection,
-                Err(value) => {
+                Err(message) => {
                     close_entry(poll, entries, completions, count, stream);
-                    complete(completions, count, pending, value);
+                    complete(
+                        completions,
+                        count,
+                        pending,
+                        tls_error(CoreCtor::TlsInvalidConfig, message),
+                    );
                     return;
                 }
             };
@@ -1021,49 +1026,35 @@ fn handle_tls_request(
     }
 }
 
-fn make_tls_client(settings: TlsClientSettings) -> Result<rustls::ClientConnection, HostValue> {
+fn make_tls_client(settings: TlsClientSettings) -> Result<rustls::ClientConnection, String> {
     validate_tls_client_settings(&settings)?;
     let mut roots = if settings.root_mode == 0 {
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned())
     } else if settings.root_mode == 1 {
         rustls::RootCertStore::empty()
     } else {
-        return Err(tls_error(
-            CoreCtor::TlsInvalidConfig,
-            "the TLS root mode is invalid",
-        ));
+        return Err("the TLS root mode is invalid".to_string());
     };
     if settings.root_mode == 1 {
         if settings.roots.is_empty() {
-            return Err(tls_error(
-                CoreCtor::TlsInvalidConfig,
-                "the custom TLS root list is empty",
-            ));
+            return Err("the custom TLS root list is empty".to_string());
         }
         for bytes in settings.roots {
             let certificate = CertificateDer::from(bytes.as_slice().to_vec());
             if roots.add(certificate).is_err() {
-                return Err(tls_error(
-                    CoreCtor::TlsInvalidConfig,
-                    "a custom TLS root certificate is invalid",
-                ));
+                return Err("a custom TLS root certificate is invalid".to_string());
             }
         }
     }
     let versions: &[&'static rustls::SupportedProtocolVersion] = match settings.minimum_version {
         12 => &[&rustls::version::TLS13, &rustls::version::TLS12],
         13 => &[&rustls::version::TLS13],
-        _ => {
-            return Err(tls_error(
-                CoreCtor::TlsInvalidConfig,
-                "the minimum TLS version is invalid",
-            ))
-        }
+        _ => return Err("the minimum TLS version is invalid".to_string()),
     };
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(versions)
-        .map_err(|error| tls_error(CoreCtor::TlsInvalidConfig, bounded(error)))?;
+        .map_err(bounded)?;
     let mut config = builder.with_root_certificates(roots).with_no_client_auth();
     config.alpn_protocols = settings
         .alpn
@@ -1071,95 +1062,59 @@ fn make_tls_client(settings: TlsClientSettings) -> Result<rustls::ClientConnecti
         .map(|bytes| bytes.as_slice().to_vec())
         .collect();
     let name = ServerName::try_from(settings.server_name)
-        .map_err(|_| tls_error(CoreCtor::TlsInvalidConfig, "the TLS server name is invalid"))?;
-    let mut connection = rustls::ClientConnection::new(std::sync::Arc::new(config), name)
-        .map_err(|error| tls_error(CoreCtor::TlsInvalidConfig, bounded(error)))?;
+        .map_err(|_| "the TLS server name is invalid".to_string())?;
+    let mut connection =
+        rustls::ClientConnection::new(std::sync::Arc::new(config), name).map_err(bounded)?;
     connection.set_buffer_limit(Some(settings.buffer_limit));
     Ok(connection)
 }
 
-fn validate_tls_client_settings(settings: &TlsClientSettings) -> Result<(), HostValue> {
+fn validate_tls_client_settings(settings: &TlsClientSettings) -> Result<(), String> {
     let name = settings.server_name.as_bytes();
     if name.is_empty() || name.len() > 253 || name.iter().any(|byte| *byte <= 32 || *byte >= 127) {
-        return Err(tls_error(
-            CoreCtor::TlsInvalidConfig,
-            "the TLS server name is invalid",
-        ));
+        return Err("the TLS server name is invalid".to_string());
     }
     if settings.root_mode != 0 && settings.root_mode != 1 {
-        return Err(tls_error(
-            CoreCtor::TlsInvalidConfig,
-            "the TLS root mode is invalid",
-        ));
+        return Err("the TLS root mode is invalid".to_string());
     }
     if settings.root_mode == 0 && !settings.roots.is_empty() {
-        return Err(tls_error(
-            CoreCtor::TlsInvalidConfig,
-            "the WebPKI root mode has custom roots",
-        ));
+        return Err("the WebPKI root mode has custom roots".to_string());
     }
     if settings.root_mode == 1 && (settings.roots.is_empty() || settings.roots.len() > 128) {
-        return Err(tls_error(
-            CoreCtor::TlsInvalidConfig,
-            "the custom TLS root list size is invalid",
-        ));
+        return Err("the custom TLS root list size is invalid".to_string());
     }
     let mut root_bytes = 0_usize;
     for root in &settings.roots {
         if root.is_empty() || root.len() > 1_048_576 {
-            return Err(tls_error(
-                CoreCtor::TlsInvalidConfig,
-                "a custom TLS root certificate size is invalid",
-            ));
+            return Err("a custom TLS root certificate size is invalid".to_string());
         }
-        root_bytes = root_bytes.checked_add(root.len()).ok_or_else(|| {
-            tls_error(
-                CoreCtor::TlsInvalidConfig,
-                "the custom TLS root data is too large",
-            )
-        })?;
+        root_bytes = root_bytes
+            .checked_add(root.len())
+            .ok_or_else(|| "the custom TLS root data is too large".to_string())?;
         if root_bytes > 4_194_304 {
-            return Err(tls_error(
-                CoreCtor::TlsInvalidConfig,
-                "the custom TLS root data is too large",
-            ));
+            return Err("the custom TLS root data is too large".to_string());
         }
     }
     if settings.alpn.len() > 32 {
-        return Err(tls_error(
-            CoreCtor::TlsInvalidConfig,
-            "the TLS ALPN list is too large",
-        ));
+        return Err("the TLS ALPN list is too large".to_string());
     }
     let mut alpn_bytes = 0_usize;
     for protocol in &settings.alpn {
         if protocol.is_empty() || protocol.len() > 255 {
-            return Err(tls_error(
-                CoreCtor::TlsInvalidConfig,
-                "a TLS ALPN value has an invalid length",
-            ));
+            return Err("a TLS ALPN value has an invalid length".to_string());
         }
-        alpn_bytes = alpn_bytes.checked_add(protocol.len()).ok_or_else(|| {
-            tls_error(CoreCtor::TlsInvalidConfig, "the TLS ALPN data is too large")
-        })?;
+        alpn_bytes = alpn_bytes
+            .checked_add(protocol.len())
+            .ok_or_else(|| "the TLS ALPN data is too large".to_string())?;
         if alpn_bytes > 4_096 {
-            return Err(tls_error(
-                CoreCtor::TlsInvalidConfig,
-                "the TLS ALPN data is too large",
-            ));
+            return Err("the TLS ALPN data is too large".to_string());
         }
     }
     if !matches!(settings.minimum_version, 12 | 13) {
-        return Err(tls_error(
-            CoreCtor::TlsInvalidConfig,
-            "the minimum TLS version is invalid",
-        ));
+        return Err("the minimum TLS version is invalid".to_string());
     }
     if settings.buffer_limit == 0 || settings.buffer_limit > 1_048_576 {
-        return Err(tls_error(
-            CoreCtor::TlsInvalidConfig,
-            "the TLS buffer limit is invalid",
-        ));
+        return Err("the TLS buffer limit is invalid".to_string());
     }
     Ok(())
 }

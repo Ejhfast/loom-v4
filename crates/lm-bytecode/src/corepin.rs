@@ -158,10 +158,27 @@ pub struct CoreLayout {
     pub slot: Option<u32>,
     pub function_def: Option<u32>,
     pub code_error: Option<u32>,
+    pub link_env: Option<u32>,
+    pub compile_env: Option<u32>,
+    pub compile_options: Option<u32>,
+    pub compile_errors: Option<u32>,
+    pub dyn_value: Option<u32>,
+    pub syntax_tree: Option<u32>,
+    pub syntax_element: Option<u32>,
+    pub syntax_node: Option<u32>,
+    pub syntax_token: Option<u32>,
+    pub syntax_trivia: Option<u32>,
+    pub syntax_builder: Option<u32>,
+    pub parse_status: Option<u32>,
+    pub parse_complete: Option<u32>,
+    pub parse_incomplete: Option<u32>,
+    pub parse_invalid: Option<u32>,
+    pub syntax_diagnostic: Option<u32>,
+    pub syntax_parse: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 115] = [
+pub const PINNED_LABELS: [&str; 132] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -277,6 +294,23 @@ pub const PINNED_LABELS: [&str; 115] = [
     "Slot",
     "FunctionDef",
     "CodeError",
+    "LinkEnv",
+    "CompileEnv",
+    "CompileOptions",
+    "CompileErrors",
+    "SyntaxTree",
+    "SyntaxElement",
+    "SyntaxNode",
+    "SyntaxToken",
+    "SyntaxTrivia",
+    "SyntaxBuilder",
+    "ParseStatus",
+    "ParseStatus.ParseComplete",
+    "ParseStatus.ParseIncomplete",
+    "ParseStatus.ParseInvalid",
+    "SyntaxDiagnostic",
+    "SyntaxParse",
+    "DynValue",
 ];
 
 /// The core role of immediate integer values.
@@ -362,6 +396,23 @@ pub const ROLE_INSTANCE: usize = 111;
 pub const ROLE_SLOT: usize = 112;
 pub const ROLE_FUNCTION_DEF: usize = 113;
 pub const ROLE_CODE_ERROR: usize = 114;
+pub const ROLE_LINK_ENV: usize = 115;
+pub const ROLE_COMPILE_ENV: usize = 116;
+pub const ROLE_COMPILE_OPTIONS: usize = 117;
+pub const ROLE_COMPILE_ERRORS: usize = 118;
+pub const ROLE_SYNTAX_TREE: usize = 119;
+pub const ROLE_SYNTAX_ELEMENT: usize = 120;
+pub const ROLE_SYNTAX_NODE: usize = 121;
+pub const ROLE_SYNTAX_TOKEN: usize = 122;
+pub const ROLE_SYNTAX_TRIVIA: usize = 123;
+pub const ROLE_SYNTAX_BUILDER: usize = 124;
+pub const ROLE_PARSE_STATUS: usize = 125;
+pub const ROLE_PARSE_COMPLETE: usize = 126;
+pub const ROLE_PARSE_INCOMPLETE: usize = 127;
+pub const ROLE_PARSE_INVALID: usize = 128;
+pub const ROLE_SYNTAX_DIAGNOSTIC: usize = 129;
+pub const ROLE_SYNTAX_PARSE: usize = 130;
+pub const ROLE_DYN_VALUE: usize = 131;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -527,6 +578,23 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Slot" => &mut layout.slot,
         "FunctionDef" => &mut layout.function_def,
         "CodeError" => &mut layout.code_error,
+        "LinkEnv" => &mut layout.link_env,
+        "CompileEnv" => &mut layout.compile_env,
+        "CompileOptions" => &mut layout.compile_options,
+        "CompileErrors" => &mut layout.compile_errors,
+        "DynValue" => &mut layout.dyn_value,
+        "SyntaxTree" => &mut layout.syntax_tree,
+        "SyntaxElement" => &mut layout.syntax_element,
+        "SyntaxNode" => &mut layout.syntax_node,
+        "SyntaxToken" => &mut layout.syntax_token,
+        "SyntaxTrivia" => &mut layout.syntax_trivia,
+        "SyntaxBuilder" => &mut layout.syntax_builder,
+        "ParseStatus" => &mut layout.parse_status,
+        "ParseStatus.ParseComplete" => &mut layout.parse_complete,
+        "ParseStatus.ParseIncomplete" => &mut layout.parse_incomplete,
+        "ParseStatus.ParseInvalid" => &mut layout.parse_invalid,
+        "SyntaxDiagnostic" => &mut layout.syntax_diagnostic,
+        "SyntaxParse" => &mut layout.syntax_parse,
         _ => unreachable!("only known labels enter the map"),
     }
 }

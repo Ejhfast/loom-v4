@@ -161,6 +161,7 @@ pub enum NativeRepr {
     CodeInstance,
     Slot,
     FunctionDef,
+    DynValue,
 }
 
 /// One checked class with its full field layout.

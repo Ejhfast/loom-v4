@@ -113,6 +113,36 @@ impl World {
                 self.build_host_tcp(vm, *token, crate::ResourceKind::TcpListener)
             }
             HostValue::TlsStream(token) => self.build_host_tls(vm, *token),
+            HostValue::Artifact { module, interface } => {
+                let valid = matches!(
+                    self.envs.ty(expected),
+                    Some(ClosedType::Class(class)) if Some(*class) == self.core.artifact
+                );
+                if !valid {
+                    return Err(FaultCode::TypeMismatch);
+                }
+                self.machines[vm as usize].alloc(Object::NativeCode(Box::new(
+                    lm_heap::PortableCode {
+                        kind: lm_heap::PortableCodeKind::Artifact,
+                        bytes: module.clone(),
+                        interface: Some(interface.clone()),
+                        index: u32::MAX,
+                    },
+                )))
+            }
+            HostValue::SyntaxParse {
+                source,
+                records,
+                status,
+                diagnostics,
+            } => self.build_syntax_parse(
+                vm,
+                source.clone(),
+                records.clone(),
+                *status,
+                diagnostics,
+                expected,
+            ),
             HostValue::Ctor(ctor, parts) => {
                 let class = match ctor {
                     CoreCtor::Some => self.core.option_some,
@@ -145,6 +175,7 @@ impl World {
                     CoreCtor::TlsNetwork => self.core.tls_network,
                     CoreCtor::TlsClosed => self.core.tls_closed,
                     CoreCtor::TlsLimitExceeded => self.core.tls_limit_exceeded,
+                    CoreCtor::CompileErrors => self.core.compile_errors,
                 };
                 if matches!(ctor, CoreCtor::Some | CoreCtor::None) {
                     let (class, args) = match self.envs.ty(expected).cloned() {
@@ -201,6 +232,117 @@ impl World {
                 self.make_instance(vm, Some(class), fields)
             }
         }
+    }
+
+    fn build_syntax_parse(
+        &mut self,
+        vm: VmId,
+        source: SharedText,
+        records: SharedBytes,
+        status: HostParseStatus,
+        diagnostics: &[HostSyntaxDiagnostic],
+        expected: ClosedTypeId,
+    ) -> Result<Value, FaultCode> {
+        let expected_ok = matches!(
+            self.envs.ty(expected),
+            Some(ClosedType::Class(class)) if Some(*class) == self.core.syntax_parse
+        );
+        if !expected_ok {
+            return Err(FaultCode::TypeMismatch);
+        }
+        let view = lm_abi::syntax::SyntaxView::new(records.as_slice(), source.len())
+            .map_err(|_| FaultCode::BadCast)?;
+        let root = view.record(view.root()).map_err(|_| FaultCode::BadCast)?;
+        if root.class != lm_abi::syntax::SyntaxClass::Node {
+            return Err(FaultCode::BadCast);
+        }
+        let mut roots = Vec::new();
+        let result = (|| -> Result<Value, FaultCode> {
+            let source = self.machines[vm as usize].alloc(Object::Str(source))?;
+            let source_ref = source.as_obj().ok_or(FaultCode::MalformedState)?;
+            self.machines[vm as usize]
+                .vm
+                .heap
+                .push_host_root(source_ref);
+            roots.push(source_ref);
+
+            let records = self.machines[vm as usize].alloc(Object::Bytes(records))?;
+            let records_ref = records.as_obj().ok_or(FaultCode::MalformedState)?;
+            self.machines[vm as usize]
+                .vm
+                .heap
+                .push_host_root(records_ref);
+            roots.push(records_ref);
+
+            let tree = self.make_instance(vm, self.core.syntax_tree, vec![source, records])?;
+            let tree_ref = tree.as_obj().ok_or(FaultCode::MalformedState)?;
+            self.machines[vm as usize].vm.heap.set_frozen(tree_ref);
+            self.machines[vm as usize].vm.heap.push_host_root(tree_ref);
+            roots.push(tree_ref);
+
+            let status_class = match status {
+                HostParseStatus::Complete => self.core.parse_complete,
+                HostParseStatus::Incomplete => self.core.parse_incomplete,
+                HostParseStatus::Invalid => self.core.parse_invalid,
+            };
+            let status = self.make_instance(vm, status_class, vec![])?;
+            let status_ref = status.as_obj().ok_or(FaultCode::MalformedState)?;
+            self.machines[vm as usize].vm.heap.set_frozen(status_ref);
+            self.machines[vm as usize]
+                .vm
+                .heap
+                .push_host_root(status_ref);
+            roots.push(status_ref);
+
+            let mut values = Vec::with_capacity(diagnostics.len());
+            for diagnostic in diagnostics {
+                let message =
+                    self.machines[vm as usize].alloc(Object::Str(diagnostic.message.clone()))?;
+                let message_ref = message.as_obj().ok_or(FaultCode::MalformedState)?;
+                self.machines[vm as usize]
+                    .vm
+                    .heap
+                    .push_host_root(message_ref);
+                roots.push(message_ref);
+                let value = self.make_instance(
+                    vm,
+                    self.core.syntax_diagnostic,
+                    vec![
+                        Value::Int(i64::from(diagnostic.start)),
+                        Value::Int(i64::from(diagnostic.stop)),
+                        message,
+                    ],
+                )?;
+                let value_ref = value.as_obj().ok_or(FaultCode::MalformedState)?;
+                self.machines[vm as usize].vm.heap.set_frozen(value_ref);
+                self.machines[vm as usize].vm.heap.push_host_root(value_ref);
+                roots.push(value_ref);
+                values.push(value);
+            }
+            let diagnostics = self.machines[vm as usize].alloc(Object::List {
+                items: values,
+                epoch: StructuralEpoch::default(),
+            })?;
+            let diagnostics_ref = diagnostics.as_obj().ok_or(FaultCode::MalformedState)?;
+            self.machines[vm as usize]
+                .vm
+                .heap
+                .set_frozen(diagnostics_ref);
+            self.machines[vm as usize]
+                .vm
+                .heap
+                .push_host_root(diagnostics_ref);
+            roots.push(diagnostics_ref);
+            let value =
+                self.make_instance(vm, self.core.syntax_parse, vec![tree, status, diagnostics])?;
+            let value_ref = value.as_obj().ok_or(FaultCode::MalformedState)?;
+            self.machines[vm as usize].vm.heap.set_frozen(value_ref);
+            Ok(value)
+        })();
+        for root in roots.into_iter().rev() {
+            self.machines[vm as usize].vm.heap.pop_host_root(root);
+        }
+        result
     }
 
     /// Build one portable socket address inside a machine.

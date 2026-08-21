@@ -23,6 +23,37 @@ pub enum HostArg {
     Shutdown(HostShutdown),
     List(Vec<HostArg>),
     Tls(u64),
+    CompileEnv(HostCompileEnv),
+    CompileOptions(HostCompileOptions),
+    Syntax {
+        source: SharedText,
+        records: SharedBytes,
+        index: u32,
+    },
+}
+
+/// One verified module supplied to the runtime compiler.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostCompileModule {
+    pub artifact: SharedBytes,
+    pub interface: SharedBytes,
+}
+
+/// One explicit runtime compiler environment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostCompileEnv {
+    pub modules: Vec<HostCompileModule>,
+    pub roots: Vec<(SharedText, SharedText)>,
+}
+
+/// One explicit runtime compiler option set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostCompileOptions {
+    pub is_main: bool,
+    pub dynamic_result: bool,
+    pub late_definitions: bool,
+    pub late_functions: Vec<SharedText>,
+    pub late_classes: Vec<SharedText>,
 }
 
 /// One portable IP address.
@@ -115,6 +146,23 @@ pub enum CoreCtor {
     TlsNetwork,
     TlsClosed,
     TlsLimitExceeded,
+    CompileErrors,
+}
+
+/// One parser status at the host boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostParseStatus {
+    Complete,
+    Incomplete,
+    Invalid,
+}
+
+/// One syntax diagnostic at the host boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSyntaxDiagnostic {
+    pub start: u32,
+    pub stop: u32,
+    pub message: SharedText,
 }
 
 /// One plain-data operation reply. `Ctor` builds a pinned core enum
@@ -131,6 +179,16 @@ pub enum HostValue {
     TcpStream(u64),
     TcpListener(u64),
     TlsStream(u64),
+    Artifact {
+        module: SharedBytes,
+        interface: SharedBytes,
+    },
+    SyntaxParse {
+        source: SharedText,
+        records: SharedBytes,
+        status: HostParseStatus,
+        diagnostics: Vec<HostSyntaxDiagnostic>,
+    },
     Ctor(CoreCtor, Vec<HostValue>),
 }
 

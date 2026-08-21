@@ -433,9 +433,13 @@ The compiler accepts source or one public syntax unit.
 Compiler.Compile(SourceText, CompileEnv, CompileOptions)
   -> Result[Artifact, CompileErrors]
 
-Compiler.CompileSyntax(CompilationUnitSyntax, CompileEnv, CompileOptions)
+Compiler.CompileSyntax(SyntaxNode, CompileEnv, CompileOptions)
   -> Result[Artifact, CompileErrors]
 ```
+
+`CompileSyntax` treats the selected node as compiler input.
+
+The compiler validates the selected source before it creates an artifact.
 
 Compilation is deterministic under its explicit inputs.
 
@@ -453,76 +457,151 @@ The caller inspects the generated row before activation. Image and run policies 
 
 ## 13. Public syntax model
 
-### 13.1 Requirements
+### 13.1 Concrete syntax tree
 
-The public syntax tree is immutable, lossless, and versioned.
+The public syntax API uses an immutable concrete syntax tree.
+
+The tree is lossless and versioned.
 
 It preserves tokens, whitespace, comments, delimiters, source ranges, and invalid fragments.
 
 It shares one immutable source backing by default.
 
-Node and token identifiers remain valid only while their tree remains alive.
+The compiler keeps its private Rust AST separate from this tree.
 
-### 13.2 Public values
+The public tree gives no identity contract for record indices.
+
+Syntax handles are opaque views over one tree.
+
+The syntax view hierarchy is sealed to core classes.
+
+Programs construct syntax through `SyntaxBuilder`.
+
+Programs cannot construct values from raw source and record fields.
+
+The parser and builder create frozen values.
+
+### 13.2 Structural values
 
 The first API contains these values:
 
 ```text
+GrammarVersion
+SourceRange
 SyntaxTree
+SyntaxElement
 SyntaxNode
 SyntaxToken
 SyntaxTrivia
-SourceRange
-GrammarVersion
+SyntaxBuilder
+SyntaxDiagnostic
+SyntaxParse
+ParseStatus
 ```
 
-`SyntaxNode.kind()` returns a stable syntax-kind value.
+`SyntaxParse` contains one tree, one status, and a diagnostic list.
 
-`SyntaxNode.children()` returns nodes and tokens in source order.
+The first implementation uses `String` as its source-text value.
 
-`SyntaxNode.range()` returns its byte range in the source.
+Stable `Int` codes form the low-level syntax-kind API.
 
-`SyntaxNode.text()` returns a text view when the backing remains live.
+Libraries can add typed kind views without replacing these code methods.
 
-`SyntaxNode.detach()` copies one subtree into compact independent backing.
+`ParseStatus` has `ParseComplete`, `ParseIncomplete`, and `ParseInvalid` cases.
 
-### 13.3 Compilation units
+`ParseIncomplete` means more source can finish one open grammar construct.
 
-The compiler accepts these unit views:
+`ParseInvalid` means the parser found a definite syntax error.
+
+`SyntaxElement.kind()` returns a stable syntax-kind code.
+
+`SyntaxElement.children()` returns elements in source order.
+
+`SyntaxElement.range()` returns its byte range in the source.
+
+`SyntaxElement.text()` returns a text view into the shared source.
+
+`SyntaxElement.detach()` copies one subtree into compact independent backing.
+
+### 13.3 Grammar views and compiler inputs
+
+Typed grammar views belong above the structural tree.
+
+These views can cover definitions, expressions, statements, patterns, types, parameters, and arguments.
+
+A typed view performs a checked projection from `SyntaxNode`.
+
+The first implementation exposes structural views and top-level kind predicates.
+
+It does not make each typed view a separate runtime class.
+
+Definition grouping is a compiler input rule. It is not a syntax-node category.
+
+`Compiler.CompileSyntax` accepts a `SyntaxNode` and validates its selected source.
+
+The compiler normalizes that source into its private Rust AST.
+
+### 13.4 Parsing and REPL policy
+
+The primitive parser has this operation:
 
 ```text
-ModuleSyntax
-DefinitionGroupSyntax
-ExpressionSyntax
+Reflect.ParseSyntax(String) -> SyntaxParse
 ```
 
-A definition group preserves mutual recursion and related declarations.
+A complete tree can contain definitions and statements together.
 
-An expression unit contains one trailing expression and no top-level definitions.
+The parser does not classify complete source as a REPL interaction.
 
-The typed compiler view can normalize public syntax into its private AST.
+A Loom REPL library inspects the root children and applies its interaction policy.
 
-The private Rust AST remains an implementation detail.
+That library can define expression, definition, incomplete, invalid, and command cases.
 
-### 13.4 Interactive parsing
+Commands such as `Quit` are not Loom syntax nodes.
 
-Interactive parsing returns one ordinary result:
+### 13.5 Transformations
 
-```text
-InteractionSyntax =
-  Expression(ExpressionSyntax)
-  | Definitions(DefinitionGroupSyntax)
-  | Incomplete(IncompleteSyntax)
-  | Invalid(ParseErrors)
-```
+`SyntaxBuilder` creates immutable tokens, trivia, and nodes.
 
-`Incomplete` means more source can form a valid unit.
+Its leaf methods accept a stable kind code and exact text.
 
-`Invalid` means the current source contains a definite syntax error.
+Its node method accepts a stable kind code and child elements.
 
-Commands such as `Quit` belong to a REPL library. They are not Loom syntax nodes.
+The node method joins child text in source order.
 
-### 13.5 Retention
+It writes compact records with new source ranges.
+
+It does not parse the result.
+
+Named methods provide common node, token, and trivia kinds.
+
+`SyntaxNode.with_children()` returns a new node with the same kind.
+
+`SyntaxNode.to_tree()` makes that node the root of a frozen tree.
+
+It reuses backing when the node is already the root.
+
+It compacts a selected child subtree.
+
+The builder checks record structure and kind categories.
+
+The builder can represent invalid syntax on purpose.
+
+Token text does not need to agree with its kind code.
+
+This rule lets tools represent incomplete and invalid edits.
+
+The compiler parses selected text before it creates an artifact.
+
+This parse is an independent compiler validation boundary.
+
+A future persistent backing can share unchanged branches without an API change.
+
+A later `SyntaxEditor` can add higher-level editing operations over this builder.
+
+No current identity rule constrains that editor or an incremental parser.
+
+### 13.6 Retention
 
 A small node can retain a large shared source buffer.
 
@@ -625,7 +704,9 @@ Ordinary execution does not repeat contract comparison.
 
 Immutable code can share storage across instances inside one VM.
 
-Syntax traversal shares source storage and allocates no wrapper per repeated read.
+Scalar syntax reads share source storage.
+
+`children()` allocates its result list and element views.
 
 The implementation tracks these benchmark groups:
 
@@ -635,7 +716,7 @@ The implementation tracks these benchmark groups:
 - slot replacement;
 - module verification and installation;
 - core compilation;
-- syntax parse and traversal;
+- syntax parse, construction, and traversal;
 - nested VM and process control.
 
 No stage can regress unrelated static execution outside normal benchmark noise.
@@ -762,9 +843,9 @@ Gate: command-line and in-language compilation produce the same canonical artifa
 
 ### Stage 8: add public syntax trees
 
-Expose lossless syntax values, interaction parsing, unit views, ranges, traversal, and detachment.
+Expose lossless syntax values, generic parse status, ranges, traversal, construction, and detachment.
 
-Gate: a Loom REPL library can classify, compile, install, and run an expression or definition group.
+Gate: Loom code can build, classify, compile, install, and run expression or definition source.
 
 ## 20. Deferred Loom libraries
 

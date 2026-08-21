@@ -8,6 +8,7 @@ pub mod diag;
 pub mod parse;
 pub mod scan;
 pub mod span;
+pub mod syntax;
 pub mod token;
 
 pub use diag::Diagnostic;

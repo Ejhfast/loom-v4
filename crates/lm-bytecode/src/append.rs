@@ -33,6 +33,13 @@ pub struct AppendResult {
     pub slot_initials: Vec<Option<SlotTarget>>,
 }
 
+/// One resolved import target in the current VM image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedImport {
+    Class(u32),
+    Function(u32),
+}
+
 fn fail(message: impl Into<String>) -> String {
     format!("append error: {}", message.into())
 }
@@ -41,6 +48,21 @@ fn fail(message: impl Into<String>) -> String {
 pub fn append_linked(base: &Module, addition: &Module) -> Result<AppendResult, String> {
     if !base.imports.is_empty() || !addition.imports.is_empty() {
         return Err(fail("both modules must have resolved imports"));
+    }
+    append_resolved(base, addition, &[])
+}
+
+/// Append one module after its imports resolve against the base.
+pub fn append_resolved(
+    base: &Module,
+    addition: &Module,
+    imports: &[ResolvedImport],
+) -> Result<AppendResult, String> {
+    if !base.imports.is_empty() {
+        return Err(fail("the base module must have resolved imports"));
+    }
+    if imports.len() != addition.imports.len() {
+        return Err(fail("the import target count differs from the module"));
     }
     let base_identity = module_identity(base).map_err(|error| fail(error.to_string()))?;
     let add_identity = module_identity(addition).map_err(|error| fail(error.to_string()))?;
@@ -82,9 +104,30 @@ pub fn append_linked(base: &Module, addition: &Module) -> Result<AppendResult, S
         })
         .collect();
     let mut classes = vec![u32::MAX; addition.classes.len()];
+    for (import, target) in addition.imports.iter().zip(imports) {
+        if import.kind != crate::ImportKind::Class {
+            continue;
+        }
+        let ResolvedImport::Class(target) = *target else {
+            return Err(fail("a class import resolved to a function"));
+        };
+        if target as usize >= base.classes.len() {
+            return Err(fail("a class import target is outside the base module"));
+        }
+        let slot = classes
+            .get_mut(import.def as usize)
+            .ok_or_else(|| fail("a class import declaration is outside the module"))?;
+        if *slot != u32::MAX && *slot != target {
+            return Err(fail("one class import declaration has two targets"));
+        }
+        *slot = target;
+    }
     let mut new_classes = Vec::new();
     let mut shared_classes = Vec::new();
     for (index, class) in addition.classes.iter().enumerate() {
+        if classes[index] != u32::MAX {
+            continue;
+        }
         let key = (class.key.clone(), add_identity.class_hashes[index]);
         if let Some(existing) = class_index.get(&key).copied() {
             classes[index] = existing;
@@ -177,9 +220,30 @@ pub fn append_linked(base: &Module, addition: &Module) -> Result<AppendResult, S
         .map(|(index, _)| (base_identity.func_hashes[index], index as u32))
         .collect();
     let mut funcs = vec![u32::MAX; addition.funcs.len()];
+    for (import, target) in addition.imports.iter().zip(imports) {
+        if import.kind == crate::ImportKind::Class {
+            continue;
+        }
+        let ResolvedImport::Function(target) = *target else {
+            return Err(fail("a function import resolved to a class"));
+        };
+        if target as usize >= base.funcs.len() {
+            return Err(fail("a function import target is outside the base module"));
+        }
+        let slot = funcs
+            .get_mut(import.def as usize)
+            .ok_or_else(|| fail("a function import declaration is outside the module"))?;
+        if *slot != u32::MAX && *slot != target {
+            return Err(fail("one function import declaration has two targets"));
+        }
+        *slot = target;
+    }
     let mut new_funcs = Vec::new();
     let mut shared_funcs = Vec::new();
     for (index, func) in addition.funcs.iter().enumerate() {
+        if funcs[index] != u32::MAX {
+            continue;
+        }
         let hash = add_identity.func_hashes[index];
         if let Some(existing) = function_index.get(&hash).copied() {
             funcs[index] = existing;
@@ -274,7 +338,11 @@ pub fn append_linked(base: &Module, addition: &Module) -> Result<AppendResult, S
             return Err(fail(format!("core role {role} has another class")));
         }
     }
+    let extern_funcs = addition.extern_funcs();
     for binding in &addition.bindings {
+        if extern_funcs[binding.func as usize] {
+            continue;
+        }
         let relocated = crate::FuncBinding {
             key: binding.key.clone(),
             func: reloc.funcs[binding.func as usize],
@@ -762,6 +830,9 @@ fn reloc_extended(instruction: &ExtendedInstr, reloc: &AppendReloc) -> ExtendedI
         ExtendedInstr::MapRemove { ty } => ExtendedInstr::MapRemove {
             ty: reloc.types[*ty as usize],
         },
+        ExtendedInstr::DynPack { ty } => ExtendedInstr::DynPack {
+            ty: reloc.types[*ty as usize],
+        },
         ExtendedInstr::CallSlot { slot, app } => ExtendedInstr::CallSlot {
             slot: reloc.slots[*slot as usize],
             app: reloc_app(*app, reloc),
@@ -793,7 +864,20 @@ fn reloc_extended(instruction: &ExtendedInstr, reloc: &AppendReloc) -> ExtendedI
         | ExtendedInstr::ListContains
         | ExtendedInstr::ListReorder
         | ExtendedInstr::MapClear
-        | ExtendedInstr::MapReserve => *instruction,
+        | ExtendedInstr::MapReserve
+        | ExtendedInstr::SyntaxTreeRoot
+        | ExtendedInstr::SyntaxKind
+        | ExtendedInstr::SyntaxCategory
+        | ExtendedInstr::SyntaxRangeStart
+        | ExtendedInstr::SyntaxRangeEnd
+        | ExtendedInstr::SyntaxText
+        | ExtendedInstr::SyntaxChildren
+        | ExtendedInstr::SyntaxDetach
+        | ExtendedInstr::DynRender
+        | ExtendedInstr::SyntaxBuildToken
+        | ExtendedInstr::SyntaxBuildTrivia
+        | ExtendedInstr::SyntaxBuildNode
+        | ExtendedInstr::SyntaxToTree => *instruction,
     }
 }
 

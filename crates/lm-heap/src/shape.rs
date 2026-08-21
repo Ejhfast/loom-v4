@@ -246,6 +246,7 @@ pub enum CodeHandleKind {
 pub struct PortableCode {
     pub kind: PortableCodeKind,
     pub bytes: SharedBytes,
+    pub interface: Option<SharedBytes>,
     pub index: u32,
 }
 
@@ -356,6 +357,8 @@ pub enum Object {
     NativeTcpListener { resource: u64 },
     /// A TLS stream resource designator. Zero marks a closed handle.
     NativeTlsStream { resource: u64 },
+    /// One value with its closed static type. Born frozen.
+    DynValue { value: Value, ty: u32 },
 }
 
 /// How a boundary transfer treats one shape.
@@ -671,9 +674,19 @@ const SHAPE_CODE_HANDLE: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_DYN_VALUE: ShapeDesc = ShapeDesc {
+    name: "DynValue",
+    has_refs: true,
+    born_frozen: true,
+    child_order: "the packaged value",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: true,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 28] = [
+pub const SHAPES: [&ShapeDesc; 29] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -702,6 +715,7 @@ pub const SHAPES: [&ShapeDesc; 28] = [
     &SHAPE_RUN,
     &SHAPE_CODE,
     &SHAPE_CODE_HANDLE,
+    &SHAPE_DYN_VALUE,
 ];
 
 impl Object {
@@ -848,6 +862,13 @@ impl Object {
             Object::NativeTlsStream { resource } => Object::NativeTlsStream {
                 resource: *resource,
             },
+            Object::DynValue { value, ty } => Object::DynValue {
+                value: match value {
+                    Value::Obj(reference) => Value::Obj(map(*reference)),
+                    other => *other,
+                },
+                ty: *ty,
+            },
         })
     }
 
@@ -884,6 +905,7 @@ impl Object {
             Object::NativeRun { .. } => 25,
             Object::NativeCode(_) => 26,
             Object::NativeCodeHandle { .. } => 27,
+            Object::DynValue { .. } => 28,
         }
     }
 
@@ -920,7 +942,9 @@ impl Object {
                 | Object::NativeRequest { .. }
                 | Object::NativeCall { .. }
                 | Object::NativeHandle { .. } => VALUE_COST,
-                Object::NativeCode(_) => VALUE_COST,
+                Object::NativeCode(code) => code.interface.as_ref().map_or(VALUE_COST, |bytes| {
+                    VALUE_COST.saturating_add(bytes.retained_capacity())
+                }),
                 Object::NativeFileHandle { .. }
                 | Object::NativeResourceHandle { .. }
                 | Object::NativeWait { .. }
@@ -931,6 +955,7 @@ impl Object {
                 Object::NativeDigest(bytes) => bytes.len(),
                 Object::NativeSnapshot(image) => image.len(),
                 Object::NativeSnapshotRef { .. } => VALUE_COST,
+                Object::DynValue { .. } => VALUE_COST,
             }
     }
 
@@ -995,6 +1020,7 @@ impl Object {
             | Object::NativeTcpListener { .. } => {}
             Object::NativeTlsStream { .. } => {}
             Object::Substring(_) => {}
+            Object::DynValue { value, .. } => visit(value),
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
             Object::List { items, .. } | Object::Tuple { items } => {
                 items.iter().for_each(&mut visit)
@@ -1081,6 +1107,10 @@ impl Object {
                 captures: vec![Value::Unit; captures.len()],
                 env: *env,
             },
+            Object::DynValue { ty, .. } => Object::DynValue {
+                value: Value::Unit,
+                ty: *ty,
+            },
             _ => return None,
         };
         Some(shell)
@@ -1146,6 +1176,10 @@ impl Object {
                 func: *func,
                 captures: captures.iter().map(|v| value(*v)).collect(),
                 env: *env,
+            },
+            Object::DynValue { value: held, ty } => Object::DynValue {
+                value: value(*held),
+                ty: *ty,
             },
             _ => return None,
         };
@@ -1276,6 +1310,23 @@ mod tests {
             Object::NativeTlsStream { resource: 7 },
             Object::NativeSnapshotRef { image: 3 },
             Object::NativeRun { vm: 2 },
+            Object::NativeCode(Box::new(PortableCode {
+                kind: PortableCodeKind::Artifact,
+                bytes: vec![1, 2].into(),
+                interface: None,
+                index: 0,
+            })),
+            Object::NativeCodeHandle {
+                image: 1,
+                generation: 0,
+                instance: 2,
+                kind: CodeHandleKind::Function,
+                index: 3,
+            },
+            Object::DynValue {
+                value: Value::Obj(a),
+                ty: 4,
+            },
         ]
     }
 
@@ -1445,6 +1496,23 @@ mod tests {
             Object::NativeTlsStream { resource: 0 },
             Object::NativeSnapshotRef { image: 0 },
             Object::NativeRun { vm: 0 },
+            Object::NativeCode(Box::new(PortableCode {
+                kind: PortableCodeKind::Artifact,
+                bytes: SharedBytes::new(),
+                interface: None,
+                index: 0,
+            })),
+            Object::NativeCodeHandle {
+                image: 0,
+                generation: 0,
+                instance: 0,
+                kind: CodeHandleKind::Instance,
+                index: 0,
+            },
+            Object::DynValue {
+                value: Value::Unit,
+                ty: 0,
+            },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1572,6 +1640,8 @@ mod tests {
                 "TcpListener",
                 "TlsStream",
                 "SnapshotRef",
+                "PortableCode",
+                "DynValue",
             ]
         );
         // A builder holds a private mutable buffer.
@@ -1588,6 +1658,7 @@ mod tests {
                 "ResourceHandle",
                 "Wait",
                 "Run",
+                "CodeHandle",
             ]
         );
     }

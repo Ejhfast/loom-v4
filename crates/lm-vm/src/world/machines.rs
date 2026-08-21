@@ -333,18 +333,19 @@ impl World {
         &mut self,
         key: VmImageKey,
         artifact: SharedBytes,
+        interface: Option<SharedBytes>,
+        imports: &[lm_bytecode::append::ResolvedImport],
     ) -> Result<u32, String> {
         self.check_slot_safepoint(key)
             .map_err(|_| "the VM image is not at a safe installation point".to_string())?;
 
         let addition = lm_bytecode::decode(artifact.as_slice())
             .map_err(|error| format!("the artifact did not decode: {error}"))?;
-        let admitted = crate::load(addition.clone())
+        lm_verify::verify_module(&addition)
             .map_err(|error| format!("the artifact did not verify: {error}"))?;
-        let identity = admitted
-            .identity()
-            .map_err(|_| "the artifact has no semantic identity".to_string())?;
-        let appended = lm_bytecode::append::append_linked(&self.module, &addition)?;
+        let identity = lm_bytecode::identity::module_identity(&addition)
+            .map_err(|error| format!("the artifact has no semantic identity: {error}"))?;
+        let appended = lm_bytecode::append::append_resolved(&self.module, &addition, imports)?;
         let next = crate::load(appended.module)
             .map_err(|error| format!("the installed code did not verify: {error}"))?;
 
@@ -393,6 +394,7 @@ impl World {
         target.instances.push(InstalledInstance {
             installation,
             artifact: artifact.clone(),
+            interface,
             semantic_hash: identity.semantic_hash,
             entry: appended.reloc.funcs[addition.entry as usize],
             funcs: appended.reloc.funcs.clone(),
@@ -981,6 +983,7 @@ impl World {
             lm_abi::OP_VM_ARTIFACT
             | lm_abi::OP_VM_VERIFY
             | lm_abi::OP_VM_INSTALL
+            | lm_abi::OP_VM_INSTALL_WITH
             | lm_abi::OP_VM_INSTANCE_ENTRY
             | lm_abi::OP_VM_INSTANCE_FUNCTION
             | lm_abi::OP_VM_INSTANCE_SLOT

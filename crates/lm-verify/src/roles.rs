@@ -100,6 +100,10 @@ pub(crate) const ROLE_TLS_PROTOCOL: usize = 101;
 pub(crate) const ROLE_TLS_NETWORK: usize = 102;
 pub(crate) const ROLE_TLS_CLOSED: usize = 103;
 pub(crate) const ROLE_TLS_LIMIT_EXCEEDED: usize = 104;
+pub(crate) const ROLE_PARSE_STATUS: usize = 125;
+pub(crate) const ROLE_PARSE_COMPLETE: usize = 126;
+pub(crate) const ROLE_PARSE_INCOMPLETE: usize = 127;
+pub(crate) const ROLE_PARSE_INVALID: usize = 128;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -119,7 +123,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 20] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 21] = [
     (
         ROLE_OPTION,
         1,
@@ -263,10 +267,20 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 20] = [
         ],
         "TlsError",
     ),
+    (
+        ROLE_PARSE_STATUS,
+        0,
+        &[
+            ROLE_PARSE_COMPLETE,
+            ROLE_PARSE_INCOMPLETE,
+            ROLE_PARSE_INVALID,
+        ],
+        "ParseStatus",
+    ),
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 67] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 70] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -337,6 +351,9 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 67] = [
     (ROLE_TLS_NETWORK, &[FieldShape::NetError]),
     (ROLE_TLS_CLOSED, &[]),
     (ROLE_TLS_LIMIT_EXCEEDED, &[FieldShape::Str]),
+    (ROLE_PARSE_COMPLETE, &[]),
+    (ROLE_PARSE_INCOMPLETE, &[]),
+    (ROLE_PARSE_INVALID, &[]),
 ];
 
 /// Prove the shape of every declared core role slot.
@@ -617,7 +634,11 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             )));
         }
     }
-    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_CODE_ERROR) {
+    for (role, name) in [
+        (lm_bytecode::corepin::ROLE_CODE_ERROR, "CodeError"),
+        (lm_bytecode::corepin::ROLE_COMPILE_ERRORS, "CompileErrors"),
+    ] {
+        let Some(idx) = slot(role) else { continue };
         let class = &module.classes[idx as usize];
         let fields: Vec<&BcType> = class
             .fields
@@ -632,8 +653,243 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             || fields.len() != 1
             || fields[0] != &BcType::Str
         {
+            return Err(terr(format!(
+                "the {name} role does not name its final error class"
+            )));
+        }
+    }
+    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_COMPILE_ENV) {
+        let Some(verified) = slot(lm_bytecode::corepin::ROLE_VERIFIED_MODULE) else {
             return Err(terr(
-                "the CodeError role does not name its final error class".to_string(),
+                "the CompileEnv role requires the VerifiedModule role".to_string(),
+            ));
+        };
+        let class = &module.classes[idx as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        let modules_ok = fields.first().is_some_and(|field| match field {
+            BcType::List(element) => {
+                module.types.get(*element as usize) == Some(&BcType::Class(verified))
+            }
+            _ => false,
+        });
+        let roots_ok = fields.get(1).is_some_and(|field| match field {
+            BcType::List(element) => match module.types.get(*element as usize) {
+                Some(BcType::Tuple(parts)) if parts.len() == 2 => parts
+                    .iter()
+                    .all(|part| module.types.get(*part as usize) == Some(&BcType::Str)),
+                _ => false,
+            },
+            _ => false,
+        });
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || fields.len() != 2
+            || !modules_ok
+            || !roots_ok
+        {
+            return Err(terr(
+                "the CompileEnv role does not name its final environment class".to_string(),
+            ));
+        }
+    }
+    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_LINK_ENV) {
+        let Some(instance) = slot(lm_bytecode::corepin::ROLE_INSTANCE) else {
+            return Err(terr(
+                "the LinkEnv role requires the Instance role".to_string(),
+            ));
+        };
+        let class = &module.classes[idx as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        let instances_ok = fields.first().is_some_and(|field| match field {
+            BcType::List(element) => {
+                module.types.get(*element as usize) == Some(&BcType::Class(instance))
+            }
+            _ => false,
+        });
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || fields.len() != 1
+            || !instances_ok
+        {
+            return Err(terr(
+                "the LinkEnv role does not name its final environment class".to_string(),
+            ));
+        }
+    }
+    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_COMPILE_OPTIONS) {
+        let class = &module.classes[idx as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        let string_list = |field: Option<&&BcType>| {
+            field.is_some_and(|field| match field {
+                BcType::List(element) => module.types.get(*element as usize) == Some(&BcType::Str),
+                _ => false,
+            })
+        };
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || fields.len() != 5
+            || fields[0] != &BcType::Bool
+            || fields[1] != &BcType::Bool
+            || fields[2] != &BcType::Bool
+            || !string_list(fields.get(3))
+            || !string_list(fields.get(4))
+        {
+            return Err(terr(
+                "the CompileOptions role does not name its final options class".to_string(),
+            ));
+        }
+    }
+    if let Some(idx) = slot(lm_bytecode::corepin::ROLE_DYN_VALUE) {
+        let class = &module.classes[idx as usize];
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !class.fields.is_empty()
+        {
+            return Err(terr(
+                "the DynValue role does not name its final native class".to_string(),
+            ));
+        }
+    }
+    let syntax_roles = [
+        slot(lm_bytecode::corepin::ROLE_SYNTAX_TREE),
+        slot(lm_bytecode::corepin::ROLE_SYNTAX_ELEMENT),
+        slot(lm_bytecode::corepin::ROLE_SYNTAX_NODE),
+        slot(lm_bytecode::corepin::ROLE_SYNTAX_TOKEN),
+        slot(lm_bytecode::corepin::ROLE_SYNTAX_TRIVIA),
+        slot(lm_bytecode::corepin::ROLE_SYNTAX_BUILDER),
+        slot(lm_bytecode::corepin::ROLE_PARSE_STATUS),
+        slot(lm_bytecode::corepin::ROLE_SYNTAX_DIAGNOSTIC),
+        slot(lm_bytecode::corepin::ROLE_SYNTAX_PARSE),
+    ];
+    if syntax_roles.iter().any(Option::is_some) && syntax_roles.iter().any(Option::is_none) {
+        return Err(terr(
+            "the syntax family resolves without every value class".to_string(),
+        ));
+    }
+    if let [Some(tree), Some(element), Some(node), Some(token), Some(trivia), Some(builder), Some(status), Some(diagnostic), Some(parse)] =
+        syntax_roles
+    {
+        let field_types = |class: u32| -> Vec<&BcType> {
+            module.classes[class as usize]
+                .fields
+                .iter()
+                .filter_map(|(_, ty)| module.types.get(*ty as usize))
+                .collect()
+        };
+        let tree_class = &module.classes[tree as usize];
+        let tree_fields = field_types(tree);
+        if tree_class.kind != BcClassKind::Normal
+            || !tree_class.is_final
+            || tree_class.type_params != 0
+            || tree_class.parent().is_some()
+            || tree_fields != [&BcType::Str, &BcType::Bytes]
+        {
+            return Err(terr(
+                "the SyntaxTree role does not name its final value class".to_string(),
+            ));
+        }
+        let view_fields = [&BcType::Str, &BcType::Bytes, &BcType::Int];
+        let element_class = &module.classes[element as usize];
+        if element_class.kind != BcClassKind::Normal
+            || element_class.is_final
+            || element_class.type_params != 0
+            || element_class.parent().is_some()
+            || field_types(element) != view_fields
+        {
+            return Err(terr(
+                "the SyntaxElement role does not name its base value class".to_string(),
+            ));
+        }
+        let node_class = &module.classes[node as usize];
+        if node_class.kind != BcClassKind::Normal
+            || node_class.is_final
+            || node_class.type_params != 0
+            || node_class.parent() != Some(element)
+            || field_types(node) != view_fields
+        {
+            return Err(terr(
+                "the SyntaxNode role does not name its node value class".to_string(),
+            ));
+        }
+        for (class, name) in [(token, "SyntaxToken"), (trivia, "SyntaxTrivia")] {
+            let info = &module.classes[class as usize];
+            if info.kind != BcClassKind::Normal
+                || !info.is_final
+                || info.type_params != 0
+                || info.parent() != Some(element)
+                || field_types(class) != view_fields
+            {
+                return Err(terr(format!(
+                    "the {name} role does not name its final view class"
+                )));
+            }
+        }
+        let builder_class = &module.classes[builder as usize];
+        if builder_class.kind != BcClassKind::Normal
+            || !builder_class.is_final
+            || builder_class.type_params != 0
+            || builder_class.parent().is_some()
+            || !builder_class.fields.is_empty()
+        {
+            return Err(terr(
+                "the SyntaxBuilder role does not name its final stateless class".to_string(),
+            ));
+        }
+        let diagnostic_class = &module.classes[diagnostic as usize];
+        let diagnostic_fields = field_types(diagnostic);
+        if diagnostic_class.kind != BcClassKind::Normal
+            || !diagnostic_class.is_final
+            || diagnostic_class.type_params != 0
+            || diagnostic_class.parent().is_some()
+            || diagnostic_fields != [&BcType::Int, &BcType::Int, &BcType::Str]
+        {
+            return Err(terr(
+                "the SyntaxDiagnostic role does not name its final value class".to_string(),
+            ));
+        }
+        let parse_class = &module.classes[parse as usize];
+        let parse_fields = field_types(parse);
+        let diagnostic_list = parse_fields.get(2).is_some_and(|field| match field {
+            BcType::List(element) => {
+                module.types.get(*element as usize) == Some(&BcType::Class(diagnostic))
+            }
+            _ => false,
+        });
+        if parse_class.kind != BcClassKind::Normal
+            || !parse_class.is_final
+            || parse_class.type_params != 0
+            || parse_class.parent().is_some()
+            || parse_fields.len() != 3
+            || parse_fields.first() != Some(&&BcType::Class(tree))
+            || parse_fields.get(1) != Some(&&BcType::Class(status))
+            || !diagnostic_list
+        {
+            return Err(terr(
+                "the SyntaxParse role does not name its final result class".to_string(),
             ));
         }
     }

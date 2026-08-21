@@ -8,13 +8,15 @@
 //! Potentially blocking file and stream work runs in a fixed I/O
 //! service. `start` submits work and returns `Waiting`.
 
+mod compiler_service;
 mod io_service;
 mod network_service;
 
+use compiler_service::{CompileRequest, CompilerService};
 use io_service::{FileRequest, IoService, StreamRequest};
 use lm_vm::{
-    CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostStart, HostTcpKind,
-    HostTcpResource, HostValue, SharedBytes,
+    CompletionKey, CoreCtor, Host, HostArg, HostCompletion, HostParseStatus, HostStart,
+    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, SharedBytes,
 };
 use network_service::{NetworkService, TcpRequest, TlsClientSettings, TlsRequest};
 use std::collections::HashMap;
@@ -31,6 +33,7 @@ pub struct CliHost {
     next_tcp: u64,
     io: Option<IoService>,
     network: Option<NetworkService>,
+    compiler: Option<CompilerService>,
 }
 
 impl CliHost {
@@ -45,6 +48,7 @@ impl CliHost {
             next_tcp: 1,
             io: None,
             network: None,
+            compiler: None,
         }
     }
 
@@ -140,6 +144,10 @@ impl CliHost {
 
     fn io(&mut self) -> &mut IoService {
         self.io.get_or_insert_with(IoService::new)
+    }
+
+    fn compiler(&mut self) -> &mut CompilerService {
+        self.compiler.get_or_insert_with(CompilerService::new)
     }
 }
 
@@ -649,6 +657,113 @@ impl Host for CliHost {
                 };
                 self.start_tls(key, TlsRequest::Close { stream: *stream })
             }
+            lm_abi::OP_COMPILER_COMPILE => {
+                let [HostArg::Str(path), HostArg::Str(source), HostArg::CompileEnv(env), HostArg::CompileOptions(options)] =
+                    args.as_slice()
+                else {
+                    return HostStart::Failed(
+                        "Compiler.Compile needs source, environment, and options".to_string(),
+                    );
+                };
+                let Some(token) = self.take_token() else {
+                    return HostStart::Failed(
+                        "the completion token space is exhausted".to_string(),
+                    );
+                };
+                let request = CompileRequest {
+                    path: path.clone(),
+                    source: source.clone(),
+                    env: env.clone(),
+                    options: options.clone(),
+                };
+                if self.compiler().submit(key, token, request) {
+                    HostStart::Waiting(token)
+                } else {
+                    HostStart::Failed("the compiler queue is full".to_string())
+                }
+            }
+            lm_abi::OP_COMPILER_COMPILE_SYNTAX => {
+                let [HostArg::Syntax {
+                    source,
+                    records,
+                    index,
+                }, HostArg::CompileEnv(env), HostArg::CompileOptions(options)] = args.as_slice()
+                else {
+                    return HostStart::Failed(
+                        "Compiler.CompileSyntax needs syntax, environment, and options".to_string(),
+                    );
+                };
+                let view = match lm_abi::syntax::SyntaxView::new(records.as_slice(), source.len()) {
+                    Ok(view) => view,
+                    Err(error) => {
+                        return HostStart::Failed(format!("invalid compiler syntax: {error}"));
+                    }
+                };
+                let record = match view.record(*index) {
+                    Ok(record)
+                        if matches!(
+                            record.class,
+                            lm_abi::syntax::SyntaxClass::Node
+                                | lm_abi::syntax::SyntaxClass::Invalid
+                        ) =>
+                    {
+                        record
+                    }
+                    _ => {
+                        return HostStart::Failed(
+                            "Compiler.CompileSyntax needs one syntax node".to_string(),
+                        );
+                    }
+                };
+                let Some(source) = source.slice(record.lo as usize, record.hi as usize) else {
+                    return HostStart::Failed(
+                        "Compiler.CompileSyntax found an invalid source range".to_string(),
+                    );
+                };
+                let Some(token) = self.take_token() else {
+                    return HostStart::Failed(
+                        "the completion token space is exhausted".to_string(),
+                    );
+                };
+                let request = CompileRequest {
+                    path: "<syntax>".into(),
+                    source,
+                    env: env.clone(),
+                    options: options.clone(),
+                };
+                if self.compiler().submit(key, token, request) {
+                    HostStart::Waiting(token)
+                } else {
+                    HostStart::Failed("the compiler queue is full".to_string())
+                }
+            }
+            lm_abi::OP_REFLECT_PARSE_SYNTAX => {
+                let [HostArg::Str(source)] = args.as_slice() else {
+                    return HostStart::Failed("Reflect.ParseSyntax needs one string".to_string());
+                };
+                let parsed = lm_source::syntax::parse_public_syntax(source.as_str());
+                let status = match parsed.status {
+                    lm_source::syntax::ParseStatus::Complete => HostParseStatus::Complete,
+                    lm_source::syntax::ParseStatus::Incomplete => HostParseStatus::Incomplete,
+                    lm_source::syntax::ParseStatus::Invalid => HostParseStatus::Invalid,
+                };
+                let file = lm_source::SourceFile::new("<syntax>", source.as_str());
+                let diagnostics = parsed
+                    .diagnostics
+                    .into_iter()
+                    .map(|diagnostic| HostSyntaxDiagnostic {
+                        start: diagnostic.span.lo,
+                        stop: diagnostic.span.hi,
+                        message: diagnostic.render(&file).into(),
+                    })
+                    .collect();
+                HostStart::Completed(HostValue::SyntaxParse {
+                    source: source.clone(),
+                    records: parsed.records.into(),
+                    status,
+                    diagnostics,
+                })
+            }
             _ => HostStart::Failed(format!(
                 "the command-line host does not implement {}",
                 lm_abi::op_name(op)
@@ -664,6 +779,11 @@ impl Host for CliHost {
         }
         if let Some(network) = &self.network {
             if let Some(completion) = network.poll() {
+                return Some(completion);
+            }
+        }
+        if let Some(compiler) = &self.compiler {
+            if let Some(completion) = compiler.poll() {
                 return Some(completion);
             }
         }
@@ -696,6 +816,13 @@ impl Host for CliHost {
                         .min(quantum)
                 })
                 .unwrap_or(quantum);
+            if let Some(compiler) = &self.compiler {
+                match compiler.wait_timeout(duration) {
+                    Ok(completion) => return Some(completion),
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => {}
+                }
+            }
             match &self.network {
                 Some(network) => match network.wait_timeout(duration) {
                     Ok(completion) => return Some(completion),

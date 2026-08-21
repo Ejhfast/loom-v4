@@ -13,6 +13,7 @@
 
 mod fault;
 mod sha;
+pub mod syntax;
 
 pub use fault::{FaultCode, SnapshotClass, FAULT_CODES};
 pub use sha::{sha256, sha256_hex};
@@ -29,8 +30,11 @@ pub use sha::{sha256, sha256_hex};
 /// waits and selectable drive and receive sources. Version 8 adds
 /// transparent effect sets and the DNS and TCP operations. Version 9
 /// adds the TLS client resource and its effect sets. Version 11 adds
-/// verified code installation and activation controls.
-pub const ABI_VERSION: u32 = 11;
+/// verified code installation and activation controls. Version 12
+/// adds the explicit runtime compiler operation. Version 13 adds
+/// public syntax parsing and syntax compilation. Version 14 adds the
+/// dynamic result value.
+pub const ABI_VERSION: u32 = 14;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -162,6 +166,18 @@ pub enum AbiCore {
     TcpRead,
     Shutdown,
     TlsError,
+    Artifact,
+    CompileEnv,
+    CompileOptions,
+    CompileErrors,
+    DynValue,
+    SyntaxTree,
+    SyntaxElement,
+    SyntaxNode,
+    SyntaxToken,
+    SyntaxTrivia,
+    SyntaxBuilder,
+    SyntaxParse,
 }
 
 impl AbiCore {
@@ -183,6 +199,18 @@ impl AbiCore {
             AbiCore::TcpRead => "TcpRead",
             AbiCore::Shutdown => "Shutdown",
             AbiCore::TlsError => "TlsError",
+            AbiCore::Artifact => "Artifact",
+            AbiCore::CompileEnv => "CompileEnv",
+            AbiCore::CompileOptions => "CompileOptions",
+            AbiCore::CompileErrors => "CompileErrors",
+            AbiCore::DynValue => "DynValue",
+            AbiCore::SyntaxTree => "SyntaxTree",
+            AbiCore::SyntaxElement => "SyntaxElement",
+            AbiCore::SyntaxNode => "SyntaxNode",
+            AbiCore::SyntaxToken => "SyntaxToken",
+            AbiCore::SyntaxTrivia => "SyntaxTrivia",
+            AbiCore::SyntaxBuilder => "SyntaxBuilder",
+            AbiCore::SyntaxParse => "SyntaxParse",
         }
     }
 }
@@ -272,6 +300,18 @@ impl AbiType {
     pub const TCP_READ: AbiType = AbiType::Core(AbiCore::TcpRead);
     pub const SHUTDOWN: AbiType = AbiType::Core(AbiCore::Shutdown);
     pub const TLS_ERROR: AbiType = AbiType::Core(AbiCore::TlsError);
+    pub const ARTIFACT: AbiType = AbiType::Core(AbiCore::Artifact);
+    pub const COMPILE_ENV: AbiType = AbiType::Core(AbiCore::CompileEnv);
+    pub const COMPILE_OPTIONS: AbiType = AbiType::Core(AbiCore::CompileOptions);
+    pub const COMPILE_ERRORS: AbiType = AbiType::Core(AbiCore::CompileErrors);
+    pub const DYN_VALUE: AbiType = AbiType::Core(AbiCore::DynValue);
+    pub const SYNTAX_TREE: AbiType = AbiType::Core(AbiCore::SyntaxTree);
+    pub const SYNTAX_ELEMENT: AbiType = AbiType::Core(AbiCore::SyntaxElement);
+    pub const SYNTAX_NODE: AbiType = AbiType::Core(AbiCore::SyntaxNode);
+    pub const SYNTAX_TOKEN: AbiType = AbiType::Core(AbiCore::SyntaxToken);
+    pub const SYNTAX_TRIVIA: AbiType = AbiType::Core(AbiCore::SyntaxTrivia);
+    pub const SYNTAX_BUILDER: AbiType = AbiType::Core(AbiCore::SyntaxBuilder);
+    pub const SYNTAX_PARSE: AbiType = AbiType::Core(AbiCore::SyntaxParse);
     pub const FILE_HANDLE: AbiType = AbiType::Native(AbiNative::FileHandle);
     pub const TCP_RESOURCE: AbiType = AbiType::Native(AbiNative::TcpResource);
     pub const TCP_STREAM: AbiType = AbiType::Native(AbiNative::TcpStream);
@@ -279,6 +319,7 @@ impl AbiType {
     pub const TLS_STREAM: AbiType = AbiType::Native(AbiNative::TlsStream);
 
     pub const LIST_SUBSTRING: AbiType = AbiType::List(&AbiType::SUBSTRING);
+    pub const LIST_SYNTAX_ELEMENT: AbiType = AbiType::List(&AbiType::SYNTAX_ELEMENT);
     pub const RESULT_OPTION_STR_IO_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
         &[
@@ -350,6 +391,10 @@ impl AbiType {
         AbiConstructor::Result,
         &[AbiType::SOCKET_ADDRESS, AbiType::TLS_ERROR],
     );
+    pub const RESULT_ARTIFACT_COMPILE_ERRORS: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::ARTIFACT, AbiType::COMPILE_ERRORS],
+    );
 
     /// The canonical text of this complete type expression.
     pub fn text(self) -> String {
@@ -395,7 +440,10 @@ impl AbiType {
 /// Version 8 completes the mutable collection leaf operations.
 /// Version 9 adds the list reorder marker.
 /// Version 10 gives collection epoch exhaustion its own fault.
-pub const INTRINSIC_ABI_VERSION: u32 = 10;
+/// Version 11 adds immutable public syntax traversal.
+/// Version 12 adds dynamic result rendering.
+/// Version 13 adds immutable public syntax construction.
+pub const INTRINSIC_ABI_VERSION: u32 = 13;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -529,9 +577,22 @@ pub const INTRINSIC_MAP_REMOVE: IntrinsicSlot = 115;
 pub const INTRINSIC_MAP_CLEAR: IntrinsicSlot = 116;
 pub const INTRINSIC_MAP_RESERVE: IntrinsicSlot = 117;
 pub const INTRINSIC_LIST_REORDER: IntrinsicSlot = 118;
+pub const INTRINSIC_SYNTAX_TREE_ROOT: IntrinsicSlot = 119;
+pub const INTRINSIC_SYNTAX_KIND: IntrinsicSlot = 120;
+pub const INTRINSIC_SYNTAX_CATEGORY: IntrinsicSlot = 121;
+pub const INTRINSIC_SYNTAX_RANGE_START: IntrinsicSlot = 122;
+pub const INTRINSIC_SYNTAX_RANGE_END: IntrinsicSlot = 123;
+pub const INTRINSIC_SYNTAX_TEXT: IntrinsicSlot = 124;
+pub const INTRINSIC_SYNTAX_CHILDREN: IntrinsicSlot = 125;
+pub const INTRINSIC_SYNTAX_DETACH: IntrinsicSlot = 126;
+pub const INTRINSIC_DYN_RENDER: IntrinsicSlot = 127;
+pub const INTRINSIC_SYNTAX_BUILD_TOKEN: IntrinsicSlot = 128;
+pub const INTRINSIC_SYNTAX_BUILD_TRIVIA: IntrinsicSlot = 129;
+pub const INTRINSIC_SYNTAX_BUILD_NODE: IntrinsicSlot = 130;
+pub const INTRINSIC_SYNTAX_TO_TREE: IntrinsicSlot = 131;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 119] = [
+pub const INTRINSICS: [IntrinsicDef; 132] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -1282,6 +1343,88 @@ pub const INTRINSICS: [IntrinsicDef; 119] = [
         reply: AbiType::UNIT,
         semantic_revision: 1,
     },
+    IntrinsicDef {
+        name: "syntax.tree_root",
+        params: &[AbiType::SYNTAX_TREE],
+        reply: AbiType::SYNTAX_NODE,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.kind",
+        params: &[AbiType::SYNTAX_ELEMENT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.category",
+        params: &[AbiType::SYNTAX_ELEMENT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.range_start",
+        params: &[AbiType::SYNTAX_ELEMENT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.range_end",
+        params: &[AbiType::SYNTAX_ELEMENT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.text",
+        params: &[AbiType::SYNTAX_ELEMENT],
+        reply: AbiType::SUBSTRING,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.children",
+        params: &[AbiType::SYNTAX_ELEMENT],
+        reply: AbiType::LIST_SYNTAX_ELEMENT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.detach",
+        params: &[AbiType::SYNTAX_ELEMENT],
+        reply: AbiType::SYNTAX_ELEMENT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "dyn.render",
+        params: &[AbiType::DYN_VALUE],
+        reply: AbiType::STR,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.build_token",
+        params: &[AbiType::SYNTAX_BUILDER, AbiType::INT, AbiType::STR],
+        reply: AbiType::SYNTAX_TOKEN,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.build_trivia",
+        params: &[AbiType::SYNTAX_BUILDER, AbiType::INT, AbiType::STR],
+        reply: AbiType::SYNTAX_TRIVIA,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.build_node",
+        params: &[
+            AbiType::SYNTAX_BUILDER,
+            AbiType::INT,
+            AbiType::LIST_SYNTAX_ELEMENT,
+        ],
+        reply: AbiType::SYNTAX_NODE,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "syntax.to_tree",
+        params: &[AbiType::SYNTAX_NODE],
+        reply: AbiType::SYNTAX_TREE,
+        semantic_revision: 1,
+    },
 ];
 
 /// The number of pure intrinsic slots.
@@ -1466,9 +1609,13 @@ pub const OP_VM_INSTANCE_SLOT: OpSlot = 75;
 pub const OP_VM_INSTANCE_SLOT_SPEC: OpSlot = 76;
 pub const OP_VM_ACTIVATE_DEF: OpSlot = 77;
 pub const OP_VM_REPLACE_FUNCTION: OpSlot = 78;
+pub const OP_VM_INSTALL_WITH: OpSlot = 79;
+pub const OP_COMPILER_COMPILE: OpSlot = 80;
+pub const OP_COMPILER_COMPILE_SYNTAX: OpSlot = 81;
+pub const OP_REFLECT_PARSE_SYNTAX: OpSlot = 82;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 79] = [
+pub const OPS: [OpDef; 83] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -2211,6 +2358,51 @@ pub const OPS: [OpDef; 79] = [
         schema: "[A,T](Vm, Slot, FunctionDef[A,T]) -> Result[(), CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
+    OpDef {
+        group: "Vm",
+        member: "InstallWith",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Vm, VerifiedModule, LinkEnv) -> Result[Instance, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Compiler",
+        member: "Compile",
+        kind: OpKind::Fixed,
+        params: &[
+            AbiType::STR,
+            AbiType::STR,
+            AbiType::COMPILE_ENV,
+            AbiType::COMPILE_OPTIONS,
+        ],
+        reply: AbiType::RESULT_ARTIFACT_COMPILE_ERRORS,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Compiler",
+        member: "CompileSyntax",
+        kind: OpKind::Fixed,
+        params: &[
+            AbiType::SYNTAX_NODE,
+            AbiType::COMPILE_ENV,
+            AbiType::COMPILE_OPTIONS,
+        ],
+        reply: AbiType::RESULT_ARTIFACT_COMPILE_ERRORS,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Reflect",
+        member: "ParseSyntax",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR],
+        reply: AbiType::SYNTAX_PARSE,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
 ];
 
 /// The number of exact operations.
@@ -2771,6 +2963,9 @@ mod tests {
                 "Tls.LocalAddress",
                 "Tls.PeerAddress",
                 "Tls.Close",
+                "Compiler.Compile",
+                "Compiler.CompileSyntax",
+                "Reflect.ParseSyntax",
             ]
         );
         // A VM control operation runs inside the driver loop, so it

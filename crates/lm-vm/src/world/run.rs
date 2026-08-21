@@ -936,6 +936,9 @@ impl World {
                         Ok(Some(ExecOutcome::Digest { value, ty, env })) => {
                             self.handle_digest(act.vm, value, ty, env)
                         }
+                        Ok(Some(ExecOutcome::DynamicRender { value, ty })) => {
+                            self.handle_dynamic_render(act.vm, value, ty)
+                        }
                     }
                 }
             }

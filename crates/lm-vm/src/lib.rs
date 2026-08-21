@@ -19,8 +19,9 @@ mod typecheck;
 mod world;
 
 pub use host::{
-    CoreCtor, Host, HostArg, HostCompletion, HostIpAddress, HostOpenOptions, HostSeekFrom,
-    HostShutdown, HostSocketAddress, HostStart, HostTcpKind, HostTcpResource, HostValue, NullHost,
+    CoreCtor, Host, HostArg, HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompletion,
+    HostIpAddress, HostOpenOptions, HostParseStatus, HostSeekFrom, HostShutdown, HostSocketAddress,
+    HostStart, HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, NullHost,
     RecordingHost,
 };
 pub use machine::{

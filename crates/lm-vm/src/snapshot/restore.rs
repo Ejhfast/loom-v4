@@ -402,6 +402,7 @@ impl World {
                         .checked_add(instance.installation)
                         .ok_or(RestoreFail::LimitExceeded)?,
                     artifact: artifact.clone(),
+                    interface: instance.interface.clone().map(SharedBytes::from),
                     semantic_hash: instance.semantic_hash,
                     entry: instance.entry,
                     funcs,
@@ -888,6 +889,10 @@ fn relocate_metadata(
             }
         }
         Object::Closure { captures, .. } => captures.iter_mut().for_each(remap),
+        Object::DynValue { value, ty } => {
+            remap(value);
+            *ty = type_map[*ty as usize];
+        }
         _ => {}
     }
     match object {

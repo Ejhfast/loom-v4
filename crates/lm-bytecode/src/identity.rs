@@ -89,8 +89,9 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 24 makes direct function parameters nonescaping by default.
 /// Version 25 renames the two guest snapshot types. Version 26 adds
 /// stable slot contracts and specialized slot instructions. Version
-/// 27 removes portable process targets from slot metadata.
-pub const COMPILER_ABI_VERSION: u32 = 27;
+/// 27 removes portable process targets from slot metadata. Version 28
+/// adds dynamic result and public syntax instructions.
+pub const COMPILER_ABI_VERSION: u32 = 28;
 
 /// The refinement work budget of one component.
 ///
@@ -852,7 +853,8 @@ fn preflight_extended(
         | ExtendedInstr::ListGet { ty }
         | ExtendedInstr::MapGet { ty }
         | ExtendedInstr::ListPop { ty }
-        | ExtendedInstr::MapRemove { ty } => {
+        | ExtendedInstr::MapRemove { ty }
+        | ExtendedInstr::DynPack { ty } => {
             if *ty as usize >= s.types {
                 return Err(bad("type index"));
             }
@@ -874,7 +876,20 @@ fn preflight_extended(
         | ExtendedInstr::ListContains
         | ExtendedInstr::ListReorder
         | ExtendedInstr::MapClear
-        | ExtendedInstr::MapReserve => {}
+        | ExtendedInstr::MapReserve
+        | ExtendedInstr::SyntaxTreeRoot
+        | ExtendedInstr::SyntaxKind
+        | ExtendedInstr::SyntaxCategory
+        | ExtendedInstr::SyntaxRangeStart
+        | ExtendedInstr::SyntaxRangeEnd
+        | ExtendedInstr::SyntaxText
+        | ExtendedInstr::SyntaxChildren
+        | ExtendedInstr::SyntaxDetach
+        | ExtendedInstr::DynRender
+        | ExtendedInstr::SyntaxBuildToken
+        | ExtendedInstr::SyntaxBuildTrivia
+        | ExtendedInstr::SyntaxBuildNode
+        | ExtendedInstr::SyntaxToTree => {}
         ExtendedInstr::CallSlot { slot, app } | ExtendedInstr::NewSlot { slot, app } => {
             if *slot as usize >= module.slots.len() {
                 return Err(bad("slot index"));
@@ -1889,6 +1904,20 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::NewSlot { .. } => 0xd4,
             ExtendedInstr::LoadSlot { .. } => 0xd5,
             ExtendedInstr::SendSlot { .. } => 0xd6,
+            ExtendedInstr::SyntaxTreeRoot => 0xd7,
+            ExtendedInstr::SyntaxKind => 0xd8,
+            ExtendedInstr::SyntaxCategory => 0xd9,
+            ExtendedInstr::SyntaxRangeStart => 0xda,
+            ExtendedInstr::SyntaxRangeEnd => 0xdb,
+            ExtendedInstr::SyntaxText => 0xdc,
+            ExtendedInstr::SyntaxChildren => 0xdd,
+            ExtendedInstr::SyntaxDetach => 0xde,
+            ExtendedInstr::DynPack { .. } => 0xdf,
+            ExtendedInstr::DynRender => 0xe0,
+            ExtendedInstr::SyntaxBuildToken => 0xe1,
+            ExtendedInstr::SyntaxBuildTrivia => 0xe2,
+            ExtendedInstr::SyntaxBuildNode => 0xe3,
+            ExtendedInstr::SyntaxToTree => 0xe4,
         }
     }
 
@@ -2189,7 +2218,8 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::ListGet { ty }
             | ExtendedInstr::MapGet { ty }
             | ExtendedInstr::ListPop { ty }
-            | ExtendedInstr::MapRemove { ty } => {
+            | ExtendedInstr::MapRemove { ty }
+            | ExtendedInstr::DynPack { ty } => {
                 out.extend_from_slice(&self.type_digest(*ty));
             }
             ExtendedInstr::AsCallback
@@ -2209,7 +2239,20 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::ListContains
             | ExtendedInstr::ListReorder
             | ExtendedInstr::MapClear
-            | ExtendedInstr::MapReserve => {}
+            | ExtendedInstr::MapReserve
+            | ExtendedInstr::SyntaxTreeRoot
+            | ExtendedInstr::SyntaxKind
+            | ExtendedInstr::SyntaxCategory
+            | ExtendedInstr::SyntaxRangeStart
+            | ExtendedInstr::SyntaxRangeEnd
+            | ExtendedInstr::SyntaxText
+            | ExtendedInstr::SyntaxChildren
+            | ExtendedInstr::SyntaxDetach
+            | ExtendedInstr::DynRender
+            | ExtendedInstr::SyntaxBuildToken
+            | ExtendedInstr::SyntaxBuildTrivia
+            | ExtendedInstr::SyntaxBuildNode
+            | ExtendedInstr::SyntaxToTree => {}
             ExtendedInstr::CallSlot { slot, app } | ExtendedInstr::NewSlot { slot, app } => {
                 self.slot_contract_bytes(out, *slot);
                 if *app == crate::NO_APP {

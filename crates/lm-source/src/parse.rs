@@ -23,6 +23,11 @@ pub const MAX_TUPLE_ARITY: usize = 16;
 /// Scan and parse one module.
 pub fn parse(text: &str) -> Result<Module, Diagnostic> {
     let tokens = scan(text)?;
+    parse_tokens(text, &tokens)
+}
+
+/// Parse one module from an existing token stream.
+pub(crate) fn parse_tokens(text: &str, tokens: &[Token]) -> Result<Module, Diagnostic> {
     let mut parser = Parser {
         text,
         tokens,
@@ -36,7 +41,7 @@ struct Parser<'t> {
     /// The source text. The trailing-closure rule reads it to decide
     /// whether a newline separates a call from a following closure.
     text: &'t str,
-    tokens: Vec<Token>,
+    tokens: &'t [Token],
     pos: usize,
     depth: usize,
 }
@@ -1622,7 +1627,7 @@ impl Parser<'_> {
                         StrPiece::Expr(tokens) => {
                             let mut sub = Parser {
                                 text: self.text,
-                                tokens,
+                                tokens: &tokens,
                                 pos: 0,
                                 depth: 0,
                             };

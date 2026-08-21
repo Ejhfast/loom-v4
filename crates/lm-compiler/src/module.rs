@@ -5,7 +5,7 @@
 
 use crate::env::FrozenCompileEnv;
 use lm_bytecode::interface::{IfaceItem, IfaceSlotKind, IfaceSlotSpec, Interface};
-use lm_bytecode::Module;
+use lm_bytecode::{BcType, ExtendedInstr, Instr, Module};
 use lm_hir::{LateCallable, LateCallableKind, LowerLinkage};
 use lm_source::SourceFile;
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Linkage choices for one compiler invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompileOptions {
+    /// Package the main entry result with its closed static type.
+    pub dynamic_result: bool,
     /// Give every named source definition late linkage.
     pub late_definitions: bool,
     /// Qualified or module-local function binding names.
@@ -28,6 +30,11 @@ impl CompileOptions {
 
     pub fn late_definitions(mut self) -> CompileOptions {
         self.late_definitions = true;
+        self
+    }
+
+    pub fn dynamic_result(mut self) -> CompileOptions {
+        self.dynamic_result = true;
         self
     }
 
@@ -77,6 +84,9 @@ pub fn compile_module_with_options(
     is_main: bool,
     options: &CompileOptions,
 ) -> Result<CompiledModule, String> {
+    if options.dynamic_result && !is_main {
+        return Err("error: a dynamic result needs a main module\n".to_string());
+    }
     let ast = lm_source::parse::parse(&source.text).map_err(|d| d.render(source))?;
     if !is_main && !ast.entry.is_empty() {
         let span = ast.entry[0].span;
@@ -100,8 +110,11 @@ pub fn compile_module_with_options(
     )
     .map_err(|d| d.render(source))?;
     let (linkage, interface_slots) = select_linkage(path, &hir, env, options)?;
-    let module = lm_hir::lower_module_with_linkage(&hir, &linkage)
+    let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
         .map_err(|error| format!("error: `{path}`: {error}\n"))?;
+    if options.dynamic_result {
+        package_dynamic_entry(&mut module, path)?;
+    }
     lm_verify::verify_module(&module)
         .map_err(|e| format!("error: the verifier rejected `{path}`: {e}\n"))?;
     let identity = lm_bytecode::identity::module_identity(&module)
@@ -122,6 +135,45 @@ pub fn compile_module_with_options(
         semantic_hash: identity.semantic_hash,
         container_hash,
     })
+}
+
+fn package_dynamic_entry(module: &mut Module, path: &str) -> Result<(), String> {
+    let entry = module.entry as usize;
+    let result = module
+        .funcs
+        .get(entry)
+        .map(|function| function.ret)
+        .ok_or_else(|| format!("error: `{path}` has no entry function\n"))?;
+    let class = module.core_roles[lm_bytecode::corepin::ROLE_DYN_VALUE];
+    if class == lm_bytecode::NO_ROLE {
+        return Err(format!("error: `{path}` has no DynValue core role\n"));
+    }
+    let package = module
+        .types
+        .iter()
+        .position(|ty| *ty == BcType::Class(class))
+        .map(|index| index as u32)
+        .unwrap_or_else(|| {
+            let index = module.types.len() as u32;
+            module.types.push(BcType::Class(class));
+            index
+        });
+    let function = &mut module.funcs[entry];
+    let mut packed = false;
+    for block in &mut function.blocks {
+        if matches!(block.last(), Some(Instr::Return)) {
+            block.insert(
+                block.len() - 1,
+                Instr::Extended(ExtendedInstr::DynPack { ty: result }),
+            );
+            packed = true;
+        }
+    }
+    if !packed {
+        return Err(format!("error: `{path}` has no returning entry path\n"));
+    }
+    function.ret = package;
+    Ok(())
 }
 
 fn select_linkage(
@@ -313,6 +365,43 @@ mod tests {
                 .expect("the probe compiles");
         assert_eq!(plain.artifact, explicit.artifact);
         assert_eq!(plain.interface_bytes, explicit.interface_bytes);
+    }
+
+    #[test]
+    fn a_dynamic_result_changes_only_the_main_entry_contract() {
+        let compiled = compile("[1, 2, 3]\n", &CompileOptions::new().dynamic_result());
+        let entry = &compiled.module.funcs[compiled.module.entry as usize];
+        let class = compiled.module.core_roles[lm_bytecode::corepin::ROLE_DYN_VALUE];
+        assert_eq!(
+            compiled.module.types[entry.ret as usize],
+            BcType::Class(class)
+        );
+        assert!(entry.blocks.iter().flatten().any(|instruction| matches!(
+            instruction,
+            Instr::Extended(ExtendedInstr::DynPack { .. })
+        )));
+        assert_eq!(
+            instructions(&compiled.module)
+                .filter(|instruction| matches!(
+                    instruction,
+                    Instr::Extended(ExtendedInstr::DynPack { .. })
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_library_rejects_a_dynamic_result() {
+        let error = compile_module_with_options(
+            "library",
+            &SourceFile::new("library.lm", "def value(): Int\n  1\nend\n"),
+            &crate::CompileEnv::new().freeze(),
+            false,
+            &CompileOptions::new().dynamic_result(),
+        )
+        .expect_err("a library cannot package an entry result");
+        assert!(error.contains("dynamic result needs a main module"));
     }
 
     #[test]

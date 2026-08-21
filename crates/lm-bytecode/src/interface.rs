@@ -387,6 +387,68 @@ pub fn build_interface(
     })
 }
 
+/// Validate one decoded interface against its verified source module.
+pub fn validate_interface(
+    module: &Module,
+    identity: &ModuleIdentity,
+    interface: &Interface,
+) -> Result<(), String> {
+    if interface.abi_version != lm_abi::ABI_VERSION {
+        return Err("the interface has another operation ABI version".to_string());
+    }
+    if interface.compiler_abi_version != COMPILER_ABI_VERSION {
+        return Err("the interface has another compiler ABI version".to_string());
+    }
+    if interface.semantic_hash != identity.semantic_hash {
+        return Err("the interface names another module identity".to_string());
+    }
+    if interface.exports.len() != module.exports.len() {
+        return Err("the interface export count differs from the module".to_string());
+    }
+    for (entry, export) in interface.exports.iter().zip(&module.exports) {
+        if entry.kind != export.kind || entry.name != export.name {
+            return Err("an interface export differs from the module export".to_string());
+        }
+        if entry.iface_hash != interface_hash(entry.kind, &entry.name, &entry.item) {
+            return Err("an interface export has an invalid interface hash".to_string());
+        }
+        let definition = if export.kind.is_class() {
+            identity.class_hashes.get(export.def as usize)
+        } else if export.kind.is_interface() {
+            identity.interface_hashes.get(export.def as usize)
+        } else {
+            identity.func_hashes.get(export.def as usize)
+        }
+        .ok_or_else(|| "an interface export names no module definition".to_string())?;
+        if entry.def_hash != *definition {
+            return Err("an interface export has another definition hash".to_string());
+        }
+    }
+    if interface.slots.len() > module.slots.len() {
+        return Err("the interface has more slots than the module".to_string());
+    }
+    for spec in &interface.slots {
+        if spec.key != crate::slot_key(&spec.binding) {
+            return Err("an interface slot has an invalid key".to_string());
+        }
+        let slot = module
+            .slots
+            .iter()
+            .find(|slot| slot.key == spec.key)
+            .ok_or_else(|| "an interface slot has no module slot".to_string())?;
+        let agrees = matches!(
+            (spec.kind, &slot.contract),
+            (IfaceSlotKind::Function, crate::SlotContract::Function(_))
+                | (IfaceSlotKind::Method, crate::SlotContract::Method(_))
+                | (IfaceSlotKind::Class, crate::SlotContract::Class { .. })
+        );
+        if !agrees {
+            return Err("an interface slot has another contract kind".to_string());
+        }
+    }
+    Ok(())
+}
+
 // ----------------------------------------------------------------
 // Encoding.
 // ----------------------------------------------------------------

@@ -533,6 +533,14 @@ fn encode_object(out: &mut Out, object: &Object) {
                 PortableCodeKind::SlotSpec => 2,
             });
             out.leb(code.index as u64);
+            match &code.interface {
+                Some(interface) => {
+                    out.u8(1);
+                    out.leb(interface.len() as u64);
+                    out.bytes.extend_from_slice(interface.as_slice());
+                }
+                None => out.u8(0),
+            }
             out.leb(code.bytes.len() as u64);
             out.bytes.extend_from_slice(code.bytes.as_slice());
         }
@@ -552,6 +560,10 @@ fn encode_object(out: &mut Out, object: &Object) {
                 CodeHandleKind::Function => 2,
             });
             out.leb(*index as u64);
+        }
+        Object::DynValue { value, ty } => {
+            out.leb(*ty as u64);
+            out.value(*value);
         }
         Object::NativeRequest { vm, ordinal } => {
             out.leb(*vm as u64);
@@ -640,6 +652,14 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
         out.leb(image.instances.len() as u64);
         for instance in &image.instances {
             out.leb(instance.installation as u64);
+            match &instance.interface {
+                Some(interface) => {
+                    out.u8(1);
+                    out.leb(interface.len() as u64);
+                    out.bytes.extend_from_slice(interface);
+                }
+                None => out.u8(0),
+            }
             out.hash(&instance.semantic_hash);
             out.leb(instance.entry as u64);
             for values in [&instance.funcs, &instance.classes, &instance.slots] {
@@ -1034,6 +1054,8 @@ struct Ctx {
     image_count: u32,
     /// The number of type environment entries the image carries.
     env_count: u32,
+    /// The number of closed type entries the image carries.
+    type_count: u32,
 }
 
 /// Load one external snapshot container.
@@ -1376,6 +1398,7 @@ fn decode_inner(
         machine_count: machine_count as u32,
         image_count: image_count as u32,
         env_count: envs.len() as u32,
+        type_count: types.len() as u32,
     };
     // Section 4: image heaps first, then machine heaps.
     let mut heaps = section(3);
@@ -1453,6 +1476,15 @@ fn decode_inner(
                 );
             }
             let installation = installation as u32;
+            let interface = match records.u8()? {
+                0 => None,
+                1 => {
+                    let count = records.count(ctx.limits.max_bytes as u64, "interface byte")?;
+                    let source = records.take(count)?;
+                    Some(records.copy_bytes(source, "interface bytes")?)
+                }
+                _ => return err(ImageReason::Layout, "a module interface flag is invalid"),
+            };
             let semantic_hash = records.hash()?;
             let entry = u32::try_from(records.leb()?).map_err(|_| {
                 ImageError::new(ImageReason::Reference, "an instance entry is too large")
@@ -1472,6 +1504,7 @@ fn decode_inner(
             };
             instances.push(ImageInstance {
                 installation,
+                interface,
                 semantic_hash,
                 entry,
                 funcs: read_map("function relocation")?,
@@ -1987,11 +2020,26 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             let index = u32::try_from(cur.leb()?).map_err(|_| {
                 ImageError::new(ImageReason::Reference, "a portable code index is too large")
             })?;
+            let interface = match cur.u8()? {
+                0 => None,
+                1 => {
+                    let count = cur.count(limits.max_bytes as u64, "interface byte")?;
+                    let source = cur.take(count)?;
+                    Some(cur.copy_bytes(source, "interface bytes")?.into())
+                }
+                _ => {
+                    return err(
+                        ImageReason::Layout,
+                        "a portable interface flag is invalid".to_string(),
+                    )
+                }
+            };
             let count = cur.count(limits.max_bytes as u64, "artifact byte")?;
             let source = cur.take(count)?;
             Object::NativeCode(Box::new(PortableCode {
                 kind,
                 bytes: cur.copy_bytes(source, "artifact bytes")?.into(),
+                interface,
                 index,
             }))
         }
@@ -2026,6 +2074,10 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 index,
             }
         }
+        28 => Object::DynValue {
+            ty: closed_ref(cur, ctx.type_count)?,
+            value: decode_value(cur, objects, 0)?,
+        },
         other => {
             return err(
                 ImageReason::Layout,
