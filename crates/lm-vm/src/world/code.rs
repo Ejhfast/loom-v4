@@ -57,41 +57,42 @@ fn closed_rows_match(
         })
 }
 
+#[derive(Clone, Copy)]
+struct ClosedTypeSpace<'a> {
+    module: &'a lm_bytecode::Module,
+    types: &'a lm_bytecode::closed::TypeEnvs,
+    identity: &'a lm_bytecode::identity::ModuleIdentity,
+}
+
 fn closed_classes_match(
-    left_module: &lm_bytecode::Module,
-    left_identity: &lm_bytecode::identity::ModuleIdentity,
+    left_space: ClosedTypeSpace<'_>,
     left: u32,
-    right_module: &lm_bytecode::Module,
-    right_identity: &lm_bytecode::identity::ModuleIdentity,
+    right_space: ClosedTypeSpace<'_>,
     right: u32,
 ) -> bool {
-    let Some(left_class) = left_module.classes.get(left as usize) else {
+    let Some(left_class) = left_space.module.classes.get(left as usize) else {
         return false;
     };
-    let Some(right_class) = right_module.classes.get(right as usize) else {
+    let Some(right_class) = right_space.module.classes.get(right as usize) else {
         return false;
     };
     left_class.key == right_class.key
-        && left_identity.class_hashes.get(left as usize)
-            == right_identity.class_hashes.get(right as usize)
+        && left_space.identity.class_hashes.get(left as usize)
+            == right_space.identity.class_hashes.get(right as usize)
 }
 
 fn closed_types_match(
-    left_module: &lm_bytecode::Module,
-    left_types: &lm_bytecode::closed::TypeEnvs,
-    left_identity: &lm_bytecode::identity::ModuleIdentity,
+    left_space: ClosedTypeSpace<'_>,
     left: ClosedTypeId,
-    right_module: &lm_bytecode::Module,
-    right_types: &lm_bytecode::closed::TypeEnvs,
-    right_identity: &lm_bytecode::identity::ModuleIdentity,
+    right_space: ClosedTypeSpace<'_>,
     right: ClosedTypeId,
 ) -> bool {
     let mut pending = vec![(left, right)];
     while let Some((left, right)) = pending.pop() {
-        let Some(left) = left_types.ty(left) else {
+        let Some(left) = left_space.types.ty(left) else {
             return false;
         };
-        let Some(right) = right_types.ty(right) else {
+        let Some(right) = right_space.types.ty(right) else {
             return false;
         };
         match (left, right) {
@@ -109,14 +110,7 @@ fn closed_types_match(
             | (ClosedType::FileHandle, ClosedType::FileHandle)
             | (ClosedType::ResourceHandle, ClosedType::ResourceHandle) => {}
             (ClosedType::Class(left), ClosedType::Class(right)) => {
-                if !closed_classes_match(
-                    left_module,
-                    left_identity,
-                    *left,
-                    right_module,
-                    right_identity,
-                    *right,
-                ) {
+                if !closed_classes_match(left_space, *left, right_space, *right) {
                     return false;
                 }
             }
@@ -125,14 +119,7 @@ fn closed_types_match(
                 ClosedType::Inst(right_class, right_args),
             ) => {
                 if left_args.len() != right_args.len()
-                    || !closed_classes_match(
-                        left_module,
-                        left_identity,
-                        *left_class,
-                        right_module,
-                        right_identity,
-                        *right_class,
-                    )
+                    || !closed_classes_match(left_space, *left_class, right_space, *right_class)
                 {
                     return false;
                 }
@@ -172,7 +159,12 @@ fn closed_types_match(
             ) => {
                 if left_params.len() != right_params.len()
                     || left_muts != right_muts
-                    || !closed_rows_match(left_module, left_row, right_module, right_row)
+                    || !closed_rows_match(
+                        left_space.module,
+                        left_row,
+                        right_space.module,
+                        right_row,
+                    )
                 {
                     return false;
                 }
@@ -1721,25 +1713,20 @@ impl World {
         let source_identity = lm_bytecode::identity::module_identity(module)
             .map_err(|_| FaultCode::MalformedState)?;
         let target_identity = self.identity()?.clone();
-        Ok(closed_types_match(
+        let source_space = ClosedTypeSpace {
             module,
-            &source_types,
-            &source_identity,
-            source_input,
-            &self.module,
-            &self.envs,
-            &target_identity,
-            input,
-        ) && closed_types_match(
-            module,
-            &source_types,
-            &source_identity,
-            source_output,
-            &self.module,
-            &self.envs,
-            &target_identity,
-            output,
-        ))
+            types: &source_types,
+            identity: &source_identity,
+        };
+        let target_space = ClosedTypeSpace {
+            module: &self.module,
+            types: &self.envs,
+            identity: &target_identity,
+        };
+        Ok(
+            closed_types_match(source_space, source_input, target_space, input)
+                && closed_types_match(source_space, source_output, target_space, output),
+        )
     }
 
     pub(super) fn code_ok(&mut self, vm: VmId, value: Value) -> Result<Value, FaultCode> {
