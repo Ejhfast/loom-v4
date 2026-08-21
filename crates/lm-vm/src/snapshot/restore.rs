@@ -490,7 +490,12 @@ impl World {
                 slots.push(match target {
                     super::ImageSlotTarget::Empty => RuntimeSlotTarget::Empty,
                     super::ImageSlotTarget::Function(func) => RuntimeSlotTarget::Function(*func),
-                    super::ImageSlotTarget::Class(class) => RuntimeSlotTarget::Class(*class),
+                    super::ImageSlotTarget::Class { class, constructor } => {
+                        RuntimeSlotTarget::Class {
+                            class: *class,
+                            constructor: *constructor,
+                        }
+                    }
                     super::ImageSlotTarget::Value(value) => {
                         RuntimeSlotTarget::Value(relocate_value(*value, &refs, type_map))
                     }

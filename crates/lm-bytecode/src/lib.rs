@@ -258,6 +258,7 @@ pub enum SlotContract {
         type_params: u32,
         abi: [u8; 32],
         ty: u32,
+        constructor: BcCallableContract,
     },
     Value {
         ty: u32,
@@ -272,7 +273,11 @@ pub enum SlotContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotTarget {
     Function(u32),
-    Class(u32),
+    /// A compatible nominal class and its current construction function.
+    Class {
+        class: u32,
+        constructor: u32,
+    },
 }
 
 /// One portable late-binding declaration.
@@ -575,7 +580,7 @@ pub enum ExtendedInstr {
     MapReserve,
     /// Call the current function target of one VM slot.
     CallSlot { slot: u32, app: u32 },
-    /// Allocate the current class target of one VM slot.
+    /// Call the current construction target of one class slot.
     NewSlot { slot: u32, app: u32 },
     /// Load the current value target of one VM slot.
     LoadSlot { slot: u32 },
@@ -1080,7 +1085,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// result and public syntax instructions. Version 36 adds the
 /// `ClassDef` role and the complete VM image control manifest.
 /// Version 37 adds fallible activation and stable slot lookup.
-pub const VERSION: u16 = 37;
+/// Version 38 makes class slots select versioned constructors.
+pub const VERSION: u16 = 38;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1460,9 +1466,10 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
                 out.push(1);
                 write_u32(&mut out, func);
             }
-            Some(SlotTarget::Class(class)) => {
+            Some(SlotTarget::Class { class, constructor }) => {
                 out.push(2);
                 write_u32(&mut out, class);
+                write_u32(&mut out, constructor);
             }
         }
     }
@@ -1562,11 +1569,13 @@ fn encode_slot_contract(out: &mut Vec<u8>, contract: &SlotContract) {
             type_params,
             abi,
             ty,
+            constructor,
         } => {
             out.push(SLOT_CLASS);
             write_u32(out, *type_params);
             out.extend_from_slice(abi);
             write_u32(out, *ty);
+            encode_callable_contract(out, constructor);
         }
         SlotContract::Value { ty } => {
             out.push(SLOT_VALUE);
@@ -2360,6 +2369,7 @@ fn decode_slot_contract(cur: &mut Cursor<'_>) -> Result<SlotContract, DecodeErro
                 type_params,
                 abi,
                 ty: cur.u32()?,
+                constructor: decode_callable_contract(cur)?,
             }
         }
         SLOT_VALUE => SlotContract::Value { ty: cur.u32()? },
@@ -2699,7 +2709,10 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         let initial = match cur.u8()? {
             0 => None,
             1 => Some(SlotTarget::Function(cur.u32()?)),
-            2 => Some(SlotTarget::Class(cur.u32()?)),
+            2 => Some(SlotTarget::Class {
+                class: cur.u32()?,
+                constructor: cur.u32()?,
+            }),
             _ => return Err(DecodeError::BadSlot),
         };
         slots.push(SlotSpec {
@@ -3375,6 +3388,12 @@ mod tests {
             row: vec![],
         };
         let mut module = sample_module();
+        let constructor = BcCallableContract {
+            ret: 3,
+            params: vec![],
+            param_muts: vec![],
+            ..callable.clone()
+        };
         module.slots = vec![
             SlotSpec {
                 key: [1; 32],
@@ -3392,8 +3411,12 @@ mod tests {
                     type_params: 0,
                     abi: [7; 32],
                     ty: 3,
+                    constructor,
                 },
-                initial: Some(SlotTarget::Class(0)),
+                initial: Some(SlotTarget::Class {
+                    class: 0,
+                    constructor: 0,
+                }),
             },
             SlotSpec {
                 key: [4; 32],

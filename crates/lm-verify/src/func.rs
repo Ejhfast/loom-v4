@@ -478,25 +478,41 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                         let Some(spec) = module.slots.get(*slot as usize) else {
                             return Err(err(fidx, at("slot index out of range")));
                         };
-                        let SlotContract::Class { type_params, .. } = &spec.contract else {
+                        let SlotContract::Class { constructor, .. } = &spec.contract else {
                             return Err(err(fidx, at("NEW_SLOT needs a class slot")));
                         };
-                        match (*app != lm_bytecode::NO_APP, *type_params) {
-                            (false, 0) => {}
-                            (false, _) => {
+                        match (
+                            *app != lm_bytecode::NO_APP,
+                            constructor.type_params,
+                            constructor.effect_params,
+                        ) {
+                            (false, 0, 0) => {}
+                            (false, _, _) => {
                                 return Err(err(
                                     fidx,
                                     at("a generic class slot needs a type application"),
                                 ));
                             }
-                            (true, 0) => {
+                            (true, 0, 0) => {
                                 return Err(err(
                                     fidx,
                                     at("a plain class slot has a type application"),
                                 ));
                             }
-                            (true, types) => {
-                                check_app(ctx, func, fidx, at_dyn, *app, types, 0)?;
+                            (true, types, rows) => {
+                                check_app(ctx, func, fidx, at_dyn, *app, types, rows)?;
+                                let application = &module.apps[*app as usize];
+                                if !ctx.type_arguments_meet_bounds(
+                                    &application.types,
+                                    &application.rows,
+                                    &constructor.type_bounds,
+                                    &module.func_bounds[fidx as usize],
+                                ) {
+                                    return Err(err(
+                                        fidx,
+                                        at("a class slot type argument does not meet its interface bounds"),
+                                    ));
+                                }
                             }
                         }
                     }

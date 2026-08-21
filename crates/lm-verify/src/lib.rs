@@ -241,7 +241,8 @@ use tables::verify_tables;
 /// Version 25 verifies runtime compiler input classes. Version 26
 /// verifies `ClassDef` and complete VM image controls. Version 27
 /// verifies fallible activation and stable slot discovery.
-pub const VERIFIER_VERSION: u32 = 27;
+/// Version 28 verifies versioned constructors in class slots.
+pub const VERIFIER_VERSION: u32 = 28;
 
 /// Verify a full module. Every table and every function must pass.
 ///

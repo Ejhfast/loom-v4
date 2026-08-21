@@ -638,9 +638,10 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
                     out.u8(1);
                     out.leb(*func as u64);
                 }
-                ImageSlotTarget::Class(class) => {
+                ImageSlotTarget::Class { class, constructor } => {
                     out.u8(2);
                     out.leb(*class as u64);
+                    out.leb(*constructor as u64);
                 }
                 ImageSlotTarget::Value(value) => {
                     out.u8(3);
@@ -1476,12 +1477,20 @@ fn decode_inner(
                         "a function slot target does not fit in 32 bits",
                     )
                 })?),
-                2 => ImageSlotTarget::Class(u32::try_from(records.leb()?).map_err(|_| {
-                    ImageError::new(
-                        ImageReason::Reference,
-                        "a class slot target does not fit in 32 bits",
-                    )
-                })?),
+                2 => ImageSlotTarget::Class {
+                    class: u32::try_from(records.leb()?).map_err(|_| {
+                        ImageError::new(
+                            ImageReason::Reference,
+                            "a class slot target does not fit in 32 bits",
+                        )
+                    })?,
+                    constructor: u32::try_from(records.leb()?).map_err(|_| {
+                        ImageError::new(
+                            ImageReason::Reference,
+                            "a class constructor target does not fit in 32 bits",
+                        )
+                    })?,
+                },
                 3 => ImageSlotTarget::Value(decode_value(&mut records, objects.len() as u32, 0)?),
                 4 => ImageSlotTarget::Process {
                     proc: machine_ref(&mut records, &ctx)?,

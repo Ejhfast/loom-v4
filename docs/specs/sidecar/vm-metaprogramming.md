@@ -245,6 +245,20 @@ Each instruction reads one dense VM slot. It then performs its specialized opera
 
 The verifier checks the instruction against the slot contract. It never trusts the current target.
 
+`NEW_SLOT` consumes the declared constructor arguments.
+
+The class slot target contains a nominal class identity and one constructor version.
+
+`NEW_SLOT` calls that constructor version. The constructor allocates and initializes the object.
+
+The bootstrap compiler emits function, method, and class slots from Loom definitions.
+
+Loom version 0.2 has no module-level value or process declaration.
+
+Other verified artifact producers can emit value and process slots.
+
+The Loom VM API can replace these targets after installation.
+
 ### 7.3 Compile environment selection
 
 `CompileEnv` can bind a source name in static or late mode.
@@ -340,13 +354,31 @@ It includes these parts:
 - enum representation;
 - primitive representation role.
 
+The contract also contains the constructor type scheme and effect row.
+
+A class slot target contains the compatible class identity and one constructor version.
+
+Field default expressions and `init` bodies belong to the constructor version.
+
+They do not belong to the class ABI.
+
 A method-body change can replace method slots without changing the class contract.
 
 A compatible class target must have the same class contract.
 
+It must also have a constructor that matches the constructor contract.
+
+Nominal identity remains part of the contract. A class from another module does not match.
+
 A layout or signature change requires a new slot and a new class identity.
 
 Existing objects never change layout.
+
+A successful class replacement affects future `NEW_SLOT` operations only.
+
+Future proc spawning also uses the current constructor target.
+
+Existing objects keep their class identity and initialized state.
 
 ### 8.5 Value contracts
 
@@ -368,6 +400,16 @@ It does not migrate a mailbox, heap, frame, or resource.
 
 Direct process handles keep their existing target.
 
+A proc spawned by an image run belongs to the same image.
+
+A nested proc inherits the same image.
+
+Slot instructions in these procs read that image's slot table.
+
+The proc image link keeps the image live until the proc becomes unreachable.
+
+Snapshots preserve this link.
+
 ## 9. Hot replacement semantics
 
 A running frame pins one `FunctionVersionId` when a call creates that frame.
@@ -375,6 +417,10 @@ A running frame pins one `FunctionVersionId` when a call creates that frame.
 Replacing a function slot does not alter an active frame.
 
 The next `CALL_SLOT` reads the new target. A `CALL_STATIC` keeps its old target.
+
+The next `NEW_SLOT` reads the new constructor target.
+
+A class replacement does not edit an existing object.
 
 This rule gives a clear mixed-version boundary.
 
@@ -399,6 +445,8 @@ Holder code can replace a slot while no guest instruction executes in that VM.
 A stopped `Run` is a safe replacement point.
 
 A paused process is a safe replacement point.
+
+An executing image proc blocks installation and replacement for its image.
 
 Guest code cannot mutate the VM that currently executes it.
 
@@ -734,6 +782,8 @@ Both snapshot forms record these items:
 
 Slot targets are code state. A snapshot records their exact versions.
 
+A class slot records both its nominal class identity and constructor version.
+
 Portable snapshots grant no effect authority.
 
 They record no live `VmPolicy`, `PolicyTable`, mock closure, or holder capability.
@@ -891,7 +941,11 @@ Gate: active frames stay old while later slot calls use a compatible replacement
 
 ### Stage 4: cover every target kind
 
-Apply the slot model to functions, methods, classes, values, and processes.
+Apply the VM and bytecode slot model to functions, methods, classes, values, and processes.
+
+The bootstrap source compiler emits function, method, and class slots.
+
+Verified artifact producers can emit value and process slots.
 
 Gate: incompatible replacements reject atomically. Compatible future operations use the new target.
 

@@ -1232,8 +1232,18 @@ fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 type_params,
                 abi,
                 ty,
+                constructor,
             } => {
                 verify_slot_type(ctx, slot, *ty, *type_params, 0, &[])?;
+                verify_callable_contract(ctx, slot, constructor)?;
+                if constructor.type_params != *type_params
+                    || constructor.effect_params != 0
+                    || constructor.ret != *ty
+                {
+                    return Err(serr(
+                        "the class constructor contract does not match the class type".to_string(),
+                    ));
+                }
                 let Some((contract_class, args)) = ctx.as_instance(*ty) else {
                     return Err(serr("the class contract type is not a class".to_string()));
                 };
@@ -1246,7 +1256,11 @@ fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                         "the class contract type does not bind its parameters".to_string(),
                     ));
                 }
-                if let Some(SlotTarget::Class(target)) = spec.initial {
+                if let Some(SlotTarget::Class {
+                    class: target,
+                    constructor: target_constructor,
+                }) = spec.initial
+                {
                     let class = module
                         .classes
                         .get(target as usize)
@@ -1264,6 +1278,21 @@ fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                     if class_hashes.as_ref().expect("identity exists")[target as usize] != *abi {
                         return Err(serr(
                             "the class target does not match the slot ABI".to_string(),
+                        ));
+                    }
+                    let function =
+                        module
+                            .funcs
+                            .get(target_constructor as usize)
+                            .ok_or_else(|| {
+                                serr("the class constructor target does not exist".to_string())
+                            })?;
+                    if !function.captures.is_empty()
+                        || !callable_matches(module, target_constructor, constructor)
+                    {
+                        return Err(serr(
+                            "the class constructor target does not match the slot contract"
+                                .to_string(),
                         ));
                     }
                 } else if spec.initial.is_some() {

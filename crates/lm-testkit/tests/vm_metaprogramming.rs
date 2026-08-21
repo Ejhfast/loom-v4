@@ -10,6 +10,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 fn run_with_files(source: &str, files: &[(&str, Vec<u8>)]) -> String {
+    run_with_files_and_grants(source, files, &[])
+}
+
+fn run_with_files_and_grants(
+    source: &str,
+    files: &[(&str, Vec<u8>)],
+    extra_grants: &[&str],
+) -> String {
     let bytes = compile_to_bytes("meta.lm", source).expect("the test program compiles");
     let loaded = load_bytes(&bytes).expect("the test program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
@@ -19,6 +27,9 @@ fn run_with_files(source: &str, files: &[(&str, Vec<u8>)]) -> String {
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
     for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
+    }
+    for grant in extra_grants {
+        world.allow(grant).expect("the extra grant exists");
     }
     let outcome = lm_proc::run_world(&mut world);
     world.show_outcome(&outcome)
@@ -950,6 +961,80 @@ fn revision_artifact(body: &str) -> Vec<u8> {
     lm_bytecode::encode(&compiled.module)
 }
 
+fn class_revision_artifact(default: i64, increment: i64) -> Vec<u8> {
+    let source = format!(
+        "final class Box\n  value: Int = {default}\n  def init(mut self)\n    \
+         self.value = self.value + {increment}\n  end\nend\nBox().value\n"
+    );
+    let compiled = compile_module_with_options(
+        "class-revision",
+        &SourceFile::new("class-revision.lm", source),
+        &CompileEnv::new().freeze(),
+        true,
+        &CompileOptions::new().late_class("Box"),
+    )
+    .expect("the class revision compiles");
+    lm_bytecode::encode(&compiled.module)
+}
+
+fn proc_class_revision_artifact(default: i64, increment: i64) -> Vec<u8> {
+    let source = format!(
+        r#"class Worker < Proc
+  value: Int = {default}
+
+  def init(mut self)
+    self.value = self.value + {increment}
+  end
+
+  def on_spawn(self): Int
+    self.value
+  end
+end
+
+worker = Worker.spawn()
+worker.pause()
+worker
+"#
+    );
+    let compiled = compile_module_with_options(
+        "proc-class-revision",
+        &SourceFile::new("proc-class-revision.lm", source),
+        &CompileEnv::new().freeze(),
+        true,
+        &CompileOptions::new().late_class("Worker"),
+    )
+    .expect("the proc class revision compiles");
+    lm_bytecode::encode(&compiled.module)
+}
+
+fn proc_revision_artifact(body: &str) -> Vec<u8> {
+    let source = format!(
+        r#"class Worker < Proc
+  def on_spawn(self): Int
+    step(21)
+  end
+end
+
+def step(value: Int): Int
+  {body}
+end
+
+worker = Worker.spawn()
+worker.pause()
+worker
+"#
+    );
+    let compiled = compile_module_with_options(
+        "proc-revision",
+        &SourceFile::new("proc-revision.lm", source),
+        &CompileEnv::new().freeze(),
+        true,
+        &CompileOptions::new().late_function("step"),
+    )
+    .expect("the proc revision compiles");
+    lm_bytecode::encode(&compiled.module)
+}
+
 fn complete_slot_artifact() -> Vec<u8> {
     let source = "final class Box\nend\n\
                   def step(value: Int): Int\n\
@@ -977,16 +1062,16 @@ fn complete_slot_artifact() -> Vec<u8> {
         .exports
         .iter()
         .find(|export| export.name == "Box" && export.kind == lm_bytecode::ExportKind::Class)
-        .expect("the class is exported")
-        .def;
+        .expect("the class is exported");
     assert!(module
         .slots
         .iter()
         .any(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Function(step))));
-    assert!(module
-        .slots
-        .iter()
-        .any(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Class(class))));
+    assert!(module.slots.iter().any(|slot| slot.initial
+        == Some(lm_bytecode::SlotTarget::Class {
+            class: class.def,
+            constructor: class.ctor,
+        })));
     let int = module
         .types
         .iter()
@@ -1102,6 +1187,340 @@ execute()
         run_with_files(source, &[("first.lmbc", first), ("second.lmbc", second)]),
         "Done((2, 11))"
     );
+}
+
+#[test]
+fn a_class_replacement_changes_future_construction() {
+    let first = class_revision_artifact(5, 1);
+    let second = class_revision_artifact(50, 2);
+    let source = r#"
+def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
+  bytes = case sys.fs.open(path, ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes)
+end
+
+def run_entry(image: Vm, entry: FunctionDef[(), Int]): Int with Vm
+  case image.activate(entry, args: ())
+  in Err(_) then 0 - 20
+  in Ok(run)
+    case run.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 21
+    end
+  end
+end
+
+def execute(): (Int, Int, Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
+  image = sys.vm.Vm()
+  first_module = case read_artifact("first-class.lmbc").verify()
+  in Ok(module) then module
+  in Err(_) then return (0 - 1, 0 - 1, 0 - 1, 0 - 1)
+  end
+  second_module = case read_artifact("second-class.lmbc").verify()
+  in Ok(module) then module
+  in Err(_) then return (0 - 2, 0 - 2, 0 - 2, 0 - 2)
+  end
+  first_instance = case image.install(first_module)
+  in Ok(instance) then instance
+  in Err(_) then return (0 - 3, 0 - 3, 0 - 3, 0 - 3)
+  end
+  second_instance = case image.install(second_module)
+  in Ok(instance) then instance
+  in Err(_) then return (0 - 4, 0 - 4, 0 - 4, 0 - 4)
+  end
+  first_entry = case first_instance.entry[(), Int]()
+  in Ok(entry) then entry
+  in Err(_) then return (0 - 5, 0 - 5, 0 - 5, 0 - 5)
+  end
+  second_entry = case second_instance.entry[(), Int]()
+  in Ok(entry) then entry
+  in Err(_) then return (0 - 6, 0 - 6, 0 - 6, 0 - 6)
+  end
+  before = run_entry(image, first_entry)
+  second_own = run_entry(image, second_entry)
+  spec = case first_instance.slot_spec("Box")
+  in Ok(value) then value
+  in Err(_) then return (before, second_own, 0 - 7, 0 - 7)
+  end
+  slot = case first_instance.slot_for(spec)
+  in Ok(value) then value
+  in Err(_) then return (before, second_own, 0 - 8, 0 - 8)
+  end
+  target = case second_instance.class_def("Box")
+  in Ok(value) then value
+  in Err(_) then return (before, second_own, 0 - 9, 0 - 9)
+  end
+  case image.replace_class(slot, target)
+  in Err(_) then (before, second_own, 0 - 10, 0 - 10)
+  in Ok(_)
+    after = run_entry(image, first_entry)
+    pending = case image.activate(first_entry, args: ())
+    in Ok(run) then run
+    in Err(_) then return (before, second_own, after, 0 - 11)
+    end
+    snapshot = case pending.snapshot()
+    in Ok(value) then value
+    in Err(_) then return (before, second_own, after, 0 - 12)
+    end
+    restored = case sys.vm.Vm().restore(snapshot)
+    in Ok(run) then run
+    in Err(_) then return (before, second_own, after, 0 - 13)
+    end
+    restored_value = case restored.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 14
+    end
+    (before, second_own, after, restored_value)
+  end
+end
+
+execute()
+"#;
+    assert_eq!(
+        run_with_files(
+            source,
+            &[("first-class.lmbc", first), ("second-class.lmbc", second),],
+        ),
+        "Done((6, 6, 52, 52))"
+    );
+}
+
+#[test]
+fn a_class_replacement_changes_future_proc_construction() {
+    let first = proc_class_revision_artifact(5, 1);
+    let second = proc_class_revision_artifact(50, 2);
+    let source = r#"
+def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
+  bytes = case sys.fs.open(path, ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes)
+end
+
+def start_worker(
+  image: Vm,
+  instance: Instance
+): Result[Handle[Never, Int], String] with Vm, Proc
+  entry = instance.entry[(), Handle[Never, Int]]().map_error() {
+    |error: CodeError| error.message
+  }?
+  run = image.activate(entry, args: ()).map_error() {
+    |error: CodeError| error.message
+  }?
+  run.table().pass(Proc)
+  case run.run()
+  in Done(worker) then Ok(worker)
+  in Fault(_) then Err("the worker entry faulted")
+  end
+end
+
+def finish_worker(worker: Handle[Never, Int]): Result[Int, String] with Proc
+  case worker.resume()
+  in Ok(_) then ()
+  in Err(_) then return Err("the worker did not resume")
+  end
+  case worker.done()
+  in Done(result) then Ok(result)
+  in Fault(_) then Err("the worker faulted")
+  end
+end
+
+def execute(): Result[(Int, Int), String] with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
+  first_module = read_artifact("first-proc-class.lmbc").verify().map_error() {
+    |error: CodeError| error.message
+  }?
+  second_module = read_artifact("second-proc-class.lmbc").verify().map_error() {
+    |error: CodeError| error.message
+  }?
+  image = sys.vm.Vm()
+  first_instance = image.install(first_module).map_error() {
+    |error: CodeError| error.message
+  }?
+  second_instance = image.install(second_module).map_error() {
+    |error: CodeError| error.message
+  }?
+
+  before = finish_worker(start_worker(image, first_instance)?)?
+  spec = first_instance.slot_spec("Worker").map_error() {
+    |error: CodeError| error.message
+  }?
+  slot = first_instance.slot_for(spec).map_error() {
+    |error: CodeError| error.message
+  }?
+  target = second_instance.class_def("Worker").map_error() {
+    |error: CodeError| error.message
+  }?
+  image.replace_class(slot, target).map_error() {
+    |error: CodeError| error.message
+  }?
+  after = finish_worker(start_worker(image, first_instance)?)?
+  Ok((before, after))
+end
+
+execute()
+"#;
+    assert_eq!(
+        run_with_files_and_grants(
+            source,
+            &[
+                ("first-proc-class.lmbc", first),
+                ("second-proc-class.lmbc", second),
+            ],
+            &["Proc"],
+        ),
+        "Done(Ok((6, 52)))"
+    );
+}
+
+#[test]
+fn an_image_proc_uses_initial_and_replaced_slot_targets() {
+    let first = proc_revision_artifact("value + 1");
+    let second = proc_revision_artifact("value + 100");
+    let source = r#"
+def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
+  bytes = case sys.fs.open(path, ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes)
+end
+
+def start_worker(
+  image: Vm,
+  instance: Instance
+): Result[Handle[Never, Int], String] with Vm, Proc
+  entry = instance.entry[(), Handle[Never, Int]]().map_error() {
+    |error: CodeError| error.message
+  }?
+  run = image.activate(entry, args: ()).map_error() {
+    |error: CodeError| error.message
+  }?
+  run.table().pass(Proc)
+  case run.run()
+  in Done(worker) then Ok(worker)
+  in Fault(_) then Err("the worker entry faulted")
+  end
+end
+
+def finish_worker(worker: Handle[Never, Int]): Result[Int, String] with Proc
+  case worker.resume()
+  in Ok(_) then ()
+  in Err(_) then return Err("the worker did not resume")
+  end
+  case worker.done()
+  in Done(result) then Ok(result)
+  in Fault(_) then Err("the worker faulted")
+  end
+end
+
+def execute(): Result[(Int, Int), String] with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
+  first_module = read_artifact("first-proc.lmbc").verify().map_error() {
+    |error: CodeError| error.message
+  }?
+  second_module = read_artifact("second-proc.lmbc").verify().map_error() {
+    |error: CodeError| error.message
+  }?
+  image = sys.vm.Vm()
+  first_instance = image.install(first_module).map_error() {
+    |error: CodeError| error.message
+  }?
+  second_instance = image.install(second_module).map_error() {
+    |error: CodeError| error.message
+  }?
+
+  initial_worker = start_worker(image, first_instance)?
+  initial = finish_worker(initial_worker)?
+
+  upgraded_worker = start_worker(image, first_instance)?
+  snapshot = case image.snapshot()
+  in Ok(value) then value
+  in Err(_) then return Err("the VM did not capture")
+  end
+  restored = case sys.vm.restore_vm(snapshot)
+  in Ok(value) then value
+  in Err(_) then return Err("the VM did not restore")
+  end
+  case restored.snapshot()
+  in Ok(_) then ()
+  in Err(_) then return Err("the restored VM did not capture")
+  end
+
+  spec = first_instance.slot_spec("step").map_error() {
+    |error: CodeError| error.message
+  }?
+  slot = first_instance.slot_for(spec).map_error() {
+    |error: CodeError| error.message
+  }?
+  target = second_instance.function[(Int,), Int]("step").map_error() {
+    |error: CodeError| error.message
+  }?
+  image.replace_function(slot, target).map_error() {
+    |error: CodeError| error.message
+  }?
+
+  upgraded = finish_worker(upgraded_worker)?
+  Ok((initial, upgraded))
+end
+
+execute()
+"#;
+    let bytes = compile_to_bytes("image-proc-host.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().set_file("first-proc.lmbc", first.clone());
+    host.borrow_mut()
+        .set_file("second-proc.lmbc", second.clone());
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    for grant in ["Fs", "Vm", "Proc", "Compiler.Verify"] {
+        world.allow(grant).expect("the grant exists");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(Ok((22, 121)))");
+
+    let image = world.last_snapshot().expect("the restored VM captures");
+    let full_vm = image.world().full_vm.expect("the snapshot names one VM");
+    let procs: Vec<_> = image
+        .world()
+        .machines
+        .iter()
+        .filter(|machine| machine.is_proc)
+        .collect();
+    assert!(!procs.is_empty());
+    assert!(procs.iter().all(|machine| machine.image == Some(full_vm)));
+    let admitted = codec::load_external(
+        image.bytes().expect("the proc snapshot encodes"),
+        &loaded,
+        LoadLimits::default(),
+    )
+    .expect("the proc snapshot admits");
+    assert!(admitted
+        .world()
+        .machines
+        .iter()
+        .filter(|machine| machine.is_proc)
+        .all(|machine| machine.image == Some(full_vm)));
 }
 
 #[test]

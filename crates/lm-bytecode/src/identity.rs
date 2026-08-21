@@ -93,7 +93,8 @@ use std::collections::{BTreeSet, HashMap};
 /// adds dynamic result and public syntax instructions. Version 29
 /// adds complete code slot and VM image controls. Version 30 adds
 /// contract-bound slot identities and Result propagation.
-pub const COMPILER_ABI_VERSION: u32 = 30;
+/// Version 31 binds class slots to constructor contracts and versions.
+pub const COMPILER_ABI_VERSION: u32 = 31;
 
 /// The refinement work budget of one component.
 ///
@@ -495,7 +496,30 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
                 }
                 check_row(&format!("slot {slot}"), &callable.row)?;
             }
-            crate::SlotContract::Class { ty, .. } => check_type(*ty)?,
+            crate::SlotContract::Class {
+                ty, constructor, ..
+            } => {
+                check_type(*ty)?;
+                if constructor.param_muts.len() != constructor.params.len() {
+                    return Err(fail(format!(
+                        "slot {slot}: constructor mut markers do not align"
+                    )));
+                }
+                if constructor.type_bounds.len() != constructor.type_params as usize {
+                    return Err(fail(format!(
+                        "slot {slot}: constructor type-bound count mismatch"
+                    )));
+                }
+                for parameter in &constructor.type_bounds {
+                    for bound in parameter {
+                        check_use(&format!("slot {slot}"), bound)?;
+                    }
+                }
+                for ty in constructor.params.iter().chain([&constructor.ret]) {
+                    check_type(*ty)?;
+                }
+                check_row(&format!("slot {slot}"), &constructor.row)?;
+            }
             crate::SlotContract::Value { ty } => check_type(*ty)?,
             crate::SlotContract::Process { message, result } => {
                 check_type(*message)?;
@@ -509,9 +533,14 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
                     return Err(fail(format!("slot {slot}: function target out of range")));
                 }
             }
-            Some(crate::SlotTarget::Class(class)) => {
+            Some(crate::SlotTarget::Class { class, constructor }) => {
                 if class as usize >= s.classes {
                     return Err(fail(format!("slot {slot}: class target out of range")));
+                }
+                if constructor as usize >= s.funcs {
+                    return Err(fail(format!(
+                        "slot {slot}: class constructor target out of range"
+                    )));
                 }
             }
         }
@@ -979,7 +1008,19 @@ fn push_slot_contract_edges(module: &Module, space: &Space, slot: u32, out: &mut
                 }
             }
         }
-        crate::SlotContract::Class { ty, .. } => out.push(space.type_node(*ty)),
+        crate::SlotContract::Class {
+            ty, constructor, ..
+        } => {
+            out.push(space.type_node(*ty));
+            for ty in constructor.params.iter().chain([&constructor.ret]) {
+                out.push(space.type_node(*ty));
+            }
+            for parameter in &constructor.type_bounds {
+                for bound in parameter {
+                    push_interface_use_edges(module, space, bound, out);
+                }
+            }
+        }
         crate::SlotContract::Value { ty } => out.push(space.type_node(*ty)),
         crate::SlotContract::Process { message, result } => {
             out.push(space.type_node(*message));
@@ -2287,11 +2328,13 @@ impl<'a> Resolver<'a> {
                 type_params,
                 abi,
                 ty,
+                constructor,
             } => {
                 out.push(2);
                 out.extend_from_slice(&type_params.to_le_bytes());
                 out.extend_from_slice(abi);
                 out.extend_from_slice(&self.type_digest(*ty));
+                self.callable_contract_bytes(out, constructor);
             }
             crate::SlotContract::Value { ty } => {
                 out.push(3);
@@ -2888,9 +2931,10 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
                 bytes.push(1);
                 bytes.extend_from_slice(&func_hashes[func as usize]);
             }
-            Some(crate::SlotTarget::Class(class)) => {
+            Some(crate::SlotTarget::Class { class, constructor }) => {
                 bytes.push(2);
                 write_str(&mut bytes, &module.classes[class as usize].key);
+                bytes.extend_from_slice(&func_hashes[constructor as usize]);
             }
         }
         slots.push(bytes);

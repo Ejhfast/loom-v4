@@ -565,7 +565,13 @@ impl World {
                 return None;
             }
             let target = if export.kind.is_class() {
-                lm_bytecode::SlotTarget::Class(export.def)
+                if export.ctor == lm_bytecode::NO_CTOR {
+                    return None;
+                }
+                lm_bytecode::SlotTarget::Class {
+                    class: export.def,
+                    constructor: export.ctor,
+                }
             } else if export.kind == lm_bytecode::ExportKind::Function {
                 lm_bytecode::SlotTarget::Function(export.def)
             } else {
@@ -815,7 +821,11 @@ impl World {
                     self.finish_code_error(vm, op, "the class does not belong to this VM image");
                     return;
                 }
-                self.replace_class_slot(key, slot.index, target.index)
+                let Some(constructor) = self.live_class_constructor(target) else {
+                    self.finish_code_error(vm, op, "the class has no construction function");
+                    return;
+                };
+                self.replace_class_slot(key, slot.index, target.index, constructor)
             }
             lm_abi::OP_VM_REPLACE_VALUE => self.replace_value_slot(key, slot.index, vm, target),
             lm_abi::OP_VM_REPLACE_PROCESS => self.replace_process_slot(key, slot.index, vm, target),
@@ -905,6 +915,29 @@ impl World {
             .filter(|image| image.live && image.generation == handle.generation)
             .and_then(|image| image.instances.get(handle.instance as usize))
             .is_some_and(|instance| instance.classes.contains(&handle.index))
+    }
+
+    fn live_class_constructor(&self, handle: CodeHandle) -> Option<u32> {
+        if handle.kind != CodeHandleKind::Class {
+            return None;
+        }
+        let instance = self
+            .vm_images
+            .get(handle.image as usize)
+            .filter(|image| image.live && image.generation == handle.generation)?
+            .instances
+            .get(handle.instance as usize)?;
+        let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+        let source_class = instance
+            .classes
+            .iter()
+            .position(|class| *class == handle.index)?;
+        let export = source.exports.iter().find(|export| {
+            export.kind.is_class()
+                && export.def as usize == source_class
+                && export.ctor != lm_bytecode::NO_CTOR
+        })?;
+        instance.funcs.get(export.ctor as usize).copied()
     }
 
     fn live_slot(&self, handle: CodeHandle) -> bool {

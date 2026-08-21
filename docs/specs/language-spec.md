@@ -2026,6 +2026,12 @@ h: Handle[Never, ()] = sys.proc.run(vm)
 
 `Class.spawn(args...)` is compiler sugar available only for a subclass with a valid `on_spawn`. It constructs a VM from the proc class and a typed argument tuple, transfers code/data through the codec, grants the child `Proc` group, creates the declared mailbox, and invokes `Proc.Run`. The return type is `Handle[M,R]` inferred from the proc superclass and `on_spawn` result.
 
+A proc spawned by a persistent VM run inherits that VM image. A nested proc inherits the same image.
+
+The proc uses the inherited image for all slot instructions. The link keeps the image live and survives snapshot restore.
+
+An executing image proc blocks installation and slot replacement. A paused proc permits both operations.
+
 The birth grant is required so mailbox-bearing procs can receive. Since `spawn` itself carries `Proc`, the spawner is statically allowed to pass that group. Additional grants, mocks, limits, or admission checks use the explicit VM path.
 
 ### 18.4 Handles and terminal results
@@ -2690,6 +2696,12 @@ This table is the complete public `Vm` operation set for version 0.2.
 `Instance.slot_for(spec)` resolves that identity inside the receiving instance.
 
 Dense slot indices remain internal. No public method accepts one.
+
+A class slot target contains one nominal class identity and one constructor version.
+
+`Vm.ReplaceClass` changes future construction. It does not change existing objects.
+
+The metaprogramming sidecar defines the complete slot contracts and replacement rules.
 
 The held, receiverless, and full VM forms use separate exact operation identities. They share one snapshot implementation family.
 

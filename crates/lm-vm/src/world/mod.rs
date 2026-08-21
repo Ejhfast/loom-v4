@@ -865,6 +865,43 @@ mod tests {
     }
 
     #[test]
+    fn a_proc_image_link_guards_slots_and_image_lifetime() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let image = world.new_vm_image(0).expect("the image fits");
+        world
+            .install_artifact(image, installable_artifact(7), None, &[])
+            .expect("the artifact installs");
+        let target = match world.vm_images[image.image as usize].slots[0] {
+            ImageSlotTarget::Function(target) => target,
+            _ => panic!("the slot has no function target"),
+        };
+
+        let mut proc = world.empty_machine(VmConfig::default(), Some(0), 0);
+        proc.image = Some(image);
+        proc.is_proc = true;
+        proc.active = 1;
+        proc.vm.state = MachineState::Ready;
+        world.machines.push(proc);
+
+        assert_eq!(
+            world.replace_function_slot(image, 0, target),
+            Err(FaultCode::InvalidVmState)
+        );
+        world.machines[1].active = 0;
+        world.machines[1].paused = true;
+        world
+            .replace_function_slot(image, 0, target)
+            .expect("the paused proc permits replacement");
+
+        world.collect_vm_images();
+        assert!(world.vm_images[image.image as usize].live);
+        world.machines[1].image = None;
+        world.collect_vm_images();
+        assert!(!world.vm_images[image.image as usize].live);
+    }
+
+    #[test]
     fn failed_installation_changes_no_world_code_or_image_state() {
         let loaded = trivial_loaded();
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
@@ -1155,6 +1192,35 @@ mod tests {
 
     #[test]
     fn a_class_slot_checks_its_exact_runtime_contract() {
+        let constructor_contract = BcCallableContract {
+            type_params: 0,
+            effect_params: 0,
+            type_bounds: vec![],
+            params: vec![],
+            param_muts: vec![],
+            ret: 4,
+            row: vec![],
+        };
+        let constructor = |name: &str, value: i64| Func {
+            name: name.to_string(),
+            type_params: 0,
+            effect_params: 0,
+            params: vec![],
+            param_muts: vec![],
+            ret: 4,
+            row: vec![],
+            captures: vec![],
+            local_types: vec![4],
+            blocks: vec![vec![
+                Instr::New(0),
+                Instr::StoreLocal(0),
+                Instr::LoadLocal(0),
+                Instr::ConstInt(value),
+                Instr::StoreField(0),
+                Instr::LoadLocal(0),
+                Instr::Return,
+            ]],
+        };
         let mut module = Module {
             strings: vec![],
             types: vec![
@@ -1169,7 +1235,7 @@ mod tests {
             interfaces: vec![],
             conformances: vec![],
             class_bounds: vec![vec![]],
-            func_bounds: vec![vec![]],
+            func_bounds: vec![vec![], vec![], vec![]],
             classes: vec![BcClass {
                 name: "Cell".to_string(),
                 key: "test.Cell".to_string(),
@@ -1178,27 +1244,32 @@ mod tests {
                 parent_args: vec![],
                 type_params: 0,
                 kind: BcClassKind::Normal,
-                fields: vec![],
+                fields: vec![("value".to_string(), 2)],
                 methods: vec![],
             }],
-            funcs: vec![Func {
-                name: "main".to_string(),
-                type_params: 0,
-                effect_params: 0,
-                params: vec![],
-                param_muts: vec![],
-                ret: 4,
-                row: vec![],
-                captures: vec![],
-                local_types: vec![],
-                blocks: vec![vec![
-                    Instr::Extended(ExtendedInstr::NewSlot {
-                        slot: 0,
-                        app: lm_bytecode::NO_APP,
-                    }),
-                    Instr::Return,
-                ]],
-            }],
+            funcs: vec![
+                Func {
+                    name: "main".to_string(),
+                    type_params: 0,
+                    effect_params: 0,
+                    params: vec![],
+                    param_muts: vec![],
+                    ret: 2,
+                    row: vec![],
+                    captures: vec![],
+                    local_types: vec![],
+                    blocks: vec![vec![
+                        Instr::Extended(ExtendedInstr::NewSlot {
+                            slot: 0,
+                            app: lm_bytecode::NO_APP,
+                        }),
+                        Instr::LoadField(0),
+                        Instr::Return,
+                    ]],
+                },
+                constructor("old", 5),
+                constructor("new", 50),
+            ],
             imports: vec![],
             slots: vec![SlotSpec {
                 key: [10; 32],
@@ -1206,6 +1277,7 @@ mod tests {
                     type_params: 0,
                     abi: [0; 32],
                     ty: 4,
+                    constructor: constructor_contract.clone(),
                 },
                 initial: None,
             }],
@@ -1223,32 +1295,27 @@ mod tests {
                 type_params: 0,
                 abi,
                 ty: 4,
+                constructor: constructor_contract,
             },
-            initial: Some(SlotTarget::Class(0)),
+            initial: Some(SlotTarget::Class {
+                class: 0,
+                constructor: 1,
+            }),
         };
         let loaded = load(module).expect("the class-slot module verifies");
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
         let image = world.new_vm_image(0).expect("the image fits");
         world.machines[0].image = Some(image);
         world
-            .replace_class_slot(image, 0, 0)
-            .expect("the same class contract matches");
+            .replace_class_slot(image, 0, 0, 2)
+            .expect("the second constructor matches");
         let old = world.vm_images[image.image as usize].slots[0];
         assert_eq!(
-            world.replace_class_slot(image, 0, 1),
+            world.replace_class_slot(image, 0, 1, 2),
             Err(FaultCode::TypeMismatch)
         );
         assert_eq!(world.vm_images[image.image as usize].slots[0], old);
-        let value = match world.run_root() {
-            Outcome::Done(value) => value,
-            other => panic!("expected an instance, got {other:?}"),
-        };
-        assert!(matches!(
-            world
-                .heap_of(0)
-                .get(value.as_obj().expect("the result is an object")),
-            Object::Instance { class: 0, .. }
-        ));
+        assert_eq!(world.run_root(), Outcome::Done(Value::Int(50)));
     }
 
     #[test]

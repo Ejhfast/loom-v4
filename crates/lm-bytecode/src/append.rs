@@ -533,10 +533,12 @@ fn reloc_slot_contract(source: &SlotContract, reloc: &AppendReloc) -> SlotContra
             type_params,
             abi,
             ty,
+            constructor,
         } => SlotContract::Class {
             type_params: *type_params,
             abi: *abi,
             ty: reloc.types[*ty as usize],
+            constructor: reloc_callable(constructor, reloc),
         },
         SlotContract::Value { ty } => SlotContract::Value {
             ty: reloc.types[*ty as usize],
@@ -551,7 +553,10 @@ fn reloc_slot_contract(source: &SlotContract, reloc: &AppendReloc) -> SlotContra
 fn reloc_slot_target(source: SlotTarget, reloc: &AppendReloc) -> SlotTarget {
     match source {
         SlotTarget::Function(function) => SlotTarget::Function(reloc.funcs[function as usize]),
-        SlotTarget::Class(class) => SlotTarget::Class(reloc.classes[class as usize]),
+        SlotTarget::Class { class, constructor } => SlotTarget::Class {
+            class: reloc.classes[class as usize],
+            constructor: reloc.funcs[constructor as usize],
+        },
     }
 }
 

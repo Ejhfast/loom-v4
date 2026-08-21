@@ -171,7 +171,10 @@ impl World {
             self.fault_caller(vm, op, code, "the scheduler has no task capacity");
             return;
         }
-        let machine = self.empty_machine(child_config, Some(vm), 0);
+        let mut machine = self.empty_machine(child_config, Some(vm), 0);
+        // An image proc reads the same slots as its spawner.
+        // The link also keeps that image live.
+        machine.image = self.machines[vm as usize].image;
         self.machines.push(machine);
         // The two closures and every argument cross the boundary. Each
         // result stays rooted while the next value crosses.

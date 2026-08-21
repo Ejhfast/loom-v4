@@ -73,7 +73,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 18 stores installed code and module instances.
 /// Version 19 stores compiler interfaces with portable code.
 /// Version 21 distinguishes typed run images from full VM images.
-pub const FORMAT_VERSION: u32 = 21;
+/// Version 22 stores one constructor version in each class slot target.
+pub const FORMAT_VERSION: u32 = 22;
 
 /// The section kinds, in canonical order.
 ///
@@ -309,7 +310,7 @@ pub struct ImageInstance {
 pub enum ImageSlotTarget {
     Empty,
     Function(u32),
-    Class(u32),
+    Class { class: u32, constructor: u32 },
     Value(Value),
     Process { proc: u32, generation: u32 },
 }

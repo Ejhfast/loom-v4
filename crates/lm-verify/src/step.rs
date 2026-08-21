@@ -1013,16 +1013,25 @@ pub(crate) fn step(
             push(state, ctx.subst(contract.ret, types, rows))?;
         }
         Instr::Extended(ExtendedInstr::NewSlot { slot, app }) => {
-            let SlotContract::Class { ty, .. } = &module.slots[*slot as usize].contract else {
+            let SlotContract::Class { constructor, .. } = &module.slots[*slot as usize].contract
+            else {
                 unreachable!("the structural pass checked the slot kind");
             };
-            let result = if *app == lm_bytecode::NO_APP {
-                *ty
+            let (types, rows): (&[u32], &[Vec<BcRow>]) = if *app == lm_bytecode::NO_APP {
+                (&[], &[])
             } else {
                 let application = &module.apps[*app as usize];
-                ctx.subst(*ty, &application.types, &application.rows)
+                (&application.types, &application.rows)
             };
-            push(state, result)?;
+            let row = ctx.row_subst(&constructor.row, rows);
+            charge_row(&row)?;
+            let params: Vec<u32> = constructor
+                .params
+                .iter()
+                .map(|param| ctx.subst(*param, types, rows))
+                .collect();
+            pop_args(state, &params)?;
+            push(state, ctx.subst(constructor.ret, types, rows))?;
         }
         Instr::Extended(ExtendedInstr::LoadSlot { slot }) => {
             let SlotContract::Value { ty } = &module.slots[*slot as usize].contract else {

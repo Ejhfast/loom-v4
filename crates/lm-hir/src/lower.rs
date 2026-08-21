@@ -49,6 +49,8 @@ struct ModLowerer<'m> {
     function_slots: HashMap<u32, u32>,
     /// Dense late-allocation slot by class index.
     class_slots: HashMap<u32, u32>,
+    /// Local dispatch function for each late class constructor.
+    class_dispatch: HashMap<u32, u32>,
 }
 
 /// The callable kind of one late function reference.
@@ -288,6 +290,13 @@ pub fn lower_module_with_linkage(
         class_slots.insert(*class, next_slot);
         next_slot += 1;
     }
+    let dispatch_base = hir.funcs.len() as u32 + hir.classes.len() as u32;
+    let class_dispatch = linkage
+        .classes
+        .keys()
+        .enumerate()
+        .map(|(offset, class)| (*class, dispatch_base + offset as u32))
+        .collect();
     let mut inline_bodies: Vec<Option<HExpr>> = hir.funcs.iter().map(inline_body).collect();
     for function in linkage.functions.keys() {
         let body = inline_bodies
@@ -312,6 +321,7 @@ pub fn lower_module_with_linkage(
         string_builder_class: hir.core_roles[lm_bytecode::corepin::ROLE_STRING_BUILDER],
         function_slots,
         class_slots,
+        class_dispatch,
     };
     // The canonical primitive prefix required by the verifier.
     m.intern_type(BcType::Unit);
@@ -335,6 +345,13 @@ pub fn lower_module_with_linkage(
     }
     for (cidx, class) in hir.classes.iter().enumerate() {
         funcs.push(lower_new_func(&mut m, class, cidx as u32));
+    }
+    for class in linkage.classes.keys() {
+        funcs.push(lower_new_dispatch_func(
+            &mut m,
+            &hir.classes[*class as usize],
+            *class,
+        ));
     }
     let interfaces: Vec<BcInterface> = hir
         .interfaces
@@ -392,6 +409,13 @@ pub fn lower_module_with_linkage(
             func_bounds.push(Vec::new());
         } else {
             func_bounds.push(m.bounds(&class.type_bounds));
+        }
+    }
+    for class in linkage.classes.keys() {
+        if hir.classes[*class as usize].type_params == 0 {
+            func_bounds.push(Vec::new());
+        } else {
+            func_bounds.push(m.bounds(&hir.classes[*class as usize].type_bounds));
         }
     }
     let class_bounds = hir
@@ -534,6 +558,7 @@ pub fn lower_module_with_linkage(
             .funcs
             .get(hir.funcs.len() + *class as usize)
             .ok_or_else(|| format!("late class {class} has no constructor"))?;
+        let constructor_index = hir.funcs.len() as u32 + *class;
         let ty = constructor.ret;
         match module.types.get(ty as usize) {
             Some(BcType::Class(found)) if found == class => {}
@@ -547,8 +572,20 @@ pub fn lower_module_with_linkage(
                 type_params: definition.type_params,
                 abi: [0; 32],
                 ty,
+                constructor: BcCallableContract {
+                    type_params: constructor.type_params,
+                    effect_params: constructor.effect_params,
+                    type_bounds: module.func_bounds[constructor_index as usize].clone(),
+                    params: constructor.params.clone(),
+                    param_muts: constructor.param_muts.clone(),
+                    ret: constructor.ret,
+                    row: constructor.row.clone(),
+                },
             },
-            initial: Some(SlotTarget::Class(*class)),
+            initial: Some(SlotTarget::Class {
+                class: *class,
+                constructor: constructor_index,
+            }),
         });
     }
     if !linkage.classes.is_empty() {
@@ -1195,8 +1232,17 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 for arg in args {
                     self.lower_expr(arg);
                 }
-                let target = self.m.new_base + *class;
-                self.emit_call(target, targs, &[]);
+                if let Some(slot) = self.m.class_slots.get(class).copied() {
+                    let app = if targs.is_empty() {
+                        NO_APP
+                    } else {
+                        self.m.app_of(targs, &[])
+                    };
+                    self.emit(extended(ExtendedInstr::NewSlot { slot, app }));
+                } else {
+                    let target = self.m.new_base + *class;
+                    self.emit_call(target, targs, &[]);
+                }
             }
             HExprKind::MethodCall {
                 recv,
@@ -1327,7 +1373,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 // construction function, the proc body, and the typed
                 // argument tuple, then one `Proc.Spawn` perform.
                 self.emit(Instr::MakeClosure {
-                    func: self.m.new_base + *class,
+                    func: self
+                        .m
+                        .class_dispatch
+                        .get(class)
+                        .copied()
+                        .unwrap_or(self.m.new_base + *class),
                     captures: 0,
                 });
                 self.emit(Instr::MakeClosure {
@@ -2734,13 +2785,9 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
     let mut base_types = params.clone();
     base_types.push(self_bc);
     let mut lowerer = Lowerer::new(m, base_types);
-    match (lowerer.m.class_slots.get(&cidx).copied(), app) {
-        (Some(slot), app) => lowerer.emit(extended(ExtendedInstr::NewSlot {
-            slot,
-            app: app.unwrap_or(NO_APP),
-        })),
-        (None, None) => lowerer.emit(Instr::New(cidx)),
-        (None, Some(app)) => lowerer.emit(Instr::NewG { class: cidx, app }),
+    match app {
+        None => lowerer.emit(Instr::New(cidx)),
+        Some(app) => lowerer.emit(Instr::NewG { class: cidx, app }),
     }
     lowerer.emit(Instr::StoreLocal(self_slot));
     if class.ctor_kind == CtorKind::CaseFields {
@@ -2795,6 +2842,47 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
         captures: vec![],
         local_types,
         blocks,
+    }
+}
+
+/// Synthesize one closure-compatible dispatcher for a late class.
+/// The target constructor remains version-specific in the class slot.
+fn lower_new_dispatch_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
+    let params: Vec<u32> = class.ctor_params.iter().map(|ty| m.bc_ty(*ty)).collect();
+    let ret = if class.type_params == 0 {
+        m.intern_type(BcType::Class(cidx))
+    } else {
+        let variables: Vec<u32> = (0..class.type_params)
+            .map(|index| m.intern_type(BcType::Var(index)))
+            .collect();
+        m.intern_type(BcType::Inst(cidx, variables))
+    };
+    let app = if class.type_params == 0 {
+        NO_APP
+    } else {
+        let variables = (0..class.type_params)
+            .map(|index| m.intern_type(BcType::Var(index)))
+            .collect();
+        m.intern_app(variables, vec![])
+    };
+    let slot = m.class_slots[&cidx];
+    let mut body = Vec::with_capacity(params.len() + 2);
+    for index in 0..params.len() as u32 {
+        body.push(Instr::LoadLocal(index));
+    }
+    body.push(extended(ExtendedInstr::NewSlot { slot, app }));
+    body.push(Instr::Return);
+    Func {
+        name: format!("<late new {}>", class.name),
+        type_params: class.type_params,
+        effect_params: 0,
+        params: params.clone(),
+        param_muts: class.ctor_param_muts.clone(),
+        ret,
+        row: m.bc_row(&class.ctor_row),
+        captures: vec![],
+        local_types: params,
+        blocks: vec![body],
     }
 }
 
@@ -3007,7 +3095,14 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
             };
             (count, 1)
         }
-        ExtendedInstr::NewSlot { .. } | ExtendedInstr::LoadSlot { .. } => (0, 1),
+        ExtendedInstr::NewSlot { slot, .. } => {
+            let count = match &module.slots[*slot as usize].contract {
+                lm_bytecode::SlotContract::Class { constructor, .. } => constructor.params.len(),
+                _ => 0,
+            };
+            (count, 1)
+        }
+        ExtendedInstr::LoadSlot { .. } => (0, 1),
         ExtendedInstr::SendSlot { .. }
         | ExtendedInstr::SyntaxTreeRoot
         | ExtendedInstr::SyntaxKind

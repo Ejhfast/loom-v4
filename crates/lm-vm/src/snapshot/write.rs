@@ -508,8 +508,13 @@ impl World {
             for target in &image.slots {
                 match target {
                     ImageSlotTarget::Function(func) if !funcs.contains(func) => funcs.push(*func),
-                    ImageSlotTarget::Class(class) if !classes.contains(class) => {
-                        classes.push(*class);
+                    ImageSlotTarget::Class { class, constructor } => {
+                        if !classes.contains(class) {
+                            classes.push(*class);
+                        }
+                        if !funcs.contains(constructor) {
+                            funcs.push(*constructor);
+                        }
                     }
                     _ => {}
                 }
@@ -716,7 +721,12 @@ impl World {
             slots.push(match target {
                 crate::machine::ImageSlotTarget::Empty => ImageSlotTarget::Empty,
                 crate::machine::ImageSlotTarget::Function(func) => ImageSlotTarget::Function(*func),
-                crate::machine::ImageSlotTarget::Class(class) => ImageSlotTarget::Class(*class),
+                crate::machine::ImageSlotTarget::Class { class, constructor } => {
+                    ImageSlotTarget::Class {
+                        class: *class,
+                        constructor: *constructor,
+                    }
+                }
                 crate::machine::ImageSlotTarget::Value(value) => {
                     ImageSlotTarget::Value(map_value(*value))
                 }

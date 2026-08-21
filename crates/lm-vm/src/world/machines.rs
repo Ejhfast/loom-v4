@@ -278,7 +278,9 @@ impl World {
             }
             slots.push(match slot.initial {
                 Some(lm_bytecode::SlotTarget::Function(func)) => ImageSlotTarget::Function(func),
-                Some(lm_bytecode::SlotTarget::Class(class)) => ImageSlotTarget::Class(class),
+                Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
+                    ImageSlotTarget::Class { class, constructor }
+                }
                 None => ImageSlotTarget::Empty,
             });
         }
@@ -386,7 +388,12 @@ impl World {
                     Some(lm_bytecode::SlotTarget::Function(func)) => {
                         ImageSlotTarget::Function(*func)
                     }
-                    Some(lm_bytecode::SlotTarget::Class(class)) => ImageSlotTarget::Class(*class),
+                    Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
+                        ImageSlotTarget::Class {
+                            class: *class,
+                            constructor: *constructor,
+                        }
+                    }
                     None => ImageSlotTarget::Empty,
                 };
             }
@@ -491,6 +498,7 @@ impl World {
         key: VmImageKey,
         slot: u32,
         target: u32,
+        target_constructor: u32,
     ) -> Result<(), FaultCode> {
         self.check_slot_safepoint(key)?;
         let spec = self
@@ -502,6 +510,7 @@ impl World {
             type_params,
             abi,
             ty,
+            constructor,
         } = &spec.contract
         else {
             return Err(FaultCode::TypeMismatch);
@@ -524,7 +533,31 @@ impl World {
         {
             return Err(FaultCode::TypeMismatch);
         }
-        self.vm_images[key.image as usize].slots[slot as usize] = ImageSlotTarget::Class(target);
+        let function = self
+            .module
+            .funcs
+            .get(target_constructor as usize)
+            .ok_or(FaultCode::TypeMismatch)?;
+        let bounds = self
+            .module
+            .func_bounds
+            .get(target_constructor as usize)
+            .ok_or(FaultCode::TypeMismatch)?;
+        if !function.captures.is_empty()
+            || function.type_params != constructor.type_params
+            || function.effect_params != constructor.effect_params
+            || bounds != &constructor.type_bounds
+            || function.params != constructor.params
+            || function.param_muts != constructor.param_muts
+            || function.ret != constructor.ret
+            || function.row != constructor.row
+        {
+            return Err(FaultCode::TypeMismatch);
+        }
+        self.vm_images[key.image as usize].slots[slot as usize] = ImageSlotTarget::Class {
+            class: target,
+            constructor: target_constructor,
+        };
         Ok(())
     }
 

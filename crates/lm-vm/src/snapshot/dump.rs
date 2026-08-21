@@ -236,7 +236,9 @@ fn slot_text(target: ImageSlotTarget) -> String {
     match target {
         ImageSlotTarget::Empty => "empty".to_string(),
         ImageSlotTarget::Function(function) => format!("function {function}"),
-        ImageSlotTarget::Class(class) => format!("class {class}"),
+        ImageSlotTarget::Class { class, constructor } => {
+            format!("class {class} constructor {constructor}")
+        }
         ImageSlotTarget::Value(value) => format!("value {}", show(value)),
         ImageSlotTarget::Process { proc, generation } => {
             format!("process {proc}:{generation}")

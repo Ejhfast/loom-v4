@@ -928,8 +928,12 @@ impl Admit<'_> {
                             type_params,
                             abi,
                             ty,
+                            constructor,
                         },
-                        ImageSlotTarget::Class(class),
+                        ImageSlotTarget::Class {
+                            class,
+                            constructor: target_constructor,
+                        },
                     ) => {
                         let target = self.module.classes.get(*class as usize);
                         let contract_class = match self.module.types.get(*ty as usize) {
@@ -942,6 +946,8 @@ impl Admit<'_> {
                             && target.is_some_and(|target| target.type_params == *type_params)
                             && contract_class == Some(*class)
                             && self.identity.class_hashes.get(*class as usize) == Some(abi)
+                            && self.func_named(*target_constructor)
+                            && self.callable_matches(*target_constructor, constructor, false)
                     }
                     (SlotContract::Value { .. }, ImageSlotTarget::Value(_)) => true,
                     (

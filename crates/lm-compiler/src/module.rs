@@ -804,6 +804,47 @@ mod tests {
     }
 
     #[test]
+    fn a_late_class_default_changes_only_its_constructor_version() {
+        let first = compile(
+            "final class Box\n  value: Int = 5\nend\nBox().value\n",
+            &CompileOptions::new().late_class("Box"),
+        );
+        let second = compile(
+            "final class Box\n  value: Int = 50\nend\nBox().value\n",
+            &CompileOptions::new().late_class("Box"),
+        );
+        assert_eq!(first.interface.slots[0].key, second.interface.slots[0].key);
+        assert_eq!(
+            first.interface.slots[0].contract_hash,
+            second.interface.slots[0].contract_hash
+        );
+        let first_identity = lm_bytecode::identity::module_identity(&first.module)
+            .expect("the first revision has an identity");
+        let second_identity = lm_bytecode::identity::module_identity(&second.module)
+            .expect("the second revision has an identity");
+        assert_eq!(first_identity.class_hashes, second_identity.class_hashes);
+        let (first_class, first_constructor) = match first.module.slots[0].initial {
+            Some(lm_bytecode::SlotTarget::Class { class, constructor }) => (class, constructor),
+            _ => panic!("the first class slot has no constructor"),
+        };
+        let second_constructor = match second.module.slots[0].initial {
+            Some(lm_bytecode::SlotTarget::Class { constructor, .. }) => constructor,
+            _ => panic!("the second class slot has no constructor"),
+        };
+        assert_ne!(
+            first_identity.func_hashes[first_constructor as usize],
+            second_identity.func_hashes[second_constructor as usize]
+        );
+        assert!(first.module.funcs[first_constructor as usize]
+            .blocks
+            .iter()
+            .flatten()
+            .any(|instruction| {
+                matches!(instruction, Instr::New(class) if *class == first_class)
+            }));
+    }
+
+    #[test]
     fn imported_late_linkage_relocates_through_the_linker() {
         let library = compile_module_with_options(
             "lib.math",

@@ -658,7 +658,10 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
                     let at = prng.below(slots.len());
                     slots[at] = match prng.below(4) {
                         0 => lm_vm::snapshot::ImageSlotTarget::Function(prng.next() as u32),
-                        1 => lm_vm::snapshot::ImageSlotTarget::Class(prng.next() as u32),
+                        1 => lm_vm::snapshot::ImageSlotTarget::Class {
+                            class: prng.next() as u32,
+                            constructor: prng.next() as u32,
+                        },
                         2 => {
                             lm_vm::snapshot::ImageSlotTarget::Value(Value::Int(prng.next() as i64))
                         }
@@ -730,16 +733,16 @@ fn installed_slot_artifact() -> Vec<u8> {
         .exports
         .iter()
         .find(|export| export.name == "Box" && export.kind == lm_bytecode::ExportKind::Class)
-        .expect("the class is exported")
-        .def;
+        .expect("the class is exported");
     assert!(module
         .slots
         .iter()
         .any(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Function(step))));
-    assert!(module
-        .slots
-        .iter()
-        .any(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Class(class))));
+    assert!(module.slots.iter().any(|slot| slot.initial
+        == Some(lm_bytecode::SlotTarget::Class {
+            class: class.def,
+            constructor: class.ctor,
+        })));
     let int = module
         .types
         .iter()

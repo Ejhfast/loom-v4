@@ -74,7 +74,7 @@ pub type FunctionVersionId = u32;
 pub(crate) enum ImageSlotTarget {
     Empty,
     Function(FunctionVersionId),
-    Class(u32),
+    Class { class: u32, constructor: u32 },
     Value(Value),
     Process { proc: VmId, generation: u32 },
 }
@@ -536,7 +536,7 @@ pub struct Machine {
     /// The persistent image that owns this run.
     ///
     /// Host root machines and legacy host restore targets have no
-    /// image. Every run that `Vm.activate` creates names one image.
+    /// image. Activated runs and their spawned procs name one image.
     pub image: Option<VmImageKey>,
     /// The world gate a restore put this machine behind.
     ///
@@ -3364,27 +3364,22 @@ impl Machine {
                 }
             }
             ExtendedInstr::NewSlot { slot, app } => {
-                let class = match slots.and_then(|slots| slots.get(slot as usize)) {
-                    Some(ImageSlotTarget::Class(class)) => *class,
+                let constructor = match slots.and_then(|slots| slots.get(slot as usize)) {
+                    Some(ImageSlotTarget::Class { constructor, .. }) => *constructor,
                     Some(ImageSlotTarget::Empty) => return Err(FaultCode::InvalidVmState),
                     _ => return Err(BAD_STATE),
                 };
-                let value = if app == lm_bytecode::NO_APP {
-                    let field_count = module
-                        .classes
-                        .get(class as usize)
+                if app == lm_bytecode::NO_APP {
+                    let argc = module
+                        .funcs
+                        .get(constructor as usize)
                         .ok_or(BAD_STATE)?
-                        .fields
+                        .params
                         .len();
-                    self.alloc(Object::Instance {
-                        class,
-                        fields: vec![Value::Uninit; field_count],
-                        env: Witness::EMPTY,
-                    })?
+                    self.push_frame(module, constructor, argc, None, TypeEnvId::EMPTY)?;
                 } else {
-                    self.new_generic(module, envs, class, app)?
-                };
-                self.push(value)?;
+                    self.call_generic(module, envs, constructor, app)?;
+                }
             }
             ExtendedInstr::LoadSlot { slot } => {
                 match slots.and_then(|slots| slots.get(slot as usize)) {
