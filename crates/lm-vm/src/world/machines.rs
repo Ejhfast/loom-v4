@@ -144,6 +144,13 @@ impl World {
             if !self.is_live_machine(vm) {
                 continue;
             }
+            if let Some(parent) = self.machines[vm as usize].vm.parent {
+                let parent = parent as usize;
+                if parent < count && !free_slot[parent] && !live[parent] {
+                    live[parent] = true;
+                    queue.push(parent as VmId);
+                }
+            }
             let Ok(found) = self.machine_references(vm) else {
                 // The walk proved nothing, so the pass frees nothing.
                 return 0;
@@ -179,6 +186,9 @@ impl World {
             if let Some(up) = parent {
                 let record = &mut self.machines[up as usize];
                 record.children = record.children.saturating_sub(1);
+                if record.children == 0 {
+                    record.compact_terminal_proc();
+                }
             }
             self.vm_free.push(id);
             freed += 1;
@@ -946,6 +956,9 @@ impl World {
         self.vm_free.push(child);
         self.machines[parent as usize].children =
             self.machines[parent as usize].children.saturating_sub(1);
+        if self.machines[parent as usize].children == 0 {
+            self.machines[parent as usize].compact_terminal_proc();
+        }
     }
 
     /// Create one normal run record for an image.

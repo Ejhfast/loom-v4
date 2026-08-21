@@ -711,9 +711,6 @@ impl std::ops::Index<usize> for Args<'_> {
 /// One resolution of a policy walk.
 enum Resolution {
     Denied,
-    /// The pass-through chain reached a parent machine that is gone.
-    /// The request fails closed (specification 18.6).
-    DeadParent,
     Mock {
         owner: VmId,
         closure: ObjRef,
@@ -1870,6 +1867,67 @@ mod tests {
             World::new_with_limits(&loaded, VmConfig::default(), limits, Box::new(NullHost));
         assert_eq!(world.run_root(), Outcome::Fault(FaultCode::OutOfFuel));
         assert_eq!(world.world_fuel(), 0);
+    }
+
+    #[test]
+    fn a_terminal_intermediate_parent_keeps_policy_routing() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let middle = world.new_child(0).expect("the middle record fits");
+        let leaf = world.new_child(middle).expect("the leaf record fits");
+        let op = lm_abi::OP_CLOCK_NOW;
+        world.machines[0].vm.state = MachineState::Ready;
+        world.machines[middle as usize].vm.state = MachineState::Done;
+        world.machines[leaf as usize].vm.state = MachineState::Ready;
+        for vm in [0, middle, leaf] {
+            world.machines[vm as usize].table.exact[op as usize] = Some(Action::Pass);
+        }
+
+        assert!(matches!(
+            world.resolve_policy(PolicyCursor::Table(leaf), op),
+            Resolution::Root
+        ));
+
+        world.machines[middle as usize].table.exact[op as usize] = Some(Action::Block);
+        assert!(matches!(
+            world.resolve_policy(PolicyCursor::Table(leaf), op),
+            Resolution::Denied
+        ));
+    }
+
+    #[test]
+    fn a_terminal_world_root_denies_a_descendant_pass() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let child = world.new_child(0).expect("the child record fits");
+        let op = lm_abi::OP_CLOCK_NOW;
+        world.machines[0].vm.state = MachineState::Done;
+        world.machines[child as usize].vm.state = MachineState::Ready;
+        world.machines[0].table.exact[op as usize] = Some(Action::Pass);
+        world.machines[child as usize].table.exact[op as usize] = Some(Action::Pass);
+
+        assert!(matches!(
+            world.resolve_policy(PolicyCursor::Table(child), op),
+            Resolution::Denied
+        ));
+    }
+
+    #[test]
+    fn a_live_child_keeps_its_terminal_parent_record() {
+        let loaded = trivial_loaded();
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
+        let middle = world.new_child(0).expect("the middle record fits");
+        let leaf = world.new_child(middle).expect("the leaf record fits");
+        world.machines[middle as usize].is_proc = true;
+        world.machines[middle as usize].vm.state = MachineState::Done;
+        world.machines[leaf as usize].vm.state = MachineState::Ready;
+        world.machines[leaf as usize].owner = Ownership::Scheduler;
+        world.machines[middle as usize].compact_terminal_proc();
+
+        world.collect_machines();
+
+        assert_eq!(world.machines[middle as usize].vm.state, MachineState::Done);
+        assert_eq!(world.machines[leaf as usize].vm.parent, Some(middle));
     }
 
     #[test]

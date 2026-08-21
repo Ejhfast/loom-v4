@@ -894,7 +894,7 @@ impl Machine {
 
     /// Remove state that a terminal proc cannot use again.
     pub(crate) fn compact_terminal_proc(&mut self) {
-        if !self.is_proc {
+        if !self.is_proc || !matches!(self.vm.state, MachineState::Done | MachineState::Faulted) {
             return;
         }
         self.vm.frames = Vec::new();
@@ -908,10 +908,18 @@ impl Machine {
         self.vm.waits.clear();
         self.vm.mailbox.queue = std::collections::VecDeque::new();
         self.start_body = None;
-        self.table.exact.fill(None);
-        self.table.group.fill(None);
+        let retain_policy = self.children > 0;
+        if !retain_policy {
+            self.table.exact.fill(None);
+            self.table.group.fill(None);
+        }
         self.resources.compact_closed();
         self.collect_garbage(&[]);
+        // A live child can route through this table. Heap collection
+        // preserves its mocks, but heap compaction needs remapping.
+        if retain_policy {
+            return;
+        }
         let root = match self.vm.terminal.as_ref() {
             Some(Terminal::Done(Value::Obj(reference))) => Some(*reference),
             _ => None,

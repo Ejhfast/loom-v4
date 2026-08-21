@@ -248,12 +248,6 @@ impl World {
                 return Some(next);
             }
             let parent = machine.vm.parent?;
-            if matches!(
-                self.machines[parent as usize].vm.state,
-                MachineState::Done | MachineState::Faulted
-            ) {
-                return None;
-            }
             cur = parent;
         }
         None
@@ -413,19 +407,6 @@ impl World {
                 self.machines[vm as usize].set_fault(
                     FaultCode::PolicyDenied,
                     format!("the operation {} is not granted", lm_abi::op_name(op)),
-                    Some(op),
-                );
-            }
-            Resolution::DeadParent => {
-                // The denial has one cause the holder cannot see from
-                // the code alone, so the message names it.
-                self.machines[vm as usize].set_fault(
-                    FaultCode::PolicyDenied,
-                    format!(
-                        "the operation {} lost its pass through: \
-                         the parent machine is gone",
-                        lm_abi::op_name(op)
-                    ),
                     Some(op),
                 );
             }
@@ -983,18 +964,13 @@ impl World {
                         };
                     }
                     match m.vm.parent {
-                        Some(parent) => {
-                            // A child table passes through the live parent
-                            // table. Parent death removes the pass
-                            // through, and a later request fails closed
-                            // (specification 18.6).
-                            if matches!(
-                                self.machines[parent as usize].vm.state,
-                                MachineState::Done | MachineState::Faulted
-                            ) {
-                                return Resolution::DeadParent;
-                            }
-                            cur = parent;
+                        Some(parent) => cur = parent,
+                        None if matches!(
+                            m.vm.state,
+                            MachineState::Done | MachineState::Faulted
+                        ) =>
+                        {
+                            return Resolution::Denied;
                         }
                         None => return Resolution::Root,
                     }

@@ -1126,15 +1126,10 @@ fn spawn_works_inside_a_generic_function() {
     assert_eq!(run(source), "Done(1)");
 }
 
-/// A handle may leave a proc as its terminal result, and it still
-/// names the same machine. The proc it names outlives its spawner, so
-/// specification 18.6 closes the pass-through: the mailbox still
-/// accepts, and the next request of the orphan fails closed.
-///
-/// The fault message names the cause, because the code alone reads
-/// like an ordinary denial.
+/// A handle can leave a proc as its terminal result.
+/// The child can still route through the terminal parent's table.
 #[test]
-fn a_proc_that_outlives_its_spawner_loses_its_pass_through() {
+fn a_proc_that_outlives_its_spawner_keeps_its_pass_through() {
     let source = "class Inner < Proc[Int]\n\
                   \x20 def on_spawn(self): Int with Proc\n\
                   \x20   case self.receive()\n\
@@ -1161,10 +1156,8 @@ fn a_proc_that_outlives_its_spawner_loses_its_pass_through() {
                   in Fault(f)\n\
                   \x20 f.code()\n\
                   end\n";
-    assert_eq!(run(source), "Done(\"PolicyDenied true true\")");
-    // The guest reads the stable code only, so the message is read
-    // from the orphan machine itself. Machine 1 is the maker, and
-    // machine 2 is the proc that outlived it.
+    assert_eq!(run(source), "Done(\"done 3\")");
+    // Machine 1 keeps its table while machine 2 uses that route.
     let bytes = compile_to_bytes("proc.lm", source).expect("the program compiles");
     let loaded = load_bytes(&bytes).expect("the program loads");
     let mut world = World::new(
@@ -1175,11 +1168,7 @@ fn a_proc_that_outlives_its_spawner_loses_its_pass_through() {
     world.allow("Proc").expect("the grant names a group");
     let mut scheduler = Scheduler::new(SchedulerMode::Deterministic);
     scheduler.run(&mut world);
-    let fault = world.fault_of(2).expect("the orphan faulted");
-    assert_eq!(
-        fault.message,
-        "the operation Proc.Recv lost its pass through: the parent machine is gone"
-    );
+    assert_eq!(world.state_of(2), MachineState::Done);
 }
 
 /// Two procs that wait for each other deadlock. The scheduler faults
