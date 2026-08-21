@@ -1537,6 +1537,9 @@ impl Admit<'_> {
                     code.origin,
                 )?;
             }
+            if let Object::NativeFault { trace, .. } = &entry.object {
+                self.check_fault_trace(trace, &at(&format!("object {ordinal}")))?;
+            }
             let target = match entry.object {
                 Object::NativeRun { vm } | Object::NativeTable { vm } => Some(vm),
                 Object::NativeRequest { vm, .. } | Object::NativeCall { vm, .. } => Some(vm),
@@ -1851,6 +1854,7 @@ impl Admit<'_> {
                         at("the terminal fault names no manifest operation"),
                     );
                 }
+                self.check_fault_trace(&rec.trace, &at("the terminal fault"))?;
             }
             None => {}
         }
@@ -1897,6 +1901,46 @@ impl Admit<'_> {
                 return fail(
                     ImageReason::Reference,
                     at("a block names no captured machine"),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn check_fault_trace(
+        &self,
+        trace: &[lm_heap::FaultSite],
+        context: &str,
+    ) -> Result<(), ImageError> {
+        if trace.len() > 64 {
+            return fail(
+                ImageReason::LimitExceeded,
+                format!("{context} has more than 64 fault locations"),
+            );
+        }
+        for (index, site) in trace.iter().enumerate() {
+            let Some(function) = self.module.funcs.get(site.function as usize) else {
+                return fail(
+                    ImageReason::Code,
+                    format!("{context} location {index} names no function"),
+                );
+            };
+            if !self.func_named(site.function) {
+                return fail(
+                    ImageReason::Code,
+                    format!("{context} location {index} names an omitted function"),
+                );
+            }
+            let Some(block) = function.blocks.get(site.block as usize) else {
+                return fail(
+                    ImageReason::Layout,
+                    format!("{context} location {index} names no block"),
+                );
+            };
+            if site.instruction as usize >= block.len() {
+                return fail(
+                    ImageReason::Layout,
+                    format!("{context} location {index} names no instruction"),
                 );
             }
         }

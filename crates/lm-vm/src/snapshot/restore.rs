@@ -830,10 +830,13 @@ fn restore_state(
                 .try_reserve_exact(record.message.len())
                 .map_err(|_| RestoreFail::LimitExceeded)?;
             message.push_str(&record.message);
+            let mut trace = try_vec(record.trace.len())?;
+            trace.extend_from_slice(&record.trace);
             Some(Terminal::Fault(FaultRec {
                 code: record.code,
                 message,
                 op: record.op,
+                trace,
             }))
         }
     };

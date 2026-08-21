@@ -96,7 +96,8 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 31 binds class slots to constructor contracts and versions.
 /// Version 32 adds portable function and class code instructions.
 /// Version 33 adds portable definition source lookup.
-pub const COMPILER_ABI_VERSION: u32 = 33;
+/// Version 34 adds fault source lookup instructions.
+pub const COMPILER_ABI_VERSION: u32 = 34;
 
 /// The refinement work budget of one component.
 ///
@@ -898,7 +899,9 @@ fn preflight_extended(
         | ExtendedInstr::ListPop { ty }
         | ExtendedInstr::MapRemove { ty }
         | ExtendedInstr::DynPack { ty }
-        | ExtendedInstr::CodeSource { ty } => {
+        | ExtendedInstr::CodeSource { ty }
+        | ExtendedInstr::FaultSite { ty }
+        | ExtendedInstr::FaultTrace { ty } => {
             if *ty as usize >= s.types {
                 return Err(bad("type index"));
             }
@@ -1173,7 +1176,9 @@ impl Graph {
                             | ExtendedInstr::MapGet { ty }
                             | ExtendedInstr::ListPop { ty }
                             | ExtendedInstr::MapRemove { ty }
-                            | ExtendedInstr::CodeSource { ty } => list.push(s.type_node(*ty)),
+                            | ExtendedInstr::CodeSource { ty }
+                            | ExtendedInstr::FaultSite { ty }
+                            | ExtendedInstr::FaultTrace { ty } => list.push(s.type_node(*ty)),
                             ExtendedInstr::CallSlot { slot, app }
                             | ExtendedInstr::NewSlot { slot, app } => {
                                 push_slot_contract_edges(module, &s, *slot, list);
@@ -1981,6 +1986,8 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::FunctionCode { .. } => 0xe5,
             ExtendedInstr::ClassCode { .. } => 0xe6,
             ExtendedInstr::CodeSource { .. } => 0xe7,
+            ExtendedInstr::FaultSite { .. } => 0xe8,
+            ExtendedInstr::FaultTrace { .. } => 0xe9,
         }
     }
 
@@ -2289,7 +2296,9 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::ListPop { ty }
             | ExtendedInstr::MapRemove { ty }
             | ExtendedInstr::DynPack { ty }
-            | ExtendedInstr::CodeSource { ty } => {
+            | ExtendedInstr::CodeSource { ty }
+            | ExtendedInstr::FaultSite { ty }
+            | ExtendedInstr::FaultTrace { ty } => {
                 out.extend_from_slice(&self.type_digest(*ty));
             }
             ExtendedInstr::AsCallback

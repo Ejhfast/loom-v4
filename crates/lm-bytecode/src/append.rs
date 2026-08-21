@@ -839,6 +839,12 @@ fn reloc_extended(instruction: &ExtendedInstr, reloc: &AppendReloc) -> ExtendedI
         ExtendedInstr::CodeSource { ty } => ExtendedInstr::CodeSource {
             ty: reloc.types[*ty as usize],
         },
+        ExtendedInstr::FaultSite { ty } => ExtendedInstr::FaultSite {
+            ty: reloc.types[*ty as usize],
+        },
+        ExtendedInstr::FaultTrace { ty } => ExtendedInstr::FaultTrace {
+            ty: reloc.types[*ty as usize],
+        },
         ExtendedInstr::OptionSome { ty } => ExtendedInstr::OptionSome {
             ty: reloc.types[*ty as usize],
         },

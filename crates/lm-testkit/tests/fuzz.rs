@@ -263,6 +263,35 @@ fn snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
     (loaded, container)
 }
 
+/// A snapshot seed with a terminal fault and retained code locations.
+fn fault_snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
+    use lm_vm::{RecordingHost, RootEvent, World};
+    let source = "def fail(value: Int): Int\n  10 / value\nend\nfail(0)\n";
+    let bytes = compile_to_bytes("fault-seed.lm", source).expect("the seed compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the seed loads");
+    let container = {
+        let mut world = World::new(
+            &loaded,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+        );
+        assert!(matches!(world.run_machine(0), RootEvent::Fault(_)));
+        assert!(!world
+            .root_fault()
+            .expect("the fault exists")
+            .trace
+            .is_empty());
+        let gate = world.next_gate();
+        world
+            .capture_snapshot(gate, 0, false)
+            .expect("the terminal machine captures")
+            .bytes()
+            .expect("the image encodes")
+            .to_vec()
+    };
+    (loaded, container)
+}
+
 /// Drive one restored world to a stop under a bounded slice budget.
 ///
 /// The budget keeps a mutant that would run forever from hanging the
@@ -684,7 +713,21 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
             }
         }
         _ => {
-            if !image.vm_images.is_empty() {
+            let mut changed = false;
+            if let Some(lm_vm::snapshot::ImageTerminal::Fault(record)) =
+                &mut image.machines[vm].terminal
+            {
+                let trace_len = record.trace.len();
+                if let Some(site) = record.trace.get_mut(prng.below(trace_len)) {
+                    match prng.below(3) {
+                        0 => site.function = prng.next() as u32,
+                        1 => site.block = prng.next() as u32,
+                        _ => site.instruction = prng.next() as u32,
+                    }
+                    changed = true;
+                }
+            }
+            if !changed && !image.vm_images.is_empty() {
                 let vm_image = prng.below(image.vm_images.len());
                 let instances = &mut image.vm_images[vm_image].instances;
                 if !instances.is_empty() {
@@ -936,6 +979,10 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
             {
                 let (loaded, base) = ready_snapshot_seed();
                 (loaded, base, &["Fs", "Vm", "Proc"][..], RICH_IMAGE_ROUNDS)
+            },
+            {
+                let (loaded, base) = fault_snapshot_seed();
+                (loaded, base, &[][..], RICH_IMAGE_ROUNDS)
             },
         ] {
             let seed_image = lm_vm::snapshot::codec::load_external(&base, &loaded, limits)

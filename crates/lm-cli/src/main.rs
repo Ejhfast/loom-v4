@@ -298,6 +298,9 @@ fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
             }
             lm_vm::RootEvent::Fault(rec) => {
                 println!("Fault({})", rec.code);
+                for line in world.fault_context(&rec) {
+                    println!("{line}");
+                }
                 return Ok(ExitCode::from(1));
             }
             lm_vm::RootEvent::Asked(_) => {
@@ -404,11 +407,20 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
         Box::new(move || Box::new(lm_host::CliHost::new(seed))),
     )
     .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
-    let (faulted, text) = (result.faulted, result.text);
+    let (faulted, text, fault_context) = (result.faulted, result.text, result.fault_context);
     if options.show_result {
         println!("{text}");
     } else if faulted {
         eprintln!("{text}");
+    }
+    if faulted {
+        for line in fault_context {
+            if options.show_result {
+                println!("{line}");
+            } else {
+                eprintln!("{line}");
+            }
+        }
     }
     if faulted {
         Ok(ExitCode::from(1))

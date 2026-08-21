@@ -525,6 +525,13 @@ impl World {
                         classes.push(*class);
                     }
                     Object::Closure { func, .. } if !funcs.contains(func) => funcs.push(*func),
+                    Object::NativeFault { trace, .. } => {
+                        for site in trace {
+                            if !funcs.contains(&site.function) {
+                                funcs.push(site.function);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -550,6 +557,13 @@ impl World {
                             funcs.push(*func);
                         }
                     }
+                    Object::NativeFault { trace, .. } => {
+                        for site in trace {
+                            if !funcs.contains(&site.function) {
+                                funcs.push(site.function);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -569,6 +583,13 @@ impl World {
             if let Some(func) = machine.body_func {
                 if !funcs.contains(&func) {
                     funcs.push(func);
+                }
+            }
+            if let Some(ImageTerminal::Fault(record)) = &machine.terminal {
+                for site in &record.trace {
+                    if !funcs.contains(&site.function) {
+                        funcs.push(site.function);
+                    }
                 }
             }
             machines.push(machine);

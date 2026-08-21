@@ -75,7 +75,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 21 distinguishes typed run images from full VM images.
 /// Version 22 stores one constructor version in each class slot target.
 /// Version 23 stores optional portable source origins.
-pub const FORMAT_VERSION: u32 = 23;
+/// Version 24 stores bounded fault execution traces.
+pub const FORMAT_VERSION: u32 = 24;
 
 /// The section kinds, in canonical order.
 ///
@@ -524,6 +525,12 @@ impl Image {
             }
             if let Some(ImageTerminal::Fault(record)) = &machine.terminal {
                 bytes = bytes.saturating_add(record.message.len());
+                bytes = bytes.saturating_add(
+                    record
+                        .trace
+                        .len()
+                        .saturating_mul(std::mem::size_of::<lm_heap::FaultSite>()),
+                );
             }
             bytes =
                 bytes.saturating_add(machine.mailbox.queue.len() * std::mem::size_of::<Value>());

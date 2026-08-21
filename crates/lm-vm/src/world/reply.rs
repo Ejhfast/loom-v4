@@ -280,6 +280,7 @@ impl World {
                 code: FaultCode::MalformedState,
                 message: "the terminal machine stores no result".to_string(),
                 op: None,
+                trace: Vec::new(),
             }),
         };
         let built = match t {
@@ -300,6 +301,7 @@ impl World {
                         code,
                         message: "the terminal value did not cross the boundary".to_string(),
                         op: None,
+                        trace: Vec::new(),
                     };
                     self.build_fault_event(parent, family, &rec)
                 }
@@ -359,6 +361,7 @@ impl World {
             code: rec.code,
             message: rec.message.clone(),
             op: rec.op,
+            trace: rec.trace.clone(),
         })?;
         let class = self.fault_arm(family);
         self.make_instance(parent, class, vec![fault])

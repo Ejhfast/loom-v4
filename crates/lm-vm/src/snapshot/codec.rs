@@ -36,8 +36,8 @@ use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
 use lm_heap::{
-    CodeHandleKind, MapIndex, NativeByteBuffer, NativeStringBuilder, Object, PortableCode,
-    PortableCodeKind, StructuralEpoch,
+    CodeHandleKind, FaultSite, MapIndex, NativeByteBuffer, NativeStringBuilder, Object,
+    PortableCode, PortableCodeKind, StructuralEpoch,
 };
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::cell::Cell;
@@ -588,18 +588,12 @@ fn encode_object(out: &mut Out, object: &Object) {
             let id = out.op_identity(*op);
             out.hash(&id);
         }
-        Object::NativeFault { code, message, op } => {
-            out.str(&code.to_string());
-            out.str(message);
-            match op {
-                None => out.u8(0),
-                Some(slot) => {
-                    out.u8(1);
-                    let id = out.op_identity(*slot);
-                    out.hash(&id);
-                }
-            }
-        }
+        Object::NativeFault {
+            code,
+            message,
+            op,
+            trace,
+        } => encode_fault(out, *code, message, *op, trace),
         Object::NativeHandle { proc, generation } => {
             out.leb(*proc as u64);
             out.u32(*generation);
@@ -790,16 +784,7 @@ fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail
             }
             Some(ImageTerminal::Fault(rec)) => {
                 out.u8(2);
-                out.str(&rec.code.to_string());
-                out.str(&rec.message);
-                match rec.op {
-                    None => out.u8(0),
-                    Some(slot) => {
-                        out.u8(1);
-                        let id = out.op_identity(slot);
-                        out.hash(&id);
-                    }
-                }
+                encode_fault(&mut out, rec.code, &rec.message, rec.op, &rec.trace);
             }
         }
         out.u32(machine.mailbox.limit);
@@ -1852,6 +1837,31 @@ fn decode_op(cur: &mut Cursor<'_, '_>) -> Read<u32> {
     }
 }
 
+fn encode_fault(
+    out: &mut Out,
+    code: FaultCode,
+    message: &str,
+    op: Option<u32>,
+    trace: &[FaultSite],
+) {
+    out.str(&code.to_string());
+    out.str(message);
+    match op {
+        None => out.u8(0),
+        Some(slot) => {
+            out.u8(1);
+            let id = out.op_identity(slot);
+            out.hash(&id);
+        }
+    }
+    out.leb(trace.len() as u64);
+    for site in trace {
+        out.leb(site.function as u64);
+        out.leb(site.block as u64);
+        out.leb(site.instruction as u64);
+    }
+}
+
 fn decode_fault(cur: &mut Cursor<'_, '_>, limits: &LoadLimits) -> Read<crate::FaultRec> {
     let name = cur.str(limits.max_string_bytes)?;
     let Some(code) = FaultCode::from_name(&name) else {
@@ -1871,7 +1881,33 @@ fn decode_fault(cur: &mut Cursor<'_, '_>, limits: &LoadLimits) -> Read<crate::Fa
             )
         }
     };
-    Ok(crate::FaultRec { code, message, op })
+    let count = cur.count(64, "fault trace")?;
+    let mut trace = cur.vector(count, "fault trace")?;
+    for _ in 0..count {
+        let function = u32::try_from(cur.leb()?).map_err(|_| {
+            ImageError::new(ImageReason::Layout, "a fault function index is too large")
+        })?;
+        let block = u32::try_from(cur.leb()?).map_err(|_| {
+            ImageError::new(ImageReason::Layout, "a fault block index is too large")
+        })?;
+        let instruction = u32::try_from(cur.leb()?).map_err(|_| {
+            ImageError::new(
+                ImageReason::Layout,
+                "a fault instruction index is too large",
+            )
+        })?;
+        trace.push(FaultSite {
+            function,
+            block,
+            instruction,
+        });
+    }
+    Ok(crate::FaultRec {
+        code,
+        message,
+        op,
+        trace,
+    })
 }
 
 fn decode_epoch(cur: &mut Cursor<'_, '_>) -> Read<StructuralEpoch> {
@@ -2008,6 +2044,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 code: rec.code,
                 message: rec.message,
                 op: rec.op,
+                trace: rec.trace,
             }
         }
         13 => Object::NativeDigest(cur.hash()?),

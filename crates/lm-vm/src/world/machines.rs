@@ -1908,10 +1908,16 @@ impl World {
                 if op == lm_abi::OP_VM_REJECT {
                     let built = args[2].as_obj().and_then(|r| {
                         match self.machines[vm as usize].vm.heap.get(r) {
-                            Object::NativeFault { code, message, op } => Some(FaultRec {
+                            Object::NativeFault {
+                                code,
+                                message,
+                                op,
+                                trace,
+                            } => Some(FaultRec {
                                 code: *code,
                                 message: message.clone(),
                                 op: *op,
+                                trace: trace.clone(),
                             }),
                             _ => None,
                         }

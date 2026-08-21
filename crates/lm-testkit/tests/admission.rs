@@ -1711,6 +1711,7 @@ fn an_operation_slot_past_the_manifest_rejects() {
         code: lm_vm::FaultCode::BoundaryViolation,
         message: "forged".to_string(),
         op: Some(lm_abi::OP_COUNT + 7),
+        trace: Vec::new(),
     }));
     recanonicalize(&mut broken.machines[at]);
     let mut budget = lm_vm::snapshot::AdmissionBudget::default();

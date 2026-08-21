@@ -1933,6 +1933,28 @@ impl<'o> FnChecker<'o> {
                     },
                 }
             }
+            (Type::Fault, "site") => {
+                Self::expect_no_args(name, args, span)?;
+                let location = Self::core_class(ctx, "CodeLocation");
+                HExpr {
+                    ty: Self::core_inst(ctx, "Option", vec![location]),
+                    mutable: true,
+                    kind: HExprKind::FaultSiteGet {
+                        fault: Box::new(recv_h),
+                    },
+                }
+            }
+            (Type::Fault, "trace") => {
+                Self::expect_no_args(name, args, span)?;
+                let location = Self::core_class(ctx, "CodeLocation");
+                HExpr {
+                    ty: ctx.store.intern(Type::List(location)),
+                    mutable: true,
+                    kind: HExprKind::FaultTraceGet {
+                        fault: Box::new(recv_h),
+                    },
+                }
+            }
             (recv_ty, _) => return Err(self.no_control_method(ctx, recv_ty, name, name_span)),
         })
     }

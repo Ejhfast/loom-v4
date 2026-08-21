@@ -28,6 +28,80 @@ impl World {
         }
     }
 
+    /// Render the retained guest locations of one machine fault.
+    pub fn fault_context(&self, fault: &FaultRec) -> Vec<String> {
+        let debug = lm_bytecode::debug::decode(&self.module.debug).ok();
+        let identity = self.identity().ok();
+        let mut lines = Vec::new();
+        for site in &fault.trace {
+            let Some(function) = self.module.funcs.get(site.function as usize) else {
+                continue;
+            };
+            let mut offset = 0usize;
+            let mut valid = true;
+            for block in function.blocks.iter().take(site.block as usize) {
+                let Some(next) = offset.checked_add(block.len()) else {
+                    valid = false;
+                    break;
+                };
+                offset = next;
+            }
+            if !valid
+                || function
+                    .blocks
+                    .get(site.block as usize)
+                    .is_none_or(|block| site.instruction as usize >= block.len())
+            {
+                continue;
+            }
+            let Some(offset) = offset.checked_add(site.instruction as usize) else {
+                continue;
+            };
+            let hash = identity
+                .and_then(|identity| identity.func_hashes.get(site.function as usize))
+                .map(|hash| {
+                    hash[..4]
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            let mapping = debug.as_ref().and_then(|debug| {
+                debug
+                    .functions
+                    .iter()
+                    .rev()
+                    .find(|mapping| mapping.function == site.function)
+                    .and_then(|mapping| {
+                        debug
+                            .sources
+                            .get(mapping.source as usize)
+                            .map(|source| (mapping, source))
+                    })
+            });
+            match mapping {
+                Some((mapping, source)) => {
+                    let start = mapping.lo as usize;
+                    let prefix = source.text.as_bytes().get(..start).unwrap_or_default();
+                    let line = prefix.iter().filter(|byte| **byte == b'\n').count() + 1;
+                    let column = prefix
+                        .iter()
+                        .rposition(|byte| *byte == b'\n')
+                        .map_or(prefix.len() + 1, |at| prefix.len() - at);
+                    lines.push(format!(
+                        "  at {} ({}:{line}:{column}, bytecode {offset}, {hash})",
+                        function.name, source.path
+                    ));
+                }
+                None => lines.push(format!(
+                    "  at {} (bytecode {offset}, {hash})",
+                    function.name
+                )),
+            }
+        }
+        lines
+    }
+
     /// Render one root-machine value in a stable readable form.
     pub fn show_value(&self, value: Value) -> String {
         self.show_value_of(0, value)

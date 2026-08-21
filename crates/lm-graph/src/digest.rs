@@ -364,7 +364,12 @@ fn encode_object(
                 )?;
             }
         }
-        Object::NativeFault { code, message, op } => {
+        Object::NativeFault {
+            code,
+            message,
+            op,
+            trace,
+        } => {
             let name = code.to_string();
             count(out, name.len())?;
             out.extend_from_slice(name.as_bytes());
@@ -376,6 +381,12 @@ fn encode_object(
                     out.push(1);
                     out.extend_from_slice(&lm_abi::op_identity(*slot));
                 }
+            }
+            count(out, trace.len())?;
+            for site in trace {
+                out.extend_from_slice(&codes.func_hash(site.function)?);
+                out.extend_from_slice(&site.block.to_le_bytes());
+                out.extend_from_slice(&site.instruction.to_le_bytes());
             }
         }
         Object::NativeDigest(bytes) => out.extend_from_slice(bytes),

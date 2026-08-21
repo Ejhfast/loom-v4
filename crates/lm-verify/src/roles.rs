@@ -661,6 +661,57 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             ));
         }
     }
+    if let Some(range) = slot(lm_bytecode::corepin::ROLE_SOURCE_RANGE) {
+        let class = &module.classes[range as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !matches!(fields.as_slice(), [BcType::Int, BcType::Int])
+        {
+            return Err(terr(
+                "the SourceRange role has an invalid layout".to_string(),
+            ));
+        }
+    }
+    if let Some(location) = slot(lm_bytecode::corepin::ROLE_CODE_LOCATION) {
+        let Some(range) = slot(lm_bytecode::corepin::ROLE_SOURCE_RANGE) else {
+            return Err(terr(
+                "the CodeLocation role requires the SourceRange role".to_string(),
+            ));
+        };
+        let class = &module.classes[location as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        let option = slot(ROLE_OPTION);
+        let valid_fields = matches!(fields.as_slice(), [BcType::Inst(path_option, path_args), BcType::Inst(range_option, range_args), BcType::Digest, BcType::Int]
+            if Some(*path_option) == option
+                && Some(*range_option) == option
+                && matches!(path_args.as_slice(), [path]
+                    if matches!(module.types.get(*path as usize), Some(BcType::Str)))
+                && matches!(range_args.as_slice(), [item]
+                    if matches!(module.types.get(*item as usize), Some(BcType::Class(found)) if *found == range)));
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !valid_fields
+        {
+            return Err(terr(
+                "the CodeLocation role has an invalid layout".to_string(),
+            ));
+        }
+    }
     for (role, name) in [
         (lm_bytecode::corepin::ROLE_CODE_ERROR, "CodeError"),
         (lm_bytecode::corepin::ROLE_COMPILE_ERRORS, "CompileErrors"),

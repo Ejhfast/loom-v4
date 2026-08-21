@@ -1619,6 +1619,16 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.lower_expr(fault);
                 self.emit(Instr::FaultCode);
             }
+            HExprKind::FaultSiteGet { fault } => {
+                self.lower_expr(fault);
+                let ty = self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::FaultSite { ty }));
+            }
+            HExprKind::FaultTraceGet { fault } => {
+                self.lower_expr(fault);
+                let ty = self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::FaultTrace { ty }));
+            }
             HExprKind::RequestOpName { request } => {
                 self.lower_expr(request);
                 self.emit(Instr::RequestOp);
@@ -2283,7 +2293,9 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
             }
         }
         HExprKind::CallArgs { call } => shift_expr_in_place(call, base, max),
-        HExprKind::FaultCodeGet { fault } => shift_expr_in_place(fault, base, max),
+        HExprKind::FaultCodeGet { fault }
+        | HExprKind::FaultSiteGet { fault }
+        | HExprKind::FaultTraceGet { fault } => shift_expr_in_place(fault, base, max),
         HExprKind::FaultDenied { reason } => shift_expr_in_place(reason, base, max),
         HExprKind::RequestOpName { request } => shift_expr_in_place(request, base, max),
     }
@@ -3107,7 +3119,9 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
         ExtendedInstr::ListSet | ExtendedInstr::ListInsert => (3, 1),
         ExtendedInstr::MakeCallback { captures, .. } => (*captures as usize, 1),
         ExtendedInstr::FunctionCode { .. } | ExtendedInstr::ClassCode { .. } => (0, 1),
-        ExtendedInstr::CodeSource { .. } => (1, 1),
+        ExtendedInstr::CodeSource { .. }
+        | ExtendedInstr::FaultSite { .. }
+        | ExtendedInstr::FaultTrace { .. } => (1, 1),
         ExtendedInstr::CallSlot { slot, .. } => {
             let count = match &module.slots[*slot as usize].contract {
                 lm_bytecode::SlotContract::Function(contract)
@@ -3351,6 +3365,8 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::FunctionCode { func } => format!("FunctionCode fn{func}"),
         ExtendedInstr::ClassCode { class } => format!("ClassCode class{class}"),
         ExtendedInstr::CodeSource { ty } => format!("CodeSource ty{ty}"),
+        ExtendedInstr::FaultSite { ty } => format!("FaultSite ty{ty}"),
+        ExtendedInstr::FaultTrace { ty } => format!("FaultTrace ty{ty}"),
         ExtendedInstr::AsCallback => "AsCallback".to_string(),
         ExtendedInstr::OptionSome { ty } => format!("OptionSome ty{ty}"),
         ExtendedInstr::OptionNone { ty } => format!("OptionNone ty{ty}"),

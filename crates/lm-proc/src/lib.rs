@@ -759,9 +759,14 @@ pub fn run_on_worker(
                     world.allow(grant)?;
                 }
                 let outcome = Scheduler::default().run(&mut world);
+                let fault_context = world
+                    .root_fault()
+                    .map(|fault| world.fault_context(fault))
+                    .unwrap_or_default();
                 Ok(WorkerOutcome {
                     faulted: matches!(outcome, Outcome::Fault(_)),
                     text: world.show_outcome(&outcome),
+                    fault_context,
                 })
             })
             .map_err(|e| format!("the worker thread did not start: {e}"))?;
@@ -782,6 +787,8 @@ pub struct WorkerOutcome {
     pub faulted: bool,
     /// The stable outcome text, for example `Done(42)`.
     pub text: String,
+    /// The retained guest locations of the root fault.
+    pub fault_context: Vec<String>,
 }
 
 /// Drive one proc slice at a time until nothing is runnable.

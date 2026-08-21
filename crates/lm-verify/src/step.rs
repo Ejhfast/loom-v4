@@ -646,6 +646,39 @@ pub(crate) fn step(
             }
             push(state, *ty)?;
         }
+        Instr::Extended(ExtendedInstr::FaultSite { ty }) => {
+            let fault = pop(state)?;
+            if ctx.ty(fault) != BcType::Fault {
+                return Err(fail("fault site needs a Fault value".to_string()));
+            }
+            let location = ctx
+                .plain_inst(ctx.core.code_location, "CodeLocation")
+                .map_err(&fail)?;
+            let found = ctx
+                .option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            if found != location {
+                return Err(fail(
+                    "fault site result must be Option[CodeLocation]".to_string(),
+                ));
+            }
+            push(state, *ty)?;
+        }
+        Instr::Extended(ExtendedInstr::FaultTrace { ty }) => {
+            let fault = pop(state)?;
+            if ctx.ty(fault) != BcType::Fault {
+                return Err(fail("fault trace needs a Fault value".to_string()));
+            }
+            let location = ctx
+                .plain_inst(ctx.core.code_location, "CodeLocation")
+                .map_err(&fail)?;
+            if ctx.ty(*ty) != BcType::List(location) {
+                return Err(fail(
+                    "fault trace result must be List[CodeLocation]".to_string(),
+                ));
+            }
+            push(state, *ty)?;
+        }
         Instr::Extended(ExtendedInstr::AsCallback) => {
             let function = pop(state)?;
             let BcType::Fn(params, muts, ret, row) = ctx.ty(function) else {

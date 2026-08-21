@@ -11,8 +11,8 @@ use crate::{FaultCode, VmConfig};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnvFull, TypeEnvs};
 use lm_bytecode::{ExtendedInstr, Instr, Module};
 use lm_heap::{
-    process_lookup_hash, Heap, HeapBudget, MapIndex, NativeByteBuffer, NativeStringBuilder, Object,
-    SharedBytes, SharedText, StructuralEpoch,
+    process_lookup_hash, FaultSite, Heap, HeapBudget, MapIndex, NativeByteBuffer,
+    NativeStringBuilder, Object, SharedBytes, SharedText, StructuralEpoch,
 };
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 
@@ -236,6 +236,7 @@ pub struct FaultRec {
     pub code: FaultCode,
     pub message: String,
     pub op: Option<u32>,
+    pub trace: Vec<FaultSite>,
 }
 
 /// The stored terminal result of a machine.
@@ -892,10 +893,12 @@ impl Machine {
     }
 
     pub fn set_fault(&mut self, code: FaultCode, message: impl Into<String>, op: Option<u32>) {
+        let trace = self.execution_trace_from(code == FaultCode::OutOfFuel);
         self.vm.terminal = Some(Terminal::Fault(FaultRec {
             code,
             message: message.into(),
             op,
+            trace,
         }));
         self.vm.state = MachineState::Faulted;
         self.vm.pending = None;
@@ -904,6 +907,31 @@ impl Machine {
         self.callbacks.clear();
         self.close_resources();
         self.compact_terminal_proc();
+    }
+
+    /// Capture the current bounded execution trace.
+    pub(crate) fn execution_trace(&self) -> Vec<FaultSite> {
+        self.execution_trace_from(false)
+    }
+
+    /// Capture a trace from the current or next top instruction.
+    fn execution_trace_from(&self, next_top: bool) -> Vec<FaultSite> {
+        self.vm
+            .frames
+            .iter()
+            .rev()
+            .take(64)
+            .enumerate()
+            .map(|(depth, frame)| FaultSite {
+                function: frame.func,
+                block: frame.block,
+                instruction: if next_top && depth == 0 {
+                    frame.ip
+                } else {
+                    frame.ip.saturating_sub(1)
+                },
+            })
+            .collect()
     }
 
     /// Remove state that a terminal proc cannot use again.
@@ -3146,6 +3174,149 @@ impl Machine {
         Ok(())
     }
 
+    /// Build one public source location for a compact fault coordinate.
+    fn alloc_fault_location(
+        &mut self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        debug: &lm_bytecode::debug::DebugInfo,
+        identity: &lm_bytecode::identity::ModuleIdentity,
+        site: FaultSite,
+    ) -> Result<Value, FaultCode> {
+        let mapping = debug
+            .functions
+            .iter()
+            .rev()
+            .find(|mapping| mapping.function == site.function);
+        let source = mapping
+            .map(|mapping| debug.sources.get(mapping.source as usize).ok_or(BAD_STATE))
+            .transpose()?;
+        let function = module.funcs.get(site.function as usize).ok_or(BAD_STATE)?;
+        let block = function.blocks.get(site.block as usize).ok_or(BAD_STATE)?;
+        if site.instruction as usize >= block.len() {
+            return Err(BAD_STATE);
+        }
+        let mut offset = 0usize;
+        for prior in function.blocks.iter().take(site.block as usize) {
+            offset = offset.checked_add(prior.len()).ok_or(BAD_STATE)?;
+        }
+        offset = offset
+            .checked_add(site.instruction as usize)
+            .ok_or(BAD_STATE)?;
+        let offset = i64::try_from(offset).map_err(|_| BAD_STATE)?;
+        let digest = *identity
+            .func_hashes
+            .get(site.function as usize)
+            .ok_or(BAD_STATE)?;
+        let range_class = module.core_roles[lm_bytecode::corepin::ROLE_SOURCE_RANGE];
+        let location_class = module.core_roles[lm_bytecode::corepin::ROLE_CODE_LOCATION];
+        if range_class == lm_bytecode::NO_ROLE || location_class == lm_bytecode::NO_ROLE {
+            return Err(BAD_STATE);
+        }
+        let location_fields = &module
+            .classes
+            .get(location_class as usize)
+            .ok_or(BAD_STATE)?
+            .fields;
+        if location_fields.len() != 4 {
+            return Err(BAD_STATE);
+        }
+        let path_ty = location_fields[0].1;
+        let range_ty = location_fields[1].1;
+
+        let root = self.vm.operands.len();
+        let (path, range) = match (mapping, source) {
+            (Some(mapping), Some(source)) => {
+                let path = SharedText::try_from_string(source.path.clone())
+                    .map_err(|_| FaultCode::HeapLimit)?;
+                let path = self.alloc(Object::Str(path))?;
+                self.push(path)?;
+                let range = self.alloc(Object::Instance {
+                    class: range_class,
+                    fields: vec![
+                        Value::Int(i64::from(mapping.lo)),
+                        Value::Int(i64::from(mapping.hi)),
+                    ],
+                    env: Witness::EMPTY,
+                })?;
+                let range_ref = range.as_obj().ok_or(BAD_STATE)?;
+                self.vm.heap.set_frozen(range_ref);
+                self.push(range)?;
+                (path, range)
+            }
+            (None, None) => {
+                let path = Value::EmptyCase {
+                    ty: self.close_option_family(module, envs, path_ty)?,
+                    arm: 1,
+                };
+                let range = Value::EmptyCase {
+                    ty: self.close_option_family(module, envs, range_ty)?,
+                    arm: 1,
+                };
+                (path, range)
+            }
+            _ => return Err(BAD_STATE),
+        };
+        let digest = self.alloc(Object::NativeDigest(digest))?;
+        self.push(digest)?;
+        let location = self.alloc(Object::Instance {
+            class: location_class,
+            fields: vec![path, range, digest, Value::Int(offset)],
+            env: Witness::EMPTY,
+        })?;
+        let location_ref = location.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(location_ref);
+        self.vm.operands.truncate(root);
+        Ok(location)
+    }
+
+    /// Resolve one fault trace only when a program inspects it.
+    #[inline(never)]
+    fn exec_fault_locations(
+        &mut self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        ty: u32,
+        primary: bool,
+    ) -> Result<(), FaultCode> {
+        let reference = self.pop_obj()?;
+        let trace = match self.vm.heap.get(reference) {
+            Object::NativeFault { trace, .. } => trace.clone(),
+            _ => return Err(BAD_TYPE),
+        };
+        let debug = lm_bytecode::debug::decode(&module.debug).map_err(|_| BAD_STATE)?;
+        lm_bytecode::debug::validate(&debug, module).map_err(|_| BAD_STATE)?;
+        let identity = lm_bytecode::identity::module_identity(module).map_err(|_| BAD_STATE)?;
+        if primary {
+            if let Some(site) = trace.into_iter().next() {
+                let location = self.alloc_fault_location(module, envs, &debug, &identity, site)?;
+                self.push(location)?;
+                return Ok(());
+            }
+            let family = self.close_option_family(module, envs, ty)?;
+            self.push(Value::EmptyCase { ty: family, arm: 1 })?;
+            return Ok(());
+        }
+
+        let root = self.vm.operands.len();
+        let mut locations = Vec::new();
+        locations
+            .try_reserve_exact(trace.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
+        for site in trace {
+            let location = self.alloc_fault_location(module, envs, &debug, &identity, site)?;
+            self.push(location)?;
+            locations.push(location);
+        }
+        let list = self.alloc(Object::List {
+            items: locations,
+            epoch: StructuralEpoch::default(),
+        })?;
+        self.vm.operands.truncate(root);
+        self.push(list)?;
+        Ok(())
+    }
+
     /// Read the debug origin for the current code reification instruction.
     fn current_code_origin(&self, module: &Module) -> Option<[u8; 32]> {
         let frame = self.vm.frames.last()?;
@@ -3618,6 +3789,12 @@ impl Machine {
             }
             ExtendedInstr::CodeSource { ty } => {
                 self.exec_code_source(module, envs, ty)?;
+            }
+            ExtendedInstr::FaultSite { ty } => {
+                self.exec_fault_locations(module, envs, ty, true)?;
+            }
+            ExtendedInstr::FaultTrace { ty } => {
+                self.exec_fault_locations(module, envs, ty, false)?;
             }
         }
         Ok(ExecOutcome::Continue)
@@ -4171,6 +4348,7 @@ impl Machine {
                     code: FaultCode::PolicyDenied,
                     message: reason.to_string(),
                     op: None,
+                    trace: Vec::new(),
                 })?;
                 self.push(value)?;
             }

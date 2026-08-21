@@ -28,6 +28,14 @@ pub(crate) const ENTRY_COST: usize = 2 * VALUE_COST;
 #[derive(Debug, Clone, Copy, Default, Eq)]
 pub struct StructuralEpoch(pub u32);
 
+/// One compact execution coordinate retained by a fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultSite {
+    pub function: u32,
+    pub block: u32,
+    pub instruction: u32,
+}
+
 impl StructuralEpoch {
     /// Start epoch tracking and return the current epoch.
     pub fn observe(&mut self) -> u32 {
@@ -327,6 +335,7 @@ pub enum Object {
         code: FaultCode,
         message: String,
         op: Option<u32>,
+        trace: Vec<FaultSite>,
     },
     /// A frozen canonical graph digest. Born frozen.
     NativeDigest([u8; 32]),
@@ -834,10 +843,16 @@ impl Object {
                 ordinal: *ordinal,
                 op: *op,
             },
-            Object::NativeFault { code, message, op } => Object::NativeFault {
+            Object::NativeFault {
+                code,
+                message,
+                op,
+                trace,
+            } => Object::NativeFault {
                 code: *code,
                 message: copy_string(message)?,
                 op: *op,
+                trace: trace.clone(),
             },
             Object::NativeDigest(bytes) => Object::NativeDigest(*bytes),
             Object::NativeHandle { proc, generation } => Object::NativeHandle {
@@ -956,7 +971,9 @@ impl Object {
                 | Object::NativeTcpStream { .. }
                 | Object::NativeTcpListener { .. } => VALUE_COST,
                 Object::NativeTlsStream { .. } => VALUE_COST,
-                Object::NativeFault { message, .. } => message.len(),
+                Object::NativeFault { message, trace, .. } => message
+                    .len()
+                    .saturating_add(trace.len().saturating_mul(std::mem::size_of::<FaultSite>())),
                 Object::NativeDigest(bytes) => bytes.len(),
                 Object::NativeSnapshot(image) => image.len(),
                 Object::NativeSnapshotRef { .. } => VALUE_COST,
@@ -1054,10 +1071,16 @@ impl Object {
         let shell = match self {
             Object::Str(s) => Object::Str(s.clone()),
             Object::Substring(text) => Object::Substring(text.clone()),
-            Object::NativeFault { code, message, op } => Object::NativeFault {
+            Object::NativeFault {
+                code,
+                message,
+                op,
+                trace,
+            } => Object::NativeFault {
                 code: *code,
                 message: message.clone(),
                 op: *op,
+                trace: trace.clone(),
             },
             Object::NativeDigest(bytes) => Object::NativeDigest(*bytes),
             Object::NativeHandle { proc, generation } => Object::NativeHandle {
@@ -1295,6 +1318,7 @@ mod tests {
                 code: FaultCode::HostFault,
                 message: "message".to_string(),
                 op: Some(1),
+                trace: Vec::new(),
             },
             Object::NativeDigest([9; 32]),
             Object::NativeHandle {
@@ -1482,6 +1506,7 @@ mod tests {
                 code: FaultCode::HostFault,
                 message: String::new(),
                 op: None,
+                trace: Vec::new(),
             },
             Object::NativeDigest([0; 32]),
             Object::NativeHandle {

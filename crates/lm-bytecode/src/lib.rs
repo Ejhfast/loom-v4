@@ -35,7 +35,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 136;
+pub const CORE_ROLE_COUNT: usize = 138;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -621,6 +621,10 @@ pub enum ExtendedInstr {
     ClassCode { class: u32 },
     /// Read optional source data from portable definition code.
     CodeSource { ty: u32 },
+    /// Pop a fault and push its primary optional source location.
+    FaultSite { ty: u32 },
+    /// Pop a fault and push its bounded source trace.
+    FaultTrace { ty: u32 },
 }
 
 /// One native value instruction.
@@ -1098,7 +1102,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 37 adds fallible activation and stable slot lookup.
 /// Version 38 makes class slots select versioned constructors.
 /// Version 39 defines the optional source debug section.
-pub const VERSION: u16 = 39;
+/// Version 40 adds fault source lookup instructions.
+pub const VERSION: u16 = 40;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1301,6 +1306,8 @@ const OP_SYNTAX_TO_TREE: u8 = 0xe4;
 const OP_FUNCTION_CODE: u8 = 0xe5;
 const OP_CLASS_CODE: u8 = 0xe6;
 const OP_CODE_SOURCE: u8 = 0xe7;
+const OP_FAULT_SITE: u8 = 0xe8;
+const OP_FAULT_TRACE: u8 = 0xe9;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -2179,6 +2186,14 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
         }
         ExtendedInstr::CodeSource { ty } => {
             out.push(OP_CODE_SOURCE);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::FaultSite { ty } => {
+            out.push(OP_FAULT_SITE);
+            write_u32(out, ty);
+        }
+        ExtendedInstr::FaultTrace { ty } => {
+            out.push(OP_FAULT_TRACE);
             write_u32(out, ty);
         }
     }
@@ -3196,6 +3211,8 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_FUNCTION_CODE => Instr::Extended(ExtendedInstr::FunctionCode { func: cur.u32()? }),
         OP_CLASS_CODE => Instr::Extended(ExtendedInstr::ClassCode { class: cur.u32()? }),
         OP_CODE_SOURCE => Instr::Extended(ExtendedInstr::CodeSource { ty: cur.u32()? }),
+        OP_FAULT_SITE => Instr::Extended(ExtendedInstr::FaultSite { ty: cur.u32()? }),
+        OP_FAULT_TRACE => Instr::Extended(ExtendedInstr::FaultTrace { ty: cur.u32()? }),
         OP_SB_NEW => Instr::Native(NativeInstr::SbNew),
         OP_SB_APPEND_STR => Instr::Native(NativeInstr::SbAppendStr),
         OP_SB_APPEND_INT => Instr::Native(NativeInstr::SbAppendInt),
@@ -3671,7 +3688,11 @@ mod tests {
             Instr::Extended(ExtendedInstr::SyntaxBuildTrivia),
             Instr::Extended(ExtendedInstr::SyntaxBuildNode),
             Instr::Extended(ExtendedInstr::SyntaxToTree),
+            Instr::Extended(ExtendedInstr::FunctionCode { func: 0 }),
+            Instr::Extended(ExtendedInstr::ClassCode { class: 0 }),
             Instr::Extended(ExtendedInstr::CodeSource { ty: 0 }),
+            Instr::Extended(ExtendedInstr::FaultSite { ty: 0 }),
+            Instr::Extended(ExtendedInstr::FaultTrace { ty: 0 }),
             Instr::Native(NativeInstr::SbNew),
             Instr::Native(NativeInstr::SbAppendStr),
             Instr::Native(NativeInstr::SbAppendInt),

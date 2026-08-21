@@ -24,6 +24,20 @@ final class SourceRange
   end
 end
 
+final class CodeLocation
+  path: Option[String]
+  range: Option[SourceRange]
+  function: Digest
+  bytecode_offset: Int
+
+  def init(mut self, path: Option[String], range: Option[SourceRange], function: Digest, bytecode_offset: Int)
+    self.path = path
+    self.range = range
+    self.function = function
+    self.bytecode_offset = bytecode_offset
+  end
+end
+
 final class SyntaxTree
   backing_source: String
   backing_records: Bytes

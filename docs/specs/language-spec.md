@@ -452,6 +452,8 @@ The type universe has four strata.
 | `FunctionCode[A,T]` | Portable verified function code |
 | `ClassCode` | Portable verified class code |
 | `DefinitionSource` | Optional syntax and contract data for portable code |
+| `SourceRange` | Half-open byte range in one source text |
+| `CodeLocation` | Function identity, bytecode offset, and optional source location |
 | `FunctionDef[A,T]` | Installed function definition |
 | `ClassDef` | Installed class definition |
 
@@ -1307,17 +1309,38 @@ Prefer a defined meaning over a reported failure when one exists, because a repo
 
 A fault halts the current machine immediately. There is no catch, unwinding, `finally`, destructor, or user-visible stack unwinding. The holder receives a frozen `Fault` through VM/proc supervisory APIs.
 
-A fault contains at least:
+A fault contains a stable code, a message, an optional operation, and a bounded execution trace.
 
 ```text
 code: FaultCode
 message: String
 operation: Option[Operation]
-data: {String: DynValue}  # frozen, bounded
-trace: [FrameView]        # frozen, bounded
+trace: List[CodeLocation]
 ```
 
 Hosts may redact message and trace details while preserving the stable code.
+
+`Fault.site()` returns `Option[CodeLocation]` for the first retained frame.
+
+`Fault.trace()` returns at most 64 locations in callee-to-caller order.
+
+`CodeLocation.function` contains the exact verified function identity.
+
+`CodeLocation.bytecode_offset` contains the instruction offset within that function.
+
+`CodeLocation.path` has type `Option[String]`.
+
+`CodeLocation.range` has type `Option[SourceRange]`.
+
+Both optional fields contain values when the exact function version retains source data.
+
+A stripped function uses `None` for both fields.
+
+The VM records compact execution coordinates only when a fault occurs.
+
+Source lookup and location allocation occur only when a holder calls `site` or `trace`.
+
+A delayed host failure retains the source coordinate of its suspended `perform` instruction.
 
 ### 12.3 Stable codes
 

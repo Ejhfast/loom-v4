@@ -571,6 +571,7 @@ impl World {
                 code: FaultCode::MalformedState,
                 message: "the terminal machine stores no result".to_string(),
                 op: None,
+                trace: Vec::new(),
             }),
         }
     }

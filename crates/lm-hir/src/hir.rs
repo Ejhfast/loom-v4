@@ -600,6 +600,14 @@ pub enum HExprKind {
     FaultCodeGet {
         fault: Box<HExpr>,
     },
+    /// `fault.site()` on a fault value.
+    FaultSiteGet {
+        fault: Box<HExpr>,
+    },
+    /// `fault.trace()` on a fault value.
+    FaultTraceGet {
+        fault: Box<HExpr>,
+    },
     /// `request.op_name()` on a live request token.
     RequestOpName {
         request: Box<HExpr>,

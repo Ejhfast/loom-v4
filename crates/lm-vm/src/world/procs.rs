@@ -58,10 +58,12 @@ impl World {
         code: FaultCode,
         message: &str,
     ) -> Result<Value, FaultCode> {
+        let trace = self.machines[vm as usize].execution_trace();
         self.machines[vm as usize].alloc(Object::NativeFault {
             code,
             message: message.to_string(),
             op: None,
+            trace,
         })
     }
 
@@ -657,6 +659,7 @@ impl World {
                 code: FaultCode::MalformedState,
                 message: "the terminal proc stores no result".to_string(),
                 op: None,
+                trace: Vec::new(),
             }),
         };
         let built = match t {
@@ -671,6 +674,7 @@ impl World {
                     code: rec.code,
                     message: rec.message.clone(),
                     op: rec.op,
+                    trace: rec.trace.clone(),
                 })
                 .and_then(|fault| self.make_instance(vm, self.core.proc_fault, vec![fault])),
         };

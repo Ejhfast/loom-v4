@@ -47,6 +47,179 @@ fn run_with_compiler(source: &str) -> String {
 }
 
 #[test]
+fn a_fault_exposes_its_source_location_and_trace() {
+    let source = r#"
+def fail(value: Int): Int
+  total = 0
+  for number in Range(0, 2)
+    total = total + number
+  end
+  total + 10 / value
+end
+
+def call_fail(value: Int): Int
+  fail(value)
+end
+
+def execute(): Bool with Vm
+  image = sys.vm.Vm()
+  definition = case image.install(codeof(call_fail))
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  run = case image.activate(definition, args: (0,))
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  case run.run()
+  in Done(_) then false
+  in Fault(fault)
+    case fault.site()
+    in None then false
+    in Some(site)
+      trace = fault.trace()
+      mapped = case (site.path, site.range)
+      in (Some(path), Some(range))
+        path == "meta.lm" and range.len() > 0
+      in _ then false
+      end
+      mapped and
+      site.function == site.function and
+      site.bytecode_offset >= 0 and
+      trace.len() >= 2
+    end
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done(true)");
+}
+
+#[test]
+fn an_async_policy_fault_keeps_its_perform_location() {
+    let source = r#"
+def announce(): Int with Io.Print
+  sys.io.print("hello")
+  1
+end
+
+def execute(): Bool with Vm
+  image = sys.vm.Vm()
+  definition = case image.install(codeof(announce))
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  run = case image.activate(definition, args: ())
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  case run.run()
+  in Done(_) then false
+  in Fault(fault)
+    case fault.site()
+    in None then false
+    in Some(site)
+      case (site.path, site.range)
+      in (Some(path), Some(range))
+        path == "meta.lm" and range.len() > 0
+      in _ then false
+      end
+    end
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done(true)");
+}
+
+#[test]
+fn a_fault_trace_survives_an_external_snapshot() {
+    let source = "def fail(value: Int): Int\n  10 / value\nend\nfail(0)\n";
+    let bytes = compile_to_bytes("fault-snapshot.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    assert!(matches!(world.run_machine(0), RootEvent::Fault(_)));
+    let original = world.root_fault().expect("the root fault exists").clone();
+    assert!(!original.trace.is_empty());
+
+    let gate = world.next_gate();
+    let captured = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the faulted machine captures");
+    let admitted = codec::load_external(
+        captured.bytes().expect("the snapshot encodes"),
+        &loaded,
+        LoadLimits::default(),
+    )
+    .expect("the snapshot admits");
+    let mut restored = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let target = restored.new_child(0).expect("the restore target exists");
+    let root = restored
+        .restore_image(0, target, &admitted)
+        .expect("the snapshot restores");
+    let restored_fault = restored.fault_of(root).expect("the restored fault exists");
+    assert_eq!(restored_fault.trace, original.trace);
+}
+
+#[test]
+fn a_stripped_fault_keeps_its_function_identity_and_offset() {
+    let source = r#"
+def fail(value: Int): Int
+  10 / value
+end
+
+def execute(): Bool with Vm
+  image = sys.vm.Vm()
+  definition = case image.install(codeof(fail))
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  run = case image.activate(definition, args: (0,))
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  case run.run()
+  in Done(_) then false
+  in Fault(fault)
+    case fault.site()
+    in None then false
+    in Some(site)
+      site.path.is_none() and
+      site.range.is_none() and
+      site.function == site.function and
+      site.bytecode_offset >= 0
+    end
+  end
+end
+
+execute()
+"#;
+    let bytes = compile_to_bytes("stripped-fault.lm", source).expect("the program compiles");
+    let mut module = lm_bytecode::decode(&bytes).expect("the program decodes");
+    module.debug.clear();
+    lm_verify::verify_module(&module).expect("the stripped program verifies");
+    let loaded = load_bytes(&lm_bytecode::encode(&module)).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(true)");
+}
+
+#[test]
 fn portable_function_code_installs_without_a_module_handle() {
     let source = r#"
 def execute(): Result[Int, String] with Compiler.Compile, Compiler.Verify, Vm
@@ -1193,6 +1366,103 @@ fn revision_artifact(body: &str) -> Vec<u8> {
     )
     .expect("the revision compiles");
     lm_bytecode::encode(&compiled.module)
+}
+
+#[test]
+fn a_replaced_function_fault_uses_the_new_source_revision() {
+    let first = revision_artifact("value + 1");
+    let second = revision_artifact("10 / (value - 1)");
+    let source = r#"
+def read_module(path: String): Result[VerifiedModule, String] with Fs.Open, Fs.Read, Fs.Close, Vm.Artifact, Compiler.Verify
+  bytes = case sys.fs.open(path, ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes).verify().map_error() { |error: CodeError| error.message }
+end
+
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Compiler.Verify, Vm
+  first_module = case read_module("first.lmbc")
+  in Ok(module) then module
+  in Err(_) then return false
+  end
+  second_module = case read_module("second.lmbc")
+  in Ok(module) then module
+  in Err(_) then return false
+  end
+  first_source = case first_module.function_code[(Int,), Int]("step")
+  in Err(_) then return false
+  in Ok(code)
+    case code.source()
+    in None then return false
+    in Some(source) then source
+    end
+  end
+  second_source = case second_module.function_code[(Int,), Int]("step")
+  in Err(_) then return false
+  in Ok(code)
+    case code.source()
+    in None then return false
+    in Some(source) then source
+    end
+  end
+  image = sys.vm.Vm()
+  first = case image.install(first_module)
+  in Ok(instance) then instance
+  in Err(_) then return false
+  end
+  second = case image.install(second_module)
+  in Ok(instance) then instance
+  in Err(_) then return false
+  end
+  entry = case first.entry[(), Int]()
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  spec = case first.slot_spec("step")
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  slot = case first.slot_for(spec)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  target = case second.function[(Int,), Int]("step")
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  case image.replace(slot, target)
+  in Err(_) then return false
+  in Ok(_) then ()
+  end
+  run = case image.activate(entry, args: ())
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  case run.run()
+  in Done(_) then false
+  in Fault(fault)
+    case fault.site()
+    in None then false
+    in Some(site)
+      site.function == second_source.contract and
+      site.function != first_source.contract
+    end
+  end
+end
+
+execute()
+"#;
+    assert_eq!(
+        run_with_files(source, &[("first.lmbc", first), ("second.lmbc", second)],),
+        "Done(true)"
+    );
 }
 
 fn class_revision_artifact(default: i64, increment: i64) -> Vec<u8> {

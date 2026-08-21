@@ -658,6 +658,11 @@ mod tests {
             },
         );
         assert_eq!(vm.run(), Outcome::Fault(crate::FaultCode::OutOfFuel));
+        let fault = vm.world.root_fault().expect("the root fault exists");
+        assert_eq!(fault.trace.len(), 1);
+        assert_eq!(fault.trace[0].function, 0);
+        assert_eq!(fault.trace[0].block, 0);
+        assert_eq!(fault.trace[0].instruction, 0);
     }
 
     #[test]

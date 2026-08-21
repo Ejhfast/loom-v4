@@ -156,6 +156,8 @@ pub struct CoreLayout {
     pub function_code: Option<u32>,
     pub class_code: Option<u32>,
     pub definition_source: Option<u32>,
+    pub source_range: Option<u32>,
+    pub code_location: Option<u32>,
     pub slot_spec: Option<u32>,
     pub instance: Option<u32>,
     pub slot: Option<u32>,
@@ -182,7 +184,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 136] = [
+pub const PINNED_LABELS: [&str; 138] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -319,6 +321,8 @@ pub const PINNED_LABELS: [&str; 136] = [
     "FunctionCode",
     "ClassCode",
     "DefinitionSource",
+    "SourceRange",
+    "CodeLocation",
 ];
 
 /// The core role of immediate integer values.
@@ -425,6 +429,8 @@ pub const ROLE_CLASS_DEF: usize = 132;
 pub const ROLE_FUNCTION_CODE: usize = 133;
 pub const ROLE_CLASS_CODE: usize = 134;
 pub const ROLE_DEFINITION_SOURCE: usize = 135;
+pub const ROLE_SOURCE_RANGE: usize = 136;
+pub const ROLE_CODE_LOCATION: usize = 137;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -588,6 +594,8 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "FunctionCode" => &mut layout.function_code,
         "ClassCode" => &mut layout.class_code,
         "DefinitionSource" => &mut layout.definition_source,
+        "SourceRange" => &mut layout.source_range,
+        "CodeLocation" => &mut layout.code_location,
         "SlotSpec" => &mut layout.slot_spec,
         "Instance" => &mut layout.instance,
         "Slot" => &mut layout.slot,

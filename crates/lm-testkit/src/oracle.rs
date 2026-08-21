@@ -694,6 +694,8 @@ impl<'m> Oracle<'m> {
             | HExprKind::TableEdit { .. }
             | HExprKind::CallArgs { .. }
             | HExprKind::FaultCodeGet { .. }
+            | HExprKind::FaultSiteGet { .. }
+            | HExprKind::FaultTraceGet { .. }
             | HExprKind::FaultDenied { .. }
             | HExprKind::RequestOpName { .. } => Err(Stop::Limit(
                 "the oracle models the pure subset only; programs with performs \

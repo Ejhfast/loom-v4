@@ -764,9 +764,15 @@ It performs no source lookup during ordinary instruction execution.
 
 `Fault.trace()` returns a bounded list of `CodeLocation` values.
 
-`CodeLocation` contains a logical path, source range, function identity, and bytecode offset.
+`CodeLocation` contains optional path and range fields, a function identity, and a bytecode offset.
 
-A stripped artifact reports its function identity and bytecode offset.
+Its `path` field has type `Option[String]`.
+
+Its `range` field has type `Option[SourceRange]`.
+
+A stripped artifact reports its function identity and bytecode offset with two `None` source fields.
+
+The trace contains at most 64 locations in callee-to-caller order.
 
 An asynchronous operation retains its perform location until completion.
 
