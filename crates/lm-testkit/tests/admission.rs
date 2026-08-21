@@ -1573,8 +1573,7 @@ fn a_nested_snapshot_of_another_root_type_rejects() {
 // Structure, order, and budget.
 // ---------------------------------------------------------------
 
-/// A snapshot world holds at least its root machine. The decoder can
-/// represent an empty world, and admission rejects it.
+/// A run snapshot holds its distinguished machine.
 #[test]
 fn a_world_with_no_machine_rejects() {
     let loaded = program(INIT_SOURCE);
@@ -1582,7 +1581,7 @@ fn a_world_with_no_machine_rejects() {
     let mut broken = images[0].clone();
     broken.machines.clear();
     broken.result_type = [0u8; 32];
-    assert_eq!(admit(&loaded, &broken), Some(ImageReason::State));
+    assert_eq!(admit(&loaded, &broken), Some(ImageReason::SectionBounds));
 }
 
 /// The stored heap is exactly the canonical traversal of its roots.

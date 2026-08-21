@@ -322,9 +322,12 @@ fn section_header(image: &Image) -> Vec<u8> {
     };
     out.leb(image.machines.len() as u64);
     out.leb(image.vm_images.len() as u64);
-    // The root ordinal. The traversal starts at the root, so it is
-    // always zero; the reader still checks it.
-    out.leb(0);
+    // Zero means that the image has no distinguished run. Other
+    // values are one greater than the selected machine ordinal.
+    out.leb(image.distinguished.map_or(0, |machine| machine as u64 + 1));
+    // A full snapshot selects one persistent VM image. A run snapshot
+    // records zero here.
+    out.leb(image.full_vm.map_or(0, |image| image as u64 + 1));
     out.hash(&image.module_semantic);
     out.hash(&image.result_type);
     out.bytes
@@ -558,6 +561,7 @@ fn encode_object(out: &mut Out, object: &Object) {
                 CodeHandleKind::Instance => 0,
                 CodeHandleKind::Slot => 1,
                 CodeHandleKind::Function => 2,
+                CodeHandleKind::Class => 3,
             });
             out.leb(*index as u64);
         }
@@ -1326,15 +1330,42 @@ fn decode_inner(
     let mut header = section(0);
     let machine_count = header.count(limits.max_machines as u64, "machine")?;
     let image_count = header.count(limits.max_vm_images as u64, "VM image")?;
-    let root = header.leb()?;
-    if root != 0 {
-        // One image has one byte string, so the canonical root ordinal
-        // is a container rule.
-        return err(
-            ImageReason::SectionBounds,
-            "the root machine ordinal of a canonical image is zero",
-        );
-    }
+    let selected = header.leb()?;
+    let distinguished = if selected == 0 {
+        None
+    } else {
+        let machine = selected - 1;
+        if machine >= machine_count as u64 {
+            return err(
+                ImageReason::SectionBounds,
+                "the distinguished run names no captured machine",
+            );
+        }
+        Some(u32::try_from(machine).map_err(|_| {
+            ImageError::new(
+                ImageReason::SectionBounds,
+                "the distinguished run ordinal is too large",
+            )
+        })?)
+    };
+    let selected_vm = header.leb()?;
+    let full_vm = if selected_vm == 0 {
+        None
+    } else {
+        let image = selected_vm - 1;
+        if image >= image_count as u64 {
+            return err(
+                ImageReason::SectionBounds,
+                "the full VM selector names no captured VM image",
+            );
+        }
+        Some(u32::try_from(image).map_err(|_| {
+            ImageError::new(
+                ImageReason::SectionBounds,
+                "the full VM selector is too large",
+            )
+        })?)
+    };
     let module_semantic = header.hash()?;
     let result_type = header.hash()?;
     if header.remaining() != 0 {
@@ -1537,6 +1568,8 @@ fn decode_inner(
             compiler_abi,
             verifier_version,
             module_semantic,
+            distinguished,
+            full_vm,
             result_type,
             funcs,
             classes,
@@ -2053,6 +2086,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 0 => CodeHandleKind::Instance,
                 1 => CodeHandleKind::Slot,
                 2 => CodeHandleKind::Function,
+                3 => CodeHandleKind::Class,
                 _ => {
                     return err(
                         ImageReason::Layout,

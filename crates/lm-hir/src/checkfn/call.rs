@@ -109,6 +109,7 @@ impl<'o> FnChecker<'o> {
                             | NativeRepr::CodeInstance
                             | NativeRepr::Slot
                             | NativeRepr::FunctionDef
+                            | NativeRepr::ClassDef
                             | NativeRepr::DynValue
                     )
                 ) {

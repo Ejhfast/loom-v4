@@ -2475,6 +2475,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 | NativeRepr::CodeInstance
                 | NativeRepr::Slot
                 | NativeRepr::FunctionDef
+                | NativeRepr::ClassDef
                 | NativeRepr::DynValue
         )
     ) {

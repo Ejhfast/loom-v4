@@ -34,7 +34,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 132;
+pub const CORE_ROLE_COUNT: usize = 133;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -1069,8 +1069,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// two guest snapshot types. Version 33 adds late-bound slot tables
 /// and four specialized slot instructions. Version 34 removes the
 /// invalid portable process target form. Version 35 adds dynamic
-/// result and public syntax instructions.
-pub const VERSION: u16 = 35;
+/// result and public syntax instructions. Version 36 adds the
+/// `ClassDef` role and the complete VM image control manifest.
+pub const VERSION: u16 = 36;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).

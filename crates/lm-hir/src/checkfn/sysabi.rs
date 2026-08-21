@@ -326,6 +326,54 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
+        if group == "Vm" && member == "load_snapshot" {
+            if args.len() != 1 {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!(
+                        "`sys.vm.load_snapshot` expects 1 argument(s), found {}",
+                        args.len()
+                    ),
+                    span,
+                ));
+            }
+            let bytes = self.check_expr(ctx, &args[0], lm_types::BYTES)?;
+            self.charge_op(ctx, lm_abi::OP_VM_LOAD_SNAPSHOT, span)?;
+            let error = Self::core_class(ctx, "SnapshotError");
+            let ty = Self::core_inst(ctx, "Result", vec![lm_types::VM_SNAPSHOT, error]);
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_VM_LOAD_SNAPSHOT,
+                    args: vec![bytes],
+                },
+            });
+        }
+        if group == "Vm" && member == "restore_vm" {
+            if args.len() != 1 {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!(
+                        "`sys.vm.restore_vm` expects 1 argument(s), found {}",
+                        args.len()
+                    ),
+                    span,
+                ));
+            }
+            let snapshot = self.check_expr(ctx, &args[0], lm_types::VM_SNAPSHOT)?;
+            self.charge_op(ctx, lm_abi::OP_VM_RESTORE_VM, span)?;
+            let error = Self::core_class(ctx, "RestoreError");
+            let ty = Self::core_inst(ctx, "Result", vec![lm_types::VM, error]);
+            return Ok(HExpr {
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_VM_RESTORE_VM,
+                    args: vec![snapshot],
+                },
+            });
+        }
         // `sys.proc.recv()` performs `Proc.Recv`. The mailbox type
         // comes from the enclosing proc class, so the call is valid
         // only inside a method of a subclass of `Proc[M]`.
@@ -637,6 +685,7 @@ impl<'o> FnChecker<'o> {
                 "SlotSpec",
                 "Instance",
                 "Slot",
+                "ClassDef",
                 "CodeError",
             ]
             .into_iter()
@@ -762,6 +811,26 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform { op, args: values },
                 })
             }
+            ("Instance", "class_def") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`class_def` expects 1 argument(s), found {}", args.len()),
+                        span,
+                    ));
+                }
+                let binding = self.check_expr(ctx, &args[0], STRING)?;
+                self.charge_op(ctx, lm_abi::OP_VM_INSTANCE_CLASS, span)?;
+                let class_def = Self::core_class(ctx, "ClassDef");
+                Ok(HExpr {
+                    ty: result(ctx, class_def),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_INSTANCE_CLASS,
+                        args: vec![recv_h, binding],
+                    },
+                })
+            }
             ("Instance", "slot") | ("Instance", "slot_spec") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
@@ -841,20 +910,20 @@ impl<'o> FnChecker<'o> {
                 // instead of calling `check_args_simple`.
                 let args = arrange_args(args, &["program", "args"], "activate")?;
                 let program = self.synth_expr(ctx, args[0])?;
-                let (want, ret, op) = match ctx.store.get(program.ty).clone() {
+                let (want, ret, op, fallible) = match ctx.store.get(program.ty).clone() {
                     Type::Fn(params, _, ret, _) => {
                         let view = if params.is_empty() {
                             UNIT
                         } else {
                             ctx.store.intern(Type::Tuple(params))
                         };
-                        (view, ret, lm_abi::OP_VM_ACTIVATE)
+                        (view, ret, lm_abi::OP_VM_ACTIVATE, false)
                     }
                     Type::Inst(class, values)
                         if ctx.core_types.get("FunctionDef") == Some(&class.0)
                             && values.len() == 2 =>
                     {
-                        (values[0], values[1], lm_abi::OP_VM_ACTIVATE_DEF)
+                        (values[0], values[1], lm_abi::OP_VM_ACTIVATE_DEF, true)
                     }
                     _ => {
                         return Err(Diagnostic::new(
@@ -870,8 +939,14 @@ impl<'o> FnChecker<'o> {
                 let tuple = self.check_expr(ctx, args[1], want)?;
                 self.charge_op(ctx, op, span)?;
                 let run_ty = ctx.store.intern(Type::Run(ret));
+                let ty = if fallible {
+                    let error = Self::core_class(ctx, "CodeError");
+                    Self::core_inst(ctx, "Result", vec![run_ty, error])
+                } else {
+                    run_ty
+                };
                 HExpr {
-                    ty: run_ty,
+                    ty,
                     mutable: true,
                     kind: HExprKind::Perform {
                         op,
@@ -909,7 +984,11 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform { op, args: values },
                 }
             }
-            (Type::Vm, "replace") => {
+            (Type::Vm, "replace")
+            | (Type::Vm, "replace_function")
+            | (Type::Vm, "replace_class")
+            | (Type::Vm, "replace_value")
+            | (Type::Vm, "replace_process") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -920,28 +999,67 @@ impl<'o> FnChecker<'o> {
                 let slot_ty = Self::core_class(ctx, "Slot");
                 let slot = self.check_expr(ctx, &args[0], slot_ty)?;
                 let target = self.synth_expr(ctx, &args[1])?;
-                let valid = matches!(
+                let is_function = matches!(
                     ctx.store.get(target.ty),
                     Type::Inst(class, values)
                         if ctx.core_types.get("FunctionDef") == Some(&class.0)
                             && values.len() == 2
                 );
-                if !valid {
-                    return Err(Diagnostic::new(
-                        "E1004",
-                        "`replace` needs a FunctionDef target",
-                        args[1].span,
-                    ));
-                }
-                self.charge_op(ctx, lm_abi::OP_VM_REPLACE_FUNCTION, span)?;
+                let is_class = matches!(
+                    ctx.store.get(target.ty),
+                    Type::Class(class) if ctx.core_types.get("ClassDef") == Some(&class.0)
+                );
+                let is_process = matches!(ctx.store.get(target.ty), Type::Handle(_, _));
+                let op = match name {
+                    "replace" | "replace_function" if is_function => lm_abi::OP_VM_REPLACE_FUNCTION,
+                    "replace_class" if is_class => lm_abi::OP_VM_REPLACE_CLASS,
+                    "replace_value" => lm_abi::OP_VM_REPLACE_VALUE,
+                    "replace_process" if is_process => lm_abi::OP_VM_REPLACE_PROCESS,
+                    "replace" | "replace_function" => {
+                        return Err(Diagnostic::new(
+                            "E1004",
+                            "`replace_function` needs a FunctionDef target",
+                            args[1].span,
+                        ));
+                    }
+                    "replace_class" => {
+                        return Err(Diagnostic::new(
+                            "E1004",
+                            "`replace_class` needs a ClassDef target",
+                            args[1].span,
+                        ));
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "E1004",
+                            "`replace_process` needs a process handle target",
+                            args[1].span,
+                        ));
+                    }
+                };
+                self.charge_op(ctx, op, span)?;
                 let error = Self::core_class(ctx, "CodeError");
                 let ty = Self::core_inst(ctx, "Result", vec![UNIT, error]);
                 HExpr {
                     ty,
                     mutable: true,
                     kind: HExprKind::Perform {
-                        op: lm_abi::OP_VM_REPLACE_FUNCTION,
+                        op,
                         args: vec![recv_h, slot, target],
+                    },
+                }
+            }
+            (Type::Vm, "snapshot") => {
+                Self::expect_no_args(name, args, span)?;
+                self.charge_op(ctx, lm_abi::OP_VM_SNAPSHOT_VM, span)?;
+                let error = Self::core_class(ctx, "SnapshotError");
+                let ty = Self::core_inst(ctx, "Result", vec![lm_types::VM_SNAPSHOT, error]);
+                HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_SNAPSHOT_VM,
+                        args: vec![recv_h],
                     },
                 }
             }

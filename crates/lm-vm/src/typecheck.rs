@@ -146,6 +146,7 @@ enum Kind {
     CodeInstance,
     Slot,
     FunctionDef,
+    ClassDef,
     DynValue,
 }
 
@@ -293,6 +294,8 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::CodeInstance)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_SLOT] == *class {
                 Node::Heap(Kind::Slot)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_CLASS_DEF] == *class {
+                Node::Heap(Kind::ClassDef)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_DYN_VALUE] == *class {
                 Node::Heap(Kind::DynValue)
             } else {
@@ -373,6 +376,7 @@ fn kind_of(object: &Object) -> Kind {
             lm_heap::CodeHandleKind::Instance => Kind::CodeInstance,
             lm_heap::CodeHandleKind::Slot => Kind::Slot,
             lm_heap::CodeHandleKind::Function => Kind::FunctionDef,
+            lm_heap::CodeHandleKind::Class => Kind::ClassDef,
         },
         Object::DynValue { .. } => Kind::DynValue,
     }

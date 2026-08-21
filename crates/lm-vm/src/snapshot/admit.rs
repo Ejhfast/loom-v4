@@ -666,8 +666,40 @@ fn check_closed_row(
 
 impl Admit<'_> {
     fn run(&self) -> Result<(), ImageError> {
-        if self.image.machines.is_empty() {
-            return fail(ImageReason::State, "a snapshot world holds no machine");
+        if self.image.distinguished.is_some() == self.image.full_vm.is_some() {
+            return fail(
+                ImageReason::State,
+                "a snapshot selects either one run or one full VM",
+            );
+        }
+        if self.image.distinguished.is_some() && self.image.machines.is_empty() {
+            return fail(ImageReason::State, "a run snapshot holds no machine");
+        }
+        if self.image.distinguished.is_some_and(|machine| machine != 0) {
+            return fail(
+                ImageReason::Layout,
+                "the distinguished run is not machine ordinal zero",
+            );
+        }
+        if self
+            .image
+            .distinguished
+            .is_some_and(|machine| machine as usize >= self.image.machines.len())
+        {
+            return fail(
+                ImageReason::Reference,
+                "the distinguished run names no captured machine",
+            );
+        }
+        if self
+            .image
+            .full_vm
+            .is_some_and(|image| image as usize >= self.image.vm_images.len())
+        {
+            return fail(
+                ImageReason::Reference,
+                "the full VM selector names no captured VM image",
+            );
         }
         self.check_code_manifest()?;
         self.check_instances()?;
@@ -684,10 +716,10 @@ impl Admit<'_> {
         self.check_parent_forest()?;
         self.check_world()?;
         self.check_machine_witness()?;
-        // The header repeats the root result type, and the witness of
-        // the root machine derives it. The check runs after the
+        // The header repeats the selected result type, and the witness
+        // of that machine derives it. The check runs after the
         // witness rules, so a damaged witness names its own rule.
-        self.check_root_result_type()?;
+        self.check_distinguished_result_type()?;
         // The canonical order runs last. Every earlier rule states a
         // property of one position, so a diagnostic names that
         // position instead of the traversal an edit moved.
@@ -1163,20 +1195,29 @@ impl Admit<'_> {
             && func.row == contract.row
     }
 
-    /// The header names the result type of the root machine, and the
-    /// witness of that machine names it again. One image states one
-    /// type.
+    /// The header names the selected run result type.
     ///
     /// The header holds the canonical content digest of the closed
     /// type, so it names a class by definition hash and never by a
     /// numeric slot of one linked program.
-    fn check_root_result_type(&self) -> Result<(), ImageError> {
-        let root = self.machine_result_digest(0);
-        if root != self.image.result_type {
-            return fail(
-                ImageReason::State,
-                "the header and the root machine name two result types",
-            );
+    fn check_distinguished_result_type(&self) -> Result<(), ImageError> {
+        match self.image.distinguished {
+            Some(machine) => {
+                let found = self.machine_result_digest(machine);
+                if found != self.image.result_type {
+                    return fail(
+                        ImageReason::State,
+                        "the header and the distinguished run name two result types",
+                    );
+                }
+            }
+            None if self.image.result_type != [0u8; 32] => {
+                return fail(
+                    ImageReason::State,
+                    "a full VM snapshot carries a run result type",
+                );
+            }
+            None => {}
         }
         Ok(())
     }
@@ -1222,6 +1263,9 @@ impl Admit<'_> {
             next += 1;
             Ok(())
         };
+        if let Some(image) = self.image.full_vm {
+            visit(image)?;
+        }
         for machine in &self.image.machines {
             if let Some(image) = machine.image {
                 visit(image)?;
@@ -1422,6 +1466,9 @@ impl Admit<'_> {
                     CodeHandleKind::Instance => index == instance,
                     CodeHandleKind::Function => {
                         record.funcs.contains(&index) && self.func_named(index)
+                    }
+                    CodeHandleKind::Class => {
+                        record.classes.contains(&index) && self.class_named(index)
                     }
                     CodeHandleKind::Slot => {
                         record.slots.contains(&index) && (index as usize) < self.module.slots.len()
@@ -2366,7 +2413,7 @@ impl Admit<'_> {
                 at("a paused proc is not scheduler-owned"),
             );
         }
-        if vm == 0 && (m.scheduler_owned || m.paused) {
+        if self.image.distinguished == Some(vm) && (m.scheduler_owned || m.paused) {
             return fail(
                 ImageReason::State,
                 at("the restored root is holder-controlled"),

@@ -379,7 +379,7 @@ fn load_inner(
     // an empty import table.
     if !module.imports.is_empty() {
         return Err(VerifyError {
-            func: u32::MAX,
+            func: None,
             message: format!(
                 "the module has {} unresolved import slot(s); link it before it runs",
                 module.imports.len()
@@ -427,7 +427,7 @@ pub fn load_with_record(
     _record: &VerifiedRecord,
 ) -> Result<LoadedModule, VerifyError> {
     let reject = |message: &str| VerifyError {
-        func: u32::MAX,
+        func: None,
         message: message.to_string(),
     };
     if !module.imports.is_empty() {

@@ -140,11 +140,15 @@ impl World {
             }
             lm_abi::OP_VM_INSTANCE_ENTRY => self.code_entry(vm, op, args[0]),
             lm_abi::OP_VM_INSTANCE_FUNCTION => self.code_function(vm, op, args[0], args[1]),
+            lm_abi::OP_VM_INSTANCE_CLASS => self.code_class(vm, op, args[0], args[1]),
             lm_abi::OP_VM_INSTANCE_SLOT | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => {
                 self.code_slot(vm, op, args[0], args[1])
             }
             lm_abi::OP_VM_ACTIVATE_DEF => self.code_activate(vm, op, args[0], args[1], args[2]),
-            lm_abi::OP_VM_REPLACE_FUNCTION => self.code_replace(vm, op, args[0], args[1], args[2]),
+            lm_abi::OP_VM_REPLACE_FUNCTION
+            | lm_abi::OP_VM_REPLACE_CLASS
+            | lm_abi::OP_VM_REPLACE_VALUE
+            | lm_abi::OP_VM_REPLACE_PROCESS => self.code_replace(vm, op, args[0], args[1], args[2]),
             _ => self.fault_caller(
                 vm,
                 op,
@@ -413,6 +417,56 @@ impl World {
         self.finish_function_lookup(vm, op, handle, function);
     }
 
+    fn code_class(&mut self, vm: VmId, op: u32, value: Value, name: Value) {
+        let handle = match self.code_handle(vm, value, CodeHandleKind::Instance) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not an Instance");
+                return;
+            }
+        };
+        let name = match name
+            .as_obj()
+            .map(|reference| self.machines[vm as usize].vm.heap.get(reference))
+        {
+            Some(Object::Str(text)) => text.as_str().to_string(),
+            _ => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the class name is not String",
+                );
+                return;
+            }
+        };
+        let class = self.live_instance(handle).and_then(|instance| {
+            let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+            let export = source
+                .exports
+                .iter()
+                .find(|export| export.name == name && export.kind.is_class())?;
+            instance.classes.get(export.def as usize).copied()
+        });
+        let Some(class) = class else {
+            let value = self.code_error(
+                vm,
+                "the module instance has no exported class with this name",
+            );
+            self.finish_code_result(vm, op, value);
+            return;
+        };
+        let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
+            image: handle.image,
+            generation: handle.generation,
+            instance: handle.instance,
+            kind: CodeHandleKind::Class,
+            index: class,
+        });
+        let result = value.and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, result);
+    }
+
     fn finish_function_lookup(&mut self, vm: VmId, op: u32, instance: CodeHandle, function: u32) {
         let contract = self.requested_function_contract(vm);
         let matches = contract
@@ -507,12 +561,7 @@ impl World {
             }
         };
         if handle.image_key() != key || !self.live_function(handle) {
-            self.fault_caller(
-                vm,
-                op,
-                FaultCode::InvalidVmState,
-                "the function does not belong to this VM image",
-            );
+            self.finish_code_error(vm, op, "the function does not belong to this VM image");
             return;
         }
         let values = match arguments {
@@ -542,28 +591,24 @@ impl World {
         let target = match self.prepare_run_target(vm, key) {
             Some(target) => target,
             None => {
-                self.fault_caller(
-                    vm,
-                    op,
-                    FaultCode::InvalidVmState,
-                    "the VM image has no run budget left",
-                );
+                self.finish_code_error(vm, op, "the VM image has no run capacity");
                 return;
             }
         };
         let locals = match self.transfer_all(vm, target, &values) {
             Ok(values) => values,
-            Err(code) => {
+            Err(_) => {
                 self.rollback_run_target(vm, target);
-                self.fault_caller(vm, op, code, "an argument is not sendable");
+                self.finish_code_error(vm, op, "an argument cannot enter the VM image");
                 return;
             }
         };
-        if let Err(code) =
-            self.check_frame_args(target, handle.index, lm_value::TypeEnvId::EMPTY, &locals)
+        if self
+            .check_frame_args(target, handle.index, lm_value::TypeEnvId::EMPTY, &locals)
+            .is_err()
         {
             self.rollback_run_target(vm, target);
-            self.fault_caller(vm, op, code, "an argument has the wrong type");
+            self.finish_code_error(vm, op, "an argument has the wrong type");
             return;
         }
         self.machines[target as usize].load_frame(
@@ -573,13 +618,13 @@ impl World {
             None,
             lm_value::TypeEnvId::EMPTY,
         );
-        match self.machines[vm as usize].alloc(Object::NativeRun { vm: target }) {
-            Ok(value) => self.install_value_reply(vm, value),
-            Err(code) => {
-                self.rollback_run_target(vm, target);
-                self.machines[vm as usize].set_fault(code, "", Some(op));
-            }
+        let result = self.machines[vm as usize]
+            .alloc(Object::NativeRun { vm: target })
+            .and_then(|value| self.code_ok(vm, value));
+        if result.is_err() {
+            self.rollback_run_target(vm, target);
         }
+        self.finish_code_result(vm, op, result);
     }
 
     fn code_replace(&mut self, vm: VmId, op: u32, image: Value, slot: Value, target: Value) {
@@ -593,35 +638,61 @@ impl World {
                 return;
             }
         };
-        let target = match self.code_handle(vm, target, CodeHandleKind::Function) {
-            Ok(handle) => handle,
-            Err(code) => {
-                self.fault_caller(vm, op, code, "the replacement target is not a FunctionDef");
-                return;
-            }
-        };
-        let valid = slot.image_key() == key
-            && target.image_key() == key
-            && self.live_slot(slot)
-            && self.live_function(target);
-        if !valid {
-            let value =
-                self.code_error(vm, "the replacement handles do not belong to this VM image");
-            self.finish_code_result(vm, op, value);
+        if slot.image_key() != key || !self.live_slot(slot) {
+            self.finish_code_error(vm, op, "the slot does not belong to this VM image");
             return;
         }
-        match self.replace_function_slot(key, slot.index, target.index) {
+        let replaced = match op {
+            lm_abi::OP_VM_REPLACE_FUNCTION => {
+                let target = match self.code_handle(vm, target, CodeHandleKind::Function) {
+                    Ok(handle) => handle,
+                    Err(code) => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            code,
+                            "the replacement target is not a FunctionDef",
+                        );
+                        return;
+                    }
+                };
+                if target.image_key() != key || !self.live_function(target) {
+                    self.finish_code_error(vm, op, "the function does not belong to this VM image");
+                    return;
+                }
+                self.replace_function_slot(key, slot.index, target.index)
+            }
+            lm_abi::OP_VM_REPLACE_CLASS => {
+                let target = match self.code_handle(vm, target, CodeHandleKind::Class) {
+                    Ok(handle) => handle,
+                    Err(code) => {
+                        self.fault_caller(vm, op, code, "the replacement target is not a ClassDef");
+                        return;
+                    }
+                };
+                if target.image_key() != key || !self.live_class(target) {
+                    self.finish_code_error(vm, op, "the class does not belong to this VM image");
+                    return;
+                }
+                self.replace_class_slot(key, slot.index, target.index)
+            }
+            lm_abi::OP_VM_REPLACE_VALUE => self.replace_value_slot(key, slot.index, vm, target),
+            lm_abi::OP_VM_REPLACE_PROCESS => self.replace_process_slot(key, slot.index, vm, target),
+            _ => Err(FaultCode::MalformedState),
+        };
+        match replaced {
             Ok(()) => {
                 let value = self.code_ok(vm, Value::Unit);
                 self.finish_code_result(vm, op, value);
             }
-            Err(_) => {
-                let value = self.code_error(
-                    vm,
-                    "the replacement target does not match the slot contract",
-                );
-                self.finish_code_result(vm, op, value);
+            Err(FaultCode::InvalidVmState) => {
+                self.finish_code_error(vm, op, "the VM image is not at a safe replacement point")
             }
+            Err(_) => self.finish_code_error(
+                vm,
+                op,
+                "the replacement target does not match the slot contract",
+            ),
         }
     }
 
@@ -682,6 +753,17 @@ impl World {
             .filter(|image| image.live && image.generation == handle.generation)
             .and_then(|image| image.instances.get(handle.instance as usize))
             .is_some_and(|instance| instance.funcs.contains(&handle.index))
+    }
+
+    fn live_class(&self, handle: CodeHandle) -> bool {
+        if handle.kind != CodeHandleKind::Class {
+            return false;
+        }
+        self.vm_images
+            .get(handle.image as usize)
+            .filter(|image| image.live && image.generation == handle.generation)
+            .and_then(|image| image.instances.get(handle.instance as usize))
+            .is_some_and(|instance| instance.classes.contains(&handle.index))
     }
 
     fn live_slot(&self, handle: CodeHandle) -> bool {
@@ -771,6 +853,11 @@ impl World {
         let message = self.machines[vm as usize].alloc(Object::Str(message.into()))?;
         let error = self.make_instance(vm, self.core.code_error, vec![message])?;
         self.make_instance(vm, self.core.result_err, vec![error])
+    }
+
+    fn finish_code_error(&mut self, vm: VmId, op: u32, message: &str) {
+        let value = self.code_error(vm, message);
+        self.finish_code_result(vm, op, value);
     }
 
     fn finish_code_result(&mut self, vm: VmId, op: u32, result: Result<Value, FaultCode>) {

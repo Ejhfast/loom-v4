@@ -18,6 +18,9 @@ end
 final class FunctionDef[A, T]
 end
 
+final class ClassDef
+end
+
 final class CodeError
   message: String
 

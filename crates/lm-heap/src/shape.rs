@@ -239,6 +239,7 @@ pub enum CodeHandleKind {
     Instance,
     Slot,
     Function,
+    Class,
 }
 
 /// One immutable portable code payload.

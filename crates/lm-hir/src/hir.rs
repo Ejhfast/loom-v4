@@ -161,6 +161,7 @@ pub enum NativeRepr {
     CodeInstance,
     Slot,
     FunctionDef,
+    ClassDef,
     DynValue,
 }
 

@@ -250,7 +250,7 @@ impl World {
     }
 
     /// Reserve one persistent VM image record.
-    pub(super) fn new_vm_image(&mut self, holder: VmId) -> Option<VmImageKey> {
+    pub(crate) fn new_vm_image(&mut self, holder: VmId) -> Option<VmImageKey> {
         let live = self
             .vm_images
             .len()
@@ -311,7 +311,7 @@ impl World {
     }
 
     /// Reclaim one image whose handle allocation failed.
-    fn rollback_vm_image(&mut self, key: VmImageKey) {
+    pub(crate) fn rollback_vm_image(&mut self, key: VmImageKey) {
         let Some(record) = self.vm_images.get_mut(key.image as usize) else {
             return;
         };
@@ -916,7 +916,7 @@ impl World {
     }
 
     /// Create one normal run record for an image.
-    pub(super) fn prepare_run_target(&mut self, parent: VmId, image: VmImageKey) -> Option<VmId> {
+    pub(crate) fn prepare_run_target(&mut self, parent: VmId, image: VmImageKey) -> Option<VmId> {
         let run_config = self.reserve_child(parent)?;
         let image_config = self.vm_images.get(image.image as usize)?.config;
         let config = intersect_config(run_config, image_config);
@@ -926,7 +926,7 @@ impl World {
     }
 
     /// Roll back a run target that no handle received.
-    pub(super) fn rollback_run_target(&mut self, parent: VmId, target: VmId) {
+    pub(crate) fn rollback_run_target(&mut self, parent: VmId, target: VmId) {
         self.rollback_child(parent, target);
     }
 
@@ -986,10 +986,14 @@ impl World {
             | lm_abi::OP_VM_INSTALL_WITH
             | lm_abi::OP_VM_INSTANCE_ENTRY
             | lm_abi::OP_VM_INSTANCE_FUNCTION
+            | lm_abi::OP_VM_INSTANCE_CLASS
             | lm_abi::OP_VM_INSTANCE_SLOT
             | lm_abi::OP_VM_INSTANCE_SLOT_SPEC
             | lm_abi::OP_VM_ACTIVATE_DEF
-            | lm_abi::OP_VM_REPLACE_FUNCTION => self.code_exec(vm, op, args),
+            | lm_abi::OP_VM_REPLACE_FUNCTION
+            | lm_abi::OP_VM_REPLACE_CLASS
+            | lm_abi::OP_VM_REPLACE_VALUE
+            | lm_abi::OP_VM_REPLACE_PROCESS => self.code_exec(vm, op, args),
             lm_abi::OP_VM_ACTIVATE => {
                 let Some(image) = self.image_arg(vm, op, args[0]) else {
                     return;
@@ -1882,16 +1886,15 @@ impl World {
                 // (specification 17.6).
                 self.take_snapshot(vm, op, vm, true);
             }
-            lm_abi::OP_VM_LOAD_SNAPSHOT => {
-                // This build has no guest snapshot decoder.
-                self.fault_caller(
-                    vm,
-                    op,
-                    FaultCode::InvalidVmState,
-                    "Vm.LoadSnapshot is not available in this build",
-                );
+            lm_abi::OP_VM_SNAPSHOT_VM => {
+                let Some(image) = self.image_arg(vm, op, args[0]) else {
+                    return;
+                };
+                self.take_vm_snapshot(vm, op, image);
             }
+            lm_abi::OP_VM_LOAD_SNAPSHOT => self.load_snapshot(vm, op, args),
             lm_abi::OP_VM_RESTORE => self.restore_snapshot(vm, op, args),
+            lm_abi::OP_VM_RESTORE_VM => self.restore_vm_snapshot(vm, op, args),
             lm_abi::OP_PROC_RECV_WAIT
             | lm_abi::OP_WAIT_WAIT
             | lm_abi::OP_WAIT_CHOOSE

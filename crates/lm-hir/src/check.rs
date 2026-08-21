@@ -63,7 +63,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 77] = [
+pub const PRELUDE_TYPES: [&str; 78] = [
     "Option",
     "Result",
     "Ordering",
@@ -86,6 +86,7 @@ pub const PRELUDE_TYPES: [&str; 77] = [
     "Instance",
     "Slot",
     "FunctionDef",
+    "ClassDef",
     "CodeError",
     "GrammarVersion",
     "SourceRange",
@@ -3041,6 +3042,7 @@ fn resolve_class(
         (true, "Instance") => Some(NativeRepr::CodeInstance),
         (true, "Slot") => Some(NativeRepr::Slot),
         (true, "FunctionDef") => Some(NativeRepr::FunctionDef),
+        (true, "ClassDef") => Some(NativeRepr::ClassDef),
         (true, "DynValue") => Some(NativeRepr::DynValue),
         _ => None,
     };
@@ -3114,6 +3116,7 @@ fn resolve_class(
             | NativeRepr::SlotSpec
             | NativeRepr::CodeInstance
             | NativeRepr::Slot
+            | NativeRepr::ClassDef
             | NativeRepr::DynValue,
         ) => ctx.store.intern(Type::Class(ClassId(idx))),
         None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),

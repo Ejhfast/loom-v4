@@ -59,19 +59,22 @@ pub const TY_STR: u32 = 3;
 /// A verification failure. The message names the exact position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyError {
-    pub func: u32,
+    pub func: Option<u32>,
     pub message: String,
 }
 
 impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "function {}: {}", self.func, self.message)
+        match self.func {
+            Some(func) => write!(f, "function {func}: {}", self.message),
+            None => f.write_str(&self.message),
+        }
     }
 }
 
 fn err(func: u32, message: impl Into<String>) -> VerifyError {
     VerifyError {
-        func,
+        func: Some(func),
         message: message.into(),
     }
 }
@@ -235,8 +238,9 @@ use tables::verify_tables;
 /// Version 21 separates persistent VMs from typed runs.
 /// Version 23 verifies late-bound slot contracts and instructions.
 /// Version 24 verifies reified code controls.
-/// Version 25 verifies runtime compiler input classes.
-pub const VERIFIER_VERSION: u32 = 25;
+/// Version 25 verifies runtime compiler input classes. Version 26
+/// verifies `ClassDef` and complete VM image controls.
+pub const VERIFIER_VERSION: u32 = 26;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -494,6 +498,15 @@ mod tests {
     fn accepts_simple_function() {
         let m = module_with(vec![vec![ConstInt(1), ConstInt(2), Add, Return]]);
         assert!(verify_module(&m).is_ok());
+    }
+
+    #[test]
+    fn module_errors_do_not_print_a_function_sentinel() {
+        let error = VerifyError {
+            func: None,
+            message: "the module is invalid".to_string(),
+        };
+        assert_eq!(error.to_string(), "the module is invalid");
     }
 
     #[test]

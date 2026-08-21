@@ -368,7 +368,7 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 70] = [
 /// part, so a rename changes nothing the verifier reads.
 pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
     let terr = |message: String| VerifyError {
-        func: u32::MAX,
+        func: None,
         message,
     };
     let slot = |role: usize| -> Option<u32> {
@@ -599,6 +599,7 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
         (lm_bytecode::corepin::ROLE_SLOT_SPEC, "SlotSpec"),
         (lm_bytecode::corepin::ROLE_INSTANCE, "Instance"),
         (lm_bytecode::corepin::ROLE_SLOT, "Slot"),
+        (lm_bytecode::corepin::ROLE_CLASS_DEF, "ClassDef"),
     ];
     for (role, name) in native_roles {
         let Some(idx) = slot(role) else { continue };

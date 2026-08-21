@@ -169,9 +169,13 @@ def execute(): Int with Compiler.CompileSyntax, Vm
   in Err(_)
     return 0 - 4
   end
-  case image.activate(entry, args: ()).run()
-  in Done(value) then value
-  in Fault(_) then 0 - 5
+  case image.activate(entry, args: ())
+  in Err(_) then 0 - 5
+  in Ok(run)
+    case run.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 5
+    end
   end
 end
 
@@ -300,9 +304,13 @@ def execute(): Int with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
   in Err(_)
     return 0 - 7
   end
-  case image.activate(entry, args: ()).run()
-  in Done(value) then value
-  in Fault(_) then 0 - 8
+  case image.activate(entry, args: ())
+  in Err(_) then 0 - 8
+  in Ok(run)
+    case run.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 8
+    end
   end
 end
 
@@ -355,9 +363,13 @@ def execute(): Bool with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
   in Err(_)
     return false
   end
-  case image.activate(entry, args: ()).run()
-  in Done(value) then value.render() == "[1, 2, 3]"
-  in Fault(_) then false
+  case image.activate(entry, args: ())
+  in Err(_) then false
+  in Ok(run)
+    case run.run()
+    in Done(value) then value.render() == "[1, 2, 3]"
+    in Fault(_) then false
+    end
   end
 end
 
@@ -412,9 +424,13 @@ def execute(): Int with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
   in Err(_)
     return 0 - 7
   end
-  case image.activate(function, args: (40,)).run()
-  in Done(value) then value
-  in Fault(_) then 0 - 8
+  case image.activate(function, args: (40,))
+  in Err(_) then 0 - 8
+  in Ok(run)
+    case run.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 8
+    end
   end
 end
 
@@ -459,9 +475,13 @@ def execute(): Int with Compiler.Compile, Vm
   in Err(_)
     return 0 - 4
   end
-  case image.activate(entry, args: ()).run()
-  in Done(value) then value
-  in Fault(_) then 0 - 5
+  case image.activate(entry, args: ())
+  in Err(_) then 0 - 5
+  in Ok(run)
+    case run.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 5
+    end
   end
 end
 
@@ -545,9 +565,13 @@ def execute(): Int with Compiler.Compile, Vm
   in Err(_)
     return 0 - 7
   end
-  case image.activate(entry, args: ()).run()
-  in Done(value) then value
-  in Fault(_) then 0 - 8
+  case image.activate(entry, args: ())
+  in Err(_) then 0 - 8
+  in Ok(run)
+    case run.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 8
+    end
   end
 end
 
@@ -627,9 +651,13 @@ def execute(): Int with Compiler.Compile, Vm
   for _ in Range(0, 1000)
     count = count + 1
   end
-  case image.activate(entry, args: ()).run()
-  in Done(value) then value
-  in Fault(_) then 0 - 8
+  case image.activate(entry, args: ())
+  in Err(_) then 0 - 8
+  in Ok(run)
+    case run.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 8
+    end
   end
 end
 
@@ -779,9 +807,13 @@ def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm
       case instance.entry[(), Int]()
       in Err(_) then 0 - 3
       in Ok(entry)
-        case image.activate(entry, args: ()).run()
-        in Done(value) then value
-        in Fault(_) then 0 - 4
+        case image.activate(entry, args: ())
+        in Err(_) then 0 - 4
+        in Ok(run)
+          case run.run()
+          in Done(value) then value
+          in Fault(_) then 0 - 4
+          end
         end
       end
     end
@@ -807,6 +839,75 @@ fn revision_artifact(body: &str) -> Vec<u8> {
     )
     .expect("the revision compiles");
     lm_bytecode::encode(&compiled.module)
+}
+
+fn complete_slot_artifact() -> (Vec<u8>, usize, usize, usize, usize) {
+    let source = "final class Box\nend\n\
+                  def step(value: Int): Int\n\
+                  \x20 value + 1\n\
+                  end\n\
+                  0\n";
+    let compiled = compile_module_with_options(
+        "slot-kinds",
+        &SourceFile::new("slot-kinds.lm", source),
+        &CompileEnv::new().freeze(),
+        true,
+        &CompileOptions::new()
+            .late_function("step")
+            .late_class("Box"),
+    )
+    .expect("the slot artifact compiles");
+    let mut module = compiled.module;
+    let step = module
+        .exports
+        .iter()
+        .find(|export| export.name == "step" && export.kind == lm_bytecode::ExportKind::Function)
+        .expect("the function is exported")
+        .def;
+    let class = module
+        .exports
+        .iter()
+        .find(|export| export.name == "Box" && export.kind == lm_bytecode::ExportKind::Class)
+        .expect("the class is exported")
+        .def;
+    let function_slot = module
+        .slots
+        .iter()
+        .position(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Function(step)))
+        .expect("the function slot exists");
+    let class_slot = module
+        .slots
+        .iter()
+        .position(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Class(class)))
+        .expect("the class slot exists");
+    let int = module
+        .types
+        .iter()
+        .position(|ty| *ty == lm_bytecode::BcType::Int)
+        .expect("the Int type exists") as u32;
+    let value_slot = module.slots.len();
+    module.slots.push(lm_bytecode::SlotSpec {
+        key: lm_bytecode::slot_key("slot-kinds.value"),
+        contract: lm_bytecode::SlotContract::Value { ty: int },
+        initial: None,
+    });
+    let process_slot = module.slots.len();
+    module.slots.push(lm_bytecode::SlotSpec {
+        key: lm_bytecode::slot_key("slot-kinds.process"),
+        contract: lm_bytecode::SlotContract::Process {
+            message: int,
+            result: int,
+        },
+        initial: None,
+    });
+    lm_verify::verify_module(&module).expect("the complete slot artifact verifies");
+    (
+        lm_bytecode::encode(&module),
+        function_slot,
+        class_slot,
+        value_slot,
+        process_slot,
+    )
 }
 
 #[test]
@@ -855,7 +956,12 @@ def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm
   in Err(_)
     return (0 - 5, 0 - 5)
   end
-  before = case image.activate(entry, args: ()).run()
+  before_run = case image.activate(entry, args: ())
+  in Ok(run) then run
+  in Err(_)
+    return (0 - 6, 0 - 6)
+  end
+  before = case before_run.run()
   in Done(value) then value
   in Fault(_)
     return (0 - 6, 0 - 6)
@@ -874,9 +980,13 @@ def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm
   in Err(_)
     return (0 - 9, 0 - 9)
   in Ok(_)
-    after = case image.activate(entry, args: ()).run()
-    in Done(value) then value
-    in Fault(_) then 0 - 10
+    after = case image.activate(entry, args: ())
+    in Err(_) then 0 - 10
+    in Ok(run)
+      case run.run()
+      in Done(value) then value
+      in Fault(_) then 0 - 10
+      end
     end
     (before, after)
   end
@@ -888,6 +998,353 @@ execute()
         run_with_files(source, &[("first.lmbc", first), ("second.lmbc", second)]),
         "Done((2, 11))"
     );
+}
+
+#[test]
+fn cross_vm_definition_activation_returns_a_code_error() {
+    let artifact = compile_to_bytes("cross-vm.lm", "42\n").expect("the artifact compiles");
+    let source = r#"
+def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
+  bytes = case sys.fs.open("cross-vm.lmbc", ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes)
+end
+
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm
+  left = sys.vm.Vm()
+  right = sys.vm.Vm()
+  module = case read_artifact().verify()
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  instance = case left.install(module)
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  entry = case instance.entry[(), Int]()
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  case right.activate(entry, args: ())
+  in Ok(_) then false
+  in Err(error) then error.message.len() > 0
+  end
+end
+
+execute()
+"#;
+    assert_eq!(
+        run_with_files(source, &[("cross-vm.lmbc", artifact)]),
+        "Done(true)"
+    );
+}
+
+#[test]
+fn loom_replaces_every_slot_target_kind() {
+    let (artifact, function_slot, class_slot, value_slot, process_slot) = complete_slot_artifact();
+    let source = format!(
+        r#"
+class Worker < Proc[Int]
+  def on_spawn(self): Int with Proc
+    7
+  end
+end
+
+def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
+  bytes = case sys.fs.open("slot-kinds.lmbc", ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes)
+end
+
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Proc
+  image = sys.vm.Vm()
+  module = case read_artifact().verify()
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  instance = case image.install(module)
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  function = case instance.function[(Int,), Int]("step")
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  class_def = case instance.class_def("Box")
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  function_slot = case instance.slot({function_slot})
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  class_slot = case instance.slot({class_slot})
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  value_slot = case instance.slot({value_slot})
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  process_slot = case instance.slot({process_slot})
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  worker = Worker.spawn()
+  function_ok = case image.replace_function(function_slot, function)
+  in Ok(_) then true
+  in Err(_) then false
+  end
+  class_ok = case image.replace_class(class_slot, class_def)
+  in Ok(_) then true
+  in Err(_) then false
+  end
+  value_ok = case image.replace_value(value_slot, 41)
+  in Ok(_) then true
+  in Err(_) then false
+  end
+  process_ok = case image.replace_process(process_slot, worker)
+  in Ok(_) then true
+  in Err(_) then false
+  end
+  case image.snapshot()
+  in Err(_) then false
+  in Ok(_) then function_ok and class_ok and value_ok and process_ok
+  end
+end
+
+execute()
+"#
+    );
+    let bytes = compile_to_bytes("slot-kinds-host.lm", &source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut()
+        .set_file("slot-kinds.lmbc", artifact.clone());
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    for grant in ["Fs", "Vm", "Proc"] {
+        world.allow(grant).expect("the grant exists");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(true)");
+    let image = world.last_snapshot().expect("the full snapshot exists");
+    let slots = &image.world().vm_images[0].slots;
+    assert!(slots.iter().any(|slot| matches!(
+        slot,
+        lm_vm::snapshot::ImageSlotTarget::Value(lm_value::Value::Int(41))
+    )));
+    assert!(slots
+        .iter()
+        .any(|slot| matches!(slot, lm_vm::snapshot::ImageSlotTarget::Process { .. })));
+}
+
+#[test]
+fn loom_captures_and_restores_a_complete_vm() {
+    let artifact = compile_to_bytes("full-vm.lm", "42\n").expect("the artifact compiles");
+    let source = r#"
+def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
+  bytes = case sys.fs.open("full-vm.lmbc", ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes)
+end
+
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm
+  image = sys.vm.Vm()
+  module = case read_artifact().verify()
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  instance = case image.install(module)
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  entry = case instance.entry[(), Int]()
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  case image.activate(entry, args: ())
+  in Err(_)
+    return false
+  in Ok(_) then ()
+  end
+  snapshot = case image.snapshot()
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  restored = case sys.vm.restore_vm(snapshot)
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  case restored.snapshot()
+  in Ok(_) then true
+  in Err(_) then false
+  end
+end
+
+execute()
+"#;
+    let bytes = compile_to_bytes("full-vm-host.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().set_file("full-vm.lmbc", artifact.clone());
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    for grant in ["Fs", "Vm"] {
+        world.allow(grant).expect("the grant exists");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(true)");
+    let image = world
+        .last_snapshot()
+        .expect("the second full snapshot exists");
+    assert_eq!(image.world().distinguished, None);
+    assert_eq!(image.world().full_vm, Some(0));
+    assert_eq!(image.world().machines.len(), 1);
+    assert_eq!(image.world().installations.len(), 1);
+    let admitted = codec::load_external(
+        image.bytes().expect("the full snapshot encodes"),
+        &loaded,
+        LoadLimits::default(),
+    )
+    .expect("the external full snapshot admits");
+    assert_eq!(admitted.world().distinguished, None);
+    assert_eq!(admitted.world().full_vm, Some(0));
+    assert_eq!(admitted.world().installations.len(), 1);
+}
+
+#[test]
+fn loom_captures_and_restores_an_empty_vm() {
+    let source = r#"
+def execute(): Bool with Vm
+  image = sys.vm.Vm()
+  snapshot = case image.snapshot()
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  restored = case sys.vm.restore_vm(snapshot)
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  case restored.snapshot()
+  in Ok(_) then true
+  in Err(_) then false
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done(true)");
+}
+
+#[test]
+fn loom_loads_an_external_snapshot_as_a_typed_result() {
+    let source = r#"
+def read_snapshot(): Bytes with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("seed.lms", ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(bytes) then bytes
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+end
+
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm
+  case sys.vm.load_snapshot(read_snapshot())
+  in Ok(_) then true
+  in Err(_) then false
+  end
+end
+
+execute()
+"#;
+    let bytes = compile_to_bytes("guest-load.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut seed = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let gate = seed.next_gate();
+    let image = seed
+        .capture_snapshot(gate, 0, false)
+        .expect("the initial machine captures");
+    let snapshot = image.bytes().expect("the snapshot encodes").to_vec();
+
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().set_file("seed.lms", snapshot);
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    for grant in ["Fs", "Vm"] {
+        world.allow(grant).expect("the grant exists");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(true)");
+}
+
+#[test]
+fn loom_rejects_invalid_snapshot_bytes_as_a_typed_error() {
+    let source = r#"
+def execute(): Bool with Vm
+  buffer = ByteBuffer()
+  buffer.append(1)
+  case sys.vm.load_snapshot(buffer.finish())
+  in Ok(_) then false
+  in Err(error)
+    case error
+    in BadImage(reason) then reason.len() > 0
+    in ResourceActive(_, _) then false
+    in SnapshotLimitExceeded then false
+    end
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done(true)");
 }
 
 #[test]
@@ -924,9 +1381,13 @@ def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm
   in Err(_)
     return 0 - 3
   end
-  case image.activate(entry, args: ()).run()
-  in Done(value) then value
-  in Fault(_) then 0 - 4
+  case image.activate(entry, args: ())
+  in Err(_) then 0 - 4
+  in Ok(run)
+    case run.run()
+    in Done(value) then value
+    in Fault(_) then 0 - 4
+    end
   end
 end
 

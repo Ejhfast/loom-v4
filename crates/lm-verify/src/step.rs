@@ -1593,6 +1593,27 @@ pub(crate) fn step(
                             }
                             push(state, reply_ty)?;
                         }
+                        lm_abi::OP_VM_INSTANCE_CLASS => {
+                            pop_expect(state, TY_STR)?;
+                            let instance = ctx
+                                .plain_inst(ctx.core.instance, "Instance")
+                                .map_err(&fail)?;
+                            pop_expect(state, instance)?;
+                            let class_def = ctx
+                                .plain_inst(ctx.core.class_def, "ClassDef")
+                                .map_err(&fail)?;
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(class_def, error).map_err(&fail)?;
+                            if reply_ty != result {
+                                return Err(fail(
+                                    "an instance class lookup has the wrong result type"
+                                        .to_string(),
+                                ));
+                            }
+                            push(state, result)?;
+                        }
                         lm_abi::OP_VM_INSTANCE_SLOT | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => {
                             pop_expect(state, TY_INT)?;
                             let instance = ctx
@@ -1663,7 +1684,16 @@ pub(crate) fn step(
                                 ));
                             }
                             let run = ctx.intern(BcType::Run(parts[1]));
-                            push(state, run)?;
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(run, error).map_err(&fail)?;
+                            if reply_ty != result {
+                                return Err(fail(
+                                    "`Vm.ActivateDef` has the wrong result type".to_string(),
+                                ));
+                            }
+                            push(state, result)?;
                         }
                         lm_abi::OP_VM_REPLACE_FUNCTION => {
                             let definition = pop(state)?;
@@ -1684,6 +1714,59 @@ pub(crate) fn step(
                             let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
                             if slot != slot_ty {
                                 return Err(fail("`Vm.ReplaceFunction` needs a Slot".to_string()));
+                            }
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(TY_UNIT, error).map_err(&fail)?;
+                            push(state, result)?;
+                        }
+                        lm_abi::OP_VM_REPLACE_CLASS => {
+                            let definition = pop(state)?;
+                            let slot = pop(state)?;
+                            pop_expect(state, ctx.intern(BcType::Vm))?;
+                            let class_def = ctx
+                                .plain_inst(ctx.core.class_def, "ClassDef")
+                                .map_err(&fail)?;
+                            if definition != class_def {
+                                return Err(fail("`Vm.ReplaceClass` needs a ClassDef".to_string()));
+                            }
+                            let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
+                            if slot != slot_ty {
+                                return Err(fail("`Vm.ReplaceClass` needs a Slot".to_string()));
+                            }
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(TY_UNIT, error).map_err(&fail)?;
+                            push(state, result)?;
+                        }
+                        lm_abi::OP_VM_REPLACE_VALUE => {
+                            pop(state)?;
+                            let slot = pop(state)?;
+                            pop_expect(state, ctx.intern(BcType::Vm))?;
+                            let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
+                            if slot != slot_ty {
+                                return Err(fail("`Vm.ReplaceValue` needs a Slot".to_string()));
+                            }
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(TY_UNIT, error).map_err(&fail)?;
+                            push(state, result)?;
+                        }
+                        lm_abi::OP_VM_REPLACE_PROCESS => {
+                            let process = pop(state)?;
+                            if !matches!(ctx.ty(process), BcType::Handle(_, _)) {
+                                return Err(fail(
+                                    "`Vm.ReplaceProcess` needs a process handle".to_string(),
+                                ));
+                            }
+                            let slot = pop(state)?;
+                            pop_expect(state, ctx.intern(BcType::Vm))?;
+                            let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
+                            if slot != slot_ty {
+                                return Err(fail("`Vm.ReplaceProcess` needs a Slot".to_string()));
                             }
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")
@@ -2118,6 +2201,18 @@ pub(crate) fn step(
                             let out = ctx.result_inst(image, error).map_err(&fail)?;
                             push(state, out)?;
                         }
+                        lm_abi::OP_VM_SNAPSHOT_VM => {
+                            let recv = pop(state)?;
+                            if ctx.ty(recv) != BcType::Vm {
+                                return Err(fail("`Vm.SnapshotVm` needs a Vm".to_string()));
+                            }
+                            let image = ctx.intern(BcType::VmSnapshot);
+                            let error = ctx
+                                .plain_inst(ctx.core.snapshot_error, "SnapshotError")
+                                .map_err(&fail)?;
+                            let out = ctx.result_inst(image, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
                         lm_abi::OP_VM_RESTORE => {
                             let snapshot = pop(state)?;
                             let recv = pop(state)?;
@@ -2137,10 +2232,28 @@ pub(crate) fn step(
                             push(state, out)?;
                         }
                         lm_abi::OP_VM_LOAD_SNAPSHOT => {
-                            // This build has no guest snapshot decoder.
-                            return Err(fail(
-                                "`Vm.LoadSnapshot` is not available in this build".to_string(),
-                            ));
+                            let bytes = pop(state)?;
+                            if ctx.ty(bytes) != BcType::Bytes {
+                                return Err(fail("`Vm.LoadSnapshot` needs Bytes".to_string()));
+                            }
+                            let image = ctx.intern(BcType::VmSnapshot);
+                            let error = ctx
+                                .plain_inst(ctx.core.snapshot_error, "SnapshotError")
+                                .map_err(&fail)?;
+                            let out = ctx.result_inst(image, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
+                        lm_abi::OP_VM_RESTORE_VM => {
+                            let image = pop(state)?;
+                            if ctx.ty(image) != BcType::VmSnapshot {
+                                return Err(fail("`Vm.RestoreVm` needs a VmSnapshot".to_string()));
+                            }
+                            let error = ctx
+                                .plain_inst(ctx.core.restore_error, "RestoreError")
+                                .map_err(&fail)?;
+                            let vm = ctx.intern(BcType::Vm);
+                            let out = ctx.result_inst(vm, error).map_err(&fail)?;
+                            push(state, out)?;
                         }
                         _ => unreachable!("every VmControl slot has a rule"),
                     }

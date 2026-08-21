@@ -214,20 +214,23 @@ fn the_header_rules_reject_precisely() {
     let mut bad = bytes.clone();
     bad[header] = 0x7f;
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Truncated);
-    // Zero machines leaves every heap byte outside the sections the
-    // header names. The zero-machine world itself is an admission
-    // rule, and `admission.rs` states it.
+    // A run selection cannot name a machine after the count becomes
+    // zero.
     let mut bad = bytes.clone();
     bad[header] = 0;
-    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Trailing);
-    // The root ordinal is zero in a canonical image. One image has one
-    // byte string, so the decoder owns that rule.
-    let mut bad = bytes.clone();
-    bad[header + 2] = 1;
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::SectionBounds);
+    let image_count = after_leb(&bytes, header);
+    let distinguished = after_leb(&bytes, image_count);
+    let full_vm = after_leb(&bytes, distinguished);
+    // A run image stores its distinguished run at machine ordinal
+    // zero. Admission owns this canonical layout rule.
+    let mut bad = bytes.clone();
+    bad[distinguished] = 2;
+    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Layout);
     // The module semantic hash names this program.
     let mut bad = bytes.clone();
-    bad[header + 3] ^= 1;
+    let module_hash = after_leb(&bytes, full_vm);
+    bad[module_hash] ^= 1;
     assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Code);
 }
 

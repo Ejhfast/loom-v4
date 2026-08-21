@@ -55,6 +55,8 @@ pub fn dump_image(world: &Image) -> String {
         world.format, world.abi_version, world.compiler_abi, world.verifier_version
     );
     let _ = writeln!(out, "module {}", hex(&world.module_semantic));
+    let _ = writeln!(out, "distinguished-run {:?}", world.distinguished);
+    let _ = writeln!(out, "full-VM {:?}", world.full_vm);
     let _ = writeln!(out, "result-type {}", hex(&world.result_type));
     let _ = writeln!(out, "{}", verdict(world));
     for (slot, hash) in &world.funcs {

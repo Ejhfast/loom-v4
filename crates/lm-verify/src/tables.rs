@@ -10,7 +10,7 @@ use super::*;
 /// One shared table error. No table names a function.
 fn terr(message: String) -> VerifyError {
     VerifyError {
-        func: u32::MAX,
+        func: None,
         message,
     }
 }

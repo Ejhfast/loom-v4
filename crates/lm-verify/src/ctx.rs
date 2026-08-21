@@ -37,6 +37,7 @@ impl<'m> Ctx<'m> {
             self.core.instance,
             self.core.slot,
             self.core.function_def,
+            self.core.class_def,
             self.core.dyn_value,
         ]
         .contains(&Some(class))

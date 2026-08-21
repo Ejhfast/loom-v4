@@ -72,7 +72,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 16 stores current late-bound slot targets in VM images.
 /// Version 18 stores installed code and module instances.
 /// Version 19 stores compiler interfaces with portable code.
-pub const FORMAT_VERSION: u32 = 20;
+/// Version 21 distinguishes typed run images from full VM images.
+pub const FORMAT_VERSION: u32 = 21;
 
 /// The section kinds, in canonical order.
 ///
@@ -394,7 +395,16 @@ pub struct Image {
     pub verifier_version: u32,
     /// The semantic hash of the program this world runs.
     pub module_semantic: [u8; 32],
-    /// The canonical content digest of the closed root machine result
+    /// The selected run for a typed run snapshot.
+    ///
+    /// A full VM snapshot has no selected run. The encoded value uses
+    /// one-based ordinals, so zero means `None`.
+    pub distinguished: Option<u32>,
+    /// The selected persistent VM for a full VM snapshot.
+    ///
+    /// A typed run snapshot has no full VM selection.
+    pub full_vm: Option<u32>,
+    /// The canonical content digest of the selected machine result
     /// type. `SnapshotImage.cast_result` compares it.
     ///
     /// The digest names a class by definition hash and an effect by
@@ -431,12 +441,14 @@ impl Image {
         self.machines.iter().filter(|m| m.is_proc).count()
     }
 
-    /// The state of the root machine.
+    /// The state of the distinguished machine.
     ///
     /// An editable image may hold no machine at all, so inspection of
     /// an invalid image stays total.
     pub fn root_state(&self) -> Option<ImageState> {
-        self.machines.first().map(|m| m.state)
+        self.distinguished
+            .and_then(|machine| self.machines.get(machine as usize))
+            .map(|machine| machine.state)
     }
 
     /// Estimate the retained storage of this decoded image.
@@ -648,7 +660,7 @@ impl SnapshotImage {
         self.origin
     }
 
-    /// The semantic type digest of the root machine result type.
+    /// The semantic type digest of the distinguished result type.
     pub fn result_type(&self) -> [u8; 32] {
         self.world.result_type
     }
@@ -672,7 +684,7 @@ impl SnapshotImage {
     /// `Type[T]` descriptor, which version 0.2 does not have. The host
     /// form below carries the same rule.
     pub fn cast_result(&self, expected: [u8; 32]) -> Result<&SnapshotImage, SnapshotTypeError> {
-        if self.world.result_type == expected {
+        if self.world.distinguished.is_some() && self.world.result_type == expected {
             Ok(self)
         } else {
             Err(SnapshotTypeError {

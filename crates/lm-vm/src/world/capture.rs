@@ -17,6 +17,13 @@ impl World {
         self.install_snapshot_result(vm, op, result);
     }
 
+    /// Capture one complete persistent VM image.
+    pub(super) fn take_vm_snapshot(&mut self, vm: VmId, op: u32, image: VmImageKey) {
+        let barrier = self.next_gate();
+        let result = self.capture_vm_snapshot(barrier, vm, image);
+        self.install_snapshot_result(vm, op, result);
+    }
+
     pub(super) fn install_snapshot_result(
         &mut self,
         vm: VmId,
@@ -78,6 +85,40 @@ impl World {
         }
     }
 
+    /// Load one external snapshot container for guest code.
+    pub(super) fn load_snapshot(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let bytes = args[0].as_obj().and_then(|reference| {
+            match self.machines[vm as usize].vm.heap.get(reference) {
+                Object::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            }
+        });
+        let Some(bytes) = bytes else {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::TypeMismatch,
+                "the argument is not a Bytes value",
+            );
+            return;
+        };
+        let built = match self.load_snapshot_bytes(bytes.as_slice()) {
+            Ok(image) => {
+                let slot = self.intern_image(image);
+                self.machines[vm as usize]
+                    .alloc(Object::NativeSnapshotRef { image: slot })
+                    .and_then(|value| self.make_instance(vm, self.core.result_ok, vec![value]))
+            }
+            Err(error) => self.machines[vm as usize]
+                .alloc(Object::Str(error.to_string().into()))
+                .and_then(|reason| {
+                    self.make_instance(vm, self.core.snapshot_bad_image, vec![reason])
+                })
+                .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error])),
+        };
+        self.reply_or_fault(vm, op, built);
+    }
+
     /// `sys.vm.Vm().restore(snap)`.
     ///
     /// A guest holds a snapshot as container bytes. Bytes this world
@@ -88,73 +129,8 @@ impl World {
         let Some(image_vm) = self.image_arg(vm, op, args[0]) else {
             return;
         };
-        // A snapshot value takes one of two shapes. A capture of this
-        // process names an admitted image of this world, so the
-        // restore reads the world back with no decode, no hash, and
-        // no lookup. A restored world states an opaque container
-        // instead, because a nested image stays opaque until its own
-        // restore admits it (specification 17.8).
-        enum Held {
-            Admitted(u32),
-            Container(std::sync::Arc<Vec<u8>>),
-        }
-        let found =
-            args[1]
-                .as_obj()
-                .and_then(|r| match self.machines[vm as usize].vm.heap.get(r) {
-                    Object::NativeSnapshotRef { image } => Some(Held::Admitted(*image)),
-                    Object::NativeSnapshot(bytes) => Some(Held::Container(bytes.clone())),
-                    _ => None,
-                });
-        let Some(held) = found else {
-            self.fault_caller(
-                vm,
-                op,
-                FaultCode::TypeMismatch,
-                "the argument is not a snapshot value",
-            );
+        let Some(image) = self.admitted_snapshot_arg(vm, op, args[1]) else {
             return;
-        };
-        let image = match held {
-            Held::Admitted(slot) => match self.image_at(slot) {
-                Some(image) => image,
-                None => {
-                    self.fault_caller(
-                        vm,
-                        op,
-                        FaultCode::MalformedState,
-                        "the snapshot value names no admitted image",
-                    );
-                    return;
-                }
-            },
-            Held::Container(bytes) => {
-                if bytes.len() < 32 {
-                    self.fault_caller(
-                        vm,
-                        op,
-                        FaultCode::BoundaryViolation,
-                        "the snapshot container is shorter than its frame",
-                    );
-                    return;
-                }
-                let hash = crate::snapshot::codec::container_hash(&bytes[..bytes.len() - 32]);
-                match self.trusted_image(&hash) {
-                    Some(image) => image,
-                    None => match self.load_snapshot_bytes(&bytes) {
-                        Ok(image) => image,
-                        Err(error) => {
-                            self.fault_caller(
-                                vm,
-                                op,
-                                FaultCode::BoundaryViolation,
-                                &format!("the snapshot image did not load: {error}"),
-                            );
-                            return;
-                        }
-                    },
-                }
-            }
         };
         let target = match self.prepare_run_target(vm, image_vm) {
             Some(target) => target,
@@ -217,6 +193,196 @@ impl World {
             }
         };
         self.reply_or_fault(vm, op, built);
+    }
+
+    /// Resolve one guest snapshot value to its admitted image.
+    fn admitted_snapshot_arg(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        value: Value,
+    ) -> Option<crate::snapshot::SnapshotImage> {
+        // A snapshot value takes one of two shapes. A capture of this
+        // process names an admitted image of this world, so the
+        // restore reads the world back with no decode, no hash, and
+        // no lookup. A restored world states an opaque container
+        // instead, because a nested image stays opaque until its own
+        // restore admits it (specification 17.8).
+        enum Held {
+            Admitted(u32),
+            Container(std::sync::Arc<Vec<u8>>),
+        }
+        let found = value
+            .as_obj()
+            .and_then(|r| match self.machines[vm as usize].vm.heap.get(r) {
+                Object::NativeSnapshotRef { image } => Some(Held::Admitted(*image)),
+                Object::NativeSnapshot(bytes) => Some(Held::Container(bytes.clone())),
+                _ => None,
+            });
+        let Some(held) = found else {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::TypeMismatch,
+                "the argument is not a snapshot value",
+            );
+            return None;
+        };
+        let image = match held {
+            Held::Admitted(slot) => match self.image_at(slot) {
+                Some(image) => image,
+                None => {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::MalformedState,
+                        "the snapshot value names no admitted image",
+                    );
+                    return None;
+                }
+            },
+            Held::Container(bytes) => {
+                if bytes.len() < 32 {
+                    self.fault_caller(
+                        vm,
+                        op,
+                        FaultCode::BoundaryViolation,
+                        "the snapshot container is shorter than its frame",
+                    );
+                    return None;
+                }
+                let hash = crate::snapshot::codec::container_hash(&bytes[..bytes.len() - 32]);
+                match self.trusted_image(&hash) {
+                    Some(image) => image,
+                    None => match self.load_snapshot_bytes(&bytes) {
+                        Ok(image) => image,
+                        Err(error) => {
+                            self.fault_caller(
+                                vm,
+                                op,
+                                FaultCode::BoundaryViolation,
+                                &format!("the snapshot image did not load: {error}"),
+                            );
+                            return None;
+                        }
+                    },
+                }
+            }
+        };
+        Some(image)
+    }
+
+    /// Restore one complete VM snapshot.
+    pub(super) fn restore_vm_snapshot(&mut self, vm: VmId, op: u32, args: Args<'_>) {
+        let Some(image) = self.admitted_snapshot_arg(vm, op, args[0]) else {
+            return;
+        };
+        let plan = match self.prepare_vm_restore(vm, &image) {
+            Ok(plan) => plan,
+            Err(crate::snapshot::RestoreFail::LimitExceeded) => {
+                let built = self
+                    .make_instance(vm, self.core.restore_limit_exceeded, vec![])
+                    .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error]));
+                self.reply_or_fault(vm, op, built);
+                return;
+            }
+            Err(crate::snapshot::RestoreFail::OtherProgram) => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::BoundaryViolation,
+                    "the snapshot is not a full VM image for this program",
+                );
+                return;
+            }
+        };
+        let reply = match self.prepare_vm_restore_reply(vm, plan.image) {
+            Ok(reply) => reply,
+            Err(code) => {
+                self.discard_vm_restore(vm, plan);
+                self.machines[vm as usize].set_fault(code, "", Some(op));
+                return;
+            }
+        };
+        if let Err(code) = self.check_reply(vm, reply.value) {
+            self.discard_restore_reply(vm, reply);
+            self.discard_vm_restore(vm, plan);
+            self.machines[vm as usize].set_fault(
+                code,
+                "the reply does not carry the type of its perform",
+                Some(op),
+            );
+            return;
+        }
+        if let Err(code) = self.reserve_restore_reply_slot(vm) {
+            self.discard_restore_reply(vm, reply);
+            self.discard_vm_restore(vm, plan);
+            self.machines[vm as usize].set_fault(code, "", Some(op));
+            return;
+        }
+        self.commit_vm_restore(plan);
+        self.install_prepared_restore_reply(vm, reply);
+    }
+
+    /// Build one successful full VM restore reply.
+    fn prepare_vm_restore_reply(
+        &mut self,
+        vm: VmId,
+        image: VmImageKey,
+    ) -> Result<PreparedRestoreReply, FaultCode> {
+        let class = self.core.result_ok.ok_or(FaultCode::MalformedState)?;
+        let handle = Object::NativeVm {
+            image: image.image,
+            generation: image.generation,
+        };
+        let mut fields = Vec::new();
+        fields
+            .try_reserve_exact(1)
+            .map_err(|_| FaultCode::HeapLimit)?;
+        fields.push(Value::Unit);
+        let mut reply = Object::Instance {
+            class,
+            fields,
+            env: lm_value::Witness::EMPTY,
+        };
+        let bytes = handle
+            .cost()
+            .checked_add(reply.cost())
+            .ok_or(FaultCode::HeapLimit)?;
+        if self.machines[vm as usize]
+            .vm
+            .heap
+            .would_exceed_batch(bytes, 2)
+        {
+            self.machines[vm as usize].collect_garbage(&[]);
+            if self.machines[vm as usize]
+                .vm
+                .heap
+                .would_exceed_batch(bytes, 2)
+            {
+                return Err(FaultCode::HeapLimit);
+            }
+        }
+        let handle = self.machines[vm as usize]
+            .vm
+            .heap
+            .try_alloc(handle)
+            .map_err(|_| FaultCode::HeapLimit)?;
+        let Object::Instance { fields, .. } = &mut reply else {
+            return Err(FaultCode::MalformedState);
+        };
+        fields[0] = Value::Obj(handle);
+        match self.machines[vm as usize].vm.heap.try_alloc(reply) {
+            Ok(reply) => Ok(PreparedRestoreReply {
+                value: Value::Obj(reply),
+                handle,
+                reply,
+            }),
+            Err(_) => {
+                self.machines[vm as usize].vm.heap.free(handle);
+                Err(FaultCode::HeapLimit)
+            }
+        }
     }
 
     /// Build the successful restore reply without partial allocation.

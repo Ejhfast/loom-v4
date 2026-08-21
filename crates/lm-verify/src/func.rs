@@ -30,7 +30,11 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_ANSWER
             | lm_abi::OP_VM_REJECT
             | lm_abi::OP_VM_SERVE_TCP_STREAM => 3,
-            lm_abi::OP_VM_ACTIVATE_DEF | lm_abi::OP_VM_REPLACE_FUNCTION => 3,
+            lm_abi::OP_VM_ACTIVATE_DEF
+            | lm_abi::OP_VM_REPLACE_FUNCTION
+            | lm_abi::OP_VM_REPLACE_CLASS
+            | lm_abi::OP_VM_REPLACE_VALUE
+            | lm_abi::OP_VM_REPLACE_PROCESS => 3,
             lm_abi::OP_PROC_RUN
             | lm_abi::OP_PROC_CLOSE
             | lm_abi::OP_PROC_DONE
@@ -43,7 +47,10 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             lm_abi::OP_PROC_SEND => 2,
             lm_abi::OP_PROC_SPAWN => 3,
             lm_abi::OP_VM_SNAPSHOT_SELF => 0,
-            lm_abi::OP_VM_SNAPSHOT_HELD | lm_abi::OP_VM_LOAD_SNAPSHOT => 1,
+            lm_abi::OP_VM_SNAPSHOT_HELD
+            | lm_abi::OP_VM_LOAD_SNAPSHOT
+            | lm_abi::OP_VM_SNAPSHOT_VM
+            | lm_abi::OP_VM_RESTORE_VM => 1,
             lm_abi::OP_VM_RESTORE
             | lm_abi::OP_VM_RESOURCE
             | lm_abi::OP_VM_SERVE_FILE
@@ -56,6 +63,7 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_WAIT_CHOOSE => 2,
             lm_abi::OP_VM_INSTALL
             | lm_abi::OP_VM_INSTANCE_FUNCTION
+            | lm_abi::OP_VM_INSTANCE_CLASS
             | lm_abi::OP_VM_INSTANCE_SLOT
             | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => 2,
             lm_abi::OP_VM_INSTALL_WITH => 3,

@@ -33,8 +33,9 @@ pub use sha::{sha256, sha256_hex};
 /// verified code installation and activation controls. Version 12
 /// adds the explicit runtime compiler operation. Version 13 adds
 /// public syntax parsing and syntax compilation. Version 14 adds the
-/// dynamic result value.
-pub const ABI_VERSION: u32 = 14;
+/// dynamic result value. Version 15 completes code slot and VM image
+/// controls.
+pub const ABI_VERSION: u32 = 15;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -1613,9 +1614,15 @@ pub const OP_VM_INSTALL_WITH: OpSlot = 79;
 pub const OP_COMPILER_COMPILE: OpSlot = 80;
 pub const OP_COMPILER_COMPILE_SYNTAX: OpSlot = 81;
 pub const OP_REFLECT_PARSE_SYNTAX: OpSlot = 82;
+pub const OP_VM_INSTANCE_CLASS: OpSlot = 83;
+pub const OP_VM_REPLACE_CLASS: OpSlot = 84;
+pub const OP_VM_REPLACE_VALUE: OpSlot = 85;
+pub const OP_VM_REPLACE_PROCESS: OpSlot = 86;
+pub const OP_VM_SNAPSHOT_VM: OpSlot = 87;
+pub const OP_VM_RESTORE_VM: OpSlot = 88;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 83] = [
+pub const OPS: [OpDef; 89] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -1945,7 +1952,7 @@ pub const OPS: [OpDef; 83] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[T,R: FileHandle | TcpResource](Run[T], R) -> ResourceHandle",
+        schema: "[T,R: FileHandle | TcpResource | TlsStream](Run[T], R) -> ResourceHandle",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2346,7 +2353,7 @@ pub const OPS: [OpDef; 83] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](Vm, FunctionDef[A,T], control A) -> Run[T]",
+        schema: "[A,T](Vm, FunctionDef[A,T], control A) -> Result[Run[T], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2402,6 +2409,60 @@ pub const OPS: [OpDef; 83] = [
         reply: AbiType::SYNTAX_PARSE,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Vm",
+        member: "InstanceClass",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Instance, String) -> Result[ClassDef, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ReplaceClass",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Vm, Slot, ClassDef) -> Result[(), CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ReplaceValue",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T](Vm, Slot, T) -> Result[(), CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ReplaceProcess",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[M,R](Vm, Slot, Handle[M,R]) -> Result[(), CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "SnapshotVm",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Vm) -> Result[VmSnapshot, SnapshotError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "RestoreVm",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(VmSnapshot) -> Result[Vm, RestoreError]",
+        snapshot: SnapshotClass::MachineState,
     },
 ];
 

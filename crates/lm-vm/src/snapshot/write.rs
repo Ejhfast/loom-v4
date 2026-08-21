@@ -52,10 +52,9 @@ pub struct CutReport {
     pub set: Vec<VmId>,
     /// The canonical machine order: ordinal `i` names `order[i]`.
     ///
-    /// The order is a breadth-first walk from the root over the
-    /// machine references of the captured state. It never reads a
-    /// scheduler identifier, so two worlds with equal shapes produce
-    /// equal ordinals.
+    /// A run cut starts with its distinguished run. A full VM cut
+    /// starts with its runs in ascending creation order. Both forms
+    /// then use breadth-first reference order.
     pub order: Vec<VmId>,
     /// The one mailbox acceptance cut of this barrier.
     pub cut: u64,
@@ -87,8 +86,13 @@ impl World {
     /// The call encodes nothing. `capture_snapshot` adds the
     /// capturability rules and the encoding step.
     pub fn run_cut(&mut self, barrier: u32, root: VmId) -> Result<CutReport, CutError> {
+        self.run_cut_many(barrier, &[root])
+    }
+
+    /// Run one consistent cut from an ordered set of roots.
+    fn run_cut_many(&mut self, barrier: u32, roots: &[VmId]) -> Result<CutReport, CutError> {
         let mut set: Vec<VmId> = Vec::new();
-        let mut queue: Vec<VmId> = vec![root];
+        let mut queue: Vec<VmId> = roots.iter().rev().copied().collect();
         // Steps 1 and 2: stop the reachable machines and close the set
         // over the machine references the stopped state holds.
         while let Some(vm) = queue.pop() {
@@ -129,7 +133,7 @@ impl World {
                 continue;
             }
             if let Some(kind) = self.live_attachment_kind(vm) {
-                let path = self.machine_path(root, vm);
+                let path = self.machine_path_many(roots, vm);
                 self.release_cut(&set, true);
                 return Err(CutError::ResourceActive { path, kind });
             }
@@ -141,7 +145,7 @@ impl World {
                 }
             }
         }
-        let order = self.machine_order(root);
+        let order = self.machine_order_many(roots);
         debug_assert_eq!(
             order.len(),
             set.len(),
@@ -177,7 +181,84 @@ impl World {
         root: VmId,
         self_root: bool,
     ) -> Result<SnapshotImage, SnapshotFail> {
-        let report = match self.run_cut(barrier, root) {
+        self.capture_selected(barrier, &[root], Some(root), None, self_root, root)
+    }
+
+    /// Capture one complete persistent VM image.
+    pub(crate) fn capture_vm_snapshot(
+        &mut self,
+        barrier: u32,
+        holder: VmId,
+        target: VmImageKey,
+    ) -> Result<SnapshotImage, SnapshotFail> {
+        let live = self
+            .vm_images
+            .get(target.image as usize)
+            .is_some_and(|image| image.live && image.generation == target.generation);
+        if !live {
+            return Err(SnapshotFail::Fault(
+                FaultCode::InvalidVmState,
+                "the VM image handle is stale".to_string(),
+            ));
+        }
+        let mut roots: Vec<VmId> = self
+            .machines
+            .iter()
+            .enumerate()
+            .filter_map(|(vm, machine)| {
+                (machine.image == Some(target) && machine.vm.state != MachineState::Empty)
+                    .then_some(vm as VmId)
+            })
+            .collect();
+        let image = &mut self.vm_images[target.image as usize];
+        for slot in &image.slots {
+            if let crate::machine::ImageSlotTarget::Process { proc, generation } = slot {
+                let live = self.machines.get(*proc as usize).is_some_and(|machine| {
+                    machine.generation == *generation && machine.vm.state != MachineState::Empty
+                });
+                if live && !roots.contains(proc) {
+                    roots.push(*proc);
+                }
+            }
+        }
+        let value_roots: Vec<ObjRef> = image
+            .slots
+            .iter()
+            .filter_map(|slot| match slot {
+                crate::machine::ImageSlotTarget::Value(Value::Obj(reference)) => Some(*reference),
+                _ => None,
+            })
+            .collect();
+        let order = lm_graph::snapshot_ordinals(&mut image.heap, &value_roots, &image.config.graph)
+            .map_err(|code| {
+                SnapshotFail::Fault(code, "a VM value-slot graph passed a limit".to_string())
+            })?;
+        for reference in order {
+            if let Object::NativeHandle { proc, generation } = image.heap.get(reference) {
+                let live = self.machines.get(*proc as usize).is_some_and(|machine| {
+                    machine.generation == *generation && machine.vm.state != MachineState::Empty
+                });
+                if live && !roots.contains(proc) {
+                    roots.push(*proc);
+                }
+            }
+        }
+        roots.sort_unstable();
+        self.capture_selected(barrier, &roots, None, Some(target), false, holder)
+    }
+
+    /// Capture one selected run or one selected persistent VM.
+    #[allow(clippy::too_many_arguments)]
+    fn capture_selected(
+        &mut self,
+        barrier: u32,
+        roots: &[VmId],
+        distinguished: Option<VmId>,
+        full_vm: Option<VmImageKey>,
+        self_root: bool,
+        limit_holder: VmId,
+    ) -> Result<SnapshotImage, SnapshotFail> {
+        let report = match self.run_cut_many(barrier, roots) {
             Ok(report) => report,
             Err(CutError::ResourceActive { path, kind }) => {
                 return Err(SnapshotFail::ResourceActive { path, kind })
@@ -205,7 +286,7 @@ impl World {
         // The encoder needs more than the cut does: a captured machine
         // must sit at a boundary the image can name.
         for vm in report.set.iter().copied() {
-            if let Err(message) = self.capturable(vm, root, self_root) {
+            if let Err(message) = self.capturable(vm, distinguished, self_root) {
                 self.release_cut(&report.set, true);
                 return Err(SnapshotFail::Fault(
                     FaultCode::InvalidVmState,
@@ -214,12 +295,12 @@ impl World {
             }
         }
         // Step 6: encode, now that every preflight succeeded.
-        let built = self.build_image(&report, self_root);
+        let built = self.build_image(&report, distinguished, full_vm, self_root);
         // Step 7: resume the original world, whatever the encoding
         // answered.
         self.release_cut(&report.set, true);
         let image = built?;
-        let limit = self.snapshot_byte_limit(root);
+        let limit = self.snapshot_byte_limit(limit_holder);
         // The cut copies a stopped verified world, so the admission
         // invariant holds by construction (specification section 7.2).
         // The constructor stays inside the snapshot module, so no host
@@ -256,16 +337,11 @@ impl World {
         self.machines[vm as usize].config.snapshot_bytes
     }
 
-    /// The canonical machine order of one closed set.
-    ///
-    /// The walk is breadth-first from the root over the machine
-    /// references of each captured heap, in canonical object order. It
-    /// reads no machine identifier, so the ordinals depend on the
-    /// world shape alone.
-    fn machine_order(&mut self, root: VmId) -> Vec<VmId> {
+    /// Return one deterministic breadth-first order from many roots.
+    fn machine_order_many(&mut self, roots: &[VmId]) -> Vec<VmId> {
         let mut order: Vec<VmId> = Vec::new();
         let mut queue: VecDeque<VmId> = VecDeque::new();
-        queue.push_back(root);
+        queue.extend(roots.iter().copied());
         while let Some(vm) = queue.pop_front() {
             if order.contains(&vm) {
                 continue;
@@ -292,11 +368,12 @@ impl World {
     /// The walk is the canonical breadth-first order, so the path
     /// names machines the way the image would name them. It never
     /// reports a scheduler identifier.
-    pub(crate) fn machine_path(&mut self, root: VmId, target: VmId) -> Vec<u32> {
+    /// Return one machine path from an ordered set of cut roots.
+    fn machine_path_many(&mut self, roots: &[VmId], target: VmId) -> Vec<u32> {
         let mut parent: std::collections::BTreeMap<VmId, VmId> = std::collections::BTreeMap::new();
-        let mut order: Vec<VmId> = vec![root];
+        let mut order: Vec<VmId> = roots.to_vec();
         let mut queue: VecDeque<VmId> = VecDeque::new();
-        queue.push_back(root);
+        queue.extend(roots.iter().copied());
         while let Some(vm) = queue.pop_front() {
             if !self.is_live_machine(vm) {
                 continue;
@@ -317,6 +394,9 @@ impl World {
                 .iter()
                 .position(|machine| *machine == vm)
                 .expect("the closed cut contains every path machine") as u32
+        };
+        let Some(_) = order.iter().position(|machine| *machine == target) else {
+            return Vec::new();
         };
         let mut path = vec![ordinal(target)];
         let mut cur = target;
@@ -343,8 +423,13 @@ impl World {
     /// activation state lives outside its record, so the copy waits
     /// for the boundary. The root of a receiverless self snapshot is
     /// the one exception (specification 17.6).
-    fn capturable(&self, vm: VmId, root: VmId, self_root: bool) -> Result<(), String> {
-        let self_snapshot_root = self_root && vm == root;
+    fn capturable(
+        &self,
+        vm: VmId,
+        distinguished: Option<VmId>,
+        self_root: bool,
+    ) -> Result<(), String> {
+        let self_snapshot_root = self_root && distinguished == Some(vm);
         if self_snapshot_root {
             return Ok(());
         }
@@ -358,12 +443,20 @@ impl World {
     }
 
     /// Build one canonical image from the stopped world.
-    fn build_image(&mut self, report: &CutReport, self_root: bool) -> Result<Image, SnapshotFail> {
-        let root = report.order[0];
+    fn build_image(
+        &mut self,
+        report: &CutReport,
+        distinguished: Option<VmId>,
+        full_vm: Option<VmImageKey>,
+        self_root: bool,
+    ) -> Result<Image, SnapshotFail> {
         let ordinal_of = |vm: VmId| -> Option<u32> {
             report.order.iter().position(|m| *m == vm).map(|i| i as u32)
         };
         let mut image_order: Vec<VmImageKey> = Vec::new();
+        if let Some(key) = full_vm {
+            self.append_image_key(key, &mut image_order)?;
+        }
         for vm in report.order.iter().copied() {
             if let Some(key) = self.machines[vm as usize].image {
                 self.append_image_key(key, &mut image_order)?;
@@ -432,9 +525,14 @@ impl World {
             }
         }
         let mut machines: Vec<ImageMachine> = Vec::new();
-        for (idx, vm) in report.order.iter().copied().enumerate() {
-            let machine =
-                self.build_machine(vm, idx == 0, self_root, &ordinal_of, &image_ordinal)?;
+        for vm in report.order.iter().copied() {
+            let machine = self.build_machine(
+                vm,
+                distinguished == Some(vm),
+                self_root,
+                &ordinal_of,
+                &image_ordinal,
+            )?;
             for entry in &machine.objects {
                 match &entry.object {
                     Object::Instance { class, .. } => {
@@ -495,11 +593,12 @@ impl World {
             .map(|slot| (slot, class_hashes[slot as usize]))
             .collect();
         let semantic = identity.semantic_hash;
-        // The header names the result type of the root machine, so a
-        // tool reads it without walking the machine records. The
-        // loader derives the same digest from the machine witness and
-        // proves the two agree.
-        let result_type = self.machine_result_digest(root, &class_hashes)?;
+        // The header names the selected run result type. A full VM
+        // snapshot has no selected run and records zeros.
+        let result_type = match distinguished {
+            Some(machine) => self.machine_result_digest(machine, &class_hashes)?,
+            None => [0u8; 32],
+        };
         let mut installations = Vec::new();
         installations
             .try_reserve_exact(self.installations.len())
@@ -518,6 +617,8 @@ impl World {
             compiler_abi: lm_bytecode::identity::COMPILER_ABI_VERSION,
             verifier_version: lm_verify::VERIFIER_VERSION,
             module_semantic: semantic,
+            distinguished: distinguished.and_then(ordinal_of),
+            full_vm: full_vm.and_then(image_ordinal),
             result_type,
             funcs,
             classes,

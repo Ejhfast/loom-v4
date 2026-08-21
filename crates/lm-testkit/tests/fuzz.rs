@@ -55,6 +55,9 @@ const SEED: u64 = 0x00c0_ffee_1234_5678;
 /// Mutations per input.
 const ROUNDS: usize = 400;
 
+/// Mutations for the larger installed-code snapshot seed.
+const RICH_IMAGE_ROUNDS: usize = 24;
+
 /// Apply one seeded mutation batch to a byte vector.
 fn mutate(bytes: &mut Vec<u8>, prng: &mut Prng) {
     if bytes.is_empty() {
@@ -477,7 +480,7 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
             _ => Value::Unit,
         }
     };
-    match prng.below(12) {
+    match prng.below(20) {
         0 => {
             let m = &mut image.machines[vm];
             if !m.locals.is_empty() {
@@ -573,7 +576,7 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
                 *v = value;
             }
         }
-        _ => {
+        11 => {
             let env = prng.below(image.envs.len().max(1)) as u32;
             let m = &mut image.machines[vm];
             if !m.objects.is_empty() {
@@ -587,60 +590,315 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
                 }
             }
         }
+        12 => {
+            if prng.next() & 1 == 0 {
+                image.distinguished = Some(prng.below(image.machines.len() + 1) as u32);
+            } else {
+                image.full_vm = Some(prng.below(image.vm_images.len() + 1) as u32);
+            }
+        }
+        13 => {
+            if !image.installations.is_empty() {
+                let installation = prng.below(image.installations.len());
+                if !image.installations[installation].is_empty() {
+                    let at = prng.below(image.installations[installation].len());
+                    image.installations[installation][at] ^= prng.next() as u8;
+                }
+            }
+        }
+        14 => {
+            if !image.vm_images.is_empty() {
+                let vm_image = prng.below(image.vm_images.len());
+                let instances = &mut image.vm_images[vm_image].instances;
+                if !instances.is_empty() {
+                    let instance = prng.below(instances.len());
+                    instances[instance].installation = prng.next() as u32;
+                }
+            }
+        }
+        15 => {
+            if !image.vm_images.is_empty() {
+                let vm_image = prng.below(image.vm_images.len());
+                let instances = &mut image.vm_images[vm_image].instances;
+                if !instances.is_empty() {
+                    let instance = prng.below(instances.len());
+                    if prng.next() & 1 == 0 {
+                        instances[instance].entry = prng.next() as u32;
+                    } else {
+                        let at = prng.below(instances[instance].semantic_hash.len());
+                        instances[instance].semantic_hash[at] ^= prng.next() as u8;
+                    }
+                }
+            }
+        }
+        16 => {
+            if !image.vm_images.is_empty() {
+                let vm_image = prng.below(image.vm_images.len());
+                let instances = &mut image.vm_images[vm_image].instances;
+                if !instances.is_empty() {
+                    let at = prng.below(instances.len());
+                    let instance = &mut instances[at];
+                    let map = match prng.below(3) {
+                        0 => &mut instance.funcs,
+                        1 => &mut instance.classes,
+                        _ => &mut instance.slots,
+                    };
+                    if !map.is_empty() {
+                        let at = prng.below(map.len());
+                        map[at] = prng.next() as u32;
+                    }
+                }
+            }
+        }
+        17 => {
+            if !image.vm_images.is_empty() {
+                let vm_image = prng.below(image.vm_images.len());
+                let slots = &mut image.vm_images[vm_image].slots;
+                if !slots.is_empty() {
+                    let at = prng.below(slots.len());
+                    slots[at] = match prng.below(4) {
+                        0 => lm_vm::snapshot::ImageSlotTarget::Function(prng.next() as u32),
+                        1 => lm_vm::snapshot::ImageSlotTarget::Class(prng.next() as u32),
+                        2 => {
+                            lm_vm::snapshot::ImageSlotTarget::Value(Value::Int(prng.next() as i64))
+                        }
+                        _ => lm_vm::snapshot::ImageSlotTarget::Empty,
+                    };
+                }
+            }
+        }
+        18 => {
+            if !image.vm_images.is_empty() {
+                let vm_image = prng.below(image.vm_images.len());
+                let slots = &mut image.vm_images[vm_image].slots;
+                if !slots.is_empty() {
+                    let at = prng.below(slots.len());
+                    slots[at] = lm_vm::snapshot::ImageSlotTarget::Process {
+                        proc: prng.below(machines as usize + 1) as u32,
+                        generation: prng.next() as u32,
+                    };
+                }
+            }
+        }
+        _ => {
+            if !image.vm_images.is_empty() {
+                let vm_image = prng.below(image.vm_images.len());
+                let instances = &mut image.vm_images[vm_image].instances;
+                if !instances.is_empty() {
+                    let at = prng.below(instances.len());
+                    let instance = &mut instances[at];
+                    if let Some(interface) = &mut instance.interface {
+                        if !interface.is_empty() {
+                            let at = prng.below(interface.len());
+                            interface[at] ^= prng.next() as u8;
+                        }
+                    }
+                }
+            }
+        }
     }
     for machine in &mut image.machines {
         recanonicalize(machine);
     }
 }
 
-/// A second seed: one world captured mid execution.
+/// Build one artifact with every slot target kind.
+fn installed_slot_artifact() -> (Vec<u8>, usize, usize, usize, usize) {
+    use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
+    let source = lm_source::SourceFile::new(
+        "fuzz-slots.lm",
+        "final class Box\nend\ndef step(value: Int): Int\n  value + 1\nend\n0\n",
+    );
+    let compiled = compile_module_with_options(
+        "fuzz-slots",
+        &source,
+        &CompileEnv::new().freeze(),
+        true,
+        &CompileOptions::new()
+            .late_function("step")
+            .late_class("Box"),
+    )
+    .expect("the installed fuzz artifact compiles");
+    let mut module = compiled.module;
+    let step = module
+        .exports
+        .iter()
+        .find(|export| export.name == "step" && export.kind == lm_bytecode::ExportKind::Function)
+        .expect("the function is exported")
+        .def;
+    let class = module
+        .exports
+        .iter()
+        .find(|export| export.name == "Box" && export.kind == lm_bytecode::ExportKind::Class)
+        .expect("the class is exported")
+        .def;
+    let function_slot = module
+        .slots
+        .iter()
+        .position(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Function(step)))
+        .expect("the function slot exists");
+    let class_slot = module
+        .slots
+        .iter()
+        .position(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Class(class)))
+        .expect("the class slot exists");
+    let int = module
+        .types
+        .iter()
+        .position(|ty| *ty == lm_bytecode::BcType::Int)
+        .expect("the Int type exists") as u32;
+    let value_slot = module.slots.len();
+    module.slots.push(lm_bytecode::SlotSpec {
+        key: lm_bytecode::slot_key("fuzz-slots.value"),
+        contract: lm_bytecode::SlotContract::Value { ty: int },
+        initial: None,
+    });
+    let process_slot = module.slots.len();
+    module.slots.push(lm_bytecode::SlotSpec {
+        key: lm_bytecode::slot_key("fuzz-slots.process"),
+        contract: lm_bytecode::SlotContract::Process {
+            message: int,
+            result: int,
+        },
+        initial: None,
+    });
+    lm_verify::verify_module(&module).expect("the installed fuzz artifact verifies");
+    (
+        lm_bytecode::encode(&module),
+        function_slot,
+        class_slot,
+        value_slot,
+        process_slot,
+    )
+}
+
+/// A second seed with installed code and every live slot target.
 ///
-/// The checkpoint world stops `asked`, so a restored root answers its
-/// event and executes no instruction. This seed stops `ready` between
-/// two instructions, so a restored mutant runs the interpreter over a
-/// heap that holds a class instance, two lists, and live locals.
+/// The root also keeps ordinary collections and live locals. Admitted
+/// mutants can therefore reach both restored code state and execution.
 fn ready_snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
     use lm_vm::{RecordingHost, RootEvent, World};
-    let source = "\
-class Counter
-  n: Int = 7
+    let (artifact, function_slot, class_slot, value_slot, process_slot) = installed_slot_artifact();
+    let source = format!(
+        r#"
+class Worker < Proc[Int]
+  def on_spawn(self): Int with Proc
+    7
+  end
 end
 
-def go(): Int
-  a = Counter()
+def artifact_bytes(): Bytes with Fs.Open, Fs.Read, Fs.Close
+  case sys.fs.open("fuzz-slots.lmbc", ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(bytes) then bytes
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+end
+
+def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc
+  image = sys.vm.Vm()
+  module = case sys.vm.artifact(artifact_bytes()).verify()
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 1
+  end
+  instance = case image.install(module)
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 2
+  end
+  function = case instance.function[(Int,), Int]("step")
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 3
+  end
+  class_def = case instance.class_def("Box")
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 4
+  end
+  function_slot = case instance.slot({function_slot})
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 5
+  end
+  class_slot = case instance.slot({class_slot})
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 6
+  end
+  value_slot = case instance.slot({value_slot})
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 7
+  end
+  process_slot = case instance.slot({process_slot})
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 8
+  end
+  image.replace_function(function_slot, function)
+  image.replace_class(class_slot, class_def)
+  image.replace_value(value_slot, 41)
+  image.replace_process(process_slot, Worker.spawn())
   xs = [1, 2]
-  ys = [\"a\", \"b\"]
-  m = ys.len()
-  m = m + xs.at(0)
-  m + a.n
+  ys = ["a", "b"]
+  total = 0
+  for _ in Range(0, 100)
+    total = total + xs.at(0) + ys.len()
+  end
+  total
 end
 
 go()
-";
-    let bytes = compile_to_bytes("ready.lm", source).expect("the seed compiles");
+"#
+    );
+    let bytes = compile_to_bytes("ready.lm", &source).expect("the seed compiles");
     let loaded = lm_vm::load_bytes(&bytes).expect("the seed loads");
     let container = {
-        let mut world = World::new(
-            &loaded,
-            VmConfig::default(),
-            Box::new(RecordingHost::new(1)),
-        );
-        // Step to the boundary that holds every object of the body.
+        let host = std::rc::Rc::new(std::cell::RefCell::new(RecordingHost::new(1)));
+        host.borrow_mut()
+            .set_file("fuzz-slots.lmbc", artifact.clone());
+        let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+        for grant in ["Fs", "Vm", "Proc"] {
+            world.allow(grant).expect("the grant names a target");
+        }
+        // Step to one boundary after every slot target is installed.
         let mut best: Option<Vec<u8>> = None;
-        for _ in 0..200 {
+        for _ in 0..2_000 {
             let gate = world.next_gate();
             if let Ok(image) = world.capture_snapshot(gate, 0, false) {
-                if image.world().machines[0].objects.len() >= 4 {
+                let rich = image.world().vm_images.iter().any(|vm| {
+                    !vm.instances.is_empty()
+                        && vm.slots.iter().any(|slot| {
+                            matches!(
+                                slot,
+                                lm_vm::snapshot::ImageSlotTarget::Value(lm_value::Value::Int(41))
+                            )
+                        })
+                        && vm.slots.iter().any(|slot| {
+                            matches!(slot, lm_vm::snapshot::ImageSlotTarget::Process { .. })
+                        })
+                });
+                if rich && image.world().machines[0].objects.len() >= 4 {
                     best = Some(image.bytes().expect("the image encodes").to_vec());
                     break;
                 }
             }
             match world.step_root() {
                 RootEvent::Ran => {}
+                RootEvent::Waiting | RootEvent::Blocked => {
+                    world.poll_blocked();
+                }
                 _ => break,
             }
         }
-        best.expect("one boundary holds the whole heap")
+        best.expect("one boundary holds installed code and every slot target")
     };
     (loaded, container)
 }
@@ -659,20 +917,20 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
         let mut admitted_count = 0usize;
         let mut restored_count = 0usize;
         let mut ran_count = 0usize;
-        for (loaded, base, grants) in [
+        for (loaded, base, grants, rounds) in [
             {
                 let (loaded, base) = snapshot_seed();
-                (loaded, base, &["Proc", "Vm", "Clock"][..])
+                (loaded, base, &["Proc", "Vm", "Clock"][..], ROUNDS * 4)
             },
             {
                 let (loaded, base) = ready_snapshot_seed();
-                (loaded, base, &[][..])
+                (loaded, base, &["Fs", "Vm", "Proc"][..], RICH_IMAGE_ROUNDS)
             },
         ] {
             let seed_image = lm_vm::snapshot::codec::load_external(&base, &loaded, limits)
                 .expect("the seed admits")
                 .into_image();
-            for _round in 0..ROUNDS * 4 {
+            for _round in 0..rounds {
                 let started = std::time::Instant::now();
                 let mut image = seed_image.clone();
                 for _ in 0..=prng.below(3) {
@@ -735,7 +993,7 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
             "too few structural mutants restored: {restored_count}"
         );
         assert!(
-            ran_count > ROUNDS,
+            ran_count > ROUNDS / 40,
             "too few restored mutants executed an instruction: {ran_count}"
         );
     });

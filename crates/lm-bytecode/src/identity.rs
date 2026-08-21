@@ -90,8 +90,9 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 25 renames the two guest snapshot types. Version 26 adds
 /// stable slot contracts and specialized slot instructions. Version
 /// 27 removes portable process targets from slot metadata. Version 28
-/// adds dynamic result and public syntax instructions.
-pub const COMPILER_ABI_VERSION: u32 = 28;
+/// adds dynamic result and public syntax instructions. Version 29
+/// adds complete code slot and VM image controls.
+pub const COMPILER_ABI_VERSION: u32 = 29;
 
 /// The refinement work budget of one component.
 ///

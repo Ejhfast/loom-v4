@@ -20,7 +20,7 @@ use lm_value::{ObjRef, TypeEnvId, Value, Witness};
 
 /// One complete restore that is ready for commit.
 pub(crate) struct RestorePlan {
-    target: VmId,
+    target: Option<VmId>,
     restorer: VmId,
     machines: Vec<Machine>,
     types: TypeImportPlan,
@@ -42,6 +42,13 @@ struct PreparedImages {
     replacement: Option<(u32, VmImageRecord)>,
 }
 
+/// One prepared full VM restore and its reserved registry entries.
+pub(crate) struct VmRestorePlan {
+    restore: RestorePlan,
+    pub(crate) image: VmImageKey,
+    target: Option<VmId>,
+}
+
 impl World {
     /// Restore one admitted image and return its root identifier.
     pub fn restore_image(
@@ -51,7 +58,9 @@ impl World {
         admitted: &SnapshotImage,
     ) -> Result<VmId, RestoreFail> {
         let plan = self.prepare_restore(restorer, target, admitted)?;
-        Ok(self.commit_restore(plan))
+        Ok(self
+            .commit_restore(plan)
+            .expect("a typed restore has one distinguished machine"))
     }
 
     /// Build one restore without changing semantic world state.
@@ -59,6 +68,101 @@ impl World {
         &mut self,
         restorer: VmId,
         target: VmId,
+        admitted: &SnapshotImage,
+    ) -> Result<RestorePlan, RestoreFail> {
+        let image = admitted.world();
+        if image.distinguished != Some(0) || image.full_vm.is_some() {
+            return Err(RestoreFail::OtherProgram);
+        }
+        let target_image = self
+            .machines
+            .get(target as usize)
+            .and_then(|machine| machine.image);
+        let reused_image = target_image.and_then(|_| image.machines[0].image);
+        self.prepare_restore_inner(
+            restorer,
+            Some(target),
+            target_image,
+            reused_image,
+            true,
+            admitted,
+        )
+    }
+
+    /// Prepare one full VM restore without exposing a partial image.
+    pub(crate) fn prepare_vm_restore(
+        &mut self,
+        restorer: VmId,
+        admitted: &SnapshotImage,
+    ) -> Result<VmRestorePlan, RestoreFail> {
+        let image = admitted.world();
+        let Some(source_image) = image.full_vm else {
+            return Err(RestoreFail::OtherProgram);
+        };
+        if image.distinguished.is_some() {
+            return Err(RestoreFail::OtherProgram);
+        }
+        let target_image = self
+            .new_vm_image(restorer)
+            .ok_or(RestoreFail::LimitExceeded)?;
+        let target = if image.machines.is_empty() {
+            None
+        } else {
+            match self.prepare_run_target(restorer, target_image) {
+                Some(target) => Some(target),
+                None => {
+                    self.rollback_vm_image(target_image);
+                    return Err(RestoreFail::LimitExceeded);
+                }
+            }
+        };
+        match self.prepare_restore_inner(
+            restorer,
+            target,
+            Some(target_image),
+            Some(source_image),
+            false,
+            admitted,
+        ) {
+            Ok(restore) => Ok(VmRestorePlan {
+                restore,
+                image: target_image,
+                target,
+            }),
+            Err(error) => {
+                if let Some(target) = target {
+                    self.rollback_run_target(restorer, target);
+                }
+                self.rollback_vm_image(target_image);
+                Err(error)
+            }
+        }
+    }
+
+    /// Cancel one prepared full VM restore.
+    pub(crate) fn discard_vm_restore(&mut self, restorer: VmId, plan: VmRestorePlan) {
+        if let Some(target) = plan.target {
+            self.rollback_run_target(restorer, target);
+        }
+        self.rollback_vm_image(plan.image);
+    }
+
+    /// Commit one prepared full VM restore.
+    pub(crate) fn commit_vm_restore(&mut self, plan: VmRestorePlan) -> VmImageKey {
+        let image = plan.image;
+        let _ = self.commit_restore(plan.restore);
+        image
+    }
+
+    /// Build one restore for a selected machine or a complete VM.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_restore_inner(
+        &mut self,
+        restorer: VmId,
+        target: Option<VmId>,
+        target_image: Option<VmImageKey>,
+        reused_image: Option<u32>,
+        attach_target_image: bool,
         admitted: &SnapshotImage,
     ) -> Result<RestorePlan, RestoreFail> {
         let identity = admitted.identity();
@@ -91,10 +195,12 @@ impl World {
         {
             return Err(RestoreFail::OtherProgram);
         }
-        if restorer == target
-            || self.machines.get(target as usize).is_none()
-            || self.machines.get(restorer as usize).is_none()
-            || self.machines[target as usize].vm.state != MachineState::Empty
+        if self.machines.get(restorer as usize).is_none()
+            || target.is_some_and(|target| {
+                restorer == target
+                    || self.machines.get(target as usize).is_none()
+                    || self.machines[target as usize].vm.state != MachineState::Empty
+            })
         {
             return Err(RestoreFail::LimitExceeded);
         }
@@ -109,10 +215,10 @@ impl World {
 
         let image = admitted.world();
         let count = image.machines.len();
-        if count == 0 {
+        if (count == 0 && target.is_some()) || (count != 0 && target.is_none()) {
             return Err(RestoreFail::OtherProgram);
         }
-        let added = count - 1;
+        let added = count.saturating_sub(usize::from(target.is_some()));
         if !self.has_machine_room(added) {
             return Err(RestoreFail::LimitExceeded);
         }
@@ -195,7 +301,9 @@ impl World {
         let type_map = types.type_map();
 
         let mut ids = try_vec(count)?;
-        ids.push(target);
+        if let Some(target) = target {
+            ids.push(target);
+        }
         for offset in 0..added {
             let raw = self
                 .machines
@@ -206,7 +314,18 @@ impl World {
         }
 
         let prepared_images = self.prepare_image_import(
-            target,
+            target_image,
+            reused_image,
+            target
+                .map(|target| self.config_of(target))
+                .or_else(|| {
+                    target_image.and_then(|key| {
+                        self.vm_images
+                            .get(key.image as usize)
+                            .map(|image| image.config)
+                    })
+                })
+                .unwrap_or_else(|| self.config_of(restorer)),
             image,
             &ids,
             env_map,
@@ -215,7 +334,16 @@ impl World {
             &artifact_table,
         )?;
 
-        let ceiling = self.config_of(target);
+        let ceiling = target
+            .map(|target| self.config_of(target))
+            .or_else(|| {
+                target_image.and_then(|key| {
+                    self.vm_images
+                        .get(key.image as usize)
+                        .map(|image| image.config)
+                })
+            })
+            .unwrap_or_else(|| self.config_of(restorer));
         let mut configs = try_vec(count)?;
         for source in &image.machines {
             configs.push(clamp(source, ceiling));
@@ -269,8 +397,8 @@ impl World {
                 .map(|image| prepared_images.keys[image as usize]);
             machines.push(machine);
         }
-        if let Some(target_image) = self.machines[target as usize].image {
-            machines[0].image = Some(target_image);
+        if attach_target_image {
+            machines[0].image = target_image;
         }
 
         Ok(RestorePlan {
@@ -293,7 +421,9 @@ impl World {
     #[allow(clippy::too_many_arguments)]
     fn prepare_image_import(
         &mut self,
-        target: VmId,
+        target_key: Option<VmImageKey>,
+        reused_source: Option<u32>,
+        ceiling: VmConfig,
         image: &crate::snapshot::Image,
         ids: &[VmId],
         env_map: &[TypeEnvId],
@@ -301,8 +431,12 @@ impl World {
         installation_base: u32,
         artifacts: &[SharedBytes],
     ) -> Result<PreparedImages, RestoreFail> {
-        let target_key = self.machines[target as usize].image;
-        let reused_source = target_key.and_then(|_| image.machines[0].image);
+        if reused_source.is_some() != target_key.is_some() {
+            return Err(RestoreFail::OtherProgram);
+        }
+        if reused_source.is_some_and(|source| source as usize >= image.vm_images.len()) {
+            return Err(RestoreFail::OtherProgram);
+        }
         let new_count = image
             .vm_images
             .len()
@@ -346,7 +480,6 @@ impl World {
         }
         let mut records = try_vec(new_count)?;
         let mut replacement = None;
-        let ceiling = self.config_of(target);
         for (ordinal, source) in image.vm_images.iter().enumerate() {
             let key = keys[ordinal];
             let config = clamp_image(&source.limits, ceiling);
@@ -433,13 +566,12 @@ impl World {
         })
     }
 
-    /// Install one prepared restore without an allocation.
     /// Commit one prepared restore.
     ///
     /// The commit marks the world. A restored machine holds values a
     /// container stated, so every later VM boundary of this world
     /// checks the type of the value that crosses it.
-    pub(crate) fn commit_restore(&mut self, plan: RestorePlan) -> VmId {
+    pub(crate) fn commit_restore(&mut self, plan: RestorePlan) -> Option<VmId> {
         let RestorePlan {
             target,
             restorer,
@@ -489,9 +621,11 @@ impl World {
         self.set_gate_marker(gate);
         self.machines[restorer as usize].children += child_charge;
         let mut machines = machines.into_iter();
-        self.machines[target as usize] = machines
-            .next()
-            .expect("a prepared restore holds its root machine");
+        if let Some(target) = target {
+            self.machines[target as usize] = machines
+                .next()
+                .expect("a prepared selected restore holds its first machine");
+        }
         self.machines.extend(machines);
         for vm in gate_members.iter().copied() {
             let machine = &self.machines[vm as usize];
