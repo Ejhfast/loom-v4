@@ -162,30 +162,30 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
   artifact = case sys.compiler.compile_syntax(syntax, env, options)
   in Ok(value) then value
   in Err(_)
-    return 0 - 1
+    return -1
   end
   module = case artifact.verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 2
+    return -2
   end
   image = sys.vm.Vm()
   instance = case image.install(module)
   in Ok(value) then value
   in Err(_)
-    return 0 - 3
+    return -3
   end
   entry = case instance.entry[(), Int]()
   in Ok(value) then value
   in Err(_)
-    return 0 - 4
+    return -4
   end
   case image.activate(entry, args: ())
-  in Err(_) then 0 - 5
+  in Err(_) then -5
   in Ok(run)
     case run.run()
     in Done(value) then value
-    in Fault(_) then 0 - 5
+    in Fault(_) then -5
     end
   end
 end
@@ -279,9 +279,9 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   syntax = case parsed.status
   in ParseComplete then parsed.tree.root()
   in ParseIncomplete
-    return 0 - 2
+    return -2
   in ParseInvalid
-    return 0 - 3
+    return -3
   end
   env = CompileEnv(
     List[VerifiedModule](),
@@ -297,30 +297,30 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   artifact = case sys.compiler.compile_syntax(syntax, env, options)
   in Ok(value) then value
   in Err(_)
-    return 0 - 4
+    return -4
   end
   module = case artifact.verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 5
+    return -5
   end
   image = sys.vm.Vm()
   instance = case image.install(module)
   in Ok(value) then value
   in Err(_)
-    return 0 - 6
+    return -6
   end
   entry = case instance.entry[(), Int]()
   in Ok(value) then value
   in Err(_)
-    return 0 - 7
+    return -7
   end
   case image.activate(entry, args: ())
-  in Err(_) then 0 - 8
+  in Err(_) then -8
   in Ok(run)
     case run.run()
     in Done(value) then value
-    in Fault(_) then 0 - 8
+    in Fault(_) then -8
     end
   end
 end
@@ -399,9 +399,9 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   syntax = case parsed.status
   in ParseComplete then parsed.tree.root()
   in ParseIncomplete
-    return 0 - 2
+    return -2
   in ParseInvalid
-    return 0 - 3
+    return -3
   end
   env = CompileEnv(
     List[VerifiedModule](),
@@ -417,30 +417,30 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   artifact = case sys.compiler.compile_syntax(syntax, env, options)
   in Ok(value) then value
   in Err(_)
-    return 0 - 4
+    return -4
   end
   module = case artifact.verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 5
+    return -5
   end
   image = sys.vm.Vm()
   instance = case image.install(module)
   in Ok(value) then value
   in Err(_)
-    return 0 - 6
+    return -6
   end
   function = case instance.function[(Int,), Int]("add")
   in Ok(value) then value
   in Err(_)
-    return 0 - 7
+    return -7
   end
   case image.activate(function, args: (40,))
-  in Err(_) then 0 - 8
+  in Err(_) then -8
   in Ok(run)
     case run.run()
     in Done(value) then value
-    in Fault(_) then 0 - 8
+    in Fault(_) then -8
     end
   end
 end
@@ -468,30 +468,30 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   artifact = case sys.compiler.compile("runtime", "40 + 2\n", env, options)
   in Ok(value) then value
   in Err(_)
-    return 0 - 1
+    return -1
   end
   module = case artifact.verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 2
+    return -2
   end
   image = sys.vm.Vm()
   instance = case image.install(module)
   in Ok(value) then value
   in Err(_)
-    return 0 - 3
+    return -3
   end
   entry = case instance.entry[(), Int]()
   in Ok(value) then value
   in Err(_)
-    return 0 - 4
+    return -4
   end
   case image.activate(entry, args: ())
-  in Err(_) then 0 - 5
+  in Err(_) then -5
   in Ok(run)
     case run.run()
     in Done(value) then value
-    in Fault(_) then 0 - 5
+    in Fault(_) then -5
     end
   end
 end
@@ -629,19 +629,19 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   )
   in Ok(value) then value
   in Err(_)
-    return 0 - 1
+    return -1
   end
   library_module = case library_artifact.verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 2
+    return -2
   end
 
   image = sys.vm.Vm()
   library_instance = case image.install(library_module)
   in Ok(value) then value
   in Err(_)
-    return 0 - 3
+    return -3
   end
 
   program_env = CompileEnv(
@@ -663,30 +663,30 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   )
   in Ok(value) then value
   in Err(_)
-    return 0 - 4
+    return -4
   end
   program_module = case program_artifact.verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 5
+    return -5
   end
   links = LinkEnv([library_instance])
   program_instance = case image.install(program_module, links)
   in Ok(value) then value
   in Err(_)
-    return 0 - 6
+    return -6
   end
   entry = case program_instance.entry[(), Int]()
   in Ok(value) then value
   in Err(_)
-    return 0 - 7
+    return -7
   end
   case image.activate(entry, args: ())
-  in Err(_) then 0 - 8
+  in Err(_) then -8
   in Ok(run)
     case run.run()
     in Done(value) then value
-    in Fault(_) then 0 - 8
+    in Fault(_) then -8
     end
   end
 end
@@ -716,19 +716,19 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   )
   in Ok(value) then value
   in Err(_)
-    return 0 - 1
+    return -1
   end
   library_module = case library_artifact.verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 2
+    return -2
   end
 
   image = sys.vm.Vm()
   library_instance = case image.install(library_module)
   in Ok(value) then value
   in Err(_)
-    return 0 - 3
+    return -3
   end
   program_env = CompileEnv([library_module], [("dep", "dep")])
   program_options = CompileOptions(
@@ -746,33 +746,33 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   )
   in Ok(value) then value
   in Err(_)
-    return 0 - 4
+    return -4
   end
   program_module = case program_artifact.verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 5
+    return -5
   end
   program_instance = case image.install(program_module, LinkEnv([library_instance]))
   in Ok(value) then value
   in Err(_)
-    return 0 - 6
+    return -6
   end
   entry = case program_instance.entry[(), Int]()
   in Ok(value) then value
   in Err(_)
-    return 0 - 7
+    return -7
   end
   count = 0
   for _ in Range(0, 1000)
     count = count + 1
   end
   case image.activate(entry, args: ())
-  in Err(_) then 0 - 8
+  in Err(_) then -8
   in Ok(run)
     case run.run()
     in Done(value) then value
-    in Fault(_) then 0 - 8
+    in Fault(_) then -8
     end
   end
 end
@@ -914,25 +914,25 @@ end
 def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   artifact = sys.vm.artifact(artifact_bytes())
   case artifact.verify()
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   in Ok(module)
     image = sys.vm.Vm()
     case image.install(module)
-    in Err(_) then 0 - 2
+    in Err(_) then -2
     in Ok(instance)
       case instance.dynamic_entry()
-      in Ok(_) then return 0 - 3
+      in Ok(_) then return -3
       in Err(_) then ()
       end
       case instance.entry[(), Int]()
-      in Err(_) then 0 - 3
+      in Err(_) then -3
       in Ok(entry)
         case image.activate(entry, args: ())
-        in Err(_) then 0 - 4
+        in Err(_) then -4
         in Ok(run)
           case run.run()
           in Done(value) then value
-          in Fault(_) then 0 - 4
+          in Fault(_) then -4
           end
         end
       end
@@ -1118,63 +1118,63 @@ def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   first_module = case read_artifact("first.lmbc").verify()
   in Ok(module) then module
   in Err(_)
-    return (0 - 1, 0 - 1)
+    return (-1, -1)
   end
   second_module = case read_artifact("second.lmbc").verify()
   in Ok(module) then module
   in Err(_)
-    return (0 - 2, 0 - 2)
+    return (-2, -2)
   end
   first = case image.install(first_module)
   in Ok(instance) then instance
   in Err(_)
-    return (0 - 3, 0 - 3)
+    return (-3, -3)
   end
   second = case image.install(second_module)
   in Ok(instance) then instance
   in Err(_)
-    return (0 - 4, 0 - 4)
+    return (-4, -4)
   end
   entry = case first.entry[(), Int]()
   in Ok(value) then value
   in Err(_)
-    return (0 - 5, 0 - 5)
+    return (-5, -5)
   end
   before_run = case image.activate(entry, args: ())
   in Ok(run) then run
   in Err(_)
-    return (0 - 6, 0 - 6)
+    return (-6, -6)
   end
   before = case before_run.run()
   in Done(value) then value
   in Fault(_)
-    return (0 - 6, 0 - 6)
+    return (-6, -6)
   end
   spec = case first.slot_spec("step")
   in Ok(value) then value
   in Err(_)
-    return (0 - 7, 0 - 7)
+    return (-7, -7)
   end
   slot = case first.slot_for(spec)
   in Ok(value) then value
   in Err(_)
-    return (0 - 7, 0 - 7)
+    return (-7, -7)
   end
   target = case second.function[(Int,), Int]("step")
   in Ok(value) then value
   in Err(_)
-    return (0 - 8, 0 - 8)
+    return (-8, -8)
   end
   case image.replace(slot, target)
   in Err(_)
-    return (0 - 9, 0 - 9)
+    return (-9, -9)
   in Ok(_)
     after = case image.activate(entry, args: ())
-    in Err(_) then 0 - 10
+    in Err(_) then -10
     in Ok(run)
       case run.run()
       in Done(value) then value
-      in Fault(_) then 0 - 10
+      in Fault(_) then -10
       end
     end
     (before, after)
@@ -1210,11 +1210,11 @@ end
 
 def run_entry(image: Vm, entry: FunctionDef[(), Int]): Int with Vm
   case image.activate(entry, args: ())
-  in Err(_) then 0 - 20
+  in Err(_) then -20
   in Ok(run)
     case run.run()
     in Done(value) then value
-    in Fault(_) then 0 - 21
+    in Fault(_) then -21
     end
   end
 end
@@ -1223,61 +1223,61 @@ def execute(): (Int, Int, Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compile
   image = sys.vm.Vm()
   first_module = case read_artifact("first-class.lmbc").verify()
   in Ok(module) then module
-  in Err(_) then return (0 - 1, 0 - 1, 0 - 1, 0 - 1)
+  in Err(_) then return (-1, -1, -1, -1)
   end
   second_module = case read_artifact("second-class.lmbc").verify()
   in Ok(module) then module
-  in Err(_) then return (0 - 2, 0 - 2, 0 - 2, 0 - 2)
+  in Err(_) then return (-2, -2, -2, -2)
   end
   first_instance = case image.install(first_module)
   in Ok(instance) then instance
-  in Err(_) then return (0 - 3, 0 - 3, 0 - 3, 0 - 3)
+  in Err(_) then return (-3, -3, -3, -3)
   end
   second_instance = case image.install(second_module)
   in Ok(instance) then instance
-  in Err(_) then return (0 - 4, 0 - 4, 0 - 4, 0 - 4)
+  in Err(_) then return (-4, -4, -4, -4)
   end
   first_entry = case first_instance.entry[(), Int]()
   in Ok(entry) then entry
-  in Err(_) then return (0 - 5, 0 - 5, 0 - 5, 0 - 5)
+  in Err(_) then return (-5, -5, -5, -5)
   end
   second_entry = case second_instance.entry[(), Int]()
   in Ok(entry) then entry
-  in Err(_) then return (0 - 6, 0 - 6, 0 - 6, 0 - 6)
+  in Err(_) then return (-6, -6, -6, -6)
   end
   before = run_entry(image, first_entry)
   second_own = run_entry(image, second_entry)
   spec = case first_instance.slot_spec("Box")
   in Ok(value) then value
-  in Err(_) then return (before, second_own, 0 - 7, 0 - 7)
+  in Err(_) then return (before, second_own, -7, -7)
   end
   slot = case first_instance.slot_for(spec)
   in Ok(value) then value
-  in Err(_) then return (before, second_own, 0 - 8, 0 - 8)
+  in Err(_) then return (before, second_own, -8, -8)
   end
   target = case second_instance.class_def("Box")
   in Ok(value) then value
-  in Err(_) then return (before, second_own, 0 - 9, 0 - 9)
+  in Err(_) then return (before, second_own, -9, -9)
   end
   case image.replace_class(slot, target)
-  in Err(_) then (before, second_own, 0 - 10, 0 - 10)
+  in Err(_) then (before, second_own, -10, -10)
   in Ok(_)
     after = run_entry(image, first_entry)
     pending = case image.activate(first_entry, args: ())
     in Ok(run) then run
-    in Err(_) then return (before, second_own, after, 0 - 11)
+    in Err(_) then return (before, second_own, after, -11)
     end
     snapshot = case pending.snapshot()
     in Ok(value) then value
-    in Err(_) then return (before, second_own, after, 0 - 12)
+    in Err(_) then return (before, second_own, after, -12)
     end
     restored = case sys.vm.Vm().restore(snapshot)
     in Ok(run) then run
-    in Err(_) then return (before, second_own, after, 0 - 13)
+    in Err(_) then return (before, second_own, after, -13)
     end
     restored_value = case restored.run()
     in Done(value) then value
-    in Fault(_) then 0 - 14
+    in Fault(_) then -14
     end
     (before, second_own, after, restored_value)
   end
@@ -1930,24 +1930,24 @@ def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   module = case sys.vm.artifact(artifact_bytes()).verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 1
+    return -1
   end
   instance = case image.install(module)
   in Ok(value) then value
   in Err(_)
-    return 0 - 2
+    return -2
   end
   entry = case instance.entry[(), Int]()
   in Ok(value) then value
   in Err(_)
-    return 0 - 3
+    return -3
   end
   case image.activate(entry, args: ())
-  in Err(_) then 0 - 4
+  in Err(_) then -4
   in Ok(run)
     case run.run()
     in Done(value) then value
-    in Fault(_) then 0 - 4
+    in Fault(_) then -4
     end
   end
 end

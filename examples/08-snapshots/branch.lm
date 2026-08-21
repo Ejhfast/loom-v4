@@ -9,9 +9,9 @@ def restore_run(snap: RunSnapshot[Int]): Int with Vm
   in Ok(restored)
     case restored.run()
     in Done(value) then value
-    in Fault(_)    then 0 - 1
+    in Fault(_)    then -1
     end
-  in Err(_) then 0 - 2
+  in Err(_) then -2
   end
 end
 
@@ -21,5 +21,5 @@ end, args: ())
 vm.step()
 case vm.snapshot()
 in Ok(snap) then (restore_run(snap), restore_run(snap))
-in Err(_)   then (0 - 3, 0 - 3)
+in Err(_)   then (-3, -3)
 end

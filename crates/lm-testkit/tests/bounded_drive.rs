@@ -51,7 +51,7 @@ def supervise(vm: Run[Int]): Int with Vm
     in Some(Done(v))
       return turns * 100000 + v
     in Some(Fault(_))
-      return 0 - 1
+      return -1
     end
   end
 end
@@ -85,9 +85,9 @@ end
 
 def supervise(vm: Run[Int]): Int with Vm
   case vm.drive()
-  in Asked(_)  then 0 - 1
+  in Asked(_)  then -1
   in Done(v)   then v
-  in Fault(_)  then 0 - 2
+  in Fault(_)  then -2
   end
 end
 

@@ -188,7 +188,7 @@ fn bench_language_operations() {
     report(
         "closure_call",
         1_000_000,
-        "i = 0\ns = 0\nwhile i < 1000000\n  f = do |x: Int|: Int x + 1 end\n  s = f(s)\n  i = i + 1\nend\ns\n",
+        "i = 0\ns = 0\nwhile i < 1000000\n  f = { |x: Int|: Int x + 1 }\n  s = f(s)\n  i = i + 1\nend\ns\n",
         base,
     );
 
@@ -284,7 +284,7 @@ fn bench_language_operations() {
     report(
         "closure_capture",
         1_000_000,
-        "k = 7\ni = 0\ns = 0\nwhile i < 1000000\n  f = do |x: Int|: Int x + k end\n  s = f(s)\n  i = i + 1\nend\ns\n",
+        "k = 7\ni = 0\ns = 0\nwhile i < 1000000\n  f = { |x: Int|: Int x + k }\n  s = f(s)\n  i = i + 1\nend\ns\n",
         base,
     );
 
@@ -517,7 +517,7 @@ fn bench_proc_operations() {
                   h.close()\n\
                   case h.done()\n\
                   in Done(v)  then v\n\
-                  in Fault(_) then 0 - 1\n\
+                  in Fault(_) then -1\n\
                   end\n";
     let elapsed = time_world(source, &["Proc"], config(), "Done(20000)");
     println!(
@@ -1209,7 +1209,7 @@ def count_lines(path: String): Int with Fs.Open, Fs.Read, Fs.Close
     end
     f.close()
     n
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 

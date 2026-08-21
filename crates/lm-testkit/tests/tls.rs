@@ -337,17 +337,17 @@ def client(address: SocketAddress): Int with Tcp.Connect, Tls.Handshake, Tls.Wri
   stream = case Tcp().connect(address)
   in Ok(value) then value
   in Err(_)
-    return 0 - 1
+    return -1
   end
   secure = case Tls().handshake(stream, test_tls_config())
   in Ok(value) then value
   in Err(_)
-    return 0 - 2
+    return -2
   end
   written = case secure.write(Bytes("hello"))
   in Ok(value) then value
   in Err(_)
-    return 0 - 3
+    return -3
   end
   secure.close()
   written
@@ -375,11 +375,11 @@ def finish(child: Run[Int], mine: ResourceHandle): Int with Vm
       end
     in Done(value)
       if mine.is_open()
-        return 0 - 4
+        return -4
       end
       return value
     in Fault(_)
-      return 0 - 5
+      return -5
     end
   end
 end
@@ -390,22 +390,22 @@ def upgrade(child: Run[Int], tcp: ResourceHandle): Int with Vm
     case request
     in Call(Tls.Handshake, call, (stream, _, _, _, _, _, _))
       if not child.resource(stream).same_resource(tcp)
-        return 0 - 6
+        return -6
       end
       secure = child.serve_tls_stream(call)
       if tcp.is_open()
-        return 0 - 7
+        return -7
       end
       finish(child, secure)
-    in _ then 0 - 8
+    in _ then -8
     end
-  in Done(_)  then 0 - 9
-  in Fault(_) then 0 - 10
+  in Done(_)  then -9
+  in Fault(_) then -10
   end
 end
 
 case loopback(8443)
-in Err(_) then 0 - 11
+in Err(_) then -11
 in Ok(address)
   child = sys.vm.Vm().activate_or_fault(client, args: (address,))
   case child.drive()
@@ -414,10 +414,10 @@ in Ok(address)
     in Call(Tcp.Connect, call, (peer,))
       tcp = child.serve_tcp_stream(call, peer)
       upgrade(child, tcp)
-    in _ then 0 - 12
+    in _ then -12
     end
-  in Done(_)  then 0 - 13
-  in Fault(_) then 0 - 14
+  in Done(_)  then -13
+  in Fault(_) then -14
   end
 end
 "#

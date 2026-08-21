@@ -383,23 +383,23 @@ fn row_rules() {
     assert_eq!(runs("def go() with Io.Print\nend\ngo()\n"), "Done(())");
     // Closures declare rows; calling charges the closure row into
     // the collected entry row.
-    assert_eq!(runs("f = do || with Io.Print 1 end\nf()\n"), "Done(1)");
+    assert_eq!(runs("f = { || with Io.Print 1 }\nf()\n"), "Done(1)");
     assert_eq!(
         runs(
             "def hold(f: () -> Int with Io.Print): Int\n  1\nend\n\
-              hold(do || with Io.Print 2 end)\n"
+              hold({ || with Io.Print 2 })\n"
         ),
         "Done(1)"
     );
     // A pure closure fits an effectful expectation, not the reverse.
     assert_eq!(
-        runs("def hold(f: () -> Int with Io.Print): Int\n  1\nend\nhold(do || 2 end)\n"),
+        runs("def hold(f: () -> Int with Io.Print): Int\n  1\nend\nhold({ || 2 })\n"),
         "Done(1)"
     );
     assert_eq!(
         code_of(
             "def hold(f: () -> Int): Int\n  f()\nend\n\
-                 hold(do || with Io.Print 2 end)\n"
+                 hold({ || with Io.Print 2 })\n"
         ),
         "E1004"
     );
@@ -407,7 +407,7 @@ fn row_rules() {
     assert_eq!(
         runs(
             "def apply[T, effect e](x: T, f: (T) -> T with e): T with e\n  f(x)\nend\n\
-              apply(20, do |n: Int|: Int n * 2 end) + 2\n"
+              apply(20, { |n: Int|: Int n * 2 }) + 2\n"
         ),
         "Done(42)"
     );

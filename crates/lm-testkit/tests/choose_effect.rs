@@ -20,16 +20,16 @@ fn a_driver_answers_a_choice_point_with_an_index() {
       case q
       in Call(Choose.Pick, call, (n,))
         if n <= 0
-          return 0 - 1
+          return -1
         end
         vm.answer(call, choice)
       in _
-        return 0 - 2
+        return -2
       end
     in Done(value)
       return value
     in Fault(_)
-      return 0 - 3
+      return -3
     end
   end
 end
@@ -115,10 +115,10 @@ fn a_pending_choice_point_never_blocks_a_capture() {
       two = answer_with(snap, 1)
       10 * one + two
     in Err(_)
-      0 - 1
+      -1
     end
-  in Done(_)  then 0 - 2
-  in Fault(_) then 0 - 3
+  in Done(_)  then -2
+  in Fault(_) then -3
   end
 end
 
@@ -132,14 +132,14 @@ def answer_with(snap: RunSnapshot[Int], choice: Int): Int with Vm
         restored.answer(call, choice)
         case restored.run()
         in Done(value) then value
-        in Fault(_)    then 0 - 1
+        in Fault(_)    then -1
         end
-      in _ then 0 - 2
+      in _ then -2
       end
     in Done(value) then value
-    in Fault(_)    then 0 - 3
+    in Fault(_)    then -3
     end
-  in Err(_) then 0 - 4
+  in Err(_) then -4
   end
 end
 

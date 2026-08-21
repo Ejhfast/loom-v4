@@ -30,7 +30,7 @@ fn primitive_method(module: &lm_bytecode::Module, role: usize, name: &str) -> (u
 
 #[test]
 fn int_abs_uses_the_final_core_method_table() {
-    let source = "(0 - 42).abs()\n";
+    let source = "(-42).abs()\n";
     let module = compile_text("int_abs.lm", source).expect("the program compiles");
     let (class, _, func) = int_method(&module);
     assert!(module.classes[class as usize].is_final);

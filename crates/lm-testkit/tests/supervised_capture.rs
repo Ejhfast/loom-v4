@@ -45,7 +45,7 @@ def app(): Int with Vm, Proc, Io.Print
   sys.io.print("[app]")
   case h.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
 end
 
@@ -58,7 +58,7 @@ def supervise(vm: Run[Int]): Int with Vm
         took = vm.snapshot().is_ok()
         vm.answer(call, ())
         if not took
-          return 0 - 7
+          return -7
         end
       in _
         vm.dispatch(request)
@@ -66,7 +66,7 @@ def supervise(vm: Run[Int]): Int with Vm
     in Done(value)
       return value
     in Fault(_)
-      return 0 - 2
+      return -2
     end
   end
 end
@@ -102,11 +102,11 @@ def app(): Int with Vm, Proc, Io.Print
   hb = sys.proc.run(b)
   first = case ha.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
   second = case hb.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
   first + second
 end
@@ -127,7 +127,7 @@ def supervise(vm: Run[Int], mut misses: [Int]): Int with Vm
     in Done(value)
       return value
     in Fault(_)
-      return 0 - 2
+      return -2
     end
   end
 end

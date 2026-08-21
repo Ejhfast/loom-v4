@@ -90,27 +90,27 @@ def transfer(): Int with Tcp
   address = case loopback(0)
   in Ok(value)  then value
   in Err(_)
-    return 0 - 1
+    return -1
   end
   listener = case Tcp().listen(address, 8)
   in Ok(value)  then value
   in Err(_)
-    return 0 - 2
+    return -2
   end
   bound = case listener.local_address()
   in Ok(value)  then value
   in Err(_)
-    return 0 - 3
+    return -3
   end
   client = case Tcp().connect(bound)
   in Ok(value)  then value
   in Err(_)
-    return 0 - 4
+    return -4
   end
   server = case listener.accept()
   in Ok(value)  then value.first
   in Err(_)
-    return 0 - 5
+    return -5
   end
   payload = ByteBuffer()
   index = 0
@@ -120,12 +120,12 @@ def transfer(): Int with Tcp
   end
   case client.write_all(payload.finish())
   in Err(_)
-    return 0 - 6
+    return -6
   in Ok(_)  then ()
   end
   count = case server.read_exact(9000)
   in Ok(bytes) then bytes.len()
-  in Err(_)    then 0 - 7
+  in Err(_)    then -7
   end
   client.close()
   server.close()
@@ -245,11 +245,11 @@ fn a_driver_can_mint_and_service_a_tcp_stream() {
         r#"{LOOPBACK}
 def client(address: SocketAddress): Int with Tcp.Connect, Tcp.Write, Tcp.Close
   case Tcp().connect(address)
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   in Ok(stream)
     written = case stream.write(Bytes("hello"))
     in Ok(value) then value
-    in Err(_)    then 0 - 2
+    in Err(_)    then -2
     end
     stream.close()
     written
@@ -278,17 +278,17 @@ def service(child: Run[Int], mine: ResourceHandle): Int with Vm
       end
     in Done(value)
       if mine.is_open()
-        return 0 - 3
+        return -3
       end
       return value
     in Fault(_)
-      return 0 - 4
+      return -4
     end
   end
 end
 
 case loopback(8080)
-in Err(_) then 0 - 5
+in Err(_) then -5
 in Ok(address)
   child = sys.vm.Vm().activate_or_fault(client, args: (address,))
   case child.drive()
@@ -297,10 +297,10 @@ in Ok(address)
     in Call(Tcp.Connect, call, (peer,))
       mine = child.serve_tcp_stream(call, peer)
       service(child, mine)
-    in _ then 0 - 6
+    in _ then -6
     end
-  in Done(_)  then 0 - 7
-  in Fault(_) then 0 - 8
+  in Done(_)  then -7
+  in Fault(_) then -8
   end
 end
 "#

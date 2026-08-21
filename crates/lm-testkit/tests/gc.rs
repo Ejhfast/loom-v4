@@ -136,7 +136,7 @@ fn reachable_data_stays_correct_across_many_collections() {
 fn closure_captures_survive_collections() {
     // The captured list is only reachable through the closure object
     // after the outer local rebinds.
-    let source = "xs = [40, 2]\nf = do ||: Int xs.at(0) + xs.at(1) end\nxs = [0]\n\
+    let source = "xs = [40, 2]\nf = { ||: Int xs.at(0) + xs.at(1) }\nxs = [0]\n\
                   i = 0\nwhile i < 20000\n  s = [i, i]\n  i = i + 1\nend\nf()\n";
     let config = VmConfig {
         heap_bytes: 16 * 1024,

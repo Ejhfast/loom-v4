@@ -38,7 +38,7 @@ fn dispatch_through_the_core_parent_type_reaches_the_override() {
                   \x20   super.init(0, 0)\n\
                   \x20 end\n\
                   \x20 def len(self): Int\n\
-                  \x20   0 - 1\n\
+                  \x20   -1\n\
                   \x20 end\n\
                   end\n\
                   r: Range = Empty()\n\

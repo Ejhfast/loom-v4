@@ -276,9 +276,9 @@ fn every_handle_in_the_set_targets_a_member_of_the_set() {
 #[test]
 fn the_set_closes_over_every_machine_reference_shape() {
     let source = "def go(): Int with Vm, Clock.Now\n\
-                  \x20 table = sys.vm.Vm().activate_or_fault(do ||: Int 1 end, args: ()).table()\n\
+                  \x20 table = sys.vm.Vm().activate_or_fault({ ||: Int 1 }, args: ()).table()\n\
                   \x20 table.pass(Clock.Now)\n\
-                  \x20 case sys.vm.Vm().activate_or_fault(do ||: Int 2 end, args: ()).run()\n\
+                  \x20 case sys.vm.Vm().activate_or_fault({ ||: Int 2 }, args: ()).run()\n\
                   \x20 in Done(v)  then v\n\
                   \x20 in Fault(_) then 0\n\
                   \x20 end\n\

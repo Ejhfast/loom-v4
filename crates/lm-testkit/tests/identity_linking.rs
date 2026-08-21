@@ -517,7 +517,7 @@ fn every_named_function_carries_one_binding() {
                   self.value = self.value + n\n    self.value\n  end\nend\n\
                   enum Shape\n  Dot\n  Line(n: Int)\nend\n\
                   def twice(n: Int): Int\n  n * 2\nend\n\
-                  add_one = do |x: Int|: Int x + 1 end\n\
+                  add_one = { |x: Int|: Int x + 1 }\n\
                   c = Counter(2)\ntwice(c.add(1)) + add_one(1)\n";
     let module = compile_text("t.lm", source).expect("compiles");
     let bound: Vec<u32> = module.bindings.iter().map(|b| b.func).collect();
@@ -941,7 +941,7 @@ fn a_misaligned_function_marker_vector_rejects_at_the_decoder() {
 /// The same rule holds for the marker vector of a function type.
 #[test]
 fn a_misaligned_type_marker_vector_rejects_at_the_decoder() {
-    let bytes = lm_testkit::compile_to_bytes("t.lm", "f = do |x: Int|: Int x + 1 end\nf(1)\n")
+    let bytes = lm_testkit::compile_to_bytes("t.lm", "f = { |x: Int|: Int x + 1 }\nf(1)\n")
         .expect("compiles");
     let mut module = lm_bytecode::decode(&bytes).expect("decodes");
     let idx = module

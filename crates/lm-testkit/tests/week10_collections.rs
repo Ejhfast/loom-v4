@@ -343,7 +343,7 @@ def before_five(values: List[Int]): Int
     end
     total = total + value
   end
-  0 - 1
+  -1
 end
 
 values = [1, 2, 3, 4, 5]
@@ -715,7 +715,7 @@ relay() { |value: Int| value + 3 }
         "def leak(f: () -> Int): Int\n  saved = f\n  saved()\nend\nleak() { || 1 }\n",
         "def leak(f: () -> Int): Int\n  pair = (f,)\n  pair[0]()\nend\nleak() { || 1 }\n",
         "def leak(f: () -> Int): Int\n  list = [f]\n  list.at(0)()\nend\nleak() { || 1 }\n",
-        "def leak(f: () -> Int): Int\n  inner = do ||: Int f() end\n  inner()\nend\nleak() { || 1 }\n",
+        "def leak(f: () -> Int): Int\n  inner = { ||: Int f() }\n  inner()\nend\nleak() { || 1 }\n",
         "def id[T](value: T): T\n  value\nend\ndef leak(f: () -> Int): Int\n  id(f)()\nend\nleak() { || 1 }\n",
     ] {
         let failure = compile_text("collections.lm", invalid);
@@ -1048,7 +1048,7 @@ final class Box[T]
 end
 
 def held[T](value: T): Digest
-  closure = do ||: T value end
+  closure = { ||: T value }
   closure.digest()
 end
 

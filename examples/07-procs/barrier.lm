@@ -24,7 +24,7 @@ class Worker < Proc[Handle[Int, Int]]
       in Done(v)
         v
       in Fault(_)
-        0 - 1
+        -1
       end
     in Closed
       0

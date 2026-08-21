@@ -20,13 +20,13 @@ h = sys.proc.run(w)
 c = sys.vm.Vm().activate_or_fault(do |hh: Handle[Never, Int]|: Int with Proc
   case hh.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
 end, args: (h,))
 c.table().pass(Proc)
 case c.run()
 in Done(v)  then v
-in Fault(_) then 0 - 2
+in Fault(_) then -2
 end
 "#;
 

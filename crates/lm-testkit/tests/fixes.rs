@@ -71,7 +71,7 @@ fn widened_tuple_local_keeps_its_declared_type() {
 
 #[test]
 fn function_local_holds_a_narrower_row_closure() {
-    let source = "f: (Int) -> Int with Io.Print = do |x: Int|: Int x + 1 end\nf(1)\n";
+    let source = "f: (Int) -> Int with Io.Print = { |x: Int|: Int x + 1 }\nf(1)\n";
     assert_eq!(run(source), "Done(2)");
 }
 
@@ -79,11 +79,11 @@ fn function_local_holds_a_narrower_row_closure() {
 fn function_local_joins_branches_with_different_rows() {
     let source = "def go(): Int with Clock.Now, Io.Print
   flag = true
-  f: (Int) -> Int with Clock.Now, Io.Print = do |x: Int|: Int x end
+  f: (Int) -> Int with Clock.Now, Io.Print = { |x: Int|: Int x }
   if flag
-    f = do |x: Int|: Int with Io.Print x end
+    f = { |x: Int|: Int with Io.Print x }
   else
-    f = do |x: Int|: Int with Clock.Now x end
+    f = { |x: Int|: Int with Clock.Now x }
   end
   f(1)
 end
@@ -260,7 +260,7 @@ fn label_for_a_filled_parameter_is_rejected() {
 
 #[test]
 fn labels_on_a_closure_value_are_rejected() {
-    let source = "f = do |x: Int|: Int x end\nf(x: 1)\n";
+    let source = "f = { |x: Int|: Int x }\nf(x: 1)\n";
     expect_error(source, "does not declare a parameter named `x`");
 }
 
@@ -290,7 +290,7 @@ xs.at(index: 0) + m.at(key: \"a\") + extra
 #[test]
 fn activate_labels_follow_the_general_rule() {
     let program = "def child(a: Int, b: Int): Int\n  a + b\nend\n";
-    let tail = "case vm.run()\nin Done(v) then v\nin Fault(_) then 0 - 1\nend\n";
+    let tail = "case vm.run()\nin Done(v) then v\nin Fault(_) then -1\nend\n";
     for call in [
         "sys.vm.Vm().activate_or_fault(child, args: (3, 4))",
         "sys.vm.Vm().activate_or_fault(child, (3, 4))",
@@ -321,11 +321,11 @@ fn vm_and_run_have_distinct_type_forms() {
     let source = "def finish(run: Run[Int]): Int with Vm\n\
         \x20 case run.run()\n\
         \x20 in Done(value) then value\n\
-        \x20 in Fault(_) then 0 - 1\n\
+        \x20 in Fault(_) then -1\n\
         \x20 end\n\
         end\n\
         image: Vm = sys.vm.Vm()\n\
-        finish(image.activate_or_fault(do ||: Int 42 end, args: ()))\n";
+        finish(image.activate_or_fault({ ||: Int 42 }, args: ()))\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(42)");
 }
 
@@ -354,9 +354,9 @@ fn labels_work_on_the_continuation_methods() {
         in _\n    \
         vm.dispatch(request)\n  \
         end\n  \
-        case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\n\
-        in Done(_) then 0 - 2\n\
-        in Fault(_) then 0 - 3\n\
+        case vm.run()\n  in Done(v) then v\n  in Fault(_) then -1\n  end\n\
+        in Done(_) then -2\n\
+        in Fault(_) then -3\n\
         end\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(7)");
 }
@@ -463,7 +463,7 @@ fn ambiguous_siblings_still_error() {
 #[test]
 fn closure_mut_parameter_needs_a_mutable_argument() {
     let source = "def sneak(xs: [Int]): Int
-  f = do |mut ys: [Int]|: () ys.push(1) end
+  f = { |mut ys: [Int]|: () ys.push(1) }
   f(xs)
   xs.len()
 end
@@ -476,7 +476,7 @@ sneak([9])
 #[test]
 fn mut_closure_calls_with_a_mutable_argument() {
     let source = "xs: [Int] = [9]
-f = do |mut ys: [Int]|: () ys.push(1) end
+f = { |mut ys: [Int]|: () ys.push(1) }
 f(xs)
 xs.len()
 ";
@@ -487,9 +487,9 @@ xs.len()
 fn function_types_carry_mut_markers() {
     // A declared `mut` position accepts a read-only closure, and a
     // `mut`-requiring closure does not fit a read-only position.
-    let ok = "f: (mut [Int]) -> Int = do |ys: [Int]|: Int ys.len() end\nf([1, 2])\n";
+    let ok = "f: (mut [Int]) -> Int = { |ys: [Int]|: Int ys.len() }\nf([1, 2])\n";
     assert_eq!(run(ok), "Done(2)");
-    let bad = "f: ([Int]) -> () = do |mut ys: [Int]|: () ys.push(1) end\n1\n";
+    let bad = "f: ([Int]) -> () = { |mut ys: [Int]|: () ys.push(1) }\n1\n";
     expect_error(bad, "E1004");
 }
 
@@ -507,7 +507,7 @@ fn calling_through_a_mut_function_type_needs_capability() {
   f(xs)
 end
 
-call_it(do |mut ys: [Int]|: () ys.push(1) end, [1])
+call_it({ |mut ys: [Int]|: () ys.push(1) }, [1])
 ";
     expect_error(source, "a `mut` parameter needs a mutable value");
 }
@@ -517,7 +517,7 @@ fn forged_fn_type_mut_flag_is_rejected() {
     // Flip the mut flag byte of the closure function type in the
     // encoded module. The stored closure type then differs from the
     // real one, so the verifier rejects the module.
-    let source = "f = do |mut ys: [Int]|: () ys.push(1) end\nxs: [Int] = []\nf(xs)\nxs.len()\n";
+    let source = "f = { |mut ys: [Int]|: () ys.push(1) }\nxs: [Int] = []\nf(xs)\nxs.len()\n";
     let mut module = compile_text("fixes.lm", source).unwrap();
     let mut hit = false;
     for ty in &mut module.types {
@@ -534,7 +534,7 @@ fn forged_fn_type_mut_flag_is_rejected() {
 
 #[test]
 fn invalid_mut_flag_byte_is_rejected_by_the_decoder() {
-    let source = "f = do |mut ys: [Int]|: () ys.push(1) end\n1\n";
+    let source = "f = { |mut ys: [Int]|: () ys.push(1) }\n1\n";
     let bytes = lm_bytecode::encode(&compile_text("fixes.lm", source).unwrap());
     // Flip every byte to 2 in turn; at least one position must be a
     // mut flag and fail with the flag error.
@@ -604,7 +604,7 @@ fn nested_constructor_scrutinee_covers_every_arm() {
     let source = "s = Some(Some(3))\ncase s\nin Some(Some(v)) then v\nend\n";
     expect_error(source, "does not cover every value");
     let covered = "s = Some(Some(3))\ncase s\n\
-                   in Some(Some(v)) then v\nin Some(None) then 0\nin None then 0 - 1\nend\n";
+                   in Some(Some(v)) then v\nin Some(None) then 0\nin None then -1\nend\n";
     assert_eq!(run(covered), "Done(3)");
 }
 

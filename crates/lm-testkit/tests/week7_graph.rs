@@ -57,7 +57,7 @@ def go(): Int with Vm
   end, args: (a,))
   case vm.run()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
 end
 
@@ -125,7 +125,7 @@ def go(): Int with Vm
       end
     in None then 0
     end
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
 end
 
@@ -160,7 +160,7 @@ def go(): Int with Vm
   a.value = 9
   case vm.run()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
 end
 

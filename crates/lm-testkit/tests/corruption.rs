@@ -46,7 +46,7 @@ nm = d.name
 words = [\"a\", \"b\"]
 counts: {String: Int} = {\"a\": 1}
 counts.put(words.at(1), 2)
-f = do |x: Int|: Int x + 1 end
+f = { |x: Int|: Int x + 1 }
 sb = StringBuilder()
 sb.append(\"{d.speak()} {f(1)} {counts.len()}\")
 sb.build()

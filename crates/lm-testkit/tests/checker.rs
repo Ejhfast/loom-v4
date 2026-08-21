@@ -124,8 +124,8 @@ fn week_two_negative_cases_have_stable_codes() {
     // `self` cannot be captured before the constructor completes.
     assert_eq!(
         code_of(
-            "class P\n  x: Int\n  def init(mut self)\n    f = do ||: Int 1 end\n    \
-             g = do ||: P self end\n    self.x = 1\n  end\nend\nP()\n"
+            "class P\n  x: Int\n  def init(mut self)\n    f = { ||: Int 1 }\n    \
+             g = { ||: P self }\n    self.x = 1\n  end\nend\nP()\n"
         ),
         "E1029"
     );
@@ -341,7 +341,7 @@ fn cfg_dump_covers_classes_selectors_and_closures() {
         "t.lm",
         "class Counter\n  value: Int = 0\n  def add(mut self, n: Int): Int\n    \
          self.value = self.value + n\n    self.value\n  end\nend\n\
-         c = Counter()\nf = do |x: Int|: Int x + 1 end\nc.add(f(1))\n",
+         c = Counter()\nf = { |x: Int|: Int x + 1 }\nc.add(f(1))\n",
     )
     .unwrap();
     let dump = lm_hir::dump_cfg(&module);

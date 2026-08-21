@@ -110,13 +110,13 @@ class Supervisor < Proc[Command]
       in Done(value)
         case self.receive()
         in Msg(Ping) then value
-        in Closed then 0 - 1
+        in Closed then -1
         end
-      in Asked(_) then 0 - 2
-      in Fault(_) then 0 - 3
+      in Asked(_) then -2
+      in Fault(_) then -3
       end
     in self.receive_wait() -> _
-      0 - 4
+      -4
     end
   end
 end
@@ -133,7 +133,7 @@ end
 supervisor.send(Ping)
 case supervisor.done()
 in Done(value) then value
-in Fault(_) then 0 - 5
+in Fault(_) then -5
 end
 "#;
 

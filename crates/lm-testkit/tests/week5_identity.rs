@@ -434,7 +434,7 @@ fn a_duplicate_selector_name_rejects_on_a_cache_hit() {
 /// cover it; an unfinished body digest must never panic the loader.
 #[test]
 fn a_self_referential_closure_hashes_without_a_panic() {
-    let source = "f = do |x: Int|: Int x + 1 end\nf(1)\n";
+    let source = "f = { |x: Int|: Int x + 1 }\nf(1)\n";
     let mut module = compile_text("t.lm", source).unwrap();
     let target = module
         .funcs

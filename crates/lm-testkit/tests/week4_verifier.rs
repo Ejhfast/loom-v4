@@ -136,7 +136,7 @@ fn an_op_const_of_a_vm_control_slot_is_rejected() {
 }
 
 const MOCKER: &str = "def f(vm: Run[Int]) with Vm\n  \
-    vm.table().mock(Clock.Now, do ||: Int 1 end)\nend\n1\n";
+    vm.table().mock(Clock.Now, { ||: Int 1 })\nend\n1\n";
 
 #[test]
 fn table_edit_forgeries_are_rejected() {
@@ -253,7 +253,7 @@ fn activate_argument_forgery_is_rejected() {
 fn activate_or_fault_reply_forgery_is_rejected() {
     let source = r#"
 def go(): Int with Vm
-  sys.vm.Vm().activate_or_fault(do ||: Int 1 end, args: ())
+  sys.vm.Vm().activate_or_fault({ ||: Int 1 }, args: ())
   1
 end
 go()

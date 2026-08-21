@@ -117,7 +117,7 @@ fn the_type_environment_table_is_bounded() {
 /// Two closures of one generic body under two type arguments.
 const TWO_ACTIVATIONS: &str = "\
 def hold[T](v: T): Digest
-  g = do ||: T v end
+  g = { ||: T v }
   g.digest()
 end
 
@@ -189,7 +189,7 @@ fn a_witness_never_enters_a_guest_digest() {
 /// under the copied environment and admission proves the whole world.
 const CLOSURE_ACROSS_A_BOUNDARY: &str = "\
 def hold[T](v: T): Run[T] with Vm
-  sys.vm.Vm().activate_or_fault(do ||: T v end, args: ())
+  sys.vm.Vm().activate_or_fault({ ||: T v }, args: ())
 end
 
 def go(): Int with Vm
@@ -521,7 +521,7 @@ fn an_uninitialized_field_outside_construction_admits() {
 /// the generic body to the same result.
 const RESTORE_SOURCE: &str = "\
 def hold[T](v: T): Run[T] with Vm
-  sys.vm.Vm().activate_or_fault(do ||: T v end, args: ())
+  sys.vm.Vm().activate_or_fault({ ||: T v }, args: ())
 end
 
 def restore_run(snap: RunSnapshot[Int]): Int with Vm
@@ -529,9 +529,9 @@ def restore_run(snap: RunSnapshot[Int]): Int with Vm
   in Ok(restored)
     case restored.run()
     in Done(value) then value
-    in Fault(_)    then 0 - 1
+    in Fault(_)    then -1
     end
-  in Err(_) then 0 - 2
+  in Err(_) then -2
   end
 end
 
@@ -539,7 +539,7 @@ def go(): Int with Vm
   vm = hold(41)
   case vm.snapshot()
   in Ok(snap) then restore_run(snap)
-  in Err(_)   then 0 - 3
+  in Err(_)   then -3
   end
 end
 

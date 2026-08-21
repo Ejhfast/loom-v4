@@ -1,9 +1,9 @@
 # Store closures in a list, select one, and call it.
 base = 2
 adders: [(Int) -> Int] = [
-  do |x: Int|: Int x + 1 end,
-  do |x: Int|: Int x + base * 10 end,
-  do |x: Int|: Int x * 2 end
+  { |x: Int|: Int x + 1 },
+  { |x: Int|: Int x + base * 10 },
+  { |x: Int|: Int x * 2 }
 ]
 
 # Rebinding `base` after capture does not change the second closure.

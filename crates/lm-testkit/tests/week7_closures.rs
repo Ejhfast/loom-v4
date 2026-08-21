@@ -65,8 +65,8 @@ def first(value: Int): Int
   value + 1
 end
 
-a = do |value: Int|: Int value + 1 end
-b = do |value: Int|: Int value + 1 end
+a = { |value: Int|: Int value + 1 }
+b = { |value: Int|: Int value + 1 }
 (first == first, a == a, a == b)
 ";
     assert_eq!(runs(source), "Done((true, true, false))");

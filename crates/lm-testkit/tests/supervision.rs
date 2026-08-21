@@ -45,7 +45,7 @@ def child(): Int with Vm, Proc, Io.Print
   sys.io.print("[child]")
   case h.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
 end
 
@@ -63,7 +63,7 @@ def supervise(vm: Run[Int], mut seen: [String]): Int with Vm
     in Done(value)
       return value
     in Fault(_)
-      return 0 - 2
+      return -2
     end
   end
 end
@@ -102,7 +102,7 @@ def child(): Int with Vm, Proc, Io.Print
     g = sys.proc.run(inner)
     case g.done()
     in Done(v)  then v + 1
-    in Fault(_) then 0 - 1
+    in Fault(_) then -1
     end
   end, args: ())
   outer.table().pass(Vm)
@@ -111,7 +111,7 @@ def child(): Int with Vm, Proc, Io.Print
   sys.io.print("[child]")
   case h.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
 end
 
@@ -123,7 +123,7 @@ def supervise(vm: Run[Int]): Int with Vm
     in Done(value)
       return value
     in Fault(_)
-      return 0 - 2
+      return -2
     end
   end
 end
@@ -153,10 +153,10 @@ class Waiter < Proc[Handle[Never, Int]]
     in Msg(h)
       case h.done()
       in Done(v)  then v
-      in Fault(_) then 0 - 1
+      in Fault(_) then -1
       end
     in Closed
-      0 - 2
+      -2
     end
   end
 end
@@ -180,10 +180,10 @@ in Ok(machine)
   machine.run()
   case q.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 3
+  in Fault(_) then -3
   end
 in Err(_)
-  0 - 4
+  -4
 end
 "#;
     let (out, faults) = run(src, &["Vm", "Proc"]);
@@ -219,14 +219,14 @@ class Pusher < Proc[Handle[Int, Int]]
         in Sent
           k = k + 1
         in Closed
-          return 0 - 1
+          return -1
         in Fault(_)
-          return 0 - 2
+          return -2
         end
       end
       k
     in Closed
-      0 - 3
+      -3
     end
   end
 end
@@ -243,10 +243,10 @@ in Ok(machine)
   machine.run()
   case q.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 4
+  in Fault(_) then -4
   end
 in Err(_)
-  0 - 5
+  -5
 end
 "#;
     let (out, faults) = run(src, &["Vm", "Proc"]);
@@ -273,11 +273,11 @@ def app(): Int with Vm, Proc, Io.Print
   sys.io.print("[app]")
   first = case ha.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
   second = case hb.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
   first + second
 end
@@ -296,7 +296,7 @@ def audit(vm: Run[Int], mut seen: [String]): Int with Vm
     in Done(value)
       return value
     in Fault(_)
-      return 0 - 9
+      return -9
     end
   end
 end

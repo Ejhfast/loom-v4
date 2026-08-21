@@ -17,7 +17,7 @@ def drive_loop(vm: Run[Int], mut captured: [String]): ([String], Int) with Vm
     in Done(value)
       return (captured.freeze(), value)
     in Fault(_)
-      return (captured.freeze(), 0 - 1)
+      return (captured.freeze(), -1)
     end
   end
 end

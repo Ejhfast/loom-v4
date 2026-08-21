@@ -32,16 +32,16 @@ def finish(child: Run[Int], first: Int): Int with Vm
           first
         end
         if index >= count
-          return 0 - 1
+          return -1
         end
         child.answer(call, index)
       in _
-        return 0 - 2
+        return -2
       end
     in Done(value)
       return value
     in Fault(_)
-      return 0 - 3
+      return -3
     end
   end
 end
@@ -54,7 +54,7 @@ def explore(image: RunSnapshot[Int], count: Int): [Int] with Vm
     # image, the original machine, or another branch.
     case sys.vm.Vm().restore(image)
     in Ok(branch) then out.push(finish(branch, index))
-    in Err(_)     then out.push(0 - 4)
+    in Err(_)     then out.push(-4)
     end
     index = index + 1
   end
@@ -76,10 +76,10 @@ in Asked(first)
       # The original still holds the same question, unanswered.
       child.answer(call, 3)
       (results, finish(child, 0))
-    in Err(_) then ([0 - 5], 0 - 5)
+    in Err(_) then ([-5], -5)
     end
-  in _ then ([0 - 6], 0 - 6)
+  in _ then ([-6], -6)
   end
-in Done(_)  then ([0 - 7], 0 - 7)
-in Fault(_) then ([0 - 8], 0 - 8)
+in Done(_)  then ([-7], -7)
+in Fault(_) then ([-8], -8)
 end

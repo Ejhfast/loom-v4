@@ -487,7 +487,7 @@ def go(): Int with Vm
   vm.step()
   case vm.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
@@ -604,7 +604,7 @@ def go(): Int with Vm
   vm.step()
   case vm.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
@@ -694,7 +694,7 @@ def go(): Int with Vm, Clock
   end
   case vm.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
@@ -750,7 +750,7 @@ def go(): Int with Vm
   vm.step()
   case vm.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
@@ -829,7 +829,7 @@ def go(): Int with Vm
   end
   case vm.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
@@ -891,7 +891,7 @@ def go(): Int with Vm
   end
   case vm.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
@@ -970,7 +970,7 @@ def go(): Int with Vm, Rand
   end
   case held.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
@@ -1095,14 +1095,14 @@ fn a_terminal_machine_with_a_frame_or_a_frameless_operand_rejects() {
     // frames but one operand.
     let source = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().activate_or_fault(do ||: Int 7 end, args: ())
+  vm = sys.vm.Vm().activate_or_fault({ ||: Int 7 }, args: ())
   case vm.run()
   in Done(_)  then 0
   in Fault(_) then 0
   end
   case vm.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 

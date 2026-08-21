@@ -290,9 +290,9 @@ class Worker < Proc[Command]
     in Msg(Release)
       case self.file.close()
       in Ok(_)  then 1
-      in Err(_) then 0 - 1
+      in Err(_) then -1
       end
-    in Closed then 0 - 2
+    in Closed then -2
     end
   end
 end

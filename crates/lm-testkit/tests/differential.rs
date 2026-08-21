@@ -87,9 +87,9 @@ fn oracle_agrees_on_the_feature_corpus() {
          then 7\n  end\nend\npick(Some(4)) + pick(None)\n",
         // Effect rows on higher-order calls, empty in practice.
         "def apply[T, U, effect e](x: T, f: (T) -> U with e): U with e\n  f(x)\nend\n\
-         apply(3, do |n: Int|: Int n * n end)\n",
+         apply(3, { |n: Int|: Int n * n })\n",
         // Closures over enum values.
-        "make = do |v: Int|: Option[Int] Some(v) end\ncase make(6)\nin Some(v) then v\nin None \
+        "make = { |v: Int|: Option[Int] Some(v) }\ncase make(6)\nin Some(v) then v\nin None \
          then 0\nend\n",
         // Freezing and frozen faults agree.
         "xs = [1]\nxs.freeze()\nxs.push(2)\nxs\n",
@@ -115,9 +115,9 @@ fn oracle_agrees_on_the_feature_corpus() {
         "xs = [Some(None), Some(Some(1)), None]\ncase xs.at(1)\nin Some(Some(v)) then v\n\
          in Some(None) then 8\nin None then 9\nend\n",
         // A mutable closure parameter with a mutable argument.
-        "xs: [Int] = [1]\nf = do |mut ys: [Int]|: () ys.push(2) end\nf(xs)\nxs.len()\n",
+        "xs: [Int] = [1]\nf = { |mut ys: [Int]|: () ys.push(2) }\nf(xs)\nxs.len()\n",
         // A nested exact-arm scrutinee is exhaustive.
-        "s = Some(Some(3))\ncase s\nin Some(Some(v)) then v\nin Some(None) then 0\nin None then 0 - 1\nend\n",
+        "s = Some(Some(3))\ncase s\nin Some(Some(v)) then v\nin Some(None) then 0\nin None then -1\nend\n",
         // A `use` alias line in a pure program: the binding resolves
         // and stays unused, and both engines agree.
         "use sys.io.print\nuse sys.vm\n\ndef double(n: Int): Int\n  n * 2\nend\ndouble(21)\n",

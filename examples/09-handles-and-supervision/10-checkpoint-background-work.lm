@@ -4,11 +4,11 @@ def index_file(file: FileHandle): Int with Fs.Read, Fs.Close
   size = case file.read(1024)
   in Ok(bytes) then bytes.len()
   in Err(_)
-    return 0 - 1
+    return -1
   end
   case file.close()
   in Ok(_)  then size
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 

@@ -55,7 +55,7 @@ fn capitalized_callable_members_get_the_casing_rule() {
 fn the_vm_constructor_keeps_its_capital() {
     assert_eq!(
         allowed(
-            "def go(): Int with Vm\n  m = sys.vm.Vm().activate_or_fault(do || 21 end, args: ())\n  \
+            "def go(): Int with Vm\n  m = sys.vm.Vm().activate_or_fault({ || 21 }, args: ())\n  \
              case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),
@@ -94,7 +94,7 @@ fn use_binds_a_sys_group() {
     assert_eq!(
         allowed(
             "use sys.vm\n\ndef go(): Int with Vm\n  \
-             m = vm.Vm().activate_or_fault(do || 21 end, args: ())\n  \
+             m = vm.Vm().activate_or_fault({ || 21 }, args: ())\n  \
              case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),
@@ -114,7 +114,7 @@ fn use_binds_the_vm_constructor() {
     assert_eq!(
         allowed(
             "use sys.vm.Vm\n\ndef go(): Int with Vm\n  \
-             m = Vm().activate_or_fault(do || 42 end, args: ())\n  \
+             m = Vm().activate_or_fault({ || 42 }, args: ())\n  \
              case m.run()\n  in Done(v) then v\n  in Fault(_) then 0\n  end\nend\ngo()\n",
             &["Vm"]
         ),

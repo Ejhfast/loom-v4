@@ -39,10 +39,10 @@ in Ok(m)
   h.send(Stop)
   case h.done()
   in Done(v)  then v
-  in Fault(_) then 0 - 9
+  in Fault(_) then -9
   end
 in Err(_)
-  0 - 8
+  -8
 end
 "#;
 
@@ -78,7 +78,7 @@ class Supervisor < Proc[Cmd]
           return seen * 10 + v
         end
       in Fault(_)
-        return 0 - 1
+        return -1
       end
     end
   end

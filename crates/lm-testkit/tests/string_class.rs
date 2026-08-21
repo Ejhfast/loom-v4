@@ -264,7 +264,7 @@ seen = StringBuilder()
   seen.push_char(value)
   ()
 end)
-mapped = "aé猫".map(do |value: Char| value end)
+mapped = "aé猫".map({ |value: Char| value })
 (seen.finish(), mapped)
 "#;
     assert_eq!(

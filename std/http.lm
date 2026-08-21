@@ -172,7 +172,7 @@ final class HttpChunkScan
     self.cursor = start
     self.total = 0
     self.chunks = 0
-    self.trailer_start = 0 - 1
+    self.trailer_start = -1
     self.trailer_scan = start
   end
 end
@@ -553,7 +553,7 @@ final class Http
       return Err(self.invalid(response, "the HTTP header range is invalid"))
     end
     headers: [HttpHeader] = []
-    content_length = 0 - 1
+    content_length = -1
     chunked = false
     host_count = 0
     cursor = start
@@ -863,7 +863,7 @@ final class Http
       return Err(HttpError.InvalidRequest("the HTTP Host header count is invalid"))
     end
     length = if head.chunked
-      0 - 1
+      -1
     elsif head.content_length >= 0
       head.content_length
     else
@@ -922,7 +922,7 @@ final class Http
       return Ok(HttpFrame(body_start, 0, false, false, head.headers.len()))
     end
     if head.chunked
-      Ok(HttpFrame(body_start, 0 - 1, true, false, head.headers.len()))
+      Ok(HttpFrame(body_start, -1, true, false, head.headers.len()))
     elsif head.content_length >= 0
       Ok(HttpFrame(
         body_start,
@@ -932,7 +932,7 @@ final class Http
         head.headers.len()
       ))
     else
-      Ok(HttpFrame(body_start, 0 - 1, false, true, head.headers.len()))
+      Ok(HttpFrame(body_start, -1, false, true, head.headers.len()))
     end
   end
 
@@ -946,14 +946,14 @@ final class Http
     cursor = scan.trailer_start
     marker_bytes = Bytes("\r\n\r\n")
     if buffer.len() - cursor < 2
-      return Ok(0 - 1)
+      return Ok(-1)
     end
-    first = buffer.at_or(cursor, 0 - 1)
-    second = buffer.at_or(cursor + 1, 0 - 1)
+    first = buffer.at_or(cursor, -1)
+    second = buffer.at_or(cursor + 1, -1)
     if first == 13 and second == 10
       return Ok(cursor + 2)
     end
-    trailer_end = buffer.find_from_or(marker_bytes, scan.trailer_scan, 0 - 1)
+    trailer_end = buffer.find_from_or(marker_bytes, scan.trailer_scan, -1)
     if trailer_end < 0
       if buffer.len() - cursor > limits.max_header_bytes - header_bytes
         return Err(HttpError.LimitExceeded("the HTTP trailers are too large"))
@@ -963,7 +963,7 @@ final class Http
       else
         cursor
       end
-      return Ok(0 - 1)
+      return Ok(-1)
     end
     if trailer_end - cursor > limits.max_header_bytes - header_bytes
       return Err(HttpError.LimitExceeded("the HTTP trailers are too large"))
@@ -987,12 +987,12 @@ final class Http
     chunks = scan.chunks
     crlf = Bytes("\r\n")
     while cursor <= buffer.len()
-      line_end = buffer.find_from_or(crlf, cursor, 0 - 1)
+      line_end = buffer.find_from_or(crlf, cursor, -1)
       if line_end < 0
         if buffer.len() - cursor > 1024
           return Err(self.invalid(response, "a chunk size line is too large"))
         end
-        return Ok(0 - 1)
+        return Ok(-1)
       end
       if line_end == cursor or line_end - cursor > 1024
         return Err(self.invalid(response, "a chunk size line is invalid"))
@@ -1000,7 +1000,7 @@ final class Http
       size_end = line_end
       index = cursor
       while index < line_end
-        byte = buffer.at_or(index, 0 - 1)
+        byte = buffer.at_or(index, -1)
         if byte == 59
           size_end = index
           index = line_end
@@ -1017,7 +1017,7 @@ final class Http
         end
         index = size_end + 1
         while index < line_end
-          byte = buffer.at_or(index, 0 - 1)
+          byte = buffer.at_or(index, -1)
           if (byte < 32 and byte != 9) or byte == 127
             return Err(self.invalid(response, "the chunk extension is invalid"))
           end
@@ -1027,7 +1027,7 @@ final class Http
       size = 0
       index = cursor
       while index < size_end
-        byte = buffer.at_or(index, 0 - 1)
+        byte = buffer.at_or(index, -1)
         digit = if byte >= 48 and byte <= 57
           byte - 48
         elsif byte >= 97 and byte <= 102
@@ -1057,13 +1057,13 @@ final class Http
         return Err(HttpError.LimitExceeded("the HTTP body is too large"))
       end
       if buffer.len() - cursor < size
-        return Ok(0 - 1)
+        return Ok(-1)
       end
       if buffer.len() - cursor - size < 2
-        return Ok(0 - 1)
+        return Ok(-1)
       end
-      first = buffer.at_or(cursor + size, 0 - 1)
-      second = buffer.at_or(cursor + size + 1, 0 - 1)
+      first = buffer.at_or(cursor + size, -1)
+      second = buffer.at_or(cursor + size + 1, -1)
       if first != 13 or second != 10
         return Err(self.invalid(response, "the chunk data has no terminator"))
       end
@@ -1073,7 +1073,7 @@ final class Http
       scan.total = total
       scan.chunks = chunks
     end
-    Ok(0 - 1)
+    Ok(-1)
   end
 
   def read_request(
@@ -1087,11 +1087,11 @@ final class Http
     in Ok(_) then ()
     end
     buffer = ByteBuffer()
-    marker = 0 - 1
+    marker = -1
     scan = 0
     delimiter = Bytes("\r\n\r\n")
     while marker < 0
-      marker = buffer.find_from_or(delimiter, scan, 0 - 1)
+      marker = buffer.find_from_or(delimiter, scan, -1)
       if marker < 0
         if buffer.len() >= limits.max_header_bytes
           return Err(HttpError.LimitExceeded("the HTTP request headers are too large"))
@@ -1203,11 +1203,11 @@ final class Http
     in Ok(_) then ()
     end
     buffer = ByteBuffer()
-    marker = 0 - 1
+    marker = -1
     scan = 0
     delimiter = Bytes("\r\n\r\n")
     while marker < 0
-      marker = buffer.find_from_or(delimiter, scan, 0 - 1)
+      marker = buffer.find_from_or(delimiter, scan, -1)
       if marker < 0
         if buffer.len() >= limits.max_header_bytes
           return Err(HttpError.LimitExceeded("the HTTP response headers are too large"))
@@ -1263,7 +1263,7 @@ final class Http
         return Err(error)
       end
     elsif frame.close_delimited
-      0 - 1
+      -1
     else
       frame.body_start + frame.content_length
     end

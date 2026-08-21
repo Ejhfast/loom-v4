@@ -797,62 +797,62 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   module = case sys.vm.artifact(artifact_bytes()).verify()
   in Ok(value) then value
   in Err(_)
-    return 0 - 1
+    return -1
   end
   instance = case image.install(module)
   in Ok(value) then value
   in Err(_)
-    return 0 - 2
+    return -2
   end
   function = case instance.function[(Int,), Int]("step")
   in Ok(value) then value
   in Err(_)
-    return 0 - 3
+    return -3
   end
   class_def = case instance.class_def("Box")
   in Ok(value) then value
   in Err(_)
-    return 0 - 4
+    return -4
   end
   function_spec = case instance.slot_spec("step")
   in Ok(value) then value
   in Err(_)
-    return 0 - 5
+    return -5
   end
   function_slot = case instance.slot_for(function_spec)
   in Ok(value) then value
   in Err(_)
-    return 0 - 5
+    return -5
   end
   class_spec = case instance.slot_spec("Box")
   in Ok(value) then value
   in Err(_)
-    return 0 - 6
+    return -6
   end
   class_slot = case instance.slot_for(class_spec)
   in Ok(value) then value
   in Err(_)
-    return 0 - 6
+    return -6
   end
   value_spec = case instance.slot_spec("fuzz-slots.value")
   in Ok(value) then value
   in Err(_)
-    return 0 - 7
+    return -7
   end
   value_slot = case instance.slot_for(value_spec)
   in Ok(value) then value
   in Err(_)
-    return 0 - 7
+    return -7
   end
   process_spec = case instance.slot_spec("fuzz-slots.process")
   in Ok(value) then value
   in Err(_)
-    return 0 - 8
+    return -8
   end
   process_slot = case instance.slot_for(process_spec)
   in Ok(value) then value
   in Err(_)
-    return 0 - 8
+    return -8
   end
   image.replace_function(function_slot, function)
   image.replace_class(class_slot, class_def)

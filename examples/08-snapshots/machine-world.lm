@@ -30,7 +30,7 @@ class Worker < Proc[Handle[Int, Int]]
       helper.send(20)
       case helper.done()
       in Done(v)  then v + 1
-      in Fault(_) then 0 - 1
+      in Fault(_) then -1
       end
     in Closed then 0
     end
@@ -40,7 +40,7 @@ end
 def run_held(vm: Run[Int]): Int with Vm
   case vm.run()
   in Done(value) then value
-  in Fault(_)    then 0 - 1
+  in Fault(_)    then -1
   end
 end
 
@@ -50,7 +50,7 @@ def restore_run(snap: RunSnapshot[Int]): Int with Vm, Proc
     # A restored world starts with no authority at all.
     world.table().pass(Proc)
     run_held(world)
-  in Err(_) then 0 - 2
+  in Err(_) then -2
   end
 end
 
@@ -60,7 +60,7 @@ worker.send(helper)
 held = sys.vm.Vm().activate_or_fault(do |w: Handle[Handle[Int, Int], Int]|: Int with Proc
   case w.done()
   in Done(v)  then v * 2
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
 end, args: (worker,))
 held.table().pass(Proc)
@@ -69,5 +69,5 @@ in Ok(snap)
   first = restore_run(snap)
   second = restore_run(snap)
   (first, second, run_held(held))
-in Err(_) then (0 - 3, 0 - 3, 0 - 3)
+in Err(_) then (-3, -3, -3)
 end

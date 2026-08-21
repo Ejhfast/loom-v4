@@ -13,9 +13,9 @@ length = case field.split_once(": ")
 in Some((_, value))
   case value.parse_int(10)
   in Ok(number)  then number
-  in Err(_)      then 0 - 1
+  in Err(_)      then -1
   end
-in None then 0 - 2
+in None then -2
 end
 
 route = case "/api/users".strip_prefix("/api/")

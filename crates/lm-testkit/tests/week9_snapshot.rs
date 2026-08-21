@@ -365,7 +365,7 @@ fn multi_shot_restore_creates_independent_worlds() {
 def restore_list(snap: RunSnapshot[List[Int]]): Run[List[Int]] with Vm
   case sys.vm.Vm().restore(snap)
   in Ok(vm)  then vm
-  in Err(_)  then sys.vm.Vm().activate_or_fault(do ||: List[Int] [] end, args: ())
+  in Err(_)  then sys.vm.Vm().activate_or_fault({ ||: List[Int] [] }, args: ())
   end
 end
 
@@ -381,18 +381,18 @@ in Ok(snap)
   second = restore_list(snap)
   a = case first.run()
       in Done(xs) then xs.len()
-      in Fault(_) then 0 - 1
+      in Fault(_) then -1
       end
   b = case second.run()
       in Done(xs) then xs.len()
-      in Fault(_) then 0 - 1
+      in Fault(_) then -1
       end
   c = case vm.run()
       in Done(xs) then xs.len()
-      in Fault(_) then 0 - 1
+      in Fault(_) then -1
       end
   (a, b, c)
-in Err(_) then (0 - 3, 0 - 3, 0 - 3)
+in Err(_) then (-3, -3, -3)
 end
 ";
     assert_eq!(
@@ -469,14 +469,14 @@ def go(): Int with Vm, Proc, Clock
   # pair and reads the other element, so the policy table of `outer`
   # is the only thing that names the worker from `outer`.
   pair = (worker, 7)
-  outer = sys.vm.Vm().activate_or_fault(do ||: Int 1 end, args: ())
+  outer = sys.vm.Vm().activate_or_fault({ ||: Int 1 }, args: ())
   outer.table().mock(Clock.Now, do ||: Int
     pair[1]
   end)
   outer.step()
   case outer.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
@@ -616,12 +616,12 @@ def go(): Int with Vm, Clock
   inner.step()
   inner.step()
   case inner.snapshot()
-  in Ok(_) then 0 - 1
+  in Ok(_) then -1
   in Err(e)
     case e
     in ResourceActive(path, _) then path.len()
-    in SnapshotLimitExceeded    then 0 - 2
-    in BadImage(_)              then 0 - 3
+    in SnapshotLimitExceeded    then -2
+    in BadImage(_)              then -3
     end
   end
 end
@@ -733,7 +733,7 @@ def dispatch_to_end(vm: Run[Int]): Int with Vm
     in Done(value)
       return value
     in Fault(_)
-      return 0 - 1
+      return -1
     end
   end
 end
@@ -747,7 +747,7 @@ def go(): Int with Vm, Io.Print
     b.table().pass(Io.Print)
     case b.run()
     in Done(value) then value
-    in Fault(_) then 0 - 3
+    in Fault(_) then -3
     end
   end
 
@@ -764,24 +764,24 @@ def go(): Int with Vm, Io.Print
           a.answer(call, ())
           original = case a.run()
                      in Done(value) then value
-                     in Fault(_) then 0 - 4
+                     in Fault(_) then -4
                      end
           case sys.vm.Vm().restore(snap)
           in Ok(restored)
             return original + dispatch_to_end(restored)
           in Err(_)
-            return 0 - 5
+            return -5
           end
         in Err(_)
-          return 0 - 6
+          return -6
         end
       in _
         a.dispatch(q)
       end
     in Done(_)
-      return 0 - 7
+      return -7
     in Fault(_)
-      return 0 - 8
+      return -8
     end
   end
 end
@@ -891,10 +891,10 @@ fn a_zero_request_ordinal_rejects() {
 fn a_terminal_capture_restores_with_its_result() {
     let source = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().activate_or_fault(do ||: Int 41 + 1 end, args: ())
+  vm = sys.vm.Vm().activate_or_fault({ ||: Int 41 + 1 }, args: ())
   case vm.run()
   in Done(_)  then 0
-  in Fault(_) then 0 - 1
+  in Fault(_) then -1
   end
   case vm.snapshot()
   in Ok(snap)
@@ -902,11 +902,11 @@ def go(): Int with Vm
     in Ok(again)
       case again.run()
       in Done(v)  then v
-      in Fault(_) then 0 - 2
+      in Fault(_) then -2
       end
-    in Err(_) then 0 - 3
+    in Err(_) then -3
     end
-  in Err(_) then 0 - 4
+  in Err(_) then -4
   end
 end
 
@@ -951,14 +951,14 @@ def go(): Int with Proc, Vm
   h = Worker.spawn()
   # A `Vm` handle is holder-local, so the held machine names the
   # paused proc through its sendable proc handle instead.
-  held = sys.vm.Vm().activate_or_fault(do |w: Handle[Int, Int]|: Int 1 end, args: (h,))
+  held = sys.vm.Vm().activate_or_fault({ |w: Handle[Int, Int]|: Int 1 }, args: (h,))
   case h.pause()
   in Ok(_)
     case held.snapshot()
     in Ok(_)  then 1
-    in Err(_) then 0 - 1
+    in Err(_) then -1
     end
-  in Err(_) then 0 - 2
+  in Err(_) then -2
   end
 end
 
@@ -1006,12 +1006,12 @@ def go(): Int with Vm, Clock
   inner.step()
   inner.step()
   case inner.snapshot()
-  in Ok(_)  then 0 - 1
+  in Ok(_)  then -1
   in Err(e)
     case e
     in ResourceActive(path, _) then path.len()
-    in SnapshotLimitExceeded   then 0 - 2
-    in BadImage(_)             then 0 - 3
+    in SnapshotLimitExceeded   then -2
+    in BadImage(_)             then -3
     end
   end
 end
@@ -1028,7 +1028,7 @@ fn a_self_snapshot_restores_with_its_request_pending() {
 def go(): Int with Vm
   case sys.vm.snapshot_self()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 

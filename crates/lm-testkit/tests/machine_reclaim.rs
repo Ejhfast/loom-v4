@@ -22,7 +22,7 @@ fn a_driver_outlives_its_child_budget() {
   end, args: (n,))
   case vm.run()
   in Done(value) then value
-  in Fault(_)    then 0 - 1
+  in Fault(_)    then -1
   end
 end
 
@@ -55,9 +55,9 @@ fn a_search_driver_restores_past_its_child_budget() {
   in Ok(restored)
     case restored.run()
     in Done(value) then value
-    in Fault(_)    then 0 - 1
+    in Fault(_)    then -1
     end
-  in Err(_) then 0 - 2
+  in Err(_) then -2
   end
 end
 
@@ -74,7 +74,7 @@ in Ok(snap)
     i = i + 1
   end
   total
-in Err(_) then 0 - 3
+in Err(_) then -3
 end";
     assert_eq!(
         run_allowed("reclaim-restore.lm", source, &["Vm"]).unwrap(),

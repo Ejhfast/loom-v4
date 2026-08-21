@@ -2015,7 +2015,7 @@ const GATE_BOUNDARIES: usize = 400;
 /// types name the type variable of the enclosing generic.
 const CLOSURE_IN_GENERIC: &str = "\
 def hold[T](v: T): T
-  g = do ||: T v end
+  g = { ||: T v }
   g()
 end
 
@@ -2026,7 +2026,7 @@ hold(41)
 /// machine carries a substitution no call site of the image states.
 const GENERIC_ENTRY: &str = "\
 def hold[T](v: T): Run[T] with Vm
-  sys.vm.Vm().activate_or_fault(do |x: T|: T x end, args: (v,))
+  sys.vm.Vm().activate_or_fault({ |x: T|: T x }, args: (v,))
 end
 
 def go(): Int with Vm
@@ -2080,7 +2080,7 @@ go()
 /// and no proc class stands behind it.
 const PROC_RUN_HANDLE: &str = "\
 def go(): Int with Proc, Vm
-  vm = sys.vm.Vm().activate_or_fault(do ||: Int 41 + 1 end, args: ())
+  vm = sys.vm.Vm().activate_or_fault({ ||: Int 41 + 1 }, args: ())
   h = sys.proc.run(vm)
   case h.done()
   in Done(v)  then v
@@ -2096,7 +2096,7 @@ go()
 const NESTED_CLOSURE_IN_GENERIC: &str = "\
 def hold[T](v: T): T
   outer = do ||: T
-    inner = do ||: T v end
+    inner = { ||: T v }
     inner()
   end
   outer()

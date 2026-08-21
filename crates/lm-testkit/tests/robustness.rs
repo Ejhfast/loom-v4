@@ -90,7 +90,7 @@ fn deep_map_literals_are_rejected_with_a_diagnostic() {
 #[test]
 fn deep_closure_bodies_are_rejected_with_a_diagnostic() {
     on_small_stack(|| {
-        let text = nested("do || ", "1", " end", 5_000) + "\n";
+        let text = nested("{ || ", "1", " }", 5_000) + "\n";
         assert_eq!(code_of(&text), "E1022");
     });
 }

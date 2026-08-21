@@ -223,8 +223,8 @@ fn perform_mock_smoke() {
     let source = "def go(): Int with Vm\n  \
                   vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    \
                   i = 0\n    total = 0\n    while i < 5000\n      total = total + sys.clock.now()\n      i = i + 1\n    end\n    total\n  end, args: ())\n  \
-                  vm.table().mock(Clock.Now, do ||: Int 1 end)\n  \
-                  case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
+                  vm.table().mock(Clock.Now, { ||: Int 1 })\n  \
+                  case vm.run()\n  in Done(v) then v\n  in Fault(_) then -1\n  end\nend\ngo()\n";
     timed_world("perform_mock_5k", source, &["Vm"], "Done(5000)");
 }
 
@@ -236,7 +236,7 @@ fn drive_interception_smoke() {
                   guard = 0\n  while guard < 100000\n    guard = guard + 1\n    \
                   case vm.drive()\n    in Asked(q)\n      \
                   case q\n      in Call(Clock.Now, call, ()) then vm.answer(call, 1)\n      in _ then vm.dispatch(q)\n      end\n    \
-                  in Done(v)\n      return v\n    in Fault(_)\n      return 0 - 1\n    end\n  end\n  0 - 2\nend\ngo()\n";
+                  in Done(v)\n      return v\n    in Fault(_)\n      return -1\n    end\n  end\n  -2\nend\ngo()\n";
     timed_world("drive_interception_5k", source, &["Vm"], "Done(5000)");
 }
 
@@ -254,7 +254,7 @@ def drive_all(vm: Run[Int]): Int with Vm
     in Done(value)
       return value
     in Fault(_)
-      return 0 - 1
+      return -1
     end
   end
 end
@@ -272,7 +272,7 @@ inner = do ||: Int with Vm, Clock.Now
   b.table().pass(Clock.Now)
   case b.run()
   in Done(value) then value
-  in Fault(_) then 0 - 3
+  in Fault(_) then -3
   end
 end
 
@@ -294,7 +294,7 @@ fn nested_vm_run_smoke() {
     let source = "def tower(n: Int): Int with Vm\n  if n <= 0\n    1\n  else\n    \
                   vm = sys.vm.Vm().activate_or_fault(do || with Vm\n      tower(n - 1)\n    end, args: ())\n    \
                   vm.table().pass(Vm)\n    \
-                  case vm.run()\n    in Done(v) then v + 1\n    in Fault(_) then 0 - 1\n    end\n  end\nend\ntower(40)\n";
+                  case vm.run()\n    in Done(v) then v + 1\n    in Fault(_) then -1\n    end\n  end\nend\ntower(40)\n";
     timed_world("nested_vm_run_40", source, &["Vm"], "Done(41)");
 }
 
@@ -304,7 +304,7 @@ fn async_wait_smoke() {
                   vm = sys.vm.Vm().activate_or_fault(do || with Clock.Sleep\n    \
                   i = 0\n    while i < 50\n      sys.clock.sleep(1)\n      i = i + 1\n    end\n    i\n  end, args: ())\n  \
                   vm.table().pass(Clock.Sleep)\n  \
-                  case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
+                  case vm.run()\n  in Done(v) then v\n  in Fault(_) then -1\n  end\nend\ngo()\n";
     timed_world("async_wait_50", source, &["Vm", "Clock.Sleep"], "Done(50)");
 }
 
@@ -328,7 +328,7 @@ fn boundary_transfer_smoke() {
                   vm = sys.vm.Vm().activate_or_fault(do ||: [[Int]]\n    \
                   xs: [[Int]] = []\n    i = 0\n    while i < 20000\n      xs.push([i])\n      i = i + 1\n    end\n    \
                   xs.freeze()\n  end, args: ())\n  \
-                  case vm.run()\n  in Done(xs) then xs.len()\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
+                  case vm.run()\n  in Done(xs) then xs.len()\n  in Fault(_) then -1\n  end\nend\ngo()\n";
     timed_world("transfer_graph_20k", source, &["Vm"], "Done(20000)");
 }
 
@@ -389,7 +389,7 @@ fn proc_send_receive_smoke() {
                   h.close()\n\
                   case h.done()\n\
                   in Done(v)  then v\n\
-                  in Fault(_) then 0 - 1\n\
+                  in Fault(_) then -1\n\
                   end\n";
     timed_world("proc_send_receive_20k", source, &["Proc"], "Done(20000)");
 }
@@ -451,7 +451,7 @@ fn proc_pause_resume_smoke() {
                   h.close()\n\
                   case h.done()\n\
                   in Done(v)  then v\n\
-                  in Fault(_) then 0 - 1\n\
+                  in Fault(_) then -1\n\
                   end\n";
     timed_world("proc_pause_resume_5k", source, &["Proc"], "Done(0)");
 }
@@ -585,7 +585,7 @@ def go(): Int with Vm, Clock
   end
   case vm.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
@@ -627,7 +627,7 @@ def go(): Int with Vm, Clock
   end
   case vm.snapshot()
   in Ok(_)  then 1
-  in Err(_) then 0 - 1
+  in Err(_) then -1
   end
 end
 
