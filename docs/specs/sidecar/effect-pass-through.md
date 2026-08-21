@@ -66,7 +66,7 @@ end
 
 inner = do || : Int with Vm, Io.Print
   sys.io.print("from A\n")
-  b = sys.vm.Vm().activate(do || : Int with Io.Print
+  b = sys.vm.Vm().activate_or_fault(do || : Int with Io.Print
     sys.io.print("from B\n")
     7
   end, args: ())
@@ -77,7 +77,7 @@ inner = do || : Int with Vm, Io.Print
   end
 end
 
-a = sys.vm.Vm().activate(inner, args: ())
+a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
 a.table().pass(Io.Print)
 

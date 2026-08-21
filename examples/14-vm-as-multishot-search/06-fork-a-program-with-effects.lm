@@ -97,4 +97,4 @@ end
 
 # Three waves of two cost 4 + 4 + 4. Any other split of six costs
 # more, so the search reports 12 and the transcript that produced it.
-cheapest(sys.vm.Vm().activate(rollout, args: ()), "")
+cheapest(sys.vm.Vm().activate_or_fault(rollout, args: ()), "")

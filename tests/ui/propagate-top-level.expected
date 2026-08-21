@@ -1,0 +1,2 @@
+error[E1066]: `?` is not valid at the top level of a module
+  --> tests/ui/propagate-top-level.lm:1:1

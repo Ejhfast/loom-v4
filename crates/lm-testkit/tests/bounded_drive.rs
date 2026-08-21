@@ -56,7 +56,7 @@ def supervise(vm: Run[Int]): Int with Vm
   end
 end
 
-supervise(sys.vm.Vm().activate(spin, args: ()))
+supervise(sys.vm.Vm().activate_or_fault(spin, args: ()))
 "#;
     let out = run(src);
     println!("bounded turns: {out}");
@@ -91,7 +91,7 @@ def supervise(vm: Run[Int]): Int with Vm
   end
 end
 
-supervise(sys.vm.Vm().activate(spin, args: ()))
+supervise(sys.vm.Vm().activate_or_fault(spin, args: ()))
 "#;
     let out = run(src);
     println!("unbounded: {out}");

@@ -96,7 +96,7 @@ def guard(child: Run[String], list: [String], canned: Bytes): String with Vm
 end
 
 def main(): String with Vm
-  child = sys.vm.Vm().activate(worker, args: ())
+  child = sys.vm.Vm().activate_or_fault(worker, args: ())
   canned = Bytes(
     "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok"
   )

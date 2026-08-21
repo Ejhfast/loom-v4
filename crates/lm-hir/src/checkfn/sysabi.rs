@@ -760,13 +760,27 @@ impl<'o> FnChecker<'o> {
         match (class, name) {
             ("Artifact", "verify") => {
                 Self::expect_no_args(name, args, span)?;
-                self.charge_op(ctx, lm_abi::OP_VM_VERIFY, span)?;
+                self.charge_op(ctx, lm_abi::OP_COMPILER_VERIFY, span)?;
                 let verified = Self::core_class(ctx, "VerifiedModule");
                 Ok(HExpr {
                     ty: result(ctx, verified),
                     mutable: true,
                     kind: HExprKind::Perform {
-                        op: lm_abi::OP_VM_VERIFY,
+                        op: lm_abi::OP_COMPILER_VERIFY,
+                        args: vec![recv_h],
+                    },
+                })
+            }
+            ("Instance", "dynamic_entry") => {
+                Self::expect_no_args(name, args, span)?;
+                let dynamic = Self::core_class(ctx, "DynValue");
+                let function = Self::core_inst(ctx, "FunctionDef", vec![UNIT, dynamic]);
+                self.charge_op(ctx, lm_abi::OP_VM_INSTANCE_ENTRY, span)?;
+                Ok(HExpr {
+                    ty: result(ctx, function),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_INSTANCE_ENTRY,
                         args: vec![recv_h],
                     },
                 })
@@ -831,7 +845,7 @@ impl<'o> FnChecker<'o> {
                     },
                 })
             }
-            ("Instance", "slot") | ("Instance", "slot_spec") => {
+            ("Instance", "slot_for") | ("Instance", "slot_spec") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -839,11 +853,16 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let index = self.check_expr(ctx, &args[0], INT)?;
-                let (op, value) = if name == "slot" {
-                    (lm_abi::OP_VM_INSTANCE_SLOT, Self::core_class(ctx, "Slot"))
+                let (argument, op, value) = if name == "slot_for" {
+                    let slot_spec = Self::core_class(ctx, "SlotSpec");
+                    (
+                        self.check_expr(ctx, &args[0], slot_spec)?,
+                        lm_abi::OP_VM_INSTANCE_SLOT_FOR,
+                        Self::core_class(ctx, "Slot"),
+                    )
                 } else {
                     (
+                        self.check_expr(ctx, &args[0], STRING)?,
                         lm_abi::OP_VM_INSTANCE_SLOT_SPEC,
                         Self::core_class(ctx, "SlotSpec"),
                     )
@@ -854,7 +873,7 @@ impl<'o> FnChecker<'o> {
                     mutable: true,
                     kind: HExprKind::Perform {
                         op,
-                        args: vec![recv_h, index],
+                        args: vec![recv_h, argument],
                     },
                 })
             }
@@ -897,39 +916,50 @@ impl<'o> FnChecker<'o> {
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
         Ok(match (recv_ty, name) {
-            (Type::Vm, "activate") => {
+            (Type::Vm, "activate" | "activate_or_fault") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(
                         "E1006",
-                        format!("`activate` expects 2 argument(s), found {}", args.len()),
+                        format!("`{name}` expects 2 argument(s), found {}", args.len()),
                         span,
                     ));
                 }
                 // The type of the second parameter comes from the
                 // first, so this method arranges the labels itself
                 // instead of calling `check_args_simple`.
-                let args = arrange_args(args, &["program", "args"], "activate")?;
+                let args = arrange_args(args, &["program", "args"], name)?;
                 let program = self.synth_expr(ctx, args[0])?;
-                let (want, ret, op, fallible) = match ctx.store.get(program.ty).clone() {
+                let (want, ret, op) = match ctx.store.get(program.ty).clone() {
                     Type::Fn(params, _, ret, _) => {
                         let view = if params.is_empty() {
                             UNIT
                         } else {
                             ctx.store.intern(Type::Tuple(params))
                         };
-                        (view, ret, lm_abi::OP_VM_ACTIVATE, false)
+                        let op = if name == "activate_or_fault" {
+                            lm_abi::OP_VM_ACTIVATE_OR_FAULT
+                        } else {
+                            lm_abi::OP_VM_ACTIVATE
+                        };
+                        (view, ret, op)
                     }
                     Type::Inst(class, values)
                         if ctx.core_types.get("FunctionDef") == Some(&class.0)
+                            && name == "activate"
                             && values.len() == 2 =>
                     {
-                        (values[0], values[1], lm_abi::OP_VM_ACTIVATE_DEF, true)
+                        (values[0], values[1], lm_abi::OP_VM_ACTIVATE_DEF)
                     }
                     _ => {
+                        let expected = if name == "activate_or_fault" {
+                            "a function"
+                        } else {
+                            "a function or function definition"
+                        };
                         return Err(Diagnostic::new(
                             "E1004",
                             format!(
-                                "`activate` needs a function or function definition, found {}",
+                                "`{name}` needs {expected}, found {}",
                                 ctx.display_type(&self.env, program.ty)
                             ),
                             args[0].span,
@@ -939,11 +969,11 @@ impl<'o> FnChecker<'o> {
                 let tuple = self.check_expr(ctx, args[1], want)?;
                 self.charge_op(ctx, op, span)?;
                 let run_ty = ctx.store.intern(Type::Run(ret));
-                let ty = if fallible {
+                let ty = if op == lm_abi::OP_VM_ACTIVATE_OR_FAULT {
+                    run_ty
+                } else {
                     let error = Self::core_class(ctx, "CodeError");
                     Self::core_inst(ctx, "Result", vec![run_ty, error])
-                } else {
-                    run_ty
                 };
                 HExpr {
                     ty,

@@ -149,7 +149,7 @@ Byte strings accept `\xNN` and reject interpolation.
 Punctuation:
 
 ```text
-( ) [ ] { } , : . ; |
+( ) [ ] { } , : . ; | ?
 ```
 
 Operators:
@@ -216,71 +216,68 @@ One import slot names the providing module, the exported name, the kind, and the
 
 ### 3.4 Primitive compile operation
 
-The primitive compiler API uses a typed heterogeneous environment object rather than `{String: Any}`:
+`CompileEnv` contains verified provider modules and explicit source-root mappings:
 
 ```lm
-env = CompileEnv()
-assert(env.bind("Json", Json).is_ok())
-assert(env.bind("Config", config.freeze()).is_ok())
-
-env = env.freeze()
-result = sys.compiler.compile(source, env, CompileOptions())
+env = CompileEnv(
+  List[VerifiedModule](),
+  List[(String, String)]()
+)
+options = CompileOptions(
+  is_main: true,
+  dynamic_result: false,
+  late_definitions: false,
+  late_functions: List[String](),
+  late_classes: List[String]()
+)
+result = sys.compiler.compile("interaction", source, env, options)
 ```
 
 Conceptually:
 
 ```text
-CompileEnv.bind[T](mut self, name: String, value: T)
-  -> Result[(), CompileEnvError]
 Compiler.Compile(String, String, CompileEnv, CompileOptions)
   -> Result[Artifact, CompileErrors]
 ```
 
 The first string is the logical source path. The second string is the source text.
 
-`bind` records the value's exact static signature, optional code hash, and a frozen control-envelope representation. Binding two values to one name or freezing an incompatible value is an ordinary `CompileEnvError`. The environment itself is holder-side control data and is not a general guest map.
+Each provider is a `VerifiedModule` with validated compiler interface metadata.
 
-The compiler records only referenced import slots and never captures the supplied value into the artifact. The `std/compiler` wrapper `compile(source)` supplies an empty frozen environment and default options. Truly dynamic compiler tooling uses `DynValue`, described in section 5.6, rather than widening normal APIs to `Any`.
+A root pair maps one source root to one provider module prefix.
 
-### 3.5 Pure entry construction
+The compiler records only referenced imports. It captures no provider instance or runtime value.
 
-Linking evaluates the trailing expression to construct the entry value, so that expression must have the empty effect row. Startup work is represented by returning a closure:
+Dynamic compiler tools request a declared `DynValue` result. They do not widen normal APIs to `Any`.
+
+### 3.5 Entry execution
+
+The compiler lowers a trailing expression into the module entry function.
+
+Verification and installation do not execute this function.
+
+`Instance.entry` returns its typed `FunctionDef`. `Vm.activate` creates a run for that definition.
+
+The entry function carries the effect row of its source expression.
+
+### 3.6 Installation and linking
+
+Inside a `Result`-returning callable, installation can use propagation:
 
 ```lm
-do || with Io.Print
-  sys.io.print("started\n")
-end
+image = sys.vm.Vm()
+provider_instance = image.install(provider_module)?
+links = LinkEnv([provider_instance])
+program_instance = image.install(program_module, links)?
 ```
 
-Creating this closure is pure; calling it requests `Io.Print`.
+`Vm.install` returns `Result[Instance,CodeError]`. `LinkEnv` contains installed provider instances from the same VM.
 
-### 3.6 Linking
+Installation validates imports, signatures, pinned hashes, slot contracts, and class identities.
 
-```lm
-bindings = LinkEnv()
-assert(bindings.bind("Json", Json).is_ok())
-assert(bindings.bind("Config", config.freeze()).is_ok())
+Installation executes no guest instruction. A failed installation changes no VM state.
 
-case artifact.link(bindings.freeze())
-in Ok(linked)
-  parser = linked.definition(
-    "parse",
-    expected: type_descriptor[(String) -> Result[Json, JsonError]]()
-  )
-  program = linked.entry(
-    expected: type_descriptor[() -> () with Io.Print]()
-  )
-  # parser and program are typed Result values
-  ()
-in Err(errors)
-  # report the LinkErrors value
-  ()
-end
-```
-
-`LinkEnv.bind[T]` returns `Result[(),LinkEnvError]`; `Artifact.link` returns `Result[LinkedModule,LinkErrors]`. The typed environment must contain exactly one frozen compatible value per import slot. Linking validates signatures and pinned hashes, creates local class/function values, evaluates the pure entry expression, deep-freezes the result, and returns a `LinkedModule`. `definition` and `entry` return typed `Result` values rather than an erased lookup. Linking installs nothing globally.
-
-Missing, extra, incompatible, or mutable bindings produce `LinkErrors` in the trusted API. Injecting malformed linked state into a VM faults with `LinkMismatch`.
+Missing, duplicate, or incompatible providers produce `CodeError` values.
 
 Linking a program merges its modules into one closed artifact with an empty import table. The merge is pure: it installs no global name, performs no host operation, and reads no file. A module with an unresolved import slot never executes: the loader admits an artifact only with an empty import table. The merged artifact meets the whole verifier before it runs.
 
@@ -556,7 +553,9 @@ dyn_unpack[T](value: DynValue, expected: Type[T]) -> Option[T]
 type_descriptor[T]() -> Type[T]
 ```
 
-`type_descriptor[T]()` is a pure compiler-known constructor for the canonical typed descriptor of `T`; it allocates no user-visible dynamic type object on repeated use and is the witness passed to typed linker and dynamic-unpack APIs.
+`type_descriptor[T]()` is a pure compiler-known constructor for the canonical typed descriptor of `T`.
+
+It allocates no visible dynamic object on repeated use. Dynamic-unpack and snapshot APIs can use this descriptor.
 
 `DynValue` is frozen and preserves the hidden exact type. It does not implicitly subtype every `T`, so dynamic data cannot infect a surrounding generic type by accident. Reflection and diagnostics use `ValueView`, which exposes type, bounded formatting, digest when available, and structural children as more views; it cannot be cast back into a live guest value.
 
@@ -720,7 +719,7 @@ Calls use parentheses. Arguments evaluate left to right; the receiver evaluates 
 ```lm
 f(1, 2)
 obj.method(1)
-vm.activate(program, args: ("Ada",))
+vm.activate_or_fault(program, args: ("Ada",))
 ```
 
 A label names one declared parameter. Labels can appear in any order after the positional arguments. A call rejects an unknown name, a repeated name, a name that a positional argument already fills, and a positional argument after a label. A label changes nothing in the call ABI.
@@ -739,7 +738,7 @@ files.with_open(path, options) do |file|
 end
 ```
 
-The two trailing forms have identical precedence and evaluation order. A call accepts at most one trailing closure. A trailing closure must start on the same line as the end of the call. A newline after the call ends the statement first (2.2). No postfix suffix may follow a trailing closure. There is no overload resolution.
+The two trailing forms have identical precedence and evaluation order. A call accepts at most one trailing closure. A trailing closure must start on the call line. A newline after the call ends the statement first (2.2). Only `?` can follow a trailing closure. There is no overload resolution.
 
 ### 6.2 Closures
 
@@ -857,7 +856,7 @@ List elements and map keys/values require a common non-`Any` type unless the lit
 
 ### 6.6 Precedence
 
-Strongest to weakest: postfix call/field/index and a trailing closure; unary `not`/`-`; multiplicative; additive; ordering; equality/`is`/`as`; `and`; `or`; assignment. Assignment is right-associative; other binary operators are left-associative.
+Strongest to weakest: postfix call, field, index, `?`, and trailing closure; unary `not`/`-`; multiplicative; additive; ordering; equality/`is`/`as`; `and`; `or`; assignment. Assignment is right-associative; other binary operators are left-associative.
 
 ---
 
@@ -1186,8 +1185,8 @@ appear wherever code names, grants, mocks, or matches an operation.
 Exactly one `sys` member is capitalized: the machine constructor
 `sys.vm.Vm()`, whose name is the constructed type. Every other
 member is a snake_case verb, including members that return objects,
-such as `sys.reflect.mirror(obj)`. The rule of thumb: lowercase
-performs the operation; a capitalized name talks about it.
+such as `sys.reflect.parse_syntax(source)`. Lowercase performs an
+operation. A capitalized name identifies its descriptor.
 
 ### 11.2 Perform
 
@@ -1438,24 +1437,32 @@ VmSnapshot
 
 There is no execute-an-unknown-signature shortcut.
 
-`Vm.activate` requires a function with a known signature. It returns `Run[DynValue]` only for a declared `DynValue` result.
+`Vm.activate` requires a function with a known signature. It returns `Result[Run[DynValue],CodeError]` only for a declared `DynValue` result.
 
 ### 14.2 Construction and loading
 
 ```lm
 vm = sys.vm.Vm()
-run = vm.activate(program, args: ("Ada",))
+activation = vm.activate(program, args: ("Ada",))
 ```
 
 `Vm.New` creates an empty execution image with default-deny policy.
 
-`activate[A,R,e](program: Fn[A,R,e], args: A) -> Run[R]` checks and transfers the arguments.
+`activate[A,R,e](program: Fn[A,R,e], args: A) -> Result[Run[R],CodeError]` checks and transfers the arguments.
+
+`activate_or_fault[A,R,e](program: Fn[A,R,e], args: A) -> Run[R]` faults when activation fails.
+
+Use `activate` for code handles or other inputs that can fail at runtime.
+
+Use `activate_or_fault` when failure indicates a program invariant violation.
 
 Activation creates the initial frame but executes no guest instruction.
 
 The VM remains available after activation. It can create later runs with different terminal types.
 
-Installed entries use the same activation rule. A caller must obtain an entry through an exact `Type[Fn[A,R,e]]` witness.
+Installed entries use the same activation rule. A typed caller uses `Instance.entry[A,R]()` with compile-time argument and result types.
+
+`Instance.dynamic_entry()` requests `FunctionDef[(),DynValue]` without a source-level type witness.
 
 ### 14.3 States
 
@@ -1685,7 +1692,7 @@ Nesting is ordinary composition of functions that use `Vm`:
 
 ```lm
 def f2(): Int with Vm
-  case sys.vm.Vm().activate(do || 21 end, args: ()).run()
+  case sys.vm.Vm().activate_or_fault(do || 21 end, args: ()).run()
   in Done(v)  then v
   in Fault(_) then 0
   end
@@ -1697,7 +1704,7 @@ def f1(e: () -> Int with Vm): Int with Vm
     x + x
   end
 
-  vm = sys.vm.Vm().activate(expr, args: ())
+  vm = sys.vm.Vm().activate_or_fault(expr, args: ())
   vm.table().pass(Vm)
   case vm.run()
   in Done(v)  then v
@@ -1832,7 +1839,7 @@ RunSnapshot[T].to_bytes(self) -> Bytes
 
 `cast_result` requires a distinguished run marker. A full VM snapshot has no such marker.
 
-A run image stores its distinguished run at machine ordinal zero.
+A run image stores an explicit distinguished-run selector. The selector does not give machine ordinal zero special meaning.
 
 A full VM image stores a separate VM-image selector. Machine ordinal zero has no selection meaning in that image.
 
@@ -2006,7 +2013,7 @@ The proc instance is constructed inside its VM. The spawner receives only a type
 ### 18.2 General launch
 
 ```lm
-vm = sys.vm.Vm().activate(program, args: ("Ada",))
+vm = sys.vm.Vm().activate_or_fault(program, args: ("Ada",))
 vm.table().pass(Io.Print)
 vm.table().mock(Clock.Now, do || 0 end)
 
@@ -2122,12 +2129,16 @@ A spawn payload is already a code hash plus a typed tuple of sendable values, an
 ## 19. Reflection
 
 ```lm
-mirror = sys.reflect.mirror(obj)
+parsed = sys.reflect.parse_syntax(source)
 ```
 
-`Mirror` returns frozen structural views: runtime class identity, declared fields and values, code/signature metadata, and permitted frame information. It never yields writable references into the inspected heap.
+`Reflect.ParseSyntax` returns one lossless concrete syntax tree, parse status, and diagnostic list.
 
-Reflection is an ordinary operation, appears in rows, and is table-gated. There is no dynamic invocation by string/symbol, no selector mutation, and no reflection API that bypasses field/method visibility or frozen boundaries.
+The syntax values are immutable. They expose no writable compiler or VM state.
+
+Version 0.2 has no general object mirror or dynamic invocation by name.
+
+The metaprogramming sidecar defines syntax inspection, construction, and compiler input rules.
 
 ---
 
@@ -2148,26 +2159,40 @@ do |name: String| with Io.Print
 end
 """
 
-env = CompileEnv().freeze()
-result = sys.compiler.compile(src, env, CompileOptions())
+env = CompileEnv(
+  List[VerifiedModule](),
+  List[(String, String)]()
+)
+options = CompileOptions(
+  is_main: true,
+  dynamic_result: false,
+  late_definitions: false,
+  late_functions: List[String](),
+  late_classes: List[String]()
+)
+result = sys.compiler.compile("greeter", src, env, options)
 ```
 
 `Compiler.Compile` is one deterministic operation whose ordinary result is `Result[Artifact, CompileErrors]`. It depends only on source bytes, compile-environment interfaces/hashes, options, compiler semantic hash, core-image hash, and operation/intrinsic ABI versions. Blocking it prevents runtime code minting.
 
 ### 20.2 Artifact API
 
-A valid artifact exposes frozen metadata:
+`Artifact` is an opaque untrusted code container.
 
 ```lm
-artifact.defs()
-artifact.imports()
-artifact.entry_type()
-artifact.row()
-artifact.hash()
-artifact.bytecode()
+case artifact.verify()
+in Ok(module) then use(module)
+in Err(error) then report(error.message)
+end
 ```
 
-An artifact may contain definitions, an entry, both, or neither. Definitions have independent semantic hashes; the module has a semantic hash; the exact byte container has a corruption hash.
+`Artifact.verify()` performs `Compiler.Verify` and returns `Result[VerifiedModule,CodeError]`.
+
+The verifier decodes the container and checks every function before it creates `VerifiedModule`.
+
+An artifact can contain definitions, an entry, both, or neither.
+
+Definitions have semantic hashes. The module and exact byte container have separate hashes.
 
 ### 20.3 Import slots and interfaces
 
@@ -2176,33 +2201,33 @@ An import slot includes name, full type/signature, effect row, mutability requir
 ### 20.4 Linking and typed entry values
 
 ```lm
-bindings = LinkEnv()
-assert(bindings.bind("Config", config.freeze()).is_ok())
-
-case artifact.link(bindings.freeze())
-in Ok(linked)
-  greeter = linked.definition(
-    "Greeter",
-    expected: type_descriptor[Class[Greeter]]()
-  )
-  entry = linked.entry(
-    expected: type_descriptor[(String) -> () with Io.Print]()
-  )
-  # greeter and entry are typed Result values
-  ()
-in Err(errors)
-  # report the LinkErrors value
-  ()
+case image.install(module, LinkEnv(providers))
+in Ok(instance)
+  entry = instance.entry[(String,), ()]()
+  greeter = instance.class_def("Greeter")
+  (entry.is_ok(), greeter.is_ok())
+in Err(_)
+  (false, false)
 end
 ```
 
-`LinkEnv.bind[T]` is the linker analogue of `CompileEnv.bind[T]`; both return typed ordinary errors and avoid a heterogeneous `Map[String,Any]`. `Artifact.link` returns `Result[LinkedModule,LinkErrors]`. `LinkedModule.entry` and `definition` require a typed `Type[T]` witness and return `Result[T,LinkError]`. Dynamic tools may request `DynValue` explicitly.
+`Vm.install` returns an `Instance`. The optional `LinkEnv` contains provider instances from that VM.
 
-Linking is pure native work. Bindings are validated, local definitions materialized as frozen code/class values, and the pure entry expression evaluated and frozen. Loading or linking never mutates a process-global namespace.
+`Instance.entry[A,T]()` and `Instance.function[A,T](name)` return typed `FunctionDef[A,T]` results.
+
+`Instance.dynamic_entry()` requests the declared `DynValue` entry form.
+
+`Instance.class_def(name)` returns one opaque `ClassDef` result.
+
+Installation validates and commits code atomically. It does not execute the entry function.
 
 ### 20.5 Rows as verified theorems
 
-The source checker proves each body row. Emitted typed bytecode carries enough metadata for a verifier to re-derive stack/type/call/perform consistency and ensure the claimed row contains all possible performs. Verification happens before an untrusted code hash enters the verified-code cache. Thereafter the hash pins the proof; runtime policy remains independent.
+The source checker proves each body row. Emitted typed bytecode carries enough metadata for independent verification.
+
+`Compiler.Verify` checks stack, type, call, perform, and row consistency.
+
+Only verified code can enter a VM installation. Runtime policy remains independent.
 
 ### 20.6 Compilation diagnostics
 
@@ -2593,7 +2618,9 @@ Generic signatures below are manifest-level schemas instantiated by the compiler
 
 ```text
 Vm.New                         () -> Vm
-Vm.Activate[A,T,e]             (Vm, Fn[A,T,e], control A) -> Run[T]
+Vm.Activate[A,T,e]             (Vm, Fn[A,T,e], control A)
+                                -> Result[Run[T], CodeError]
+Vm.ActivateOrFault[A,T,e]      (Vm, Fn[A,T,e], control A) -> Run[T]
 Vm.Run[T]                      (Run[T]) -> RunResult[T]
 Vm.Step[T]                     (Run[T]) -> StepEvent[T]
 Vm.Drive[T]                    (Run[T]) -> DriveEvent[T]
@@ -2628,16 +2655,15 @@ Vm.ServeTcpListener[T]         (Run[T], PendingCall[SocketAddress,
                                 -> ResourceHandle
 Vm.ServeTlsStream[T]           (Run[T], PendingCall) -> ResourceHandle
 Vm.Artifact                    (Bytes) -> Artifact
-Vm.Verify                      (Artifact)
-                                -> Result[VerifiedModule, CodeError]
 Vm.Install                     (Vm, VerifiedModule)
                                 -> Result[Instance, CodeError]
 Vm.InstanceEntry[A,T]          (Instance)
                                 -> Result[FunctionDef[A,T], CodeError]
 Vm.InstanceFunction[A,T]       (Instance, String)
                                 -> Result[FunctionDef[A,T], CodeError]
-Vm.InstanceSlot                (Instance, Int) -> Result[Slot, CodeError]
-Vm.InstanceSlotSpec            (Instance, Int)
+Vm.InstanceSlotFor             (Instance, SlotSpec)
+                                -> Result[Slot, CodeError]
+Vm.InstanceSlotSpec            (Instance, String)
                                 -> Result[SlotSpec, CodeError]
 Vm.ActivateDef[A,T]            (Vm, FunctionDef[A,T], control A)
                                 -> Result[Run[T], CodeError]
@@ -2658,6 +2684,12 @@ Vm.RestoreVm                   (VmSnapshot) -> Result[Vm, RestoreError]
 ```
 
 This table is the complete public `Vm` operation set for version 0.2.
+
+`Instance.slot_spec(name)` returns one portable stable slot identity.
+
+`Instance.slot_for(spec)` resolves that identity inside the receiving instance.
+
+Dense slot indices remain internal. No public method accepts one.
 
 The held, receiverless, and full VM forms use separate exact operation identities. They share one snapshot implementation family.
 
@@ -2718,10 +2750,14 @@ Compiler.Compile       (String, String, CompileEnv, CompileOptions)
                        -> Result[Artifact, CompileErrors]
 Compiler.CompileSyntax (SyntaxNode, CompileEnv, CompileOptions)
                        -> Result[Artifact, CompileErrors]
+Compiler.Verify        (Artifact)
+                       -> Result[VerifiedModule, CodeError]
 Reflect.ParseSyntax    (String) -> SyntaxParse
 ```
 
 `Compiler.Compile` receives a logical path before the source text.
+
+`Compiler.Verify` performs independent bytecode verification. The compiler cannot mint `VerifiedModule` values directly.
 
 `Reflect.ParseSyntax` returns a lossless syntax tree, parse status, and diagnostics.
 
@@ -2842,7 +2878,15 @@ Result[T,E]
   option() -> Option[T]
 ```
 
-There is no postfix propagation operator in version 0.2; explicit `case` remains the universal control form.
+Postfix `?` propagates a `Result` error from the nearest callable.
+
+For `value: Result[T,E]`, `value?` evaluates `value` once. It produces the `Ok` payload or returns `Err(error)`.
+
+The enclosing callable must return `Result[U,E]`. The error types must be equal.
+
+The top level cannot use `?`. A closure that uses `?` must declare its `Result` type.
+
+`Result.map`, `map_error`, and `and_then` support explicit error conversion and staged pipelines.
 
 ### 24.4 Native `List[T]`
 
@@ -3252,9 +3296,17 @@ A policy can define one such function per operation whose behavior it owns. This
 
 ### 24.14 Compiler, reflection, and testing
 
-`std/compiler.compile(source)` supplies an empty `CompileEnv` and default options. Builders expose typed `bind[T]` and link helpers; dynamic plugin tooling must use `DynValue` explicitly.
+`std/compiler.compile(source)` can supply an empty `CompileEnv` and default options.
 
-`std/reflect` formats mirrors and frame views without dynamic invocation. `std/test` represents each test body as a frozen descriptor carrying its exact function type, row, code hash, and captures. The runner executes every case in a child VM, configures an explicit table, records `Done`/`Fault`, and may use `drive` for deterministic operation transcripts.
+Installation helpers can build `LinkEnv` values from module instances. Dynamic tools must use `DynValue` explicitly.
+
+`std/reflect` formats syntax trees and diagnostics. Version 0.2 has no general value mirror or dynamic invocation.
+
+`std/test` represents each test body as a frozen descriptor. The descriptor carries its function type, row, code hash, and captures.
+
+The runner executes each case in a child VM. It configures an explicit table and records `Done` or `Fault`.
+
+The runner can use `drive` for deterministic operation transcripts.
 
 The compiler test harness has UI diagnostics, compile-pass, run-pass, run-fail, bytecode-verifier, artifact/snapshot corruption, conformance, fuzz-regression, and benchmark suites.
 
@@ -3529,12 +3581,14 @@ multiplicative  = unary, { ( "*" | "/" | "%" ), unary } ;
 unary           = ( "not" | "-" ), unary | postfix ;
 
 postfix         = primary,
-                  { generic_apply_suffix | call_suffix | field_suffix | index_suffix },
-                  [ trailing_closure ] ;
+                  { generic_apply_suffix | call_suffix | field_suffix | index_suffix
+                  | propagate_suffix },
+                  [ trailing_closure, { propagate_suffix } ] ;
 generic_apply_suffix = "[", type, { ",", type }, "]" ;
 call_suffix     = "(", [ arguments ], ")" ;
 field_suffix    = ".", IDENT ;
 index_suffix    = "[", expression, "]" ;
+propagate_suffix= "?" ;
 trailing_closure= closure ;
 
 arguments       = argument, { ",", argument } ;
@@ -3578,7 +3632,7 @@ loop_expr       = "loop", "do", separators, block, "end" ;
 case_expr       = "case", expression, separators,
                   case_arm, { separators, case_arm }, separators, "end" ;
 case_arm        = "in", pattern,
-                  ( "then", expression | separators, block ) ;
+                  ( "then", ( return_expr | expression ) | separators, block ) ;
 
 pattern         = "_"
                 | IDENT
@@ -3602,7 +3656,8 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - `()` is unit. `(T,)` and `(T,U)` are tuple types; the same parenthesized list followed by `->` is a function parameter list. A one-element tuple requires the trailing comma.
 - `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.
 - A left brace followed by a pipe starts a brace closure. Other braces start a map literal. `{}` is an empty map.
-- A trailing closure is valid only after a postfix chain that contains a call suffix. It becomes the final call argument. It must start on the same line as that chain, and no suffix may follow it.
+- A trailing closure is valid only after a postfix chain that contains a call suffix. It becomes the final call argument. It must start on the same line as that chain. Only `?` can follow it.
+- A single-line `then` arm can contain one expression or one `return` statement.
 - A bracket suffix is generic application only where static resolution permits it and normally precedes a call; otherwise it is indexing. Ambiguous source is rejected.
 - A postfix assignment target must be a writable field or index, not an arbitrary call result.
 - Enum arms must precede enum methods. A zero-field constructor such as `None` is recognized from expected/scrutinee context; another bare name is a binding pattern.
@@ -3635,7 +3690,7 @@ Canonical artifact rows expand groups to exact ABI operation identities and sort
 def supervise(
   program: () -> String with Io.Print, Clock.Now
 ): RunResult[String] with Vm, Io.Print
-  vm = sys.vm.Vm().activate(program, args: ())
+  vm = sys.vm.Vm().activate_or_fault(program, args: ())
   captured: [String] = []
 
   loop do

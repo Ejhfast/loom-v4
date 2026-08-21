@@ -1,0 +1,5 @@
+def bad(): Int
+  Ok[Int, String](1)?
+end
+
+bad()

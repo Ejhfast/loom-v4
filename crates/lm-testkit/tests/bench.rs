@@ -719,6 +719,37 @@ fn bench_core_compilation() {
 
 #[test]
 #[ignore]
+fn bench_late_compilation() {
+    use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
+    use lm_source::SourceFile;
+
+    let source = SourceFile::new("late-bench.lm", checker_source(256));
+    let env = CompileEnv::new().freeze();
+    let cases = [
+        ("static_compile", CompileOptions::new()),
+        ("late_compile", CompileOptions::new().late_definitions()),
+    ];
+    for (name, options) in cases {
+        let mut runs = Vec::with_capacity(ROUNDS);
+        for round in 0..=ROUNDS {
+            let start = Instant::now();
+            let compiled = compile_module_with_options("bench.late", &source, &env, true, &options)
+                .expect("the late benchmark compiles");
+            let elapsed = start.elapsed();
+            std::hint::black_box(compiled.semantic_hash);
+            if round > 0 {
+                runs.push(elapsed);
+            }
+        }
+        println!(
+            "LOOM\t{name}\t256\t{:.3}\tms",
+            median(runs).as_secs_f64() * 1e3
+        );
+    }
+}
+
+#[test]
+#[ignore]
 fn bench_public_syntax() {
     let mut source = String::from("value = 0\n");
     for _ in 1..5000 {

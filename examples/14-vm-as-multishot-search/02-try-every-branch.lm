@@ -61,7 +61,7 @@ def explore(image: RunSnapshot[Int], count: Int): [Int] with Vm
   out
 end
 
-child = sys.vm.Vm().activate(program, args: ())
+child = sys.vm.Vm().activate_or_fault(program, args: ())
 
 # Run the prefix, then stop on the first question.
 case child.drive()

@@ -72,4 +72,4 @@ def search(child: Run[Int]): Int with Vm
   end
 end
 
-search(sys.vm.Vm().activate(sides, args: ()))
+search(sys.vm.Vm().activate_or_fault(sides, args: ()))

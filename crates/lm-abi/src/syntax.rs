@@ -5,7 +5,7 @@ use std::fmt;
 pub const MAGIC: [u8; 8] = *b"LMSYNT\0\x01";
 pub const FORMAT_VERSION: u16 = 1;
 pub const GRAMMAR_MAJOR: u16 = 1;
-pub const GRAMMAR_MINOR: u16 = 0;
+pub const GRAMMAR_MINOR: u16 = 1;
 const HEADER_SIZE: usize = 28;
 const RECORD_SIZE: usize = 20;
 
@@ -495,6 +495,7 @@ pub const KIND_STAR: u16 = 124;
 pub const KIND_SLASH: u16 = 125;
 pub const KIND_PERCENT: u16 = 126;
 pub const KIND_NEWLINE: u16 = 127;
+pub const KIND_QUESTION: u16 = 128;
 pub const KIND_WHITESPACE: u16 = 500;
 pub const KIND_COMMENT: u16 = 501;
 pub const KIND_BOM: u16 = 502;
@@ -504,7 +505,7 @@ pub fn syntax_kind_class(kind: u16) -> Option<SyntaxClass> {
         KIND_MODULE | KIND_USE | KIND_INTERFACE | KIND_CLASS | KIND_ENUM | KIND_FUNCTION
         | KIND_STATEMENT => SyntaxClass::Node,
         KIND_INVALID => SyntaxClass::Invalid,
-        KIND_INT..=KIND_NEWLINE => SyntaxClass::Token,
+        KIND_INT..=KIND_QUESTION => SyntaxClass::Token,
         KIND_WHITESPACE | KIND_COMMENT | KIND_BOM => SyntaxClass::Trivia,
         _ => return None,
     })
@@ -547,6 +548,7 @@ pub fn syntax_kind_name(kind: u16) -> Option<&'static str> {
         KIND_STAR => "StarToken",
         KIND_SLASH => "SlashToken",
         KIND_PERCENT => "PercentToken",
+        KIND_QUESTION => "QuestionToken",
         KIND_NEWLINE => "NewlineToken",
         KIND_WHITESPACE => "WhitespaceTrivia",
         KIND_COMMENT => "CommentTrivia",

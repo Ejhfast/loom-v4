@@ -28,7 +28,7 @@ The implementation uses these decisions:
 - `RunSnapshot[T]` captures one distinguished run and its reachable image.
 - `VmSnapshot` is the untyped view of one admitted snapshot image.
 - An `Artifact` contains portable, untrusted compiler output.
-- Independent verification produces a `VerifiedModule`.
+- `Compiler.Verify` performs independent verification and produces a `VerifiedModule`.
 - `Vm.install` installs one verified module and returns an `Instance`.
 - Installed definitions remain immutable.
 - A `Slot` provides optional late binding under one immutable contract.
@@ -88,7 +88,7 @@ Compiler.Compile with path, source, CompileEnv, and CompileOptions
 Artifact
         |
         v
-independent decode and verification
+Compiler.Verify with one Artifact
         |
         v
 VerifiedModule
@@ -204,11 +204,13 @@ The handle carries no object instance. It identifies one verified class target f
 
 ### 6.6 Activation errors
 
-Activation through an ordinary closure returns `Run[T]`.
+`Vm.activate` returns `Result[Run[T], CodeError]` for closures and `FunctionDef` values.
 
-Activation through `FunctionDef[A,T]` returns `Result[Run[T], CodeError]`.
+The error covers stale code, cross-VM code, bad arguments, unsendable captures, and exhausted run capacity.
 
-The error result covers a stale handle, a cross-VM handle, a bad argument boundary, or exhausted run capacity.
+`Vm.activate_or_fault` accepts an ordinary closure and returns `Run[T]` directly.
+
+It converts an activation error into a VM fault. Use it only when failure violates a caller invariant.
 
 ## 7. Static and late binding
 
@@ -277,6 +279,24 @@ A `SlotSpec` can cross artifact and compiler boundaries. A live `Slot` cannot cr
 `Vm.install` maps each required `SlotSpec` through `LinkEnv`.
 
 An installation can also declare a new slot. The VM returns that live slot through the `Instance`.
+
+Dense slot indices are internal and can change between compilations.
+
+`Instance.slot_spec(name)` returns the portable specification for one named slot.
+
+`Instance.slot_for(spec)` resolves that specification inside the receiving instance.
+
+The lookup checks the stable key and immutable contract. It never guesses from an integer position.
+
+A function body edit preserves its key. A contract edit creates a new key.
+
+A raw artifact can find exported function and class slots by name.
+
+Its specification resolves only inside an instance of the exact artifact.
+
+Matching between distinct artifacts requires validated compiler interface metadata.
+
+An internal binding requires compiler interface metadata or a retained `SlotSpec`.
 
 ### 8.2 Replacement
 
@@ -414,9 +434,11 @@ An interactive definition group compiles with late bindings from the current nam
 
 The artifact exports immutable definitions. It can also declare new slots with initial targets.
 
-After installation, a Loom library maps each source name to its returned `Slot` and `SlotSpec`.
+After installation, a Loom library maps each source name to its returned `SlotSpec`.
 
 The VM does not own this source-name map.
+
+The library calls `instance.slot_spec(name)` after the first installation.
 
 ### 11.2 Compatible redefinition
 
@@ -424,7 +446,9 @@ The compiler receives the existing `SlotSpec` through `CompileEnv`.
 
 It emits a new immutable definition with the same contract.
 
-The library installs the definition. It then calls `Vm.replace` on the existing slot.
+The library installs the definition. It resolves the old specification through `instance.slot_for(spec)`.
+
+It then calls `Vm.replace` on the resolved slot.
 
 Old compiled callers use the same slot and see the new target on their next late call.
 
@@ -446,9 +470,11 @@ The compiler gives free namespace references late linkage.
 
 The library installs the module and obtains the entry metadata.
 
-A typed caller uses an exact `Type[Fn[A,R,e]]` witness.
+A typed caller uses `Instance.entry[A,R]()` with compile-time argument and result types.
 
 A dynamic evaluator can activate an entry that returns `DynValue`.
+
+`Instance.dynamic_entry()` returns `Result[FunctionDef[(),DynValue],CodeError]`.
 
 The VM packages a value at the declared boundary. It does not erase internal operand types.
 
@@ -462,6 +488,9 @@ Compiler.Compile(String, String, CompileEnv, CompileOptions)
 
 Compiler.CompileSyntax(SyntaxNode, CompileEnv, CompileOptions)
   -> Result[Artifact, CompileErrors]
+
+Compiler.Verify(Artifact)
+  -> Result[VerifiedModule, CodeError]
 ```
 
 `CompileSyntax` treats the selected node as compiler input.
@@ -479,6 +508,10 @@ The compiler reads no ambient filesystem or package catalog.
 A caller must bind every external interface through `CompileEnv`.
 
 `Compiler.Compile` remains an explicit effect. A policy can block runtime code creation.
+
+`Compiler.Verify` is a separate effect and verifier boundary.
+
+Its group records its compiler-pipeline role. The compiler still cannot approve its own output.
 
 The generated program's effect row does not enter the compiler operation's outer row.
 
@@ -871,6 +904,8 @@ Gate: static package builds remain byte-identical unless they use new linkage me
 ### Stage 6: reify verification and installation
 
 Expose `Artifact`, `VerifiedModule`, `Instance`, `SlotSpec`, `Slot`, `FunctionDef`, and `ClassDef` to Loom.
+
+Expose `Compiler.Verify` as the independent verification boundary.
 
 Gate: a Loom program verifies, installs, activates, and replaces code through typed APIs.
 

@@ -55,6 +55,6 @@ def supervise(child: Run[String]): String with Vm
   end
 end
 
-child = sys.vm.Vm().activate(read_message, args: ())
+child = sys.vm.Vm().activate_or_fault(read_message, args: ())
 child.table().pass(Fs)
 supervise(child)

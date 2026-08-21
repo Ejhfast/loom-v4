@@ -518,6 +518,7 @@ impl<'a> Scanner<'a> {
                 b'*' => Tok::Star,
                 b'/' => Tok::Slash,
                 b'%' => Tok::Percent,
+                b'?' => Tok::Question,
                 b'(' => {
                     self.nesting.push(Nest::Delim);
                     Tok::LParen
@@ -654,6 +655,20 @@ mod tests {
                 Tok::KwClass,
                 Tok::KwEnd,
                 Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn scans_result_propagation() {
+        assert_eq!(
+            kinds("work()?"),
+            vec![
+                Tok::Ident("work".to_string()),
+                Tok::LParen,
+                Tok::RParen,
+                Tok::Question,
+                Tok::Eof,
             ]
         );
     }

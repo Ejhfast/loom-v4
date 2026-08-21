@@ -10,7 +10,7 @@ def greet(name: String) with Io.Print
 end
 
 def run_child(): Int with Vm
-  m = vm.Vm().activate(do || 40 + 2 end, args: ())
+  m = vm.Vm().activate_or_fault(do || 40 + 2 end, args: ())
   case m.run()
   in Done(v) then v
   in Fault(_) then 0 - 1

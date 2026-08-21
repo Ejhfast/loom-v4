@@ -62,7 +62,7 @@ def serve(child: Run[String], mine: ResourceHandle, contents: Bytes): String wit
   end
 end
 
-child = sys.vm.Vm().activate(read_settings, args: ())
+child = sys.vm.Vm().activate_or_fault(read_settings, args: ())
 
 # The first request is the open. `serve_file` answers it and returns
 # the holder-side control of the new entry.

@@ -1,0 +1,2 @@
+error[E1066]: `?` cannot propagate Int through a Result error type of String
+  --> tests/ui/propagate-error-type.lm:2:3

@@ -407,7 +407,7 @@ end
 case loopback(8443)
 in Err(_) then 0 - 11
 in Ok(address)
-  child = sys.vm.Vm().activate(client, args: (address,))
+  child = sys.vm.Vm().activate_or_fault(client, args: (address,))
   case child.drive()
   in Asked(request)
     case request

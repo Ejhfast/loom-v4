@@ -80,7 +80,7 @@ end
 
 # Answer the name lookup and the connection, then serve the bytes.
 def run_case(canned: Bytes): String with Vm
-  child = sys.vm.Vm().activate(fetch_status, args: ())
+  child = sys.vm.Vm().activate_or_fault(fetch_status, args: ())
   case child.drive()
   in Asked(lookup)
     case lookup

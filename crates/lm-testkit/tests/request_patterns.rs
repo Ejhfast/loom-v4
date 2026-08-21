@@ -34,7 +34,7 @@ fn serve(body: &str) -> String {
          \x20 end\n\
          end\n\
          seen: [Int] = []\n\
-         serve(sys.vm.Vm().activate({CHILD}, args: ()), Bytes(\"abcdef\"), seen)\n"
+         serve(sys.vm.Vm().activate_or_fault({CHILD}, args: ()), Bytes(\"abcdef\"), seen)\n"
     );
     run_allowed("request.lm", &source, &["Vm"]).expect("the program compiles")
 }
@@ -74,7 +74,7 @@ fn drive_body(arms: &str) -> String {
          \x20 in Fault(_) then \"f\"\n\
          \x20 end\n\
          end\n\
-         serve(sys.vm.Vm().activate({CHILD}, args: ()))\n"
+         serve(sys.vm.Vm().activate_or_fault({CHILD}, args: ()))\n"
     )
 }
 
@@ -118,7 +118,7 @@ fn a_call_pattern_names_a_manifest_operation() {
          \x20 end\n\
          end\n\
          seen: [Int] = []\n\
-         serve(sys.vm.Vm().activate({CHILD}, args: ()), Bytes(\"ab\"), seen)\n"
+         serve(sys.vm.Vm().activate_or_fault({CHILD}, args: ()), Bytes(\"ab\"), seen)\n"
     );
     let error = run_allowed("request.lm", &source, &["Vm"]).expect_err("no such operation");
     assert!(error.contains("E1051"), "{error}");
@@ -141,7 +141,7 @@ fn a_call_pattern_checks_its_argument_arity() {
          \x20 end\n\
          end\n\
          seen: [Int] = []\n\
-         serve(sys.vm.Vm().activate({CHILD}, args: ()), Bytes(\"ab\"), seen)\n"
+         serve(sys.vm.Vm().activate_or_fault({CHILD}, args: ()), Bytes(\"ab\"), seen)\n"
     );
     let error = run_allowed("request.lm", &source, &["Vm"]).expect_err("wrong arity");
     assert!(error.contains("E1041"), "{error}");

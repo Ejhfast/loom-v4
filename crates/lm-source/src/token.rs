@@ -81,6 +81,7 @@ pub enum Tok {
     Dot,
     Pipe,
     Arrow,
+    Question,
 
     // Operators.
     Assign,
@@ -158,6 +159,7 @@ impl fmt::Display for Tok {
             Tok::Dot => "`.`",
             Tok::Pipe => "`|`",
             Tok::Arrow => "`->`",
+            Tok::Question => "`?`",
             Tok::Assign => "`=`",
             Tok::EqEq => "`==`",
             Tok::NotEq => "`!=`",

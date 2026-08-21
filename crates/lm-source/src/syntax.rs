@@ -333,6 +333,7 @@ fn token_kind(token: &Tok) -> u16 {
         Tok::Dot => KIND_DOT,
         Tok::Pipe => KIND_PIPE,
         Tok::Arrow => KIND_ARROW,
+        Tok::Question => KIND_QUESTION,
         Tok::Assign => KIND_ASSIGN,
         Tok::EqEq => KIND_EQ,
         Tok::NotEq => KIND_NE,

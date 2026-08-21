@@ -231,7 +231,7 @@ fn new_type_entries_check_their_references() {
 fn activate_argument_forgery_is_rejected() {
     // The argument view must match the program parameters.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do |a: Int|: Int\n    a\n  end, args: (1,))\n  1\nend\ngo()\n";
+        vm = sys.vm.Vm().activate_or_fault(do |a: Int|: Int\n    a\n  end, args: (1,))\n  1\nend\ngo()\n";
     let mut module = compile(source);
     let go = func_index(&module, "go");
     // Retarget the tuple: replace the args-view TupleNew with a plain
@@ -247,4 +247,30 @@ fn activate_argument_forgery_is_rejected() {
     }
     assert!(hit, "the seed builds an argument tuple");
     assert_rejected(&module, "Vm.Activate");
+}
+
+#[test]
+fn activate_or_fault_reply_forgery_is_rejected() {
+    let source = r#"
+def go(): Int with Vm
+  sys.vm.Vm().activate_or_fault(do ||: Int 1 end, args: ())
+  1
+end
+go()
+"#;
+    let mut module = compile(source);
+    let go = func_index(&module, "go");
+    let mut hit = false;
+    for block in &mut module.funcs[go].blocks {
+        for instr in block {
+            if let Instr::Perform { op, reply_ty, .. } = instr {
+                if *op == lm_abi::OP_VM_ACTIVATE_OR_FAULT {
+                    *reply_ty = 0;
+                    hit = true;
+                }
+            }
+        }
+    }
+    assert!(hit, "the seed performs Vm.ActivateOrFault");
+    assert_rejected(&module, "Vm.ActivateOrFault");
 }

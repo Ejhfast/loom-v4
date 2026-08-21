@@ -42,5 +42,5 @@ def print_only(child: Run[String]): String with Vm, Io.Print
   end
 end
 
-child = sys.vm.Vm().activate(read_clock, args: ())
+child = sys.vm.Vm().activate_or_fault(read_clock, args: ())
 print_only(child)

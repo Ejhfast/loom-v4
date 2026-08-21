@@ -23,10 +23,11 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_RESOURCE_CLOSE
             | lm_abi::OP_VM_RESOURCE_KIND
             | lm_abi::OP_VM_ARTIFACT
-            | lm_abi::OP_VM_VERIFY
+            | lm_abi::OP_COMPILER_VERIFY
             | lm_abi::OP_VM_INSTANCE_ENTRY => 1,
             lm_abi::OP_VM_DISPATCH => 2,
             lm_abi::OP_VM_ACTIVATE
+            | lm_abi::OP_VM_ACTIVATE_OR_FAULT
             | lm_abi::OP_VM_ANSWER
             | lm_abi::OP_VM_REJECT
             | lm_abi::OP_VM_SERVE_TCP_STREAM => 3,
@@ -64,7 +65,7 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             lm_abi::OP_VM_INSTALL
             | lm_abi::OP_VM_INSTANCE_FUNCTION
             | lm_abi::OP_VM_INSTANCE_CLASS
-            | lm_abi::OP_VM_INSTANCE_SLOT
+            | lm_abi::OP_VM_INSTANCE_SLOT_FOR
             | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => 2,
             lm_abi::OP_VM_INSTALL_WITH => 3,
             _ => unreachable!("every VmControl slot has an arity"),

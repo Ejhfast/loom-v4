@@ -239,8 +239,9 @@ use tables::verify_tables;
 /// Version 23 verifies late-bound slot contracts and instructions.
 /// Version 24 verifies reified code controls.
 /// Version 25 verifies runtime compiler input classes. Version 26
-/// verifies `ClassDef` and complete VM image controls.
-pub const VERIFIER_VERSION: u32 = 26;
+/// verifies `ClassDef` and complete VM image controls. Version 27
+/// verifies fallible activation and stable slot discovery.
+pub const VERIFIER_VERSION: u32 = 27;
 
 /// Verify a full module. Every table and every function must pass.
 ///

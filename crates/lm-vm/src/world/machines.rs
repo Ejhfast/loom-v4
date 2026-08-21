@@ -930,6 +930,14 @@ impl World {
         self.rollback_child(parent, target);
     }
 
+    fn finish_activation_error(&mut self, vm: VmId, op: u32, code: FaultCode, message: &str) {
+        if op == lm_abi::OP_VM_ACTIVATE {
+            self.finish_code_error(vm, op, message);
+        } else {
+            self.fault_caller(vm, op, code, message);
+        }
+    }
+
     /// Execute one VM control operation of the machine `vm`.
     pub(super) fn kernel_exec(
         &mut self,
@@ -981,27 +989,51 @@ impl World {
                 }
             }
             lm_abi::OP_VM_ARTIFACT
-            | lm_abi::OP_VM_VERIFY
+            | lm_abi::OP_COMPILER_VERIFY
             | lm_abi::OP_VM_INSTALL
             | lm_abi::OP_VM_INSTALL_WITH
             | lm_abi::OP_VM_INSTANCE_ENTRY
             | lm_abi::OP_VM_INSTANCE_FUNCTION
             | lm_abi::OP_VM_INSTANCE_CLASS
-            | lm_abi::OP_VM_INSTANCE_SLOT
+            | lm_abi::OP_VM_INSTANCE_SLOT_FOR
             | lm_abi::OP_VM_INSTANCE_SLOT_SPEC
             | lm_abi::OP_VM_ACTIVATE_DEF
             | lm_abi::OP_VM_REPLACE_FUNCTION
             | lm_abi::OP_VM_REPLACE_CLASS
             | lm_abi::OP_VM_REPLACE_VALUE
             | lm_abi::OP_VM_REPLACE_PROCESS => self.code_exec(vm, op, args),
-            lm_abi::OP_VM_ACTIVATE => {
-                let Some(image) = self.image_arg(vm, op, args[0]) else {
-                    return;
+            lm_abi::OP_VM_ACTIVATE | lm_abi::OP_VM_ACTIVATE_OR_FAULT => {
+                let image = match self.handle_vm(vm, args[0]) {
+                    Some(key)
+                        if self.vm_images.get(key.image as usize).is_some_and(|image| {
+                            image.live && image.generation == key.generation
+                        }) =>
+                    {
+                        key
+                    }
+                    None => {
+                        self.fault_caller(
+                            vm,
+                            op,
+                            FaultCode::TypeMismatch,
+                            "the receiver is not a VM image handle",
+                        );
+                        return;
+                    }
+                    Some(_) => {
+                        self.finish_activation_error(
+                            vm,
+                            op,
+                            FaultCode::InvalidVmState,
+                            "the VM image handle is stale",
+                        );
+                        return;
+                    }
                 };
                 let target = match self.prepare_run_target(vm, image) {
                     Some(target) => target,
                     None => {
-                        self.fault_caller(
+                        self.finish_activation_error(
                             vm,
                             op,
                             FaultCode::InvalidVmState,
@@ -1014,7 +1046,7 @@ impl World {
                     Ok(value) => value,
                     Err(code) => {
                         self.rollback_run_target(vm, target);
-                        self.fault_caller(vm, op, code, "the program is not sendable");
+                        self.finish_activation_error(vm, op, code, "the program is not sendable");
                         return;
                     }
                 };
@@ -1061,7 +1093,12 @@ impl World {
                         Ok(values) => locals = values,
                         Err(code) => {
                             self.rollback_run_target(vm, target);
-                            self.fault_caller(vm, op, code, "an argument is not sendable");
+                            self.finish_activation_error(
+                                vm,
+                                op,
+                                code,
+                                "an argument is not sendable",
+                            );
                             return;
                         }
                     }
@@ -1088,7 +1125,12 @@ impl World {
                 // loads them.
                 if let Err(code) = self.check_frame_args(target, func, env, &locals) {
                     self.rollback_run_target(vm, target);
-                    self.fault_caller(vm, op, code, "an argument does not carry its declared type");
+                    self.finish_activation_error(
+                        vm,
+                        op,
+                        code,
+                        "an argument does not carry its declared type",
+                    );
                     return;
                 }
                 self.machines[target as usize].load_frame(
@@ -1099,7 +1141,19 @@ impl World {
                     env,
                 );
                 match self.machines[vm as usize].alloc(Object::NativeRun { vm: target }) {
-                    Ok(handle) => self.install_value_reply(vm, handle),
+                    Ok(handle) => {
+                        if op == lm_abi::OP_VM_ACTIVATE_OR_FAULT {
+                            self.install_value_reply(vm, handle);
+                        } else {
+                            match self.code_ok(vm, handle) {
+                                Ok(result) => self.install_value_reply(vm, result),
+                                Err(code) => {
+                                    self.rollback_run_target(vm, target);
+                                    self.machines[vm as usize].set_fault(code, "", Some(op));
+                                }
+                            }
+                        }
+                    }
                     Err(code) => {
                         self.rollback_run_target(vm, target);
                         self.machines[vm as usize].set_fault(code, "", Some(op));

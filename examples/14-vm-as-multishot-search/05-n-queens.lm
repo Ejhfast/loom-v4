@@ -81,7 +81,7 @@ def count(child: Run[Int]): Int with Vm
 end
 
 def solutions(n: Int): Int with Vm
-  count(sys.vm.Vm().activate(place, args: (n,)))
+  count(sys.vm.Vm().activate_or_fault(place, args: (n,)))
 end
 
 # Boards four through eight hold 2, 10, 4, 40, and 92 solutions.

@@ -950,10 +950,10 @@ fn a_generic_instance_field_of_the_wrong_shape_rejects() {
 
 const TWO_MACHINES_SOURCE: &str = "\
 def go(): Int with Vm
-  a = sys.vm.Vm().activate(do ||: Int
+  a = sys.vm.Vm().activate_or_fault(do ||: Int
     41
   end, args: ())
-  b = sys.vm.Vm().activate(do ||: String
+  b = sys.vm.Vm().activate_or_fault(do ||: String
     \"answer\"
   end, args: ())
   case a.run()
@@ -1030,7 +1030,7 @@ fn a_machine_handle_that_names_another_result_type_faults() {
 const VM_IMAGE_SOURCE: &str = "\
 def go(): Int with Vm
   empty = sys.vm.Vm()
-  loaded = sys.vm.Vm().activate(do ||: Int
+  loaded = sys.vm.Vm().activate_or_fault(do ||: Int
     41
   end, args: ())
   case loaded.run()
@@ -1072,7 +1072,7 @@ fn a_vm_image_handle_with_a_live_generation_rejects() {
 
 const TERMINAL_SOURCE: &str = "\
 def go(): Int with Vm
-  vm = sys.vm.Vm().activate(do ||: String
+  vm = sys.vm.Vm().activate_or_fault(do ||: String
     \"answer\"
   end, args: ())
   case vm.run()
@@ -1214,7 +1214,7 @@ fn a_proc_handle_that_names_another_mailbox_faults() {
 
 const CALL_TOKEN_SOURCE: &str = "\
 def go(): Int with Vm, Rand
-  held = sys.vm.Vm().activate(do ||: Int with Rand.Int
+  held = sys.vm.Vm().activate_or_fault(do ||: Int with Rand.Int
     sys.rand.int(0, 10)
   end, args: ())
   case held.drive()
@@ -1406,7 +1406,7 @@ fn a_pending_request_with_another_argument_count_rejects() {
 
 const FAULTED_SOURCE: &str = "\
 def go(): String with Vm
-  vm = sys.vm.Vm().activate(do || with Io.Print
+  vm = sys.vm.Vm().activate_or_fault(do || with Io.Print
     sys.io.print(\"hi\\n\")
   end, args: ())
   case vm.run()
@@ -1473,7 +1473,7 @@ fn a_done_machine_that_holds_a_frame_rejects() {
 
 const ASKED_SOURCE: &str = "\
 def go(): Int with Vm, Io
-  vm = sys.vm.Vm().activate(do ||: Int with Io.Print
+  vm = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
     sys.io.print(\"hi\\n\")
     41
   end, args: ())
@@ -1524,10 +1524,10 @@ fn an_asked_machine_on_a_host_operation_admits() {
 
 const NESTED_SOURCE: &str = "\
 def go(): Int with Vm
-  a = sys.vm.Vm().activate(do ||: Int
+  a = sys.vm.Vm().activate_or_fault(do ||: Int
     41
   end, args: ())
-  b = sys.vm.Vm().activate(do ||: String
+  b = sys.vm.Vm().activate_or_fault(do ||: String
     \"answer\"
   end, args: ())
   first = a.snapshot()
@@ -1741,7 +1741,7 @@ fn a_sealed_image_past_the_byte_limit_reports_the_limit_rule() {
 
 const TABLE_SOURCE: &str = "\
 def go(): Int with Vm, Io
-  held = sys.vm.Vm().activate(do ||: Int
+  held = sys.vm.Vm().activate_or_fault(do ||: Int
     41
   end, args: ())
   held.table().pass(Io)
@@ -2026,7 +2026,7 @@ hold(41)
 /// machine carries a substitution no call site of the image states.
 const GENERIC_ENTRY: &str = "\
 def hold[T](v: T): Run[T] with Vm
-  sys.vm.Vm().activate(do |x: T|: T x end, args: (v,))
+  sys.vm.Vm().activate_or_fault(do |x: T|: T x end, args: (v,))
 end
 
 def go(): Int with Vm
@@ -2080,7 +2080,7 @@ go()
 /// and no proc class stands behind it.
 const PROC_RUN_HANDLE: &str = "\
 def go(): Int with Proc, Vm
-  vm = sys.vm.Vm().activate(do ||: Int 41 + 1 end, args: ())
+  vm = sys.vm.Vm().activate_or_fault(do ||: Int 41 + 1 end, args: ())
   h = sys.proc.run(vm)
   case h.done()
   in Done(v)  then v

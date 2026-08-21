@@ -91,8 +91,9 @@ use std::collections::{BTreeSet, HashMap};
 /// stable slot contracts and specialized slot instructions. Version
 /// 27 removes portable process targets from slot metadata. Version 28
 /// adds dynamic result and public syntax instructions. Version 29
-/// adds complete code slot and VM image controls.
-pub const COMPILER_ABI_VERSION: u32 = 29;
+/// adds complete code slot and VM image controls. Version 30 adds
+/// contract-bound slot identities and Result propagation.
+pub const COMPILER_ABI_VERSION: u32 = 30;
 
 /// The refinement work budget of one component.
 ///

@@ -34,8 +34,9 @@ pub use sha::{sha256, sha256_hex};
 /// adds the explicit runtime compiler operation. Version 13 adds
 /// public syntax parsing and syntax compilation. Version 14 adds the
 /// dynamic result value. Version 15 completes code slot and VM image
-/// controls.
-pub const ABI_VERSION: u32 = 15;
+/// controls. Version 16 adds stable slot discovery and fallible
+/// activation. It also moves verification into the Compiler group.
+pub const ABI_VERSION: u32 = 16;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -1602,11 +1603,11 @@ pub const OP_TLS_PEER_ADDRESS: OpSlot = 66;
 pub const OP_TLS_CLOSE: OpSlot = 67;
 pub const OP_VM_SERVE_TLS_STREAM: OpSlot = 68;
 pub const OP_VM_ARTIFACT: OpSlot = 70;
-pub const OP_VM_VERIFY: OpSlot = 71;
+pub const OP_COMPILER_VERIFY: OpSlot = 71;
 pub const OP_VM_INSTALL: OpSlot = 72;
 pub const OP_VM_INSTANCE_ENTRY: OpSlot = 73;
 pub const OP_VM_INSTANCE_FUNCTION: OpSlot = 74;
-pub const OP_VM_INSTANCE_SLOT: OpSlot = 75;
+pub const OP_VM_INSTANCE_SLOT_FOR: OpSlot = 75;
 pub const OP_VM_INSTANCE_SLOT_SPEC: OpSlot = 76;
 pub const OP_VM_ACTIVATE_DEF: OpSlot = 77;
 pub const OP_VM_REPLACE_FUNCTION: OpSlot = 78;
@@ -1620,9 +1621,10 @@ pub const OP_VM_REPLACE_VALUE: OpSlot = 85;
 pub const OP_VM_REPLACE_PROCESS: OpSlot = 86;
 pub const OP_VM_SNAPSHOT_VM: OpSlot = 87;
 pub const OP_VM_RESTORE_VM: OpSlot = 88;
+pub const OP_VM_ACTIVATE_OR_FAULT: OpSlot = 89;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 89] = [
+pub const OPS: [OpDef; 90] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -1701,7 +1703,7 @@ pub const OPS: [OpDef; 89] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T,e](Vm, Fn[A,T,e], control A) -> Run[T]",
+        schema: "[A,T,e](Vm, Fn[A,T,e], control A) -> Result[Run[T], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2294,7 +2296,7 @@ pub const OPS: [OpDef; 89] = [
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
-        group: "Vm",
+        group: "Compiler",
         member: "Verify",
         kind: OpKind::VmControl,
         params: &[],
@@ -2331,11 +2333,11 @@ pub const OPS: [OpDef; 89] = [
     },
     OpDef {
         group: "Vm",
-        member: "InstanceSlot",
+        member: "InstanceSlotFor",
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "(Instance, Int) -> Result[Slot, CodeError]",
+        schema: "(Instance, SlotSpec) -> Result[Slot, CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2344,7 +2346,7 @@ pub const OPS: [OpDef; 89] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "(Instance, Int) -> Result[SlotSpec, CodeError]",
+        schema: "(Instance, String) -> Result[SlotSpec, CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2462,6 +2464,15 @@ pub const OPS: [OpDef; 89] = [
         params: &[],
         reply: AbiType::UNIT,
         schema: "(VmSnapshot) -> Result[Vm, RestoreError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "ActivateOrFault",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T,e](Vm, Fn[A,T,e], control A) -> Run[T]",
         snapshot: SnapshotClass::MachineState,
     },
 ];

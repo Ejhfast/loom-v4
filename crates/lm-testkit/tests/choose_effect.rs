@@ -39,8 +39,8 @@ def program(): Int with Choose
   10 * sys.choose.pick(4) + sys.choose.pick(4)
 end
 
-first = take(sys.vm.Vm().activate(program, args: ()), 0)
-third = take(sys.vm.Vm().activate(program, args: ()), 2)
+first = take(sys.vm.Vm().activate_or_fault(program, args: ()), 0)
+third = take(sys.vm.Vm().activate_or_fault(program, args: ()), 2)
 (first, third)
 ";
     assert_eq!(
@@ -81,7 +81,7 @@ def program(): String with Choose
   pick[String](names)
 end
 
-take(sys.vm.Vm().activate(program, args: ()), 1)
+take(sys.vm.Vm().activate_or_fault(program, args: ()), 1)
 ";
     assert_eq!(
         run_allowed("choose-values.lm", source, &["Vm"]).unwrap(),
@@ -147,7 +147,7 @@ def program(): Int with Choose
   sys.choose.pick(2) + 5
 end
 
-branch(sys.vm.Vm().activate(program, args: ()))
+branch(sys.vm.Vm().activate_or_fault(program, args: ()))
 ";
     // Candidate 0 answers 5 and candidate 1 answers 6.
     assert_eq!(

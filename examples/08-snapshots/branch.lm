@@ -15,7 +15,7 @@ def restore_run(snap: RunSnapshot[Int]): Int with Vm
   end
 end
 
-vm = sys.vm.Vm().activate(do ||: Int
+vm = sys.vm.Vm().activate_or_fault(do ||: Int
   20 + 22
 end, args: ())
 vm.step()

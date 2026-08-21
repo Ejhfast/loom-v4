@@ -17,7 +17,7 @@ use lm_vm::VmConfig;
 #[test]
 fn a_driver_outlives_its_child_budget() {
     let source = "def once(n: Int): Int with Vm
-  vm = sys.vm.Vm().activate(do |x: Int|: Int
+  vm = sys.vm.Vm().activate_or_fault(do |x: Int|: Int
     x + 1
   end, args: (n,))
   case vm.run()
@@ -61,7 +61,7 @@ fn a_search_driver_restores_past_its_child_budget() {
   end
 end
 
-vm = sys.vm.Vm().activate(do ||: Int
+vm = sys.vm.Vm().activate_or_fault(do ||: Int
   20 + 22
 end, args: ())
 vm.step()
@@ -92,7 +92,7 @@ fn a_held_machine_is_never_reclaimed() {
     let source = "held: [Run[Int]] = []
 i = 0
 while i < 2000
-  held.push(sys.vm.Vm().activate(do ||: Int
+  held.push(sys.vm.Vm().activate_or_fault(do ||: Int
     7
   end, args: ()))
   i = i + 1

@@ -45,7 +45,7 @@ def go(): Int with Vm
   a.next = Some(b)
   b.next = Some(a)
   a.freeze()
-  vm = sys.vm.Vm().activate(do |n: Node|: Int
+  vm = sys.vm.Vm().activate_or_fault(do |n: Node|: Int
     case n.next
     in Some(m)
       case m.next
@@ -79,7 +79,7 @@ def go(): Bool with Vm
   a.next = Some(b)
   b.next = Some(a)
   a.freeze()
-  vm = sys.vm.Vm().activate(do |n: Node|: Bool
+  vm = sys.vm.Vm().activate_or_fault(do |n: Node|: Bool
     case n.next
     in Some(m)
       case m.next
@@ -108,7 +108,7 @@ fn a_cycle_crosses_back_through_the_terminal_result() {
     let source = format!(
         "{NODE}
 def go(): Int with Vm
-  vm = sys.vm.Vm().activate(do ||: Node
+  vm = sys.vm.Vm().activate_or_fault(do ||: Node
     a = Node(7)
     b = Node(5)
     a.next = Some(b)
@@ -147,7 +147,7 @@ def go(): Int with Vm
   b = Node(2)
   a.next = Some(b)
   b.next = Some(a)
-  vm = sys.vm.Vm().activate(do |n: Node|: Int
+  vm = sys.vm.Vm().activate_or_fault(do |n: Node|: Int
     case n.next
     in Some(m)
       case m.next
@@ -215,7 +215,7 @@ def go(): Bool with Vm
   bottom = Pair(leaf, leaf)
   d = Diamond(top, bottom)
   d.freeze()
-  vm = sys.vm.Vm().activate(do |g: Diamond|: Bool
+  vm = sys.vm.Vm().activate_or_fault(do |g: Diamond|: Bool
     g.a.left == g.a.right and g.a.left == g.b.right and g.a.left.tag == 3
   end, args: (d,))
   case vm.run()
@@ -243,7 +243,7 @@ class Leaf
 end
 
 def go(): Bool with Vm
-  vm = sys.vm.Vm().activate(do ||: (Leaf, Leaf)
+  vm = sys.vm.Vm().activate_or_fault(do ||: (Leaf, Leaf)
     leaf = Leaf(9)
     pair = (leaf, leaf)
     pair.freeze()
@@ -350,7 +350,7 @@ fn week7_examples_have_checked_output() {
             "cycle-digest.lm",
             &read("examples/06-graphs/cycle-digest.lm")
         ),
-        "Done(95145ae3257d968a47a91b338941cdab243e6eb419c01f471ed116d2e963316c)"
+        "Done(0f92d42f331e0ea7c96db2a424f91e518915b8ef534abfbeec2d9ca255d16bf9)"
     );
     assert_eq!(
         run(
@@ -467,7 +467,7 @@ def go(): Bool with Vm
   a.freeze()
   pair = (a, a)
   pair.freeze()
-  vm = sys.vm.Vm().activate(do |p: ([Int], [Int])|: Bool
+  vm = sys.vm.Vm().activate_or_fault(do |p: ([Int], [Int])|: Bool
     p[0] == p[1]
   end, args: (pair,))
   case vm.run()
@@ -483,7 +483,7 @@ go()
 def go(): Bool with Vm
   a = [1, 2]
   a.freeze()
-  vm = sys.vm.Vm().activate(do |p: [Int], q: [Int]|: Bool
+  vm = sys.vm.Vm().activate_or_fault(do |p: [Int], q: [Int]|: Bool
     p == q
   end, args: (a, a))
   case vm.run()

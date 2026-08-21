@@ -89,6 +89,6 @@ def checkpoint_now(child: Run[String]): String with Vm, Fs
   end
 end
 
-child = sys.vm.Vm().activate(read_with_recovery, args: ())
+child = sys.vm.Vm().activate_or_fault(read_with_recovery, args: ())
 child.table().pass(Fs)
 checkpoint_now(child)

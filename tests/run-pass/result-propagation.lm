@@ -1,0 +1,28 @@
+def divide(value: Int): Result[Int, String]
+  if value == 0
+    Err("zero")
+  else
+    Ok(84 / value)
+  end
+end
+
+def twice(value: Int): Result[Int, String]
+  first = divide(value)?
+  second = divide(value)?
+  Ok(first + second)
+end
+
+success = twice(2).map() do |value: Int|: Int
+  value + 1
+end
+failure = twice(0).map_error() do |error: String|: String
+  "bad {error}"
+end
+chained = divide(2).and_then() do |value: Int|: Result[Int, String]
+  Ok(value + 1)
+end
+
+case (success, failure, chained)
+in (Ok(a), Err(b), Ok(c)) then "{a}:{b}:{c}"
+in _ then "wrong"
+end

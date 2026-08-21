@@ -34,6 +34,6 @@ def allow_only(child: Run[String], permitted: String): String with Vm
   end
 end
 
-child = sys.vm.Vm().activate(read_secret, args: ())
+child = sys.vm.Vm().activate_or_fault(read_secret, args: ())
 child.table().pass(Fs)
 allow_only(child, "message.txt")

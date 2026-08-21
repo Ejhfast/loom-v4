@@ -292,10 +292,10 @@ fn activate_labels_follow_the_general_rule() {
     let program = "def child(a: Int, b: Int): Int\n  a + b\nend\n";
     let tail = "case vm.run()\nin Done(v) then v\nin Fault(_) then 0 - 1\nend\n";
     for call in [
-        "sys.vm.Vm().activate(child, args: (3, 4))",
-        "sys.vm.Vm().activate(child, (3, 4))",
-        "sys.vm.Vm().activate(program: child, args: (3, 4))",
-        "sys.vm.Vm().activate(args: (3, 4), program: child)",
+        "sys.vm.Vm().activate_or_fault(child, args: (3, 4))",
+        "sys.vm.Vm().activate_or_fault(child, (3, 4))",
+        "sys.vm.Vm().activate_or_fault(program: child, args: (3, 4))",
+        "sys.vm.Vm().activate_or_fault(args: (3, 4), program: child)",
     ] {
         let source = format!("{program}vm = {call}\n{tail}");
         assert_eq!(allowed(&source, &["Vm"]), "Done(7)", "call: {call}");
@@ -305,10 +305,10 @@ fn activate_labels_follow_the_general_rule() {
 #[test]
 fn an_unknown_activate_label_reports_the_general_diagnostic() {
     let source = "def child(): Int\n  1\nend\n\
-        vm = sys.vm.Vm().activate(child, tuple: ())\n";
+        vm = sys.vm.Vm().activate_or_fault(child, tuple: ())\n";
     expect_error(
         source,
-        "`activate` does not declare a parameter named `tuple`",
+        "`activate_or_fault` does not declare a parameter named `tuple`",
     );
 }
 
@@ -325,7 +325,7 @@ fn vm_and_run_have_distinct_type_forms() {
         \x20 end\n\
         end\n\
         image: Vm = sys.vm.Vm()\n\
-        finish(image.activate(do ||: Int 42 end, args: ()))\n";
+        finish(image.activate_or_fault(do ||: Int 42 end, args: ()))\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(42)");
 }
 
@@ -345,7 +345,7 @@ fn a_positional_argument_cannot_follow_a_native_label() {
 #[test]
 fn labels_work_on_the_continuation_methods() {
     let source = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
-        vm = sys.vm.Vm().activate(child, args: ())\n\
+        vm = sys.vm.Vm().activate_or_fault(child, args: ())\n\
         case vm.drive()\n\
         in Asked(request)\n  \
         case request\n  \

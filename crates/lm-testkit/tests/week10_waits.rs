@@ -27,7 +27,7 @@ def value(): Int
   1
 end
 
-child = sys.vm.Vm().activate(value, args: ())
+child = sys.vm.Vm().activate_or_fault(value, args: ())
 select
 in child.drive_wait() -> _
   1
@@ -53,9 +53,9 @@ def answer(): Int
   7
 end
 
-first = sys.vm.Vm().activate(spin, args: ())
-second = sys.vm.Vm().activate(answer, args: ())
-third = sys.vm.Vm().activate(spin, args: ())
+first = sys.vm.Vm().activate_or_fault(spin, args: ())
+second = sys.vm.Vm().activate_or_fault(answer, args: ())
+third = sys.vm.Vm().activate_or_fault(spin, args: ())
 second.run()
 
 select
@@ -102,7 +102,7 @@ end
 
 class Supervisor < Proc[Command]
   def on_spawn(self): Int with Proc, Vm, Wait
-    child = sys.vm.Vm().activate(answer, args: ())
+    child = sys.vm.Vm().activate_or_fault(answer, args: ())
     child.run()
     select
     in child.drive_wait() -> event

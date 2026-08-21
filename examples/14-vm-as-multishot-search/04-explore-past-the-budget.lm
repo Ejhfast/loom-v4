@@ -71,4 +71,4 @@ end
 
 # 11 * 11 * 11 leaves, plus the nodes above them. That is well past
 # 1024 machines, and the default budget is 1024.
-walk(sys.vm.Vm().activate(sides, args: ()))
+walk(sys.vm.Vm().activate_or_fault(sides, args: ()))

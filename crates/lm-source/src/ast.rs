@@ -431,6 +431,8 @@ pub enum ExprKind {
         recv: Box<Expr>,
         index: Box<Expr>,
     },
+    /// `value?` returns an error from the enclosing callable.
+    Propagate(Box<Expr>),
     /// A tuple literal `(a, b)` or `(a,)`.
     TupleLit(Vec<Expr>),
     /// A list literal `[a, b]`.
@@ -861,6 +863,10 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
             out.push_str("index\n");
             dump_expr(out, recv, depth + 1);
             dump_expr(out, index, depth + 1);
+        }
+        ExprKind::Propagate(value) => {
+            out.push_str("propagate\n");
+            dump_expr(out, value, depth + 1);
         }
         ExprKind::TupleLit(items) => {
             out.push_str("tuple\n");

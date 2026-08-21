@@ -213,6 +213,7 @@ impl<'o> FnChecker<'o> {
                 args,
             } => self.synth_super_call(ctx, name, *name_span, args, expr.span),
             ExprKind::Index { recv, index } => self.synth_index(ctx, recv, index, expr.span),
+            ExprKind::Propagate(value) => self.check_propagate(ctx, value, expr.span),
             ExprKind::TupleLit(items) => {
                 let mut checked = Vec::new();
                 let mut tys = Vec::new();
@@ -319,6 +320,140 @@ impl<'o> FnChecker<'o> {
                 expr.span,
             )),
         }
+    }
+
+    /// Check postfix Result propagation.
+    fn check_propagate(
+        &mut self,
+        ctx: &mut Ctx,
+        value: &ast::Expr,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let value_h = self.synth_expr(ctx, value)?;
+        let result_class = *ctx
+            .core_types
+            .get("Result")
+            .expect("the core declares Result");
+        let Type::Inst(found, arguments) = ctx.store.get(value_h.ty).clone() else {
+            return Err(Diagnostic::new(
+                "E1066",
+                format!(
+                    "`?` needs Result[T, E], found {}",
+                    ctx.display_type(&self.env, value_h.ty)
+                ),
+                span,
+            ));
+        };
+        if found.0 != result_class || arguments.len() != 2 {
+            return Err(Diagnostic::new(
+                "E1066",
+                format!(
+                    "`?` needs Result[T, E], found {}",
+                    ctx.display_type(&self.env, value_h.ty)
+                ),
+                span,
+            ));
+        }
+        let ok_ty = arguments[0];
+        let error_ty = arguments[1];
+        let ret = match self.ret {
+            RetKind::Known(ret) => ret,
+            RetKind::Entry => {
+                return Err(Diagnostic::new(
+                    "E1066",
+                    "`?` is not valid at the top level of a module",
+                    span,
+                ));
+            }
+            RetKind::ClosureInfer => {
+                return Err(Diagnostic::new(
+                    "E1066",
+                    "`?` needs a declared Result type on the closure",
+                    span,
+                ));
+            }
+        };
+        let Type::Inst(ret_class, ret_arguments) = ctx.store.get(ret).clone() else {
+            return Err(Diagnostic::new(
+                "E1066",
+                format!(
+                    "`?` needs an enclosing Result return type, found {}",
+                    ctx.display_type(&self.env, ret)
+                ),
+                span,
+            ));
+        };
+        if ret_class.0 != result_class || ret_arguments.len() != 2 {
+            return Err(Diagnostic::new(
+                "E1066",
+                format!(
+                    "`?` needs an enclosing Result return type, found {}",
+                    ctx.display_type(&self.env, ret)
+                ),
+                span,
+            ));
+        }
+        if ret_arguments[1] != error_ty {
+            return Err(Diagnostic::new(
+                "E1066",
+                format!(
+                    "`?` cannot propagate {} through a Result error type of {}",
+                    ctx.display_type(&self.env, error_ty),
+                    ctx.display_type(&self.env, ret_arguments[1])
+                ),
+                span,
+            ));
+        }
+
+        let value_name = "__loom_propagated_value".to_string();
+        let error_name = "__loom_propagated_error".to_string();
+        let binding = |name: String| ast::Pattern {
+            kind: PatternKind::Name(name),
+            span,
+        };
+        let constructor = |name: &str, argument: ast::Pattern| ast::Pattern {
+            kind: PatternKind::Ctor {
+                qualifier: Some("Result".to_string()),
+                name: name.to_string(),
+                args: vec![argument],
+                has_parens: true,
+            },
+            span,
+        };
+        let ok_arm = ast::CaseArm {
+            pattern: constructor("Ok", binding(value_name.clone())),
+            body: vec![ast::Stmt {
+                kind: StmtKind::Expr(ast::Expr {
+                    kind: ExprKind::Name(value_name),
+                    span,
+                }),
+                span,
+            }],
+            span,
+        };
+        let error_value = ast::Expr {
+            kind: ExprKind::Name(error_name.clone()),
+            span,
+        };
+        let err_arm = ast::CaseArm {
+            pattern: constructor("Err", binding(error_name)),
+            body: vec![ast::Stmt {
+                kind: StmtKind::Return {
+                    value: Some(ast::Expr {
+                        kind: ExprKind::Call {
+                            name: "Err".to_string(),
+                            name_span: span,
+                            type_args: Vec::new(),
+                            args: vec![error_value],
+                        },
+                        span,
+                    }),
+                },
+                span,
+            }],
+            span,
+        };
+        self.check_case_value(ctx, value_h, &[ok_arm, err_arm], Some(ok_ty), span)
     }
 
     /// Lower `select` to one wait and one case expression.

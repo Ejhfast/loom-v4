@@ -48,9 +48,17 @@ pub fn qualified_key(module: &str, name: &str) -> String {
     }
 }
 
-/// Derive one stable late-binding slot key from its namespace key.
-pub fn slot_key(binding: &str) -> [u8; 32] {
-    let mut bytes = b"lm-slot-key-v1\0".to_vec();
+/// Derive one stable late-binding slot key from its binding and contract.
+pub fn slot_key(binding: &str, contract_hash: &[u8; 32]) -> [u8; 32] {
+    let mut bytes = b"lm-slot-key-v2\0".to_vec();
+    bytes.extend_from_slice(binding.as_bytes());
+    bytes.extend_from_slice(contract_hash);
+    hash::sha256(&bytes)
+}
+
+/// Derive one test or host slot key without a source binding contract.
+pub fn ad_hoc_slot_key(binding: &str) -> [u8; 32] {
+    let mut bytes = b"lm-ad-hoc-slot-key-v1\0".to_vec();
     bytes.extend_from_slice(binding.as_bytes());
     hash::sha256(&bytes)
 }
@@ -1071,7 +1079,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// invalid portable process target form. Version 35 adds dynamic
 /// result and public syntax instructions. Version 36 adds the
 /// `ClassDef` role and the complete VM image control manifest.
-pub const VERSION: u16 = 36;
+/// Version 37 adds fallible activation and stable slot lookup.
+pub const VERSION: u16 = 37;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).

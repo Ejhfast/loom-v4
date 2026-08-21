@@ -58,7 +58,7 @@ end
 
 class Supervisor < Proc[Cmd]
   def on_spawn(self): Int with Proc, Vm, Io.Print
-    child = sys.vm.Vm().activate(do ||: Int with Io.Print
+    child = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
       sys.io.print("a")
       sys.io.print("b")
       7

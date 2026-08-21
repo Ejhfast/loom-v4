@@ -15,7 +15,7 @@ end
 case sys.fs.open("message.txt", ReadOnly)
 in Ok(file)
   # The new VM starts with one live file attachment.
-  worker = sys.vm.Vm().activate(index_file, args: (file,))
+  worker = sys.vm.Vm().activate_or_fault(index_file, args: (file,))
   worker.table().pass(Fs.Read)
   worker.table().pass(Fs.Close)
 

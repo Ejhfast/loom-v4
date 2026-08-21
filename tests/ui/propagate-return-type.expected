@@ -1,0 +1,2 @@
+error[E1066]: `?` needs an enclosing Result return type, found Int
+  --> tests/ui/propagate-return-type.lm:2:3

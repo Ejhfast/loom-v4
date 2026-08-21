@@ -107,12 +107,14 @@ impl CompileEnv {
     pub fn bind_late(
         &mut self,
         name: &str,
+        contract_hash: [u8; 32],
         key: [u8; 32],
         kind: IfaceSlotKind,
     ) -> Result<(), CompileEnvError> {
         self.static_bindings.remove(name);
         self.insert_late(IfaceSlotSpec {
             binding: name.to_string(),
+            contract_hash,
             key,
             kind,
         })

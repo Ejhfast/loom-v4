@@ -127,8 +127,8 @@ go()
 fn a_child_inherits_the_rest_of_the_budget() {
     let source = "\
 def go(): Int with Vm
-  outer = sys.vm.Vm().activate(do ||: Int with Vm
-    inner = sys.vm.Vm().activate(do ||: Int
+  outer = sys.vm.Vm().activate_or_fault(do ||: Int with Vm
+    inner = sys.vm.Vm().activate_or_fault(do ||: Int
       7
     end, args: ())
     case inner.run()
@@ -210,7 +210,7 @@ def go(): Int with Vm
   a = build(8)
   b = build(8)
   c = build(8)
-  vm = sys.vm.Vm().activate(do |p: [[Int]], q: [[Int]], r: [[Int]]|: Int
+  vm = sys.vm.Vm().activate_or_fault(do |p: [[Int]], q: [[Int]], r: [[Int]]|: Int
     p.len() + q.len() + r.len()
   end, args: (a, b, c))
   case vm.run()
@@ -245,7 +245,7 @@ go()
 fn mocked_performs_reuse_one_machine_slot() {
     let source = "\
 def go(count: Int): Int with Vm, Clock.Now
-  vm = sys.vm.Vm().activate(do |n: Int|: Int with Clock.Now
+  vm = sys.vm.Vm().activate_or_fault(do |n: Int|: Int with Clock.Now
     i = 0
     total = 0
     while i < n

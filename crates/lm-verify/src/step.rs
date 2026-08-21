@@ -1498,7 +1498,7 @@ pub(crate) fn step(
                                 .map_err(&fail)?;
                             push(state, artifact)?;
                         }
-                        lm_abi::OP_VM_VERIFY => {
+                        lm_abi::OP_COMPILER_VERIFY => {
                             let artifact = ctx
                                 .plain_inst(ctx.core.artifact, "Artifact")
                                 .map_err(&fail)?;
@@ -1614,13 +1614,19 @@ pub(crate) fn step(
                             }
                             push(state, result)?;
                         }
-                        lm_abi::OP_VM_INSTANCE_SLOT | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => {
-                            pop_expect(state, TY_INT)?;
+                        lm_abi::OP_VM_INSTANCE_SLOT_FOR | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => {
+                            let argument = if op == lm_abi::OP_VM_INSTANCE_SLOT_FOR {
+                                ctx.plain_inst(ctx.core.slot_spec, "SlotSpec")
+                                    .map_err(&fail)?
+                            } else {
+                                TY_STR
+                            };
+                            pop_expect(state, argument)?;
                             let instance = ctx
                                 .plain_inst(ctx.core.instance, "Instance")
                                 .map_err(&fail)?;
                             pop_expect(state, instance)?;
-                            let value = if op == lm_abi::OP_VM_INSTANCE_SLOT {
+                            let value = if op == lm_abi::OP_VM_INSTANCE_SLOT_FOR {
                                 ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?
                             } else {
                                 ctx.plain_inst(ctx.core.slot_spec, "SlotSpec")
@@ -1632,7 +1638,7 @@ pub(crate) fn step(
                             let result = ctx.result_inst(value, error).map_err(&fail)?;
                             push(state, result)?;
                         }
-                        lm_abi::OP_VM_ACTIVATE => {
+                        lm_abi::OP_VM_ACTIVATE | lm_abi::OP_VM_ACTIVATE_OR_FAULT => {
                             let args_ty = pop(state)?;
                             let fn_ty = pop(state)?;
                             let recv = pop(state)?;
@@ -1657,7 +1663,26 @@ pub(crate) fn step(
                                 ));
                             }
                             let run = ctx.intern(BcType::Run(ret));
-                            push(state, run)?;
+                            if op == lm_abi::OP_VM_ACTIVATE_OR_FAULT {
+                                if reply_ty != run {
+                                    return Err(fail(
+                                        "`Vm.ActivateOrFault` has the wrong result type"
+                                            .to_string(),
+                                    ));
+                                }
+                                push(state, run)?;
+                            } else {
+                                let error = ctx
+                                    .plain_inst(ctx.core.code_error, "CodeError")
+                                    .map_err(&fail)?;
+                                let result = ctx.result_inst(run, error).map_err(&fail)?;
+                                if reply_ty != result {
+                                    return Err(fail(
+                                        "`Vm.Activate` has the wrong result type".to_string(),
+                                    ));
+                                }
+                                push(state, result)?;
+                            }
                         }
                         lm_abi::OP_VM_ACTIVATE_DEF => {
                             let args_ty = pop(state)?;

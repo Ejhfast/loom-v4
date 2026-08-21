@@ -1,2 +1,2 @@
-error[E1055]: no suffix may follow a trailing closure, found `.`
+error[E1055]: only `?` can follow a trailing closure, found `.`
   --> tests/ui/trailing-closure-suffix.lm:5:34

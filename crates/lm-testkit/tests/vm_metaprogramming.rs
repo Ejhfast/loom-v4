@@ -17,7 +17,7 @@ fn run_with_files(source: &str, files: &[(&str, Vec<u8>)]) -> String {
         host.borrow_mut().set_file(*name, bytes.clone());
     }
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
-    for grant in ["Fs", "Vm"] {
+    for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
     let outcome = lm_proc::run_world(&mut world);
@@ -123,7 +123,7 @@ execute()
 #[test]
 fn loom_builds_syntax_without_parsing_and_runs_it() {
     let source = r#"
-def execute(): Int with Compiler.CompileSyntax, Vm
+def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
   builder = SyntaxBuilder()
   statement_items = List[SyntaxElement]()
   statement_items.push(builder.integer("40"))
@@ -142,11 +142,11 @@ def execute(): Int with Compiler.CompileSyntax, Vm
     List[(String, String)]()
   )
   options = CompileOptions(
-    true,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   artifact = case sys.compiler.compile_syntax(syntax, env, options)
   in Ok(value) then value
@@ -197,11 +197,11 @@ def execute(): Bool with Compiler.CompileSyntax
     List[(String, String)]()
   )
   options = CompileOptions(
-    true,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   case sys.compiler.compile_syntax(syntax, env, options)
   in Ok(_) then false
@@ -263,7 +263,7 @@ end
 #[test]
 fn loom_compiles_an_expression_syntax_node() {
     let source = r#"
-def execute(): Int with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
+def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSyntax, Vm
   parsed = sys.reflect.parse_syntax("40 + 2\n")
   syntax = case parsed.status
   in ParseComplete then parsed.tree.root()
@@ -277,11 +277,11 @@ def execute(): Int with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
     List[(String, String)]()
   )
   options = CompileOptions(
-    true,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   artifact = case sys.compiler.compile_syntax(syntax, env, options)
   in Ok(value) then value
@@ -322,7 +322,7 @@ execute()
 #[test]
 fn loom_runs_an_expression_with_an_unknown_result_type() {
     let source = r#"
-def execute(): Bool with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
+def execute(): Bool with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSyntax, Vm
   parsed = sys.reflect.parse_syntax("[1, 2, 3]\n")
   syntax = case parsed.status
   in ParseComplete then parsed.tree.root()
@@ -336,11 +336,11 @@ def execute(): Bool with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
     List[(String, String)]()
   )
   options = CompileOptions(
-    true,
-    true,
-    false,
-    List[String](),
-    List[String]()
+    is_main: true,
+    dynamic_result: true,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   artifact = case sys.compiler.compile_syntax(syntax, env, options)
   in Ok(value) then value
@@ -358,7 +358,7 @@ def execute(): Bool with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
   in Err(_)
     return false
   end
-  entry = case instance.entry[(), DynValue]()
+  entry = case instance.dynamic_entry()
   in Ok(value) then value
   in Err(_)
     return false
@@ -381,7 +381,7 @@ execute()
 #[test]
 fn loom_compiles_a_definition_syntax_node() {
     let source = r#"
-def execute(): Int with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
+def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSyntax, Vm
   parsed = sys.reflect.parse_syntax(
     "def add(value: Int): Int\n  value + 2\nend\n"
   )
@@ -397,11 +397,11 @@ def execute(): Int with Compiler.CompileSyntax, Reflect.ParseSyntax, Vm
     List[(String, String)]()
   )
   options = CompileOptions(
-    false,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   artifact = case sys.compiler.compile_syntax(syntax, env, options)
   in Ok(value) then value
@@ -442,17 +442,17 @@ execute()
 #[test]
 fn loom_compiles_verifies_installs_and_runs_source() {
     let source = r#"
-def execute(): Int with Compiler.Compile, Vm
+def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   env = CompileEnv(
     List[VerifiedModule](),
     List[(String, String)]()
   )
   options = CompileOptions(
-    true,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   artifact = case sys.compiler.compile("runtime", "40 + 2\n", env, options)
   in Ok(value) then value
@@ -491,19 +491,124 @@ execute()
 }
 
 #[test]
+fn stable_slot_specs_survive_declaration_reordering() {
+    let source = r#"
+def compile_revision(
+  source: String,
+  functions: List[String]
+): Result[VerifiedModule, String] with Compiler.Compile, Compiler.Verify
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)]()
+  )
+  options = CompileOptions(
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: functions,
+    late_classes: List[String]()
+  )
+  artifact = sys.compiler.compile("revision", source, env, options).map_error() {
+    |error: CompileErrors| error.message
+  }?
+  artifact.verify().map_error() { |error: CodeError| error.message }
+end
+
+def run_entry(image: Vm, entry: FunctionDef[(), Int]): Result[Int, String] with Vm
+  run = image.activate(entry, args: ()).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Done(value) then Ok(value)
+  in Fault(_) then Err("the run faulted")
+  end
+end
+
+def execute(): Result[(Int, Int), String] with Compiler.Compile, Compiler.Verify, Vm
+  first_functions = List[String]()
+  first_functions.push("add")
+  first_module = compile_revision(
+    "def add(value: Int): Int\n  value + 100\nend\nadd(0)\n",
+    first_functions
+  )?
+
+  second_functions = List[String]()
+  second_functions.push("step")
+  second_functions.push("add")
+  second_module = compile_revision(
+    "def step(value: Int): Int\n  value + 2\nend\ndef add(value: Int): Int\n  value + 1\nend\nstep(add(0))\n",
+    second_functions
+  )?
+
+  third_functions = List[String]()
+  third_functions.push("add")
+  third_module = compile_revision(
+    "def add(value: String): String\n  value\nend\nadd(\"x\")\n",
+    third_functions
+  )?
+
+  image = sys.vm.Vm()
+  second = image.install(second_module).map_error() {
+    |error: CodeError| error.message
+  }?
+  first = image.install(first_module).map_error() {
+    |error: CodeError| error.message
+  }?
+  third = image.install(third_module).map_error() {
+    |error: CodeError| error.message
+  }?
+  entry = second.entry[(), Int]().map_error() {
+    |error: CodeError| error.message
+  }?
+  before = run_entry(image, entry)?
+
+  spec = first.slot_spec("add").map_error() {
+    |error: CodeError| error.message
+  }?
+  case first.slot_spec("missing")
+  in Ok(_) then return Err("an unknown name found a slot")
+  in Err(_) then ()
+  end
+  incompatible = third.slot_spec("add").map_error() {
+    |error: CodeError| error.message
+  }?
+  case second.slot_for(incompatible)
+  in Ok(_) then return Err("an incompatible slot matched")
+  in Err(_) then ()
+  end
+  slot = second.slot_for(spec).map_error() {
+    |error: CodeError| error.message
+  }?
+  target = first.function[(Int,), Int]("add").map_error() {
+    |error: CodeError| error.message
+  }?
+  image.replace(slot, target).map_error() {
+    |error: CodeError| error.message
+  }?
+
+  after = run_entry(image, entry)?
+  Ok((before, after))
+end
+
+execute()
+"#;
+    assert_eq!(run_with_compiler(source), "Done(Ok((3, 102)))");
+}
+
+#[test]
 fn runtime_compilation_links_an_explicit_provider_instance() {
     let source = r#"
-def execute(): Int with Compiler.Compile, Vm
+def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   empty_env = CompileEnv(
     List[VerifiedModule](),
     List[(String, String)]()
   )
   library_options = CompileOptions(
-    false,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   library_artifact = case sys.compiler.compile(
     "dep",
@@ -533,11 +638,11 @@ def execute(): Int with Compiler.Compile, Vm
     [("dep", "dep")]
   )
   program_options = CompileOptions(
-    true,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   program_artifact = case sys.compiler.compile(
     "app",
@@ -583,14 +688,14 @@ execute()
 #[test]
 fn runtime_linked_instances_survive_an_external_snapshot() {
     let source = r#"
-def execute(): Int with Compiler.Compile, Vm
+def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   empty = CompileEnv(List[VerifiedModule](), List[(String, String)]())
   library_options = CompileOptions(
-    false,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   library_artifact = case sys.compiler.compile(
     "dep",
@@ -616,11 +721,11 @@ def execute(): Int with Compiler.Compile, Vm
   end
   program_env = CompileEnv([library_module], [("dep", "dep")])
   program_options = CompileOptions(
-    true,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   program_artifact = case sys.compiler.compile(
     "app",
@@ -738,11 +843,11 @@ def execute(): Bool with Compiler.Compile
     List[(String, String)]()
   )
   options = CompileOptions(
-    true,
-    false,
-    false,
-    List[String](),
-    List[String]()
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
   )
   case sys.compiler.compile("broken", "def", env, options)
   in Ok(_) then false
@@ -763,11 +868,11 @@ env = CompileEnv(
   List[(String, String)]()
 )
 options = CompileOptions(
-  true,
-  false,
-  false,
-  List[String](),
-  List[String]()
+  is_main: true,
+  dynamic_result: false,
+  late_definitions: false,
+  late_functions: List[String](),
+  late_classes: List[String]()
 )
 sys.compiler.compile("blocked", "1\n", env, options)
 "#;
@@ -795,7 +900,7 @@ def artifact_bytes(): Bytes with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm
+def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   artifact = sys.vm.artifact(artifact_bytes())
   case artifact.verify()
   in Err(_) then 0 - 1
@@ -804,6 +909,10 @@ def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm
     case image.install(module)
     in Err(_) then 0 - 2
     in Ok(instance)
+      case instance.dynamic_entry()
+      in Ok(_) then return 0 - 3
+      in Err(_) then ()
+      end
       case instance.entry[(), Int]()
       in Err(_) then 0 - 3
       in Ok(entry)
@@ -841,7 +950,7 @@ fn revision_artifact(body: &str) -> Vec<u8> {
     lm_bytecode::encode(&compiled.module)
 }
 
-fn complete_slot_artifact() -> (Vec<u8>, usize, usize, usize, usize) {
+fn complete_slot_artifact() -> Vec<u8> {
     let source = "final class Box\nend\n\
                   def step(value: Int): Int\n\
                   \x20 value + 1\n\
@@ -870,30 +979,26 @@ fn complete_slot_artifact() -> (Vec<u8>, usize, usize, usize, usize) {
         .find(|export| export.name == "Box" && export.kind == lm_bytecode::ExportKind::Class)
         .expect("the class is exported")
         .def;
-    let function_slot = module
+    assert!(module
         .slots
         .iter()
-        .position(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Function(step)))
-        .expect("the function slot exists");
-    let class_slot = module
+        .any(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Function(step))));
+    assert!(module
         .slots
         .iter()
-        .position(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Class(class)))
-        .expect("the class slot exists");
+        .any(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Class(class))));
     let int = module
         .types
         .iter()
         .position(|ty| *ty == lm_bytecode::BcType::Int)
         .expect("the Int type exists") as u32;
-    let value_slot = module.slots.len();
     module.slots.push(lm_bytecode::SlotSpec {
-        key: lm_bytecode::slot_key("slot-kinds.value"),
+        key: lm_bytecode::ad_hoc_slot_key("slot-kinds.value"),
         contract: lm_bytecode::SlotContract::Value { ty: int },
         initial: None,
     });
-    let process_slot = module.slots.len();
     module.slots.push(lm_bytecode::SlotSpec {
-        key: lm_bytecode::slot_key("slot-kinds.process"),
+        key: lm_bytecode::ad_hoc_slot_key("slot-kinds.process"),
         contract: lm_bytecode::SlotContract::Process {
             message: int,
             result: int,
@@ -901,13 +1006,7 @@ fn complete_slot_artifact() -> (Vec<u8>, usize, usize, usize, usize) {
         initial: None,
     });
     lm_verify::verify_module(&module).expect("the complete slot artifact verifies");
-    (
-        lm_bytecode::encode(&module),
-        function_slot,
-        class_slot,
-        value_slot,
-        process_slot,
-    )
+    lm_bytecode::encode(&module)
 }
 
 #[test]
@@ -915,7 +1014,7 @@ fn a_slot_replacement_changes_later_calls_only() {
     let first = revision_artifact("value + 1");
     let second = revision_artifact("value + 10");
     let source = r#"
-def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
+def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   bytes = case sys.fs.open(path, ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
@@ -929,7 +1028,7 @@ def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
   sys.vm.artifact(bytes)
 end
 
-def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm
+def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   image = sys.vm.Vm()
   first_module = case read_artifact("first.lmbc").verify()
   in Ok(module) then module
@@ -966,7 +1065,12 @@ def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm
   in Fault(_)
     return (0 - 6, 0 - 6)
   end
-  slot = case first.slot(0)
+  spec = case first.slot_spec("step")
+  in Ok(value) then value
+  in Err(_)
+    return (0 - 7, 0 - 7)
+  end
+  slot = case first.slot_for(spec)
   in Ok(value) then value
   in Err(_)
     return (0 - 7, 0 - 7)
@@ -1004,7 +1108,7 @@ execute()
 fn cross_vm_definition_activation_returns_a_code_error() {
     let artifact = compile_to_bytes("cross-vm.lm", "42\n").expect("the artifact compiles");
     let source = r#"
-def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
+def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   bytes = case sys.fs.open("cross-vm.lmbc", ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
@@ -1018,7 +1122,7 @@ def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
   sys.vm.artifact(bytes)
 end
 
-def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   left = sys.vm.Vm()
   right = sys.vm.Vm()
   module = case read_artifact().verify()
@@ -1051,17 +1155,36 @@ execute()
 }
 
 #[test]
+fn closure_activation_returns_a_code_error() {
+    let source = r#"
+def execute(): Bool with Vm
+  captured = sys.vm.Vm()
+  image = sys.vm.Vm()
+  case image.activate(do ||: Int with Vm
+    captured.snapshot()
+    1
+  end, args: ())
+  in Ok(_) then false
+  in Err(error) then error.message.len() > 0
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_compiler(source), "Done(true)");
+}
+
+#[test]
 fn loom_replaces_every_slot_target_kind() {
-    let (artifact, function_slot, class_slot, value_slot, process_slot) = complete_slot_artifact();
-    let source = format!(
-        r#"
+    let artifact = complete_slot_artifact();
+    let source = r#"
 class Worker < Proc[Int]
   def on_spawn(self): Int with Proc
     7
   end
 end
 
-def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
+def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   bytes = case sys.fs.open("slot-kinds.lmbc", ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
@@ -1075,7 +1198,7 @@ def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
   sys.vm.artifact(bytes)
 end
 
-def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Proc
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   image = sys.vm.Vm()
   module = case read_artifact().verify()
   in Ok(value) then value
@@ -1097,22 +1220,42 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Proc
   in Err(_)
     return false
   end
-  function_slot = case instance.slot({function_slot})
+  function_spec = case instance.slot_spec("step")
   in Ok(value) then value
   in Err(_)
     return false
   end
-  class_slot = case instance.slot({class_slot})
+  function_slot = case instance.slot_for(function_spec)
   in Ok(value) then value
   in Err(_)
     return false
   end
-  value_slot = case instance.slot({value_slot})
+  class_spec = case instance.slot_spec("Box")
   in Ok(value) then value
   in Err(_)
     return false
   end
-  process_slot = case instance.slot({process_slot})
+  class_slot = case instance.slot_for(class_spec)
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  value_spec = case instance.slot_spec("slot-kinds.value")
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  value_slot = case instance.slot_for(value_spec)
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  process_spec = case instance.slot_spec("slot-kinds.process")
+  in Ok(value) then value
+  in Err(_)
+    return false
+  end
+  process_slot = case instance.slot_for(process_spec)
   in Ok(value) then value
   in Err(_)
     return false
@@ -1141,15 +1284,14 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Proc
 end
 
 execute()
-"#
-    );
-    let bytes = compile_to_bytes("slot-kinds-host.lm", &source).expect("the program compiles");
+"#;
+    let bytes = compile_to_bytes("slot-kinds-host.lm", source).expect("the program compiles");
     let loaded = load_bytes(&bytes).expect("the program loads");
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut()
         .set_file("slot-kinds.lmbc", artifact.clone());
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
-    for grant in ["Fs", "Vm", "Proc"] {
+    for grant in ["Fs", "Vm", "Proc", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
     let outcome = lm_proc::run_world(&mut world);
@@ -1169,7 +1311,7 @@ execute()
 fn loom_captures_and_restores_a_complete_vm() {
     let artifact = compile_to_bytes("full-vm.lm", "42\n").expect("the artifact compiles");
     let source = r#"
-def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
+def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   bytes = case sys.fs.open("full-vm.lmbc", ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
@@ -1183,7 +1325,7 @@ def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm
   sys.vm.artifact(bytes)
 end
 
-def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   image = sys.vm.Vm()
   module = case read_artifact().verify()
   in Ok(value) then value
@@ -1228,7 +1370,7 @@ execute()
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().set_file("full-vm.lmbc", artifact.clone());
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
-    for grant in ["Fs", "Vm"] {
+    for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
     let outcome = lm_proc::run_world(&mut world);
@@ -1318,7 +1460,7 @@ execute()
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().set_file("seed.lms", snapshot);
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
-    for grant in ["Fs", "Vm"] {
+    for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
     let outcome = lm_proc::run_world(&mut world);
@@ -1364,7 +1506,7 @@ def artifact_bytes(): Bytes with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm
+def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   image = sys.vm.Vm()
   module = case sys.vm.artifact(artifact_bytes()).verify()
   in Ok(value) then value
@@ -1399,7 +1541,7 @@ execute()
     host.borrow_mut()
         .set_file("installed.lmbc", artifact.clone());
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
-    for grant in ["Fs", "Vm"] {
+    for grant in ["Fs", "Vm", "Compiler.Verify"] {
         world.allow(grant).expect("the grant exists");
     }
 

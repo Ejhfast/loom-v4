@@ -1,0 +1,9 @@
+def read(value: Result[Int, String]): Result[Int, String]
+  item = case value
+  in Ok(found) then found
+  in Err(error) then return Err(error)
+  end
+  Ok(item + 1)
+end
+
+(read(Ok(4)), read(Err("stop")))

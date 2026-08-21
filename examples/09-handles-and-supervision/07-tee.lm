@@ -71,7 +71,7 @@ end
 
 case sys.fs.open("message.txt", ReadOnly)
 in Ok(backing)
-  child = sys.vm.Vm().activate(read_twice, args: ())
+  child = sys.vm.Vm().activate_or_fault(read_twice, args: ())
   case child.drive()
   in Asked(request)
     case request

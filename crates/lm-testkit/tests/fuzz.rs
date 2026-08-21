@@ -703,7 +703,7 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
 }
 
 /// Build one artifact with every slot target kind.
-fn installed_slot_artifact() -> (Vec<u8>, usize, usize, usize, usize) {
+fn installed_slot_artifact() -> Vec<u8> {
     use lm_compiler::{compile_module_with_options, CompileEnv, CompileOptions};
     let source = lm_source::SourceFile::new(
         "fuzz-slots.lm",
@@ -732,30 +732,26 @@ fn installed_slot_artifact() -> (Vec<u8>, usize, usize, usize, usize) {
         .find(|export| export.name == "Box" && export.kind == lm_bytecode::ExportKind::Class)
         .expect("the class is exported")
         .def;
-    let function_slot = module
+    assert!(module
         .slots
         .iter()
-        .position(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Function(step)))
-        .expect("the function slot exists");
-    let class_slot = module
+        .any(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Function(step))));
+    assert!(module
         .slots
         .iter()
-        .position(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Class(class)))
-        .expect("the class slot exists");
+        .any(|slot| slot.initial == Some(lm_bytecode::SlotTarget::Class(class))));
     let int = module
         .types
         .iter()
         .position(|ty| *ty == lm_bytecode::BcType::Int)
         .expect("the Int type exists") as u32;
-    let value_slot = module.slots.len();
     module.slots.push(lm_bytecode::SlotSpec {
-        key: lm_bytecode::slot_key("fuzz-slots.value"),
+        key: lm_bytecode::ad_hoc_slot_key("fuzz-slots.value"),
         contract: lm_bytecode::SlotContract::Value { ty: int },
         initial: None,
     });
-    let process_slot = module.slots.len();
     module.slots.push(lm_bytecode::SlotSpec {
-        key: lm_bytecode::slot_key("fuzz-slots.process"),
+        key: lm_bytecode::ad_hoc_slot_key("fuzz-slots.process"),
         contract: lm_bytecode::SlotContract::Process {
             message: int,
             result: int,
@@ -763,13 +759,7 @@ fn installed_slot_artifact() -> (Vec<u8>, usize, usize, usize, usize) {
         initial: None,
     });
     lm_verify::verify_module(&module).expect("the installed fuzz artifact verifies");
-    (
-        lm_bytecode::encode(&module),
-        function_slot,
-        class_slot,
-        value_slot,
-        process_slot,
-    )
+    lm_bytecode::encode(&module)
 }
 
 /// A second seed with installed code and every live slot target.
@@ -778,9 +768,8 @@ fn installed_slot_artifact() -> (Vec<u8>, usize, usize, usize, usize) {
 /// mutants can therefore reach both restored code state and execution.
 fn ready_snapshot_seed() -> (lm_vm::LoadedModule, Vec<u8>) {
     use lm_vm::{RecordingHost, RootEvent, World};
-    let (artifact, function_slot, class_slot, value_slot, process_slot) = installed_slot_artifact();
-    let source = format!(
-        r#"
+    let artifact = installed_slot_artifact();
+    let source = r#"
 class Worker < Proc[Int]
   def on_spawn(self): Int with Proc
     7
@@ -800,7 +789,7 @@ def artifact_bytes(): Bytes with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc
+def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   image = sys.vm.Vm()
   module = case sys.vm.artifact(artifact_bytes()).verify()
   in Ok(value) then value
@@ -822,22 +811,42 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc
   in Err(_)
     return 0 - 4
   end
-  function_slot = case instance.slot({function_slot})
+  function_spec = case instance.slot_spec("step")
   in Ok(value) then value
   in Err(_)
     return 0 - 5
   end
-  class_slot = case instance.slot({class_slot})
+  function_slot = case instance.slot_for(function_spec)
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 5
+  end
+  class_spec = case instance.slot_spec("Box")
   in Ok(value) then value
   in Err(_)
     return 0 - 6
   end
-  value_slot = case instance.slot({value_slot})
+  class_slot = case instance.slot_for(class_spec)
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 6
+  end
+  value_spec = case instance.slot_spec("fuzz-slots.value")
   in Ok(value) then value
   in Err(_)
     return 0 - 7
   end
-  process_slot = case instance.slot({process_slot})
+  value_slot = case instance.slot_for(value_spec)
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 7
+  end
+  process_spec = case instance.slot_spec("fuzz-slots.process")
+  in Ok(value) then value
+  in Err(_)
+    return 0 - 8
+  end
+  process_slot = case instance.slot_for(process_spec)
   in Ok(value) then value
   in Err(_)
     return 0 - 8
@@ -856,16 +865,15 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc
 end
 
 go()
-"#
-    );
-    let bytes = compile_to_bytes("ready.lm", &source).expect("the seed compiles");
+"#;
+    let bytes = compile_to_bytes("ready.lm", source).expect("the seed compiles");
     let loaded = lm_vm::load_bytes(&bytes).expect("the seed loads");
     let container = {
         let host = std::rc::Rc::new(std::cell::RefCell::new(RecordingHost::new(1)));
         host.borrow_mut()
             .set_file("fuzz-slots.lmbc", artifact.clone());
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
-        for grant in ["Fs", "Vm", "Proc"] {
+        for grant in ["Fs", "Vm", "Proc", "Compiler.Verify"] {
             world.allow(grant).expect("the grant names a target");
         }
         // Step to one boundary after every slot target is installed.

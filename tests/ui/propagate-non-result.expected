@@ -1,0 +1,2 @@
+error[E1066]: `?` needs Result[T, E], found Int
+  --> tests/ui/propagate-non-result.lm:2:11

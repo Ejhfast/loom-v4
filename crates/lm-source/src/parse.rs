@@ -1416,6 +1416,14 @@ impl Parser<'_> {
                     let (call, trailing) = self.finish_call(expr, Vec::new(), args, close_span)?;
                     expr = call;
                     if trailing {
+                        while matches!(self.peek(), Tok::Question) {
+                            let question = self.next();
+                            let span = expr.span.to(question.span);
+                            expr = Expr {
+                                kind: ExprKind::Propagate(Box::new(expr)),
+                                span,
+                            };
+                        }
                         return self.no_suffix_after_trailing(expr);
                     }
                 }
@@ -1431,6 +1439,14 @@ impl Parser<'_> {
                                 self.finish_call(expr, type_args, args, close_span)?;
                             expr = call;
                             if trailing {
+                                while matches!(self.peek(), Tok::Question) {
+                                    let question = self.next();
+                                    let span = expr.span.to(question.span);
+                                    expr = Expr {
+                                        kind: ExprKind::Propagate(Box::new(expr)),
+                                        span,
+                                    };
+                                }
                                 return self.no_suffix_after_trailing(expr);
                             }
                         }
@@ -1452,6 +1468,14 @@ impl Parser<'_> {
                             name,
                             name_span,
                         },
+                        span,
+                    };
+                }
+                Tok::Question => {
+                    let question = self.next();
+                    let span = expr.span.to(question.span);
+                    expr = Expr {
+                        kind: ExprKind::Propagate(Box::new(expr)),
                         span,
                     };
                 }
@@ -1488,13 +1512,13 @@ impl Parser<'_> {
         Ok((self.make_call(callee, type_args, args, span)?, trailing))
     }
 
-    /// Reject any postfix suffix after a trailing closure.
+    /// Reject a call, field, or index suffix after a trailing closure.
     fn no_suffix_after_trailing(&mut self, expr: Expr) -> Result<Expr, Diagnostic> {
         if matches!(self.peek(), Tok::LParen | Tok::LBracket | Tok::Dot) {
             return Err(self.error(
                 "E1055",
                 format!(
-                    "no suffix may follow a trailing closure, found {}",
+                    "only `?` can follow a trailing closure, found {}",
                     self.peek()
                 ),
             ));
@@ -1881,16 +1905,22 @@ impl Parser<'_> {
                     let pattern = self.pattern()?;
                     let (body, hi) = if matches!(self.peek(), Tok::KwThen) {
                         self.pos += 1;
-                        let value = self.expr()?;
-                        let hi = value.span;
-                        let span = value.span;
-                        (
-                            vec![Stmt {
-                                kind: StmtKind::Expr(value),
-                                span,
-                            }],
-                            hi,
-                        )
+                        if matches!(self.peek(), Tok::KwReturn) {
+                            let stmt = self.stmt()?;
+                            let hi = stmt.span;
+                            (vec![stmt], hi)
+                        } else {
+                            let value = self.expr()?;
+                            let hi = value.span;
+                            let span = value.span;
+                            (
+                                vec![Stmt {
+                                    kind: StmtKind::Expr(value),
+                                    span,
+                                }],
+                                hi,
+                            )
+                        }
                     } else {
                         self.expect_terminator()?;
                         let body = self.block(&[Tok::KwIn, Tok::KwEnd])?;
@@ -2436,6 +2466,28 @@ mod tests {
         let source = "def f(): Int\n  return 1\nend\ndef g()\n  return\nend\n1\n";
         let module = parse(source).unwrap();
         assert_eq!(module.funcs.len(), 2);
+    }
+
+    #[test]
+    fn parses_result_propagation() {
+        let module = parse("def f(): Result[Int, String]\n  work()?\nend\n1\n").unwrap();
+        let StmtKind::Expr(value) = &module.funcs[0].body[0].kind else {
+            panic!("the function body holds an expression");
+        };
+        assert!(matches!(value.kind, ExprKind::Propagate(_)));
+    }
+
+    #[test]
+    fn parses_return_in_a_then_arm() {
+        let source = "def f(): Int\n  case x\n  in _ then return 1\n  end\nend\n1\n";
+        let module = parse(source).unwrap();
+        let StmtKind::Expr(value) = &module.funcs[0].body[0].kind else {
+            panic!("the function body holds an expression");
+        };
+        let ExprKind::Case { arms, .. } = &value.kind else {
+            panic!("the expression is a case");
+        };
+        assert!(matches!(arms[0].body[0].kind, StmtKind::Return { .. }));
     }
 
     #[test]

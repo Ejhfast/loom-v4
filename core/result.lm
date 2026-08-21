@@ -26,4 +26,25 @@ enum Result[T, E]
     in Err(_) then fallback
     end
   end
+
+  def map[U, effect e](self, f: (T) -> U with e): Result[U, E] with e
+    case self
+    in Ok(v)     then Ok(f(v))
+    in Err(error) then Err(error)
+    end
+  end
+
+  def map_error[F, effect e](self, f: (E) -> F with e): Result[T, F] with e
+    case self
+    in Ok(v)     then Ok(v)
+    in Err(error) then Err(f(error))
+    end
+  end
+
+  def and_then[U, effect e](self, f: (T) -> Result[U, E] with e): Result[U, E] with e
+    case self
+    in Ok(v)     then f(v)
+    in Err(error) then Err(error)
+    end
+  end
 end

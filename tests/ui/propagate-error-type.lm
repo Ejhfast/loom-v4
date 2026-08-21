@@ -1,0 +1,6 @@
+def bad(): Result[Int, String]
+  Ok[Int, Int](1)?
+  Ok(2)
+end
+
+bad()

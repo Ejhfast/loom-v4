@@ -38,7 +38,7 @@ def always(child: Run[Int], index: Int): Int with Vm
 end
 
 def run_with(index: Int): Int with Vm
-  always(sys.vm.Vm().activate(program, args: ()), index)
+  always(sys.vm.Vm().activate_or_fault(program, args: ()), index)
 end
 
 # The driver reads the count, so it can also refuse a candidate it

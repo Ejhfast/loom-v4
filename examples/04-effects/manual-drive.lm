@@ -22,7 +22,7 @@ def drive_loop(vm: Run[Int], mut captured: [String]): ([String], Int) with Vm
   end
 end
 
-vm = sys.vm.Vm().activate(do || with Io.Print, Clock.Now
+vm = sys.vm.Vm().activate_or_fault(do || with Io.Print, Clock.Now
   sys.io.print("tick\n")
   sys.clock.now()
 end, args: ())

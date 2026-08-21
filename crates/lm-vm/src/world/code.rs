@@ -133,7 +133,7 @@ impl World {
     pub(super) fn code_exec(&mut self, vm: VmId, op: u32, args: Args<'_>) {
         match op {
             lm_abi::OP_VM_ARTIFACT => self.code_artifact(vm, op, args[0]),
-            lm_abi::OP_VM_VERIFY => self.code_verify(vm, op, args[0]),
+            lm_abi::OP_COMPILER_VERIFY => self.code_verify(vm, op, args[0]),
             lm_abi::OP_VM_INSTALL => self.code_install(vm, op, args[0], args[1], None),
             lm_abi::OP_VM_INSTALL_WITH => {
                 self.code_install(vm, op, args[0], args[1], Some(args[2]))
@@ -141,9 +141,8 @@ impl World {
             lm_abi::OP_VM_INSTANCE_ENTRY => self.code_entry(vm, op, args[0]),
             lm_abi::OP_VM_INSTANCE_FUNCTION => self.code_function(vm, op, args[0], args[1]),
             lm_abi::OP_VM_INSTANCE_CLASS => self.code_class(vm, op, args[0], args[1]),
-            lm_abi::OP_VM_INSTANCE_SLOT | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => {
-                self.code_slot(vm, op, args[0], args[1])
-            }
+            lm_abi::OP_VM_INSTANCE_SLOT_FOR => self.code_slot_for(vm, op, args[0], args[1]),
+            lm_abi::OP_VM_INSTANCE_SLOT_SPEC => self.code_slot_spec(vm, op, args[0], args[1]),
             lm_abi::OP_VM_ACTIVATE_DEF => self.code_activate(vm, op, args[0], args[1], args[2]),
             lm_abi::OP_VM_REPLACE_FUNCTION
             | lm_abi::OP_VM_REPLACE_CLASS
@@ -494,7 +493,7 @@ impl World {
         }
     }
 
-    fn code_slot(&mut self, vm: VmId, op: u32, value: Value, index: Value) {
+    fn code_slot_spec(&mut self, vm: VmId, op: u32, value: Value, name: Value) {
         let handle = match self.code_handle(vm, value, CodeHandleKind::Instance) {
             Ok(handle) => handle,
             Err(code) => {
@@ -502,42 +501,184 @@ impl World {
                 return;
             }
         };
-        let Value::Int(index) = index else {
-            self.fault_caller(vm, op, FaultCode::TypeMismatch, "the slot index is not Int");
+        let name = match name
+            .as_obj()
+            .map(|reference| self.machines[vm as usize].vm.heap.get(reference))
+        {
+            Some(Object::Str(text)) => text.as_str().to_string(),
+            _ => {
+                self.fault_caller(
+                    vm,
+                    op,
+                    FaultCode::TypeMismatch,
+                    "the slot name is not String",
+                );
+                return;
+            }
+        };
+        let Some(instance) = self.live_instance(handle) else {
+            self.finish_code_error(vm, op, "the module instance is not live");
             return;
         };
-        let source = usize::try_from(index).ok();
-        let mapped = source.and_then(|source| {
-            self.live_instance(handle)
-                .and_then(|instance| instance.slots.get(source).copied())
+        let interface_bytes = instance.interface.clone();
+        let artifact = instance.artifact.clone();
+        let module = match lm_bytecode::decode(artifact.as_slice()) {
+            Ok(module) => module,
+            Err(error) => {
+                self.finish_code_error(
+                    vm,
+                    op,
+                    &format!("the module artifact did not decode: {error}"),
+                );
+                return;
+            }
+        };
+        let interface_key = match interface_bytes.as_ref() {
+            Some(bytes) => match lm_bytecode::interface::decode_interface(bytes.as_slice()) {
+                Ok(interface) => {
+                    let qualified = lm_bytecode::qualified_key(&interface.module_path, &name);
+                    interface
+                        .slots
+                        .iter()
+                        .find(|spec| spec.binding == name)
+                        .or_else(|| {
+                            interface
+                                .slots
+                                .iter()
+                                .find(|spec| spec.binding == qualified)
+                        })
+                        .map(|spec| spec.key)
+                }
+                Err(error) => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        &format!("the module interface did not decode: {error}"),
+                    );
+                    return;
+                }
+            },
+            None => None,
+        };
+        let exported_index = module.exports.iter().find_map(|export| {
+            if export.name != name {
+                return None;
+            }
+            let target = if export.kind.is_class() {
+                lm_bytecode::SlotTarget::Class(export.def)
+            } else if export.kind == lm_bytecode::ExportKind::Function {
+                lm_bytecode::SlotTarget::Function(export.def)
+            } else {
+                return None;
+            };
+            module
+                .slots
+                .iter()
+                .position(|slot| slot.initial == Some(target))
         });
-        let Some(mapped) = mapped else {
-            let value = self.code_error(vm, "the module instance has no slot at this index");
-            self.finish_code_result(vm, op, value);
+        let ad_hoc_key = lm_bytecode::ad_hoc_slot_key(&name);
+        let index = interface_key
+            .and_then(|key| module.slots.iter().position(|slot| slot.key == key))
+            .or(exported_index)
+            .or_else(|| module.slots.iter().position(|slot| slot.key == ad_hoc_key));
+        let Some(index) = index else {
+            self.finish_code_error(vm, op, "the module instance has no slot with this name");
             return;
         };
-        let value = if op == lm_abi::OP_VM_INSTANCE_SLOT {
-            self.machines[vm as usize].alloc(Object::NativeCodeHandle {
-                image: handle.image,
-                generation: handle.generation,
-                instance: handle.instance,
-                kind: CodeHandleKind::Slot,
-                index: mapped,
-            })
-        } else {
-            let artifact = self
-                .live_instance(handle)
-                .map(|instance| instance.artifact.clone())
-                .ok_or(FaultCode::InvalidVmState);
-            artifact.and_then(|bytes| {
-                self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
-                    kind: PortableCodeKind::SlotSpec,
-                    bytes,
-                    interface: None,
-                    index: index as u32,
-                })))
-            })
+        let Ok(index) = u32::try_from(index) else {
+            self.finish_code_error(vm, op, "the module slot index is too large");
+            return;
         };
+        let value = self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
+            kind: PortableCodeKind::SlotSpec,
+            bytes: artifact,
+            interface: interface_bytes,
+            index,
+        })));
+        let result = value.and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, result);
+    }
+
+    fn code_slot_for(&mut self, vm: VmId, op: u32, value: Value, spec: Value) {
+        let handle = match self.code_handle(vm, value, CodeHandleKind::Instance) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not an Instance");
+                return;
+            }
+        };
+        let portable = match self.portable_code(vm, spec, PortableCodeKind::SlotSpec) {
+            Ok(portable) => portable,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the slot specification has another shape");
+                return;
+            }
+        };
+        let source = match lm_bytecode::decode(portable.bytes.as_slice()) {
+            Ok(source) => source,
+            Err(error) => {
+                self.finish_code_error(
+                    vm,
+                    op,
+                    &format!("the slot specification did not decode: {error}"),
+                );
+                return;
+            }
+        };
+        let Some(wanted) = source.slots.get(portable.index as usize) else {
+            self.finish_code_error(vm, op, "the slot specification has an invalid index");
+            return;
+        };
+        let Some(instance) = self.live_instance(handle) else {
+            self.finish_code_error(vm, op, "the module instance is not live");
+            return;
+        };
+        let target_artifact = instance.artifact.clone();
+        let target_interface = instance.interface.clone();
+        let target_slots = instance.slots.clone();
+        let target = match lm_bytecode::decode(target_artifact.as_slice()) {
+            Ok(target) => target,
+            Err(error) => {
+                self.finish_code_error(
+                    vm,
+                    op,
+                    &format!("the module artifact did not decode: {error}"),
+                );
+                return;
+            }
+        };
+        let target_index = target.slots.iter().position(|slot| slot.key == wanted.key);
+        let source_contract = portable.interface.as_ref().and_then(|bytes| {
+            lm_bytecode::interface::decode_interface(bytes.as_slice())
+                .ok()?
+                .slots
+                .into_iter()
+                .find(|slot| slot.key == wanted.key)
+                .map(|slot| slot.contract_hash)
+        });
+        let target_contract = target_interface.as_ref().and_then(|bytes| {
+            lm_bytecode::interface::decode_interface(bytes.as_slice())
+                .ok()?
+                .slots
+                .into_iter()
+                .find(|slot| slot.key == wanted.key)
+                .map(|slot| slot.contract_hash)
+        });
+        let compatible = portable.bytes.as_slice() == target_artifact.as_slice()
+            || matches!((source_contract, target_contract), (Some(left), Some(right)) if left == right);
+        let target_index = if compatible { target_index } else { None };
+        let mapped = target_index.and_then(|index| target_slots.get(index).copied());
+        let Some(mapped) = mapped else {
+            self.finish_code_error(vm, op, "the module instance has no compatible slot");
+            return;
+        };
+        let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
+            image: handle.image,
+            generation: handle.generation,
+            instance: handle.instance,
+            kind: CodeHandleKind::Slot,
+            index: mapped,
+        });
         let result = value.and_then(|value| self.code_ok(vm, value));
         self.finish_code_result(vm, op, result);
     }
@@ -845,22 +986,27 @@ impl World {
         Ok(actual_input == input && actual_output == output)
     }
 
-    fn code_ok(&mut self, vm: VmId, value: Value) -> Result<Value, FaultCode> {
+    pub(super) fn code_ok(&mut self, vm: VmId, value: Value) -> Result<Value, FaultCode> {
         self.make_instance(vm, self.core.result_ok, vec![value])
     }
 
-    fn code_error(&mut self, vm: VmId, message: &str) -> Result<Value, FaultCode> {
+    pub(super) fn code_error(&mut self, vm: VmId, message: &str) -> Result<Value, FaultCode> {
         let message = self.machines[vm as usize].alloc(Object::Str(message.into()))?;
         let error = self.make_instance(vm, self.core.code_error, vec![message])?;
         self.make_instance(vm, self.core.result_err, vec![error])
     }
 
-    fn finish_code_error(&mut self, vm: VmId, op: u32, message: &str) {
+    pub(super) fn finish_code_error(&mut self, vm: VmId, op: u32, message: &str) {
         let value = self.code_error(vm, message);
         self.finish_code_result(vm, op, value);
     }
 
-    fn finish_code_result(&mut self, vm: VmId, op: u32, result: Result<Value, FaultCode>) {
+    pub(super) fn finish_code_result(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        result: Result<Value, FaultCode>,
+    ) {
         match result {
             Ok(value) => self.install_value_reply(vm, value),
             Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),

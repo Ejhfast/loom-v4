@@ -319,7 +319,7 @@ Hello Ada!
 ```
 
 ```lm
-vm = sys.vm.Vm().activate(do || with Io.Print, Clock.Now
+vm = sys.vm.Vm().activate_or_fault(do || with Io.Print, Clock.Now
   sys.io.print("tick\n")
   sys.clock.now()
 end, args: ())
@@ -443,11 +443,10 @@ modules from files, and the `use` declaration over interfaces.
   local name.
 - `lm new` scaffolding; the dependency DAG; the content-addressed
   build directory with cache hits; `lm build`/`lm run` on packages.
-- Explicit `CompileEnv` and `LinkEnv` typed builders; import slots
-  with signatures/rows/pinned hashes; a pure linker; typed
-  `LinkedEntry[A,R]`; dynamic access deferred with `DynValue`
-  (week 13). The build tool constructs the environments; ordinary
-  development never touches them.
+- Explicit `CompileEnv` and `LinkEnv` values; import slots with
+  signatures, rows, and pinned hashes; and a pure build linker.
+  Dynamic access uses `DynValue` in week 13. The build tool constructs
+  these values. Ordinary development never uses them directly.
 
 ### Runnable outputs
 
@@ -489,9 +488,9 @@ Hello Ada!
 paths admit code through the same verifier. A second build with
 unchanged inputs reports cache hits.
 
-A runtime-compilation example binds a frozen `Config` with
-`CompileEnv.bind`, compiles a module, links it with `LinkEnv`,
-requests a typed entry, and runs it.
+A runtime-compilation example supplies provider modules through
+`CompileEnv`. It compiles and verifies a module. It installs that
+module with `LinkEnv`, requests a typed entry, and runs it.
 
 ### Gates
 
@@ -729,7 +728,7 @@ def restore_run(snap: RunSnapshot[Int]): Int with Vm
   end
 end
 
-vm = sys.vm.Vm().activate({ || 20 + 22 }, args: ())
+vm = sys.vm.Vm().activate_or_fault({ || 20 + 22 }, args: ())
 vm.step()
 case vm.snapshot()
 in Ok(snap) then (restore_run(snap), restore_run(snap))
@@ -1018,34 +1017,39 @@ bounded trace, and captured operation transcript.
 
 ---
 
-## Week 13 — Reified compiler, typed linker, reflection, and dynamic programs
+## Week 13 — Reified compiler, verified code, syntax, and dynamic programs
 
 ### Land
 
-- `Compiler.Compile` host operation backed by the same bootstrap compiler pipeline and explicit `CompileEnv`.
-- Typed `LinkEnv`, `Type[T]` witnesses, `DynValue` pack/unpack for intentionally dynamic tooling, and typed `LinkedEntry[A,R]`.
-- Read-only `Reflect.Mirror`, frame/code/class metadata, no dynamic selector invocation, and detached `ValueView` trees.
-- Standard VM/compiler/reflection/test helpers built on these primitives.
-- End-to-end admission example: compile source, inspect row/hash, choose policy, link, run in a child VM, capture requests, and snapshot its reachable machine world.
+- `Compiler.Compile` and `Compiler.CompileSyntax` use the bootstrap compiler and explicit `CompileEnv` values.
+- `Compiler.Verify` creates opaque `VerifiedModule` values through the independent verifier.
+- `Vm.install` uses `LinkEnv` and returns one `Instance`.
+- Typed entry lookup returns `FunctionDef[A,R]`. Dynamic entry lookup requires a declared `DynValue` result.
+- Public syntax trees preserve source text, trivia, invalid fragments, and grammar versions.
+- Syntax builders create immutable nodes without exposing the private compiler AST.
+- VM and compiler libraries can add name maps, revisions, rollback, and interaction policy.
+- An end-to-end example compiles, verifies, installs, activates, drives, and snapshots generated code.
 
 ### Runnable outputs
 
 ```text
 $ lm run examples/12-meta/compile-and-run.lm \
-    --allow Compiler.Compile,Vm,Io.Print
+    --allow Compiler,Vm,Io.Print
 compiled hash=7b2f… row={Io.Print}
 Hello generated world!
 ```
 
-A plugin-host example accepts source defining a pure transformer, verifies its empty row, links a typed `(Json) -> Json` entry, runs it under a default-deny child VM, and rejects a plugin that requests I/O.
+A plugin host accepts source that defines a pure transformer. It verifies and installs the module.
 
-A reflection example prints class/field/code metadata without acquiring a callable dynamic method or live guest reference.
+The host requests a typed `(Json) -> Json` entry. It rejects a plugin that requests I/O.
+
+A syntax example inspects and builds a tree without accessing the private compiler AST.
 
 ### Gates
 
 - Runtime compilation and command-line compilation produce identical semantic artifacts for identical inputs.
-- Dynamic access requires an explicit `DynValue`; normal typed paths do not widen.
-- Reflection cannot invoke a selector, mutate code, or bypass frozen/boundary rules.
+- Dynamic access requires an explicit `DynValue`. Normal typed paths do not widen.
+- Public syntax cannot mutate compiler state or bypass frozen boundaries.
 - Compiler operation can be blocked independently and has deterministic ordinary errors.
 - By the end of Week 13, every version 0.2 surface area has at least one executable example on the production path.
 

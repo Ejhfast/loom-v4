@@ -320,6 +320,18 @@ impl<'o> FnChecker<'o> {
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
         let scrut_h = self.synth_expr(ctx, scrut)?;
+        self.check_case_value(ctx, scrut_h, arms, expected, span)
+    }
+
+    /// Check a case expression with an existing scrutinee value.
+    pub(super) fn check_case_value(
+        &mut self,
+        ctx: &mut Ctx,
+        scrut_h: HExpr,
+        arms: &[ast::CaseArm],
+        expected: Option<TypeId>,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
         let scrut_ty = scrut_h.ty;
         let scrut_mut = scrut_h.mutable;
         // A hidden slot holds the scrutinee during the arm tests.

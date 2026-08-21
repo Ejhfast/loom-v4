@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 13;
+const VERSION: u16 = 14;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -311,6 +311,8 @@ impl IfaceSlotKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IfaceSlotSpec {
     pub binding: String,
+    /// The body-independent contract identity of this binding.
+    pub contract_hash: [u8; 32],
     pub key: [u8; 32],
     pub kind: IfaceSlotKind,
 }
@@ -428,7 +430,7 @@ pub fn validate_interface(
         return Err("the interface has more slots than the module".to_string());
     }
     for spec in &interface.slots {
-        if spec.key != crate::slot_key(&spec.binding) {
+        if spec.key != crate::slot_key(&spec.binding, &spec.contract_hash) {
             return Err("an interface slot has an invalid key".to_string());
         }
         let slot = module
@@ -774,6 +776,7 @@ pub fn encode_interface(interface: &Interface) -> Vec<u8> {
         write_u32(&mut out, slots.len() as u32);
         for slot in slots {
             write_str(&mut out, &slot.binding);
+            out.extend_from_slice(&slot.contract_hash);
             out.extend_from_slice(&slot.key);
             out.push(slot.kind.tag());
         }
@@ -1201,10 +1204,17 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
         slots.reserve(slot_count);
         for _ in 0..slot_count {
             let binding = cur.string()?;
+            let mut contract_hash = [0u8; 32];
+            contract_hash.copy_from_slice(cur.take(32)?);
             let mut key = [0u8; 32];
             key.copy_from_slice(cur.take(32)?);
             let kind = IfaceSlotKind::from_tag(cur.u8()?).ok_or(DecodeError::BadSlot)?;
-            slots.push(IfaceSlotSpec { binding, key, kind });
+            slots.push(IfaceSlotSpec {
+                binding,
+                contract_hash,
+                key,
+                kind,
+            });
         }
         let mut canonical = slots.clone();
         canonical.sort();

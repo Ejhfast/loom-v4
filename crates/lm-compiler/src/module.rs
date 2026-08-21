@@ -6,8 +6,10 @@
 use crate::env::FrozenCompileEnv;
 use lm_bytecode::interface::{IfaceItem, IfaceSlotKind, IfaceSlotSpec, Interface};
 use lm_bytecode::{BcType, ExtendedInstr, Instr, Module};
+use lm_hir::hir::{HirClass, HirInterfaceUse};
 use lm_hir::{LateCallable, LateCallableKind, LowerLinkage};
 use lm_source::SourceFile;
+use lm_types::{RowElem, Type, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Linkage choices for one compiler invocation.
@@ -176,6 +178,302 @@ fn package_dynamic_entry(module: &mut Module, path: &str) -> Result<(), String> 
     Ok(())
 }
 
+fn contract_u32(out: &mut Vec<u8>, value: usize) {
+    out.extend_from_slice(&(value as u32).to_le_bytes());
+}
+
+fn contract_text(out: &mut Vec<u8>, value: &str) {
+    contract_u32(out, value.len());
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn encode_contract_row(out: &mut Vec<u8>, hir: &lm_hir::HirModule, row: &[RowElem]) {
+    contract_u32(out, row.len());
+    for item in row {
+        match item {
+            RowElem::Op(name) => {
+                out.push(0);
+                contract_text(out, hir.store.row_name(*name));
+            }
+            RowElem::Var(index) => {
+                out.push(1);
+                out.extend_from_slice(&index.to_le_bytes());
+            }
+        }
+    }
+}
+
+fn encode_contract_type(
+    out: &mut Vec<u8>,
+    hir: &lm_hir::HirModule,
+    ty: TypeId,
+) -> Result<(), String> {
+    match hir.store.get(ty) {
+        Type::Unit => out.push(0),
+        Type::Bool => out.push(1),
+        Type::Int => out.push(2),
+        Type::String => out.push(3),
+        Type::Never => out.push(4),
+        Type::Bytes => out.push(5),
+        Type::Digest => out.push(6),
+        Type::Class(class) => {
+            out.push(7);
+            let class = hir
+                .classes
+                .get(class.0 as usize)
+                .ok_or_else(|| "a slot contract names no class".to_string())?;
+            contract_text(out, &class.key);
+        }
+        Type::Inst(class, args) => {
+            out.push(8);
+            let class = hir
+                .classes
+                .get(class.0 as usize)
+                .ok_or_else(|| "a slot contract names no class".to_string())?;
+            contract_text(out, &class.key);
+            contract_u32(out, args.len());
+            for arg in args {
+                encode_contract_type(out, hir, *arg)?;
+            }
+        }
+        Type::List(element) => {
+            out.push(9);
+            encode_contract_type(out, hir, *element)?;
+        }
+        Type::Map(key, value) => {
+            out.push(10);
+            encode_contract_type(out, hir, *key)?;
+            encode_contract_type(out, hir, *value)?;
+        }
+        Type::Tuple(elements) => {
+            out.push(11);
+            contract_u32(out, elements.len());
+            for element in elements {
+                encode_contract_type(out, hir, *element)?;
+            }
+        }
+        Type::Fn(params, muts, ret, row) | Type::Callback(params, muts, ret, row) => {
+            out.push(if matches!(hir.store.get(ty), Type::Fn(..)) {
+                12
+            } else {
+                13
+            });
+            contract_u32(out, params.len());
+            for (param, mutable) in params.iter().zip(muts) {
+                out.push(u8::from(*mutable));
+                encode_contract_type(out, hir, *param)?;
+            }
+            encode_contract_type(out, hir, *ret)?;
+            encode_contract_row(out, hir, row);
+        }
+        Type::Var(index) => {
+            out.push(14);
+            out.extend_from_slice(&index.to_le_bytes());
+        }
+        Type::Projection {
+            base,
+            interface,
+            assoc,
+        } => {
+            out.push(15);
+            encode_contract_type(out, hir, *base)?;
+            let interface = hir
+                .interfaces
+                .get(interface.0 as usize)
+                .ok_or_else(|| "a slot contract names no interface".to_string())?;
+            contract_text(out, &interface.key);
+            let associated = interface
+                .associated
+                .get(*assoc as usize)
+                .ok_or_else(|| "a slot contract names no associated type".to_string())?;
+            contract_text(out, &associated.name);
+        }
+        Type::Fault => out.push(16),
+        Type::Request => out.push(17),
+        Type::PolicyTable => out.push(18),
+        Type::Vm => out.push(19),
+        Type::Run(result) => {
+            out.push(20);
+            encode_contract_type(out, hir, *result)?;
+        }
+        Type::Wait(result) => {
+            out.push(21);
+            encode_contract_type(out, hir, *result)?;
+        }
+        Type::PendingCall(args, reply) => {
+            out.push(22);
+            encode_contract_type(out, hir, *args)?;
+            encode_contract_type(out, hir, *reply)?;
+        }
+        Type::Handle(message, result) => {
+            out.push(23);
+            encode_contract_type(out, hir, *message)?;
+            encode_contract_type(out, hir, *result)?;
+        }
+        Type::VmSnapshot => out.push(24),
+        Type::RunSnapshot(result) => {
+            out.push(25);
+            encode_contract_type(out, hir, *result)?;
+        }
+        Type::FileHandle => out.push(26),
+        Type::ResourceHandle => out.push(27),
+        Type::Op(op, function) => {
+            out.push(28);
+            out.extend_from_slice(&lm_abi::op_identity(*op));
+            encode_contract_type(out, hir, *function)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_contract_use(
+    out: &mut Vec<u8>,
+    hir: &lm_hir::HirModule,
+    application: &HirInterfaceUse,
+) -> Result<(), String> {
+    let interface = hir
+        .interfaces
+        .get(application.interface as usize)
+        .ok_or_else(|| "a slot contract names no interface".to_string())?;
+    contract_text(out, &interface.key);
+    contract_u32(out, application.types.len());
+    for ty in &application.types {
+        encode_contract_type(out, hir, *ty)?;
+    }
+    contract_u32(out, application.rows.len());
+    for row in &application.rows {
+        encode_contract_row(out, hir, row);
+    }
+    Ok(())
+}
+
+fn encode_callable_contract(
+    out: &mut Vec<u8>,
+    hir: &lm_hir::HirModule,
+    function: u32,
+) -> Result<(), String> {
+    let function = hir
+        .funcs
+        .get(function as usize)
+        .ok_or_else(|| "a slot contract names no function".to_string())?;
+    out.extend_from_slice(&function.type_params.to_le_bytes());
+    out.extend_from_slice(&function.effect_params.to_le_bytes());
+    contract_u32(out, function.type_bounds.len());
+    for bounds in &function.type_bounds {
+        contract_u32(out, bounds.len());
+        for bound in bounds {
+            encode_contract_use(out, hir, bound)?;
+        }
+    }
+    contract_u32(out, function.params.len());
+    for (param, mutable) in function.params.iter().zip(&function.param_muts) {
+        out.push(u8::from(*mutable));
+        encode_contract_type(out, hir, *param)?;
+    }
+    encode_contract_type(out, hir, function.ret)?;
+    encode_contract_row(out, hir, &function.row);
+    Ok(())
+}
+
+fn callable_contract_hash(
+    hir: &lm_hir::HirModule,
+    function: u32,
+    kind: IfaceSlotKind,
+) -> Result<[u8; 32], String> {
+    let mut bytes = b"lm-slot-contract-v1\0".to_vec();
+    bytes.push(match kind {
+        IfaceSlotKind::Function => 0,
+        IfaceSlotKind::Method => 1,
+        IfaceSlotKind::Class => return Err("a callable slot names a class".to_string()),
+    });
+    encode_callable_contract(&mut bytes, hir, function)?;
+    Ok(lm_bytecode::hash::sha256(&bytes))
+}
+
+fn class_contract_hash(hir: &lm_hir::HirModule, class_index: u32) -> Result<[u8; 32], String> {
+    let class = hir
+        .classes
+        .get(class_index as usize)
+        .ok_or_else(|| "a slot contract names no class".to_string())?;
+    let mut bytes = b"lm-slot-contract-v1\0".to_vec();
+    bytes.push(2);
+    out_class_contract(&mut bytes, hir, class_index, class)?;
+    Ok(lm_bytecode::hash::sha256(&bytes))
+}
+
+fn out_class_contract(
+    out: &mut Vec<u8>,
+    hir: &lm_hir::HirModule,
+    class_index: u32,
+    class: &HirClass,
+) -> Result<(), String> {
+    out.push(u8::from(class.is_final));
+    out.push(match class.kind {
+        lm_types::ClassKind::Normal => 0,
+        lm_types::ClassKind::EnumParent => 1,
+        lm_types::ClassKind::EnumCase => 2,
+    });
+    out.extend_from_slice(&class.type_params.to_le_bytes());
+    contract_u32(out, class.type_bounds.len());
+    for bounds in &class.type_bounds {
+        contract_u32(out, bounds.len());
+        for bound in bounds {
+            encode_contract_use(out, hir, bound)?;
+        }
+    }
+    match class.parent {
+        Some(parent) => {
+            out.push(1);
+            let parent = hir
+                .classes
+                .get(parent as usize)
+                .ok_or_else(|| "a slot class names no parent".to_string())?;
+            contract_text(out, &parent.key);
+            contract_u32(out, class.parent_args.len());
+            for arg in &class.parent_args {
+                encode_contract_type(out, hir, *arg)?;
+            }
+        }
+        None => out.push(0),
+    }
+    contract_u32(out, class.field_tys.len());
+    for ((name, ty), default) in class
+        .field_names
+        .iter()
+        .zip(&class.field_tys)
+        .zip(&class.defaults)
+    {
+        contract_text(out, name);
+        encode_contract_type(out, hir, *ty)?;
+        out.push(u8::from(default.is_some()));
+    }
+    contract_u32(out, class.methods.len());
+    for (name, function) in &class.methods {
+        contract_text(out, name);
+        encode_callable_contract(out, hir, *function)?;
+    }
+    contract_u32(out, class.ctor_params.len());
+    for (param, mutable) in class.ctor_params.iter().zip(&class.ctor_param_muts) {
+        out.push(u8::from(*mutable));
+        encode_contract_type(out, hir, *param)?;
+    }
+    encode_contract_row(out, hir, &class.ctor_row);
+    let conformances: Vec<_> = hir
+        .conformances
+        .iter()
+        .filter(|item| item.class == class_index)
+        .collect();
+    contract_u32(out, conformances.len());
+    for conformance in conformances {
+        encode_contract_use(out, hir, &conformance.application)?;
+        contract_u32(out, conformance.associated.len());
+        for associated in &conformance.associated {
+            encode_contract_type(out, hir, *associated)?;
+        }
+    }
+    Ok(())
+}
+
 fn select_linkage(
     path: &str,
     hir: &lm_hir::HirModule,
@@ -234,7 +532,8 @@ fn select_linkage(
         let kind = functions[&binding].1;
         selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
             binding: binding.clone(),
-            key: lm_bytecode::slot_key(&binding),
+            contract_hash: [0; 32],
+            key: [0; 32],
             kind,
         });
     }
@@ -250,7 +549,8 @@ fn select_linkage(
         }
         selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
             binding: binding.clone(),
-            key: lm_bytecode::slot_key(&binding),
+            contract_hash: [0; 32],
+            key: [0; 32],
             kind: IfaceSlotKind::Class,
         });
     }
@@ -260,7 +560,8 @@ fn select_linkage(
             if local {
                 selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
                     binding: binding.clone(),
-                    key: lm_bytecode::slot_key(binding),
+                    contract_hash: [0; 32],
+                    key: [0; 32],
                     kind: *kind,
                 });
             }
@@ -274,7 +575,8 @@ fn select_linkage(
             if local {
                 selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
                     binding: binding.clone(),
-                    key: lm_bytecode::slot_key(binding),
+                    contract_hash: [0; 32],
+                    key: [0; 32],
                     kind: IfaceSlotKind::Class,
                 });
             }
@@ -284,7 +586,32 @@ fn select_linkage(
     let mut linkage = LowerLinkage::default();
     let mut published = Vec::new();
     let mut used_keys = BTreeMap::new();
-    for (binding, spec) in selected {
+    for (binding, mut spec) in selected {
+        let local_contract = match spec.kind {
+            IfaceSlotKind::Function | IfaceSlotKind::Method => {
+                let Some((function, found_kind)) = functions.get(&binding).copied() else {
+                    return Err(format!("error: no callable binding named `{binding}`\n"));
+                };
+                if found_kind != spec.kind {
+                    return Err(format!("error: `{binding}` has another late target kind\n"));
+                }
+                (!hir.funcs[function as usize].imported)
+                    .then(|| callable_contract_hash(hir, function, spec.kind))
+                    .transpose()?
+            }
+            IfaceSlotKind::Class => {
+                let Some(class) = classes.get(&binding).copied() else {
+                    return Err(format!("error: no class binding named `{binding}`\n"));
+                };
+                (!hir.classes[class as usize].imported)
+                    .then(|| class_contract_hash(hir, class))
+                    .transpose()?
+            }
+        };
+        if let Some(contract_hash) = local_contract {
+            spec.contract_hash = contract_hash;
+            spec.key = lm_bytecode::slot_key(&binding, &contract_hash);
+        }
         if let Some(old) = used_keys.insert(spec.key, binding.clone()) {
             return Err(format!(
                 "error: `{old}` and `{binding}` use the same late slot key\n"
@@ -423,6 +750,40 @@ mod tests {
         let decoded = lm_bytecode::interface::decode_interface(&compiled.interface_bytes)
             .expect("the interface decodes");
         assert_eq!(decoded, compiled.interface);
+    }
+
+    #[test]
+    fn a_late_function_body_does_not_change_its_slot_key() {
+        let first = compile(
+            "def step(value: Int): Int\n  value + 1\nend\n0\n",
+            &CompileOptions::new().late_function("step"),
+        );
+        let second = compile(
+            "def step(value: Int): Int\n  value + 10\nend\n0\n",
+            &CompileOptions::new().late_function("step"),
+        );
+        assert_eq!(first.interface.slots[0].key, second.interface.slots[0].key);
+        assert_eq!(
+            first.interface.slots[0].contract_hash,
+            second.interface.slots[0].contract_hash
+        );
+    }
+
+    #[test]
+    fn a_late_function_contract_changes_its_slot_key() {
+        let first = compile(
+            "def step(value: Int): Int\n  value + 1\nend\n0\n",
+            &CompileOptions::new().late_function("step"),
+        );
+        let second = compile(
+            "def step(value: String): String\n  value\nend\n0\n",
+            &CompileOptions::new().late_function("step"),
+        );
+        assert_ne!(first.interface.slots[0].key, second.interface.slots[0].key);
+        assert_ne!(
+            first.interface.slots[0].contract_hash,
+            second.interface.slots[0].contract_hash
+        );
     }
 
     #[test]

@@ -198,7 +198,7 @@ fn a_label_must_name_a_parameter_of_the_target() {
         "E1006"
     );
     assert_eq!(
-        code_of("e = sys.vm.Vm()\nv = e.activate(do || 1 end, wrong: ())\n1\n"),
+        code_of("e = sys.vm.Vm()\nv = e.activate_or_fault(do || 1 end, wrong: ())\n1\n"),
         "E1006"
     );
 }
@@ -247,7 +247,7 @@ fn default_deny_blocks_at_the_root() {
 }
 
 const CHILD_PRINT: &str = "def spawn_print(): Run[()] with Vm\n  \
-    sys.vm.Vm().activate(do || with Io.Print\n    sys.io.print(\"c\\n\")\n  end, args: ())\n\
+    sys.vm.Vm().activate_or_fault(do || with Io.Print\n    sys.io.print(\"c\\n\")\n  end, args: ())\n\
     end\n";
 
 #[test]
@@ -287,8 +287,8 @@ fn clear_returns_the_target_to_the_default_block() {
 fn pass_chain_reaches_the_root_and_fails_closed() {
     // Grandchild -> child -> root: every level passes Io.
     let source = "def go(): String with Vm, Io\n  \
-        vm = sys.vm.Vm().activate(do || with Vm, Io\n    \
-        inner = sys.vm.Vm().activate(do || with Io.Print\n      sys.io.print(\"deep\\n\")\n    end, args: ())\n    \
+        vm = sys.vm.Vm().activate_or_fault(do || with Vm, Io\n    \
+        inner = sys.vm.Vm().activate_or_fault(do || with Io.Print\n      sys.io.print(\"deep\\n\")\n    end, args: ())\n    \
         inner.table().pass(Io)\n    \
         case inner.run()\n    in Done(_) then \"done\"\n    in Fault(f) then f.code()\n    end\n  end, args: ())\n  \
         vm.table().pass(Io)\n  vm.table().pass(Vm)\n  \
@@ -303,26 +303,26 @@ fn pass_chain_reaches_the_root_and_fails_closed() {
 #[test]
 fn mock_runs_pure_and_bounded() {
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int 41 end)\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(42)");
     // A faulting mock faults the controlled guest with HostFault.
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int 1 / 0 end)\n  \
         case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"HostFault\")");
     // A mock that exhausts its work budget faults the guest too.
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int\n    while 0 == 0\n    end\n    1\n  end)\n  \
         case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"HostFault\")");
     // A mock with captures uses the frozen captured values.
     let source = "def go(): Int with Vm\n  \
         base = 40\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now() + 2\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now() + 2\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int base end)\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(42)");
@@ -330,7 +330,7 @@ fn mock_runs_pure_and_bounded() {
     // crosses and a later write into the source misses the copy.
     let source = "def go(): Int with Vm\n  \
         xs = [7]\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int xs.len() + 40 end)\n  \
         xs.push(1)\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
@@ -342,7 +342,7 @@ fn live_table_edits_affect_future_lookups() {
     // The holder steps the child, then revokes Io.Print between the
     // first and second print. The second perform faults.
     let source = "def go(): String with Vm, Io\n  \
-        vm = sys.vm.Vm().activate(do || with Io.Print\n    \
+        vm = sys.vm.Vm().activate_or_fault(do || with Io.Print\n    \
         sys.io.print(\"a\\n\")\n    sys.io.print(\"b\\n\")\n  end, args: ())\n  \
         vm.table().pass(Io)\n  \
         steps = 0\n  \
@@ -376,8 +376,8 @@ fn live_table_edits_affect_future_lookups() {
 #[test]
 fn one_vm_activates_runs_with_two_result_types() {
     let source = "def go(): (Int, String) with Vm\n  image = sys.vm.Vm()\n  \
-        numbers = image.activate(do || 7 end, args: ())\n  \
-        text = image.activate(do || \"ready\" end, args: ())\n  \
+        numbers = image.activate_or_fault(do || 7 end, args: ())\n  \
+        text = image.activate_or_fault(do || \"ready\" end, args: ())\n  \
         n = case numbers.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\n  \
         s = case text.run()\n  in Done(v) then v\n  in Fault(_) then \"fault\"\n  end\n  \
         (n, s)\nend\ngo()\n";
@@ -387,7 +387,7 @@ fn one_vm_activates_runs_with_two_result_types() {
 #[test]
 fn terminal_execution_calls_are_idempotent() {
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do || 21 end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || 21 end, args: ())\n  \
         first = case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\n  \
         second = case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\n  \
         third = case vm.drive()\n  in Done(v) then v\n  in Asked(_) then 0 - 2\n  in Fault(_) then 0 - 1\n  end\n  \
@@ -399,7 +399,7 @@ fn terminal_execution_calls_are_idempotent() {
 fn asked_rejects_run_and_step_and_recovers_tokens_through_drive() {
     // run() while asked faults the caller.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q)\n    \
         case vm.run()\n    in Done(_) then 1\n    in Fault(_) then 2\n    end\n  \
         in Done(_) then 3\n  in Fault(_) then 4\n  end\nend\ngo()\n";
@@ -407,7 +407,7 @@ fn asked_rejects_run_and_step_and_recovers_tokens_through_drive() {
     // Token recovery: a second drive mints a fresh token; the stale
     // call token faults the caller with InvalidRequestToken.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q1)\n    \
         case q1\n    in Call(Clock.Now, stale, ())\n      \
         case vm.drive()\n      in Asked(q2)\n        vm.answer(stale, 9)\n        1\n      \
@@ -417,7 +417,7 @@ fn asked_rejects_run_and_step_and_recovers_tokens_through_drive() {
     assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidRequestToken)");
     // The fresh token answers.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q1)\n    \
         case vm.drive()\n    in Asked(q2)\n      \
         case q2\n      in Call(Clock.Now, call, ())\n        \
@@ -435,7 +435,7 @@ fn continuation_methods_need_an_asked_machine() {
     // has no pending request, so the second continuation faults
     // InvalidRequestToken (specification 12.3).
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
         case vm.drive()\n  in Asked(q)\n    \
         case q\n    in Call(Clock.Now, call, ())\n      \
         vm.answer(call, 7)\n      vm.dispatch(q)\n      1\n    \
@@ -447,7 +447,7 @@ fn continuation_methods_need_an_asked_machine() {
 #[test]
 fn cross_vm_tokens_fault_safely() {
     let source = "def spawn_now(): Run[Int] with Vm\n  \
-        sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\nend\n\
+        sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\nend\n\
         def go(): Int with Vm\n  \
         a = spawn_now()\n  b = spawn_now()\n  \
         case a.drive()\n  in Asked(qa)\n    \
@@ -460,7 +460,7 @@ fn cross_vm_tokens_fault_safely() {
     assert_eq!(allowed(source, &["Vm"]), "Fault(InvalidRequestToken)");
     // A request token of one machine cannot dispatch another.
     let source = "def spawn_now(): Run[Int] with Vm\n  \
-        sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\nend\n\
+        sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\nend\n\
         def go(): Int with Vm\n  \
         a = spawn_now()\n  b = spawn_now()\n  \
         case a.drive()\n  in Asked(qa)\n    \
@@ -473,8 +473,8 @@ fn cross_vm_tokens_fault_safely() {
 #[test]
 fn reject_installs_the_supplied_fault() {
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
-        blocked = sys.vm.Vm().activate(do || with Io.Print\n    sys.io.print(\"x\")\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now()\n  end, args: ())\n  \
+        blocked = sys.vm.Vm().activate_or_fault(do || with Io.Print\n    sys.io.print(\"x\")\n  end, args: ())\n  \
         case blocked.run()\n  in Done(_) then \"no-fault\"\n  in Fault(fault)\n    \
         case vm.drive()\n    in Asked(q)\n      \
         vm.reject(q, fault)\n      \
@@ -490,7 +490,7 @@ fn reject_installs_the_supplied_fault() {
 /// `Fault.denied`, the driver had to invent a time.
 const DENY_CLOCK: &str = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
     def go(): String with Vm\n  \
-    vm = sys.vm.Vm().activate(child, args: ())\n  \
+    vm = sys.vm.Vm().activate_or_fault(child, args: ())\n  \
     case vm.drive()\n  in Asked(request)\n    \
     vm.reject(request, Fault.denied(\"the clock is not permitted\"))\n    \
     case vm.run()\n    in Done(_) then \"done\"\n    in Fault(f) then f.code()\n    end\n  \
@@ -529,7 +529,7 @@ fn a_denied_fault_carries_its_reason_and_operation() {
 fn a_wildcard_arm_can_deny_a_request() {
     let source = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
         def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(child, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(child, args: ())\n  \
         case vm.drive()\n  in Asked(request)\n    \
         case request\n    in Call(Io.Print, call, (_,))\n      vm.answer(call, ())\n    \
         in _\n      vm.reject(request, Fault.denied(\"denied\"))\n    end\n    \
@@ -559,7 +559,7 @@ fn a_denied_fault_takes_its_reason_by_label() {
 #[test]
 fn dispatch_applies_the_controlled_table() {
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Now\n    sys.clock.now() + 1\n  end, args: ())\n  \
         vm.table().mock(Clock.Now, do ||: Int 10 end)\n  \
         case vm.drive()\n  in Asked(q)\n    \
         vm.dispatch(q)\n    \
@@ -580,11 +580,11 @@ fn drive_receives_a_passed_descendant_request() {
         in Fault(_)\n      return 0 - 1\n    end\n  end\nend\n\
         inner = do ||: Int with Vm, Io.Print\n  \
         sys.io.print(\"from A\")\n  \
-        b = sys.vm.Vm().activate(do ||: Int with Io.Print\n    \
+        b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print\n    \
         sys.io.print(\"from B\")\n    7\n  end, args: ())\n  \
         b.table().pass(Io.Print)\n  \
         case b.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\n\
-        a = sys.vm.Vm().activate(inner, args: ())\n\
+        a = sys.vm.Vm().activate_or_fault(inner, args: ())\n\
         a.table().pass(Vm)\n\
         a.table().pass(Io.Print)\n\
         seen: [String] = []\n\
@@ -611,7 +611,7 @@ def drive_all(vm: Run[Int]): Int with Vm
 end
 
 inner = do ||: Int with Vm, Io.Print
-  b = sys.vm.Vm().activate(do ||: Int with Io.Print
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
     sys.io.print("from B")
     7
   end, args: ())
@@ -622,7 +622,7 @@ inner = do ||: Int with Vm, Io.Print
   end
 end
 
-a = sys.vm.Vm().activate(inner, args: ())
+a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
 a.table().pass(Io.Print)
 drive_all(a)
@@ -654,7 +654,7 @@ def reject_print(vm: Run[String], source_fault: Fault): String with Vm
   end
 end
 
-blocked = sys.vm.Vm().activate(do || with Io.Print
+blocked = sys.vm.Vm().activate_or_fault(do || with Io.Print
   sys.io.print("blocked")
 end, args: ())
 
@@ -662,7 +662,7 @@ case blocked.run()
 in Done(_) then "no source fault"
 in Fault(source_fault)
   inner = do ||: String with Vm, Io.Print
-    b = sys.vm.Vm().activate(do ||: String with Io.Print
+    b = sys.vm.Vm().activate_or_fault(do ||: String with Io.Print
       sys.io.print("from B")
       "done"
     end, args: ())
@@ -673,7 +673,7 @@ in Fault(source_fault)
     end
   end
 
-  a = sys.vm.Vm().activate(inner, args: ())
+  a = sys.vm.Vm().activate_or_fault(inner, args: ())
   a.table().pass(Vm)
   a.table().pass(Io.Print)
   reject_print(a, source_fault)
@@ -706,7 +706,7 @@ def drive_without_print(vm: Run[Int]): Int with Vm
 end
 
 inner = do ||: Int with Vm, Io.Print
-  b = sys.vm.Vm().activate(do ||: Int with Io.Print
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
     sys.io.print("from B")
     7
   end, args: ())
@@ -717,7 +717,7 @@ inner = do ||: Int with Vm, Io.Print
   end
 end
 
-a = sys.vm.Vm().activate(inner, args: ())
+a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
 drive_without_print(a)
 "#;
@@ -749,7 +749,7 @@ def drive_without_clock(vm: Run[Int]): Int with Vm
 end
 
 inner = do ||: Int with Vm, Clock.Now
-  b = sys.vm.Vm().activate(do ||: Int with Clock.Now
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Clock.Now
     sys.clock.now()
   end, args: ())
   b.table().pass(Clock.Now)
@@ -759,7 +759,7 @@ inner = do ||: Int with Vm, Clock.Now
   end
 end
 
-a = sys.vm.Vm().activate(inner, args: ())
+a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
 a.table().mock(Clock.Now, do ||: Int 9 end)
 drive_without_clock(a)
@@ -790,7 +790,7 @@ def answer_through_wrong_vm(vm: Run[Int], wrong: Run[Int]): Int with Vm
 end
 
 inner = do ||: Int with Vm, Io.Print
-  b = sys.vm.Vm().activate(do ||: Int with Io.Print
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
     sys.io.print("from B")
     7
   end, args: ())
@@ -801,10 +801,10 @@ inner = do ||: Int with Vm, Io.Print
   end
 end
 
-a = sys.vm.Vm().activate(inner, args: ())
+a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
 a.table().pass(Io.Print)
-c = sys.vm.Vm().activate(do ||: Int 0 end, args: ())
+c = sys.vm.Vm().activate_or_fault(do ||: Int 0 end, args: ())
 answer_through_wrong_vm(a, c)
 "#;
     assert_eq!(
@@ -851,7 +851,7 @@ end
 
 inner = do ||: Int with Vm, Io.Print
   sys.io.print("from A")
-  b = sys.vm.Vm().activate(do ||: Int with Io.Print
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
     sys.io.print("from B")
     7
   end, args: ())
@@ -859,7 +859,7 @@ inner = do ||: Int with Vm, Io.Print
   step_all(b)
 end
 
-a = sys.vm.Vm().activate(inner, args: ())
+a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
 a.table().pass(Io.Print)
 seen: [String] = []
@@ -912,7 +912,7 @@ end
 
 inner = do ||: Int with Vm, Io.Print
   sys.io.print("from A")
-  b = sys.vm.Vm().activate(do ||: Int with Io.Print
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
     sys.io.print("from B")
     7
   end, args: ())
@@ -920,7 +920,7 @@ inner = do ||: Int with Vm, Io.Print
   a_drives_b(b)
 end
 
-a = sys.vm.Vm().activate(inner, args: ())
+a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
 a.table().pass(Io.Print)
 seen: [String] = []
@@ -959,9 +959,9 @@ end
 
 inner = do ||: Int with Vm, Io.Print
   sys.io.print("from A")
-  b = sys.vm.Vm().activate(do ||: Int with Vm, Io.Print
+  b = sys.vm.Vm().activate_or_fault(do ||: Int with Vm, Io.Print
     sys.io.print("from B")
-    c = sys.vm.Vm().activate(do ||: Int with Io.Print
+    c = sys.vm.Vm().activate_or_fault(do ||: Int with Io.Print
       sys.io.print("from C")
       7
     end, args: ())
@@ -979,7 +979,7 @@ inner = do ||: Int with Vm, Io.Print
   end
 end
 
-a = sys.vm.Vm().activate(inner, args: ())
+a = sys.vm.Vm().activate_or_fault(inner, args: ())
 a.table().pass(Vm)
 a.table().pass(Io.Print)
 seen: [String] = []
@@ -998,13 +998,13 @@ fn run_step_and_drive_agree_on_one_program() {
         total = total + sys.clock.now()\n      i = i + 1\n    end\n    total\n  end";
     // run() with a mocked clock.
     let by_run = format!(
-        "def go(): Int with Vm\n  vm = sys.vm.Vm().activate({program}, args: ())\n  \
+        "def go(): Int with Vm\n  vm = sys.vm.Vm().activate_or_fault({program}, args: ())\n  \
          vm.table().mock(Clock.Now, do ||: Int 5 end)\n  \
          case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n"
     );
     // step() to the terminal with the same mock.
     let by_step = format!(
-        "def go(): Int with Vm\n  vm = sys.vm.Vm().activate({program}, args: ())\n  \
+        "def go(): Int with Vm\n  vm = sys.vm.Vm().activate_or_fault({program}, args: ())\n  \
          vm.table().mock(Clock.Now, do ||: Int 5 end)\n  \
          guard = 0\n  \
          while guard < 100000\n    guard = guard + 1\n    \
@@ -1014,7 +1014,7 @@ fn run_step_and_drive_agree_on_one_program() {
     );
     // drive() with manual answers.
     let by_drive = format!(
-        "def go(): Int with Vm\n  vm = sys.vm.Vm().activate({program}, args: ())\n  \
+        "def go(): Int with Vm\n  vm = sys.vm.Vm().activate_or_fault({program}, args: ())\n  \
          guard = 0\n  \
          while guard < 100000\n    guard = guard + 1\n    \
          case vm.drive()\n    in Asked(q)\n      \
@@ -1034,7 +1034,7 @@ fn waiting_state_appears_through_step_and_completes() {
     // the recording host: the accepting step reports Waiting, a poll
     // completes it, and the machine continues to its terminal.
     let source = "def go(): Int with Vm, Clock.Sleep\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Sleep\n    \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Sleep\n    \
         sys.clock.sleep(5)\n    27\n  end, args: ())\n  \
         vm.table().pass(Clock.Sleep)\n  \
         waits = 0\n  \
@@ -1054,7 +1054,7 @@ fn waiting_state_appears_through_step_and_completes() {
     assert!(value % 100 >= 1, "no Waiting event was observed: {out}");
     // run() waits out the completion without holder involvement.
     let source = "def go(): Int with Vm, Clock.Sleep\n  \
-        vm = sys.vm.Vm().activate(do || with Clock.Sleep\n    \
+        vm = sys.vm.Vm().activate_or_fault(do || with Clock.Sleep\n    \
         sys.clock.sleep(5)\n    27\n  end, args: ())\n  \
         vm.table().pass(Clock.Sleep)\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
@@ -1065,26 +1065,26 @@ fn waiting_state_appears_through_step_and_completes() {
 fn terminal_results_cross_the_boundary_as_a_copy() {
     // A frozen list crosses.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do ||\n    xs = [1, 2, 3]\n    xs.freeze()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do ||\n    xs = [1, 2, 3]\n    xs.freeze()\n  end, args: ())\n  \
         case vm.run()\n  in Done(xs) then xs.len()\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(3)");
     // A mutable list crosses as a mutable copy, so the holder writes
     // into the copy it received.
     let source = "def go(): Int with Vm\n  \
-        vm = sys.vm.Vm().activate(do ||\n    [1, 2, 3]\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do ||\n    [1, 2, 3]\n  end, args: ())\n  \
         case vm.run()\n  in Done(xs)\n    xs.push(4)\n    xs.len()\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(4)");
     // A holder-local value still converts the machine to
     // Fault(UnsendableValue).
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(do ||: Vm with Vm\n    sys.vm.Vm()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do ||: Vm with Vm\n    sys.vm.Vm()\n  end, args: ())\n  \
         vm.table().pass(Vm)\n  \
         case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"UnsendableValue\")");
     // The conversion is sticky: a second observation returns the
     // same stable code.
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(do ||: Vm with Vm\n    sys.vm.Vm()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do ||: Vm with Vm\n    sys.vm.Vm()\n  end, args: ())\n  \
         vm.table().pass(Vm)\n  \
         first = case vm.run()\n  in Done(_) then \"done\"\n  in Fault(f) then f.code()\n  end\n  \
         case vm.run()\n  in Done(_) then first\n  in Fault(f2) then f2.code()\n  end\nend\ngo()\n";
@@ -1097,20 +1097,20 @@ fn program_captures_and_arguments_copy_at_the_loader_boundary() {
     // the source misses the copy the child machine holds.
     let source = "def go(): Int with Vm\n  \
         xs = [1]\n  \
-        vm = sys.vm.Vm().activate(do ||: Int\n    xs.len()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do ||: Int\n    xs.len()\n  end, args: ())\n  \
         xs.push(2)\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(1)");
     // A frozen capture crosses the same way.
     let source = "def go(): Int with Vm\n  \
         xs = [1, 2]\n  xs.freeze()\n  \
-        vm = sys.vm.Vm().activate(do ||\n    xs.len()\n  end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do ||\n    xs.len()\n  end, args: ())\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(2)");
     // Arguments transfer through the control envelope, strings
     // included.
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(do |a: Int, b: String|: String\n    \"{b}{a}\"\n  end, args: (42, \"x\"))\n  \
+        vm = sys.vm.Vm().activate_or_fault(do |a: Int, b: String|: String\n    \"{b}{a}\"\n  end, args: (42, \"x\"))\n  \
         case vm.run()\n  in Done(v) then v\n  in Fault(_) then \"fault\"\n  end\nend\ngo()\n";
     assert_eq!(allowed(source, &["Vm"]), "Done(\"x42\")");
 }
@@ -1120,7 +1120,7 @@ fn nested_towers_stay_off_the_rust_stack() {
     // A 60-level tower runs on a small Rust stack.
     let source = "def tower(n: Int): Int with Vm\n  \
         if n <= 0\n    41\n  else\n    \
-        vm = sys.vm.Vm().activate(do || with Vm\n      tower(n - 1)\n    end, args: ())\n    \
+        vm = sys.vm.Vm().activate_or_fault(do || with Vm\n      tower(n - 1)\n    end, args: ())\n    \
         vm.table().pass(Vm)\n    \
         case vm.run()\n    in Done(v) then v\n    in Fault(_) then 0 - 1\n    end\n  \
         end\nend\ntower(60) + 1\n";
@@ -1247,7 +1247,7 @@ fn week4_examples_compile_twice_to_identical_bytes() {
 fn op_name_reads_the_operation_of_a_wildcard_arm() {
     let source = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
         def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(child, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(child, args: ())\n  \
         case vm.drive()\n  in Asked(request)\n    \
         name = request.op_name()\n    \
         vm.reject(request, Fault.denied(\"{name} is not permitted\"))\n    \
@@ -1262,7 +1262,7 @@ fn op_name_reads_the_operation_of_a_wildcard_arm() {
 fn op_name_faults_on_a_spent_request() {
     let source = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
         def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(child, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(child, args: ())\n  \
         case vm.drive()\n  in Asked(request)\n    \
         vm.dispatch(request)\n    \
         request.op_name()\n  \
@@ -1277,11 +1277,11 @@ fn op_name_faults_on_a_spent_request() {
 fn op_name_reads_a_descendant_request() {
     let source = "def inner(): Int with Io.Print\n  sys.io.print(\"x\")\n  1\nend\n\
         def outer(): Int with Vm, Io.Print\n  \
-        b = sys.vm.Vm().activate(inner, args: ())\n  \
+        b = sys.vm.Vm().activate_or_fault(inner, args: ())\n  \
         b.table().pass(Io.Print)\n  \
         case b.run()\n  in Done(v) then v\n  in Fault(_) then 0 - 1\n  end\nend\n\
         def go(): String with Vm, Io.Print\n  \
-        a = sys.vm.Vm().activate(outer, args: ())\n  \
+        a = sys.vm.Vm().activate_or_fault(outer, args: ())\n  \
         a.table().pass(Vm)\n  a.table().pass(Io.Print)\n  \
         loop do\n    case a.drive()\n    in Asked(request)\n      \
         name = request.op_name()\n      \
@@ -1294,7 +1294,7 @@ fn op_name_reads_a_descendant_request() {
 #[test]
 fn op_name_takes_no_arguments() {
     let source = "def go(): String with Vm\n  \
-        vm = sys.vm.Vm().activate(do ||: Int 1 end, args: ())\n  \
+        vm = sys.vm.Vm().activate_or_fault(do ||: Int 1 end, args: ())\n  \
         case vm.drive()\n  in Asked(q) then q.op_name(1)\n  \
         in Done(_) then \"d\"\n  in Fault(_) then \"f\"\n  end\nend\n1\n";
     assert_eq!(code_of(source), "E1006");
