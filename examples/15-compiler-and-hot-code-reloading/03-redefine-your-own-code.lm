@@ -1,0 +1,95 @@
+# Redefine a definition this program wrote, while it runs.
+#
+# Run with `--allow Compiler,Vm`.
+#
+# `codeof` reifies a named definition. Beside its portable code it
+# carries a `DefinitionSpec`: the module it belongs to, its qualified
+# key, its contract digest, and its slots.
+#
+# That spec is what makes a revision a revision. Binding it into a
+# `CompileEnv` tells the compiler that the source below defines the
+# same `Box`, not a new class that happens to share a name. Without
+# it the two are different nominal families, and the replacement is
+# refused.
+#
+# So the original stays ordinary Loom. Only the change arrives as
+# text, which is the shape a patch has anyway.
+#
+# A class replacement changes what later construction produces.
+# Objects that already exist keep their class and their layout.
+
+final class Box
+  value: Int = 5
+
+  def amount(self): Int
+    self.value + 1
+  end
+end
+
+def read_box(): Int
+  Box().amount()
+end
+
+def run_read(image: Vm, f: FunctionBinding[(), Int]): Result[Int, String] with Vm
+  run = image.activate(f, args: ()).map_error() {
+    |e: CodeError| e.message
+  }?
+  case run.run()
+  in Done(value) then Ok(value)
+  in Fault(_) then Err("the read faulted")
+  end
+end
+
+# The revision. Its field default and its method body both change,
+# and neither is part of the class contract, so the shape still
+# matches.
+def revision(): String
+  "final class Box\n" +
+    "  value: Int = 50\n" +
+    "\n" +
+    "  def amount(self): Int\n" +
+    "    self.value + 10\n" +
+    "  end\n" +
+    "end\n"
+end
+
+def go(): Result[(Int, Int), String] with Compiler, Vm
+  image = sys.vm.Vm()
+  original = image.install(codeof(Box)).map_error() { |e: CodeError| e.message }?
+  reader = image.install(read_box).map_error() { |e: CodeError| e.message }?
+  before = run_read(image, reader)?
+
+  # Name the definition the revision replaces.
+  spec = codeof(Box).definition()
+  known = List[(String, DefinitionSpec)]()
+  known.push(("Box", spec))
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)](), known)
+  options = CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+
+  # The revision compiles under the module of the original, and under
+  # its own file name.
+  artifact = sys.compiler.compile(
+    spec.module_name,
+    "box-revision.lm",
+    revision(),
+    env,
+    options
+  ).map_error() { |e: CompileErrors| e.message }?
+  module = artifact.verify().map_error() { |e: CodeError| e.message }?
+  code = module.class_code("Box").map_error() { |e: CodeError| e.message }?
+  replacement = image.install(code).map_error() { |e: CodeError| e.message }?
+  image.replace(original, replacement).map_error() { |e: CodeError| e.message }?
+
+  after = run_read(image, reader)?
+  Ok((before, after))
+end
+
+# `Box().amount()` answered 5 + 1, and after the revision it answers
+# 50 + 10.
+go()

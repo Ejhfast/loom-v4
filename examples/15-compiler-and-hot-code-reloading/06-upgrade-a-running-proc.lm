@@ -13,9 +13,12 @@
 # what the next call reaches. The worker keeps its mailbox, its
 # frame, and its place in the loop.
 #
-# The pause is the safe point. A running process may sit between any
-# two instructions, so the VM refuses a replacement until the process
-# stops. `pause` makes that moment explicit, and `resume` gives the
+# The VM refuses a replacement only while a machine of that image is
+# mid-instruction. A process parked on its mailbox is already at a
+# safe point, so an idle worker needs no pause at all.
+#
+# The supervisor pauses anyway, because it cannot know whether the
+# worker is idle. `pause` buys that certainty, and `resume` gives the
 # process back to the scheduler.
 
 class Collector < Proc[Int]

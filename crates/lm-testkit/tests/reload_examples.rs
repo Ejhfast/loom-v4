@@ -52,15 +52,16 @@ fn the_evaluator_example_classifies_each_line() {
 }
 
 #[test]
-fn the_server_example_upgrades_between_requests() {
-    // Orders one and two price at twice the amount. Orders three and
-    // four add the ten unit handling charge of the second release.
+fn a_program_redefines_its_own_class() {
+    // `Box().amount()` answered 5 + 1. The revision compiles under
+    // the module of the original, so it lands in the same nominal
+    // family and replaces it. The reader then answers 50 + 10.
     assert_eq!(
         run_example(
-            "examples/15-compiler-and-hot-code-reloading/03-upgrade-a-running-server.lm",
+            "examples/15-compiler-and-hot-code-reloading/03-redefine-your-own-code.lm",
             &["Compiler", "Vm"],
         ),
-        "Done(Ok([20, 50, 70, 90]))"
+        "Done(Ok((6, 51)))"
     );
 }
 
@@ -107,14 +108,15 @@ fn generated_code_compiles_and_invalid_trees_reject() {
 
 #[test]
 fn a_rewrite_keeps_every_other_byte() {
-    // The no-op rewrite rebuilds the file exactly, the edit lands on
-    // the one token, and both versions compile and run.
+    // The edit landed on one token and every other byte survived,
+    // the original definition answered 10, and the rewritten one
+    // that replaced it answers 25.
     assert_eq!(
         run_example(
             "examples/15-compiler-and-hot-code-reloading/08-rewrite-source-safely.lm",
-            &["Reflect", "Compiler", "Vm"],
+            &["Compiler", "Vm"],
         ),
-        "Done((true, true, [Ok(10), Ok(25)]))"
+        "Done(Ok((true, 10, 25)))"
     );
 }
 
@@ -131,5 +133,20 @@ fn the_proc_example_upgrades_a_live_process() {
             &["Vm", "Proc"],
         ),
         "Done(Ok((20, 30, 2)))"
+    );
+}
+
+#[test]
+fn a_batch_publishes_both_halves_or_neither() {
+    // The shown price and the charged price move together, so the
+    // pair never mixes releases. The stale batch that follows is
+    // refused whole: the shown price carries the single replace that
+    // disturbed it, and the charged price still carries the fee.
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/09-change-definitions-together.lm",
+            &["Vm"],
+        ),
+        "Done(Ok(((20, 20), (30, 30), \"a slot change is stale\", (10, 30))))"
     );
 }

@@ -1,0 +1,96 @@
+# Some definitions must change together, or not at all.
+#
+# Run with `--allow Vm`.
+#
+# `replace` moves one slot. Two calls move two slots, and between
+# them the image holds one new definition beside one old one. When
+# the two agree on something, that gap is a bug: here the customer
+# would see one price and the card would take another.
+#
+# `change` stages a replacement without publishing it. `replace_all`
+# publishes a list of staged changes as one step, so no run and no
+# process ever observes half of an upgrade.
+#
+# A staged change also records the target it was built against. If
+# that slot moves before the batch publishes, the change is stale and
+# the whole batch is refused. Nothing in the list applies.
+
+def shown_price(amount: Int): Int
+  amount * 2
+end
+
+def charged_price(amount: Int): Int
+  amount * 2
+end
+
+def checkout(amount: Int): (Int, Int)
+  (shown_price(amount), charged_price(amount))
+end
+
+# The new pricing. Both halves move by the same rule.
+def shown_with_fee(amount: Int): Int
+  amount * 2 + 10
+end
+
+def charged_with_fee(amount: Int): Int
+  amount * 2 + 10
+end
+
+# A third rule, used below to disturb a staged change.
+def shown_at_cost(amount: Int): Int
+  amount
+end
+
+def run_checkout(
+  image: Vm,
+  entry: FunctionBinding[(Int,), (Int, Int)]
+): Result[(Int, Int), String] with Vm
+  run = image.activate(entry, args: (10,)).map_error() {
+    |e: CodeError| e.message
+  }?
+  case run.run()
+  in Done(pair) then Ok(pair)
+  in Fault(_) then Err("the checkout faulted")
+  end
+end
+
+def go(): Result[((Int, Int), (Int, Int), String, (Int, Int)), String] with Vm
+  image = sys.vm.Vm()
+  shown = image.install(shown_price).map_error() { |e: CodeError| e.message }?
+  charged = image.install(charged_price).map_error() {
+    |e: CodeError| e.message
+  }?
+  entry = image.install(checkout).map_error() { |e: CodeError| e.message }?
+  before = run_checkout(image, entry)?
+
+  # Stage both halves, then publish them as one step.
+  batch = List[SlotChange]()
+  batch.push(image.change(shown, shown_with_fee).map_error() {
+    |e: CodeError| e.message
+  }?)
+  batch.push(image.change(charged, charged_with_fee).map_error() {
+    |e: CodeError| e.message
+  }?)
+  image.replace_all(batch).map_error() { |e: CodeError| e.message }?
+  after = run_checkout(image, entry)?
+
+  # Now stage a change and move the same slot by another route
+  # before the batch publishes.
+  stale = image.change(shown, shown_price).map_error() {
+    |e: CodeError| e.message
+  }?
+  image.replace(shown, shown_at_cost).map_error() { |e: CodeError| e.message }?
+  late = List[SlotChange]()
+  late.push(stale)
+  refused = case image.replace_all(late)
+  in Ok(_) then "the stale batch published"
+  in Err(problem) then problem.message
+  end
+  ending = run_checkout(image, entry)?
+  Ok((before, after, refused, ending))
+end
+
+# Both halves moved together, and the stale batch changed nothing:
+# the shown price is the one the single replace left behind, and the
+# charged price still carries the fee.
+go()

@@ -1,123 +1,115 @@
-# Change one token, and leave every other byte alone.
+# Change one token of your own code, and leave every other byte.
 #
-# Run with `--allow Reflect,Compiler,Vm`.
+# Run with `--allow Compiler,Vm`.
 #
-# The public syntax tree is lossless. It holds comments, blank lines,
-# and the exact spacing of the file, not only the parts a compiler
-# needs. A tool can therefore rebuild a file from its tree and get
-# the original bytes back.
+# `codeof` hands back the syntax the compiler retained for a named
+# definition. That tree is lossless: it holds the comments, the blank
+# lines, and the exact spacing of the source, not only the parts a
+# compiler needs.
 #
-# That is what makes an automatic edit safe to run over source a
-# person owns. This example changes one number and shows that the
-# comment, the blank line, and the spacing all survive.
+# An edit rebuilds only the nodes between the change and the root.
+# `with_children` takes the children it is given, so every child off
+# that path travels by reference and cannot be altered. That is what
+# makes an automatic edit safe to run over source a person owns.
 #
-# The rewritten tree is not trusted because it came from a tree. It
-# goes through the compiler like any other source.
+# Retention is per definition, and the tree it returns is a flat run
+# of tokens and trivia. So the number below is a direct child, and a
+# comment written above `def` is not part of what comes back.
 
-# Join source lines, so the sample file reads like a file.
-def source(lines: [String]): String
-  text = ""
-  for line in lines
-    text = text + line + "\n"
-  end
-  text
+def limit(): Int
+  # The service refuses more than this.
+
+  ceiling    =    10
+
+  ceiling
 end
 
-def original(): String
-  source([
-    "# The limit this service enforces.",
-    "def limit(): Int",
-    "  10",
-    "end",
-    "",
-    "limit()"
-  ])
-end
-
-# Rebuild one element, replacing the text of any token that matches.
-# Tokens and trivia are leaves. A node keeps its kind and takes the
-# rebuilt children.
-def rewrite(element: SyntaxElement, from: String, to: String): SyntaxElement
-  builder = SyntaxBuilder()
-  text = element.text().to_string()
-  if element.is_token()
-    if text == from
-      return builder.token(element.kind(), to)
+# The child index of the first token whose text matches, or -1.
+def index_of(node: SyntaxElement, text: String): Int
+  children = node.children()
+  index = 0
+  while index < children.len()
+    if children.at(index).text() == text
+      return index
     end
-    return builder.token(element.kind(), text)
+    index = index + 1
   end
-  if element.is_trivia()
-    return builder.trivia(element.kind(), text)
-  end
-  children = List[SyntaxElement]()
-  for child in element.children()
-    children.push(rewrite(child, from, to))
-  end
-  builder.node(element.kind(), children)
+  -1
 end
 
-def run_source(tree: SyntaxNode): Result[Int, CodeError] with Compiler, Vm
-  env = CompileEnv(
-    List[VerifiedModule](),
-    List[(String, String)](),
-    List[(String, DefinitionSpec)]()
-  )
+# Rebuild one node. `parent` keeps every other child untouched.
+def replace_child(parent: SyntaxNode, at: Int, child: SyntaxElement): SyntaxNode
+  children = parent.children()
+  children.set(at, child)
+  parent.with_children(children)
+end
+
+def run_it(image: Vm, f: FunctionBinding[(), Int]): Result[Int, String] with Vm
+  run = image.activate(f, args: ()).map_error() { |e: CodeError| e.message }?
+  case run.run()
+  in Done(value) then Ok(value)
+  in Fault(_) then Err("the definition faulted")
+  end
+end
+
+def go(): Result[(Bool, Int, Int), String] with Compiler, Vm
+  original = case codeof(limit).source()
+  in Some(source) then source.syntax
+  in None then return Err("the definition kept no syntax")
+  end
+
+  # Retained definition syntax is a flat run of tokens and trivia, so
+  # the number is a direct child.
+  number_at = index_of(original, "10")
+  if number_at < 0
+    return Err("the number is not a child of the definition")
+  end
+  builder = SyntaxBuilder()
+  edited = replace_child(original as SyntaxNode, number_at, builder.integer("25"))
+
+  # Everything except the number is byte for byte what it was.
+  expected = "def limit(): Int\n" +
+    "  # The service refuses more than this.\n" +
+    "\n" +
+    "  ceiling    =    25\n" +
+    "\n" +
+    "  ceiling\nend"
+  exact = edited.text().to_string() == expected
+
+  # The rewritten tree is not trusted because it came from a tree. It
+  # goes through the compiler like any other source.
+  spec = codeof(limit).definition()
+  known = List[(String, DefinitionSpec)]()
+  known.push(("limit", spec))
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)](), known)
   options = CompileOptions(
-    is_main: true,
+    is_main: false,
     dynamic_result: false,
     late_definitions: false,
     late_functions: List[String](),
     late_classes: List[String]()
   )
-  artifact = case sys.compiler.compile_syntax("syntax", "syntax.lm", tree, env, options)
-  in Ok(value) then value
-  in Err(problem) then return Err(CodeError(problem.message))
-  end
-  module = artifact.verify()?
+  artifact = sys.compiler.compile_syntax(
+    spec.module_name,
+    "limit-revision.lm",
+    edited,
+    env,
+    options
+  ).map_error() { |e: CompileErrors| e.message }?
+  module = artifact.verify().map_error() { |e: CodeError| e.message }?
+  code = module.function_code[(), Int]("limit").map_error() {
+    |e: CodeError| e.message
+  }?
+
   image = sys.vm.Vm()
-  instance = image.install(module)?
-  entry = instance.entry[(), Int]()?
-  case image.activate(entry, args: ())?.run()
-  in Done(value) then Ok(value)
-  in Fault(problem) then Err(CodeError(problem.code()))
-  end
+  first = image.install(codeof(limit)).map_error() { |e: CodeError| e.message }?
+  before = run_it(image, first)?
+  revision = image.install(code).map_error() { |e: CodeError| e.message }?
+  image.replace(first, revision).map_error() { |e: CodeError| e.message }?
+  after = run_it(image, first)?
+  Ok((exact, before, after))
 end
 
-def report(): (Bool, Bool, [Result[Int, CodeError]]) with Reflect, Compiler, Vm
-  text = original()
-  parse = sys.reflect.parse_syntax(text)
-  root = parse.tree.root()
-
-  # A tree with no edit rebuilds the file exactly.
-  unchanged = rewrite(root, "nothing", "nothing")
-  round_trip = unchanged.text().to_string() == text
-
-  edited = rewrite(root, "10", "25")
-  changed = edited.text().to_string()
-
-  # The only difference is the number. The comment, the blank line,
-  # and the two space indent are all still there.
-  expected = source([
-    "# The limit this service enforces.",
-    "def limit(): Int",
-    "  25",
-    "end",
-    "",
-    "limit()"
-  ])
-  exact = changed == expected
-
-  before = run_source(root)
-  after = case edited is SyntaxNode
-  in true then run_source(edited as SyntaxNode)
-  in false then Err(CodeError("the rewrite lost the root node"))
-  end
-  ran: [Result[Int, CodeError]] = []
-  ran.push(before)
-  ran.push(after)
-  (round_trip, exact, ran.freeze())
-end
-
-# The file rebuilds byte for byte, the edit lands where it should,
-# and both versions still compile and run.
-report()
+# The edit landed on the one token, and the rewritten definition
+# replaced the original it was read from.
+go()
