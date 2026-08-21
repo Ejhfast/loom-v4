@@ -7,6 +7,8 @@ Snapshot form: serialized machine image, conventional extension `.lms`
 
 This specification defines an object language with a reified compiler, reified virtual machines, immutable code identity, explicit effect rows, runtime policy tables, snapshots, and isolated procs. “Must” and “must not” are normative. Text labeled *implementation note* describes the reference implementation without changing observable semantics.
 
+Sidecar specifications give detailed rules for named topics. This document defines every public operation identity and signature. A sidecar cannot conflict with those definitions.
+
 ---
 
 ## 1. Governing model
@@ -230,9 +232,11 @@ Conceptually:
 ```text
 CompileEnv.bind[T](mut self, name: String, value: T)
   -> Result[(), CompileEnvError]
-Compiler.Compile(String, CompileEnv, CompileOptions)
+Compiler.Compile(String, String, CompileEnv, CompileOptions)
   -> Result[Artifact, CompileErrors]
 ```
+
+The first string is the logical source path. The second string is the source text.
 
 `bind` records the value's exact static signature, optional code hash, and a frozen control-envelope representation. Binding two values to one name or freezing an incompatible value is an ordinary `CompileEnvError`. The environment itself is holder-side control data and is not a general guest map.
 
@@ -1816,7 +1820,7 @@ Each creation path runs admission or copies a stopped verified image.
 
 Editable snapshot data has no guest spelling. It never backs a guest value.
 
-`RunSnapshot[T]` is a typed view over one `VmSnapshot`. It adds one distinguished run selection.
+`RunSnapshot[T]` is a typed view over one `VmSnapshot`. It validates the image's distinguished run selection.
 
 ```text
 VmSnapshot.result_type(self) -> TypeView
@@ -1828,6 +1832,10 @@ RunSnapshot[T].to_bytes(self) -> Bytes
 
 `cast_result` requires a distinguished run marker. A full VM snapshot has no such marker.
 
+A run image stores its distinguished run at machine ordinal zero.
+
+A full VM image stores a separate VM-image selector. Machine ordinal zero has no selection meaning in that image.
+
 ### 17.2 World contents
 
 A snapshot contains format and ABI versions, code manifests, type tables, heaps, frames, limits, fuel, and machine states.
@@ -1836,7 +1844,15 @@ It also contains pending requests, nested control edges, routed requests, mailbo
 
 It excludes policy tables, root grants, live host callbacks, host thread identity, executor tasks, mutex/channel storage, wake objects, and live OS handles. It can include closed resource handles.
 
-The encoder assigns one canonical machine ordinal to each captured machine. A handle in snapshot bytes stores that ordinal and its static type. Restore relocates every handle to the corresponding restored machine. This covers handles in heaps, frames, locals, operands, closure captures, mailbox values, pending arguments, and terminal results. Relocation is implementation work and is not observable from guest code.
+The encoder assigns one canonical machine ordinal to each captured machine. A run image assigns ordinal zero to its distinguished run.
+
+A full VM image orders machines canonically. Its VM-image selector identifies the captured VM.
+
+A handle in snapshot bytes stores its machine ordinal and static type. Restore relocates each handle to its restored machine.
+
+This rule covers handles in heaps, frames, locals, operands, closure captures, mailboxes, pending arguments, and terminal results.
+
+Relocation is implementation work. Guest code cannot observe it.
 
 ### 17.3 Consistent cut
 
@@ -2576,43 +2592,78 @@ The network sidecar defines limits, ownership, errors, and HTTP/TLS layers.
 Generic signatures below are manifest-level schemas instantiated by the compiler. `A` is an argument-tuple type, `T` is the machine's terminal result, `R` is one pending operation's reply type, and `Fn[A,T,e]` is manifest metanotation for a callable with argument tuple `A`, result `T`, and row `e`.
 
 ```text
-Vm.New                   () -> Vm
-Vm.Activate[A,T,e]     (Vm, Fn[A,T,e], control A) -> Run[T]
-Vm.FromArtifact[A,T]     (Vm, LinkedEntry[A,T], control A) -> Run[T]
-Vm.Step[T]               (Run[T]) -> StepEvent[T]
-Vm.Run[T]                (Run[T]) -> RunResult[T]
-Vm.Drive[T]              (Run[T]) -> DriveEvent[T]
-Vm.DriveWait[T]          (Run[T]) -> Wait[DriveEvent[T]]
-Vm.Answer[T,A,R]         (Run[T], PendingCall[A,R], R) -> ()
-Vm.Reject[T]             (Run[T], Request, Fault) -> ()
-Vm.Dispatch[T]           (Run[T], Request) -> ()
-Vm.Stack[T]              (Run[T]) -> [FrameView]
-Vm.Table[T]              (Run[T]) -> PolicyTable
-Vm.Handles[T]            (Run[T]) -> [ResourceHandle]
-Vm.Resource[T,R]         (Run[T], R) -> ResourceHandle
-Vm.ServeFile[T]           (Run[T], PendingCall[(String, OpenOptions),
-                           Result[FileHandle, FsError]]) -> ResourceHandle
-Vm.ServeTcpStream[T]      (Run[T], PendingCall, SocketAddress)
-                           -> ResourceHandle
-Vm.ServeTcpListener[T]    (Run[T], PendingCall) -> ResourceHandle
-Vm.ServeTlsStream[T]      (Run[T], PendingCall) -> ResourceHandle
-Vm.ResourceIsOpen        (ResourceHandle) -> Bool
-Vm.ResourceClose         (ResourceHandle) -> Bool
-Vm.ResourceKind          (ResourceHandle) -> String
-Vm.ResourceSame          (ResourceHandle, ResourceHandle) -> Bool
-Vm.SetLimits[T]          (Run[T], Limits) -> ()
-Vm.AddFuel[T]            (Run[T], Int) -> ()
-Vm.SnapshotHeld[T]       (Run[T])
-                          -> Result[RunSnapshot[T], SnapshotError]
-Vm.SnapshotSelf          ()
-                          -> Result[VmSnapshot, SnapshotError]
-Vm.LoadSnapshot          (Bytes)
-                          -> Result[VmSnapshot, SnapshotError]
-Vm.Restore[T]            (Vm, RunSnapshot[T])
-                          -> Result[Run[T], RestoreError]
+Vm.New                         () -> Vm
+Vm.Activate[A,T,e]             (Vm, Fn[A,T,e], control A) -> Run[T]
+Vm.Run[T]                      (Run[T]) -> RunResult[T]
+Vm.Step[T]                     (Run[T]) -> StepEvent[T]
+Vm.Drive[T]                    (Run[T]) -> DriveEvent[T]
+Vm.Answer[T,A,R]               (Run[T], PendingCall[A,R], R) -> ()
+Vm.Reject[T]                   (Run[T], Request, Fault) -> ()
+Vm.Dispatch[T]                 (Run[T], Request) -> ()
+Vm.Table[T]                    (Run[T]) -> PolicyTable
+Vm.SnapshotHeld[T]             (Run[T])
+                                -> Result[RunSnapshot[T], SnapshotError]
+Vm.SnapshotSelf                ()
+                                -> Result[VmSnapshot, SnapshotError]
+Vm.LoadSnapshot                (Bytes)
+                                -> Result[VmSnapshot, SnapshotError]
+Vm.Restore[T]                  (Vm, RunSnapshot[T])
+                                -> Result[Run[T], RestoreError]
+Vm.Handles[T]                  (Run[T]) -> List[ResourceHandle]
+Vm.Resource[T,R]               (Run[T], R) -> ResourceHandle
+Vm.ServeFile[T]                (Run[T], PendingCall[(String, OpenOptions),
+                                Result[FileHandle, FsError]]) -> ResourceHandle
+Vm.ResourceIsOpen              (ResourceHandle) -> Bool
+Vm.ResourceClose               (ResourceHandle) -> Bool
+Vm.ResourceKind                (ResourceHandle) -> String
+Vm.ResourceSame                (ResourceHandle, ResourceHandle) -> Bool
+Vm.DriveWait[T]                (Run[T]) -> Wait[DriveEvent[T]]
+Vm.DriveFor[T]                 (Run[T], Int) -> Option[DriveEvent[T]]
+Vm.SnapshotWaitHeld[T]         (Run[T], Int)
+                                -> Result[RunSnapshot[T], SnapshotError]
+Vm.ServeTcpStream[T]           (Run[T], PendingCall, SocketAddress)
+                                -> ResourceHandle
+Vm.ServeTcpListener[T]         (Run[T], PendingCall[SocketAddress,
+                                Result[TcpListener, NetError]])
+                                -> ResourceHandle
+Vm.ServeTlsStream[T]           (Run[T], PendingCall) -> ResourceHandle
+Vm.Artifact                    (Bytes) -> Artifact
+Vm.Verify                      (Artifact)
+                                -> Result[VerifiedModule, CodeError]
+Vm.Install                     (Vm, VerifiedModule)
+                                -> Result[Instance, CodeError]
+Vm.InstanceEntry[A,T]          (Instance)
+                                -> Result[FunctionDef[A,T], CodeError]
+Vm.InstanceFunction[A,T]       (Instance, String)
+                                -> Result[FunctionDef[A,T], CodeError]
+Vm.InstanceSlot                (Instance, Int) -> Result[Slot, CodeError]
+Vm.InstanceSlotSpec            (Instance, Int)
+                                -> Result[SlotSpec, CodeError]
+Vm.ActivateDef[A,T]            (Vm, FunctionDef[A,T], control A)
+                                -> Result[Run[T], CodeError]
+Vm.ReplaceFunction[A,T]        (Vm, Slot, FunctionDef[A,T])
+                                -> Result[(), CodeError]
+Vm.InstallWith                 (Vm, VerifiedModule, LinkEnv)
+                                -> Result[Instance, CodeError]
+Vm.InstanceClass               (Instance, String)
+                                -> Result[ClassDef, CodeError]
+Vm.ReplaceClass                (Vm, Slot, ClassDef)
+                                -> Result[(), CodeError]
+Vm.ReplaceValue[T]             (Vm, Slot, T) -> Result[(), CodeError]
+Vm.ReplaceProcess[M,R]         (Vm, Slot, Handle[M,R])
+                                -> Result[(), CodeError]
+Vm.SnapshotVm                  (Vm)
+                                -> Result[VmSnapshot, SnapshotError]
+Vm.RestoreVm                   (VmSnapshot) -> Result[Vm, RestoreError]
 ```
 
-The held and receiverless forms use separate exact operation identities because their honest result types differ, while sharing one serializer/host implementation family. `VmSnapshot.cast_result(type_descriptor[T]())` checks the hidden result `TypeId` and returns `Result[RunSnapshot[T],SnapshotTypeError]`; typed restore accepts only the checked view.
+This table is the complete public `Vm` operation set for version 0.2.
+
+The held, receiverless, and full VM forms use separate exact operation identities. They share one snapshot implementation family.
+
+`VmSnapshot.cast_result(type_descriptor[T]())` checks a distinguished run. It returns `Result[RunSnapshot[T],SnapshotTypeError]`.
+
+A full VM snapshot has no distinguished run. `Vm.RestoreVm` restores that image without selecting a run.
 
 `Vm.Handles` returns controls for the live resources in the controlled
 machine world. A resource control stays with its holder.
@@ -2663,12 +2714,18 @@ Wait tokens are holder-local and one-shot. Section 7.4 defines select syntax.
 ### 23.8 Compiler and reflection
 
 ```text
-Compiler.Compile  (String, CompileEnv, CompileOptions)
-                  -> Result[Artifact, CompileErrors]
-Reflect.Mirror[T] (T) -> Mirror[T]
+Compiler.Compile       (String, String, CompileEnv, CompileOptions)
+                       -> Result[Artifact, CompileErrors]
+Compiler.CompileSyntax (SyntaxNode, CompileEnv, CompileOptions)
+                       -> Result[Artifact, CompileErrors]
+Reflect.ParseSyntax    (String) -> SyntaxParse
 ```
 
-`Mirror[T]` returns detached `ValueView` children and typed metadata; it never widens the inspected value to `Any` or exposes a live guest reference.
+`Compiler.Compile` receives a logical path before the source text.
+
+`Reflect.ParseSyntax` returns a lossless syntax tree, parse status, and diagnostics.
+
+`docs/specs/sidecar/vm-metaprogramming.md` defines syntax values, construction, detachment, and compiler inputs.
 
 All host-operation argument/reply types are frozen ABI definitions. Operations may add ordinary error arms compatibly only through an ABI version change reflected in identity hashes.
 

@@ -2,6 +2,8 @@
 
 Status: accepted design. This document defines the staged implementation.
 
+The language specification defines public operation identities and signatures. This sidecar defines detailed behavior and implementation stages.
+
 ## 1. Purpose
 
 This document defines Loom metaprogramming through verified code and reified virtual machines.
@@ -24,7 +26,7 @@ The implementation uses these decisions:
 - `Vm` is a persistent execution image without a result type.
 - `Run[T]` is one active invocation with terminal type `T`.
 - `RunSnapshot[T]` captures one distinguished run and its reachable image.
-- `VmSnapshot` captures one complete VM without a distinguished result.
+- `VmSnapshot` is the untyped view of one admitted snapshot image.
 - An `Artifact` contains portable, untrusted compiler output.
 - Independent verification produces a `VerifiedModule`.
 - `Vm.install` installs one verified module and returns an `Instance`.
@@ -55,7 +57,7 @@ The new split uses these roles:
 | `Vm` | Installed code, classes, types, slots, policies, and processes |
 | `Run[T]` | One active root invocation with terminal type `T` |
 | `RunSnapshot[T]` | Reachable VM state with one distinguished `Run[T]` |
-| `VmSnapshot` | Complete stopped VM state without one result type |
+| `VmSnapshot` | Untyped view of one admitted snapshot image |
 | `Instance` | One installation of one verified module |
 
 `Vm` remains holder-local. A guest cannot transfer its authority through an ordinary value boundary.
@@ -80,7 +82,7 @@ The complete pipeline has these phases:
 Source or SyntaxTree
         |
         v
-Compiler.Compile with CompileEnv and CompileOptions
+Compiler.Compile with path, source, CompileEnv, and CompileOptions
         |
         v
 Artifact
@@ -192,6 +194,22 @@ The Stage 6 bootstrap surface accepts monomorphic functions without captures or 
 
 Lookup returns `CodeError` for another function. Later stages can add typed applications without changing the handle representation.
 
+### 6.5 `ClassDef`
+
+`ClassDef` names one immutable class definition in one installed VM.
+
+`Instance.class_def(name)` returns `Result[ClassDef, CodeError]`.
+
+The handle carries no object instance. It identifies one verified class target for class-slot replacement.
+
+### 6.6 Activation errors
+
+Activation through an ordinary closure returns `Run[T]`.
+
+Activation through `FunctionDef[A,T]` returns `Result[Run[T], CodeError]`.
+
+The error result covers a stale handle, a cross-VM handle, a bad argument boundary, or exhausted run capacity.
+
 ## 7. Static and late binding
 
 Every code reference uses one of two linkage modes.
@@ -262,7 +280,16 @@ An installation can also declare a new slot. The VM returns that live slot throu
 
 ### 8.2 Replacement
 
-`Vm.replace(slot, target)` checks the target against the slot's immutable contract.
+Each replacement method checks the target against the slot's immutable contract.
+
+```text
+Vm.replace_function(Slot, FunctionDef[A,T]) -> Result[(), CodeError]
+Vm.replace_class(Slot, ClassDef) -> Result[(), CodeError]
+Vm.replace_value(Slot, T) -> Result[(), CodeError]
+Vm.replace_process(Slot, Handle[M,R]) -> Result[(), CodeError]
+```
+
+`Vm.replace` is a short alias for `replace_function`.
 
 A successful replacement changes only the current target.
 
@@ -430,7 +457,7 @@ The VM packages a value at the declared boundary. It does not erase internal ope
 The compiler accepts source or one public syntax unit.
 
 ```text
-Compiler.Compile(SourceText, CompileEnv, CompileOptions)
+Compiler.Compile(String, String, CompileEnv, CompileOptions)
   -> Result[Artifact, CompileErrors]
 
 Compiler.CompileSyntax(SyntaxNode, CompileEnv, CompileOptions)
@@ -438,6 +465,8 @@ Compiler.CompileSyntax(SyntaxNode, CompileEnv, CompileOptions)
 ```
 
 `CompileSyntax` treats the selected node as compiler input.
+
+The first `Compile` string is the logical source path. The second string is the source text.
 
 The compiler validates the selected source before it creates an artifact.
 
@@ -618,19 +647,25 @@ The snapshot API has two value types.
 | Type | Captured root | Restore result |
 |---|---|---|
 | `RunSnapshot[T]` | One distinguished `Run[T]` and its reachable machine image | `Run[T]` in a target `Vm` |
-| `VmSnapshot` | One complete stopped `Vm` | One stopped `Vm` |
+| Full `VmSnapshot` | One complete stopped `Vm` | One stopped `Vm` |
 
 `Run.snapshot()` returns `Result[RunSnapshot[T], SnapshotError]`.
 
-`SnapshotImage` stores no selected run. It stores the complete admitted machine graph.
+`SnapshotImage` stores one optional distinguished-run selector and one optional full-VM selector.
 
-`RunSnapshot[T]` pairs that image with one typed run selector. The selector belongs to the view, not the image.
+A run snapshot stores the distinguished-run selector and its result-type digest.
+
+A full VM snapshot stores the full-VM selector. It stores no distinguished-run selector or result type.
+
+Machine ordinal zero has no selection meaning in a full VM snapshot. It is only the first serialized machine record.
 
 A run snapshot captures the run, its reachable processes, and all required installation state.
 
 It does not capture an unrelated run in the same VM.
 
-The distinguished run preserves the result type. The surrounding captured image has no result type.
+The distinguished-run selector records its result-type digest.
+
+A full VM image records no result type.
 
 `Vm.restore(snapshot)` imports a run snapshot and returns its distinguished `Run[T]`.
 
@@ -648,7 +683,11 @@ The pair `(vm, run)` is the restored image and its distinguished run.
 
 `Vm.snapshot()` requires a safe stopped image. It returns `Result[VmSnapshot, SnapshotError]`.
 
-Restoring a VM snapshot creates one stopped VM. It does not select one run.
+The exact operation is `Vm.SnapshotVm`.
+
+`sys.vm.restore_vm(snapshot)` creates one stopped VM. The exact operation is `Vm.RestoreVm`.
+
+Restoring a VM snapshot does not select one run.
 
 Both snapshot forms record these items:
 
@@ -831,7 +870,7 @@ Gate: static package builds remain byte-identical unless they use new linkage me
 
 ### Stage 6: reify verification and installation
 
-Expose `Artifact`, `VerifiedModule`, `Instance`, `SlotSpec`, `Slot`, and `FunctionDef` to Loom.
+Expose `Artifact`, `VerifiedModule`, `Instance`, `SlotSpec`, `Slot`, `FunctionDef`, and `ClassDef` to Loom.
 
 Gate: a Loom program verifies, installs, activates, and replaces code through typed APIs.
 

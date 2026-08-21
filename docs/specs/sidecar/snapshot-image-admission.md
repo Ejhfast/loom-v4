@@ -80,18 +80,19 @@ select a weaker restore path.
 
 ### 2.4 VmSnapshot
 
-`VmSnapshot` is the untyped guest view of one admitted complete image.
+`VmSnapshot` is the untyped guest view of one admitted image.
 
-The image contains no distinguished run marker.
+A held or self image can contain one distinguished-run selector.
 
-`VmSnapshot.select[T](run)` checks one run selector and its result type.
-Success returns `RunSnapshot[T]` without copying the image.
+`VmSnapshot.cast_result[T](type)` checks that selector and its result type. Success returns `RunSnapshot[T]` without copying the image.
 
-A full snapshot from `Vm.snapshot()` contains every selected run in that VM.
+A full snapshot from `Vm.snapshot()` contains one full-VM selector. It contains no distinguished-run selector.
+
+The full snapshot contains every stopped run and process in that VM.
 
 ### 2.5 RunSnapshot[T]
 
-`RunSnapshot[T]` is a typed guest view over one `SnapshotImage` and one run selector.
+`RunSnapshot[T]` is a typed guest view over one `SnapshotImage` and its distinguished-run selector.
 
 It does not own another image. It does not add another admission state.
 
@@ -189,7 +190,11 @@ includes the snapshot classification.
 
 Structural resolution enforces these rules:
 
-- The image contains one root machine.
+- The image selects exactly one distinguished run or one full VM.
+- A run selection names one captured machine.
+- A distinguished run has machine ordinal zero.
+- A full VM selection names one captured VM image.
+- An empty full VM image can contain no machine.
 - Every machine ordinal names one captured machine.
 - Every object ordinal names one object in the correct heap.
 - Every function, class, type, and operation identity resolves.
