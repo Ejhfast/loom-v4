@@ -1,0 +1,119 @@
+//! The `examples/15-compiler-and-hot-code-reloading` programs.
+//!
+//! Each checked output pins the behaviour its example claims. The
+//! reload examples state an exact price list, so a change in slot
+//! semantics shows up here as a changed list rather than as prose
+//! that quietly stops being true.
+
+use lm_host::CliHost;
+use lm_testkit::{compile_to_bytes, repo_root};
+use lm_vm::{load_bytes, VmConfig, World};
+
+/// Run one example on the command-line host, which is the host that
+/// answers `Compiler` and `Reflect`. The recording host does not
+/// carry the compiler service.
+fn run_example(path: &str, allow: &[&str]) -> String {
+    let source = std::fs::read_to_string(repo_root().join(path)).expect("the example reads");
+    let bytes = compile_to_bytes(path, &source).expect("the example compiles");
+    let loaded = load_bytes(&bytes).expect("the example loads");
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(CliHost::new(1)));
+    for grant in allow {
+        world.allow(grant).expect("the grant names a target");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    world.show_outcome(&outcome)
+}
+
+#[test]
+fn the_pipeline_example_names_each_step() {
+    let out = run_example(
+        "examples/15-compiler-and-hot-code-reloading/01-compile-at-runtime.lm",
+        &["Compiler", "Vm"],
+    );
+    // Two programs run, one fails to compile, and one fails the
+    // typed entry lookup before anything runs.
+    assert!(out.starts_with("Done([Ok(42), Ok(42), Err("), "{out}");
+    assert!(out.contains("E1001"), "{out}");
+    assert!(
+        out.contains("does not match the requested monomorphic contract"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_evaluator_example_classifies_each_line() {
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/02-a-small-evaluator.lm",
+            &["Reflect", "Compiler", "Vm"],
+        ),
+        "Done([\"42\", \"...\", \"...\", \"defined\", \"\\\"loom\\\"\", \"...\", \"syntax error\"])"
+    );
+}
+
+#[test]
+fn the_server_example_upgrades_between_requests() {
+    // Orders one and two price at twice the amount. Orders three and
+    // four add the ten unit handling charge of the second release.
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/03-upgrade-a-running-server.lm",
+            &["Compiler", "Vm"],
+        ),
+        "Done(Ok([20, 50, 70, 90]))"
+    );
+}
+
+#[test]
+fn the_open_request_keeps_its_own_version() {
+    // The open call answers 10 * 3. The next call reads the new slot
+    // target and answers 10 * 3 + 1000.
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/04-finish-the-open-request.lm",
+            &["Compiler", "Vm"],
+        ),
+        "Done(Ok([30, 1030]))"
+    );
+}
+
+#[test]
+fn untrusted_code_gets_no_authority() {
+    let out = run_example(
+        "examples/15-compiler-and-hot-code-reloading/05-run-untrusted-code.lm",
+        &["Compiler", "Vm"],
+    );
+    // The computing rule runs. The rule that names an outside module
+    // never compiles. The rule that prints compiles and verifies, and
+    // the run policy stops it.
+    assert!(out.starts_with("Done([Ok(42), Err("), "{out}");
+    assert!(out.contains("E1052"), "{out}");
+    assert!(out.contains("PolicyDenied"), "{out}");
+}
+
+#[test]
+fn generated_code_compiles_and_invalid_trees_reject() {
+    // The builder wrote `10 + 20 + 12`, which runs to 42. A second
+    // table runs to 3. The builder also made a tree the grammar
+    // rejects, and the compiler refused it.
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/07-generate-code-from-data.lm",
+            &["Compiler", "Vm"],
+        ),
+        "Done((\"10 + 20 + 12\\n\", [Ok(42), Ok(3)], true))"
+    );
+}
+
+#[test]
+fn a_rewrite_keeps_every_other_byte() {
+    // The no-op rewrite rebuilds the file exactly, the edit lands on
+    // the one token, and both versions compile and run.
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/08-rewrite-source-safely.lm",
+            &["Reflect", "Compiler", "Vm"],
+        ),
+        "Done((true, true, [Ok(10), Ok(25)]))"
+    );
+}

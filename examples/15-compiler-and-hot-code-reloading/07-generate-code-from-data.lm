@@ -1,0 +1,96 @@
+# Build a program from data, without writing source text.
+#
+# Run with `--allow Compiler,Vm`.
+#
+# A table of numbers arrives at runtime. One way to use it is to keep
+# the table and walk it on every call. Another is to compile it once
+# into straight line code, which is what this example does.
+#
+# `SyntaxBuilder` makes the tokens and nodes directly, so no string
+# quoting stands between the data and the program. A number cannot
+# arrive as a broken literal, and a separator cannot go missing.
+#
+# The builder does not parse, and it does not judge. It will build a
+# tree that no grammar accepts. The compiler is the checkpoint: it
+# validates the selected source before it makes an artifact, so an
+# invalid tree becomes an ordinary compile error.
+
+# Build `first + second + third + ...` as one statement.
+def sum_of(texts: [String]): SyntaxNode
+  builder = SyntaxBuilder()
+  items = List[SyntaxElement]()
+  first = true
+  for text in texts
+    if not first
+      items.push(builder.whitespace(" "))
+      items.push(builder.plus())
+      items.push(builder.whitespace(" "))
+    end
+    items.push(builder.integer(text))
+    first = false
+  end
+  items.push(builder.newline())
+  statement = builder.statement(items)
+  lines = List[SyntaxElement]()
+  lines.push(statement)
+  builder.module(lines).to_tree().root()
+end
+
+# A tree the grammar rejects: two operators and no second operand.
+def broken(): SyntaxNode
+  builder = SyntaxBuilder()
+  items = List[SyntaxElement]()
+  items.push(builder.integer("1"))
+  items.push(builder.plus())
+  items.push(builder.plus())
+  items.push(builder.newline())
+  statement = builder.statement(items)
+  lines = List[SyntaxElement]()
+  lines.push(statement)
+  builder.module(lines).to_tree().root()
+end
+
+def run_tree(tree: SyntaxNode): Result[Int, CodeError] with Compiler, Vm
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  options = CompileOptions(
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = case sys.compiler.compile_syntax(tree, env, options)
+  in Ok(value) then value
+  in Err(problem) then return Err(CodeError(problem.message))
+  end
+  module = artifact.verify()?
+  image = sys.vm.Vm()
+  instance = image.install(module)?
+  entry = instance.entry[(), Int]()?
+  case image.activate(entry, args: ())?.run()
+  in Done(value) then Ok(value)
+  in Fault(problem) then Err(CodeError(problem.code()))
+  end
+end
+
+def report(): (String, [Result[Int, CodeError]], Bool) with Compiler, Vm
+  texts: [String] = ["10", "20", "12"]
+  tree = sum_of(texts)
+
+  # The builder wrote real source. `text` reads it back.
+  written = tree.text().to_string()
+
+  rejected = case run_tree(broken())
+  in Ok(_) then false
+  in Err(_) then true
+  end
+  values: [Result[Int, CodeError]] = []
+  values.push(run_tree(tree))
+  values.push(run_tree(sum_of(["1", "2"])))
+  (written, values.freeze(), rejected)
+end
+
+# The generated source, its value, a second generated value, and the
+# fact that the compiler refused the tree the builder was willing to
+# make.
+report()

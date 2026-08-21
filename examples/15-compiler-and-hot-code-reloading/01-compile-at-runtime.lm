@@ -1,0 +1,68 @@
+# Turn source text into a running program, one named step at a time.
+#
+# Run with `--allow Compiler,Vm`. Drop `Compiler` and the program
+# stops at the first step, because compilation is an ordinary effect.
+#
+# The pipeline has five values, and no step performs a later one:
+#
+#   source text    -> Compiler.Compile -> Artifact
+#   Artifact       -> Artifact.verify  -> VerifiedModule
+#   VerifiedModule -> Vm.install       -> Instance
+#   Instance       -> entry lookup     -> FunctionDef
+#   FunctionDef    -> Vm.activate      -> Run
+#
+# The compiler cannot mark its own output as trusted. An `Artifact`
+# is untrusted bytes until the independent verifier accepts it. The
+# verifier cannot install, and installation runs no guest code. Only
+# `Run.run` executes the new program.
+
+def build(text: String): Result[VerifiedModule, CodeError] with Compiler
+  # `CompileEnv` names every outside definition the source may use.
+  # These programs use none, so the environment is empty.
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  options = CompileOptions(
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  # A compile error and a code error are different types, so this
+  # arm states the conversion. Every later step already answers
+  # `CodeError`, so `?` carries those out on its own.
+  artifact = case sys.compiler.compile("formula", text, env, options)
+  in Ok(value) then value
+  in Err(problem) then return Err(CodeError(problem.message))
+  end
+  artifact.verify()
+end
+
+def evaluate(text: String): Result[Int, CodeError] with Compiler, Vm
+  module = build(text)?
+  image = sys.vm.Vm()
+  instance = image.install(module)?
+
+  # The caller states the type it expects. The lookup fails as an
+  # ordinary error when the entry carries another type.
+  entry = instance.entry[(), Int]()?
+  case image.activate(entry, args: ())?.run()
+  in Done(value) then Ok(value)
+  in Fault(_) then Err(CodeError("the program faulted"))
+  end
+end
+
+def report(): [Result[Int, CodeError]] with Compiler, Vm
+  out: [Result[Int, CodeError]] = []
+  out.push(evaluate("40 + 2\n"))
+  out.push(evaluate("def double(n: Int): Int\n  n * 2\nend\ndouble(21)\n"))
+
+  # Source that does not compile is an ordinary failed value.
+  out.push(evaluate("40 +\n"))
+
+  # A program whose result is not `Int` fails at the entry lookup,
+  # before anything runs.
+  out.push(evaluate("\"text\"\n"))
+  out.freeze()
+end
+
+report()

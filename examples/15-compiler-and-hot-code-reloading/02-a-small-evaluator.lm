@@ -1,0 +1,119 @@
+# Read lines the way an interactive evaluator does.
+#
+# Run with `--allow Reflect,Compiler,Vm`.
+#
+# The parser answers one of three states for any text. `ParseComplete`
+# means the text is a whole unit. `ParseIncomplete` means more text
+# can finish an open construct, so the evaluator asks for another
+# line. `ParseInvalid` means the text has a definite error, so no
+# amount of extra input helps.
+#
+# That difference is what lets an evaluator hold a multi-line
+# definition without guessing where the input ends.
+#
+# The parser does not decide what an interaction means. It reports
+# the tree, and this program applies its own policy: a line that
+# holds only definitions installs code, and a line that holds an
+# expression prints a value.
+
+def env(): CompileEnv
+  CompileEnv(List[VerifiedModule](), List[(String, String)]())
+end
+
+# `dynamic_result` lets the evaluator run source whose result type it
+# cannot know in advance. The value arrives as `DynValue`.
+def options(): CompileOptions
+  CompileOptions(
+    is_main: true,
+    dynamic_result: true,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+end
+
+def holds_only_definitions(root: SyntaxNode): Bool
+  found = false
+  for child in root.children()
+    if child.is_statement()
+      return false
+    end
+    if child.is_definition()
+      found = true
+    end
+  end
+  found
+end
+
+def evaluate(tree: SyntaxNode): Result[String, CodeError] with Compiler.CompileSyntax, Compiler.Verify, Vm
+  raw = sys.compiler.compile_syntax(tree, env(), options())
+  artifact = case raw
+  in Ok(value) then value
+  in Err(problem) then return Err(CodeError(problem.message))
+  end
+  module = artifact.verify()?
+  image = sys.vm.Vm()
+  instance = image.install(module)?
+  entry = instance.entry[(), DynValue]()?
+  case image.activate(entry, args: ())?.run()
+  in Done(value) then Ok(value.render())
+  in Fault(_) then Err(CodeError("the program faulted"))
+  end
+end
+
+# One interaction turn. `pending` is the text the evaluator already
+# holds. The reply states what to show and what text to keep.
+def turn(pending: String, line: String): (String, String) with Reflect.ParseSyntax, Compiler.CompileSyntax, Compiler.Verify, Vm
+  text = pending + line + "\n"
+  parse = sys.reflect.parse_syntax(text)
+  case parse.status
+  in ParseIncomplete
+    # Keep the text and ask for the next line.
+    ("...", text)
+  in ParseInvalid
+    ("syntax error", "")
+  in ParseComplete
+    if holds_only_definitions(parse.tree.root())
+      # A definition group installs, but shows no value.
+      case evaluate(parse.tree.root())
+      in Ok(_) then ("defined", "")
+      in Err(problem) then ("error", "")
+      end
+    else
+      case evaluate(parse.tree.root())
+      in Ok(shown) then (shown, "")
+      in Err(_) then ("error", "")
+      end
+    end
+  end
+end
+
+def session(lines: [String]): [String] with Reflect.ParseSyntax, Compiler.CompileSyntax, Compiler.Verify, Vm
+  shown: [String] = []
+  pending = ""
+  for line in lines
+    case turn(pending, line)
+    in (text, keep)
+      shown.push(text)
+      pending = keep
+    end
+  end
+  shown.freeze()
+end
+
+# The middle three lines are one definition. The evaluator asks for
+# more text twice, then installs the definition. `40 +` can still be
+# finished, so it asks again. `@@@` cannot be finished at all.
+#
+# Each turn installs into a new VM, so a definition does not reach
+# the next line. Specification 11 describes the library that keeps
+# one VM and maps each source name to a slot.
+session([
+  "40 + 2",
+  "def triple(n: Int): Int",
+  "  n * 3",
+  "end",
+  "\"loom\"",
+  "40 +",
+  "@@@"
+])

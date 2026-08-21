@@ -1,0 +1,119 @@
+# Change one token, and leave every other byte alone.
+#
+# Run with `--allow Reflect,Compiler,Vm`.
+#
+# The public syntax tree is lossless. It holds comments, blank lines,
+# and the exact spacing of the file, not only the parts a compiler
+# needs. A tool can therefore rebuild a file from its tree and get
+# the original bytes back.
+#
+# That is what makes an automatic edit safe to run over source a
+# person owns. This example changes one number and shows that the
+# comment, the blank line, and the spacing all survive.
+#
+# The rewritten tree is not trusted because it came from a tree. It
+# goes through the compiler like any other source.
+
+# Join source lines, so the sample file reads like a file.
+def source(lines: [String]): String
+  text = ""
+  for line in lines
+    text = text + line + "\n"
+  end
+  text
+end
+
+def original(): String
+  source([
+    "# The limit this service enforces.",
+    "def limit(): Int",
+    "  10",
+    "end",
+    "",
+    "limit()"
+  ])
+end
+
+# Rebuild one element, replacing the text of any token that matches.
+# Tokens and trivia are leaves. A node keeps its kind and takes the
+# rebuilt children.
+def rewrite(element: SyntaxElement, from: String, to: String): SyntaxElement
+  builder = SyntaxBuilder()
+  text = element.text().to_string()
+  if element.is_token()
+    if text == from
+      return builder.token(element.kind(), to)
+    end
+    return builder.token(element.kind(), text)
+  end
+  if element.is_trivia()
+    return builder.trivia(element.kind(), text)
+  end
+  children = List[SyntaxElement]()
+  for child in element.children()
+    children.push(rewrite(child, from, to))
+  end
+  builder.node(element.kind(), children)
+end
+
+def run_source(tree: SyntaxNode): Result[Int, CodeError] with Compiler, Vm
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  options = CompileOptions(
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = case sys.compiler.compile_syntax(tree, env, options)
+  in Ok(value) then value
+  in Err(problem) then return Err(CodeError(problem.message))
+  end
+  module = artifact.verify()?
+  image = sys.vm.Vm()
+  instance = image.install(module)?
+  entry = instance.entry[(), Int]()?
+  case image.activate(entry, args: ())?.run()
+  in Done(value) then Ok(value)
+  in Fault(problem) then Err(CodeError(problem.code()))
+  end
+end
+
+def report(): (Bool, Bool, [Result[Int, CodeError]]) with Reflect, Compiler, Vm
+  text = original()
+  parse = sys.reflect.parse_syntax(text)
+  root = parse.tree.root()
+
+  # A tree with no edit rebuilds the file exactly.
+  unchanged = rewrite(root, "nothing", "nothing")
+  round_trip = unchanged.text().to_string() == text
+
+  edited = rewrite(root, "10", "25")
+  changed = edited.text().to_string()
+
+  # The only difference is the number. The comment, the blank line,
+  # and the two space indent are all still there.
+  expected = source([
+    "# The limit this service enforces.",
+    "def limit(): Int",
+    "  25",
+    "end",
+    "",
+    "limit()"
+  ])
+  exact = changed == expected
+
+  before = run_source(root)
+  after = case edited is SyntaxNode
+  in true then run_source(edited as SyntaxNode)
+  in false then Err(CodeError("the rewrite lost the root node"))
+  end
+  ran: [Result[Int, CodeError]] = []
+  ran.push(before)
+  ran.push(after)
+  (round_trip, exact, ran.freeze())
+end
+
+# The file rebuilds byte for byte, the edit lands where it should,
+# and both versions still compile and run.
+report()

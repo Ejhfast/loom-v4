@@ -1,0 +1,65 @@
+# Run code you did not write, and grant it nothing.
+#
+# Run with `--allow Compiler,Vm`.
+#
+# Three separate authorities guard this path, and holding one grants
+# nothing about the others:
+#
+# - `CompileEnv` decides what names the source may mention;
+# - the verifier decides whether the artifact may install at all;
+# - the run policy table decides what the code may perform.
+#
+# So a rule that compiles is still not a rule that may print, read a
+# file, or open a socket. The guest below tries all three cases.
+
+def build(text: String): Result[VerifiedModule, CodeError] with Compiler
+  # An empty compile environment. The guest can name no module, so
+  # it cannot reach any definition this program holds.
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  options = CompileOptions(
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = case sys.compiler.compile("guest", text, env, options)
+  in Ok(value) then value
+  in Err(problem) then return Err(CodeError(problem.message))
+  end
+  artifact.verify()
+end
+
+def score(text: String): Result[Int, CodeError] with Compiler, Vm
+  module = build(text)?
+  image = sys.vm.Vm()
+  instance = image.install(module)?
+  entry = instance.entry[(), Int]()?
+
+  # A new run starts with the default-deny table. The holder passes
+  # nothing through, so any operation the guest performs stops here.
+  run = image.activate(entry, args: ())?
+  case run.run()
+  in Done(value) then Ok(value)
+  in Fault(problem) then Err(CodeError(problem.code()))
+  end
+end
+
+def report(): [Result[Int, CodeError]] with Compiler, Vm
+  out: [Result[Int, CodeError]] = []
+
+  # A rule that only computes. This one is welcome.
+  out.push(score("def rule(n: Int): Int\n  n * 7\nend\nrule(6)\n"))
+
+  # A rule that tries to name an outside module. The compile
+  # environment holds nothing, so it never becomes an artifact.
+  out.push(score("use secrets\nsecrets.key()\n"))
+
+  # A rule that tries to print. It compiles and it verifies, because
+  # printing is a legal thing for a program to declare. The run
+  # policy is what stops it.
+  out.push(score("def rule(): Int with Io.Print\n  sys.io.print(\"out\\n\")\n  1\nend\nrule()\n"))
+  out.freeze()
+end
+
+report()
