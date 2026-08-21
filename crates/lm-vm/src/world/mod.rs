@@ -1892,7 +1892,9 @@ mod tests {
         world.machines[middle as usize].vm.state = MachineState::Done;
         world.machines[leaf as usize].vm.state = MachineState::Ready;
         for vm in [0, middle, leaf] {
-            world.machines[vm as usize].table.exact[op as usize] = Some(Action::Pass);
+            world.machines[vm as usize]
+                .table
+                .set_exact(op, Some(Action::Pass));
         }
 
         assert!(matches!(
@@ -1900,7 +1902,9 @@ mod tests {
             Resolution::Root
         ));
 
-        world.machines[middle as usize].table.exact[op as usize] = Some(Action::Block);
+        world.machines[middle as usize]
+            .table
+            .set_exact(op, Some(Action::Block));
         assert!(matches!(
             world.resolve_policy(PolicyCursor::Table(leaf), op),
             Resolution::Denied
@@ -1915,8 +1919,10 @@ mod tests {
         let op = lm_abi::OP_CLOCK_NOW;
         world.machines[0].vm.state = MachineState::Done;
         world.machines[child as usize].vm.state = MachineState::Ready;
-        world.machines[0].table.exact[op as usize] = Some(Action::Pass);
-        world.machines[child as usize].table.exact[op as usize] = Some(Action::Pass);
+        world.machines[0].table.set_exact(op, Some(Action::Pass));
+        world.machines[child as usize]
+            .table
+            .set_exact(op, Some(Action::Pass));
 
         assert!(matches!(
             world.resolve_policy(PolicyCursor::Table(child), op),

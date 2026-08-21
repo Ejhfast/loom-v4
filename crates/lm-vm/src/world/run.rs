@@ -144,11 +144,11 @@ impl World {
     pub fn allow(&mut self, name: &str) -> Result<(), String> {
         let table = &mut self.machines[0].table;
         if let Some(op) = lm_abi::op_by_name(name) {
-            table.exact[op as usize] = Some(Action::Pass);
+            table.set_exact(op, Some(Action::Pass));
             return Ok(());
         }
         if let Some(group) = lm_abi::group_by_name(name) {
-            table.group[group as usize] = Some(Action::Pass);
+            table.set_group(group, Some(Action::Pass));
             return Ok(());
         }
         Err(format!(
@@ -469,11 +469,11 @@ impl World {
     pub fn allow_on(&mut self, vm: VmId, name: &str) -> Result<(), String> {
         let table = &mut self.machines[vm as usize].table;
         if let Some(op) = lm_abi::op_by_name(name) {
-            table.exact[op as usize] = Some(Action::Pass);
+            table.set_exact(op, Some(Action::Pass));
             return Ok(());
         }
         if let Some(group) = lm_abi::group_by_name(name) {
-            table.group[group as usize] = Some(Action::Pass);
+            table.set_group(group, Some(Action::Pass));
             return Ok(());
         }
         Err(format!(
@@ -486,8 +486,7 @@ impl World {
     /// A restored machine starts default-deny, so the count states
     /// exactly what restore granted.
     pub fn table_entry_count(&self, vm: VmId) -> usize {
-        let table = &self.machines[vm as usize].table;
-        table.exact.iter().flatten().count() + table.group.iter().flatten().count()
+        self.machines[vm as usize].table.entry_count()
     }
 
     /// True when the table of one machine passes one group by name.
@@ -496,7 +495,7 @@ impl World {
             return false;
         };
         matches!(
-            self.machines[vm as usize].table.group[group as usize],
+            self.machines[vm as usize].table.group_action(group),
             Some(Action::Pass)
         )
     }

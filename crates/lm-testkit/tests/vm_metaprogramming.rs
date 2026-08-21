@@ -359,13 +359,18 @@ def add(value: Int): Int
 end
 
 def execute(): Bool
-  case codeof(add).source()
+  portable = codeof(add)
+  definition = portable.definition()
+  case portable.source()
   in Some(source)
     source.path == "meta.lm" and
     source.syntax.kind() == 6 and
     source.syntax.text().contains("value + 1") and
     source.slots.len() == 1 and
-    source.contract == source.contract
+    source.slot_keys.len() == 1 and
+    source.definition_hash == definition.definition_hash and
+    source.module_hash == definition.module_hash and
+    source.slot_keys.at(0) == definition.slot_keys.at(0)
   in None then false
   end
 end
@@ -473,6 +478,13 @@ def execute(): Result[(Int, Int), String] with Compiler.CompileSyntax, Compiler.
   code = module.function_code[(Int,), Int]("add").map_error() {
     |error: CodeError| error.message
   }?
+  replacement_definition = code.definition()
+  if replacement_definition.definition_hash == definition.definition_hash
+    return Err("the edited body kept its definition hash")
+  end
+  if replacement_definition.slot_keys.at(0) != definition.slot_keys.at(0)
+    return Err("the compatible edit changed its slot key")
+  end
   image = sys.vm.Vm()
   original_binding = image.install(portable).map_error() {
     |error: CodeError| error.message
@@ -2012,8 +2024,8 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Compiler.Verify, Vm
     case fault.site()
     in None then false
     in Some(site)
-      site.function == second_source.contract and
-      site.function != first_source.contract
+      site.function == second_source.definition_hash and
+      site.function != first_source.definition_hash
     end
   end
 end
@@ -3041,6 +3053,220 @@ execute()
     assert!(slots
         .iter()
         .any(|slot| matches!(slot, lm_vm::snapshot::ImageSlotTarget::Process { .. })));
+}
+
+#[test]
+fn a_value_change_commits_and_a_stale_change_publishes_nothing() {
+    let artifact = complete_slot_artifact();
+    let source = r#"
+def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
+  bytes = case sys.fs.open("slot-kinds.lmbc", ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes)
+end
+
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
+  image = sys.vm.Vm()
+  module = case read_artifact().verify()
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  instance = case image.install(module)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  spec = case instance.slot_spec("slot-kinds.value")
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  slot = case instance.slot_for(spec)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+
+  first = case image.change_value(slot, 41)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  first_batch = List[SlotChange]()
+  first_batch.push(first)
+  case image.replace_all(first_batch)
+  in Ok(_) then ()
+  in Err(_) then return false
+  end
+
+  stale = case image.change_value(slot, 42)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  case image.replace_value(slot, 43)
+  in Ok(_) then ()
+  in Err(_) then return false
+  end
+  stale_batch = List[SlotChange]()
+  stale_batch.push(stale)
+  stale_rejected = case image.replace_all(stale_batch)
+  in Ok(_) then false
+  in Err(_) then true
+  end
+  case image.snapshot()
+  in Ok(_) then stale_rejected
+  in Err(_) then false
+  end
+end
+
+execute()
+"#;
+    let bytes = compile_to_bytes("value-change.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut()
+        .set_file("slot-kinds.lmbc", artifact.clone());
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    for grant in ["Fs", "Vm", "Compiler.Verify"] {
+        world.allow(grant).expect("the grant exists");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(true)");
+    let image = world.last_snapshot().expect("the full snapshot exists");
+    assert!(image.world().vm_images[0].slots.iter().any(|slot| {
+        matches!(
+            slot,
+            lm_vm::snapshot::ImageSlotTarget::Value(lm_value::Value::Int(43))
+        )
+    }));
+}
+
+#[test]
+fn a_process_change_keeps_its_target_and_rejects_a_stale_change() {
+    let artifact = complete_slot_artifact();
+    let source = r#"
+class Worker < Proc[Int]
+  answer: Int
+
+  def init(mut self, answer: Int)
+    self.answer = answer
+  end
+
+  def on_spawn(self): Int with Proc
+    self.answer
+  end
+end
+
+def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
+  bytes = case sys.fs.open("slot-kinds.lmbc", ReadOnly)
+  in Ok(file)
+    value = case file.read(1048576)
+    in Ok(data) then data
+    in Err(_) then Bytes()
+    end
+    file.close()
+    value
+  in Err(_) then Bytes()
+  end
+  sys.vm.artifact(bytes)
+end
+
+def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
+  image = sys.vm.Vm()
+  module = case read_artifact().verify()
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  instance = case image.install(module)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  spec = case instance.slot_spec("slot-kinds.process")
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  slot = case instance.slot_for(spec)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  first = Worker.spawn(7)
+  second = Worker.spawn(9)
+  case first.done()
+  in Done(7) then ()
+  in _ then return false
+  end
+  case second.done()
+  in Done(9) then ()
+  in _ then return false
+  end
+
+  prepared = case image.change_process(slot, first)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  first_batch = List[SlotChange]()
+  first_batch.push(prepared)
+  case image.replace_all(first_batch)
+  in Ok(_) then ()
+  in Err(_) then return false
+  end
+
+  stale = case image.change_process(slot, second)
+  in Ok(value) then value
+  in Err(_) then return false
+  end
+  case image.replace_process(slot, first)
+  in Ok(_) then ()
+  in Err(_) then return false
+  end
+  stale_batch = List[SlotChange]()
+  stale_batch.push(stale)
+  stale_rejected = case image.replace_all(stale_batch)
+  in Ok(_) then false
+  in Err(_) then true
+  end
+  case image.snapshot()
+  in Ok(_) then stale_rejected
+  in Err(_) then false
+  end
+end
+
+execute()
+"#;
+    let bytes = compile_to_bytes("process-change.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let host = Rc::new(RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut()
+        .set_file("slot-kinds.lmbc", artifact.clone());
+    let mut world = World::new(&loaded, VmConfig::default(), Box::new(host));
+    for grant in ["Fs", "Vm", "Proc", "Compiler.Verify"] {
+        world.allow(grant).expect("the grant exists");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(true)");
+    let image = world.last_snapshot().expect("the full snapshot exists");
+    let process = image.world().vm_images[0]
+        .slots
+        .iter()
+        .find_map(|slot| match slot {
+            lm_vm::snapshot::ImageSlotTarget::Process { proc, .. } => Some(*proc),
+            _ => None,
+        })
+        .expect("the process slot has a target");
+    let terminal = &image.world().machines[process as usize].terminal;
+    assert!(
+        matches!(
+            terminal,
+            Some(lm_vm::snapshot::ImageTerminal::Done(lm_value::Value::Int(
+                7
+            )))
+        ),
+        "the staged process target changed: {terminal:?}"
+    );
 }
 
 #[test]

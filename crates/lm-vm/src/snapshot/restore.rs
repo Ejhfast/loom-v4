@@ -30,6 +30,7 @@ pub(crate) struct RestorePlan {
     image_records: Vec<(u32, VmImageRecord)>,
     image_appended: usize,
     image_replacement: Option<(u32, VmImageRecord)>,
+    image_config_update: Option<(u32, VmConfig)>,
     loaded: Option<LoadedModule>,
     installations: Vec<SharedBytes>,
 }
@@ -40,6 +41,7 @@ struct PreparedImages {
     records: Vec<(u32, VmImageRecord)>,
     appended: usize,
     replacement: Option<(u32, VmImageRecord)>,
+    config_update: Option<(u32, VmConfig)>,
 }
 
 /// One prepared full VM restore and its reserved registry entries.
@@ -412,6 +414,7 @@ impl World {
             image_records: prepared_images.records,
             image_appended: prepared_images.appended,
             image_replacement: prepared_images.replacement,
+            image_config_update: prepared_images.config_update,
             loaded,
             installations,
         })
@@ -436,6 +439,35 @@ impl World {
         }
         if reused_source.is_some_and(|source| source as usize >= image.vm_images.len()) {
             return Err(RestoreFail::OtherProgram);
+        }
+        if image.vm_images.len() == 1 && reused_source == Some(0) {
+            let source = &image.vm_images[0];
+            let key = target_key.ok_or(RestoreFail::OtherProgram)?;
+            let config = clamp_image(&source.limits, ceiling);
+            let target = self
+                .vm_images
+                .get(key.image as usize)
+                .ok_or(RestoreFail::OtherProgram)?;
+            let reuses_pristine_image = target.live
+                && target.generation == key.generation
+                && same_image_slots(&target.slots, &source.slots)
+                && target.slot_versions == source.slot_versions
+                && target.heap.live_count() == 0
+                && target.heap.slot_count() == 0
+                && target.instances.is_empty()
+                && source.objects.is_empty()
+                && source.instances.is_empty();
+            if reuses_pristine_image {
+                let mut keys = try_vec(1)?;
+                keys.push(key);
+                return Ok(PreparedImages {
+                    keys,
+                    records: Vec::new(),
+                    appended: 0,
+                    replacement: None,
+                    config_update: Some((key.image, config)),
+                });
+            }
         }
         let new_count = image
             .vm_images
@@ -594,6 +626,7 @@ impl World {
             records,
             appended,
             replacement,
+            config_update: None,
         })
     }
 
@@ -614,6 +647,7 @@ impl World {
             image_records,
             image_appended,
             image_replacement,
+            image_config_update,
             loaded,
             installations,
         } = plan;
@@ -632,6 +666,12 @@ impl World {
         self.installations.extend(installations);
         if let Some((slot, record)) = image_replacement {
             self.vm_images[slot as usize] = record;
+        }
+        if let Some((slot, config)) = image_config_update {
+            let heap = self.empty_image_heap(config);
+            let record = &mut self.vm_images[slot as usize];
+            record.config = config;
+            record.heap = heap;
         }
         let reused = image_records.len().saturating_sub(image_appended);
         for (index, (slot, record)) in image_records.into_iter().enumerate() {
@@ -893,7 +933,7 @@ fn restore_state(
     machine.paused = source.paused;
     if source.is_proc {
         let group = lm_abi::group_by_name("Proc").expect("the manifest declares the Proc group");
-        machine.table.group[group as usize] = Some(Action::Pass);
+        machine.table.set_group(group, Some(Action::Pass));
     }
     machine.children = children;
     machine.is_proc = source.is_proc;
@@ -983,6 +1023,31 @@ fn try_vec<T>(count: usize) -> Result<Vec<T>, RestoreFail> {
         .try_reserve_exact(count)
         .map_err(|_| RestoreFail::LimitExceeded)?;
     Ok(values)
+}
+
+/// Test whether two slot tables hold the same static targets.
+fn same_image_slots(left: &[RuntimeSlotTarget], right: &[super::ImageSlotTarget]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| match (left, right) {
+                (RuntimeSlotTarget::Empty, super::ImageSlotTarget::Empty) => true,
+                (RuntimeSlotTarget::Function(left), super::ImageSlotTarget::Function(right)) => {
+                    left == right
+                }
+                (
+                    RuntimeSlotTarget::Class {
+                        class: left_class,
+                        constructor: left_constructor,
+                    },
+                    super::ImageSlotTarget::Class {
+                        class: right_class,
+                        constructor: right_constructor,
+                    },
+                ) => left_class == right_class && left_constructor == right_constructor,
+                _ => false,
+            })
 }
 
 /// Clamp captured limits by the target ceiling.

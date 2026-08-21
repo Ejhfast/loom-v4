@@ -168,12 +168,30 @@ fn bind_definition(
     let first_module = decode_compile_slot(first)?;
     validate_definition_identity(&first_module, &definition)?;
 
-    for slot in &definition.slots {
+    if definition.slot_keys.len() != definition.slots.len() {
+        return Err(format!(
+            "definition `{}` has misaligned slot keys",
+            definition.local_name
+        ));
+    }
+    for (slot, slot_key) in definition.slots.iter().zip(&definition.slot_keys) {
+        if slot.artifact != first.artifact {
+            return Err(format!(
+                "definition `{}` combines different modules",
+                definition.qualified_key
+            ));
+        }
         let module = decode_compile_slot(slot)?;
         let spec = module
             .slots
             .get(slot.index as usize)
             .ok_or_else(|| "a definition slot index is invalid".to_string())?;
+        if spec.key != *slot_key {
+            return Err(format!(
+                "definition `{}` has another slot key",
+                definition.local_name
+            ));
+        }
         let (binding, kind) = definition_slot_binding(&module, slot, spec, &definition)?;
         let in_family = binding == definition.qualified_key.as_str()
             || binding
@@ -235,9 +253,15 @@ fn validate_definition_identity(
             definition.qualified_key
         ));
     };
-    if found != definition.contract {
+    if found != definition.definition_hash {
         return Err(format!(
             "definition `{}` has another verified identity",
+            definition.qualified_key
+        ));
+    }
+    if identity.semantic_hash != definition.module_hash {
+        return Err(format!(
+            "definition `{}` has another module identity",
             definition.qualified_key
         ));
     }

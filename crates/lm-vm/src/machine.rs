@@ -256,24 +256,70 @@ pub enum Action {
     Mock(ObjRef),
 }
 
-/// One native policy table: dense exact and group action vectors with
-/// an implicit default of block.
-#[derive(Debug)]
+/// One native policy table with an implicit default of block.
+///
+/// Each vector ends at its highest edited slot. A default table owns
+/// no allocation, so operation-manifest growth does not enlarge each machine.
+#[derive(Debug, Default)]
 pub struct PolicyTable {
-    pub exact: Vec<Option<Action>>,
-    pub group: Vec<Option<Action>>,
-}
-
-impl Default for PolicyTable {
-    fn default() -> PolicyTable {
-        PolicyTable {
-            exact: vec![None; lm_abi::OP_COUNT as usize],
-            group: vec![None; lm_abi::GROUP_COUNT as usize],
-        }
-    }
+    exact: Vec<Option<Action>>,
+    group: Vec<Option<Action>>,
 }
 
 impl PolicyTable {
+    fn action(entries: &[Option<Action>], slot: u32) -> Option<Action> {
+        entries.get(slot as usize).copied().flatten()
+    }
+
+    fn set(
+        entries: &mut Vec<Option<Action>>,
+        limit: u32,
+        slot: u32,
+        action: Option<Action>,
+    ) -> bool {
+        if slot >= limit {
+            return false;
+        }
+        if action.is_some() && entries.len() <= slot as usize {
+            entries.resize(slot as usize + 1, None);
+        }
+        if let Some(cell) = entries.get_mut(slot as usize) {
+            *cell = action;
+            while entries.last().is_some_and(Option::is_none) {
+                entries.pop();
+            }
+        }
+        true
+    }
+
+    pub(crate) fn set_exact(&mut self, slot: u32, action: Option<Action>) -> bool {
+        Self::set(&mut self.exact, lm_abi::OP_COUNT, slot, action)
+    }
+
+    pub(crate) fn set_group(&mut self, slot: u32, action: Option<Action>) -> bool {
+        Self::set(&mut self.group, lm_abi::GROUP_COUNT, slot, action)
+    }
+
+    pub(crate) fn group_action(&self, slot: u32) -> Option<Action> {
+        Self::action(&self.group, slot)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.exact.clear();
+        self.group.clear();
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.exact.iter().flatten().count() + self.group.iter().flatten().count()
+    }
+
+    fn actions(&self) -> impl Iterator<Item = Action> + '_ {
+        self.exact
+            .iter()
+            .chain(self.group.iter())
+            .filter_map(|action| *action)
+    }
+
     /// Find the action for one exact operation.
     ///
     /// An exact entry has precedence. A block from any containing
@@ -290,12 +336,12 @@ impl PolicyTable {
     /// 4 ns on `byte_buffer` and 6 ns on `text_compare`.
     #[inline(never)]
     pub fn lookup(&self, op: u32) -> Option<Action> {
-        if let Some(action) = self.exact[op as usize] {
+        if let Some(action) = Self::action(&self.exact, op) {
             return Some(action);
         }
         let mut passed = false;
         for group in lm_abi::groups_containing_op(op) {
-            match self.group[*group as usize] {
+            match Self::action(&self.group, *group) {
                 Some(Action::Block) => return Some(Action::Block),
                 Some(Action::Pass) => passed = true,
                 Some(Action::Mock(closure)) => return Some(Action::Mock(closure)),
@@ -958,8 +1004,7 @@ impl Machine {
         self.start_body = None;
         let retain_policy = self.children > 0;
         if !retain_policy {
-            self.table.exact.fill(None);
-            self.table.group.fill(None);
+            self.table.clear();
         }
         self.resources.compact_closed();
         self.collect_garbage(&[]);
@@ -1055,9 +1100,9 @@ impl Machine {
                 roots.push(*r);
             }
         }
-        for action in self.table.exact.iter().chain(self.table.group.iter()) {
-            if let Some(Action::Mock(r)) = action {
-                roots.push(*r);
+        for action in self.table.actions() {
+            if let Action::Mock(reference) = action {
+                roots.push(reference);
             }
         }
         // The proc body waits for the constructor frame to return.
@@ -3101,7 +3146,7 @@ impl Machine {
             .get(definition.source as usize)
             .ok_or(BAD_STATE)?;
         let identity = lm_bytecode::identity::module_identity(&decoded).map_err(|_| BAD_STATE)?;
-        let contract = match kind {
+        let definition_hash = match kind {
             lm_bytecode::debug::DefinitionKind::Function => identity
                 .func_hashes
                 .get(code.index as usize)
@@ -3134,10 +3179,19 @@ impl Machine {
         self.push(records)?;
         let syntax = self.alloc_syntax_view(syntax_class, text, records, definition.syntax)?;
         self.push(syntax)?;
-        let contract = self.alloc(Object::NativeDigest(contract))?;
-        self.push(contract)?;
+        let definition_hash = self.alloc(Object::NativeDigest(definition_hash))?;
+        self.push(definition_hash)?;
+        let module_hash = self.alloc(Object::NativeDigest(identity.semantic_hash))?;
+        self.push(module_hash)?;
 
+        let mut slot_keys = Vec::new();
+        slot_keys
+            .try_reserve_exact(decoded.slots.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
         let mut slot_values = Vec::new();
+        slot_values
+            .try_reserve_exact(decoded.slots.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
         for (index, slot) in decoded.slots.iter().enumerate() {
             let matches = match (kind, slot.initial) {
                 (
@@ -3154,6 +3208,9 @@ impl Machine {
                 continue;
             }
             let index = u32::try_from(index).map_err(|_| BAD_STATE)?;
+            let key = self.alloc(Object::NativeDigest(slot.key))?;
+            self.push(key)?;
+            slot_keys.push(key);
             let value = self.alloc(Object::NativeCode(Box::new(lm_heap::PortableCode {
                 kind: lm_heap::PortableCodeKind::SlotSpec,
                 bytes: code.bytes.clone(),
@@ -3164,14 +3221,23 @@ impl Machine {
             self.push(value)?;
             slot_values.push(value);
         }
+        let slot_keys = self.alloc(Object::List {
+            items: slot_keys,
+            epoch: StructuralEpoch::default(),
+        })?;
+        let slot_keys_reference = slot_keys.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(slot_keys_reference);
+        self.push(slot_keys)?;
         let slots = self.alloc(Object::List {
             items: slot_values,
             epoch: StructuralEpoch::default(),
         })?;
+        let slots_reference = slots.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(slots_reference);
         self.push(slots)?;
         let value = self.alloc(Object::Instance {
             class: source_class,
-            fields: vec![path, syntax, contract, slots],
+            fields: vec![path, syntax, definition_hash, module_hash, slot_keys, slots],
             env: Witness::EMPTY,
         })?;
         let reference = value.as_obj().ok_or(BAD_STATE)?;
@@ -3198,7 +3264,7 @@ impl Machine {
         };
         let decoded = lm_bytecode::decode(code.bytes.as_slice()).map_err(|_| BAD_STATE)?;
         let identity = lm_bytecode::identity::module_identity(&decoded).map_err(|_| BAD_STATE)?;
-        let (qualified_key, module_name, contract, related_functions) = match code.kind {
+        let (qualified_key, module_name, definition_hash, related_functions) = match code.kind {
             lm_heap::PortableCodeKind::Function => {
                 let binding = decoded
                     .bindings
@@ -3213,11 +3279,16 @@ impl Machine {
                     .rsplit_once('.')
                     .map_or("", |(prefix, _)| prefix)
                     .to_string();
-                let contract = *identity
+                let definition_hash = *identity
                     .func_hashes
                     .get(code.index as usize)
                     .ok_or(BAD_STATE)?;
-                (binding.key.clone(), module_name, contract, vec![code.index])
+                (
+                    binding.key.clone(),
+                    module_name,
+                    definition_hash,
+                    vec![code.index],
+                )
             }
             lm_heap::PortableCodeKind::Class => {
                 let class = decoded.classes.get(code.index as usize).ok_or(BAD_STATE)?;
@@ -3231,7 +3302,7 @@ impl Machine {
                         .ok_or(BAD_STATE)?
                         .to_string()
                 };
-                let contract = *identity
+                let definition_hash = *identity
                     .class_hashes
                     .get(code.index as usize)
                     .ok_or(BAD_STATE)?;
@@ -3240,7 +3311,7 @@ impl Machine {
                     .iter()
                     .map(|(_, function)| *function)
                     .collect();
-                (class.key.clone(), module_name, contract, related)
+                (class.key.clone(), module_name, definition_hash, related)
             }
             _ => return Err(BAD_TYPE),
         };
@@ -3258,9 +3329,15 @@ impl Machine {
             SharedText::try_from_string(qualified_key).map_err(|_| FaultCode::HeapLimit)?;
         let qualified_key = self.alloc(Object::Str(qualified_key))?;
         self.push(qualified_key)?;
-        let contract = self.alloc(Object::NativeDigest(contract))?;
-        self.push(contract)?;
+        let definition_hash = self.alloc(Object::NativeDigest(definition_hash))?;
+        self.push(definition_hash)?;
+        let module_hash = self.alloc(Object::NativeDigest(identity.semantic_hash))?;
+        self.push(module_hash)?;
 
+        let mut slot_keys = Vec::new();
+        slot_keys
+            .try_reserve_exact(decoded.slots.len())
+            .map_err(|_| FaultCode::HeapLimit)?;
         let mut slot_values = Vec::new();
         slot_values
             .try_reserve_exact(decoded.slots.len())
@@ -3285,6 +3362,9 @@ impl Machine {
                 continue;
             }
             let index = u32::try_from(index).map_err(|_| BAD_STATE)?;
+            let key = self.alloc(Object::NativeDigest(slot.key))?;
+            self.push(key)?;
+            slot_keys.push(key);
             let value = self.alloc(Object::NativeCode(Box::new(lm_heap::PortableCode {
                 kind: lm_heap::PortableCodeKind::SlotSpec,
                 bytes: code.bytes.clone(),
@@ -3298,6 +3378,13 @@ impl Machine {
         if slot_values.is_empty() {
             return Err(BAD_STATE);
         }
+        let slot_keys = self.alloc(Object::List {
+            items: slot_keys,
+            epoch: StructuralEpoch::default(),
+        })?;
+        let slot_keys_reference = slot_keys.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(slot_keys_reference);
+        self.push(slot_keys)?;
         let slots = self.alloc(Object::List {
             items: slot_values,
             epoch: StructuralEpoch::default(),
@@ -3307,7 +3394,14 @@ impl Machine {
         self.push(slots)?;
         let value = self.alloc(Object::Instance {
             class: definition_class,
-            fields: vec![module_name, qualified_key, contract, slots],
+            fields: vec![
+                module_name,
+                qualified_key,
+                definition_hash,
+                module_hash,
+                slot_keys,
+                slots,
+            ],
             env: Witness::EMPTY,
         })?;
         let definition_reference = value.as_obj().ok_or(BAD_STATE)?;
@@ -5154,16 +5248,16 @@ mod tests {
     #[test]
     fn policy_set_overlap_has_stable_precedence() {
         let mut table = PolicyTable::default();
-        let client = lm_abi::group_by_name("Tcp.Client").unwrap() as usize;
-        let stream = lm_abi::group_by_name("Tcp.Stream").unwrap() as usize;
-        table.group[client] = Some(Action::Pass);
+        let client = lm_abi::group_by_name("Tcp.Client").unwrap();
+        let stream = lm_abi::group_by_name("Tcp.Stream").unwrap();
+        table.set_group(client, Some(Action::Pass));
         assert!(matches!(
             table.lookup(lm_abi::OP_TCP_READ),
             Some(Action::Pass)
         ));
         assert!(table.lookup(lm_abi::OP_TCP_LISTEN).is_none());
 
-        table.group[stream] = Some(Action::Block);
+        table.set_group(stream, Some(Action::Block));
         assert!(matches!(
             table.lookup(lm_abi::OP_TCP_READ),
             Some(Action::Block)
@@ -5173,7 +5267,7 @@ mod tests {
             Some(Action::Pass)
         ));
 
-        table.exact[lm_abi::OP_TCP_READ as usize] = Some(Action::Pass);
+        table.set_exact(lm_abi::OP_TCP_READ, Some(Action::Pass));
         assert!(matches!(
             table.lookup(lm_abi::OP_TCP_READ),
             Some(Action::Pass)

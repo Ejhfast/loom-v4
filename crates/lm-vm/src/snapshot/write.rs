@@ -634,23 +634,25 @@ impl World {
         }
         funcs.sort_unstable();
         classes.sort_unstable();
-        let identity = self.identity().map_err(|code| {
+        // Keep a separate loaded-code handle while the result type closes.
+        // This avoids cloning every class hash for each snapshot.
+        let loaded = self.loaded_code();
+        let identity = loaded.identity().map_err(|code| {
             SnapshotFail::Fault(code, "the program has no verified identity".to_string())
         })?;
         let funcs: Vec<(u32, [u8; 32])> = funcs
             .into_iter()
             .map(|slot| (slot, identity.func_hashes[slot as usize]))
             .collect();
-        let class_hashes: Vec<[u8; 32]> = identity.class_hashes.clone();
         let classes: Vec<(u32, [u8; 32])> = classes
             .into_iter()
-            .map(|slot| (slot, class_hashes[slot as usize]))
+            .map(|slot| (slot, identity.class_hashes[slot as usize]))
             .collect();
         let semantic = identity.semantic_hash;
         // The header names the selected run result type. A full VM
         // snapshot has no selected run and records zeros.
         let result_type = match distinguished {
-            Some(machine) => self.machine_result_digest(machine, &class_hashes)?,
+            Some(machine) => self.machine_result_digest(machine, &identity.class_hashes)?,
             None => [0u8; 32],
         };
         let mut installations = Vec::new();
@@ -712,6 +714,21 @@ impl World {
         key: VmImageKey,
         ordinal_of: &impl Fn(VmId) -> Option<u32>,
     ) -> Result<ImageVm, SnapshotFail> {
+        let record = &self.vm_images[key.image as usize];
+        if record.slots.is_empty()
+            && record.slot_versions.is_empty()
+            && record.heap.live_count() == 0
+            && record.heap.slot_count() == 0
+            && record.instances.is_empty()
+        {
+            return Ok(ImageVm {
+                limits: image_limits(record.config),
+                slots: Vec::new(),
+                slot_versions: Vec::new(),
+                objects: Vec::new(),
+                instances: Vec::new(),
+            });
+        }
         let roots: Vec<ObjRef> = self.vm_images[key.image as usize]
             .slots
             .iter()

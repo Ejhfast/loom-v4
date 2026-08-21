@@ -459,7 +459,7 @@ The type universe has four strata.
 | `FunctionCode[A,T]` | Portable verified function code |
 | `ClassCode` | Portable verified class code |
 | `DefinitionSpec` | Verified identity and slot contracts for one definition |
-| `DefinitionSource` | Optional syntax and contract data for portable code |
+| `DefinitionSource` | Optional syntax and verified identity data for portable code |
 | `SourceRange` | Half-open byte range in one source text |
 | `CodeLocation` | Function identity, bytecode offset, and optional source location |
 | `FunctionDef[A,T]` | Installed function definition |
@@ -2325,13 +2325,23 @@ Definitions outside the closure remain static.
 
 `ClassCode.definition()` returns `DefinitionSpec`.
 
-`DefinitionSpec` contains `module_name`, `qualified_key`, `contract`, and `slots` fields.
+`DefinitionSpec` contains six fields.
+
+The fields are `module_name`, `qualified_key`, `definition_hash`, `module_hash`, `slot_keys`, and `slots`.
+
+The definition hash includes the selected implementation.
+
+The module hash identifies the complete verified source module.
+
+Each slot key combines one qualified binding with its body-independent contract hash.
+
+The slot keys align with the slot specifications.
 
 The module name is a logical namespace. It is not a filesystem path.
 
 The compiler uses `CompileEnv.definitions` to bind local declarations to these verified contracts.
 
-`DefinitionSource` contains `path`, `syntax`, `contract`, and `slots` fields.
+`DefinitionSource` contains `path`, `syntax`, `definition_hash`, `module_hash`, `slot_keys`, and `slots`.
 
 The source attachment does not affect semantic or verification hashes.
 

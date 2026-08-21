@@ -258,20 +258,16 @@ impl World {
         let limit = self.machines[child as usize].config.mailbox_limit;
         {
             let m = &mut self.machines[child as usize];
-            m.table.group[group as usize] = Some(Action::Pass);
+            m.table.set_group(group, Some(Action::Pass));
             // The birth grant also passes the declared row of the proc
             // body. The spawner charges the same row, so this creates
             // no authority. A proc that drives therefore needs no
             // pause and no table edit before it runs.
             for op in &birth_ops {
-                if let Some(action) = m.table.exact.get_mut(*op as usize) {
-                    *action = Some(Action::Pass);
-                }
+                m.table.set_exact(*op, Some(Action::Pass));
             }
             for group in &birth_groups {
-                if let Some(action) = m.table.group.get_mut(*group as usize) {
-                    *action = Some(Action::Pass);
-                }
+                m.table.set_group(*group, Some(Action::Pass));
             }
             m.vm.mailbox = Mailbox::new(limit);
             m.start_body = Some(body);
@@ -810,25 +806,21 @@ impl World {
             }
             _ => None,
         };
-        let t = &mut self.machines[target as usize].table;
-        // The verifier bounds every table-edit slot, so the store
-        // reaches a live entry. A slot outside the table drops the
-        // edit instead of indexing past it.
-        let cell = if kind == 0 {
-            t.exact.get_mut(slot as usize)
+        let table = &mut self.machines[target as usize].table;
+        // The verifier bounds every table-edit slot. A bad slot still
+        // faults instead of changing the table.
+        let stored = if kind == 0 {
+            table.set_exact(slot, entry)
         } else {
-            t.group.get_mut(slot as usize)
+            table.set_group(slot, entry)
         };
-        match cell {
-            Some(cell) => *cell = entry,
-            None => {
-                self.machines[vm as usize].set_fault(
-                    FaultCode::MalformedState,
-                    "the table edit names no policy slot",
-                    None,
-                );
-                return;
-            }
+        if !stored {
+            self.machines[vm as usize].set_fault(
+                FaultCode::MalformedState,
+                "the table edit names no policy slot",
+                None,
+            );
+            return;
         }
         // A table edit is an ordinary instruction: push the unit
         // result directly.

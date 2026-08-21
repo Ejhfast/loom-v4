@@ -260,7 +260,21 @@ Generic definitions require an explicit type application in version 0.2.
 
 `ClassCode.definition()` returns one frozen `DefinitionSpec`.
 
-The specification contains a logical module name, qualified key, definition identity, and verified slot specifications.
+The specification contains a logical module name and a qualified key.
+
+It also contains a definition hash, module hash, slot keys, and verified slot specifications.
+
+The definition hash includes the selected implementation.
+
+The module hash identifies the complete verified source module.
+
+Each slot key combines one qualified binding with its body-independent contract hash.
+
+Equal slot keys identify the same compatible replacement address.
+
+`ModuleIdentity.interface_hashes` identifies declared Loom interfaces instead.
+
+Those hashes do not identify function or class replacement contracts.
 
 The logical module name creates qualified declaration keys.
 
@@ -949,7 +963,7 @@ It does affect the exact container hash.
 
 The selected node is one definition or one required recursive definition group.
 
-It also contains the diagnostic source name, slot specifications, and declared contract identity.
+It also contains the diagnostic source name, definition hash, module hash, slot keys, and slot specifications.
 
 Tools can inspect or transform that node with the public syntax API.
 
@@ -1284,7 +1298,15 @@ The implementation tracks these benchmark groups:
 - syntax parse, construction, and traversal;
 - nested VM and process control.
 
-No stage can regress unrelated static execution outside normal benchmark noise.
+Steady-state static execution must remain within normal benchmark noise.
+
+The mandatory compiler and syntax surface increases every program artifact.
+
+Release tests must record artifact size, load cost, snapshot cost, and suite time.
+
+Version 0.2 accepts this fixed image growth.
+
+A future standard-module split can remove this cost from programs that do not use metaprogramming.
 
 ## 17. Rejected designs
 

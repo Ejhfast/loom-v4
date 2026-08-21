@@ -53,7 +53,9 @@ pub struct HostCompileDefinition {
     pub local_name: SharedText,
     pub module_name: SharedText,
     pub qualified_key: SharedText,
-    pub contract: [u8; 32],
+    pub definition_hash: [u8; 32],
+    pub module_hash: [u8; 32],
+    pub slot_keys: Vec<[u8; 32]>,
     pub slots: Vec<HostCompileSlot>,
 }
 
