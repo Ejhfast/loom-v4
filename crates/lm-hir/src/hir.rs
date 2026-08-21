@@ -172,6 +172,8 @@ pub struct HirClass {
     /// True for an imported declaration: a shape with no method body
     /// and no construction body.
     pub imported: bool,
+    /// The source definition range for optional debug data.
+    pub source_span: Option<lm_source::Span>,
     /// True when the class cannot have a subclass.
     pub is_final: bool,
     /// The primitive representation of a native core class.
@@ -217,6 +219,8 @@ pub struct HirClass {
 pub struct HirFunc {
     /// True for an imported declaration: a signature with no body.
     pub imported: bool,
+    /// The source definition range for optional debug data.
+    pub source_span: Option<lm_source::Span>,
     pub name: String,
     /// The number of generic type parameters in scope for the body.
     pub type_params: u32,
@@ -508,6 +512,11 @@ pub enum HExprKind {
     /// A portable view of one named class definition.
     ClassCode {
         class: u32,
+    },
+    /// Read optional source metadata from portable definition code.
+    CodeSource {
+        code: Box<HExpr>,
+        element: TypeId,
     },
     /// A stack callback descriptor with a bounded lifetime.
     MakeCallback {

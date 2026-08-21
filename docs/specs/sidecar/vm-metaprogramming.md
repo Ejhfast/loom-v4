@@ -710,6 +710,12 @@ That origin identifies the same shared verified module bytes and local definitio
 
 Both paths therefore install the same portable definition form.
 
+`codeof` creates this portable form without a VM.
+
+The portable form is the primary value for inspection, editing, installation, and replacement.
+
+`Vm.install(function)` is convenience syntax for `Vm.install(codeof(function))`.
+
 Dense installed indices and holder-local handles can differ between installations.
 
 ### 12.2 Definition source records
@@ -717,6 +723,10 @@ Dense installed indices and holder-local handles can differ between installation
 An artifact can carry an optional source attachment in its debug section.
 
 The attachment contains logical source names, source text, syntax records, and definition ranges.
+
+It also maps each `codeof` instruction to one stable source origin key.
+
+The key distinguishes named definitions that share one structural function body.
 
 It does not affect the module semantic hash or verification hash.
 

@@ -687,6 +687,7 @@ mod tests {
             entry: 0,
             exports: Vec::new(),
             bindings: Vec::new(),
+            debug: Vec::new(),
         }
     }
 

@@ -623,6 +623,29 @@ pub(crate) fn step(
                 .map_err(&fail)?;
             push(state, class_code)?;
         }
+        Instr::Extended(ExtendedInstr::CodeSource { ty }) => {
+            let code = pop(state)?;
+            let Some((class, _)) = ctx.as_instance(code) else {
+                return Err(fail("code source needs a portable definition".to_string()));
+            };
+            if Some(class) != ctx.core.function_code && Some(class) != ctx.core.class_code {
+                return Err(fail(
+                    "code source needs FunctionCode or ClassCode".to_string(),
+                ));
+            }
+            let source = ctx
+                .plain_inst(ctx.core.definition_source, "DefinitionSource")
+                .map_err(&fail)?;
+            let found = ctx
+                .option_arg(*ty)
+                .ok_or_else(|| fail(format!("type {ty} is not pinned Option")))?;
+            if found != source {
+                return Err(fail(
+                    "code source result must be Option[DefinitionSource]".to_string(),
+                ));
+            }
+            push(state, *ty)?;
+        }
         Instr::Extended(ExtendedInstr::AsCallback) => {
             let function = pop(state)?;
             let BcType::Fn(params, muts, ret, row) = ctx.ty(function) else {

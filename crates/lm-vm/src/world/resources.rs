@@ -127,6 +127,7 @@ impl World {
                         bytes: module.clone(),
                         interface: Some(interface.clone()),
                         index: u32::MAX,
+                        origin: None,
                     },
                 )))
             }

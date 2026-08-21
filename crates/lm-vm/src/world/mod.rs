@@ -763,6 +763,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         })
         .expect("the trivial module verifies")
     }
@@ -809,6 +810,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         })
         .into()
     }
@@ -982,6 +984,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         })
         .expect("the slot module verifies");
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
@@ -1041,6 +1044,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         })
         .expect("the value-slot module verifies");
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
@@ -1172,6 +1176,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         })
         .expect("the method-slot module verifies");
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));
@@ -1282,6 +1287,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         };
         let abi = lm_bytecode::identity::module_identity(&module)
             .expect("the provisional identity resolves")
@@ -1398,6 +1404,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         })
         .expect("the process-slot module verifies");
         let mut world = World::new(&loaded, VmConfig::default(), Box::new(NullHost));

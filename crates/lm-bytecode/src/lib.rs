@@ -11,6 +11,7 @@
 pub mod append;
 pub mod closed;
 pub mod corepin;
+pub mod debug;
 pub mod hash;
 pub mod identity;
 pub mod interface;
@@ -34,7 +35,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 135;
+pub const CORE_ROLE_COUNT: usize = 136;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -618,6 +619,8 @@ pub enum ExtendedInstr {
     FunctionCode { func: u32 },
     /// Push one portable view of a named class definition.
     ClassCode { class: u32 },
+    /// Read optional source data from portable definition code.
+    CodeSource { ty: u32 },
 }
 
 /// One native value instruction.
@@ -1021,6 +1024,10 @@ pub struct Module {
     /// so a binding key never reaches the verifier and never enters a
     /// structural hash.
     pub bindings: Vec<FuncBinding>,
+    /// Optional source and diagnostic metadata.
+    ///
+    /// This content stays outside the semantic and verification regions.
+    pub debug: Vec<u8>,
 }
 
 impl Module {
@@ -1090,7 +1097,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// `ClassDef` role and the complete VM image control manifest.
 /// Version 37 adds fallible activation and stable slot lookup.
 /// Version 38 makes class slots select versioned constructors.
-pub const VERSION: u16 = 38;
+/// Version 39 defines the optional source debug section.
+pub const VERSION: u16 = 39;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1292,6 +1300,7 @@ const OP_SYNTAX_BUILD_NODE: u8 = 0xe3;
 const OP_SYNTAX_TO_TREE: u8 = 0xe4;
 const OP_FUNCTION_CODE: u8 = 0xe5;
 const OP_CLASS_CODE: u8 = 0xe6;
+const OP_CODE_SOURCE: u8 = 0xe7;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1342,25 +1351,25 @@ const SLOT_PROCESS: u8 = 4;
 ///
 /// The container holds the magic and version header, a section
 /// table, the semantic region, the export section with the
-/// definition names and the function bindings, and an empty reserved
-/// debug section. The semantic bytes of a definition do not contain
+/// definition names and the function bindings, and an optional debug
+/// section. The semantic bytes of a definition do not contain
 /// its own name.
 pub fn encode(module: &Module) -> Vec<u8> {
     let semantic = encode_semantic(module);
     let exports = encode_exports(module);
-    let debug: Vec<u8> = Vec::new();
+    let debug = &module.debug;
     let mut out = Vec::with_capacity(HEADER_LEN + semantic.len() + exports.len() + debug.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
     let mut offset = HEADER_LEN as u32;
-    for section in [&semantic, &exports, &debug] {
+    for section in [&semantic, &exports, debug] {
         write_u32(&mut out, offset);
         write_u32(&mut out, section.len() as u32);
         offset += section.len() as u32;
     }
     out.extend_from_slice(&semantic);
     out.extend_from_slice(&exports);
-    out.extend_from_slice(&debug);
+    out.extend_from_slice(debug);
     out
 }
 
@@ -2168,6 +2177,10 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
             out.push(OP_CLASS_CODE);
             write_u32(out, class);
         }
+        ExtendedInstr::CodeSource { ty } => {
+            out.push(OP_CODE_SOURCE);
+            write_u32(out, ty);
+        }
     }
 }
 
@@ -2217,6 +2230,8 @@ pub enum DecodeError {
     /// A core role slot names a class outside the table, or two roles
     /// name one class.
     BadCoreRole,
+    /// The optional debug section is malformed.
+    BadDebug(debug::DebugError),
 }
 
 impl fmt::Display for DecodeError {
@@ -2249,6 +2264,7 @@ impl fmt::Display for DecodeError {
                 write!(f, "a mut marker vector does not match its parameter count")
             }
             DecodeError::BadCoreRole => write!(f, "a core role slot is out of range"),
+            DecodeError::BadDebug(error) => write!(f, "the debug section is invalid: {error}"),
         }
     }
 }
@@ -2467,9 +2483,16 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     }
     let (sem_at, sem_len) = sections[0];
     let (exp_at, exp_len) = sections[1];
-    // The debug section is reserved. Its content is ignored.
+    let (debug_at, debug_len) = sections[2];
     let mut module = decode_semantic(&bytes[sem_at..sem_at + sem_len])?;
     decode_exports(&bytes[exp_at..exp_at + exp_len], &mut module)?;
+    let debug_bytes = &bytes[debug_at..debug_at + debug_len];
+    let info = debug::decode(debug_bytes).map_err(DecodeError::BadDebug)?;
+    debug::validate(&info, &module).map_err(DecodeError::BadDebug)?;
+    if debug::encode(&info) != debug_bytes {
+        return Err(DecodeError::BadDebug(debug::DebugError::NonCanonical));
+    }
+    module.debug = debug_bytes.to_vec();
     Ok(module)
 }
 
@@ -2897,6 +2920,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         entry,
         exports: Vec::new(),
         bindings: Vec::new(),
+        debug: Vec::new(),
     })
 }
 
@@ -3171,6 +3195,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_SYNTAX_TO_TREE => Instr::Extended(ExtendedInstr::SyntaxToTree),
         OP_FUNCTION_CODE => Instr::Extended(ExtendedInstr::FunctionCode { func: cur.u32()? }),
         OP_CLASS_CODE => Instr::Extended(ExtendedInstr::ClassCode { class: cur.u32()? }),
+        OP_CODE_SOURCE => Instr::Extended(ExtendedInstr::CodeSource { ty: cur.u32()? }),
         OP_SB_NEW => Instr::Native(NativeInstr::SbNew),
         OP_SB_APPEND_STR => Instr::Native(NativeInstr::SbAppendStr),
         OP_SB_APPEND_INT => Instr::Native(NativeInstr::SbAppendInt),
@@ -3365,6 +3390,7 @@ mod tests {
                     class: NO_CLASS,
                 },
             ],
+            debug: Vec::new(),
         }
     }
 
@@ -3390,6 +3416,62 @@ mod tests {
         let module = sample_module();
         let bytes = encode(&module);
         assert_eq!(decode(&bytes).unwrap(), module);
+    }
+
+    #[test]
+    fn debug_data_changes_only_the_container_hash() {
+        let plain = sample_module();
+        let mut attached = plain.clone();
+        let built = lm_abi::syntax::build_syntax_node(lm_abi::syntax::KIND_FUNCTION, &[])
+            .expect("the syntax encodes");
+        attached.debug = debug::encode(&debug::DebugInfo {
+            sources: vec![debug::DebugSource {
+                path: "sample.lm".to_string(),
+                text: built.source,
+                syntax: built.records,
+            }],
+            definitions: vec![debug::DebugDefinition {
+                kind: debug::DefinitionKind::Function,
+                target: 0,
+                source: 0,
+                lo: 0,
+                hi: 0,
+                syntax: 0,
+                origin: debug::definition_origin(
+                    "sample.lm",
+                    "",
+                    debug::DefinitionKind::Function,
+                    0,
+                    0,
+                )
+                .expect("the origin hashes"),
+            }],
+            functions: vec![debug::DebugFunction {
+                function: 0,
+                source: 0,
+                lo: 0,
+                hi: 0,
+            }],
+            code_origins: Vec::new(),
+        });
+        let plain_identity = identity::module_identity(&plain).expect("the module hashes");
+        let attached_identity =
+            identity::module_identity(&attached).expect("the attached module hashes");
+        assert_eq!(
+            plain_identity.semantic_hash,
+            attached_identity.semantic_hash
+        );
+        assert_eq!(
+            identity::verification_hash(&plain),
+            identity::verification_hash(&attached)
+        );
+        let plain_bytes = encode(&plain);
+        let attached_bytes = encode(&attached);
+        assert_ne!(
+            identity::container_hash(&plain_bytes),
+            identity::container_hash(&attached_bytes)
+        );
+        assert_eq!(decode(&attached_bytes), Ok(attached));
     }
 
     #[test]
@@ -3589,6 +3671,7 @@ mod tests {
             Instr::Extended(ExtendedInstr::SyntaxBuildTrivia),
             Instr::Extended(ExtendedInstr::SyntaxBuildNode),
             Instr::Extended(ExtendedInstr::SyntaxToTree),
+            Instr::Extended(ExtendedInstr::CodeSource { ty: 0 }),
             Instr::Native(NativeInstr::SbNew),
             Instr::Native(NativeInstr::SbAppendStr),
             Instr::Native(NativeInstr::SbAppendInt),
@@ -3678,6 +3761,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         };
         let mut bytes = encode(&module);
         // The single type tag sits directly after the string count

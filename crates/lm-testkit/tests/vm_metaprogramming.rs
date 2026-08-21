@@ -114,6 +114,120 @@ execute()
 }
 
 #[test]
+fn named_code_exposes_its_independent_source_record() {
+    let source = r#"
+def add(value: Int): Int
+  value + 1
+end
+
+def execute(): Bool
+  case codeof(add).source()
+  in Some(source)
+    source.path == "meta.lm" and
+    source.syntax.kind() == 6 and
+    source.syntax.text().contains("value + 1") and
+    source.slots.len() == 0 and
+    source.contract == source.contract
+  in None then false
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done(true)");
+}
+
+#[test]
+fn codeof_preserves_the_selected_source_for_equal_function_bodies() {
+    let source = r#"
+def first(): Int
+  1
+end
+
+def second(): Int
+  1
+end
+
+def execute(): (Bool, Bool)
+  first_source = case codeof(first).source()
+  in Some(source) then source.syntax.text().contains("def first")
+  in None then false
+  end
+  second_source = case codeof(second).source()
+  in Some(source) then source.syntax.text().contains("def second")
+  in None then false
+  end
+  (first_source, second_source)
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done((true, true))");
+}
+
+#[test]
+fn loom_edits_named_code_syntax_then_installs_the_result() {
+    let source = r#"
+def add(value: Int): Int
+  value + 1
+end
+
+def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
+  original = case codeof(add).source()
+  in Some(source) then source.syntax
+  in None then return -1
+  end
+  children = original.children()
+  builder = SyntaxBuilder()
+  index = 0
+  while index < children.len()
+    if children.at(index).text() == "1"
+      children.set(index, builder.integer("41"))
+    end
+    index = index + 1
+  end
+  edited = original.with_children(children)
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  options = CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = case sys.compiler.compile_syntax(edited, env, options)
+  in Ok(value) then value
+  in Err(_) then return -2
+  end
+  module = case artifact.verify()
+  in Ok(value) then value
+  in Err(_) then return -3
+  end
+  code = case module.function_code[(Int,), Int]("add")
+  in Ok(value) then value
+  in Err(_) then return -4
+  end
+  image = sys.vm.Vm()
+  definition = case image.install(code)
+  in Ok(value) then value
+  in Err(_) then return -5
+  end
+  run = case image.activate(definition, args: (1,))
+  in Ok(value) then value
+  in Err(_) then return -6
+  end
+  case run.run()
+  in Done(value) then value
+  in Fault(_) then -7
+  end
+end
+
+execute()
+"#;
+    assert_eq!(run_with_compiler(source), "Done(42)");
+}
+
+#[test]
 fn a_named_loom_class_becomes_portable_code_without_source_text() {
     let source = r#"
 final class Box
@@ -122,9 +236,14 @@ end
 
 def execute(): Bool with Vm
   code = codeof(Box)
+  has_source = case code.source()
+  in Some(source)
+    source.syntax.kind() == 4 and source.syntax.text().contains("value: Int = 7")
+  in None then false
+  end
   image = sys.vm.Vm()
   case image.install(code)
-  in Ok(_) then true
+  in Ok(_) then has_source
   in Err(_) then false
   end
 end

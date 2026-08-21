@@ -526,6 +526,7 @@ impl<'a> Materializer<'a> {
                 let sig = self.fn_sig(ctx, &method.sig, Some(self_ty), span)?;
                 let func = ctx.push_func(
                     HirFunc {
+                        source_span: None,
                         name: format!("{}.{}", item.name, method.name),
                         type_params: sig.type_params.len() as u32,
                         type_bounds: crate::check::hir_bounds(&sig.type_bounds),
@@ -562,6 +563,7 @@ impl<'a> Materializer<'a> {
             let sig = self.fn_sig(ctx, &item.sig, None, span)?;
             let func = ctx.push_func(
                 HirFunc {
+                    source_span: None,
                     name: item.name.clone(),
                     type_params: sig.type_params.len() as u32,
                     type_bounds: crate::check::hir_bounds(&sig.type_bounds),
@@ -696,6 +698,7 @@ impl<'a> Materializer<'a> {
         }
         Ok(ClassInfo {
             imported: true,
+            source_span: None,
             is_final: class.is_final,
             native_repr: None,
             name: item.name.clone(),

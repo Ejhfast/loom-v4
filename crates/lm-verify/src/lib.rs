@@ -242,7 +242,8 @@ use tables::verify_tables;
 /// verifies `ClassDef` and complete VM image controls. Version 27
 /// verifies fallible activation and stable slot discovery.
 /// Version 28 verifies versioned constructors in class slots.
-pub const VERIFIER_VERSION: u32 = 28;
+/// Version 29 verifies portable definition source lookup.
+pub const VERIFIER_VERSION: u32 = 29;
 
 /// Verify a full module. Every table and every function must pass.
 ///
@@ -374,6 +375,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         }
     }
 
@@ -425,6 +427,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         }
     }
 
@@ -493,6 +496,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         }
     }
 
@@ -1283,6 +1287,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         };
         assert!(verify_module(&m).is_ok(), "{:?}", verify_module(&m));
     }

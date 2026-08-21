@@ -765,6 +765,19 @@ impl<'o> FnChecker<'o> {
         let code_error = Self::core_class(ctx, "CodeError");
         let result = |ctx: &mut Ctx, ok| Self::core_inst(ctx, "Result", vec![ok, code_error]);
         match (class, name) {
+            ("FunctionCode", "source") | ("ClassCode", "source") => {
+                Self::expect_no_args(name, args, span)?;
+                let element = Self::core_class(ctx, "DefinitionSource");
+                let ty = Self::core_inst(ctx, "Option", vec![element]);
+                Ok(HExpr {
+                    ty,
+                    mutable: true,
+                    kind: HExprKind::CodeSource {
+                        code: Box::new(recv_h),
+                        element,
+                    },
+                })
+            }
             ("Artifact", "verify") => {
                 Self::expect_no_args(name, args, span)?;
                 self.charge_op(ctx, lm_abi::OP_COMPILER_VERIFY, span)?;

@@ -95,7 +95,8 @@ use std::collections::{BTreeSet, HashMap};
 /// contract-bound slot identities and Result propagation.
 /// Version 31 binds class slots to constructor contracts and versions.
 /// Version 32 adds portable function and class code instructions.
-pub const COMPILER_ABI_VERSION: u32 = 32;
+/// Version 33 adds portable definition source lookup.
+pub const COMPILER_ABI_VERSION: u32 = 33;
 
 /// The refinement work budget of one component.
 ///
@@ -896,7 +897,8 @@ fn preflight_extended(
         | ExtendedInstr::MapGet { ty }
         | ExtendedInstr::ListPop { ty }
         | ExtendedInstr::MapRemove { ty }
-        | ExtendedInstr::DynPack { ty } => {
+        | ExtendedInstr::DynPack { ty }
+        | ExtendedInstr::CodeSource { ty } => {
             if *ty as usize >= s.types {
                 return Err(bad("type index"));
             }
@@ -1170,7 +1172,8 @@ impl Graph {
                             | ExtendedInstr::ListGet { ty }
                             | ExtendedInstr::MapGet { ty }
                             | ExtendedInstr::ListPop { ty }
-                            | ExtendedInstr::MapRemove { ty } => list.push(s.type_node(*ty)),
+                            | ExtendedInstr::MapRemove { ty }
+                            | ExtendedInstr::CodeSource { ty } => list.push(s.type_node(*ty)),
                             ExtendedInstr::CallSlot { slot, app }
                             | ExtendedInstr::NewSlot { slot, app } => {
                                 push_slot_contract_edges(module, &s, *slot, list);
@@ -1977,6 +1980,7 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::SyntaxToTree => 0xe4,
             ExtendedInstr::FunctionCode { .. } => 0xe5,
             ExtendedInstr::ClassCode { .. } => 0xe6,
+            ExtendedInstr::CodeSource { .. } => 0xe7,
         }
     }
 
@@ -2284,7 +2288,8 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::MapGet { ty }
             | ExtendedInstr::ListPop { ty }
             | ExtendedInstr::MapRemove { ty }
-            | ExtendedInstr::DynPack { ty } => {
+            | ExtendedInstr::DynPack { ty }
+            | ExtendedInstr::CodeSource { ty } => {
                 out.extend_from_slice(&self.type_digest(*ty));
             }
             ExtendedInstr::AsCallback
@@ -3207,6 +3212,7 @@ mod slot_tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         }
     }
 

@@ -63,7 +63,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 80] = [
+pub const PRELUDE_TYPES: [&str; 81] = [
     "Option",
     "Result",
     "Ordering",
@@ -84,6 +84,7 @@ pub const PRELUDE_TYPES: [&str; 80] = [
     "VerifiedModule",
     "FunctionCode",
     "ClassCode",
+    "DefinitionSource",
     "SlotSpec",
     "Instance",
     "Slot",
@@ -303,6 +304,7 @@ pub(crate) fn hir_bounds(bounds: &[Vec<InterfaceUse>]) -> Vec<Vec<HirInterfaceUs
 pub(crate) struct ClassInfo {
     /// True for an imported declaration: a shape with no body.
     pub(crate) imported: bool,
+    pub(crate) source_span: Option<Span>,
     pub(crate) is_final: bool,
     pub(crate) native_repr: Option<NativeRepr>,
     pub(crate) name: String,
@@ -336,6 +338,7 @@ impl ClassInfo {
     pub(crate) fn placeholder(_idx: u32) -> ClassInfo {
         ClassInfo {
             imported: false,
+            source_span: None,
             is_final: false,
             native_repr: None,
             name: String::new(),
@@ -1768,6 +1771,7 @@ pub fn check_module_with(
         let checked = checker.check_callable(&mut ctx, &func.body, sig.ret, func.span)?;
         ctx.funcs[idx] = Some(HirFunc {
             imported: false,
+            source_span: Some(func.span),
             name: func.name.clone(),
             type_params: sig.type_params.len() as u32,
             type_bounds: hir_bounds(&sig.type_bounds),
@@ -1813,6 +1817,7 @@ pub fn check_module_with(
             .map_err(core_defect)?;
         ctx.funcs[index] = Some(HirFunc {
             imported: false,
+            source_span: None,
             name: func.name.clone(),
             type_params: sig.type_params.len() as u32,
             type_bounds: hir_bounds(&sig.type_bounds),
@@ -1842,6 +1847,11 @@ pub fn check_module_with(
     let exports = collect_exports(&ctx, module, &options.module_path)?;
     ctx.funcs[entry_idx] = Some(HirFunc {
         imported: false,
+        source_span: module
+            .entry
+            .first()
+            .zip(module.entry.last())
+            .map(|(first, last)| first.span.to(last.span)),
         name: "<entry>".to_string(),
         type_params: 0,
         type_bounds: Vec::new(),
@@ -1997,6 +2007,7 @@ fn assemble(
             .unwrap_or_default();
         hir_classes.push(HirClass {
             imported: info.imported,
+            source_span: info.source_span,
             is_final: info.is_final,
             native_repr: info.native_repr,
             name: info.name.clone(),
@@ -3315,6 +3326,7 @@ fn resolve_class(
     let conformances = resolve_conformance_shapes(ctx, class, idx, &env)?;
     Ok(ClassInfo {
         imported: false,
+        source_span: (!is_core).then_some(class.span),
         is_final: class.is_final,
         native_repr,
         name: class.name.clone(),
@@ -3422,6 +3434,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
     let arms: Vec<u32> = arm_infos.iter().map(|(idx, _, _, _)| *idx).collect();
     ctx.classes[parent_idx as usize] = ClassInfo {
         imported: false,
+        source_span: (!is_core).then_some(enum_def.span),
         is_final: false,
         native_repr: None,
         name: enum_def.name.clone(),
@@ -3453,6 +3466,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         let count = field_tys.len();
         ctx.classes[arm_class as usize] = ClassInfo {
             imported: false,
+            source_span: (!is_core).then_some(enum_def.span),
             is_final: false,
             native_repr: None,
             name: format!("{}.{}", enum_def.name, short),
@@ -3623,6 +3637,7 @@ fn check_method(
     }
     ctx.funcs[func_idx as usize] = Some(HirFunc {
         imported: false,
+        source_span: (!is_core).then_some(method.span),
         name: format!("{}.{}", ctx.classes[cidx as usize].name, method.name),
         type_params: sig.type_params.len() as u32,
         type_bounds: hir_bounds(&sig.type_bounds),

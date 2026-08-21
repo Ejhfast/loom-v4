@@ -57,6 +57,7 @@ fn importing_module(pin: [u8; 32]) -> Module {
         entry: 1,
         exports: vec![],
         bindings: vec![],
+        debug: Vec::new(),
     }
 }
 

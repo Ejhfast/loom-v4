@@ -227,7 +227,15 @@ pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String
         },
     )
     .map_err(|error| error.render(source))?;
-    Ok(lm_hir::lower_module(&hir))
+    let mut module = lm_hir::lower_module(&hir);
+    crate::module::attach_source_debug(
+        &mut module,
+        source,
+        &ast,
+        &hir,
+        &lm_hir::LowerLinkage::default(),
+    )?;
+    Ok(module)
 }
 
 #[cfg(test)]

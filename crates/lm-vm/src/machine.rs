@@ -434,9 +434,15 @@ pub enum ExecOutcome {
     /// Render one value through its stored closed static type.
     DynamicRender { value: Value, ty: u32 },
     /// Reify one named function as portable verified code.
-    FunctionCode { function: u32 },
+    FunctionCode {
+        function: u32,
+        origin: Option<[u8; 32]>,
+    },
     /// Reify one named class as portable verified code.
-    ClassCode { class: u32 },
+    ClassCode {
+        class: u32,
+        origin: Option<[u8; 32]>,
+    },
 }
 
 /// The serializable state of one machine.
@@ -3011,6 +3017,152 @@ impl Machine {
         Ok(value)
     }
 
+    /// Read one portable definition source attachment.
+    #[inline(never)]
+    fn exec_code_source(
+        &mut self,
+        module: &Module,
+        envs: &mut TypeEnvs,
+        ty: u32,
+    ) -> Result<(), FaultCode> {
+        let reference = self.pop_obj()?;
+        let code = match self.vm.heap.get(reference) {
+            Object::NativeCode(code)
+                if matches!(
+                    code.kind,
+                    lm_heap::PortableCodeKind::Function | lm_heap::PortableCodeKind::Class
+                ) =>
+            {
+                (**code).clone()
+            }
+            _ => return Err(BAD_TYPE),
+        };
+        let decoded = lm_bytecode::decode(code.bytes.as_slice()).map_err(|_| BAD_STATE)?;
+        let debug = lm_bytecode::debug::decode(&decoded.debug).map_err(|_| BAD_STATE)?;
+        lm_bytecode::debug::validate(&debug, &decoded).map_err(|_| BAD_STATE)?;
+        let kind = match code.kind {
+            lm_heap::PortableCodeKind::Function => lm_bytecode::debug::DefinitionKind::Function,
+            lm_heap::PortableCodeKind::Class => lm_bytecode::debug::DefinitionKind::Class,
+            _ => return Err(BAD_TYPE),
+        };
+        let definition = match code.origin {
+            Some(origin) => debug
+                .definitions
+                .iter()
+                .find(|definition| definition.origin == origin),
+            None => debug
+                .definitions
+                .iter()
+                .rev()
+                .find(|definition| definition.kind == kind && definition.target == code.index),
+        };
+        let Some(definition) = definition else {
+            let family = self.close_option_family(module, envs, ty)?;
+            self.push(Value::EmptyCase { ty: family, arm: 1 })?;
+            return Ok(());
+        };
+        let source = debug
+            .sources
+            .get(definition.source as usize)
+            .ok_or(BAD_STATE)?;
+        let identity = lm_bytecode::identity::module_identity(&decoded).map_err(|_| BAD_STATE)?;
+        let contract = match kind {
+            lm_bytecode::debug::DefinitionKind::Function => identity
+                .func_hashes
+                .get(code.index as usize)
+                .copied()
+                .ok_or(BAD_STATE)?,
+            lm_bytecode::debug::DefinitionKind::Class => identity
+                .class_hashes
+                .get(code.index as usize)
+                .copied()
+                .ok_or(BAD_STATE)?,
+        };
+        let syntax_class = module.core_roles[lm_bytecode::corepin::ROLE_SYNTAX_NODE];
+        let source_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_SOURCE];
+        if syntax_class == lm_bytecode::NO_ROLE || source_class == lm_bytecode::NO_ROLE {
+            return Err(BAD_STATE);
+        }
+
+        let root = self.vm.operands.len();
+        let path =
+            SharedText::try_from_string(source.path.clone()).map_err(|_| FaultCode::HeapLimit)?;
+        let path = self.alloc(Object::Str(path))?;
+        self.push(path)?;
+        let text =
+            SharedText::try_from_string(source.text.clone()).map_err(|_| FaultCode::HeapLimit)?;
+        let text = self.alloc(Object::Str(text))?;
+        self.push(text)?;
+        let records =
+            SharedBytes::try_from_slice(&source.syntax).map_err(|_| FaultCode::HeapLimit)?;
+        let records = self.alloc(Object::Bytes(records))?;
+        self.push(records)?;
+        let syntax = self.alloc_syntax_view(syntax_class, text, records, definition.syntax)?;
+        self.push(syntax)?;
+        let contract = self.alloc(Object::NativeDigest(contract))?;
+        self.push(contract)?;
+
+        let mut slot_values = Vec::new();
+        for (index, slot) in decoded.slots.iter().enumerate() {
+            let matches = match (kind, slot.initial) {
+                (
+                    lm_bytecode::debug::DefinitionKind::Function,
+                    Some(lm_bytecode::SlotTarget::Function(target)),
+                ) => target == code.index,
+                (
+                    lm_bytecode::debug::DefinitionKind::Class,
+                    Some(lm_bytecode::SlotTarget::Class { class, .. }),
+                ) => class == code.index,
+                _ => false,
+            };
+            if !matches {
+                continue;
+            }
+            let index = u32::try_from(index).map_err(|_| BAD_STATE)?;
+            let value = self.alloc(Object::NativeCode(Box::new(lm_heap::PortableCode {
+                kind: lm_heap::PortableCodeKind::SlotSpec,
+                bytes: code.bytes.clone(),
+                interface: code.interface.clone(),
+                index,
+                origin: None,
+            })))?;
+            self.push(value)?;
+            slot_values.push(value);
+        }
+        let slots = self.alloc(Object::List {
+            items: slot_values,
+            epoch: StructuralEpoch::default(),
+        })?;
+        self.push(slots)?;
+        let value = self.alloc(Object::Instance {
+            class: source_class,
+            fields: vec![path, syntax, contract, slots],
+            env: Witness::EMPTY,
+        })?;
+        let reference = value.as_obj().ok_or(BAD_STATE)?;
+        self.vm.heap.set_frozen(reference);
+        self.vm.operands.truncate(root);
+        self.push(value)?;
+        Ok(())
+    }
+
+    /// Read the debug origin for the current code reification instruction.
+    fn current_code_origin(&self, module: &Module) -> Option<[u8; 32]> {
+        let frame = self.vm.frames.last()?;
+        let instruction = frame.ip.checked_sub(1)?;
+        let debug = lm_bytecode::debug::decode(&module.debug).ok()?;
+        debug
+            .code_origins
+            .iter()
+            .rev()
+            .find(|origin| {
+                origin.function == frame.func
+                    && origin.block == frame.block
+                    && origin.instruction == instruction
+            })
+            .map(|origin| origin.origin)
+    }
+
     fn syntax_view_class(
         class: lm_abi::syntax::SyntaxClass,
         node: u32,
@@ -3453,10 +3605,19 @@ impl Machine {
                 return Ok(ExecOutcome::DynamicRender { value, ty });
             }
             ExtendedInstr::FunctionCode { func } => {
-                return Ok(ExecOutcome::FunctionCode { function: func });
+                return Ok(ExecOutcome::FunctionCode {
+                    function: func,
+                    origin: self.current_code_origin(module),
+                });
             }
             ExtendedInstr::ClassCode { class } => {
-                return Ok(ExecOutcome::ClassCode { class });
+                return Ok(ExecOutcome::ClassCode {
+                    class,
+                    origin: self.current_code_origin(module),
+                });
+            }
+            ExtendedInstr::CodeSource { ty } => {
+                self.exec_code_source(module, envs, ty)?;
             }
         }
         Ok(ExecOutcome::Continue)

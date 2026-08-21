@@ -1352,6 +1352,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         }
     }
 

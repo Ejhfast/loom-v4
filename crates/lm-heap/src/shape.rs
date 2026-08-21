@@ -251,6 +251,8 @@ pub struct PortableCode {
     pub bytes: SharedBytes,
     pub interface: Option<SharedBytes>,
     pub index: u32,
+    /// The selected debug definition origin, when source data exists.
+    pub origin: Option<[u8; 32]>,
 }
 
 /// The payload of one heap object.
@@ -1318,6 +1320,7 @@ mod tests {
                 bytes: vec![1, 2].into(),
                 interface: None,
                 index: 0,
+                origin: None,
             })),
             Object::NativeCodeHandle {
                 image: 1,
@@ -1504,6 +1507,7 @@ mod tests {
                 bytes: SharedBytes::new(),
                 interface: None,
                 index: 0,
+                origin: None,
             })),
             Object::NativeCodeHandle {
                 image: 0,

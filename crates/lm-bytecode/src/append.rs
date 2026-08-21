@@ -356,6 +356,22 @@ pub fn append_resolved(
             merged.bindings.push(relocated);
         }
     }
+    let mut debug = crate::debug::decode(&base.debug)
+        .map_err(|error| fail(format!("the base debug data is invalid: {error}")))?;
+    crate::debug::validate(&debug, base)
+        .map_err(|error| fail(format!("the base debug data is invalid: {error}")))?;
+    let added_debug = crate::debug::decode(&addition.debug)
+        .map_err(|error| fail(format!("the added debug data is invalid: {error}")))?;
+    crate::debug::validate(&added_debug, addition)
+        .map_err(|error| fail(format!("the added debug data is invalid: {error}")))?;
+    debug
+        .append_relocated(&added_debug, &reloc.funcs, &reloc.classes)
+        .map_err(|error| fail(format!("the added debug data is invalid: {error}")))?;
+    merged.debug = if debug.sources.is_empty() {
+        Vec::new()
+    } else {
+        crate::debug::encode(&debug)
+    };
     Ok(AppendResult {
         module: merged,
         reloc,
@@ -819,6 +835,9 @@ fn reloc_extended(instruction: &ExtendedInstr, reloc: &AppendReloc) -> ExtendedI
         },
         ExtendedInstr::ClassCode { class } => ExtendedInstr::ClassCode {
             class: reloc.classes[*class as usize],
+        },
+        ExtendedInstr::CodeSource { ty } => ExtendedInstr::CodeSource {
+            ty: reloc.types[*ty as usize],
         },
         ExtendedInstr::OptionSome { ty } => ExtendedInstr::OptionSome {
             ty: reloc.types[*ty as usize],

@@ -637,6 +637,30 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             )));
         }
     }
+    if let Some(definition) = slot(lm_bytecode::corepin::ROLE_DEFINITION_SOURCE) {
+        let class = &module.classes[definition as usize];
+        let fields: Vec<&BcType> = class
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| module.types.get(*ty as usize))
+            .collect();
+        let syntax = slot(lm_bytecode::corepin::ROLE_SYNTAX_NODE);
+        let slot_spec = slot(lm_bytecode::corepin::ROLE_SLOT_SPEC);
+        let valid_fields = matches!(fields.as_slice(), [BcType::Str, BcType::Class(found), BcType::Digest, BcType::List(item)]
+            if Some(*found) == syntax
+                && matches!(module.types.get(*item as usize), Some(BcType::Class(found)) if Some(*found) == slot_spec));
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || !valid_fields
+        {
+            return Err(terr(
+                "the DefinitionSource role has an invalid layout".to_string(),
+            ));
+        }
+    }
     for (role, name) in [
         (lm_bytecode::corepin::ROLE_CODE_ERROR, "CodeError"),
         (lm_bytecode::corepin::ROLE_COMPILE_ERRORS, "CompileErrors"),

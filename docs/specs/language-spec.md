@@ -451,6 +451,7 @@ The type universe has four strata.
 | `VerifiedModule` | Portable verified module revision |
 | `FunctionCode[A,T]` | Portable verified function code |
 | `ClassCode` | Portable verified class code |
+| `DefinitionSource` | Optional syntax and contract data for portable code |
 | `FunctionDef[A,T]` | Installed function definition |
 | `ClassDef` | Installed class definition |
 
@@ -2256,6 +2257,16 @@ The optional `LinkEnv` contains provider instances from that VM.
 `codeof(Class)` creates `ClassCode` for a class definition.
 
 `codeof` does not install code and does not require a `Vm`.
+
+`FunctionCode[A,T].source()` returns `Option[DefinitionSource]`.
+
+`ClassCode.source()` returns `Option[DefinitionSource]`.
+
+`DefinitionSource` contains `path`, `syntax`, `contract`, and `slots` fields.
+
+The source attachment does not affect semantic or verification hashes.
+
+The metaprogramming sidecar defines source attachment and origin selection.
 
 Capturing closures cannot become portable code values.
 

@@ -31,6 +31,20 @@ struct CodeProvider {
     classes: Vec<u32>,
 }
 
+fn source_origin(
+    module: &lm_bytecode::Module,
+    kind: lm_bytecode::debug::DefinitionKind,
+    target: u32,
+) -> Option<[u8; 32]> {
+    let debug = lm_bytecode::debug::decode(&module.debug).ok()?;
+    debug
+        .definitions
+        .iter()
+        .rev()
+        .find(|definition| definition.kind == kind && definition.target == target)
+        .map(|definition| definition.origin)
+}
+
 fn closed_rows_match(
     left_module: &lm_bytecode::Module,
     left: &[u32],
@@ -334,6 +348,7 @@ impl World {
             bytes,
             interface: None,
             index: u32::MAX,
+            origin: None,
         }));
         match self.machines[vm as usize].alloc(object) {
             Ok(value) => self.install_value_reply(vm, value),
@@ -375,6 +390,7 @@ impl World {
                         bytes: code.bytes,
                         interface: code.interface,
                         index: u32::MAX,
+                        origin: None,
                     })));
                 let result = value.and_then(|value| self.code_ok(vm, value));
                 self.finish_code_result(vm, op, result);
@@ -405,7 +421,7 @@ impl World {
                 return;
             }
         };
-        self.finish_portable_function_lookup(vm, op, code, module.entry);
+        self.finish_portable_function_lookup(vm, op, code, module.entry, None);
     }
 
     fn code_module_function(&mut self, vm: VmId, op: u32, value: Value, name: Value) {
@@ -442,7 +458,12 @@ impl World {
             );
             return;
         };
-        self.finish_portable_function_lookup(vm, op, code, function);
+        let origin = source_origin(
+            &module,
+            lm_bytecode::debug::DefinitionKind::Function,
+            function,
+        );
+        self.finish_portable_function_lookup(vm, op, code, function, origin);
     }
 
     fn code_module_class(&mut self, vm: VmId, op: u32, value: Value, name: Value) {
@@ -483,6 +504,7 @@ impl World {
             bytes: code.bytes,
             interface: code.interface,
             index: class,
+            origin: source_origin(&module, lm_bytecode::debug::DefinitionKind::Class, class),
         })));
         let result = value.and_then(|value| self.code_ok(vm, value));
         self.finish_code_result(vm, op, result);
@@ -647,7 +669,7 @@ impl World {
 
     fn portable_function_value(&self, vm: VmId, value: Value) -> Result<PortableCode, String> {
         let function = self.function_value_target(vm, value)?;
-        self.portable_function_origin(vm, function)
+        self.portable_function_origin(vm, function, None)
     }
 
     fn function_value_target(&self, vm: VmId, value: Value) -> Result<u32, String> {
@@ -685,13 +707,19 @@ impl World {
         Ok(function)
     }
 
-    fn portable_function_origin(&self, vm: VmId, function: u32) -> Result<PortableCode, String> {
+    fn portable_function_origin(
+        &self,
+        vm: VmId,
+        function: u32,
+        origin: Option<[u8; 32]>,
+    ) -> Result<PortableCode, String> {
         if (function as usize) < self.base_loaded.module().funcs.len() {
             return Ok(PortableCode {
                 kind: PortableCodeKind::Function,
                 bytes: self.base_loaded.artifact_bytes(),
                 interface: None,
                 index: function,
+                origin,
             });
         }
         let preferred = self.machines[vm as usize].image;
@@ -716,6 +744,7 @@ impl World {
                         bytes: instance.artifact.clone(),
                         interface: instance.interface.clone(),
                         index: index as u32,
+                        origin,
                     });
                 }
             }
@@ -740,19 +769,26 @@ impl World {
                     bytes: artifact.clone(),
                     interface: None,
                     index: index as u32,
+                    origin,
                 });
             }
         }
         Err("the function has no retained verified origin".to_string())
     }
 
-    fn portable_class_origin(&self, vm: VmId, class: u32) -> Result<PortableCode, String> {
+    fn portable_class_origin(
+        &self,
+        vm: VmId,
+        class: u32,
+        origin: Option<[u8; 32]>,
+    ) -> Result<PortableCode, String> {
         if (class as usize) < self.base_loaded.module().classes.len() {
             return Ok(PortableCode {
                 kind: PortableCodeKind::Class,
                 bytes: self.base_loaded.artifact_bytes(),
                 interface: None,
                 index: class,
+                origin,
             });
         }
         let preferred = self.machines[vm as usize].image;
@@ -777,6 +813,7 @@ impl World {
                         bytes: instance.artifact.clone(),
                         interface: instance.interface.clone(),
                         index: index as u32,
+                        origin,
                     });
                 }
             }
@@ -805,14 +842,20 @@ impl World {
                     bytes: artifact.clone(),
                     interface: None,
                     index: index as u32,
+                    origin,
                 });
             }
         }
         Err("the class has no retained verified origin".to_string())
     }
 
-    pub(super) fn handle_function_code(&mut self, vm: VmId, function: u32) {
-        match self.portable_function_origin(vm, function) {
+    pub(super) fn handle_function_code(
+        &mut self,
+        vm: VmId,
+        function: u32,
+        origin: Option<[u8; 32]>,
+    ) {
+        match self.portable_function_origin(vm, function, origin) {
             Ok(code) => {
                 let value = self.machines[vm as usize]
                     .alloc(Object::NativeCode(Box::new(code)))
@@ -827,8 +870,8 @@ impl World {
         }
     }
 
-    pub(super) fn handle_class_code(&mut self, vm: VmId, class: u32) {
-        match self.portable_class_origin(vm, class) {
+    pub(super) fn handle_class_code(&mut self, vm: VmId, class: u32, origin: Option<[u8; 32]>) {
+        match self.portable_class_origin(vm, class, origin) {
             Ok(code) => {
                 let value = self.machines[vm as usize]
                     .alloc(Object::NativeCode(Box::new(code)))
@@ -1068,6 +1111,7 @@ impl World {
         op: u32,
         code: PortableCode,
         function: u32,
+        origin: Option<[u8; 32]>,
     ) {
         let Some(function_class) = self.core.function_code else {
             self.machines[vm as usize].set_fault(FaultCode::MalformedState, "", Some(op));
@@ -1090,6 +1134,7 @@ impl World {
                         bytes: code.bytes,
                         interface: code.interface,
                         index: function,
+                        origin,
                     })));
                 let result = value.and_then(|value| self.code_ok(vm, value));
                 self.finish_code_result(vm, op, result);
@@ -1210,6 +1255,7 @@ impl World {
             bytes: artifact,
             interface: interface_bytes,
             index,
+            origin: None,
         })));
         let result = value.and_then(|value| self.code_ok(vm, value));
         self.finish_code_result(vm, op, result);

@@ -12,6 +12,26 @@ end
 final class ClassCode
 end
 
+final class DefinitionSource
+  path: String
+  syntax: SyntaxNode
+  contract: Digest
+  slots: List[SlotSpec]
+
+  def init(
+    mut self,
+    path: String,
+    syntax: SyntaxNode,
+    contract: Digest,
+    slots: List[SlotSpec]
+  )
+    self.path = path
+    self.syntax = syntax
+    self.contract = contract
+    self.slots = slots
+  end
+end
+
 final class SlotSpec
 end
 

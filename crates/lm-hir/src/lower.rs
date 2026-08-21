@@ -518,6 +518,7 @@ pub fn lower_module_with_linkage(
         entry: hir.entry as u32,
         exports,
         bindings,
+        debug: Vec::new(),
     };
     for (function, selected) in &linkage.functions {
         let func = module
@@ -1328,6 +1329,11 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             HExprKind::ClassCode { class } => {
                 self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::ClassCode { class: *class }));
+            }
+            HExprKind::CodeSource { code, .. } => {
+                self.lower_expr(code);
+                let ty = self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::CodeSource { ty }));
             }
             HExprKind::MakeCallback { func, captures } => {
                 for capture in captures {
@@ -2173,6 +2179,7 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         | HExprKind::Capture(_)
         | HExprKind::FunctionCode { .. }
         | HExprKind::ClassCode { .. } => {}
+        HExprKind::CodeSource { code, .. } => shift_expr_in_place(code, base, max),
         HExprKind::Not(inner) | HExprKind::Neg(inner) => shift_expr_in_place(inner, base, max),
         HExprKind::Binary { left, right, .. }
         | HExprKind::And(left, right)
@@ -3100,6 +3107,7 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
         ExtendedInstr::ListSet | ExtendedInstr::ListInsert => (3, 1),
         ExtendedInstr::MakeCallback { captures, .. } => (*captures as usize, 1),
         ExtendedInstr::FunctionCode { .. } | ExtendedInstr::ClassCode { .. } => (0, 1),
+        ExtendedInstr::CodeSource { .. } => (1, 1),
         ExtendedInstr::CallSlot { slot, .. } => {
             let count = match &module.slots[*slot as usize].contract {
                 lm_bytecode::SlotContract::Function(contract)
@@ -3342,6 +3350,7 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         }
         ExtendedInstr::FunctionCode { func } => format!("FunctionCode fn{func}"),
         ExtendedInstr::ClassCode { class } => format!("ClassCode class{class}"),
+        ExtendedInstr::CodeSource { ty } => format!("CodeSource ty{ty}"),
         ExtendedInstr::AsCallback => "AsCallback".to_string(),
         ExtendedInstr::OptionSome { ty } => format!("OptionSome ty{ty}"),
         ExtendedInstr::OptionNone { ty } => format!("OptionNone ty{ty}"),

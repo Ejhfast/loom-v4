@@ -595,6 +595,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         })
         .unwrap()
     }
@@ -689,6 +690,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         };
         assert!(load(module).is_err());
     }
@@ -741,6 +743,7 @@ mod tests {
             entry: 0,
             exports: vec![],
             bindings: vec![],
+            debug: Vec::new(),
         };
         let loaded = load(module).unwrap();
         let mut vm = Vm::new(&loaded, VmConfig::default());

@@ -81,6 +81,7 @@ fn loop_module() -> Module {
         entry: 0,
         exports: vec![],
         bindings: vec![],
+        debug: Vec::new(),
     }
 }
 

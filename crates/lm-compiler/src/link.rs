@@ -166,6 +166,8 @@ struct Merged {
     /// The named function bindings of the merged program, in link
     /// order. Several bindings may name one function value.
     bindings: Vec<lm_bytecode::FuncBinding>,
+    /// Optional source data after table relocation.
+    debug: lm_bytecode::debug::DebugInfo,
     /// The one structural hash every binding key carries, and the
     /// module that first provided it. A second version of one key is a
     /// rejection, and the message names both providers.
@@ -207,6 +209,7 @@ impl Default for Merged {
             interface_by_key: HashMap::new(),
             func_by_hash: HashMap::new(),
             bindings: Vec::new(),
+            debug: lm_bytecode::debug::DebugInfo::default(),
             binding_version: HashMap::new(),
             class_exports: HashMap::new(),
             interface_exports: HashMap::new(),
@@ -309,6 +312,11 @@ pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError>
         entry,
         exports: Vec::new(),
         bindings: merged.bindings,
+        debug: if merged.debug.sources.is_empty() {
+            Vec::new()
+        } else {
+            lm_bytecode::debug::encode(&merged.debug)
+        },
     };
     // The merged program meets the whole verifier before it runs.
     lm_verify::verify_module(&module)
@@ -713,6 +721,14 @@ fn relocate(
         }
     }
     merge_bindings(merged, module, identity, path, &reloc)?;
+    let debug = lm_bytecode::debug::decode(&module.debug)
+        .map_err(|error| fail(format!("the debug data of `{path}` is invalid: {error}")))?;
+    lm_bytecode::debug::validate(&debug, module)
+        .map_err(|error| fail(format!("the debug data of `{path}` is invalid: {error}")))?;
+    merged
+        .debug
+        .append_relocated(&debug, &reloc.funcs, &reloc.classes)
+        .map_err(|error| fail(format!("the debug data of `{path}` is invalid: {error}")))?;
     Ok(reloc)
 }
 
@@ -1553,6 +1569,9 @@ fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
         },
         ExtendedInstr::ClassCode { class } => ExtendedInstr::ClassCode {
             class: reloc.classes[*class as usize],
+        },
+        ExtendedInstr::CodeSource { ty } => ExtendedInstr::CodeSource {
+            ty: reloc.types[*ty as usize],
         },
         ExtendedInstr::OptionSome { ty } => ExtendedInstr::OptionSome {
             ty: reloc.types[*ty as usize],

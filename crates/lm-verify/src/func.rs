@@ -441,7 +441,8 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     | ExtendedInstr::MapGet { ty }
                     | ExtendedInstr::ListPop { ty }
                     | ExtendedInstr::MapRemove { ty }
-                    | ExtendedInstr::DynPack { ty } => {
+                    | ExtendedInstr::DynPack { ty }
+                    | ExtendedInstr::CodeSource { ty } => {
                         if *ty as usize >= module.types.len() {
                             return Err(err(fidx, at("type index out of range")));
                         }

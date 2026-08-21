@@ -538,6 +538,13 @@ fn encode_object(out: &mut Out, object: &Object) {
                 PortableCodeKind::Class => 4,
             });
             out.leb(code.index as u64);
+            match code.origin {
+                Some(origin) => {
+                    out.u8(1);
+                    out.bytes.extend_from_slice(&origin);
+                }
+                None => out.u8(0),
+            }
             match &code.interface {
                 Some(interface) => {
                     out.u8(1);
@@ -2066,6 +2073,20 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             let index = u32::try_from(cur.leb()?).map_err(|_| {
                 ImageError::new(ImageReason::Reference, "a portable code index is too large")
             })?;
+            let origin = match cur.u8()? {
+                0 => None,
+                1 => {
+                    let mut origin = [0u8; 32];
+                    origin.copy_from_slice(cur.take(32)?);
+                    Some(origin)
+                }
+                _ => {
+                    return err(
+                        ImageReason::Layout,
+                        "a portable source origin flag is invalid".to_string(),
+                    )
+                }
+            };
             let interface = match cur.u8()? {
                 0 => None,
                 1 => {
@@ -2087,6 +2108,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 bytes: cur.copy_bytes(source, "artifact bytes")?.into(),
                 interface,
                 index,
+                origin,
             }))
         }
         27 => {

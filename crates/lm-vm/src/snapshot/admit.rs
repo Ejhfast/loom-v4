@@ -837,8 +837,9 @@ impl Admit<'_> {
         bytes: &[u8],
         interface: Option<&[u8]>,
         index: u32,
+        origin: Option<[u8; 32]>,
     ) -> Result<(), ImageError> {
-        if kind == PortableCodeKind::Artifact {
+        if kind == PortableCodeKind::Artifact && origin.is_none() {
             return Ok(());
         }
         let module = lm_bytecode::decode(bytes).map_err(|error| {
@@ -882,6 +883,34 @@ impl Admit<'_> {
                 ImageReason::Code,
                 "a verified module value carries a source index",
             );
+        }
+        if let Some(origin) = origin {
+            let debug = lm_bytecode::debug::decode(&module.debug).map_err(|error| {
+                ImageError::admission(
+                    ImageReason::Code,
+                    format!("a portable source origin did not decode: {error}"),
+                )
+            })?;
+            let matches = debug.definitions.iter().any(|definition| {
+                definition.origin == origin
+                    && match kind {
+                        PortableCodeKind::Function => {
+                            definition.kind == lm_bytecode::debug::DefinitionKind::Function
+                                && definition.target == index
+                        }
+                        PortableCodeKind::Class => {
+                            definition.kind == lm_bytecode::debug::DefinitionKind::Class
+                                && definition.target == index
+                        }
+                        _ => false,
+                    }
+            });
+            if !matches {
+                return fail(
+                    ImageReason::Code,
+                    "a portable source origin does not match its code",
+                );
+            }
         }
         Ok(())
     }
@@ -1149,6 +1178,7 @@ impl Admit<'_> {
                         code.bytes.as_slice(),
                         code.interface.as_ref().map(|bytes| bytes.as_slice()),
                         code.index,
+                        code.origin,
                     )?;
                 }
                 _ => {}
@@ -1504,6 +1534,7 @@ impl Admit<'_> {
                     code.bytes.as_slice(),
                     code.interface.as_ref().map(|bytes| bytes.as_slice()),
                     code.index,
+                    code.origin,
                 )?;
             }
             let target = match entry.object {

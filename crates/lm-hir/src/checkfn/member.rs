@@ -1131,6 +1131,7 @@ impl<'o> FnChecker<'o> {
         let func = ctx.push_func(
             HirFunc {
                 imported: false,
+                source_span: (!env.core_scope).then_some(span),
                 name,
                 type_params: type_param_count,
                 type_bounds: env

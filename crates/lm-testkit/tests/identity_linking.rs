@@ -712,6 +712,7 @@ fn chain_cycle(n: usize) -> Module {
         entry: 0,
         exports: vec![],
         bindings: vec![],
+        debug: Vec::new(),
     }
 }
 
@@ -838,6 +839,7 @@ fn many_chains(count: usize, per: usize, repeats: usize) -> Module {
         entry: 0,
         exports: vec![],
         bindings: vec![],
+        debug: Vec::new(),
     }
 }
 

@@ -74,7 +74,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 19 stores compiler interfaces with portable code.
 /// Version 21 distinguishes typed run images from full VM images.
 /// Version 22 stores one constructor version in each class slot target.
-pub const FORMAT_VERSION: u32 = 22;
+/// Version 23 stores optional portable source origins.
+pub const FORMAT_VERSION: u32 = 23;
 
 /// The section kinds, in canonical order.
 ///

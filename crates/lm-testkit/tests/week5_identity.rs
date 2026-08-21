@@ -244,6 +244,7 @@ fn a_deep_definition_chain_hashes_on_a_bounded_stack() {
         entry: 0,
         exports: vec![],
         bindings: vec![],
+        debug: Vec::new(),
     };
     let identity = std::thread::Builder::new()
         .stack_size(256 * 1024)

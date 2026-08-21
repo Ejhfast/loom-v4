@@ -944,11 +944,11 @@ impl World {
                         Ok(Some(ExecOutcome::DynamicRender { value, ty })) => {
                             self.handle_dynamic_render(act.vm, value, ty)
                         }
-                        Ok(Some(ExecOutcome::FunctionCode { function })) => {
-                            self.handle_function_code(act.vm, function)
+                        Ok(Some(ExecOutcome::FunctionCode { function, origin })) => {
+                            self.handle_function_code(act.vm, function, origin)
                         }
-                        Ok(Some(ExecOutcome::ClassCode { class })) => {
-                            self.handle_class_code(act.vm, class)
+                        Ok(Some(ExecOutcome::ClassCode { class, origin })) => {
+                            self.handle_class_code(act.vm, class, origin)
                         }
                     }
                 }
