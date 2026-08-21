@@ -258,6 +258,8 @@ Verification and installation do not execute this function.
 
 `Instance.entry` returns its typed `FunctionDef`. `Vm.activate` creates a run for that definition.
 
+`Instance.entry_binding` returns a typed installed binding. Activation through that binding reads its current slot target.
+
 The entry function carries the effect row of its source expression.
 
 ### 3.6 Installation and linking
@@ -273,7 +275,7 @@ program_instance = image.install(program_module, links)?
 
 Module installation returns `Result[Instance,CodeError]`.
 
-Definition installation returns a typed installed definition.
+Definition installation returns a typed installed binding.
 
 `LinkEnv` contains installed provider instances from the same VM.
 
@@ -344,7 +346,7 @@ The set of components is a property of the graph, so the emission order of the c
 
 - A **function binding** rename moves no code hash. A binding name lives outside every structural hash, so the function value keeps its identity and so does every caller.
 - A **class key** rename and a **selector** rename can move a referenced hash. A type digest and a `New` site name a class by qualified key, and a method entry names a selector by name. A source class rename moves the key, so it moves the hash of every definition that names that class. Its own key never enters its own hash directly, so a class that never reaches its own key keeps its hash through a rename. A class does reach its own key through a method that names the class, a field whose type names it, or an enum arm the parent lists, and the class hash then moves with the rename.
-- A **VerificationHash** stays stable through a class rename and a function rename, and it moves on a selector rename. A class key, a definition name, and a function binding all live in the export section, which the verifier never reads. A selector name lives in the semantic region, which the verifier does read.
+- A **VerificationHash** includes each published slot key. A source rename changes this hash when it changes a published binding. An export-label edit alone preserves this hash. A selector rename also changes this hash.
 
 Structural refinement cannot always give each member a unique label. The stable partition of this rule is bisimulation: two members keep one label exactly when they are bisimilar. Bisimulation is coarser than isomorphism, so the rule may give one label to two members an isomorphism test separates. One label stays sound, because a member is a deterministic system with ordered successors: two bisimilar members have identical unfoldings, so they compute the same thing. Members with one label share one StructuralHash, and their QualifiedKey values keep them distinct wherever distinctness is observable.
 
@@ -2267,7 +2269,7 @@ end
 
 `Vm.install(module)` returns an `Instance`.
 
-`Vm.install(code)` returns the installed definition selected by that code value.
+`Vm.install(code)` returns the installed binding selected by that code value.
 
 `Vm.install(function)` is convenience syntax for `Vm.install(codeof(function))`.
 
@@ -2280,6 +2282,14 @@ The optional `LinkEnv` contains provider instances from that VM.
 `codeof(Class)` creates `ClassCode` for a class definition.
 
 `codeof` does not install code and does not require a `Vm`.
+
+Source, syntax, module, and command-line compilation use one binding publication rule.
+
+Every exported function and class publishes stable slot metadata.
+
+Publication does not make a static call late.
+
+Reifying a local definition makes references to that definition late in the same compilation.
 
 `FunctionCode[A,T].source()` returns `Option[DefinitionSource]`.
 
@@ -2301,9 +2311,21 @@ Capturing closures cannot become portable code values.
 
 `Instance.entry[A,T]()` and `Instance.function[A,T](name)` return typed `FunctionDef[A,T]` results.
 
+`Instance.entry_binding[A,T]()` and `Instance.function_binding[A,T](name)` return typed `FunctionBinding[A,T]` results.
+
 `Instance.dynamic_entry()` requests the declared `DynValue` entry form.
 
 `Instance.class_def(name)` returns one opaque `ClassDef` result.
+
+`Instance.class_binding(name)` returns one opaque `ClassBinding` result.
+
+An installed binding retains both a live slot address and its installation's immutable target.
+
+`slot`, `spec`, `instance`, and `target` expose these parts through checked methods.
+
+Activation through a function binding reads its current slot target.
+
+Replacement through two bindings uses the address binding's slot and the target binding's immutable target.
 
 Installation validates and commits code atomically. It does not execute the entry function.
 
@@ -2751,15 +2773,18 @@ Vm.InstanceSlotFor             (Instance, SlotSpec)
                                 -> Result[Slot, CodeError]
 Vm.InstanceSlotSpec            (Instance, String)
                                 -> Result[SlotSpec, CodeError]
-Vm.ActivateDef[A,T]            (Vm, FunctionDef[A,T], control A)
+Vm.ActivateDef[A,T]            (Vm, FunctionDef[A,T] | FunctionBinding[A,T],
+                                control A)
                                 -> Result[Run[T], CodeError]
-Vm.ReplaceFunction[A,T]        (Vm, Slot, FunctionDef[A,T])
+Vm.ReplaceFunction[A,T]        (Vm, Slot | FunctionBinding[A,T],
+                                FunctionDef[A,T] | FunctionBinding[A,T])
                                 -> Result[(), CodeError]
 Vm.InstallWith[X]              (Vm, X, LinkEnv)
                                 -> Result[Installed[X], CodeError]
 Vm.InstanceClass               (Instance, String)
                                 -> Result[ClassDef, CodeError]
-Vm.ReplaceClass                (Vm, Slot, ClassDef)
+Vm.ReplaceClass                (Vm, Slot | ClassBinding,
+                                ClassDef | ClassBinding)
                                 -> Result[(), CodeError]
 Vm.ReplaceValue[T]             (Vm, Slot, T) -> Result[(), CodeError]
 Vm.ReplaceProcess[M,R]         (Vm, Slot, Handle[M,R])
@@ -2773,17 +2798,39 @@ Vm.ModuleFunctionCode[A,T]     (VerifiedModule, String)
                                 -> Result[FunctionCode[A,T], CodeError]
 Vm.ModuleClassCode             (VerifiedModule, String)
                                 -> Result[ClassCode, CodeError]
+Vm.InstanceEntryBinding[A,T]   (Instance)
+                                -> Result[FunctionBinding[A,T], CodeError]
+Vm.InstanceFunctionBinding[A,T](Instance, String)
+                                -> Result[FunctionBinding[A,T], CodeError]
+Vm.InstanceClassBinding        (Instance, String)
+                                -> Result[ClassBinding, CodeError]
+Vm.BindingSlot                 (FunctionBinding | ClassBinding)
+                                -> Result[Slot, CodeError]
+Vm.BindingSpec                 (FunctionBinding | ClassBinding)
+                                -> Result[SlotSpec, CodeError]
+Vm.BindingInstance             (FunctionBinding | ClassBinding)
+                                -> Result[Instance, CodeError]
+Vm.BindingFunctionTarget[A,T]  (FunctionBinding[A,T])
+                                -> Result[FunctionDef[A,T], CodeError]
+Vm.BindingClassTarget          (ClassBinding)
+                                -> Result[ClassDef, CodeError]
 ```
 
 This table is the complete public `Vm` operation set for version 0.2.
 
 `Installed[VerifiedModule]` is `Instance`.
 
-`Installed[FunctionCode[A,T]]` is `FunctionDef[A,T]`.
+`Installed[FunctionCode[A,T]]` is `FunctionBinding[A,T]`.
 
-`Installed[ClassCode]` is `ClassDef`.
+`Installed[ClassCode]` is `ClassBinding`.
+
+`Installed[Fn[A,T,e]]` is `FunctionBinding[A,T]` for a supported named function.
 
 The function convenience form uses the corresponding `FunctionCode` result.
+
+A binding's slot is its mutable address.
+
+A binding's target is the immutable definition from its own installation.
 
 `Instance.slot_spec(name)` returns one portable stable slot identity.
 

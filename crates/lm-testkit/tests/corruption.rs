@@ -349,7 +349,10 @@ fn entry_with_captures_is_rejected() {
     let mut module = lm_bytecode::decode(&object_bytes()).unwrap();
     let entry = module.entry as usize;
     module.funcs[entry].captures.push(2);
-    expect_verify_reject(&lm_bytecode::encode(&module), "entry function");
+    expect_verify_reject(
+        &lm_bytecode::encode(&module),
+        "function target has captures",
+    );
 }
 
 #[test]
@@ -430,7 +433,7 @@ fn widened_callee_row_is_rejected() {
         .position(|s| s == "Io.Print")
         .expect("the row name is interned");
     module.funcs[target].row = vec![BcRow::Op(op as u32)];
-    expect_verify_reject(&lm_bytecode::encode(&module), "row");
+    expect_verify_reject(&lm_bytecode::encode(&module), "slot contract");
 }
 
 #[test]

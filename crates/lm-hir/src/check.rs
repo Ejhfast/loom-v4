@@ -15,7 +15,7 @@ use lm_source::span::Span;
 use lm_types::{
     ClassId, ClassKind, InterfaceId, Row, RowElem, Type, TypeId, TypeStore, NEVER, UNIT,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 /// The concatenated pinned core sources, in canonical file order.
@@ -63,7 +63,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 82] = [
+pub const PRELUDE_TYPES: [&str; 84] = [
     "Option",
     "Result",
     "Ordering",
@@ -90,6 +90,8 @@ pub const PRELUDE_TYPES: [&str; 82] = [
     "Slot",
     "FunctionDef",
     "ClassDef",
+    "FunctionBinding",
+    "ClassBinding",
     "CodeError",
     "GrammarVersion",
     "SourceRange",
@@ -688,6 +690,10 @@ pub(crate) struct Ctx {
     pub(crate) core_func_index: HashMap<String, u32>,
     pub(crate) sigs: Vec<FnSig>,
     pub(crate) funcs: Vec<Option<HirFunc>>,
+    /// Local functions that one expression installs or reifies.
+    pub(crate) reified_functions: BTreeSet<u32>,
+    /// Local classes that one expression reifies.
+    pub(crate) reified_classes: BTreeSet<u32>,
     pub(crate) core: CoreIds,
     /// The import slots the module needs, in slot order.
     pub(crate) imports: Vec<HirImport>,
@@ -1582,6 +1588,8 @@ pub fn check_module_with(
         core_func_index: HashMap::new(),
         sigs: Vec::new(),
         funcs: Vec::new(),
+        reified_functions: BTreeSet::new(),
+        reified_classes: BTreeSet::new(),
         core: CoreIds {
             option_class: 0,
             some_class: 0,
@@ -2101,6 +2109,8 @@ fn assemble(
             }
         }
     }
+    let reified_functions = ctx.reified_functions.clone();
+    let reified_classes = ctx.reified_classes.clone();
     let funcs: Vec<HirFunc> = ctx
         .funcs
         .into_iter()
@@ -2160,6 +2170,8 @@ fn assemble(
         exports,
         imports: ctx.imports,
         bindings,
+        reified_functions,
+        reified_classes,
     })
 }
 
@@ -3059,6 +3071,8 @@ fn resolve_class(
         (true, "Slot") => Some(NativeRepr::Slot),
         (true, "FunctionDef") => Some(NativeRepr::FunctionDef),
         (true, "ClassDef") => Some(NativeRepr::ClassDef),
+        (true, "FunctionBinding") => Some(NativeRepr::FunctionBinding),
+        (true, "ClassBinding") => Some(NativeRepr::ClassBinding),
         (true, "DynValue") => Some(NativeRepr::DynValue),
         _ => None,
     };
@@ -3077,9 +3091,12 @@ fn resolve_class(
     };
     let valid_native_arity = match native_repr {
         Some(NativeRepr::List) => type_names.len() == 1,
-        Some(NativeRepr::Map | NativeRepr::FunctionCode | NativeRepr::FunctionDef) => {
-            type_names.len() == 2
-        }
+        Some(
+            NativeRepr::Map
+            | NativeRepr::FunctionCode
+            | NativeRepr::FunctionDef
+            | NativeRepr::FunctionBinding,
+        ) => type_names.len() == 2,
         Some(_) => type_names.is_empty(),
         None => true,
     };
@@ -3112,7 +3129,7 @@ fn resolve_class(
             let value = ctx.store.intern(Type::Var(1));
             ctx.store.intern(Type::Map(key, value))
         }
-        Some(NativeRepr::FunctionCode | NativeRepr::FunctionDef) => {
+        Some(NativeRepr::FunctionCode | NativeRepr::FunctionDef | NativeRepr::FunctionBinding) => {
             let args = vec![
                 ctx.store.intern(Type::Var(0)),
                 ctx.store.intern(Type::Var(1)),
@@ -3136,6 +3153,7 @@ fn resolve_class(
             | NativeRepr::CodeInstance
             | NativeRepr::Slot
             | NativeRepr::ClassDef
+            | NativeRepr::ClassBinding
             | NativeRepr::DynValue,
         ) => ctx.store.intern(Type::Class(ClassId(idx))),
         None if type_names.is_empty() => ctx.store.intern(Type::Class(ClassId(idx))),

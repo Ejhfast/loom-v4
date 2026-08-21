@@ -27,7 +27,7 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 14;
+const VERSION: u16 = 15;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -304,7 +304,7 @@ impl IfaceSlotKind {
     }
 }
 
-/// One position-independent late binding in a module interface.
+/// One position-independent published binding in a module interface.
 ///
 /// The named export or class member supplies the full contract. This
 /// record adds its linkage mode and stable slot key.
@@ -315,6 +315,8 @@ pub struct IfaceSlotSpec {
     pub contract_hash: [u8; 32],
     pub key: [u8; 32],
     pub kind: IfaceSlotKind,
+    /// True when compiled callers must read this slot.
+    pub late: bool,
 }
 
 /// One decoded interface.
@@ -326,7 +328,7 @@ pub struct Interface {
     pub module_path: String,
     pub semantic_hash: [u8; 32],
     pub exports: Vec<ExportEntry>,
-    /// Late linkage declarations. Static interfaces keep this empty.
+    /// Published bindings and their linkage modes.
     pub slots: Vec<IfaceSlotSpec>,
 }
 
@@ -769,17 +771,16 @@ pub fn encode_interface(interface: &Interface) -> Vec<u8> {
         out.extend_from_slice(&entry.def_hash);
         encode_item(&mut out, &entry.item);
     }
-    if !interface.slots.is_empty() {
-        out.extend_from_slice(LINKAGE_MAGIC);
-        let mut slots = interface.slots.clone();
-        slots.sort();
-        write_u32(&mut out, slots.len() as u32);
-        for slot in slots {
-            write_str(&mut out, &slot.binding);
-            out.extend_from_slice(&slot.contract_hash);
-            out.extend_from_slice(&slot.key);
-            out.push(slot.kind.tag());
-        }
+    out.extend_from_slice(LINKAGE_MAGIC);
+    let mut slots = interface.slots.clone();
+    slots.sort();
+    write_u32(&mut out, slots.len() as u32);
+    for slot in slots {
+        write_str(&mut out, &slot.binding);
+        out.extend_from_slice(&slot.contract_hash);
+        out.extend_from_slice(&slot.key);
+        out.push(slot.kind.tag());
+        out.push(u8::from(slot.late));
     }
     out
 }
@@ -1195,32 +1196,39 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
             def_hash,
         });
     }
-    let mut slots = Vec::new();
-    if cur.pos != bytes.len() {
-        if cur.take(4)? != LINKAGE_MAGIC {
-            return Err(DecodeError::TrailingBytes);
-        }
-        let slot_count = cur.len()?;
-        slots.reserve(slot_count);
-        for _ in 0..slot_count {
-            let binding = cur.string()?;
-            let mut contract_hash = [0u8; 32];
-            contract_hash.copy_from_slice(cur.take(32)?);
-            let mut key = [0u8; 32];
-            key.copy_from_slice(cur.take(32)?);
-            let kind = IfaceSlotKind::from_tag(cur.u8()?).ok_or(DecodeError::BadSlot)?;
-            slots.push(IfaceSlotSpec {
-                binding,
-                contract_hash,
-                key,
-                kind,
-            });
-        }
-        let mut canonical = slots.clone();
-        canonical.sort();
-        if slots != canonical {
-            return Err(DecodeError::BadSlot);
-        }
+    if cur.take(4)? != LINKAGE_MAGIC {
+        return Err(DecodeError::TrailingBytes);
+    }
+    let slot_count = cur.len()?;
+    const MIN_SLOT_BYTES: usize = 4 + 32 + 32 + 1 + 1;
+    if slot_count > cur.remaining() / MIN_SLOT_BYTES {
+        return Err(DecodeError::BadLength);
+    }
+    let mut slots = Vec::with_capacity(slot_count);
+    for _ in 0..slot_count {
+        let binding = cur.string()?;
+        let mut contract_hash = [0u8; 32];
+        contract_hash.copy_from_slice(cur.take(32)?);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(cur.take(32)?);
+        let kind = IfaceSlotKind::from_tag(cur.u8()?).ok_or(DecodeError::BadSlot)?;
+        let late = match cur.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(DecodeError::BadSlot),
+        };
+        slots.push(IfaceSlotSpec {
+            binding,
+            contract_hash,
+            key,
+            kind,
+            late,
+        });
+    }
+    let mut canonical = slots.clone();
+    canonical.sort();
+    if slots != canonical {
+        return Err(DecodeError::BadSlot);
     }
     if cur.pos != bytes.len() {
         return Err(DecodeError::TrailingBytes);

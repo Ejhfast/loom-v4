@@ -7,7 +7,7 @@
 //! process. A later release bundle can replace the source builder
 //! with decoded artifacts without changing its callers.
 
-use crate::{compile_module, link, CompileEnv, CompiledModule, LinkEnv, LinkUnit};
+use crate::{compile_module, link, CompileEnv, CompileOptions, CompiledModule, LinkEnv, LinkUnit};
 use lm_bytecode::Module;
 use lm_source::SourceFile;
 use std::sync::OnceLock;
@@ -228,15 +228,13 @@ pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String
         },
     )
     .map_err(|error| error.render(source))?;
-    let mut module = lm_hir::lower_module(&hir);
-    crate::module::attach_source_debug(
-        &mut module,
-        source,
-        syntax,
-        &ast,
-        &hir,
-        &lm_hir::LowerLinkage::default(),
-    )?;
+    let mut env = CompileEnv::new();
+    env.bind_standard_root();
+    let (linkage, _) =
+        crate::module::select_linkage(path, &hir, &env.freeze(), &CompileOptions::default())?;
+    let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
+        .map_err(|error| format!("error: `{path}`: {error}\n"))?;
+    crate::module::attach_source_debug(&mut module, source, syntax, &ast, &hir, &linkage)?;
     Ok(module)
 }
 

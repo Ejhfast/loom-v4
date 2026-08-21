@@ -1626,19 +1626,20 @@ pub(crate) fn step(
                                         "`Vm.Install` has invalid code input".to_string(),
                                     ));
                                 }
-                                let function_def = ctx.core.function_def.ok_or_else(|| {
+                                let function_binding =
+                                    ctx.core.function_binding.ok_or_else(|| {
                                     fail(
-                                        "the module does not carry the pinned core FunctionDef definition"
+                                        "the module does not carry the pinned core FunctionBinding definition"
                                             .to_string(),
                                     )
                                 })?;
-                                ctx.intern(BcType::Inst(function_def, args))
+                                ctx.intern(BcType::Inst(function_binding, args))
                             } else if code
                                 == ctx
                                     .plain_inst(ctx.core.class_code, "ClassCode")
                                     .map_err(&fail)?
                             {
-                                ctx.plain_inst(ctx.core.class_def, "ClassDef")
+                                ctx.plain_inst(ctx.core.class_binding, "ClassBinding")
                                     .map_err(&fail)?
                             } else if let BcType::Fn(params, muts, ret, _) = code_ty {
                                 if muts.iter().any(|marker| *marker) {
@@ -1652,13 +1653,14 @@ pub(crate) fn step(
                                 } else {
                                     ctx.intern(BcType::Tuple(params))
                                 };
-                                let function_def = ctx.core.function_def.ok_or_else(|| {
+                                let function_binding =
+                                    ctx.core.function_binding.ok_or_else(|| {
                                     fail(
-                                        "the module does not carry the pinned core FunctionDef definition"
+                                        "the module does not carry the pinned core FunctionBinding definition"
                                             .to_string(),
                                     )
                                 })?;
-                                ctx.intern(BcType::Inst(function_def, vec![input, ret]))
+                                ctx.intern(BcType::Inst(function_binding, vec![input, ret]))
                             } else {
                                 return Err(fail(
                                     "`Vm.Install` has invalid code input".to_string(),
@@ -1755,8 +1757,15 @@ pub(crate) fn step(
                             }
                             push(state, reply_ty)?;
                         }
-                        lm_abi::OP_VM_INSTANCE_ENTRY | lm_abi::OP_VM_INSTANCE_FUNCTION => {
-                            if op == lm_abi::OP_VM_INSTANCE_FUNCTION {
+                        lm_abi::OP_VM_INSTANCE_ENTRY
+                        | lm_abi::OP_VM_INSTANCE_FUNCTION
+                        | lm_abi::OP_VM_INSTANCE_ENTRY_BINDING
+                        | lm_abi::OP_VM_INSTANCE_FUNCTION_BINDING => {
+                            if matches!(
+                                op,
+                                lm_abi::OP_VM_INSTANCE_FUNCTION
+                                    | lm_abi::OP_VM_INSTANCE_FUNCTION_BINDING
+                            ) {
                                 pop_expect(state, TY_STR)?;
                             }
                             let instance = ctx
@@ -1769,9 +1778,18 @@ pub(crate) fn step(
                                         .to_string(),
                                 ));
                             };
-                            let Some(function_def) = ctx.core.function_def else {
+                            let function_class = if matches!(
+                                op,
+                                lm_abi::OP_VM_INSTANCE_ENTRY_BINDING
+                                    | lm_abi::OP_VM_INSTANCE_FUNCTION_BINDING
+                            ) {
+                                ctx.core.function_binding
+                            } else {
+                                ctx.core.function_def
+                            };
+                            let Some(function_class) = function_class else {
                                 return Err(fail(
-                                    "the module does not carry the pinned core FunctionDef definition"
+                                    "the module does not carry the pinned core function handle definition"
                                         .to_string(),
                                 ));
                             };
@@ -1800,34 +1818,36 @@ pub(crate) fn step(
                                         .to_string(),
                                 ));
                             };
-                            if found_function != function_def || function_args.len() != 2 {
+                            if found_function != function_class || function_args.len() != 2 {
                                 return Err(fail(
-                                    "an instance function lookup has the wrong function type"
+                                    "an instance function lookup has the wrong handle type"
                                         .to_string(),
                                 ));
                             }
                             if !matches!(ctx.ty(function_args[0]), BcType::Unit | BcType::Tuple(_))
                             {
                                 return Err(fail(
-                                    "a FunctionDef argument view must be unit or a tuple"
-                                        .to_string(),
+                                    "a function argument view must be unit or a tuple".to_string(),
                                 ));
                             }
                             push(state, reply_ty)?;
                         }
-                        lm_abi::OP_VM_INSTANCE_CLASS => {
+                        lm_abi::OP_VM_INSTANCE_CLASS | lm_abi::OP_VM_INSTANCE_CLASS_BINDING => {
                             pop_expect(state, TY_STR)?;
                             let instance = ctx
                                 .plain_inst(ctx.core.instance, "Instance")
                                 .map_err(&fail)?;
                             pop_expect(state, instance)?;
-                            let class_def = ctx
-                                .plain_inst(ctx.core.class_def, "ClassDef")
-                                .map_err(&fail)?;
+                            let class = if op == lm_abi::OP_VM_INSTANCE_CLASS_BINDING {
+                                ctx.plain_inst(ctx.core.class_binding, "ClassBinding")
+                            } else {
+                                ctx.plain_inst(ctx.core.class_def, "ClassDef")
+                            }
+                            .map_err(&fail)?;
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")
                                 .map_err(&fail)?;
-                            let result = ctx.result_inst(class_def, error).map_err(&fail)?;
+                            let result = ctx.result_inst(class, error).map_err(&fail)?;
                             if reply_ty != result {
                                 return Err(fail(
                                     "an instance class lookup has the wrong result type"
@@ -1859,6 +1879,79 @@ pub(crate) fn step(
                                 .map_err(&fail)?;
                             let result = ctx.result_inst(value, error).map_err(&fail)?;
                             push(state, result)?;
+                        }
+                        lm_abi::OP_VM_BINDING_SLOT
+                        | lm_abi::OP_VM_BINDING_SPEC
+                        | lm_abi::OP_VM_BINDING_INSTANCE
+                        | lm_abi::OP_VM_BINDING_FUNCTION_TARGET
+                        | lm_abi::OP_VM_BINDING_CLASS_TARGET => {
+                            let binding = pop(state)?;
+                            let function_binding = ctx.core.function_binding.ok_or_else(|| {
+                                fail(
+                                    "the module does not carry the pinned core FunctionBinding definition"
+                                        .to_string(),
+                                )
+                            })?;
+                            let class_binding = ctx
+                                .plain_inst(ctx.core.class_binding, "ClassBinding")
+                                .map_err(&fail)?;
+                            let function_args = match ctx.ty(binding) {
+                                BcType::Inst(class, args)
+                                    if class == function_binding && args.len() == 2 =>
+                                {
+                                    Some(args)
+                                }
+                                _ => None,
+                            };
+                            let is_class = binding == class_binding;
+                            if function_args.is_none() && !is_class {
+                                return Err(fail(
+                                    "a binding operation needs an installed binding".to_string(),
+                                ));
+                            }
+                            let value = match op {
+                                lm_abi::OP_VM_BINDING_SLOT => {
+                                    ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?
+                                }
+                                lm_abi::OP_VM_BINDING_SPEC => ctx
+                                    .plain_inst(ctx.core.slot_spec, "SlotSpec")
+                                    .map_err(&fail)?,
+                                lm_abi::OP_VM_BINDING_INSTANCE => ctx
+                                    .plain_inst(ctx.core.instance, "Instance")
+                                    .map_err(&fail)?,
+                                lm_abi::OP_VM_BINDING_FUNCTION_TARGET => {
+                                    let Some(args) = function_args else {
+                                        return Err(fail(
+                                            "a function target needs a FunctionBinding".to_string(),
+                                        ));
+                                    };
+                                    let function_def = ctx.core.function_def.ok_or_else(|| {
+                                        fail(
+                                            "the module does not carry the pinned core FunctionDef definition"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                    ctx.intern(BcType::Inst(function_def, args))
+                                }
+                                _ if is_class => ctx
+                                    .plain_inst(ctx.core.class_def, "ClassDef")
+                                    .map_err(&fail)?,
+                                _ => {
+                                    return Err(fail(
+                                        "a class target needs a ClassBinding".to_string(),
+                                    ));
+                                }
+                            };
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(value, error).map_err(&fail)?;
+                            if reply_ty != result {
+                                return Err(fail(
+                                    "a binding operation has the wrong result type".to_string(),
+                                ));
+                            }
+                            push(state, reply_ty)?;
                         }
                         lm_abi::OP_VM_ACTIVATE | lm_abi::OP_VM_ACTIVATE_OR_FAULT => {
                             let args_ty = pop(state)?;
@@ -1916,12 +2009,18 @@ pub(crate) fn step(
                                         .to_string(),
                                 ));
                             };
-                            let BcType::Inst(found, parts) = ctx.ty(definition) else {
+                            let Some(function_binding) = ctx.core.function_binding else {
                                 return Err(fail(
-                                    "`Vm.ActivateDef` needs a FunctionDef".to_string(),
+                                    "the module does not carry the pinned core FunctionBinding definition"
+                                        .to_string(),
                                 ));
                             };
-                            if found != function_def
+                            let BcType::Inst(found, parts) = ctx.ty(definition) else {
+                                return Err(fail(
+                                    "`Vm.ActivateDef` needs an installed function".to_string(),
+                                ));
+                            };
+                            if (found != function_def && found != function_binding)
                                 || parts.len() != 2
                                 || !ctx.is_subtype(args_ty, parts[0])
                             {
@@ -1952,11 +2051,18 @@ pub(crate) fn step(
                                         .to_string(),
                                 )
                             })?;
+                            let function_binding = ctx.core.function_binding.ok_or_else(|| {
+                                fail(
+                                    "the module does not carry the pinned core FunctionBinding definition"
+                                        .to_string(),
+                                )
+                            })?;
                             let definition_ty = ctx.ty(definition);
                             let valid = matches!(
                                 &definition_ty,
                                 BcType::Inst(class, args)
-                                    if *class == function_def && args.len() == 2
+                                    if (*class == function_def || *class == function_binding)
+                                        && args.len() == 2
                             ) || matches!(
                                 &definition_ty,
                                 BcType::Fn(_, muts, _, _)
@@ -1964,13 +2070,19 @@ pub(crate) fn step(
                             );
                             if !valid {
                                 return Err(fail(
-                                    "`Vm.ReplaceFunction` needs a FunctionDef or function"
-                                        .to_string(),
+                                    "`Vm.ReplaceFunction` needs a function target".to_string(),
                                 ));
                             }
                             let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
-                            if slot != slot_ty {
-                                return Err(fail("`Vm.ReplaceFunction` needs a Slot".to_string()));
+                            let binding = matches!(
+                                ctx.ty(slot),
+                                BcType::Inst(class, args)
+                                    if class == function_binding && args.len() == 2
+                            );
+                            if slot != slot_ty && !binding {
+                                return Err(fail(
+                                    "`Vm.ReplaceFunction` needs a function binding".to_string(),
+                                ));
                             }
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")
@@ -1985,12 +2097,19 @@ pub(crate) fn step(
                             let class_def = ctx
                                 .plain_inst(ctx.core.class_def, "ClassDef")
                                 .map_err(&fail)?;
-                            if definition != class_def {
-                                return Err(fail("`Vm.ReplaceClass` needs a ClassDef".to_string()));
+                            let class_binding = ctx
+                                .plain_inst(ctx.core.class_binding, "ClassBinding")
+                                .map_err(&fail)?;
+                            if definition != class_def && definition != class_binding {
+                                return Err(fail(
+                                    "`Vm.ReplaceClass` needs a class target".to_string(),
+                                ));
                             }
                             let slot_ty = ctx.plain_inst(ctx.core.slot, "Slot").map_err(&fail)?;
-                            if slot != slot_ty {
-                                return Err(fail("`Vm.ReplaceClass` needs a Slot".to_string()));
+                            if slot != slot_ty && slot != class_binding {
+                                return Err(fail(
+                                    "`Vm.ReplaceClass` needs a class binding".to_string(),
+                                ));
                             }
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")

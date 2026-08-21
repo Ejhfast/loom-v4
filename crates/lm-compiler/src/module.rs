@@ -297,7 +297,7 @@ pub(crate) fn attach_source_debug(
         }
     }
     let dispatch_base = constructor_base + hir.classes.len() as u32;
-    for (offset, class) in linkage.classes.keys().enumerate() {
+    for (offset, class) in linkage.dynamic_classes.iter().enumerate() {
         if let Some(span) = hir.classes[*class as usize].source_span {
             functions.push(DebugFunction {
                 function: dispatch_base + offset as u32,
@@ -391,6 +391,19 @@ fn package_dynamic_entry(module: &mut Module, path: &str) -> Result<(), String> 
         return Err(format!("error: `{path}` has no returning entry path\n"));
     }
     function.ret = package;
+    for slot in &mut module.slots {
+        if slot.initial != Some(lm_bytecode::SlotTarget::Function(module.entry)) {
+            continue;
+        }
+        match &mut slot.contract {
+            lm_bytecode::SlotContract::Function(contract) => contract.ret = package,
+            _ => {
+                return Err(format!(
+                    "error: `{path}` has an invalid entry binding contract\n"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -690,7 +703,7 @@ fn out_class_contract(
     Ok(())
 }
 
-fn select_linkage(
+pub(crate) fn select_linkage(
     path: &str,
     hir: &lm_hir::HirModule,
     env: &FrozenCompileEnv,
@@ -730,9 +743,108 @@ fn select_linkage(
         .collect();
 
     let mut selected: BTreeMap<String, IfaceSlotSpec> = BTreeMap::new();
+    let entry_binding = lm_bytecode::qualified_key(path, "<entry>");
+    selected.insert(
+        entry_binding.clone(),
+        IfaceSlotSpec {
+            binding: entry_binding.clone(),
+            contract_hash: [0; 32],
+            key: [0; 32],
+            kind: IfaceSlotKind::Function,
+            late: false,
+        },
+    );
+    functions.insert(
+        entry_binding.clone(),
+        (hir.entry as u32, IfaceSlotKind::Function),
+    );
+
+    for export in &hir.exports {
+        match export.kind {
+            lm_bytecode::ExportKind::Function => {
+                let binding = lm_bytecode::qualified_key(path, &export.name);
+                selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
+                    binding,
+                    contract_hash: [0; 32],
+                    key: [0; 32],
+                    kind: IfaceSlotKind::Function,
+                    late: false,
+                });
+            }
+            kind if kind.is_class()
+                && hir.classes[export.def as usize].native_repr.is_none()
+                && hir.classes[export.def as usize].kind != lm_types::ClassKind::EnumParent =>
+            {
+                let binding = hir.classes[export.def as usize].key.clone();
+                selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
+                    binding,
+                    contract_hash: [0; 32],
+                    key: [0; 32],
+                    kind: IfaceSlotKind::Class,
+                    late: false,
+                });
+            }
+            _ => {}
+        }
+    }
+
     for spec in env.late_bindings().values() {
         if functions.contains_key(&spec.binding) || classes.contains_key(&spec.binding) {
-            selected.insert(spec.binding.clone(), spec.clone());
+            selected
+                .entry(spec.binding.clone())
+                .and_modify(|selected| {
+                    selected.contract_hash = spec.contract_hash;
+                    selected.key = spec.key;
+                    selected.kind = spec.kind;
+                    selected.late = true;
+                })
+                .or_insert_with(|| spec.clone());
+        }
+    }
+    for function in &hir.reified_functions {
+        if let Some((binding, (_, kind))) = functions
+            .iter()
+            .find(|(_, (candidate, _))| candidate == function)
+        {
+            let mut published = env
+                .published_binding(binding)
+                .cloned()
+                .unwrap_or(IfaceSlotSpec {
+                    binding: binding.clone(),
+                    contract_hash: [0; 32],
+                    key: [0; 32],
+                    kind: *kind,
+                    late: true,
+                });
+            published.late = true;
+            selected
+                .entry(binding.clone())
+                .and_modify(|spec| spec.late = true)
+                .or_insert(published);
+        }
+    }
+    for class in &hir.reified_classes {
+        if let Some((binding, _)) = classes.iter().find(|(_, candidate)| candidate == &class) {
+            let definition = &hir.classes[*class as usize];
+            if definition.native_repr.is_none()
+                && definition.kind != lm_types::ClassKind::EnumParent
+            {
+                let mut published =
+                    env.published_binding(binding)
+                        .cloned()
+                        .unwrap_or(IfaceSlotSpec {
+                            binding: binding.clone(),
+                            contract_hash: [0; 32],
+                            key: [0; 32],
+                            kind: IfaceSlotKind::Class,
+                            late: true,
+                        });
+                published.late = true;
+                selected
+                    .entry(binding.clone())
+                    .and_modify(|spec| spec.late = true)
+                    .or_insert(published);
+            }
         }
     }
     for name in &options.late_functions {
@@ -746,12 +858,21 @@ fn select_linkage(
             return Err(format!("error: no function binding named `{binding}`\n"));
         }
         let kind = functions[&binding].1;
-        selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
-            binding: binding.clone(),
-            contract_hash: [0; 32],
-            key: [0; 32],
-            kind,
-        });
+        let mut published = env
+            .published_binding(&binding)
+            .cloned()
+            .unwrap_or(IfaceSlotSpec {
+                binding: binding.clone(),
+                contract_hash: [0; 32],
+                key: [0; 32],
+                kind,
+                late: true,
+            });
+        published.late = true;
+        selected
+            .entry(binding.clone())
+            .and_modify(|spec| spec.late = true)
+            .or_insert(published);
     }
     for name in &options.late_classes {
         let qualified = lm_bytecode::qualified_key(path, name);
@@ -763,23 +884,36 @@ fn select_linkage(
         if !classes.contains_key(&binding) {
             return Err(format!("error: no class binding named `{binding}`\n"));
         }
-        selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
-            binding: binding.clone(),
-            contract_hash: [0; 32],
-            key: [0; 32],
-            kind: IfaceSlotKind::Class,
-        });
+        let mut published = env
+            .published_binding(&binding)
+            .cloned()
+            .unwrap_or(IfaceSlotSpec {
+                binding: binding.clone(),
+                contract_hash: [0; 32],
+                key: [0; 32],
+                kind: IfaceSlotKind::Class,
+                late: true,
+            });
+        published.late = true;
+        selected
+            .entry(binding.clone())
+            .and_modify(|spec| spec.late = true)
+            .or_insert(published);
     }
     if options.late_definitions {
         for (binding, (function, kind)) in &functions {
             let local = !hir.funcs[*function as usize].imported && !binding.starts_with("core.");
             if local {
-                selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
-                    binding: binding.clone(),
-                    contract_hash: [0; 32],
-                    key: [0; 32],
-                    kind: *kind,
-                });
+                selected
+                    .entry(binding.clone())
+                    .and_modify(|spec| spec.late = true)
+                    .or_insert(IfaceSlotSpec {
+                        binding: binding.clone(),
+                        contract_hash: [0; 32],
+                        key: [0; 32],
+                        kind: *kind,
+                        late: true,
+                    });
             }
         }
         for (binding, class) in &classes {
@@ -789,12 +923,16 @@ fn select_linkage(
                 && definition.kind != lm_types::ClassKind::EnumParent
                 && !binding.starts_with("core.");
             if local {
-                selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
-                    binding: binding.clone(),
-                    contract_hash: [0; 32],
-                    key: [0; 32],
-                    kind: IfaceSlotKind::Class,
-                });
+                selected
+                    .entry(binding.clone())
+                    .and_modify(|spec| spec.late = true)
+                    .or_insert(IfaceSlotSpec {
+                        binding: binding.clone(),
+                        contract_hash: [0; 32],
+                        key: [0; 32],
+                        kind: IfaceSlotKind::Class,
+                        late: true,
+                    });
             }
         }
     }
@@ -824,7 +962,10 @@ fn select_linkage(
                     .transpose()?
             }
         };
-        if let Some(contract_hash) = local_contract {
+        if let Some(mut contract_hash) = local_contract {
+            if binding == entry_binding && options.dynamic_result {
+                contract_hash = lm_bytecode::hash::sha256(b"lm-dynamic-entry-contract-v1\0");
+            }
             spec.contract_hash = contract_hash;
             spec.key = lm_bytecode::slot_key(&binding, &contract_hash);
         }
@@ -852,7 +993,10 @@ fn select_linkage(
                         },
                     },
                 );
-                if !hir.funcs[function as usize].imported {
+                if spec.late {
+                    linkage.dynamic_functions.insert(function);
+                }
+                if !hir.funcs[function as usize].imported && binding != entry_binding {
                     published.push(spec);
                 }
             }
@@ -860,7 +1004,16 @@ fn select_linkage(
                 let Some(class) = classes.get(&binding).copied() else {
                     return Err(format!("error: no class binding named `{binding}`\n"));
                 };
-                linkage.classes.insert(class, spec.key);
+                linkage.classes.insert(
+                    class,
+                    lm_hir::LateClass {
+                        key: spec.key,
+                        abi: spec.contract_hash,
+                    },
+                );
+                if spec.late {
+                    linkage.dynamic_classes.insert(class);
+                }
                 if !hir.classes[class as usize].imported {
                     published.push(spec);
                 }
@@ -908,6 +1061,11 @@ mod tests {
                 .expect("the probe compiles");
         assert_eq!(plain.artifact, explicit.artifact);
         assert_eq!(plain.interface_bytes, explicit.interface_bytes);
+        assert!(!instructions(&plain.module).any(|instruction| matches!(
+            instruction,
+            Instr::Extended(ExtendedInstr::CallSlot { .. })
+        )));
+        assert!(plain.interface.slots.iter().all(|slot| !slot.late));
     }
 
     #[test]
@@ -953,16 +1111,23 @@ mod tests {
             "def add1(n: Int): Int\n  n + 1\nend\nadd1(41)\n",
             &CompileOptions::new().late_function("add1"),
         );
-        assert_eq!(compiled.module.slots.len(), 1);
+        let published = &compiled.interface.slots[0];
+        let slot = compiled
+            .module
+            .slots
+            .iter()
+            .position(|slot| slot.key == published.key)
+            .expect("the published slot exists");
         assert!(matches!(
-            compiled.module.slots[0].contract,
+            compiled.module.slots[slot].contract,
             SlotContract::Function(_)
         ));
         assert!(instructions(&compiled.module).any(|instruction| matches!(
             instruction,
-            Instr::Extended(ExtendedInstr::CallSlot { slot: 0, .. })
+            Instr::Extended(ExtendedInstr::CallSlot { slot: found, .. }) if *found as usize == slot
         )));
         assert_eq!(compiled.interface.slots.len(), 1);
+        assert!(compiled.interface.slots[0].late);
         let decoded = lm_bytecode::interface::decode_interface(&compiled.interface_bytes)
             .expect("the interface decodes");
         assert_eq!(decoded, compiled.interface);
@@ -1008,14 +1173,20 @@ mod tests {
             "final class Box\n  value: Int\n  def init(mut self, value: Int)\n    self.value = value\n  end\nend\nBox(42).value\n",
             &CompileOptions::new().late_class("Box"),
         );
-        assert_eq!(compiled.module.slots.len(), 1);
+        let published = &compiled.interface.slots[0];
+        let slot = compiled
+            .module
+            .slots
+            .iter()
+            .position(|slot| slot.key == published.key)
+            .expect("the published slot exists");
         assert!(matches!(
-            compiled.module.slots[0].contract,
+            compiled.module.slots[slot].contract,
             SlotContract::Class { .. }
         ));
         assert!(instructions(&compiled.module).any(|instruction| matches!(
             instruction,
-            Instr::Extended(ExtendedInstr::NewSlot { slot: 0, .. })
+            Instr::Extended(ExtendedInstr::NewSlot { slot: found, .. }) if *found as usize == slot
         )));
     }
 
@@ -1039,11 +1210,23 @@ mod tests {
         let second_identity = lm_bytecode::identity::module_identity(&second.module)
             .expect("the second revision has an identity");
         assert_eq!(first_identity.class_hashes, second_identity.class_hashes);
-        let (first_class, first_constructor) = match first.module.slots[0].initial {
+        let first_slot = first
+            .module
+            .slots
+            .iter()
+            .find(|slot| slot.key == first.interface.slots[0].key)
+            .expect("the first class slot exists");
+        let second_slot = second
+            .module
+            .slots
+            .iter()
+            .find(|slot| slot.key == second.interface.slots[0].key)
+            .expect("the second class slot exists");
+        let (first_class, first_constructor) = match first_slot.initial {
             Some(lm_bytecode::SlotTarget::Class { class, constructor }) => (class, constructor),
             _ => panic!("the first class slot has no constructor"),
         };
-        let second_constructor = match second.module.slots[0].initial {
+        let second_constructor = match second_slot.initial {
             Some(lm_bytecode::SlotTarget::Class { constructor, .. }) => constructor,
             _ => panic!("the second class slot has no constructor"),
         };
@@ -1101,7 +1284,53 @@ mod tests {
                 .expect("the unit binds");
         }
         let linked = crate::link("app.main", &link_env.freeze()).expect("the program links");
-        assert_eq!(linked.module.slots.len(), 1);
+        let key = library
+            .interface
+            .slots
+            .iter()
+            .find(|slot| slot.binding.ends_with(".twice"))
+            .expect("the library publishes twice")
+            .key;
+        assert!(linked.module.slots.iter().any(|slot| slot.key == key));
+    }
+
+    #[test]
+    fn imported_reification_uses_the_published_static_contract() {
+        let library = compile_module(
+            "lib.math",
+            &SourceFile::new("lib/math.lm", "def twice(n: Int): Int\n  n * 2\nend\n"),
+            &crate::CompileEnv::new().freeze(),
+            false,
+        )
+        .expect("the library compiles");
+        let published = library
+            .interface
+            .slots
+            .iter()
+            .find(|slot| slot.binding == "lib.math.twice")
+            .expect("the library publishes twice");
+        assert!(!published.late);
+
+        let mut compile_env = crate::CompileEnv::new();
+        compile_env
+            .bind_interface(library.interface.clone())
+            .expect("the interface binds");
+        compile_env.bind_root("lib", "lib").expect("the root binds");
+        let program = compile_module(
+            "app.main",
+            &SourceFile::new(
+                "app/main.lm",
+                "use lib.math.twice\ndef portable(): FunctionCode[(Int,), Int]\n  codeof(twice)\nend\ndef run(): Int\n  twice(21)\nend\nrun()\n",
+            ),
+            &compile_env.freeze(),
+            true,
+        )
+        .expect("the program compiles");
+        assert!(instructions(&program.module).any(|instruction| matches!(
+            instruction,
+            Instr::Extended(ExtendedInstr::CallSlot { slot, .. })
+                if program.module.slots[*slot as usize].key == published.key
+        )));
     }
 
     #[test]

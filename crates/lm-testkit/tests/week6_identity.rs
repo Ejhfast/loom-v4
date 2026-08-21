@@ -51,9 +51,8 @@ fn the_qualified_key_separates_a_user_enum_from_the_core_family() {
     );
 }
 
-/// A class rename through the source moves the qualified key, so it
-/// moves every hash that names the class. The verification hash holds,
-/// because a key lives in the export section.
+/// A class rename through source moves the qualified key. It also moves
+/// every hash that names the class. A published slot key moves too.
 ///
 /// An earlier version of this test set `class.name` and left
 /// `class.key`, which the source compiler cannot produce, so it proved
@@ -91,12 +90,10 @@ fn a_class_rename_moves_no_hash_when_the_key_holds() {
         identity.func_hashes, renamed_identity.func_hashes,
         "a source rename must move the hash of a definition that names the class"
     );
-    // The verification hash holds: a key lives in the export section,
-    // which the verifier never reads.
-    assert_eq!(
+    assert_ne!(
         lm_bytecode::identity::verification_hash(&module),
         lm_bytecode::identity::verification_hash(&renamed),
-        "a source rename moved the verification hash"
+        "a source binding rename must move the verification hash"
     );
 }
 

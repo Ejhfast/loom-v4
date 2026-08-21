@@ -182,12 +182,17 @@ impl<'o> FnChecker<'o> {
                         | NativeRepr::SlotSpec
                         | NativeRepr::CodeInstance
                         | NativeRepr::Slot
+                        | NativeRepr::ClassBinding
                 )
             ),
             Type::Inst(class, _) => {
                 matches!(
                     ctx.classes[class.0 as usize].native_repr,
-                    Some(NativeRepr::FunctionCode | NativeRepr::FunctionDef)
+                    Some(
+                        NativeRepr::FunctionCode
+                            | NativeRepr::FunctionDef
+                            | NativeRepr::FunctionBinding
+                    )
                 )
             }
             _ => false,

@@ -687,6 +687,7 @@ impl<'o> FnChecker<'o> {
                 "Instance",
                 "Slot",
                 "ClassDef",
+                "ClassBinding",
                 "CodeError",
             ]
             .into_iter()
@@ -696,6 +697,9 @@ impl<'o> FnChecker<'o> {
             }
             Type::Inst(class, _) if ctx.core_types.get("FunctionDef") == Some(&class.0) => {
                 Some("FunctionDef")
+            }
+            Type::Inst(class, _) if ctx.core_types.get("FunctionBinding") == Some(&class.0) => {
+                Some("FunctionBinding")
             }
             _ => None,
         };
@@ -716,8 +720,10 @@ impl<'o> FnChecker<'o> {
         }
         let code_takes_types = matches!(
             (code_class, name),
-            (Some("Instance"), "entry" | "function")
-                | (Some("VerifiedModule"), "entry_code" | "function_code")
+            (
+                Some("Instance"),
+                "entry" | "function" | "entry_binding" | "function_binding"
+            ) | (Some("VerifiedModule"), "entry_code" | "function_code")
         );
         if !type_args.is_empty() && !code_takes_types {
             return Err(Diagnostic::new(
@@ -865,7 +871,10 @@ impl<'o> FnChecker<'o> {
                     },
                 })
             }
-            ("Instance", "entry") | ("Instance", "function") => {
+            ("Instance", "entry")
+            | ("Instance", "function")
+            | ("Instance", "entry_binding")
+            | ("Instance", "function_binding") => {
                 if type_args.len() != 2 {
                     return Err(Diagnostic::new(
                         "E1024",
@@ -883,10 +892,24 @@ impl<'o> FnChecker<'o> {
                         type_args[0].span,
                     ));
                 }
-                let function = Self::core_inst(ctx, "FunctionDef", vec![input, output]);
-                let (op, values) = if name == "entry" {
+                let is_binding = matches!(name, "entry_binding" | "function_binding");
+                let class = if is_binding {
+                    "FunctionBinding"
+                } else {
+                    "FunctionDef"
+                };
+                let function = Self::core_inst(ctx, class, vec![input, output]);
+                let entry = matches!(name, "entry" | "entry_binding");
+                let (op, values) = if entry {
                     Self::expect_no_args(name, args, span)?;
-                    (lm_abi::OP_VM_INSTANCE_ENTRY, vec![recv_h])
+                    (
+                        if is_binding {
+                            lm_abi::OP_VM_INSTANCE_ENTRY_BINDING
+                        } else {
+                            lm_abi::OP_VM_INSTANCE_ENTRY
+                        },
+                        vec![recv_h],
+                    )
                 } else {
                     if args.len() != 1 {
                         return Err(Diagnostic::new(
@@ -895,8 +918,15 @@ impl<'o> FnChecker<'o> {
                             span,
                         ));
                     }
-                    let binding = self.check_expr(ctx, &args[0], STRING)?;
-                    (lm_abi::OP_VM_INSTANCE_FUNCTION, vec![recv_h, binding])
+                    let name_value = self.check_expr(ctx, &args[0], STRING)?;
+                    (
+                        if is_binding {
+                            lm_abi::OP_VM_INSTANCE_FUNCTION_BINDING
+                        } else {
+                            lm_abi::OP_VM_INSTANCE_FUNCTION
+                        },
+                        vec![recv_h, name_value],
+                    )
                 };
                 self.charge_op(ctx, op, span)?;
                 Ok(HExpr {
@@ -905,7 +935,7 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform { op, args: values },
                 })
             }
-            ("Instance", "class_def") => {
+            ("Instance", "class_def") | ("Instance", "class_binding") => {
                 if args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1006",
@@ -913,15 +943,28 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let binding = self.check_expr(ctx, &args[0], STRING)?;
-                self.charge_op(ctx, lm_abi::OP_VM_INSTANCE_CLASS, span)?;
-                let class_def = Self::core_class(ctx, "ClassDef");
+                let name_value = self.check_expr(ctx, &args[0], STRING)?;
+                let is_binding = name == "class_binding";
+                let op = if is_binding {
+                    lm_abi::OP_VM_INSTANCE_CLASS_BINDING
+                } else {
+                    lm_abi::OP_VM_INSTANCE_CLASS
+                };
+                self.charge_op(ctx, op, span)?;
+                let class_def = Self::core_class(
+                    ctx,
+                    if is_binding {
+                        "ClassBinding"
+                    } else {
+                        "ClassDef"
+                    },
+                );
                 Ok(HExpr {
                     ty: result(ctx, class_def),
                     mutable: true,
                     kind: HExprKind::Perform {
-                        op: lm_abi::OP_VM_INSTANCE_CLASS,
-                        args: vec![recv_h, binding],
+                        op,
+                        args: vec![recv_h, name_value],
                     },
                 })
             }
@@ -954,6 +997,63 @@ impl<'o> FnChecker<'o> {
                     kind: HExprKind::Perform {
                         op,
                         args: vec![recv_h, argument],
+                    },
+                })
+            }
+            ("FunctionBinding", "slot")
+            | ("ClassBinding", "slot")
+            | ("FunctionBinding", "spec")
+            | ("ClassBinding", "spec")
+            | ("FunctionBinding", "instance")
+            | ("ClassBinding", "instance") => {
+                Self::expect_no_args(name, args, span)?;
+                let (op, value) = match name {
+                    "slot" => (lm_abi::OP_VM_BINDING_SLOT, Self::core_class(ctx, "Slot")),
+                    "spec" => (
+                        lm_abi::OP_VM_BINDING_SPEC,
+                        Self::core_class(ctx, "SlotSpec"),
+                    ),
+                    _ => (
+                        lm_abi::OP_VM_BINDING_INSTANCE,
+                        Self::core_class(ctx, "Instance"),
+                    ),
+                };
+                self.charge_op(ctx, op, span)?;
+                Ok(HExpr {
+                    ty: result(ctx, value),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op,
+                        args: vec![recv_h],
+                    },
+                })
+            }
+            ("FunctionBinding", "target") => {
+                Self::expect_no_args(name, args, span)?;
+                let Type::Inst(_, values) = ctx.store.get(recv_h.ty).clone() else {
+                    unreachable!("a function binding is generic")
+                };
+                let target = Self::core_inst(ctx, "FunctionDef", values);
+                self.charge_op(ctx, lm_abi::OP_VM_BINDING_FUNCTION_TARGET, span)?;
+                Ok(HExpr {
+                    ty: result(ctx, target),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_BINDING_FUNCTION_TARGET,
+                        args: vec![recv_h],
+                    },
+                })
+            }
+            ("ClassBinding", "target") => {
+                Self::expect_no_args(name, args, span)?;
+                let target = Self::core_class(ctx, "ClassDef");
+                self.charge_op(ctx, lm_abi::OP_VM_BINDING_CLASS_TARGET, span)?;
+                Ok(HExpr {
+                    ty: result(ctx, target),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op: lm_abi::OP_VM_BINDING_CLASS_TARGET,
+                        args: vec![recv_h],
                     },
                 })
             }
@@ -1030,11 +1130,18 @@ impl<'o> FnChecker<'o> {
                     {
                         (values[0], values[1], lm_abi::OP_VM_ACTIVATE_DEF)
                     }
+                    Type::Inst(class, values)
+                        if ctx.core_types.get("FunctionBinding") == Some(&class.0)
+                            && name == "activate"
+                            && values.len() == 2 =>
+                    {
+                        (values[0], values[1], lm_abi::OP_VM_ACTIVATE_DEF)
+                    }
                     _ => {
                         let expected = if name == "activate_or_fault" {
                             "a function"
                         } else {
-                            "a function or function definition"
+                            "a function, function definition, or function binding"
                         };
                         return Err(Diagnostic::new(
                             "E1004",
@@ -1073,6 +1180,11 @@ impl<'o> FnChecker<'o> {
                     ));
                 }
                 let code = self.synth_expr(ctx, &args[0])?;
+                if let HExprKind::MakeClosure { func, captures } = &code.kind {
+                    if captures.is_empty() {
+                        ctx.reified_functions.insert(*func);
+                    }
+                }
                 let installed = match ctx.store.get(code.ty).clone() {
                     Type::Class(class)
                         if ctx.core_types.get("VerifiedModule") == Some(&class.0) =>
@@ -1083,10 +1195,10 @@ impl<'o> FnChecker<'o> {
                         if ctx.core_types.get("FunctionCode") == Some(&class.0)
                             && values.len() == 2 =>
                     {
-                        Self::core_inst(ctx, "FunctionDef", values)
+                        Self::core_inst(ctx, "FunctionBinding", values)
                     }
                     Type::Class(class) if ctx.core_types.get("ClassCode") == Some(&class.0) => {
-                        Self::core_class(ctx, "ClassDef")
+                        Self::core_class(ctx, "ClassBinding")
                     }
                     Type::Fn(params, muts, ret, _) if !muts.iter().any(|marker| *marker) => {
                         let input = if params.is_empty() {
@@ -1094,7 +1206,7 @@ impl<'o> FnChecker<'o> {
                         } else {
                             ctx.store.intern(Type::Tuple(params))
                         };
-                        Self::core_inst(ctx, "FunctionDef", vec![input, ret])
+                        Self::core_inst(ctx, "FunctionBinding", vec![input, ret])
                     }
                     Type::Fn(_, _, _, _) => {
                         return Err(Diagnostic::new(
@@ -1142,36 +1254,61 @@ impl<'o> FnChecker<'o> {
                         span,
                     ));
                 }
-                let slot_ty = Self::core_class(ctx, "Slot");
-                let slot = self.check_expr(ctx, &args[0], slot_ty)?;
+                let address = self.synth_expr(ctx, &args[0])?;
+                let address_kind = match ctx.store.get(address.ty) {
+                    Type::Class(class) if ctx.core_types.get("Slot") == Some(&class.0) => 0,
+                    Type::Inst(class, values)
+                        if ctx.core_types.get("FunctionBinding") == Some(&class.0)
+                            && values.len() == 2 =>
+                    {
+                        1
+                    }
+                    Type::Class(class) if ctx.core_types.get("ClassBinding") == Some(&class.0) => 2,
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "E1004",
+                            "`replace` needs a Slot or installed binding",
+                            args[0].span,
+                        ));
+                    }
+                };
                 let target = self.synth_expr(ctx, &args[1])?;
                 let is_function = matches!(
                     ctx.store.get(target.ty),
                     Type::Inst(class, values)
-                        if ctx.core_types.get("FunctionDef") == Some(&class.0)
+                        if (ctx.core_types.get("FunctionDef") == Some(&class.0)
+                            || ctx.core_types.get("FunctionBinding") == Some(&class.0))
                             && values.len() == 2
                 ) || matches!(ctx.store.get(target.ty), Type::Fn(_, muts, _, _) if !muts.iter().any(|marker| *marker));
                 let is_class = matches!(
                     ctx.store.get(target.ty),
-                    Type::Class(class) if ctx.core_types.get("ClassDef") == Some(&class.0)
+                    Type::Class(class)
+                        if ctx.core_types.get("ClassDef") == Some(&class.0)
+                            || ctx.core_types.get("ClassBinding") == Some(&class.0)
                 );
                 let is_process = matches!(ctx.store.get(target.ty), Type::Handle(_, _));
                 let op = match name {
-                    "replace" | "replace_function" if is_function => lm_abi::OP_VM_REPLACE_FUNCTION,
-                    "replace_class" if is_class => lm_abi::OP_VM_REPLACE_CLASS,
-                    "replace_value" => lm_abi::OP_VM_REPLACE_VALUE,
-                    "replace_process" if is_process => lm_abi::OP_VM_REPLACE_PROCESS,
+                    "replace" | "replace_function" if is_function && address_kind != 2 => {
+                        lm_abi::OP_VM_REPLACE_FUNCTION
+                    }
+                    "replace" | "replace_class" if is_class && address_kind != 1 => {
+                        lm_abi::OP_VM_REPLACE_CLASS
+                    }
+                    "replace_value" if address_kind == 0 => lm_abi::OP_VM_REPLACE_VALUE,
+                    "replace_process" if is_process && address_kind == 0 => {
+                        lm_abi::OP_VM_REPLACE_PROCESS
+                    }
                     "replace" | "replace_function" => {
                         return Err(Diagnostic::new(
                             "E1004",
-                            "`replace_function` needs a FunctionDef or function target",
+                            "`replace_function` needs a function target",
                             args[1].span,
                         ));
                     }
                     "replace_class" => {
                         return Err(Diagnostic::new(
                             "E1004",
-                            "`replace_class` needs a ClassDef target",
+                            "`replace_class` needs a class target",
                             args[1].span,
                         ));
                     }
@@ -1191,7 +1328,7 @@ impl<'o> FnChecker<'o> {
                     mutable: true,
                     kind: HExprKind::Perform {
                         op,
-                        args: vec![recv_h, slot, target],
+                        args: vec![recv_h, address, target],
                     },
                 }
             }

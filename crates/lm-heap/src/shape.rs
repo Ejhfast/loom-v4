@@ -250,6 +250,8 @@ pub enum CodeHandleKind {
     Slot,
     Function,
     Class,
+    FunctionBinding,
+    ClassBinding,
 }
 
 /// One immutable portable code payload.

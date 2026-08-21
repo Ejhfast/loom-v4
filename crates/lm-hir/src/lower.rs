@@ -18,7 +18,7 @@ use lm_source::ast::BinOp;
 use lm_types::{
     ClassKind, Row, RowElem, Type, TypeId, TypeStore, BOOL, DIGEST, INT, NEVER, STRING, UNIT,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 fn extended(instr: ExtendedInstr) -> Instr {
@@ -67,11 +67,24 @@ pub struct LateCallable {
     pub kind: LateCallableKind,
 }
 
+/// One published class binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LateClass {
+    pub key: [u8; 32],
+    pub abi: [u8; 32],
+}
+
 /// Late-linkage choices for one checked module.
 #[derive(Debug, Clone, Default)]
 pub struct LowerLinkage {
+    /// Every callable binding that the artifact publishes.
     pub functions: BTreeMap<u32, LateCallable>,
-    pub classes: BTreeMap<u32, [u8; 32]>,
+    /// Every class binding that the artifact publishes.
+    pub classes: BTreeMap<u32, LateClass>,
+    /// Published callables that compiled calls must read through slots.
+    pub dynamic_functions: BTreeSet<u32>,
+    /// Published classes that compiled construction must read through slots.
+    pub dynamic_classes: BTreeSet<u32>,
 }
 
 impl<'m> ModLowerer<'m> {
@@ -283,22 +296,26 @@ pub fn lower_module_with_linkage(
     let mut class_slots = HashMap::new();
     let mut next_slot = 0u32;
     for function in linkage.functions.keys() {
-        function_slots.insert(*function, next_slot);
+        if linkage.dynamic_functions.contains(function) {
+            function_slots.insert(*function, next_slot);
+        }
         next_slot += 1;
     }
     for class in linkage.classes.keys() {
-        class_slots.insert(*class, next_slot);
+        if linkage.dynamic_classes.contains(class) {
+            class_slots.insert(*class, next_slot);
+        }
         next_slot += 1;
     }
     let dispatch_base = hir.funcs.len() as u32 + hir.classes.len() as u32;
     let class_dispatch = linkage
-        .classes
-        .keys()
+        .dynamic_classes
+        .iter()
         .enumerate()
         .map(|(offset, class)| (*class, dispatch_base + offset as u32))
         .collect();
     let mut inline_bodies: Vec<Option<HExpr>> = hir.funcs.iter().map(inline_body).collect();
-    for function in linkage.functions.keys() {
+    for function in &linkage.dynamic_functions {
         let body = inline_bodies
             .get_mut(*function as usize)
             .ok_or_else(|| format!("late function {function} does not exist"))?;
@@ -346,7 +363,7 @@ pub fn lower_module_with_linkage(
     for (cidx, class) in hir.classes.iter().enumerate() {
         funcs.push(lower_new_func(&mut m, class, cidx as u32));
     }
-    for class in linkage.classes.keys() {
+    for class in &linkage.dynamic_classes {
         funcs.push(lower_new_dispatch_func(
             &mut m,
             &hir.classes[*class as usize],
@@ -411,7 +428,7 @@ pub fn lower_module_with_linkage(
             func_bounds.push(m.bounds(&class.type_bounds));
         }
     }
-    for class in linkage.classes.keys() {
+    for class in &linkage.dynamic_classes {
         if hir.classes[*class as usize].type_params == 0 {
             func_bounds.push(Vec::new());
         } else {
@@ -546,8 +563,7 @@ pub fn lower_module_with_linkage(
             initial: Some(SlotTarget::Function(*function)),
         });
     }
-    let class_slot_start = module.slots.len();
-    for (class, key) in &linkage.classes {
+    for (class, selected) in &linkage.classes {
         let definition = module
             .classes
             .get(*class as usize)
@@ -568,10 +584,10 @@ pub fn lower_module_with_linkage(
             _ => return Err(format!("late class {class} has a native representation")),
         }
         module.slots.push(SlotSpec {
-            key: *key,
+            key: selected.key,
             contract: SlotContract::Class {
                 type_params: definition.type_params,
-                abi: [0; 32],
+                abi: selected.abi,
                 ty,
                 constructor: BcCallableContract {
                     type_params: constructor.type_params,
@@ -588,18 +604,6 @@ pub fn lower_module_with_linkage(
                 constructor: constructor_index,
             }),
         });
-    }
-    if !linkage.classes.is_empty() {
-        let identity = lm_bytecode::identity::module_identity(&module)
-            .map_err(|error| format!("late class identity failed: {error}"))?;
-        for (offset, class) in linkage.classes.keys().enumerate() {
-            let SlotContract::Class { abi, .. } =
-                &mut module.slots[class_slot_start + offset].contract
-            else {
-                unreachable!("the class slot range contains class contracts");
-            };
-            *abi = identity.class_hashes[*class as usize];
-        }
     }
     Ok(module)
 }
@@ -2558,6 +2562,8 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 | NativeRepr::Slot
                 | NativeRepr::FunctionDef
                 | NativeRepr::ClassDef
+                | NativeRepr::FunctionBinding
+                | NativeRepr::ClassBinding
                 | NativeRepr::DynValue
         )
     ) {

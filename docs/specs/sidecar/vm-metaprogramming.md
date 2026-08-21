@@ -31,8 +31,8 @@ The implementation uses these decisions:
 - `Compiler.Verify` performs independent verification and produces a `VerifiedModule`.
 - `Vm.install` installs verified modules or portable definitions.
 - Module installation returns an `Instance`.
-- Definition installation returns an installed definition handle.
-- Installed definitions remain immutable.
+- Definition installation returns an installed binding.
+- Each binding retains an immutable definition target.
 - A `Slot` provides optional late binding under one immutable contract.
 - Active frames pin exact function versions.
 - Future slot operations read the current slot target.
@@ -229,6 +229,12 @@ The compiler also provides `codeof` for definitions known at compile time.
 
 `codeof(Class)` returns `ClassCode` for a class definition.
 
+Reification publishes the selected definition as a slot binding.
+
+It also gives references to that definition late linkage in the same compilation.
+
+Other calls and constructions keep static linkage.
+
 Reflection can recover code for a named capture-free function value.
 
 Capturing closures remain valid activation targets.
@@ -244,6 +250,12 @@ Generic definitions require an explicit type application in version 0.2.
 It provides typed lookup for exported definitions, entries, slot specifications, and live slots.
 
 An instance cannot move to another VM. A second VM must install the verified module again.
+
+`Instance.entry_binding[A,R]()` returns the installed entry binding.
+
+`Instance.function_binding[A,R](name)` returns one installed function binding.
+
+`Instance.class_binding(name)` returns one installed class binding.
 
 ### 6.5 `FunctionDef`
 
@@ -267,27 +279,67 @@ Lookup returns `CodeError` for another function. Later stages can add typed appl
 
 The handle carries no object instance. It identifies one verified class target for class-slot replacement.
 
-### 6.7 Direct installation
+### 6.7 Installed bindings
+
+`FunctionBinding[A,R]` combines one mutable function slot with one immutable installed function target.
+
+`ClassBinding` combines one mutable class slot with one immutable installed class target.
+
+A binding belongs to one VM image and one module instance.
+
+`binding.slot()` returns its live replacement address.
+
+`binding.spec()` returns its portable slot specification.
+
+`binding.instance()` returns the installation that supplied its immutable target.
+
+`binding.target()` returns that immutable `FunctionDef` or `ClassDef`.
+
+These projections return `CodeError` for stale handles.
+
+`Vm.activate(function_binding, args)` reads the current target from the binding slot.
+
+`Vm.replace(address_binding, target_binding)` writes the target binding's immutable installed target.
+
+The operation does not read the target binding's current slot target.
+
+This rule keeps two installed revisions distinct after either slot changes.
+
+### 6.8 Direct installation
 
 `Vm.install(VerifiedModule, LinkEnv)` returns an `Instance`.
 
-`Vm.install(FunctionCode[A,R], LinkEnv)` returns a `FunctionDef[A,R]`.
+`Vm.install(FunctionCode[A,R], LinkEnv)` returns a `FunctionBinding[A,R]`.
 
-`Vm.install(ClassCode, LinkEnv)` returns a `ClassDef`.
+`Vm.install(ClassCode, LinkEnv)` returns a `ClassBinding`.
 
 Direct installation installs the retained module revision as needed.
 
-It publishes only the selected definition through the returned handle.
+It returns the binding selected by the portable code value.
+
+The installation retains all verified definitions and published slots from that module.
 
 It never rewrites an existing slot.
 
-The returned definition keeps its owning installed instance alive.
+The returned binding keeps its owning installed instance alive.
 
-The definition can resolve required slots through that instance.
+Its immutable target can resolve required slots through that instance.
 
 `Vm.install(function)` is convenience syntax for a portable named function.
 
-`Vm.replace(slot, function)` installs the function and then replaces the slot atomically.
+It returns the same binding type as `Vm.install(codeof(function))`.
+
+```lm
+original = image.install(rate)?
+replacement = image.install(with_fee)?
+image.replace(original, replacement)?
+```
+
+Calls through `original` now use `with_fee`.
+
+`original.target()` still returns the installed `rate` definition.
+
+`Vm.replace(slot, function)` uses the retained verified function as the new target.
 
 The convenience forms reject capturing closures and unsupported generic values.
 
@@ -295,9 +347,9 @@ Static callers still use their immutable targets after direct installation.
 
 Only slot instructions observe a later replacement.
 
-### 6.8 Activation errors
+### 6.9 Activation errors
 
-`Vm.activate` returns `Result[Run[T], CodeError]` for closures and `FunctionDef` values.
+`Vm.activate` returns `Result[Run[T], CodeError]` for closures, definitions, and function bindings.
 
 The error covers stale code, cross-VM code, bad arguments, unsendable captures, and exhausted run capacity.
 
@@ -367,6 +419,14 @@ A late binding records one portable `SlotSpec`.
 
 `CompileOptions` can select late linkage for new definitions and selected free names.
 
+Every exported function and class has a published slot specification.
+
+Publication alone does not change call or construction instructions.
+
+The interface records a separate late-linkage bit for each published binding.
+
+`codeof` and direct named installation set that bit for the selected local definition.
+
 Normal package builds use static linkage by default.
 
 Interactive tools use late linkage for their mutable namespace.
@@ -392,6 +452,8 @@ Dense slot indices are internal and can change between compilations.
 `Instance.slot_spec(name)` returns the portable specification for one named slot.
 
 `Instance.slot_for(spec)` resolves that specification inside the receiving instance.
+
+Installed bindings provide the same stable lookup without a text name.
 
 The lookup checks the stable key and immutable contract. It never guesses from an integer position.
 
@@ -432,13 +494,15 @@ A value or process target cannot be portable inside artifact bytes.
 Each replacement method checks the target against the slot's immutable contract.
 
 ```text
-Vm.replace_function(Slot, FunctionDef[A,T]) -> Result[(), CodeError]
-Vm.replace_class(Slot, ClassDef) -> Result[(), CodeError]
+Vm.replace_function(Slot | FunctionBinding[A,T], FunctionDef[A,T] | FunctionBinding[A,T])
+  -> Result[(), CodeError]
+Vm.replace_class(Slot | ClassBinding, ClassDef | ClassBinding)
+  -> Result[(), CodeError]
 Vm.replace_value(Slot, T) -> Result[(), CodeError]
 Vm.replace_process(Slot, Handle[M,R]) -> Result[(), CodeError]
 ```
 
-`Vm.replace` is a short alias for `replace_function`.
+`Vm.replace` selects function or class replacement from its typed arguments.
 
 A successful replacement changes only the current target.
 
@@ -607,11 +671,11 @@ The compiler returns a verified module with portable definition views.
 
 The library installs each selected definition directly.
 
-It maps each source name to its returned `SlotSpec`.
+It maps each source name to its returned binding.
 
 The VM does not own this source-name map.
 
-The library can retain the owning `Instance` for batch operations.
+The binding exposes its `SlotSpec` and owning `Instance` for batch operations.
 
 ### 11.2 Compatible redefinition
 
@@ -621,9 +685,7 @@ It emits a new immutable definition with the same contract.
 
 The library installs the new `FunctionCode` or `ClassCode`.
 
-It resolves the old specification through the target's owning instance.
-
-It then calls `Vm.replace` on the resolved slot.
+It then calls `Vm.replace(old_binding, new_binding)`.
 
 Old compiled callers use the same slot and see the new target on their next late call.
 
@@ -631,7 +693,7 @@ Old compiled callers use the same slot and see the new target on their next late
 
 An incompatible definition cannot replace the old slot.
 
-The library creates a new slot. It then maps the source spelling to that new slot.
+The library retains the new binding. It then maps the source spelling to that binding.
 
 New compilations use the new slot. Old compiled code retains the old slot.
 
@@ -645,9 +707,9 @@ The compiler gives free namespace references late linkage.
 
 The library verifies the module and selects its portable entry code.
 
-It installs that entry directly and obtains a `FunctionDef`.
+It installs that entry directly and obtains a `FunctionBinding`.
 
-A typed caller uses `Instance.entry[A,R]()` with compile-time argument and result types.
+A typed caller activates that binding with compile-time argument and result types.
 
 A dynamic evaluator can activate an entry that returns `DynValue`.
 
@@ -700,6 +762,8 @@ Source text and syntax nodes enter the same compiler pipeline.
 
 Both inputs produce the same canonical `Artifact` for equal syntax and compile inputs.
 
+The command-line path uses the same linkage selection as module and runtime compilation.
+
 Verification creates the same `VerifiedModule` representation for both paths.
 
 A compiled program can select a `FunctionCode` or `ClassCode` from that module.
@@ -712,11 +776,17 @@ Both paths therefore install the same portable definition form.
 
 `codeof` creates this portable form without a VM.
 
+It references the verified artifact that already contains the running source definition.
+
 The portable form is the primary value for inspection, editing, installation, and replacement.
 
 `Vm.install(function)` is convenience syntax for `Vm.install(codeof(function))`.
 
+Both forms install the same artifact revision and return the same installed binding type.
+
 Dense installed indices and holder-local handles can differ between installations.
+
+Slot keys and contracts remain stable across these paths.
 
 ### 12.2 Definition source records
 
@@ -1168,11 +1238,13 @@ Gate: incompatible replacements reject atomically. Compatible future operations 
 
 Extend artifacts, interfaces, compile environments, link environments, and the bootstrap compiler.
 
-Gate: static package builds remain byte-identical unless they use new linkage metadata.
+Published binding metadata can change artifact bytes.
+
+Gate: unrelated calls remain static and retain their prior execution cost.
 
 ### Stage 6: reify verification and installation
 
-Expose modules, instances, slots, and installed definition handles to Loom.
+Expose modules, instances, slots, immutable targets, and installed bindings to Loom.
 
 Expose `Compiler.Verify` as the independent verification boundary.
 
@@ -1197,6 +1269,10 @@ Expose `FunctionCode`, `ClassCode`, definition lookup, and direct installation.
 Retain one verified origin for named functions and classes.
 
 Gate: a Loom function installs without a source string or module-level public edit.
+
+Gate: direct installation returns a stable binding with both address and revision target.
+
+Gate: all source and syntax compilation paths use identical publication and late-linkage rules.
 
 ### Stage 10: retain source attachments
 

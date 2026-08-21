@@ -794,13 +794,11 @@ fn the_verification_hash_keeps_every_index() {
     assert_ne!(base, verification_hash(&dead));
 }
 
-/// Definition names live outside the semantic region, and the
-/// verifier reads no name: the core layout comes from the declared
-/// role table, and every rule reads resolved slots and structures. A
-/// rename therefore costs no cache hit. See `week6_names.rs` for the
-/// probes that hold the boundary.
+/// Definition names live outside the semantic region. Published slot
+/// keys live inside it. A source binding rename changes its slot key
+/// and verification hash.
 #[test]
-fn a_rename_keeps_the_verification_hash() {
+fn a_published_rename_moves_the_verification_hash() {
     use lm_bytecode::identity::verification_hash;
     let before = "def helper(n: Int): Int\n  n * 2\nend\n\
                   def caller(n: Int): Int\n  helper(n) + 1\nend\ncaller(3)\n";
@@ -813,16 +811,14 @@ fn a_rename_keeps_the_verification_hash() {
         module_identity(&mb).unwrap().semantic_hash,
         "a rename must move the semantic hash through the export table"
     );
-    assert_eq!(
+    assert_ne!(
         verification_hash(&ma),
         verification_hash(&mb),
-        "a rename must not move the verification hash"
+        "a published rename must move the verification hash"
     );
-    // The semantic region itself does not move: the names live in the
-    // export section.
-    assert_eq!(
+    assert_ne!(
         lm_bytecode::semantic_section(&ma),
         lm_bytecode::semantic_section(&mb),
-        "a rename must not move the semantic region"
+        "a published rename must move the semantic region"
     );
 }

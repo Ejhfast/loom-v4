@@ -25,7 +25,8 @@ pub fn core_source_digest() -> [u8; 32] {
 }
 pub use hir::{dump_classes, HirImportDef, HirModule};
 pub use lower::{
-    lower_module, lower_module_with_linkage, LateCallable, LateCallableKind, LowerLinkage,
+    lower_module, lower_module_with_linkage, LateCallable, LateCallableKind, LateClass,
+    LowerLinkage,
 };
 
 /// Render the lowered control-flow graph in a stable readable form.

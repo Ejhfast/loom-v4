@@ -535,6 +535,30 @@ impl World {
                 classes.extend_from_slice(&instance.classes);
                 let mut instance_slots = try_vec(instance.slots.len())?;
                 instance_slots.extend_from_slice(&instance.slots);
+                let mut binding_targets = try_vec(module.slots.len())?;
+                for slot in &module.slots {
+                    let target = match slot.initial {
+                        Some(lm_bytecode::SlotTarget::Function(function)) => {
+                            RuntimeSlotTarget::Function(
+                                *funcs
+                                    .get(function as usize)
+                                    .ok_or(RestoreFail::OtherProgram)?,
+                            )
+                        }
+                        Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
+                            RuntimeSlotTarget::Class {
+                                class: *classes
+                                    .get(class as usize)
+                                    .ok_or(RestoreFail::OtherProgram)?,
+                                constructor: *funcs
+                                    .get(constructor as usize)
+                                    .ok_or(RestoreFail::OtherProgram)?,
+                            }
+                        }
+                        None => RuntimeSlotTarget::Empty,
+                    };
+                    binding_targets.push(target);
+                }
                 instances.push(InstalledInstance {
                     installation: installation_base
                         .checked_add(instance.installation)
@@ -546,6 +570,7 @@ impl World {
                     funcs,
                     classes,
                     slots: instance_slots,
+                    binding_targets,
                     exports,
                 });
             }

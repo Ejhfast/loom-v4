@@ -385,27 +385,31 @@ impl World {
             .try_reserve(1)
             .map_err(|_| "the world has no installation capacity".to_string())?;
 
+        let binding_targets: Vec<ImageSlotTarget> = appended
+            .slot_initials
+            .iter()
+            .map(|initial| match initial {
+                Some(lm_bytecode::SlotTarget::Function(func)) => ImageSlotTarget::Function(*func),
+                Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
+                    ImageSlotTarget::Class {
+                        class: *class,
+                        constructor: *constructor,
+                    }
+                }
+                None => ImageSlotTarget::Empty,
+            })
+            .collect();
+
         for image in &mut self.vm_images {
             if image.live {
                 image.slots.resize(slot_count, ImageSlotTarget::Empty);
             }
         }
         let target = &mut self.vm_images[target_index];
-        for (source, initial) in appended.slot_initials.iter().enumerate() {
+        for (source, initial) in binding_targets.iter().enumerate() {
             let slot = appended.reloc.slots[source] as usize;
             if matches!(target.slots[slot], ImageSlotTarget::Empty) {
-                target.slots[slot] = match initial {
-                    Some(lm_bytecode::SlotTarget::Function(func)) => {
-                        ImageSlotTarget::Function(*func)
-                    }
-                    Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
-                        ImageSlotTarget::Class {
-                            class: *class,
-                            constructor: *constructor,
-                        }
-                    }
-                    None => ImageSlotTarget::Empty,
-                };
+                target.slots[slot] = *initial;
             }
         }
         target.instances.push(InstalledInstance {
@@ -417,6 +421,7 @@ impl World {
             funcs: appended.reloc.funcs.clone(),
             classes: appended.reloc.classes,
             slots: appended.reloc.slots,
+            binding_targets,
             exports: addition
                 .exports
                 .iter()
@@ -518,7 +523,7 @@ impl World {
             .ok_or(FaultCode::TypeMismatch)?;
         let lm_bytecode::SlotContract::Class {
             type_params,
-            abi,
+            abi: _,
             ty,
             constructor,
         } = &spec.contract
@@ -536,11 +541,7 @@ impl World {
             }
             _ => return Err(FaultCode::TypeMismatch),
         };
-        let identity = self.identity()?;
-        if class.type_params != *type_params
-            || target != contract_class
-            || identity.class_hashes.get(target as usize) != Some(abi)
-        {
+        if class.type_params != *type_params || target != contract_class {
             return Err(FaultCode::TypeMismatch);
         }
         let function = self
@@ -1043,6 +1044,14 @@ impl World {
             | lm_abi::OP_VM_INSTANCE_CLASS
             | lm_abi::OP_VM_INSTANCE_SLOT_FOR
             | lm_abi::OP_VM_INSTANCE_SLOT_SPEC
+            | lm_abi::OP_VM_INSTANCE_ENTRY_BINDING
+            | lm_abi::OP_VM_INSTANCE_FUNCTION_BINDING
+            | lm_abi::OP_VM_INSTANCE_CLASS_BINDING
+            | lm_abi::OP_VM_BINDING_SLOT
+            | lm_abi::OP_VM_BINDING_SPEC
+            | lm_abi::OP_VM_BINDING_INSTANCE
+            | lm_abi::OP_VM_BINDING_FUNCTION_TARGET
+            | lm_abi::OP_VM_BINDING_CLASS_TARGET
             | lm_abi::OP_VM_MODULE_ENTRY_CODE
             | lm_abi::OP_VM_MODULE_FUNCTION_CODE
             | lm_abi::OP_VM_MODULE_CLASS_CODE

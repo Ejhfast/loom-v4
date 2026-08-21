@@ -35,7 +35,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 138;
+pub const CORE_ROLE_COUNT: usize = 140;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -1024,9 +1024,8 @@ pub struct Module {
     /// this table, so it stays outside the semantic region.
     pub exports: Vec<Export>,
     /// The named function bindings. Each entry maps a qualified name
-    /// to a function value. The export section holds this table too,
-    /// so a binding key never reaches the verifier and never enters a
-    /// structural hash.
+    /// to a function value. The export section holds this table. A
+    /// published slot can contain a hash derived from the binding key.
     pub bindings: Vec<FuncBinding>,
     /// Optional source and diagnostic metadata.
     ///
@@ -1103,7 +1102,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 38 makes class slots select versioned constructors.
 /// Version 39 defines the optional source debug section.
 /// Version 40 adds fault source lookup instructions.
-pub const VERSION: u16 = 40;
+/// Version 41 adds installed binding core roles.
+pub const VERSION: u16 = 41;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).

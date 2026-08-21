@@ -964,7 +964,7 @@ impl Admit<'_> {
                     (
                         SlotContract::Class {
                             type_params,
-                            abi,
+                            abi: _,
                             ty,
                             constructor,
                         },
@@ -983,7 +983,6 @@ impl Admit<'_> {
                         self.class_named(*class)
                             && target.is_some_and(|target| target.type_params == *type_params)
                             && contract_class == Some(*class)
-                            && self.identity.class_hashes.get(*class as usize) == Some(abi)
                             && self.func_named(*target_constructor)
                             && self.callable_matches(*target_constructor, constructor, false)
                     }
@@ -1517,6 +1516,60 @@ impl Admit<'_> {
                     }
                     CodeHandleKind::Slot => {
                         record.slots.contains(&index) && (index as usize) < self.module.slots.len()
+                    }
+                    CodeHandleKind::FunctionBinding => {
+                        let source_slot = usize::try_from(index).ok();
+                        let mapped = source_slot
+                            .and_then(|source_slot| record.slots.get(source_slot))
+                            .and_then(|slot| self.module.slots.get(*slot as usize));
+                        let source = self
+                            .installations
+                            .get(record.installation as usize)
+                            .map(|proof| &proof.source);
+                        matches!(
+                            (source_slot, source, mapped),
+                            (
+                                Some(source_slot),
+                                Some(source),
+                                Some(lm_bytecode::SlotSpec {
+                                    contract: SlotContract::Function(_) | SlotContract::Method(_),
+                                    ..
+                                })
+                            ) if matches!(
+                                source.slots.get(source_slot).and_then(|slot| slot.initial),
+                                Some(lm_bytecode::SlotTarget::Function(function))
+                                    if record.funcs.get(function as usize)
+                                        .is_some_and(|target| self.func_named(*target))
+                            )
+                        )
+                    }
+                    CodeHandleKind::ClassBinding => {
+                        let source_slot = usize::try_from(index).ok();
+                        let mapped = source_slot
+                            .and_then(|source_slot| record.slots.get(source_slot))
+                            .and_then(|slot| self.module.slots.get(*slot as usize));
+                        let source = self
+                            .installations
+                            .get(record.installation as usize)
+                            .map(|proof| &proof.source);
+                        matches!(
+                            (source_slot, source, mapped),
+                            (
+                                Some(source_slot),
+                                Some(source),
+                                Some(lm_bytecode::SlotSpec {
+                                    contract: SlotContract::Class { .. },
+                                    ..
+                                })
+                            ) if matches!(
+                                source.slots.get(source_slot).and_then(|slot| slot.initial),
+                                Some(lm_bytecode::SlotTarget::Class { class, constructor })
+                                    if record.classes.get(class as usize)
+                                        .is_some_and(|target| self.class_named(*target))
+                                        && record.funcs.get(constructor as usize)
+                                            .is_some_and(|target| self.func_named(*target))
+                            )
+                        )
                     }
                 };
                 if !valid {

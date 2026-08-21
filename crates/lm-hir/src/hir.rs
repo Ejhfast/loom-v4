@@ -10,6 +10,7 @@
 
 use lm_source::ast::BinOp;
 use lm_types::{ClassKind, Row, TypeId, TypeStore};
+use std::collections::BTreeSet;
 
 /// The pinned core definition indices inside one checked module.
 ///
@@ -81,6 +82,10 @@ pub struct HirModule {
     /// methods, and the initializers. Lowering appends one binding per
     /// generated constructor.
     pub bindings: Vec<lm_bytecode::FuncBinding>,
+    /// Local functions that enter the portable installation surface.
+    pub reified_functions: BTreeSet<u32>,
+    /// Local classes that enter the portable installation surface.
+    pub reified_classes: BTreeSet<u32>,
 }
 
 /// One applied nominal interface before bytecode type interning.
@@ -164,6 +169,8 @@ pub enum NativeRepr {
     Slot,
     FunctionDef,
     ClassDef,
+    FunctionBinding,
+    ClassBinding,
     DynValue,
 }
 

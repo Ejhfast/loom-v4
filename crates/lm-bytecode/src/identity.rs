@@ -97,7 +97,8 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 32 adds portable function and class code instructions.
 /// Version 33 adds portable definition source lookup.
 /// Version 34 adds fault source lookup instructions.
-pub const COMPILER_ABI_VERSION: u32 = 34;
+/// Version 35 publishes static bindings apart from late linkage.
+pub const COMPILER_ABI_VERSION: u32 = 35;
 
 /// The refinement work budget of one component.
 ///
@@ -192,9 +193,11 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
 /// - it reads the core role table, which lives inside the semantic
 ///   region, and it proves the shape of every filled slot.
 ///
-/// No definition name and no qualified key enters the digest. Both
-/// live in the export section, and the verifier reads neither. A
-/// rename therefore costs no cache hit.
+/// Definition names and qualified export keys do not enter the digest
+/// directly. Published slot keys live in the semantic region. The
+/// verifier reads these slot keys. Changing only an export label
+/// preserves the hash. Recompiling a renamed published binding changes
+/// its slot key and hash.
 ///
 /// The `mut` marker vectors carry their own count inside the semantic
 /// section since container version 8, so the digest needs no separate
@@ -1168,6 +1171,7 @@ impl Graph {
                             }
                             ExtendedInstr::FunctionCode { func } => {
                                 list.push(s.func_node(*func));
+                                called[*func as usize] = true;
                             }
                             ExtendedInstr::OptionSome { ty }
                             | ExtendedInstr::OptionNone { ty }
@@ -1194,6 +1198,20 @@ impl Graph {
                         _ => {}
                     }
                 }
+            }
+        }
+        for binding in &module.bindings {
+            called[binding.func as usize] = true;
+        }
+        for slot in &module.slots {
+            match slot.initial {
+                Some(crate::SlotTarget::Function(function)) => {
+                    called[function as usize] = true;
+                }
+                Some(crate::SlotTarget::Class { constructor, .. }) => {
+                    called[constructor as usize] = true;
+                }
+                None => {}
             }
         }
         called[module.entry as usize] = true;
@@ -2333,7 +2351,7 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::SyntaxBuildNode
             | ExtendedInstr::SyntaxToTree => {}
             ExtendedInstr::CallSlot { slot, app } | ExtendedInstr::NewSlot { slot, app } => {
-                self.slot_contract_bytes(out, *slot);
+                self.slot_contract_bytes(out, *slot, false);
                 if *app == crate::NO_APP {
                     out.push(0);
                 } else {
@@ -2342,13 +2360,13 @@ impl<'a> Resolver<'a> {
                 }
             }
             ExtendedInstr::LoadSlot { slot } | ExtendedInstr::SendSlot { slot } => {
-                self.slot_contract_bytes(out, *slot);
+                self.slot_contract_bytes(out, *slot, false);
             }
         }
     }
 
     /// Write the stable key and immutable contract of one VM slot.
-    fn slot_contract_bytes(&self, out: &mut Vec<u8>, slot: u32) {
+    fn slot_contract_bytes(&self, out: &mut Vec<u8>, slot: u32, include_class_abi: bool) {
         let spec = &self.module.slots[slot as usize];
         out.extend_from_slice(&spec.key);
         match &spec.contract {
@@ -2368,7 +2386,9 @@ impl<'a> Resolver<'a> {
             } => {
                 out.push(2);
                 out.extend_from_slice(&type_params.to_le_bytes());
-                out.extend_from_slice(abi);
+                if include_class_abi {
+                    out.extend_from_slice(abi);
+                }
                 out.extend_from_slice(&self.type_digest(*ty));
                 self.callable_contract_bytes(out, constructor);
             }
@@ -2960,7 +2980,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
     let mut slots: Vec<Vec<u8>> = Vec::with_capacity(module.slots.len());
     for (index, spec) in module.slots.iter().enumerate() {
         let mut bytes = Vec::new();
-        resolver.slot_contract_bytes(&mut bytes, index as u32);
+        resolver.slot_contract_bytes(&mut bytes, index as u32, true);
         match spec.initial {
             None => bytes.push(0),
             Some(crate::SlotTarget::Function(func)) => {

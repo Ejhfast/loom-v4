@@ -2,7 +2,7 @@
 //! reconstruction, operation slots, first-class operation types,
 //! table edits, and the `Unreachable` terminator.
 
-use lm_bytecode::{BcRow, BcType, Instr, Module};
+use lm_bytecode::{BcRow, BcType, Instr, Module, SlotContract, SlotTarget};
 use lm_testkit::compile_text;
 
 fn compile(source: &str) -> Module {
@@ -39,6 +39,15 @@ fn a_claimed_row_narrower_than_the_performs_is_rejected() {
     let mut module = compile(GREET);
     let greet = func_index(&module, "greet");
     module.funcs[greet].row.clear();
+    let greet_slot = module
+        .slots
+        .iter_mut()
+        .find(|slot| slot.initial == Some(SlotTarget::Function(greet as u32)))
+        .expect("the greet slot exists");
+    let SlotContract::Function(contract) = &mut greet_slot.contract else {
+        panic!("the greet slot has a function contract");
+    };
+    contract.row.clear();
     assert_rejected(&module, "not inside the claimed row");
 }
 

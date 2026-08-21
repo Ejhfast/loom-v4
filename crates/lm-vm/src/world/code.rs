@@ -31,6 +31,73 @@ struct CodeProvider {
     classes: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstalledBindingTarget {
+    Function(u32),
+    Class { class: u32, constructor: u32 },
+}
+
+fn source_binding_slot(
+    module: &lm_bytecode::Module,
+    kind: PortableCodeKind,
+    index: u32,
+) -> Option<u32> {
+    let position = module
+        .slots
+        .iter()
+        .position(|slot| match (kind, slot.initial) {
+            (PortableCodeKind::Function, Some(lm_bytecode::SlotTarget::Function(function))) => {
+                function == index
+            }
+            (PortableCodeKind::Class, Some(lm_bytecode::SlotTarget::Class { class, .. })) => {
+                class == index
+            }
+            _ => false,
+        })?;
+    u32::try_from(position).ok()
+}
+
+fn cached_binding_target(
+    instance: &InstalledInstance,
+    source_slot: u32,
+) -> Option<InstalledBindingTarget> {
+    match instance.binding_targets.get(source_slot as usize)? {
+        ImageSlotTarget::Function(function) => Some(InstalledBindingTarget::Function(*function)),
+        ImageSlotTarget::Class { class, constructor } => Some(InstalledBindingTarget::Class {
+            class: *class,
+            constructor: *constructor,
+        }),
+        ImageSlotTarget::Empty | ImageSlotTarget::Value(_) | ImageSlotTarget::Process { .. } => {
+            None
+        }
+    }
+}
+
+fn installed_binding(
+    instance: &InstalledInstance,
+    kind: PortableCodeKind,
+    source_index: u32,
+) -> Option<(u32, InstalledBindingTarget)> {
+    let module = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+    let source_slot = source_binding_slot(&module, kind, source_index)?;
+    let target = cached_binding_target(instance, source_slot)?;
+    Some((source_slot, target))
+}
+
+fn installed_binding_target(
+    instance: &InstalledInstance,
+    kind: CodeHandleKind,
+    source_slot: u32,
+) -> Option<InstalledBindingTarget> {
+    instance.slots.get(source_slot as usize)?;
+    let target = cached_binding_target(instance, source_slot)?;
+    match (kind, target) {
+        (CodeHandleKind::FunctionBinding, InstalledBindingTarget::Function(_))
+        | (CodeHandleKind::ClassBinding, InstalledBindingTarget::Class { .. }) => Some(target),
+        _ => None,
+    }
+}
+
 fn source_origin(
     module: &lm_bytecode::Module,
     kind: lm_bytecode::debug::DefinitionKind,
@@ -300,6 +367,20 @@ impl World {
             lm_abi::OP_VM_INSTANCE_CLASS => self.code_class(vm, op, args[0], args[1]),
             lm_abi::OP_VM_INSTANCE_SLOT_FOR => self.code_slot_for(vm, op, args[0], args[1]),
             lm_abi::OP_VM_INSTANCE_SLOT_SPEC => self.code_slot_spec(vm, op, args[0], args[1]),
+            lm_abi::OP_VM_INSTANCE_ENTRY_BINDING => self.code_entry_binding(vm, op, args[0]),
+            lm_abi::OP_VM_INSTANCE_FUNCTION_BINDING => {
+                self.code_function_binding(vm, op, args[0], args[1])
+            }
+            lm_abi::OP_VM_INSTANCE_CLASS_BINDING => {
+                self.code_class_binding(vm, op, args[0], args[1])
+            }
+            lm_abi::OP_VM_BINDING_SLOT => self.code_binding_slot(vm, op, args[0]),
+            lm_abi::OP_VM_BINDING_SPEC => self.code_binding_spec(vm, op, args[0]),
+            lm_abi::OP_VM_BINDING_INSTANCE => self.code_binding_instance(vm, op, args[0]),
+            lm_abi::OP_VM_BINDING_FUNCTION_TARGET => {
+                self.code_binding_function_target(vm, op, args[0])
+            }
+            lm_abi::OP_VM_BINDING_CLASS_TARGET => self.code_binding_class_target(vm, op, args[0]),
             lm_abi::OP_VM_MODULE_ENTRY_CODE => self.code_module_entry(vm, op, args[0]),
             lm_abi::OP_VM_MODULE_FUNCTION_CODE => {
                 self.code_module_function(vm, op, args[0], args[1])
@@ -558,26 +639,59 @@ impl World {
                 return;
             }
         };
-        if code.kind == PortableCodeKind::Function {
-            let source = match lm_bytecode::decode(code.bytes.as_slice()) {
+        let source = if matches!(
+            code.kind,
+            PortableCodeKind::Function | PortableCodeKind::Class
+        ) {
+            Some(match lm_bytecode::decode(code.bytes.as_slice()) {
                 Ok(source) => source,
                 Err(error) => {
                     self.finish_code_error(
                         vm,
                         op,
-                        &format!("the function code did not decode: {error}"),
+                        &format!("the portable code did not decode: {error}"),
                     );
                     return;
                 }
-            };
-            let Some(function_class) = self.core.function_def else {
+            })
+        } else {
+            None
+        };
+        let source_slot = if matches!(
+            code.kind,
+            PortableCodeKind::Function | PortableCodeKind::Class
+        ) {
+            match source
+                .as_ref()
+                .and_then(|source| source_binding_slot(source, code.kind, code.index))
+            {
+                Some(slot) => Some(slot),
+                None => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        "the portable definition has no published binding",
+                    );
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if code.kind == PortableCodeKind::Function {
+            let Some(function_class) = self.core.function_binding else {
                 self.machines[vm as usize].set_fault(FaultCode::MalformedState, "", Some(op));
                 return;
             };
             let contract = self
                 .requested_function_contract(vm, function_class)
                 .and_then(|(input, output)| {
-                    self.portable_function_matches_contract(&source, code.index, input, output)
+                    self.portable_function_matches_contract(
+                        source.as_ref().expect("function code has a decoded module"),
+                        code.index,
+                        input,
+                        output,
+                    )
                 });
             match contract {
                 Ok(true) => {}
@@ -607,7 +721,6 @@ impl World {
             None => Vec::new(),
         };
         let kind = code.kind;
-        let local_index = code.index;
         match self.install_artifact(key, code.bytes, code.interface, &imports) {
             Ok(instance) => {
                 let selected = self.vm_images[key.image as usize]
@@ -615,28 +728,25 @@ impl World {
                     .get(instance as usize);
                 let (handle_kind, index) = match kind {
                     PortableCodeKind::VerifiedModule => (CodeHandleKind::Instance, instance),
-                    PortableCodeKind::Function => match selected
-                        .and_then(|selected| selected.funcs.get(local_index as usize))
-                    {
-                        Some(function) => (CodeHandleKind::Function, *function),
-                        None => {
-                            self.finish_code_error(
-                                vm,
-                                op,
-                                "the function code has an invalid index",
-                            );
+                    PortableCodeKind::Function | PortableCodeKind::Class => {
+                        let handle_kind = if kind == PortableCodeKind::Function {
+                            CodeHandleKind::FunctionBinding
+                        } else {
+                            CodeHandleKind::ClassBinding
+                        };
+                        let valid = source_slot.and_then(|source_slot| {
+                            selected
+                                .and_then(|selected| {
+                                    installed_binding_target(selected, handle_kind, source_slot)
+                                })
+                                .map(|_| source_slot)
+                        });
+                        let Some(source_slot) = valid else {
+                            self.finish_code_error(vm, op, "the installed binding is invalid");
                             return;
-                        }
-                    },
-                    PortableCodeKind::Class => match selected
-                        .and_then(|selected| selected.classes.get(local_index as usize))
-                    {
-                        Some(class) => (CodeHandleKind::Class, *class),
-                        None => {
-                            self.finish_code_error(vm, op, "the class code has an invalid index");
-                            return;
-                        }
-                    },
+                        };
+                        (handle_kind, source_slot)
+                    }
                     _ => {
                         self.finish_code_error(vm, op, "the install input has another code kind");
                         return;
@@ -1066,6 +1176,257 @@ impl World {
         self.finish_code_result(vm, op, result);
     }
 
+    fn code_entry_binding(&mut self, vm: VmId, op: u32, value: Value) {
+        let handle = match self.code_handle(vm, value, CodeHandleKind::Instance) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not an Instance");
+                return;
+            }
+        };
+        let binding = self.live_instance(handle).and_then(|instance| {
+            let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+            installed_binding(instance, PortableCodeKind::Function, source.entry)
+        });
+        let Some((slot, InstalledBindingTarget::Function(function))) = binding else {
+            self.finish_code_error(vm, op, "the module entry has no installed binding");
+            return;
+        };
+        self.finish_function_binding_lookup(vm, op, handle, slot, function);
+    }
+
+    fn code_function_binding(&mut self, vm: VmId, op: u32, value: Value, name: Value) {
+        let handle = match self.code_handle(vm, value, CodeHandleKind::Instance) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not an Instance");
+                return;
+            }
+        };
+        let Some(name) = self.code_name(vm, op, name, "function") else {
+            return;
+        };
+        let binding = self.live_instance(handle).and_then(|instance| {
+            let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+            let export = source.exports.iter().find(|export| {
+                export.name == name && export.kind == lm_bytecode::ExportKind::Function
+            })?;
+            installed_binding(instance, PortableCodeKind::Function, export.def)
+        });
+        let Some((slot, InstalledBindingTarget::Function(function))) = binding else {
+            self.finish_code_error(
+                vm,
+                op,
+                "the module instance has no function binding with this name",
+            );
+            return;
+        };
+        self.finish_function_binding_lookup(vm, op, handle, slot, function);
+    }
+
+    fn code_class_binding(&mut self, vm: VmId, op: u32, value: Value, name: Value) {
+        let handle = match self.code_handle(vm, value, CodeHandleKind::Instance) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not an Instance");
+                return;
+            }
+        };
+        let Some(name) = self.code_name(vm, op, name, "class") else {
+            return;
+        };
+        let binding = self.live_instance(handle).and_then(|instance| {
+            let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+            let export = source
+                .exports
+                .iter()
+                .find(|export| export.name == name && export.kind.is_class())?;
+            installed_binding(instance, PortableCodeKind::Class, export.def)
+        });
+        let Some((slot, InstalledBindingTarget::Class { .. })) = binding else {
+            self.finish_code_error(
+                vm,
+                op,
+                "the module instance has no class binding with this name",
+            );
+            return;
+        };
+        self.finish_binding_lookup(vm, op, handle, CodeHandleKind::ClassBinding, slot);
+    }
+
+    fn finish_function_binding_lookup(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        instance: CodeHandle,
+        slot: u32,
+        function: u32,
+    ) {
+        let Some(function_class) = self.core.function_binding else {
+            self.machines[vm as usize].set_fault(FaultCode::MalformedState, "", Some(op));
+            return;
+        };
+        let matches = self
+            .requested_function_contract(vm, function_class)
+            .and_then(|(input, output)| self.function_matches_contract(function, input, output));
+        match matches {
+            Ok(true) => {
+                self.finish_binding_lookup(vm, op, instance, CodeHandleKind::FunctionBinding, slot)
+            }
+            Ok(false) => self.finish_code_error(
+                vm,
+                op,
+                "the binding does not match the requested monomorphic contract",
+            ),
+            Err(code) => self.machines[vm as usize].set_fault(code, "", Some(op)),
+        }
+    }
+
+    fn finish_binding_lookup(
+        &mut self,
+        vm: VmId,
+        op: u32,
+        instance: CodeHandle,
+        kind: CodeHandleKind,
+        slot: u32,
+    ) {
+        let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
+            image: instance.image,
+            generation: instance.generation,
+            instance: instance.instance,
+            kind,
+            index: slot,
+        });
+        let result = value.and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, result);
+    }
+
+    fn code_binding_slot(&mut self, vm: VmId, op: u32, value: Value) {
+        let handle = match self.binding_handle(vm, value) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not an installed binding");
+                return;
+            }
+        };
+        let Some(slot) = self.live_binding_slot(handle) else {
+            self.finish_code_error(vm, op, "the installed binding is not live");
+            return;
+        };
+        let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
+            image: handle.image,
+            generation: handle.generation,
+            instance: handle.instance,
+            kind: CodeHandleKind::Slot,
+            index: slot,
+        });
+        let result = value.and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, result);
+    }
+
+    fn code_binding_spec(&mut self, vm: VmId, op: u32, value: Value) {
+        let handle = match self.binding_handle(vm, value) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not an installed binding");
+                return;
+            }
+        };
+        let source = self
+            .live_binding_source(handle)
+            .map(|(instance, source_slot)| {
+                (
+                    instance.artifact.clone(),
+                    instance.interface.clone(),
+                    source_slot,
+                )
+            });
+        let Some((bytes, interface, index)) = source else {
+            self.finish_code_error(vm, op, "the installed binding is not live");
+            return;
+        };
+        let value = self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
+            kind: PortableCodeKind::SlotSpec,
+            bytes,
+            interface,
+            index,
+            origin: None,
+        })));
+        let result = value.and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, result);
+    }
+
+    fn code_binding_instance(&mut self, vm: VmId, op: u32, value: Value) {
+        let handle = match self.binding_handle(vm, value) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not an installed binding");
+                return;
+            }
+        };
+        if self.live_binding_target(handle).is_none() {
+            self.finish_code_error(vm, op, "the installed binding is not live");
+            return;
+        }
+        let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
+            image: handle.image,
+            generation: handle.generation,
+            instance: handle.instance,
+            kind: CodeHandleKind::Instance,
+            index: handle.instance,
+        });
+        let result = value.and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, result);
+    }
+
+    fn code_binding_function_target(&mut self, vm: VmId, op: u32, value: Value) {
+        let handle = match self.code_handle(vm, value, CodeHandleKind::FunctionBinding) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not a FunctionBinding");
+                return;
+            }
+        };
+        let Some(InstalledBindingTarget::Function(function)) = self.live_binding_target(handle)
+        else {
+            self.finish_code_error(vm, op, "the function binding is not live");
+            return;
+        };
+        let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
+            image: handle.image,
+            generation: handle.generation,
+            instance: handle.instance,
+            kind: CodeHandleKind::Function,
+            index: function,
+        });
+        let result = value.and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, result);
+    }
+
+    fn code_binding_class_target(&mut self, vm: VmId, op: u32, value: Value) {
+        let handle = match self.code_handle(vm, value, CodeHandleKind::ClassBinding) {
+            Ok(handle) => handle,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the receiver is not a ClassBinding");
+                return;
+            }
+        };
+        let Some(InstalledBindingTarget::Class { class, .. }) = self.live_binding_target(handle)
+        else {
+            self.finish_code_error(vm, op, "the class binding is not live");
+            return;
+        };
+        let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
+            image: handle.image,
+            generation: handle.generation,
+            instance: handle.instance,
+            kind: CodeHandleKind::Class,
+            index: class,
+        });
+        let result = value.and_then(|value| self.code_ok(vm, value));
+        self.finish_code_result(vm, op, result);
+    }
+
     fn finish_function_lookup(&mut self, vm: VmId, op: u32, instance: CodeHandle, function: u32) {
         let Some(function_class) = self.core.function_def else {
             self.machines[vm as usize].set_fault(FaultCode::MalformedState, "", Some(op));
@@ -1348,17 +1709,39 @@ impl World {
         let Some(key) = self.image_arg(vm, op, image) else {
             return;
         };
-        let handle = match self.code_handle(vm, definition, CodeHandleKind::Function) {
+        let handle = self
+            .code_handle(vm, definition, CodeHandleKind::Function)
+            .or_else(|_| self.code_handle(vm, definition, CodeHandleKind::FunctionBinding));
+        let handle = match handle {
             Ok(handle) => handle,
             Err(code) => {
-                self.fault_caller(vm, op, code, "the program is not a FunctionDef");
+                self.fault_caller(vm, op, code, "the program is not an installed function");
                 return;
             }
         };
-        if handle.image_key() != key || !self.live_function(handle) {
+        if handle.image_key() != key {
             self.finish_code_error(vm, op, "the function does not belong to this VM image");
             return;
         }
+        let function = if handle.kind == CodeHandleKind::Function {
+            if !self.live_function(handle) {
+                self.finish_code_error(vm, op, "the function does not belong to this VM image");
+                return;
+            }
+            handle.index
+        } else {
+            let Some(slot) = self.live_binding_slot(handle) else {
+                self.finish_code_error(vm, op, "the function binding is not live");
+                return;
+            };
+            match self.vm_images[key.image as usize].slots.get(slot as usize) {
+                Some(ImageSlotTarget::Function(function)) => *function,
+                _ => {
+                    self.finish_code_error(vm, op, "the function binding has no current target");
+                    return;
+                }
+            }
+        };
         let values = match arguments {
             Value::Unit => Vec::new(),
             Value::Obj(reference) => match self.machines[vm as usize].vm.heap.get(reference) {
@@ -1399,7 +1782,7 @@ impl World {
             }
         };
         if self
-            .check_frame_args(target, handle.index, lm_value::TypeEnvId::EMPTY, &locals)
+            .check_frame_args(target, function, lm_value::TypeEnvId::EMPTY, &locals)
             .is_err()
         {
             self.rollback_run_target(vm, target);
@@ -1408,7 +1791,7 @@ impl World {
         }
         self.machines[target as usize].load_frame(
             &self.module,
-            handle.index,
+            function,
             locals,
             None,
             lm_value::TypeEnvId::EMPTY,
@@ -1426,22 +1809,45 @@ impl World {
         let Some(key) = self.image_arg(vm, op, image) else {
             return;
         };
-        let slot = match self.code_handle(vm, slot, CodeHandleKind::Slot) {
+        let slot = match self
+            .code_handle(vm, slot, CodeHandleKind::Slot)
+            .or_else(|_| self.binding_handle(vm, slot))
+        {
             Ok(handle) => handle,
             Err(code) => {
-                self.fault_caller(vm, op, code, "the replacement slot is not a Slot");
+                self.fault_caller(vm, op, code, "the replacement address is not a binding");
                 return;
             }
         };
-        if slot.image_key() != key || !self.live_slot(slot) {
+        let slot_index = if slot.kind == CodeHandleKind::Slot {
+            self.live_slot(slot).then_some(slot.index)
+        } else {
+            self.live_binding_slot(slot)
+        };
+        if slot.image_key() != key {
             self.finish_code_error(vm, op, "the slot does not belong to this VM image");
             return;
         }
+        let Some(slot_index) = slot_index else {
+            self.finish_code_error(vm, op, "the slot does not belong to this VM image");
+            return;
+        };
         let replaced = match op {
             lm_abi::OP_VM_REPLACE_FUNCTION => {
-                let function = match self.code_handle(vm, target, CodeHandleKind::Function) {
+                let function = match self
+                    .code_handle(vm, target, CodeHandleKind::Function)
+                    .or_else(|_| self.code_handle(vm, target, CodeHandleKind::FunctionBinding))
+                {
                     Ok(handle) => {
-                        if handle.image_key() != key || !self.live_function(handle) {
+                        let function = if handle.kind == CodeHandleKind::Function {
+                            self.live_function(handle).then_some(handle.index)
+                        } else {
+                            match self.live_binding_target(handle) {
+                                Some(InstalledBindingTarget::Function(function)) => Some(function),
+                                _ => None,
+                            }
+                        };
+                        if handle.image_key() != key {
                             self.finish_code_error(
                                 vm,
                                 op,
@@ -1449,7 +1855,15 @@ impl World {
                             );
                             return;
                         }
-                        handle.index
+                        let Some(function) = function else {
+                            self.finish_code_error(
+                                vm,
+                                op,
+                                "the function does not belong to this VM image",
+                            );
+                            return;
+                        };
+                        function
                     }
                     Err(_) => match self.function_value_target(vm, target) {
                         Ok(function) => function,
@@ -1459,28 +1873,46 @@ impl World {
                         }
                     },
                 };
-                self.replace_function_slot(key, slot.index, function)
+                self.replace_function_slot(key, slot_index, function)
             }
             lm_abi::OP_VM_REPLACE_CLASS => {
-                let target = match self.code_handle(vm, target, CodeHandleKind::Class) {
+                let target = match self
+                    .code_handle(vm, target, CodeHandleKind::Class)
+                    .or_else(|_| self.code_handle(vm, target, CodeHandleKind::ClassBinding))
+                {
                     Ok(handle) => handle,
                     Err(code) => {
-                        self.fault_caller(vm, op, code, "the replacement target is not a ClassDef");
+                        self.fault_caller(vm, op, code, "the replacement target is not a class");
                         return;
                     }
                 };
-                if target.image_key() != key || !self.live_class(target) {
+                let replacement = if target.kind == CodeHandleKind::Class {
+                    self.live_class(target)
+                        .then(|| {
+                            self.live_class_constructor(target)
+                                .map(|ctor| (target.index, ctor))
+                        })
+                        .flatten()
+                } else {
+                    match self.live_binding_target(target) {
+                        Some(InstalledBindingTarget::Class { class, constructor }) => {
+                            Some((class, constructor))
+                        }
+                        _ => None,
+                    }
+                };
+                if target.image_key() != key {
                     self.finish_code_error(vm, op, "the class does not belong to this VM image");
                     return;
                 }
-                let Some(constructor) = self.live_class_constructor(target) else {
-                    self.finish_code_error(vm, op, "the class has no construction function");
+                let Some((class, constructor)) = replacement else {
+                    self.finish_code_error(vm, op, "the class does not belong to this VM image");
                     return;
                 };
-                self.replace_class_slot(key, slot.index, target.index, constructor)
+                self.replace_class_slot(key, slot_index, class, constructor)
             }
-            lm_abi::OP_VM_REPLACE_VALUE => self.replace_value_slot(key, slot.index, vm, target),
-            lm_abi::OP_VM_REPLACE_PROCESS => self.replace_process_slot(key, slot.index, vm, target),
+            lm_abi::OP_VM_REPLACE_VALUE => self.replace_value_slot(key, slot_index, vm, target),
+            lm_abi::OP_VM_REPLACE_PROCESS => self.replace_process_slot(key, slot_index, vm, target),
             _ => Err(FaultCode::MalformedState),
         };
         match replaced {
@@ -1537,6 +1969,46 @@ impl World {
         }
     }
 
+    fn binding_handle(&self, vm: VmId, value: Value) -> Result<CodeHandle, FaultCode> {
+        self.code_handle(vm, value, CodeHandleKind::FunctionBinding)
+            .or_else(|_| self.code_handle(vm, value, CodeHandleKind::ClassBinding))
+    }
+
+    fn live_binding_source(&self, handle: CodeHandle) -> Option<(&InstalledInstance, u32)> {
+        if !matches!(
+            handle.kind,
+            CodeHandleKind::FunctionBinding | CodeHandleKind::ClassBinding
+        ) {
+            return None;
+        }
+        let instance = self
+            .vm_images
+            .get(handle.image as usize)
+            .filter(|image| image.live && image.generation == handle.generation)?
+            .instances
+            .get(handle.instance as usize)?;
+        instance.slots.get(handle.index as usize)?;
+        let source_slot = handle.index;
+        let target = installed_binding_target(instance, handle.kind, source_slot)?;
+        match (handle.kind, target) {
+            (CodeHandleKind::FunctionBinding, InstalledBindingTarget::Function(_))
+            | (CodeHandleKind::ClassBinding, InstalledBindingTarget::Class { .. }) => {
+                Some((instance, source_slot))
+            }
+            _ => None,
+        }
+    }
+
+    fn live_binding_target(&self, handle: CodeHandle) -> Option<InstalledBindingTarget> {
+        let (instance, _) = self.live_binding_source(handle)?;
+        installed_binding_target(instance, handle.kind, handle.index)
+    }
+
+    fn live_binding_slot(&self, handle: CodeHandle) -> Option<u32> {
+        let (instance, source_slot) = self.live_binding_source(handle)?;
+        instance.slots.get(source_slot as usize).copied()
+    }
+
     fn live_instance(&self, handle: CodeHandle) -> Option<&InstalledInstance> {
         if handle.kind != CodeHandleKind::Instance || handle.index != handle.instance {
             return None;
@@ -1584,12 +2056,23 @@ impl World {
             .classes
             .iter()
             .position(|class| *class == handle.index)?;
-        let export = source.exports.iter().find(|export| {
-            export.kind.is_class()
-                && export.def as usize == source_class
-                && export.ctor != lm_bytecode::NO_CTOR
+        let constructor = source.slots.iter().find_map(|slot| match slot.initial {
+            Some(lm_bytecode::SlotTarget::Class { class, constructor })
+                if class as usize == source_class =>
+            {
+                Some(constructor)
+            }
+            _ => None,
+        });
+        let constructor = constructor.or_else(|| {
+            source.exports.iter().find_map(|export| {
+                (export.kind.is_class()
+                    && export.def as usize == source_class
+                    && export.ctor != lm_bytecode::NO_CTOR)
+                    .then_some(export.ctor)
+            })
         })?;
-        instance.funcs.get(export.ctor as usize).copied()
+        instance.funcs.get(constructor as usize).copied()
     }
 
     fn live_slot(&self, handle: CodeHandle) -> bool {

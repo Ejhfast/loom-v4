@@ -287,6 +287,66 @@ execute()
 }
 
 #[test]
+fn named_function_bindings_replace_directly() {
+    let source = r#"
+def rate(value: Int): Int
+  value * 2
+end
+
+def with_fee(value: Int): Int
+  value * 20
+end
+
+def call(
+  image: Vm,
+  binding: FunctionBinding[(Int,), Int],
+  value: Int
+): Result[Int, String] with Vm
+  run = image.activate(binding, args: (value,)).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Done(result) then Ok(result)
+  in Fault(_) then Err("the installed function faulted")
+  end
+end
+
+def call_target(
+  image: Vm,
+  target: FunctionDef[(Int,), Int],
+  value: Int
+): Result[Int, String] with Vm
+  run = image.activate(target, args: (value,)).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Done(result) then Ok(result)
+  in Fault(_) then Err("the installed target faulted")
+  end
+end
+
+def execute(): Result[(Int, Int, Int), String] with Vm
+  image = sys.vm.Vm()
+  original = image.install(rate).map_error() {
+    |error: CodeError| error.message
+  }?
+  replacement = image.install(with_fee).map_error() {
+    |error: CodeError| error.message
+  }?
+  retained = original.target().map_error() { |error: CodeError| error.message }?
+  before = call(image, original, 3)?
+  image.replace(original, replacement).map_error() {
+    |error: CodeError| error.message
+  }?
+  Ok((before, call(image, original, 3)?, call_target(image, retained, 3)?))
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done(Ok((6, 60, 6)))");
+}
+
+#[test]
 fn named_code_exposes_its_independent_source_record() {
     let source = r#"
 def add(value: Int): Int
@@ -299,7 +359,7 @@ def execute(): Bool
     source.path == "meta.lm" and
     source.syntax.kind() == 6 and
     source.syntax.text().contains("value + 1") and
-    source.slots.len() == 0 and
+    source.slots.len() == 1 and
     source.contract == source.contract
   in None then false
   end
@@ -416,7 +476,11 @@ def execute(): Bool with Vm
   end
   image = sys.vm.Vm()
   case image.install(code)
-  in Ok(_) then has_source
+  in Ok(binding)
+    case binding.slot()
+    in Ok(_) then has_source
+    in Err(_) then false
+    end
   in Err(_) then false
   end
 end
@@ -424,6 +488,71 @@ end
 execute()
 "#;
     assert_eq!(run_with_files(source, &[]), "Done(true)");
+}
+
+#[test]
+fn compiled_class_code_returns_replaceable_bindings() {
+    let source = r#"
+def compile_box(source: String): Result[VerifiedModule, String] with Compiler.Compile, Compiler.Verify
+  classes = List[String]()
+  classes.push("Box")
+  options = CompileOptions(
+    is_main: true,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: classes
+  )
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)]())
+  artifact = sys.compiler.compile("box", source, env, options).map_error() {
+    |error: CompileErrors| error.message
+  }?
+  artifact.verify().map_error() { |error: CodeError| error.message }
+end
+
+def run_entry(
+  image: Vm,
+  entry: FunctionBinding[(), Int]
+): Result[Int, String] with Vm
+  run = image.activate(entry, args: ()).map_error() {
+    |error: CodeError| error.message
+  }?
+  case run.run()
+  in Done(value) then Ok(value)
+  in Fault(_) then Err("the entry faulted")
+  end
+end
+
+def execute(): Result[(Int, Int), String] with Compiler.Compile, Compiler.Verify, Vm
+  first = compile_box("final class Box\n  value: Int = 5\nend\nBox().value\n")?
+  second = compile_box("final class Box\n  value: Int = 50\nend\nBox().value\n")?
+  first_code = first.class_code("Box").map_error() {
+    |error: CodeError| error.message
+  }?
+  second_code = second.class_code("Box").map_error() {
+    |error: CodeError| error.message
+  }?
+  image = sys.vm.Vm()
+  original = image.install(first_code).map_error() {
+    |error: CodeError| error.message
+  }?
+  replacement = image.install(second_code).map_error() {
+    |error: CodeError| error.message
+  }?
+  instance = original.instance().map_error() { |error: CodeError| error.message }?
+  entry = instance.entry_binding[(), Int]().map_error() {
+    |error: CodeError| error.message
+  }?
+  before = run_entry(image, entry)?
+  image.replace(original, replacement).map_error() {
+    |error: CodeError| error.message
+  }?
+  Ok((before, run_entry(image, entry)?))
+end
+
+execute()
+"#;
+    assert_eq!(run_with_compiler(source), "Done(Ok((5, 50)))");
 }
 
 #[test]
@@ -2218,6 +2347,106 @@ execute()
 }
 
 #[test]
+fn a_source_defined_worker_uses_replaced_named_code() {
+    let source = r#"
+class Collector < Proc[Int]
+  def on_spawn(self): Int with Proc
+    case self.receive()
+    in Msg(value) then value
+    in Closed then -1
+    end
+  end
+end
+
+def rate(value: Int): Int
+  value * 2
+end
+
+def with_fee(value: Int): Int
+  value * 20
+end
+
+class Worker < Proc[(Int, Handle[Int, Int])]
+  def on_spawn(self): Int with Proc
+    loop do
+      case self.receive()
+      in Msg((value, reply))
+        reply.send(rate(value))
+      in Closed
+        return 0
+      end
+    end
+  end
+end
+
+def launch(): Handle[(Int, Handle[Int, Int]), Int] with Proc
+  worker = Worker.spawn()
+  worker.pause()
+  worker
+end
+
+def ask(
+  worker: Handle[(Int, Handle[Int, Int]), Int],
+  value: Int
+): Result[Int, String] with Proc
+  collector = Collector.spawn()
+  case worker.send((value, collector))
+  in Sent then ()
+  in Closed then return Err("the worker mailbox closed")
+  in Fault(_) then return Err("the worker send faulted")
+  end
+  case collector.done()
+  in Done(answer) then Ok(answer)
+  in Fault(_) then Err("the collector faulted")
+  end
+end
+
+def execute(): Result[(Int, Int), String] with Vm, Proc
+  image = sys.vm.Vm()
+  worker_class = image.install(codeof(Worker)).map_error() {
+    |error: CodeError| error.message
+  }?
+  worker_class.slot().map_error() { |error: CodeError| error.message }?
+  launcher = image.install(launch).map_error() {
+    |error: CodeError| error.message
+  }?
+  original = image.install(rate).map_error() {
+    |error: CodeError| error.message
+  }?
+  replacement = image.install(with_fee).map_error() {
+    |error: CodeError| error.message
+  }?
+
+  run = image.activate(launcher, args: ()).map_error() {
+    |error: CodeError| error.message
+  }?
+  run.table().pass(Proc)
+  worker = case run.run()
+  in Done(value) then value
+  in Fault(_) then return Err("the launcher faulted")
+  end
+  worker.resume().map_error() { |_: ProcError| "the worker did not resume" }?
+  before = ask(worker, 10)?
+  worker.pause().map_error() { |_: ProcError| "the worker did not pause" }?
+  image.replace(original, replacement).map_error() {
+    |error: CodeError| error.message
+  }?
+  worker.resume().map_error() { |_: ProcError| "the worker did not resume again" }?
+  after = ask(worker, 10)?
+  worker.close()
+  worker.done()
+  Ok((before, after))
+end
+
+execute()
+"#;
+    assert_eq!(
+        run_with_files_and_grants(source, &[], &["Proc"]),
+        "Done(Ok((20, 200)))"
+    );
+}
+
+#[test]
 fn cross_vm_definition_activation_returns_a_code_error() {
     let artifact = compile_to_bytes("cross-vm.lm", "42\n").expect("the artifact compiles");
     let source = r#"
@@ -2699,6 +2928,118 @@ execute()
     let root = restored
         .restore_image(0, target, &admitted)
         .expect("the code image restores");
+    restored.allow_on(root, "Vm").expect("the grant exists");
+    loop {
+        match restored.run_machine(root) {
+            RootEvent::Done(value) => {
+                assert_eq!(restored.show_result_of(root, value), "42");
+                break;
+            }
+            RootEvent::Ran => {}
+            event => panic!("the restored run stopped: {event:?}"),
+        }
+    }
+}
+
+#[test]
+fn installed_bindings_survive_an_external_snapshot() {
+    let source = r#"
+final class Box
+end
+
+def add(value: Int): Int
+  value + 1
+end
+
+def execute(): Int with Vm
+  image = sys.vm.Vm()
+  function = case image.install(add)
+  in Ok(value) then value
+  in Err(_) then return -1
+  end
+  class_binding = case image.install(codeof(Box))
+  in Ok(value) then value
+  in Err(_) then return -2
+  end
+  count = 0
+  for _ in Range(0, 1000)
+    count = count + 1
+  end
+  case function.slot()
+  in Ok(_) then ()
+  in Err(_) then return -3
+  end
+  case class_binding.slot()
+  in Ok(_) then ()
+  in Err(_) then return -4
+  end
+  run = case image.activate(function, args: (41,))
+  in Ok(value) then value
+  in Err(_) then return -5
+  end
+  case run.run()
+  in Done(value) then value
+  in Fault(_) then -6
+  end
+end
+
+execute()
+"#;
+    let bytes = compile_to_bytes("snapshot-bindings.lm", source).expect("the program compiles");
+    let loaded = load_bytes(&bytes).expect("the program loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the grant exists");
+
+    let mut captured = None;
+    for _ in 0..4000 {
+        match world.step_root() {
+            RootEvent::Ran => {}
+            event => panic!("the source stopped before capture: {event:?}"),
+        }
+        let gate = world.next_gate();
+        match world.capture_snapshot(gate, 0, false) {
+            Ok(image) if image.world().installations.len() == 2 => {
+                captured = Some(image);
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => panic!("the snapshot failed: {error:?}"),
+        }
+    }
+    let captured = captured.expect("a boundary follows both binding installations");
+    let kinds: Vec<_> = captured
+        .world()
+        .machines
+        .iter()
+        .flat_map(|machine| &machine.objects)
+        .filter_map(|entry| match &entry.object {
+            lm_heap::Object::NativeCodeHandle { kind, .. } => Some(*kind),
+            _ => None,
+        })
+        .collect();
+    assert!(kinds.contains(&lm_heap::CodeHandleKind::FunctionBinding));
+    assert!(kinds.contains(&lm_heap::CodeHandleKind::ClassBinding));
+
+    let admitted = codec::load_external(
+        captured.bytes().expect("the snapshot encodes"),
+        &loaded,
+        LoadLimits::default(),
+    )
+    .expect("the external snapshot admits");
+    let mut restored = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    restored.allow("Vm").expect("the grant exists");
+    let target = restored.new_child(0).expect("the restore target exists");
+    let root = restored
+        .restore_image(0, target, &admitted)
+        .expect("the binding image restores");
     restored.allow_on(root, "Vm").expect("the grant exists");
     loop {
         match restored.run_machine(root) {

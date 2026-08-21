@@ -36,7 +36,8 @@ pub use sha::{sha256, sha256_hex};
 /// dynamic result value. Version 15 completes code slot and VM image
 /// controls. Version 16 adds stable slot discovery and fallible
 /// activation. It also moves verification into the Compiler group.
-pub const ABI_VERSION: u32 = 16;
+/// Version 17 adds installed function and class binding controls.
+pub const ABI_VERSION: u32 = 17;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -1625,9 +1626,17 @@ pub const OP_VM_ACTIVATE_OR_FAULT: OpSlot = 89;
 pub const OP_VM_MODULE_ENTRY_CODE: OpSlot = 90;
 pub const OP_VM_MODULE_FUNCTION_CODE: OpSlot = 91;
 pub const OP_VM_MODULE_CLASS_CODE: OpSlot = 92;
+pub const OP_VM_INSTANCE_ENTRY_BINDING: OpSlot = 93;
+pub const OP_VM_INSTANCE_FUNCTION_BINDING: OpSlot = 94;
+pub const OP_VM_INSTANCE_CLASS_BINDING: OpSlot = 95;
+pub const OP_VM_BINDING_SLOT: OpSlot = 96;
+pub const OP_VM_BINDING_SPEC: OpSlot = 97;
+pub const OP_VM_BINDING_INSTANCE: OpSlot = 98;
+pub const OP_VM_BINDING_FUNCTION_TARGET: OpSlot = 99;
+pub const OP_VM_BINDING_CLASS_TARGET: OpSlot = 100;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 93] = [
+pub const OPS: [OpDef; 101] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -2358,7 +2367,7 @@ pub const OPS: [OpDef; 93] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](Vm, FunctionDef[A,T], control A) -> Result[Run[T], CodeError]",
+        schema: "[A,T](Vm, FunctionDef[A,T] | FunctionBinding[A,T], control A) -> Result[Run[T], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2367,7 +2376,7 @@ pub const OPS: [OpDef; 93] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](Vm, Slot, FunctionDef[A,T]) -> Result[(), CodeError]",
+        schema: "[A,T,e](Vm, Slot | FunctionBinding[A,T], FunctionDef[A,T] | FunctionBinding[A,T] | Fn[A,T,e]) -> Result[(), CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2430,7 +2439,7 @@ pub const OPS: [OpDef; 93] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "(Vm, Slot, ClassDef) -> Result[(), CodeError]",
+        schema: "(Vm, Slot | ClassBinding, ClassDef | ClassBinding) -> Result[(), CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -2503,6 +2512,78 @@ pub const OPS: [OpDef; 93] = [
         params: &[],
         reply: AbiType::UNIT,
         schema: "(VerifiedModule, String) -> Result[ClassCode, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "InstanceEntryBinding",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](Instance) -> Result[FunctionBinding[A,T], CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "InstanceFunctionBinding",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](Instance, String) -> Result[FunctionBinding[A,T], CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "InstanceClassBinding",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(Instance, String) -> Result[ClassBinding, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "BindingSlot",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](FunctionBinding[A,T] | ClassBinding) -> Result[Slot, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "BindingSpec",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](FunctionBinding[A,T] | ClassBinding) -> Result[SlotSpec, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "BindingInstance",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](FunctionBinding[A,T] | ClassBinding) -> Result[Instance, CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "BindingFunctionTarget",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[A,T](FunctionBinding[A,T]) -> Result[FunctionDef[A,T], CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "BindingClassTarget",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(ClassBinding) -> Result[ClassDef, CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
 ];

@@ -49,7 +49,7 @@ impl std::fmt::Display for CompileEnvError {
                 write!(f, "two modules claim the path `{path}`")
             }
             CompileEnvError::DuplicateBinding(name) => {
-                write!(f, "two late bindings claim `{name}`")
+                write!(f, "two published bindings claim `{name}`")
             }
         }
     }
@@ -59,6 +59,7 @@ impl std::fmt::Display for CompileEnvError {
 #[derive(Debug, Clone, Default)]
 pub struct CompileEnv {
     env: ImportEnv,
+    published: BTreeMap<String, IfaceSlotSpec>,
     late: BTreeMap<String, IfaceSlotSpec>,
     static_bindings: BTreeSet<String>,
 }
@@ -83,12 +84,24 @@ impl CompileEnv {
             return Ok(());
         }
         for spec in &interface.slots {
-            if self.static_bindings.contains(&spec.binding) {
+            self.insert_published(spec.clone())?;
+            if !spec.late || self.static_bindings.contains(&spec.binding) {
                 continue;
             }
             self.insert_late(spec.clone())?;
         }
         self.env.modules.insert(path, interface);
+        Ok(())
+    }
+
+    fn insert_published(&mut self, spec: IfaceSlotSpec) -> Result<(), CompileEnvError> {
+        if let Some(old) = self.published.get(&spec.binding) {
+            if old != &spec {
+                return Err(CompileEnvError::DuplicateBinding(spec.binding));
+            }
+            return Ok(());
+        }
+        self.published.insert(spec.binding.clone(), spec);
         Ok(())
     }
 
@@ -112,12 +125,15 @@ impl CompileEnv {
         kind: IfaceSlotKind,
     ) -> Result<(), CompileEnvError> {
         self.static_bindings.remove(name);
-        self.insert_late(IfaceSlotSpec {
+        let spec = IfaceSlotSpec {
             binding: name.to_string(),
             contract_hash,
             key,
             kind,
-        })
+            late: true,
+        };
+        self.insert_published(spec.clone())?;
+        self.insert_late(spec)
     }
 
     /// Force one source name to use static linkage.
@@ -160,6 +176,7 @@ impl CompileEnv {
     pub fn freeze(self) -> FrozenCompileEnv {
         FrozenCompileEnv {
             env: self.env,
+            published: self.published,
             late: self.late,
         }
     }
@@ -169,6 +186,7 @@ impl CompileEnv {
 #[derive(Debug, Clone, Default)]
 pub struct FrozenCompileEnv {
     env: ImportEnv,
+    published: BTreeMap<String, IfaceSlotSpec>,
     late: BTreeMap<String, IfaceSlotSpec>,
 }
 
@@ -185,6 +203,11 @@ impl FrozenCompileEnv {
     /// The late linkage for one qualified source binding.
     pub fn late_binding(&self, name: &str) -> Option<&IfaceSlotSpec> {
         self.late.get(name)
+    }
+
+    /// Return one published slot contract without changing linkage.
+    pub(crate) fn published_binding(&self, name: &str) -> Option<&IfaceSlotSpec> {
+        self.published.get(name)
     }
 
     pub(crate) fn late_bindings(&self) -> &BTreeMap<String, IfaceSlotSpec> {

@@ -702,6 +702,12 @@ impl Machine {
                             lm_bytecode::corepin::ROLE_FUNCTION_DEF
                         }
                         lm_heap::CodeHandleKind::Class => lm_bytecode::corepin::ROLE_CLASS_DEF,
+                        lm_heap::CodeHandleKind::FunctionBinding => {
+                            lm_bytecode::corepin::ROLE_FUNCTION_BINDING
+                        }
+                        lm_heap::CodeHandleKind::ClassBinding => {
+                            lm_bytecode::corepin::ROLE_CLASS_BINDING
+                        }
                     };
                     let class = module.core_roles[role];
                     if class == lm_bytecode::NO_ROLE {

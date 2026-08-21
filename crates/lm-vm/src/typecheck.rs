@@ -149,6 +149,8 @@ enum Kind {
     Slot,
     FunctionDef,
     ClassDef,
+    FunctionBinding,
+    ClassBinding,
     DynValue,
 }
 
@@ -300,6 +302,8 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
                 Node::Heap(Kind::Slot)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_CLASS_DEF] == *class {
                 Node::Heap(Kind::ClassDef)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_CLASS_BINDING] == *class {
+                Node::Heap(Kind::ClassBinding)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_DYN_VALUE] == *class {
                 Node::Heap(Kind::DynValue)
             } else {
@@ -346,6 +350,12 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
         {
             Node::Heap(Kind::FunctionDef)
         }
+        ClosedType::Inst(class, args)
+            if args.len() == 2
+                && *class == module.core_roles[lm_bytecode::corepin::ROLE_FUNCTION_BINDING] =>
+        {
+            Node::Heap(Kind::FunctionBinding)
+        }
         ClosedType::Inst(_, _) => Node::Heap(Kind::Instance),
     })
 }
@@ -389,6 +399,8 @@ fn kind_of(object: &Object) -> Kind {
             lm_heap::CodeHandleKind::Slot => Kind::Slot,
             lm_heap::CodeHandleKind::Function => Kind::FunctionDef,
             lm_heap::CodeHandleKind::Class => Kind::ClassDef,
+            lm_heap::CodeHandleKind::FunctionBinding => Kind::FunctionBinding,
+            lm_heap::CodeHandleKind::ClassBinding => Kind::ClassBinding,
         },
         Object::DynValue { .. } => Kind::DynValue,
     }

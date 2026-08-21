@@ -76,7 +76,8 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 22 stores one constructor version in each class slot target.
 /// Version 23 stores optional portable source origins.
 /// Version 24 stores bounded fault execution traces.
-pub const FORMAT_VERSION: u32 = 24;
+/// Version 25 stores installed function and class binding handles.
+pub const FORMAT_VERSION: u32 = 25;
 
 /// The section kinds, in canonical order.
 ///

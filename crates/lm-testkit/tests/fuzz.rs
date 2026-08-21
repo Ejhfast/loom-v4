@@ -538,7 +538,7 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
             _ => Value::Unit,
         }
     };
-    match prng.below(20) {
+    match prng.below(21) {
         0 => {
             let m = &mut image.machines[vm];
             if !m.locals.is_empty() {
@@ -741,6 +741,34 @@ fn mutate_image(image: &mut lm_vm::snapshot::Image, prng: &mut Prng) {
                 }
             }
         }
+        19 => {
+            let m = &mut image.machines[vm];
+            if !m.objects.is_empty() {
+                let at = prng.below(m.objects.len());
+                if let lm_heap::Object::NativeCodeHandle {
+                    image,
+                    generation,
+                    instance,
+                    kind,
+                    index,
+                } = &mut m.objects[at].object
+                {
+                    match prng.below(5) {
+                        0 => *image = prng.next() as u32,
+                        1 => *generation = prng.next() as u32,
+                        2 => *instance = prng.next() as u32,
+                        3 => *index = prng.next() as u32,
+                        _ => {
+                            *kind = if prng.next() & 1 == 0 {
+                                lm_heap::CodeHandleKind::FunctionBinding
+                            } else {
+                                lm_heap::CodeHandleKind::ClassBinding
+                            }
+                        }
+                    }
+                }
+            }
+        }
         _ => {
             let mut changed = false;
             if let Some(lm_vm::snapshot::ImageTerminal::Fault(record)) =
@@ -876,15 +904,25 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   in Err(_)
     return -2
   end
-  function = case instance.function[(Int,), Int]("step")
+  function_binding = case instance.function_binding[(Int,), Int]("step")
   in Ok(value) then value
   in Err(_)
     return -3
   end
-  class_def = case instance.class_def("Box")
+  class_binding = case instance.class_binding("Box")
   in Ok(value) then value
   in Err(_)
     return -4
+  end
+  function = case instance.function[(Int,), Int]("step")
+  in Ok(value) then value
+  in Err(_)
+    return -5
+  end
+  class_def = case instance.class_def("Box")
+  in Ok(value) then value
+  in Err(_)
+    return -6
   end
   function_spec = case instance.slot_spec("step")
   in Ok(value) then value
@@ -936,6 +974,8 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   for _ in Range(0, 100)
     total = total + xs.at(0) + ys.len()
   end
+  function_binding.target()
+  class_binding.target()
   total
 end
 
@@ -968,7 +1008,18 @@ go()
                             matches!(slot, lm_vm::snapshot::ImageSlotTarget::Process { .. })
                         })
                 });
-                if rich && image.world().machines[0].objects.len() >= 4 {
+                let bindings = image.world().machines[0]
+                    .objects
+                    .iter()
+                    .filter_map(|entry| match &entry.object {
+                        lm_heap::Object::NativeCodeHandle { kind, .. } => Some(*kind),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if rich
+                    && bindings.contains(&lm_heap::CodeHandleKind::FunctionBinding)
+                    && bindings.contains(&lm_heap::CodeHandleKind::ClassBinding)
+                {
                     best = Some(image.bytes().expect("the image encodes").to_vec());
                     break;
                 }

@@ -115,6 +115,8 @@ impl<'o> FnChecker<'o> {
                             | NativeRepr::Slot
                             | NativeRepr::FunctionDef
                             | NativeRepr::ClassDef
+                            | NativeRepr::FunctionBinding
+                            | NativeRepr::ClassBinding
                             | NativeRepr::DynValue
                     )
                 ) {
@@ -299,6 +301,7 @@ impl<'o> FnChecker<'o> {
             } else {
                 ctx.store.intern(Type::Tuple(sig.params.clone()))
             };
+            ctx.reified_functions.insert(func);
             let ty = Self::core_inst(ctx, "FunctionCode", vec![input, sig.ret]);
             return Ok(HExpr {
                 ty,
@@ -307,6 +310,7 @@ impl<'o> FnChecker<'o> {
             });
         }
         if let Some(class) = ctx.lookup_type(name, &self.env) {
+            ctx.reified_classes.insert(class);
             let ty = Self::core_class(ctx, "ClassCode");
             return Ok(HExpr {
                 ty,

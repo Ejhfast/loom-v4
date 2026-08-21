@@ -1194,7 +1194,6 @@ fn verify_signatures(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
 fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     let module = ctx.module;
     let mut keys = HashSet::new();
-    let mut class_hashes: Option<Vec<[u8; 32]>> = None;
     for (slot, spec) in module.slots.iter().enumerate() {
         let serr = |message: String| terr(format!("slot {slot}: {message}"));
         if !keys.insert(spec.key) {
@@ -1230,11 +1229,11 @@ fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             }
             SlotContract::Class {
                 type_params,
-                abi,
+                abi: _,
                 ty,
                 constructor,
             } => {
-                verify_slot_type(ctx, slot, *ty, *type_params, 0, &[])?;
+                verify_slot_type(ctx, slot, *ty, *type_params, 0, &[], false)?;
                 verify_callable_contract(ctx, slot, constructor)?;
                 if constructor.type_params != *type_params
                     || constructor.effect_params != 0
@@ -1270,16 +1269,6 @@ fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                             "the class target does not match the slot type".to_string(),
                         ));
                     }
-                    if class_hashes.is_none() {
-                        let identity = lm_bytecode::identity::module_identity(module)
-                            .map_err(|error| serr(format!("identity failed: {error}")))?;
-                        class_hashes = Some(identity.class_hashes);
-                    }
-                    if class_hashes.as_ref().expect("identity exists")[target as usize] != *abi {
-                        return Err(serr(
-                            "the class target does not match the slot ABI".to_string(),
-                        ));
-                    }
                     let function =
                         module
                             .funcs
@@ -1300,7 +1289,7 @@ fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 }
             }
             SlotContract::Value { ty } => {
-                verify_slot_type(ctx, slot, *ty, 0, 0, &[])?;
+                verify_slot_type(ctx, slot, *ty, 0, 0, &[], false)?;
                 if spec.initial.is_some() {
                     return Err(serr(
                         "a value slot cannot have a portable initial value".to_string(),
@@ -1308,8 +1297,8 @@ fn verify_slots(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 }
             }
             SlotContract::Process { message, result } => {
-                verify_slot_type(ctx, slot, *message, 0, 0, &[])?;
-                verify_slot_type(ctx, slot, *result, 0, 0, &[])?;
+                verify_slot_type(ctx, slot, *message, 0, 0, &[], false)?;
+                verify_slot_type(ctx, slot, *result, 0, 0, &[], false)?;
                 if spec.initial.is_some() {
                     return Err(serr(
                         "a process slot cannot have a portable initial process".to_string(),
@@ -1349,7 +1338,7 @@ fn verify_callable_contract(
             }
         }
     }
-    for ty in contract.params.iter().chain([&contract.ret]) {
+    for ty in &contract.params {
         verify_slot_type(
             ctx,
             slot,
@@ -1357,8 +1346,18 @@ fn verify_callable_contract(
             contract.type_params,
             contract.effect_params,
             &contract.type_bounds,
+            true,
         )?;
     }
+    verify_slot_type(
+        ctx,
+        slot,
+        contract.ret,
+        contract.type_params,
+        contract.effect_params,
+        &contract.type_bounds,
+        false,
+    )?;
     for elem in &contract.row {
         match elem {
             BcRow::Op(name) => {
@@ -1392,6 +1391,7 @@ fn verify_slot_type(
     type_params: u32,
     effect_params: u32,
     bounds: &[Vec<BcInterfaceUse>],
+    allow_direct_callback: bool,
 ) -> Result<(), VerifyError> {
     let serr = |message: String| terr(format!("slot {slot}: {message}"));
     if ty as usize >= ctx.module.types.len() {
@@ -1407,7 +1407,9 @@ fn verify_slot_type(
             "the contract uses an associated type without its interface bound".to_string(),
         ));
     }
-    if ctx.stores_callback(ty) {
+    if ctx.stores_callback(ty)
+        && !(allow_direct_callback && matches!(ctx.ty(ty), BcType::Callback(..)))
+    {
         return Err(serr(
             "the contract stores a nonescaping callback".to_string(),
         ));

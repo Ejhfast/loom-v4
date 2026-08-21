@@ -1,6 +1,6 @@
 use lm_bytecode::{
     corepin::{ROLE_CHAR, ROLE_STRING, ROLE_SUBSTRING, ROLE_TEXT},
-    BcType, Instr,
+    BcType, Instr, SlotContract, SlotTarget,
 };
 use lm_testkit::{compile_text, run_text};
 use lm_vm::{Vm, VmConfig};
@@ -193,6 +193,15 @@ fn the_verifier_rejects_heap_allocation_for_char() {
     let entry = module.entry as usize;
     module.funcs[entry].ret = char_ty;
     module.funcs[entry].blocks = vec![vec![Instr::New(class), Instr::Return]];
+    let entry_slot = module
+        .slots
+        .iter_mut()
+        .find(|slot| slot.initial == Some(SlotTarget::Function(entry as u32)))
+        .expect("the entry slot exists");
+    let SlotContract::Function(contract) = &mut entry_slot.contract else {
+        panic!("the entry slot has a function contract");
+    };
+    contract.ret = char_ty;
     let error = lm_verify::verify_module(&module).expect_err("native allocation rejects");
     assert!(
         error

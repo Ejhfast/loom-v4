@@ -430,6 +430,8 @@ impl<'m> Oracle<'m> {
                 | NativeRepr::Slot
                 | NativeRepr::FunctionDef
                 | NativeRepr::ClassDef
+                | NativeRepr::FunctionBinding
+                | NativeRepr::ClassBinding
                 | NativeRepr::DynValue,
             ) => return Err(Stop::Limit("this native class has no direct constructor")),
             None => {}

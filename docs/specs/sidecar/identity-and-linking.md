@@ -324,17 +324,14 @@ must not read a source name.
 
 ## 9. The verification hash and its ordering constraint
 
-VerificationHash covers every resolved verifier input. Section 8 has
-landed, so that set is the semantic region and the operation manifest,
-and nothing else. The names have left the hash: an artifact declares
-its own core role table, the verifier proves the shape of every filled
-slot, and no name-derived value reaches the verifier.
+VerificationHash covers every resolved verifier input. This set includes
+the semantic region and the operation manifest. An artifact declares its
+core role table. The verifier proves every filled slot.
 
-One name still moves the hash, and it is not a declaration name. A
-selector name lives in the semantic region, so a selector rename moves
-VerificationHash. A class key, a definition name, and a function
-binding all live in the export section, which the verifier never
-reads.
+Definition names remain in the export section. Published slot keys live
+in the semantic region. The compiler derives these keys from binding
+names and contracts. A source binding rename therefore moves
+VerificationHash. A selector rename also moves VerificationHash.
 
 The ordering constraint below is met. It stays recorded, because it
 governs any future change that moves a name back into the verifier.
@@ -434,11 +431,9 @@ identity rule.
 
 Use these as the baseline. Re-measure and report each one.
 
-- A rename never changes the semantic region. Four cases measured a
-  byte-identical semantic section: a free function rename, a cyclic
-  rename that keeps the order, a cyclic rename that changes the order,
-  and a class rename. Names live in the export section, and the
-  verifier never reads that section.
+- An export-label edit never changes the semantic region. A source
+  binding rename changes its published slot key. This key lives in the
+  semantic region.
 - A cyclic rename moves a definition hash only when the rename changes
   the name order. `even` to `evenx` and `even` to `aaa` moved no hash.
   `even` to `zzz` moved both member hashes.
@@ -465,4 +460,3 @@ set of qualified keys, one semantic hash, and one admission answer. A
 file name never becomes a module path: a file name may hold characters
 a module name cannot, and it may be `core`, which the core image
 reserves.
-

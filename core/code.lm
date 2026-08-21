@@ -47,6 +47,12 @@ end
 final class ClassDef
 end
 
+final class FunctionBinding[A, T]
+end
+
+final class ClassBinding
+end
+
 final class CodeError
   message: String
 

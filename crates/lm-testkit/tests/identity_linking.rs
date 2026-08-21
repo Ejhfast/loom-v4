@@ -1332,11 +1332,10 @@ fn an_impossible_binding_count_rejects_before_the_reserve() {
     );
 }
 
-/// A selector name lives in the semantic region, so a selector rename
-/// moves the verification hash. A class rename and a function rename
-/// do not.
+/// A selector name and each published slot key live in the semantic
+/// region. Renaming either value moves the verification hash.
 #[test]
-fn a_selector_rename_moves_the_verification_hash() {
+fn a_selector_or_published_binding_rename_moves_the_verification_hash() {
     use lm_bytecode::identity::verification_hash;
     let foo = compile_text(
         "t.lm",
@@ -1358,10 +1357,18 @@ fn a_selector_rename_moves_the_verification_hash() {
         "class D\n  def foo(self): Int\n    1\n  end\nend\nD().foo()\n",
     )
     .unwrap();
-    assert_eq!(
+    assert_ne!(
         verification_hash(&foo),
         verification_hash(&renamed),
-        "a class rename must hold the verification hash"
+        "a class binding rename must move the verification hash"
+    );
+    let first = compile_text("t.lm", "def first(n: Int): Int\n  n + 1\nend\nfirst(1)\n").unwrap();
+    let second =
+        compile_text("t.lm", "def second(n: Int): Int\n  n + 1\nend\nsecond(1)\n").unwrap();
+    assert_ne!(
+        verification_hash(&first),
+        verification_hash(&second),
+        "a function binding rename must move the verification hash"
     );
 }
 

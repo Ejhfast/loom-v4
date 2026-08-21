@@ -45,7 +45,13 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_PROC_RECV_WAIT
             | lm_abi::OP_WAIT_WAIT
             | lm_abi::OP_WAIT_CANCEL
-            | lm_abi::OP_VM_MODULE_ENTRY_CODE => 1,
+            | lm_abi::OP_VM_MODULE_ENTRY_CODE
+            | lm_abi::OP_VM_INSTANCE_ENTRY_BINDING
+            | lm_abi::OP_VM_BINDING_SLOT
+            | lm_abi::OP_VM_BINDING_SPEC
+            | lm_abi::OP_VM_BINDING_INSTANCE
+            | lm_abi::OP_VM_BINDING_FUNCTION_TARGET
+            | lm_abi::OP_VM_BINDING_CLASS_TARGET => 1,
             lm_abi::OP_PROC_SEND => 2,
             lm_abi::OP_PROC_SPAWN => 3,
             lm_abi::OP_VM_SNAPSHOT_SELF => 0,
@@ -67,7 +73,9 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             | lm_abi::OP_VM_INSTANCE_FUNCTION
             | lm_abi::OP_VM_INSTANCE_CLASS
             | lm_abi::OP_VM_INSTANCE_SLOT_FOR
-            | lm_abi::OP_VM_INSTANCE_SLOT_SPEC => 2,
+            | lm_abi::OP_VM_INSTANCE_SLOT_SPEC
+            | lm_abi::OP_VM_INSTANCE_FUNCTION_BINDING
+            | lm_abi::OP_VM_INSTANCE_CLASS_BINDING => 2,
             lm_abi::OP_VM_MODULE_FUNCTION_CODE | lm_abi::OP_VM_MODULE_CLASS_CODE => 2,
             lm_abi::OP_VM_INSTALL_WITH => 3,
             _ => unreachable!("every VmControl slot has an arity"),

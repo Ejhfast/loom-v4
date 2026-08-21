@@ -571,6 +571,8 @@ fn encode_object(out: &mut Out, object: &Object) {
                 CodeHandleKind::Slot => 1,
                 CodeHandleKind::Function => 2,
                 CodeHandleKind::Class => 3,
+                CodeHandleKind::FunctionBinding => 4,
+                CodeHandleKind::ClassBinding => 5,
             });
             out.leb(*index as u64);
         }
@@ -2159,6 +2161,8 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 1 => CodeHandleKind::Slot,
                 2 => CodeHandleKind::Function,
                 3 => CodeHandleKind::Class,
+                4 => CodeHandleKind::FunctionBinding,
+                5 => CodeHandleKind::ClassBinding,
                 _ => {
                     return err(
                         ImageReason::Layout,

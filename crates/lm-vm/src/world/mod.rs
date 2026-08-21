@@ -201,6 +201,8 @@ pub(crate) struct InstalledInstance {
     pub(crate) classes: Vec<u32>,
     /// Source slot indices mapped into the world slot store.
     pub(crate) slots: Vec<u32>,
+    /// Immutable installed targets, indexed by source slot.
+    pub(crate) binding_targets: Vec<ImageSlotTarget>,
     /// Exported source names mapped into the world function store.
     pub(crate) exports: Vec<(String, u32)>,
 }
