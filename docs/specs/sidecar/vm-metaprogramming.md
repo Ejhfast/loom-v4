@@ -29,7 +29,9 @@ The implementation uses these decisions:
 - `VmSnapshot` is the untyped view of one admitted snapshot image.
 - An `Artifact` contains portable, untrusted compiler output.
 - `Compiler.Verify` performs independent verification and produces a `VerifiedModule`.
-- `Vm.install` installs one verified module and returns an `Instance`.
+- `Vm.install` installs verified modules or portable definitions.
+- Module installation returns an `Instance`.
+- Definition installation returns an installed definition handle.
 - Installed definitions remain immutable.
 - A `Slot` provides optional late binding under one immutable contract.
 - Active frames pin exact function versions.
@@ -38,7 +40,8 @@ The implementation uses these decisions:
 - One general slot model covers functions, classes, values, and processes.
 - The compiler emits code but never installs or executes it.
 - Compile environments and link environments remain separate.
-- Image and run policies control every effect from installed code.
+- Each run and proc owns one policy table.
+- A terminal parent keeps routing authority for its live children.
 - Public syntax trees are immutable and lossless.
 - The public syntax tree does not expose the compiler's Rust AST.
 
@@ -54,7 +57,7 @@ The new split uses these roles:
 
 | Type | Role |
 |---|---|
-| `Vm` | Installed code, classes, types, slots, policies, and processes |
+| `Vm` | Installed code, classes, types, slots, runs, and processes |
 | `Run[T]` | One active root invocation with terminal type `T` |
 | `RunSnapshot[T]` | Reachable VM state with one distinguished `Run[T]` |
 | `VmSnapshot` | Untyped view of one admitted snapshot image |
@@ -124,7 +127,7 @@ Runtime metaprogramming separates three forms of authority.
 
 `LinkEnv` supplies concrete definitions and holder-local slots during installation.
 
-Image and run policies control effects during execution.
+Run and proc policy tables control effects during execution.
 
 Possession of compiler authority grants no file, network, clock, process, or VM-control authority.
 
@@ -132,25 +135,35 @@ Possession of an artifact grants no installation or execution authority.
 
 Possession of a slot grants only the replacement operations allowed by that slot.
 
-### 5.1 Policy layers
+### 5.1 Policy routing
 
-`VmPolicy` is a holder-local ceiling for all runs in one VM.
+Each `Run[T]` and proc owns one holder-local `PolicyTable`.
 
-`Run[T]` owns one holder-local `PolicyTable` for routing, mocks, passes, and blocks.
+The table contains exact and group actions for mocks, passes, and blocks.
 
-The VM checks its ceiling before it reads the run table. A ceiling denial always wins.
+A mock handles one permitted operation without reaching an ancestor.
 
-A run-table mock handles an allowed operation without reaching the outer holder.
+A pass continues at the parent table or the embedding host.
 
-A run-table pass sends an allowed operation to the VM holder or its next policy layer.
+The parent relation follows machine creation. Installation does not create or change that relation.
 
-A new `Vm` permits pass-through to its holder. A new `Run` starts with the existing default-deny table.
+Terminal completion stops machine execution. It does not remove the machine's policy table.
 
-An image policy cannot grant authority that its holder does not possess.
+A live descendant can continue through a terminal intermediate parent.
 
-An image-policy change affects future operations in every run. A run-table change affects only that run.
+The runtime retains that parent record while a live descendant refers to it.
 
-An active pending operation keeps the decision that routed it.
+Table edits affect future requests from the machine and its descendants.
+
+A terminal world root cannot create new host requests. A pass that reaches it denies the request.
+
+A missing or stale parent also denies the request.
+
+An active pending operation keeps the routing decision that accepted it.
+
+Snapshots do not contain policy tables or host authority.
+
+Restore creates fresh default-deny tables for restored machines.
 
 ## 6. Portable code values
 
@@ -172,7 +185,59 @@ The type is opaque. Guest code cannot construct or alter it.
 
 A verified module remains portable. It does not name one VM installation.
 
-### 6.3 `Instance`
+A verified module is the storage and verification unit.
+
+It also defines imports, interfaces, nominal class families, and batch installation.
+
+Several module revisions can coexist in one VM.
+
+Installation never mutates an earlier module revision.
+
+### 6.3 Portable definition code
+
+`FunctionCode[A,R]` is one portable function view into a `VerifiedModule`.
+
+`ClassCode` is one portable class view into a `VerifiedModule`.
+
+Both values retain shared verified bytes and validated interface metadata.
+
+Each value also stores one artifact-local definition index.
+
+They do not copy bytecode and do not define a second artifact format.
+
+The definition index is internal to the retained module revision.
+
+It is not a portable name and does not enter a public slot API.
+
+A function view carries its complete function contract and effect row.
+
+A class view carries its nominal identity, class contract, and constructor contract.
+
+These values can cross a value boundary because they contain no VM identifier.
+
+`VerifiedModule.function_code[A,R](name)` returns one typed function view.
+
+`VerifiedModule.class_code(name)` returns one class view.
+
+`VerifiedModule.entry_code[A,R]()` returns the module entry as a function view.
+
+Each lookup checks the requested static contract.
+
+The compiler also provides `codeof` for definitions known at compile time.
+
+`codeof(function)` returns `FunctionCode[A,R]` for a named monomorphic function.
+
+`codeof(Class)` returns `ClassCode` for a class definition.
+
+Reflection can recover code for a named capture-free function value.
+
+Capturing closures remain valid activation targets.
+
+They are not portable slot targets because they contain environment state.
+
+Generic definitions require an explicit type application in version 0.2.
+
+### 6.4 `Instance`
 
 `Instance` names one module installation inside one VM.
 
@@ -180,7 +245,7 @@ It provides typed lookup for exported definitions, entries, slot specifications,
 
 An instance cannot move to another VM. A second VM must install the verified module again.
 
-### 6.4 `FunctionDef`
+### 6.5 `FunctionDef`
 
 `FunctionDef` names one immutable function definition.
 
@@ -194,7 +259,7 @@ The Stage 6 bootstrap surface accepts monomorphic functions without captures or 
 
 Lookup returns `CodeError` for another function. Later stages can add typed applications without changing the handle representation.
 
-### 6.5 `ClassDef`
+### 6.6 `ClassDef`
 
 `ClassDef` names one immutable class definition in one installed VM.
 
@@ -202,7 +267,35 @@ Lookup returns `CodeError` for another function. Later stages can add typed appl
 
 The handle carries no object instance. It identifies one verified class target for class-slot replacement.
 
-### 6.6 Activation errors
+### 6.7 Direct installation
+
+`Vm.install(VerifiedModule, LinkEnv)` returns an `Instance`.
+
+`Vm.install(FunctionCode[A,R], LinkEnv)` returns a `FunctionDef[A,R]`.
+
+`Vm.install(ClassCode, LinkEnv)` returns a `ClassDef`.
+
+Direct installation installs the retained module revision as needed.
+
+It publishes only the selected definition through the returned handle.
+
+It never rewrites an existing slot.
+
+The returned definition keeps its owning installed instance alive.
+
+The definition can resolve required slots through that instance.
+
+`Vm.install(function)` is convenience syntax for a portable named function.
+
+`Vm.replace(slot, function)` installs the function and then replaces the slot atomically.
+
+The convenience forms reject capturing closures and unsupported generic values.
+
+Static callers still use their immutable targets after direct installation.
+
+Only slot instructions observe a later replacement.
+
+### 6.8 Activation errors
 
 `Vm.activate` returns `Result[Run[T], CodeError]` for closures and `FunctionDef` values.
 
@@ -304,7 +397,7 @@ The lookup checks the stable key and immutable contract. It never guesses from a
 
 A function body edit preserves its key. A contract edit creates a new key.
 
-A raw artifact can find exported function and class slots by name.
+A verified module can find exported function and class slots by name.
 
 Its specification resolves only inside an instance of the exact artifact.
 
@@ -312,7 +405,29 @@ Matching between distinct artifacts requires validated compiler interface metada
 
 An internal binding requires compiler interface metadata or a retained `SlotSpec`.
 
-### 8.2 Replacement
+### 8.2 Target categories
+
+One slot table supports five contract categories.
+
+| Slot category | Target | Instruction |
+|---|---|---|
+| function | `FunctionDef[A,R]` | `CALL_SLOT` |
+| method | `FunctionDef[A,R]` with a receiver contract | `CALL_SLOT` |
+| class | `ClassDef` and its constructor version | `NEW_SLOT` |
+| value | one image-owned value | `LOAD_SLOT` |
+| process | `Handle[M,R]` | `SEND_SLOT` |
+
+`FunctionCode` covers function and method definitions.
+
+`ClassCode` covers class definitions and proc subclasses.
+
+A process slot stores a live process handle. It does not store proc class code.
+
+A value or process target cannot be portable inside artifact bytes.
+
+`LinkEnv` or a holder replacement supplies those live targets.
+
+### 8.3 Replacement
 
 Each replacement method checks the target against the slot's immutable contract.
 
@@ -331,7 +446,7 @@ A failed replacement changes no VM state.
 
 The operation never edits a frame, closure, object, or immutable definition.
 
-### 8.3 Function contracts
+### 8.4 Function contracts
 
 A function contract contains the full type scheme, mutability markers, result type, and effect row.
 
@@ -339,7 +454,7 @@ Replacement accepts equal generic structure and compatible effect behavior.
 
 The first implementation requires exact canonical contracts. Later variance can relax this rule safely.
 
-### 8.4 Class contracts
+### 8.5 Class contracts
 
 A class contract contains the complete runtime ABI.
 
@@ -380,13 +495,13 @@ Future proc spawning also uses the current constructor target.
 
 Existing objects keep their class identity and initialized state.
 
-### 8.5 Value contracts
+### 8.6 Value contracts
 
 A value slot has one exact static type. `LOAD_SLOT` copies or references its current value by normal value rules.
 
 Replacing a value affects future loads only. Existing copied values remain unchanged.
 
-### 8.6 Process contracts
+### 8.7 Process contracts
 
 A process slot contains mailbox and terminal contracts.
 
@@ -409,6 +524,12 @@ Slot instructions in these procs read that image's slot table.
 The proc image link keeps the image live until the proc becomes unreachable.
 
 Snapshots preserve this link.
+
+The proc owns its own policy table and parent route.
+
+Its parent can become terminal while the proc remains live.
+
+That terminal parent keeps its table until the final child route disappears.
 
 ## 9. Hot replacement semantics
 
@@ -478,15 +599,19 @@ They can share immutable code storage inside one VM.
 
 ### 11.1 Definitions
 
-An interactive definition group compiles with late bindings from the current namespace.
+An interactive definition or recursive definition group uses late namespace bindings.
 
 The artifact exports immutable definitions. It can also declare new slots with initial targets.
 
-After installation, a Loom library maps each source name to its returned `SlotSpec`.
+The compiler returns a verified module with portable definition views.
+
+The library installs each selected definition directly.
+
+It maps each source name to its returned `SlotSpec`.
 
 The VM does not own this source-name map.
 
-The library calls `instance.slot_spec(name)` after the first installation.
+The library can retain the owning `Instance` for batch operations.
 
 ### 11.2 Compatible redefinition
 
@@ -494,7 +619,9 @@ The compiler receives the existing `SlotSpec` through `CompileEnv`.
 
 It emits a new immutable definition with the same contract.
 
-The library installs the definition. It resolves the old specification through `instance.slot_for(spec)`.
+The library installs the new `FunctionCode` or `ClassCode`.
+
+It resolves the old specification through the target's owning instance.
 
 It then calls `Vm.replace` on the resolved slot.
 
@@ -516,7 +643,9 @@ An interactive expression compiles as an anonymous entry.
 
 The compiler gives free namespace references late linkage.
 
-The library installs the module and obtains the entry metadata.
+The library verifies the module and selects its portable entry code.
+
+It installs that entry directly and obtains a `FunctionDef`.
 
 A typed caller uses `Instance.entry[A,R]()` with compile-time argument and result types.
 
@@ -563,7 +692,77 @@ Its group records its compiler-pipeline role. The compiler still cannot approve 
 
 The generated program's effect row does not enter the compiler operation's outer row.
 
-The caller inspects the generated row before activation. Image and run policies remain the final authority.
+The caller inspects the generated row before activation. Run and proc policies remain the final authority.
+
+### 12.1 Equivalent code paths
+
+Source text and syntax nodes enter the same compiler pipeline.
+
+Both inputs produce the same canonical `Artifact` for equal syntax and compile inputs.
+
+Verification creates the same `VerifiedModule` representation for both paths.
+
+A compiled program can select a `FunctionCode` or `ClassCode` from that module.
+
+An existing named Loom function can also recover its verified definition origin.
+
+That origin identifies the same shared verified module bytes and local definition index.
+
+Both paths therefore install the same portable definition form.
+
+Dense installed indices and holder-local handles can differ between installations.
+
+### 12.2 Definition source records
+
+An artifact can carry an optional source attachment in its debug section.
+
+The attachment contains logical source names, source text, syntax records, and definition ranges.
+
+It does not affect the module semantic hash or verification hash.
+
+It does affect the exact container hash.
+
+`FunctionCode.source()` returns `Option[DefinitionSource]`.
+
+`ClassCode.source()` returns `Option[DefinitionSource]`.
+
+`DefinitionSource` contains the selected syntax node and its compile metadata.
+
+The selected node is one definition or one required recursive definition group.
+
+It also contains the logical path, slot specifications, and declared contract identity.
+
+Tools can inspect or transform that node with the public syntax API.
+
+They can pass the result to `Compiler.CompileSyntax`.
+
+The compiler checks the edited definition against supplied compile bindings.
+
+Code without source attachment still installs and executes normally.
+
+### 12.3 Runtime fault locations
+
+Each executable function version can reference one immutable source map.
+
+The map belongs to that exact version and survives later slot replacement.
+
+The interpreter records a function version and bytecode offset when a fault occurs.
+
+It performs no source lookup during ordinary instruction execution.
+
+`Fault.site()` returns the primary `Option[CodeLocation]`.
+
+`Fault.trace()` returns a bounded list of `CodeLocation` values.
+
+`CodeLocation` contains a logical path, source range, function identity, and bytecode offset.
+
+A stripped artifact reports its function identity and bytecode offset.
+
+An asynchronous operation retains its perform location until completion.
+
+A host fault therefore reports the guest operation site when one exists.
+
+Fault locations are diagnostic metadata. They do not affect fault codes or effect rows.
 
 ## 13. Public syntax model
 
@@ -786,11 +985,11 @@ A class slot records both its nominal class identity and constructor version.
 
 Portable snapshots grant no effect authority.
 
-They record no live `VmPolicy`, `PolicyTable`, mock closure, or holder capability.
+They record no `PolicyTable`, mock closure, or holder capability.
 
 A restored run starts default-deny. Declared birth grants and explicit holder grants apply through existing rules.
 
-A restored VM starts default-deny. Its holder must install its image policy before execution.
+A restored machine starts with a fresh default-deny table.
 
 Restore admits every referenced verified module before it admits machine state.
 
@@ -957,7 +1156,7 @@ Gate: static package builds remain byte-identical unless they use new linkage me
 
 ### Stage 6: reify verification and installation
 
-Expose `Artifact`, `VerifiedModule`, `Instance`, `SlotSpec`, `Slot`, `FunctionDef`, and `ClassDef` to Loom.
+Expose modules, instances, slots, and installed definition handles to Loom.
 
 Expose `Compiler.Verify` as the independent verification boundary.
 
@@ -974,6 +1173,30 @@ Gate: command-line and in-language compilation produce the same canonical artifa
 Expose lossless syntax values, generic parse status, ranges, traversal, construction, and detachment.
 
 Gate: Loom code can build, classify, compile, install, and run expression or definition source.
+
+### Stage 9: add portable definition views
+
+Expose `FunctionCode`, `ClassCode`, definition lookup, and direct installation.
+
+Retain one verified origin for named functions and classes.
+
+Gate: a Loom function installs without a source string or module-level public edit.
+
+### Stage 10: retain source attachments
+
+Encode optional source text, syntax records, definition ranges, and source maps.
+
+Exclude this attachment from semantic and verification hashes.
+
+Gate: a function maps to editable syntax and compiles through `CompileSyntax`.
+
+### Stage 11: report fault locations
+
+Capture the exact function version and bytecode offset when a fault occurs.
+
+Map the trace through optional source attachments outside the execution hot path.
+
+Gate: static, replaced, and asynchronous faults report the correct source revision.
 
 ## 20. Deferred Loom libraries
 

@@ -1399,6 +1399,12 @@ Resolution can eventually reach an embedding-host registry. Each ancestor theref
 
 Parent edits affect future child performs. A missing parent or root binding denies the request with `PolicyDenied`.
 
+Terminal completion stops machine execution. It does not remove a table used by live descendants.
+
+A live descendant can pass through a terminal intermediate parent.
+
+A pass that reaches a terminal world root denies the request.
+
 Editing a table while a proc runs affects future lookups; it does not retroactively cancel a host operation already accepted unless that operation's own semantics expose cancellation.
 
 ### 13.5 Manual policy
@@ -1415,7 +1421,7 @@ For a routed request, `dispatch()` continues after the pass that reached the dri
 
 ### 14.1 VM images and typed runs
 
-`Vm` is a native persistent execution image. It owns installed code, live slots, policies, runs, and processes.
+`Vm` is a native persistent execution image. It owns installed code, live slots, runs, and processes.
 
 `Run[T]` names one active invocation. Its terminal result has type `T`.
 
@@ -1446,7 +1452,7 @@ vm = sys.vm.Vm()
 activation = vm.activate(program, args: ("Ada",))
 ```
 
-`Vm.New` creates an empty execution image with default-deny policy.
+`Vm.New` creates an empty execution image.
 
 `activate[A,R,e](program: Fn[A,R,e], args: A) -> Result[Run[R],CodeError]` checks and transfers the arguments.
 
@@ -1468,7 +1474,7 @@ Installed entries use the same activation rule. A typed caller uses `Instance.en
 
 | State | Meaning |
 |---|---|
-| `image` | persistent installed code and holder policy; public type is `Vm` |
+| `image` | persistent installed code and live slots; public type is `Vm` |
 | `ready` | paused and holder-controlled |
 | `running` | executing on a host thread |
 | `asked` | `drive` stopped before dispatch |
@@ -1904,11 +1910,11 @@ It returns `Result[Run[T],RestoreError]`. A failed restore exposes no partial wo
 
 It returns no distinguished run. A failed restore exposes no partial VM.
 
-Policy tables and VM policy ceilings are never serialized.
+Policy tables are never serialized.
 
 Each restored run receives a fresh default-deny table.
 
-Each restored VM receives a fresh default-deny policy ceiling.
+Each restored machine receives a fresh default-deny table.
 
 Restore creates no authority.
 
@@ -2126,7 +2132,15 @@ Handles are sendable typed designators, so send rights can travel as data withou
 
 ### 18.6 Failure and parent lifetime
 
-A proc crash is a value for its holder. Two blocked procs may deadlock; fuel, explicit timeout operations, or supervision converts that condition into policy-specific results or faults. A child table passes through the live parent's table. Parent death removes those pass-throughs and future requests fail closed.
+A proc crash is a value for its holder.
+
+Two blocked procs can deadlock. Fuel, timeout operations, or supervision can convert that state into a result or fault.
+
+A child table passes through its parent's table.
+
+Terminal completion does not remove that table while a live child route refers to it.
+
+A missing parent denies future requests.
 
 ### 18.7 Distribution
 
