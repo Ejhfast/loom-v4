@@ -1487,10 +1487,25 @@ impl Machine {
     fn map_lookup(&mut self, r: ObjRef, key: Value) -> Result<Option<usize>, FaultCode> {
         self.ensure_map_index(r)?;
         let hash = self.key_index_hash(key)?;
-        let (entries, candidates) = match self.vm.heap.get(r) {
-            Object::Map { entries, index, .. } => (entries, index.candidates(hash)),
+        let (entries, candidates, dense) = match self.vm.heap.get(r) {
+            Object::Map { entries, index, .. } => (
+                entries,
+                index.candidates(hash),
+                index.live_len() == entries.len(),
+            ),
             _ => return Err(FaultCode::TypeMismatch),
         };
+        if dense {
+            for i in candidates {
+                let Some(entry) = entries.get(i as usize) else {
+                    continue;
+                };
+                if self.key_eq(entry.key, key) {
+                    return Ok(Some(i as usize));
+                }
+            }
+            return Ok(None);
+        }
         for i in candidates {
             let k = match entries.get(i as usize) {
                 Some(entry) if entry.is_live() => entry.key,

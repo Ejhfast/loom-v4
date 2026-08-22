@@ -52,8 +52,9 @@ pub struct AdmissionBudget {
 
 /// One bounded cache for repeated admissions with the same code.
 ///
-/// The cache retains only the latest verified aggregate. It never
-/// caches machine state, heaps, policies, or slot targets.
+/// The cache retains the latest verified aggregate.
+/// It also retains 64 portable code proof keys.
+/// It never caches machine state, heaps, policies, or slot targets.
 #[derive(Default)]
 pub struct AdmissionCache {
     code: Option<CachedCode>,
@@ -70,6 +71,24 @@ struct CachedCode {
     key: CodeCacheKey,
     aggregate: LoadedModule,
     installations: Vec<InstallationProof>,
+    portable: RefCell<Vec<PortableCodeCacheKey>>,
+}
+
+/// The domain for installed artifact cache keys.
+const CODE_CACHE_ARTIFACT_DOMAIN: &[u8] = b"lm-snapshot-code-cache-v1\0";
+/// The domain for portable code cache keys.
+const PORTABLE_CODE_CACHE_DOMAIN: &[u8] = b"lm-snapshot-portable-code-cache-v1\0";
+/// The largest number of portable code proofs one cache retains.
+const PORTABLE_CODE_CACHE_LIMIT: usize = 64;
+
+#[derive(Clone, PartialEq, Eq)]
+struct PortableCodeCacheKey {
+    kind: PortableCodeKind,
+    bytes: [u8; 32],
+    byte_len: usize,
+    interface: Option<([u8; 32], usize)>,
+    index: u32,
+    origin: Option<[u8; 32]>,
 }
 
 enum CodeProof<'a> {
@@ -89,6 +108,13 @@ impl CodeProof<'_> {
         match self {
             CodeProof::Owned(_, installations) => installations,
             CodeProof::Cached(cached) => &cached.installations,
+        }
+    }
+
+    fn portable_cache(&self) -> Option<&RefCell<Vec<PortableCodeCacheKey>>> {
+        match self {
+            CodeProof::Owned(..) => None,
+            CodeProof::Cached(cached) => Some(&cached.portable),
         }
     }
 }
@@ -208,9 +234,7 @@ fn prove_inner(
         ImageError::admission(ImageReason::Code, "the program has no verified identity")
     })?;
     let code = match cache {
-        Some(cache) if !image.installations.is_empty() => {
-            CodeProof::Cached(cache.prepare(image, loaded)?)
-        }
+        Some(cache) => CodeProof::Cached(cache.prepare(image, loaded)?),
         _ => {
             let (aggregate, installations) = rebuild_aggregate(image, loaded)?;
             CodeProof::Owned(Box::new(aggregate), installations)
@@ -218,6 +242,7 @@ fn prove_inner(
     };
     let aggregate = code.aggregate();
     let installations = code.installations();
+    let portable_cache = code.portable_cache();
     let identity = aggregate.identity().map_err(|_| {
         ImageError::admission(
             ImageReason::Code,
@@ -233,6 +258,7 @@ fn prove_inner(
         bundle: aggregate.bundle(),
         identity,
         installations,
+        portable_cache,
         witness: tables,
     };
     admit.run()?;
@@ -265,6 +291,7 @@ impl AdmissionCache {
             key,
             aggregate,
             installations,
+            portable: RefCell::new(Vec::new()),
         });
         Ok(self.code.as_ref().expect("the cached code exists"))
     }
@@ -281,7 +308,7 @@ fn code_cache_key(image: &Image, base: &LoadedModule) -> Result<CodeCacheKey, Im
         image
             .installations
             .iter()
-            .map(|artifact| lm_bytecode::hash::sha256(artifact)),
+            .map(|artifact| lm_graph::digest::hash_parts(&[CODE_CACHE_ARTIFACT_DOMAIN, artifact])),
     );
     let mut providers = Vec::new();
     providers
@@ -623,6 +650,7 @@ struct Admit<'m> {
     bundle: &'m std::sync::Arc<lm_abi::AbiBundle>,
     identity: &'m ModuleIdentity,
     installations: &'m [InstallationProof],
+    portable_cache: Option<&'m RefCell<Vec<PortableCodeCacheKey>>>,
     /// The witness tables the image carries.
     witness: WitnessTables,
 }
@@ -996,6 +1024,25 @@ impl Admit<'_> {
         if kind == PortableCodeKind::Artifact && origin.is_none() {
             return Ok(());
         }
+        let cache_key = PortableCodeCacheKey {
+            kind,
+            bytes: lm_graph::digest::hash_parts(&[PORTABLE_CODE_CACHE_DOMAIN, bytes]),
+            byte_len: bytes.len(),
+            interface: interface.map(|bytes| {
+                (
+                    lm_graph::digest::hash_parts(&[PORTABLE_CODE_CACHE_DOMAIN, bytes]),
+                    bytes.len(),
+                )
+            }),
+            index,
+            origin,
+        };
+        if self
+            .portable_cache
+            .is_some_and(|cache| cache.borrow().contains(&cache_key))
+        {
+            return Ok(());
+        }
         let module = lm_bytecode::decode_with_bundle(bytes, self.bundle).map_err(|error| {
             ImageError::admission(
                 ImageReason::Code,
@@ -1066,6 +1113,13 @@ impl Admit<'_> {
                     "a portable source origin does not match its code",
                 );
             }
+        }
+        if let Some(cache) = self.portable_cache {
+            let mut cache = cache.borrow_mut();
+            if cache.len() == PORTABLE_CODE_CACHE_LIMIT {
+                cache.remove(0);
+            }
+            cache.push(cache_key);
         }
         Ok(())
     }

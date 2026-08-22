@@ -771,6 +771,40 @@ fn shapes() -> Vec<Shape> {
 #[test]
 #[ignore]
 fn bench_core_compilation() {
+    let empty = lm_source::parse::parse("").expect("the empty module parses");
+    let check = || {
+        lm_hir::check_module_with(
+            &empty,
+            lm_hir::CheckOptions {
+                prelude: false,
+                ..lm_hir::CheckOptions::default()
+            },
+        )
+        .expect("the core image checks")
+    };
+    let mut check_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let hir = check();
+        let elapsed = start.elapsed();
+        std::hint::black_box(hir.funcs.len());
+        if round > 0 {
+            check_runs.push(elapsed);
+        }
+    }
+
+    let hir = check();
+    let mut lower_runs: Vec<Duration> = Vec::new();
+    for round in 0..=ROUNDS {
+        let start = Instant::now();
+        let module = lm_hir::lower_module(&hir);
+        let elapsed = start.elapsed();
+        std::hint::black_box(module.funcs.len());
+        if round > 0 {
+            lower_runs.push(elapsed);
+        }
+    }
+
     let mut compile_runs: Vec<Duration> = Vec::new();
     for round in 0..=ROUNDS {
         let start = Instant::now();
@@ -795,6 +829,18 @@ fn bench_core_compilation() {
         }
     }
 
+    println!(
+        "LOOM\tcore_check\t{}\t{}\t{:.3}\tms",
+        hir.classes.len(),
+        hir.funcs.len(),
+        median(check_runs).as_secs_f64() * 1e3
+    );
+    println!(
+        "LOOM\tcore_lower\t{}\t{}\t{:.3}\tms",
+        hir.classes.len(),
+        hir.funcs.len(),
+        median(lower_runs).as_secs_f64() * 1e3
+    );
     println!(
         "LOOM\tcore_compile\t{}\t{}\t{:.3}\tms",
         module.classes.len(),

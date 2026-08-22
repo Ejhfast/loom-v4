@@ -4,6 +4,6 @@ c = a
 s1 = "he"
 s2 = "hello"
 same_ref = a == c
-diff_ref = a == b
+same_value = a == b
 str_eq = "{s1}llo" == s2
-"{same_ref} {diff_ref} {str_eq}"
+"{same_ref} {same_value} {str_eq}"

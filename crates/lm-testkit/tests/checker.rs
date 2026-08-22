@@ -5,7 +5,10 @@ use lm_testkit::{compile_text, run_allowed, run_text};
 use lm_vm::VmConfig;
 
 fn code_of(source: &str) -> String {
-    let rendered = compile_text("t.lm", source).unwrap_err();
+    let rendered = match compile_text("t.lm", source) {
+        Err(error) => error,
+        Ok(_) => panic!("negative source compiled:\n{source}"),
+    };
     // The rendered text starts with `error[CODE]:`.
     rendered[6..11].to_string()
 }
@@ -85,7 +88,10 @@ fn negative_cases_have_stable_codes() {
         "E1014"
     );
     assert_eq!(code_of("return\n"), "E1016");
-    assert_eq!(code_of("def f()\nend\nf() == f()\n"), "E1017");
+    assert_eq!(
+        code_of("def f[T](x: (T, Int)): Bool\n  x == x\nend\nf((1, 2))\n"),
+        "E1017"
+    );
     assert_eq!(code_of("class A\nend\nA\n"), "E1018");
     assert_eq!(code_of("def f(): Int\n  1\nend\nf = 3\n"), "E1019");
     assert_eq!(code_of("x = 1\nx: Int = 2\n"), "E1020");
@@ -188,11 +194,11 @@ fn week_two_negative_cases_have_stable_codes() {
     );
     // Calling a value that is not a closure.
     assert_eq!(code_of("x = 1\nx(2)\n"), "E1032");
-    // A map key must be Bool, Int, String, or Bytes.
-    assert_eq!(code_of("m = {[1]: 2}\nm\n"), "E1033");
-    assert_eq!(code_of("m: {[Int]: Int} = {}\nm\n"), "E1033");
-    // Interpolation of an unsupported type.
-    assert_eq!(code_of("xs = [1]\n\"{xs}\"\n"), "E1034");
+    // A map key must implement Hashable.
+    assert_eq!(code_of("class A\nend\nm = {A(): 2}\nm\n"), "E1033");
+    assert_eq!(code_of("class A\nend\nm: {A: Int} = {}\nm\n"), "E1033");
+    // Interpolation of a type without Display.
+    assert_eq!(code_of("class Plain\nend\n\"{Plain()}\"\n"), "E1034");
     // A write through a read-only reference.
     assert_eq!(
         code_of("def f(xs: [Int])\n  xs.push(1)\nend\nf([1])\n"),

@@ -384,6 +384,52 @@ impl<'o> FnChecker<'o> {
                 if sig.mut_self {
                     self.guard_iterated_mutation(&recv_h, name_span)?;
                 }
+                if ctx.classes[class as usize].type_params.is_empty()
+                    && owner_args.is_empty()
+                    && sig.own_type_params.is_empty()
+                    && sig.own_effect_params.is_empty()
+                    && type_args.is_empty()
+                {
+                    let args = self.check_args_simple(
+                        ctx,
+                        args,
+                        &sig.params,
+                        &sig.param_muts,
+                        &sig.param_names,
+                        name,
+                        span,
+                    )?;
+                    self.charge_row(ctx, &sig.row, span)?;
+                    if ctx.classes[class as usize].is_final
+                        || ctx.classes[class as usize].kind == ClassKind::EnumParent
+                    {
+                        let mut all_args = Vec::with_capacity(args.len() + 1);
+                        all_args.push(recv_h);
+                        all_args.extend(args);
+                        return Ok(HExpr {
+                            ty: sig.ret,
+                            mutable: true,
+                            kind: HExprKind::Call {
+                                func: sig.func,
+                                targs: Vec::new(),
+                                rowargs: Vec::new(),
+                                args: all_args,
+                            },
+                        });
+                    }
+                    return Ok(HExpr {
+                        ty: sig.ret,
+                        mutable: true,
+                        kind: HExprKind::MethodCall {
+                            recv: Box::new(recv_h),
+                            selector: name.to_string(),
+                            generic_owner: false,
+                            own_targs: Vec::new(),
+                            own_rowargs: Vec::new(),
+                            args,
+                        },
+                    });
+                }
                 let class_names = ctx.classes[class as usize].type_params.clone();
                 let mut type_names = class_names.clone();
                 type_names.extend(sig.own_type_params.iter().cloned());

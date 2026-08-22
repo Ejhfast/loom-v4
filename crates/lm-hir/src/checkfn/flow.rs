@@ -112,7 +112,7 @@ impl<'o> FnChecker<'o> {
         if let (Some(c), Some(entry)) = (self.ctor.as_mut(), entry_state) {
             c.state = entry.clone();
         }
-        self.scopes.push(HashMap::new());
+        self.scopes.push(Scope::default());
         let shadow_init =
             refinement.map(|(slot, name, target)| self.bind_refinement(slot, name, target));
         let result = self.check_block(ctx, body, mode, span);
@@ -444,7 +444,7 @@ impl<'o> FnChecker<'o> {
         if let (Some(c), Some(entry)) = (self.ctor.as_mut(), entry_state) {
             c.state = entry.clone();
         }
-        self.scopes.push(HashMap::new());
+        self.scopes.push(Scope::default());
         let mut binds: Vec<String> = Vec::new();
         let pat = self.check_pattern(ctx, &arm.pattern, scrut_ty, scrut_mut, &mut binds);
         let result = pat.and_then(|hpat| {

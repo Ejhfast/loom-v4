@@ -792,6 +792,7 @@ mod tests {
                 name: "Point".to_string(),
                 key: "Point".to_string(),
                 is_final: false,
+                is_frozen: false,
                 parent: lm_bytecode::NO_PARENT,
                 parent_args: Vec::new(),
                 type_params: 0,

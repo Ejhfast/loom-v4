@@ -856,6 +856,7 @@ mod tests {
             name: name.to_string(),
             key: name.to_string(),
             is_final: false,
+            is_frozen: false,
             parent,
             parent_args,
             type_params,

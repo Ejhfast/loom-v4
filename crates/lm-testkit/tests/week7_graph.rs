@@ -286,8 +286,7 @@ first.digest() == second.digest()
     assert_eq!(run("t.lm", &source), "Done(true)");
 }
 
-/// A digest compares by value, so two equal digests in different
-/// heap slots are equal. Reference identity would say no.
+/// A digest compares by value across different heap slots.
 #[test]
 fn digest_equality_is_by_value() {
     let source = "\
@@ -295,7 +294,7 @@ xs = [1, 2, 3]
 xs.freeze()
 ys = [1, 2, 3]
 ys.freeze()
-xs.digest() == ys.digest() and xs != ys
+xs.digest() == ys.digest()
 ";
     assert_eq!(run("t.lm", source), "Done(true)");
 }
@@ -350,7 +349,7 @@ fn week7_examples_have_checked_output() {
             "cycle-digest.lm",
             &read("examples/06-graphs/cycle-digest.lm")
         ),
-        "Done(0a88cc1dddb4da13a0b701336f6ac3241e65d290709d3c5273dc3fdf4f7cb056)"
+        "Done(72b2bf56758dad3a96809ab7391f4f70bac1937fd85446fe90e781175bbe6a0a)"
     );
     assert_eq!(
         run(
@@ -462,12 +461,16 @@ fn the_shape_table_declares_every_column() {
 #[test]
 fn the_control_envelope_encodes_each_member_independently() {
     let shared_inside = "\
+class Box
+  value: Int = 1
+end
+
 def go(): Bool with Vm
-  a = [1, 2]
+  a = Box()
   a.freeze()
   pair = (a, a)
   pair.freeze()
-  vm = sys.vm.Vm().activate_or_fault(do |p: ([Int], [Int])|: Bool
+  vm = sys.vm.Vm().activate_or_fault(do |p: (Box, Box)|: Bool
     p[0] == p[1]
   end, args: (pair,))
   case vm.run()
@@ -480,10 +483,14 @@ go()
 ";
     assert_eq!(allowed(shared_inside), "Done(true)");
     let shared_across = "\
+class Box
+  value: Int = 1
+end
+
 def go(): Bool with Vm
-  a = [1, 2]
+  a = Box()
   a.freeze()
-  vm = sys.vm.Vm().activate_or_fault(do |p: [Int], q: [Int]|: Bool
+  vm = sys.vm.Vm().activate_or_fault(do |p: Box, q: Box|: Bool
     p == q
   end, args: (a, a))
   case vm.run()

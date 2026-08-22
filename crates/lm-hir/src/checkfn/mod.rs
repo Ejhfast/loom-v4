@@ -29,7 +29,7 @@ use lm_source::ast::{self, BinOp, ExprKind, PatternKind, StmtKind};
 use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
 use lm_types::{ClassId, ClassKind, Row, Type, TypeId, BOOL, DIGEST, INT, NEVER, STRING, UNIT};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// The work budget for one pattern usefulness analysis.
 const PATTERN_BUDGET: u64 = 1_000_000;
@@ -155,6 +155,47 @@ enum NameRes {
     Capture(u32, TypeId, bool),
 }
 
+/// One lexical scope. Loom scopes usually contain few names.
+#[derive(Default)]
+pub(crate) struct Scope {
+    bindings: Vec<(String, u32)>,
+}
+
+impl Scope {
+    pub(crate) fn insert(&mut self, name: String, slot: u32) -> Option<u32> {
+        if let Some((_, old)) = self.bindings.iter_mut().find(|(item, _)| item == &name) {
+            return Some(std::mem::replace(old, slot));
+        }
+        self.bindings.push((name, slot));
+        None
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<&u32> {
+        self.bindings
+            .iter()
+            .find(|(item, _)| item == name)
+            .map(|(_, slot)| slot)
+    }
+
+    pub(crate) fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &u32)> {
+        self.bindings.iter().map(|(name, slot)| (name, slot))
+    }
+}
+
+impl FromIterator<(String, u32)> for Scope {
+    fn from_iter<T: IntoIterator<Item = (String, u32)>>(items: T) -> Self {
+        let mut scope = Scope::default();
+        for (name, slot) in items {
+            scope.insert(name, slot);
+        }
+        scope
+    }
+}
+
 /// The resolved meaning of one called name.
 enum Callee {
     Value(HExpr),
@@ -188,7 +229,7 @@ struct PolyOut {
 pub(crate) struct FnChecker<'o> {
     outer: Option<&'o mut dyn OuterScope>,
     pub(crate) locals: Vec<(TypeId, bool)>,
-    pub(crate) scopes: Vec<HashMap<String, u32>>,
+    pub(crate) scopes: Vec<Scope>,
     captures: Vec<CaptureRec>,
     is_closure: bool,
     loop_depth: u32,

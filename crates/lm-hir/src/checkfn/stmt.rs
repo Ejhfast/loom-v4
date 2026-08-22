@@ -112,7 +112,7 @@ impl<'o> FnChecker<'o> {
                 let cond = self.check_expr(ctx, cond, BOOL)?;
                 self.ctor_guard_loop(&before, stmt.span)?;
                 let snapshot = self.ctor.as_ref().map(|c| c.state.clone());
-                self.scopes.push(HashMap::new());
+                self.scopes.push(Scope::default());
                 self.loop_depth += 1;
                 let result = self.check_block(ctx, body, BlockMode::Stmt, stmt.span);
                 self.loop_depth -= 1;
@@ -333,7 +333,7 @@ impl<'o> FnChecker<'o> {
         bindings: &[(String, Span)],
         types: &[TypeId],
         mutable: bool,
-    ) -> Result<(Vec<u32>, HashMap<String, u32>), Diagnostic> {
+    ) -> Result<(Vec<u32>, Scope), Diagnostic> {
         if bindings.len() != types.len() {
             let found = bindings.len();
             let expected = types.len();
@@ -347,7 +347,7 @@ impl<'o> FnChecker<'o> {
             ));
         }
         let mut slots = Vec::with_capacity(bindings.len());
-        let mut scope = HashMap::new();
+        let mut scope = Scope::default();
         for ((name, span), ty) in bindings.iter().zip(types) {
             if name != "_" && scope.contains_key(name) {
                 return Err(Diagnostic::new(

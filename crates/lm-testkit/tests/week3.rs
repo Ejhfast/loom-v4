@@ -611,9 +611,9 @@ fn tuple_equality_is_structural() {
     // Nested tuples recurse.
     assert_eq!(runs("((1, 2), 3) == ((1, 2), 3)\n"), "Done(true)");
     assert_eq!(runs("((1, 2), 3) == ((1, 9), 3)\n"), "Done(false)");
-    // A heap element compares by reference identity.
+    // List elements use structural equality.
     assert_eq!(runs("xs = [1]\n(xs, 1) == (xs, 1)\n"), "Done(true)");
-    assert_eq!(runs("xs = [1]\n(xs, 1) == ([1], 1)\n"), "Done(false)");
+    assert_eq!(runs("xs = [1]\n(xs, 1) == ([1], 1)\n"), "Done(true)");
     // Unit elements are always equal.
     assert_eq!(runs("def u()\nend\n(u(), 1) == (u(), 1)\n"), "Done(true)");
 }

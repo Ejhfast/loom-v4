@@ -40,6 +40,31 @@ impl<'o> FnChecker<'o> {
             }
             Callee::Func(func) => {
                 let sig = ctx.sigs[func as usize].clone();
+                if sig.type_params.is_empty()
+                    && sig.effect_params.is_empty()
+                    && type_args.is_empty()
+                {
+                    let args = self.check_args_simple(
+                        ctx,
+                        args,
+                        &sig.params,
+                        &sig.param_muts,
+                        &sig.param_names,
+                        name,
+                        span,
+                    )?;
+                    self.charge_row(ctx, &sig.row, span)?;
+                    return Ok(HExpr {
+                        ty: sig.ret,
+                        mutable: true,
+                        kind: HExprKind::Call {
+                            func,
+                            targs: Vec::new(),
+                            rowargs: Vec::new(),
+                            args,
+                        },
+                    });
+                }
                 let out = self.check_poly_call(
                     ctx,
                     name,
@@ -608,7 +633,7 @@ impl<'o> FnChecker<'o> {
             ));
         }
         let args = arrange_args(args, param_names, what)?;
-        let mut checked = Vec::new();
+        let mut checked = Vec::with_capacity(args.len());
         for ((arg, param), is_mut) in args.iter().zip(params.iter()).zip(param_muts.iter()) {
             let h = self.check_expr(ctx, arg, *param)?;
             if *is_mut && !h.mutable {

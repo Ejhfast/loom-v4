@@ -98,6 +98,57 @@ fn repeated_code_admission_rechecks_mutable_image_state() {
     assert_eq!(error.reason, ImageReason::Code);
 }
 
+#[test]
+fn repeated_portable_code_admission_rechecks_changed_bytes() {
+    let loaded = program(
+        "def add(value: Int): Int\n  value + 1\nend\n\
+         def keep(): Int\n  code = codeof(add)\n  code.definition().slots.len()\nend\nkeep()\n",
+    );
+    let images = boundaries(&loaded, &[], 100);
+    let mut image = pick(&images, "one portable function", |image| {
+        image.machines.iter().any(|machine| {
+            machine.objects.iter().any(|entry| {
+                matches!(
+                    &entry.object,
+                    Object::NativeCode(code) if code.kind == lm_heap::PortableCodeKind::Function
+                )
+            })
+        })
+    });
+    let limits = lm_vm::snapshot::LoadLimits::default();
+    let mut cache = lm_vm::snapshot::AdmissionCache::default();
+    let bytes = codec::encode(&image, usize::MAX).expect("the image encodes");
+    codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
+        .expect("the first image admits");
+    codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
+        .expect("the repeated image admits");
+
+    let mut changed = false;
+    for machine in &mut image.machines {
+        for entry in &mut machine.objects {
+            let Object::NativeCode(code) = &mut entry.object else {
+                continue;
+            };
+            if code.kind != lm_heap::PortableCodeKind::Function {
+                continue;
+            }
+            let mut damaged = code.bytes.as_slice().to_vec();
+            damaged[0] ^= 1;
+            code.bytes = lm_heap::SharedBytes::from(damaged.as_slice());
+            changed = true;
+            break;
+        }
+        if changed {
+            break;
+        }
+    }
+    assert!(changed, "the capture holds no portable function");
+    let bytes = codec::encode(&image, usize::MAX).expect("the changed image encodes");
+    let error = codec::load_external_cached(&bytes, &loaded, limits, &mut cache)
+        .expect_err("the cache must not hide changed portable code");
+    assert_eq!(error.reason, ImageReason::Code);
+}
+
 /// Restore one container into a fresh world and drive the restored
 /// root to a stop.
 ///
@@ -2277,8 +2328,9 @@ fn gate_sweep(label: &str, source: &str) -> Vec<String> {
         let gate = world.next_gate();
         if let Ok(image) = world.capture_snapshot(gate, 0, false) {
             captures += 1;
+            let bytes = image.bytes().expect("the image encodes");
             if let Err(e) = codec::load_external_cached(
-                image.bytes().expect("the image encodes"),
+                bytes,
                 &loaded,
                 lm_vm::snapshot::LoadLimits::default(),
                 &mut admission_cache,

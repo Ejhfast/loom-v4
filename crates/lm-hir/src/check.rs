@@ -199,6 +199,13 @@ pub const PRELUDE_CTORS: [&str; 17] = [
     "InteractionInvalid",
 ];
 
+fn is_prelude_type(name: &str) -> bool {
+    static NAMES: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    NAMES
+        .get_or_init(|| PRELUDE_TYPES.into_iter().collect())
+        .contains(name)
+}
+
 fn tuple_core_arity(name: &str) -> Option<usize> {
     let arity = name.strip_prefix("Tuple")?.parse().ok()?;
     (2..=16).contains(&arity).then_some(arity)
@@ -372,6 +379,7 @@ pub(crate) struct ClassInfo {
     /// The layout index where own fields start.
     pub(crate) own_start: usize,
     pub(crate) methods: Vec<MethodSig>,
+    pub(crate) method_index: Vec<usize>,
     pub(crate) init: Option<MethodSig>,
     /// For an enum case: the family parent class index.
     pub(crate) family: Option<u32>,
@@ -404,12 +412,22 @@ impl ClassInfo {
             has_default: Vec::new(),
             own_start: 0,
             methods: Vec::new(),
+            method_index: Vec::new(),
             init: None,
             family: None,
             arms: Vec::new(),
             arm_short: String::new(),
         }
     }
+}
+
+pub(crate) fn index_methods(methods: &[MethodSig]) -> Vec<usize> {
+    if methods.len() < 8 {
+        return Vec::new();
+    }
+    let mut index: Vec<usize> = (0..methods.len()).collect();
+    index.sort_unstable_by(|left, right| methods[*left].name.cmp(&methods[*right].name));
+    index
 }
 
 /// One resolved `use` binding.
@@ -906,7 +924,7 @@ impl Ctx {
         if let Some(idx) = self.user_types.get(name) {
             return Some(*idx);
         }
-        if self.prelude && PRELUDE_TYPES.contains(&name) {
+        if self.prelude && is_prelude_type(name) {
             return self.core_types.get(name).copied();
         }
         None
@@ -1263,46 +1281,67 @@ impl Ctx {
         name: &str,
         span: Span,
     ) -> Result<Option<(u32, u32, InterfaceMethodSig)>, Diagnostic> {
-        let applications: Vec<InterfaceUse> = match self.store.get(ty).clone() {
-            Type::Var(index) if index >= env.type_offset => env
-                .type_bounds
-                .get((index - env.type_offset) as usize)
-                .cloned()
-                .unwrap_or_default(),
+        enum BoundSource {
+            Variable(u32),
+            Projection(InterfaceId, u32),
+            None,
+        }
+        let source = match self.store.get(ty) {
+            Type::Var(index) if *index >= env.type_offset => BoundSource::Variable(*index),
             Type::Projection {
                 interface, assoc, ..
-            } => self.interfaces[interface.0 as usize]
-                .associated
-                .get(assoc as usize)
-                .map(|item| item.bounds.clone())
-                .unwrap_or_default(),
-            _ => Vec::new(),
+            } => BoundSource::Projection(*interface, *assoc),
+            _ => BoundSource::None,
         };
-        let mut found = Vec::new();
+        match source {
+            BoundSource::Variable(index) => {
+                let applications = env
+                    .type_bounds
+                    .get((index - env.type_offset) as usize)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                self.bound_method_in(applications, ty, name, span)
+            }
+            BoundSource::Projection(interface, assoc) => {
+                let applications = self.interfaces[interface.0 as usize]
+                    .associated
+                    .get(assoc as usize)
+                    .map(|item| item.bounds.clone())
+                    .unwrap_or_default();
+                self.bound_method_in(&applications, ty, name, span)
+            }
+            BoundSource::None => Ok(None),
+        }
+    }
+
+    fn bound_method_in(
+        &mut self,
+        applications: &[InterfaceUse],
+        ty: TypeId,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<(u32, u32, InterfaceMethodSig)>, Diagnostic> {
+        let mut found: Option<(u32, u32, InterfaceMethodSig)> = None;
         for application in applications {
             let contract = &self.interfaces[application.interface as usize];
             if let Some(method) = contract.methods.iter().position(|item| item.name == name) {
                 let requirement = contract.methods[method].clone();
-                let requirement = self.instantiate_interface_method(ty, &application, &requirement);
-                found.push((application.interface, method as u32, requirement));
+                let requirement = self.instantiate_interface_method(ty, application, &requirement);
+                let candidate = (application.interface, method as u32, requirement);
+                if let Some(first) = &found {
+                    if first.2 != candidate.2 {
+                        return Err(Diagnostic::new(
+                            "E1053",
+                            format!("the interface method `{name}` is ambiguous"),
+                            span,
+                        ));
+                    }
+                } else {
+                    found = Some(candidate);
+                }
             }
         }
-        let Some(first) = found.first().cloned() else {
-            return Ok(None);
-        };
-        if found
-            .iter()
-            .skip(1)
-            .all(|(_, _, requirement)| requirement == &first.2)
-        {
-            Ok(Some(first))
-        } else {
-            Err(Diagnostic::new(
-                "E1053",
-                format!("the interface method `{name}` is ambiguous"),
-                span,
-            ))
-        }
+        Ok(found)
     }
 
     /// Find a method by name and return the declaring class with its
@@ -1331,11 +1370,18 @@ impl Ctx {
         let mut cur = start;
         let mut cur_args = args;
         loop {
-            let found = self.classes[cur as usize]
-                .methods
-                .iter()
-                .find(|m| m.name == name)
-                .cloned();
+            let info = &self.classes[cur as usize];
+            let found = if info.method_index.is_empty() {
+                info.methods
+                    .iter()
+                    .find(|method| method.name == name)
+                    .cloned()
+            } else {
+                info.method_index
+                    .binary_search_by(|index| info.methods[*index].name.as_str().cmp(name))
+                    .ok()
+                    .map(|position| info.methods[info.method_index[position]].clone())
+            };
             if let Some(sig) = found {
                 if cur_args.is_empty() {
                     return Some((sig, cur_args, cur));
@@ -2177,11 +2223,14 @@ pub fn check_module_with(
     }
     // Pass 4: check top-level function bodies.
     for (idx, func) in module.funcs.iter().enumerate() {
-        let sig = ctx.sigs[idx].clone();
+        let mut sig = ctx.sigs[idx].clone();
+        let type_param_count = sig.type_params.len() as u32;
+        let type_bounds = hir_bounds(&sig.type_bounds);
+        let effect_param_count = sig.effect_params.len() as u32;
         let env = TyEnv {
-            type_names: sig.type_params.clone(),
-            type_bounds: sig.type_bounds.clone(),
-            effect_names: sig.effect_params.clone(),
+            type_names: std::mem::take(&mut sig.type_params),
+            type_bounds: std::mem::take(&mut sig.type_bounds),
+            effect_names: std::mem::take(&mut sig.effect_params),
             type_offset: 0,
             self_interface: None,
             self_ty: None,
@@ -2208,13 +2257,13 @@ pub fn check_module_with(
             imported: false,
             source_span: Some(func.span),
             name: func.name.clone(),
-            type_params: sig.type_params.len() as u32,
-            type_bounds: hir_bounds(&sig.type_bounds),
-            effect_params: sig.effect_params.len() as u32,
-            params: sig.params.clone(),
-            param_muts: sig.param_muts.clone(),
+            type_params: type_param_count,
+            type_bounds,
+            effect_params: effect_param_count,
+            params: sig.params,
+            param_muts: sig.param_muts,
             ret: sig.ret,
-            row: sig.row.clone(),
+            row: sig.row,
             captures: vec![],
             locals: checked.locals,
             body: checked.body,
@@ -2222,11 +2271,14 @@ pub fn check_module_with(
     }
     for func in &core.funcs {
         let index = ctx.core_func_index[&func.name] as usize;
-        let sig = ctx.sigs[index].clone();
+        let mut sig = ctx.sigs[index].clone();
+        let type_param_count = sig.type_params.len() as u32;
+        let type_bounds = hir_bounds(&sig.type_bounds);
+        let effect_param_count = sig.effect_params.len() as u32;
         let env = TyEnv {
-            type_names: sig.type_params.clone(),
-            type_bounds: sig.type_bounds.clone(),
-            effect_names: sig.effect_params.clone(),
+            type_names: std::mem::take(&mut sig.type_params),
+            type_bounds: std::mem::take(&mut sig.type_bounds),
+            effect_names: std::mem::take(&mut sig.effect_params),
             type_offset: 0,
             self_interface: None,
             self_ty: None,
@@ -2255,13 +2307,13 @@ pub fn check_module_with(
             imported: false,
             source_span: None,
             name: func.name.clone(),
-            type_params: sig.type_params.len() as u32,
-            type_bounds: hir_bounds(&sig.type_bounds),
-            effect_params: sig.effect_params.len() as u32,
-            params: sig.params.clone(),
-            param_muts: sig.param_muts.clone(),
+            type_params: type_param_count,
+            type_bounds,
+            effect_params: effect_param_count,
+            params: sig.params,
+            param_muts: sig.param_muts,
             ret: sig.ret,
-            row: sig.row.clone(),
+            row: sig.row,
             captures: vec![],
             locals: checked.locals,
             body: checked.body,
@@ -4269,6 +4321,7 @@ fn resolve_class(
         self_ty,
         &env,
     )?;
+    let method_index = index_methods(&methods);
     Ok(ClassInfo {
         imported: false,
         source_span: (!is_core).then_some(class.span),
@@ -4287,6 +4340,7 @@ fn resolve_class(
         has_default,
         own_start,
         methods,
+        method_index,
         init,
         family: None,
         arms: Vec::new(),
@@ -4379,6 +4433,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         methods.push(msig);
     }
     let arms: Vec<u32> = arm_infos.iter().map(|(idx, _, _, _)| *idx).collect();
+    let method_index = index_methods(&methods);
     ctx.classes[parent_idx as usize] = ClassInfo {
         imported: false,
         source_span: (!is_core).then_some(enum_def.span),
@@ -4397,6 +4452,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         has_default: Vec::new(),
         own_start: 0,
         methods,
+        method_index,
         init: None,
         family: None,
         arms,
@@ -4439,6 +4495,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
             has_default: vec![false; count],
             own_start: 0,
             methods: Vec::new(),
+            method_index: Vec::new(),
             init: None,
             family: Some(parent_idx),
             arms: Vec::new(),
@@ -4516,8 +4573,21 @@ fn check_all_methods(ctx: &mut Ctx, module: &ast::Module, is_core: bool) -> Resu
             &ctx.user_types
         };
         let cidx = map[&class.name];
+        let mut ordinary = 0;
         for method in &class.methods {
-            check_method(ctx, cidx, method, is_core)?;
+            let func = if method.name == "init" {
+                ctx.classes[cidx as usize]
+                    .init
+                    .as_ref()
+                    .expect("init resolved")
+                    .func
+            } else {
+                let signature = &ctx.classes[cidx as usize].methods[ordinary];
+                debug_assert_eq!(signature.name, method.name);
+                ordinary += 1;
+                signature.func
+            };
+            check_method(ctx, cidx, func, method, is_core)?;
         }
     }
     for enum_def in &module.enums {
@@ -4527,8 +4597,10 @@ fn check_all_methods(ctx: &mut Ctx, module: &ast::Module, is_core: bool) -> Resu
             &ctx.user_types
         };
         let cidx = map[&enum_def.name];
-        for method in &enum_def.methods {
-            check_method(ctx, cidx, method, is_core)?;
+        for (index, method) in enum_def.methods.iter().enumerate() {
+            let signature = &ctx.classes[cidx as usize].methods[index];
+            debug_assert_eq!(signature.name, method.name);
+            check_method(ctx, cidx, signature.func, method, is_core)?;
         }
     }
     Ok(())
@@ -4538,26 +4610,19 @@ fn check_all_methods(ctx: &mut Ctx, module: &ast::Module, is_core: bool) -> Resu
 fn check_method(
     ctx: &mut Ctx,
     cidx: u32,
+    func_idx: u32,
     method: &ast::MethodDef,
     is_core: bool,
 ) -> Result<(), Diagnostic> {
     let is_init = method.name == "init";
-    let (func_idx, sig) = {
-        let info = &ctx.classes[cidx as usize];
-        let msig = if is_init {
-            info.init.as_ref().expect("init resolved")
-        } else {
-            info.methods
-                .iter()
-                .find(|m| m.name == method.name)
-                .expect("method resolved")
-        };
-        (msig.func, ctx.sigs[msig.func as usize].clone())
-    };
+    let mut sig = ctx.sigs[func_idx as usize].clone();
+    let type_param_count = sig.type_params.len() as u32;
+    let type_bounds = hir_bounds(&sig.type_bounds);
+    let effect_param_count = sig.effect_params.len() as u32;
     let env = TyEnv {
-        type_names: sig.type_params.clone(),
-        type_bounds: sig.type_bounds.clone(),
-        effect_names: sig.effect_params.clone(),
+        type_names: std::mem::take(&mut sig.type_params),
+        type_bounds: std::mem::take(&mut sig.type_bounds),
+        effect_names: std::mem::take(&mut sig.effect_params),
         type_offset: 0,
         self_interface: None,
         self_ty: Some(ctx.classes[cidx as usize].self_ty),
@@ -4599,13 +4664,13 @@ fn check_method(
         imported: false,
         source_span: (!is_core).then_some(method.span),
         name: format!("{}.{}", ctx.classes[cidx as usize].name, method.name),
-        type_params: sig.type_params.len() as u32,
-        type_bounds: hir_bounds(&sig.type_bounds),
-        effect_params: sig.effect_params.len() as u32,
-        params: sig.params.clone(),
-        param_muts: sig.param_muts.clone(),
+        type_params: type_param_count,
+        type_bounds,
+        effect_params: effect_param_count,
+        params: sig.params,
+        param_muts: sig.param_muts,
         ret: sig.ret,
-        row: sig.row.clone(),
+        row: sig.row,
         captures: vec![],
         locals: checked.locals,
         body: checked.body,

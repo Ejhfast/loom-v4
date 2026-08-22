@@ -10,7 +10,7 @@ impl<'o> FnChecker<'o> {
         FnChecker {
             outer: None,
             locals: Vec::new(),
-            scopes: vec![HashMap::new()],
+            scopes: vec![Scope::default()],
             captures: Vec::new(),
             is_closure: false,
             loop_depth: 0,

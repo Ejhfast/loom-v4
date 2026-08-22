@@ -767,10 +767,21 @@ impl<'m> Oracle<'m> {
     /// value form. The VM reads the same relation from its heap tag.
     fn native_class(&self, value: &OV) -> Option<u32> {
         let want = match value {
+            OV::Unit => NativeRepr::Unit,
+            OV::Bool(_) => NativeRepr::Bool,
+            OV::Int(_) => NativeRepr::Int,
             OV::Str(_) => NativeRepr::String,
             OV::Substring(_) => NativeRepr::Substring,
             OV::Char(_) => NativeRepr::Char,
-            _ => return None,
+            OV::Obj(object) => match &object.borrow().kind {
+                OKind::List(_) => NativeRepr::List,
+                OKind::Map(_) => NativeRepr::Map,
+                OKind::Tuple(values) => NativeRepr::Tuple(values.len().try_into().ok()?),
+                OKind::Sb(_) => NativeRepr::StringBuilder,
+                OKind::Bb(_) => NativeRepr::ByteBuffer,
+                OKind::Bytes(_) => NativeRepr::Bytes,
+                OKind::Instance { .. } | OKind::Closure { .. } => return None,
+            },
         };
         self.m
             .classes

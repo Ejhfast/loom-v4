@@ -894,14 +894,14 @@ def artifact_bytes(): Bytes with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
+def install_fuzz(image: Vm): Result[Instance, CodeError] with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
+  module = sys.vm.artifact(artifact_bytes()).verify()?
+  image.install(module)
+end
+
 def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   image = sys.vm.Vm()
-  module = case sys.vm.artifact(artifact_bytes()).verify()
-  in Ok(value) then value
-  in Err(_)
-    return -1
-  end
-  instance = case image.install(module)
+  instance = case install_fuzz(image)
   in Ok(value) then value
   in Err(_)
     return -2
@@ -1088,16 +1088,24 @@ fn mutated_snapshot_images_never_panic_the_runtime() {
             let seed_image = lm_vm::snapshot::codec::load_external(&base, &loaded, limits)
                 .expect("the seed admits")
                 .into_image();
+            // A valid seed can exceed the general byte limit as core grows.
+            // Structural mutations cannot change collection lengths.
+            let case_limit = MAX_CASE_BYTES.max(base.len().saturating_add(64));
             for _round in 0..rounds {
                 let started = std::time::Instant::now();
                 let mut image = seed_image.clone();
                 for _ in 0..=prng.below(3) {
                     mutate_image(&mut image, &mut prng);
                 }
-                let Ok(bytes) = lm_vm::snapshot::codec::encode(&image, usize::MAX) else {
+                let Ok(bytes) = lm_vm::snapshot::codec::encode(&image, case_limit) else {
                     continue;
                 };
-                assert!(bytes.len() <= MAX_CASE_BYTES, "a mutation grew the input");
+                assert!(
+                    bytes.len() <= case_limit,
+                    "a mutation encoded {} bytes from a {} byte seed",
+                    bytes.len(),
+                    base.len()
+                );
                 let Ok(admitted) = lm_vm::snapshot::codec::load_external(&bytes, &loaded, limits)
                 else {
                     continue;
@@ -1336,6 +1344,7 @@ fn regenerate_fuzz_corpus() {
                 parent_args: Vec::new(),
                 key: "C".to_string(),
                 is_final: false,
+                is_frozen: false,
                 parent: NO_PARENT,
                 type_params: 0,
                 kind: BcClassKind::Normal,
@@ -1396,6 +1405,7 @@ fn regenerate_fuzz_corpus() {
                 parent_args: Vec::new(),
                 key: "Box".to_string(),
                 is_final: false,
+                is_frozen: false,
                 parent: NO_PARENT,
                 type_params: 1,
                 kind: BcClassKind::Normal,

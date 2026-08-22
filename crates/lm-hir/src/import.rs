@@ -21,8 +21,8 @@
 //! an imported signature may name a core type.
 
 use crate::check::{
-    AssociatedInfo, ClassInfo, ConformanceInfo, ConformancePremise, Ctx, FnSig, InterfaceInfo,
-    InterfaceMethodSig, InterfaceUse, MethodSig,
+    index_methods, AssociatedInfo, ClassInfo, ConformanceInfo, ConformancePremise, Ctx, FnSig,
+    InterfaceInfo, InterfaceMethodSig, InterfaceUse, MethodSig,
 };
 use crate::hir::{HirFunc, HirImport, HirImportDef};
 use lm_bytecode::interface::{
@@ -728,6 +728,7 @@ impl<'a> Materializer<'a> {
                     .ok_or_else(|| error(span, format!("the arm `{full}` is not exported")))?,
             );
         }
+        let method_index = index_methods(&methods);
         Ok(ClassInfo {
             imported: true,
             source_span: None,
@@ -746,6 +747,7 @@ impl<'a> Materializer<'a> {
             has_default,
             own_start: class.own_start as usize,
             methods,
+            method_index,
             init,
             family,
             arms,

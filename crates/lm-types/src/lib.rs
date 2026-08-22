@@ -171,6 +171,9 @@ pub struct ClassMeta {
 pub struct TypeStore {
     bundle: std::sync::Arc<lm_abi::AbiBundle>,
     types: Vec<Type>,
+    type_variables: Vec<bool>,
+    effect_variables: Vec<bool>,
+    callbacks: Vec<bool>,
     index: HashMap<Type, TypeId>,
     classes: Vec<ClassMeta>,
     row_names: Vec<String>,
@@ -201,6 +204,9 @@ impl TypeStore {
         let mut store = TypeStore {
             bundle,
             types: Vec::new(),
+            type_variables: Vec::new(),
+            effect_variables: Vec::new(),
+            callbacks: Vec::new(),
             index: HashMap::new(),
             classes: Vec::new(),
             row_names: Vec::new(),
@@ -236,8 +242,70 @@ impl TypeStore {
         if let Some(id) = self.index.get(&ty) {
             return *id;
         }
+        let type_variable = match &ty {
+            Type::Var(_) => true,
+            Type::Projection { base, .. }
+            | Type::List(base)
+            | Type::Run(base)
+            | Type::Wait(base)
+            | Type::RunSnapshot(base) => self.type_variables[base.0 as usize],
+            Type::Inst(_, args) | Type::Tuple(args) => {
+                args.iter().any(|item| self.type_variables[item.0 as usize])
+            }
+            Type::Map(left, right) | Type::PendingCall(left, right) | Type::Handle(left, right) => {
+                self.type_variables[left.0 as usize] || self.type_variables[right.0 as usize]
+            }
+            Type::Fn(params, _, ret, _) | Type::Callback(params, _, ret, _) => {
+                self.type_variables[ret.0 as usize]
+                    || params
+                        .iter()
+                        .any(|item| self.type_variables[item.0 as usize])
+            }
+            _ => false,
+        };
+        let effect_variable = match &ty {
+            Type::Projection { base, .. }
+            | Type::List(base)
+            | Type::Run(base)
+            | Type::Wait(base)
+            | Type::RunSnapshot(base) => self.effect_variables[base.0 as usize],
+            Type::Inst(_, args) | Type::Tuple(args) => args
+                .iter()
+                .any(|item| self.effect_variables[item.0 as usize]),
+            Type::Map(left, right) | Type::PendingCall(left, right) | Type::Handle(left, right) => {
+                self.effect_variables[left.0 as usize] || self.effect_variables[right.0 as usize]
+            }
+            Type::Fn(params, _, ret, row) | Type::Callback(params, _, ret, row) => {
+                row.iter().any(|item| matches!(item, RowElem::Var(_)))
+                    || self.effect_variables[ret.0 as usize]
+                    || params
+                        .iter()
+                        .any(|item| self.effect_variables[item.0 as usize])
+            }
+            _ => false,
+        };
+        let callback = match &ty {
+            Type::Callback(..) => true,
+            Type::Inst(_, args) | Type::Tuple(args) => {
+                args.iter().any(|item| self.callbacks[item.0 as usize])
+            }
+            Type::List(item)
+            | Type::Projection { base: item, .. }
+            | Type::Run(item)
+            | Type::Wait(item)
+            | Type::RunSnapshot(item)
+            | Type::Op(_, item)
+            | Type::Fn(_, _, item, _) => self.callbacks[item.0 as usize],
+            Type::Map(left, right) | Type::PendingCall(left, right) | Type::Handle(left, right) => {
+                self.callbacks[left.0 as usize] || self.callbacks[right.0 as usize]
+            }
+            _ => false,
+        };
         let id = TypeId(self.types.len() as u32);
         self.types.push(ty.clone());
+        self.type_variables.push(type_variable);
+        self.effect_variables.push(effect_variable);
+        self.callbacks.push(callback);
         self.index.insert(ty, id);
         id
     }
@@ -752,34 +820,7 @@ impl TypeStore {
 
     /// Return true when one value position contains a callback.
     pub fn contains_callback(&self, id: TypeId) -> bool {
-        let mut stack = vec![id];
-        let mut seen = vec![false; self.types.len()];
-        while let Some(current) = stack.pop() {
-            let index = current.0 as usize;
-            if seen[index] {
-                continue;
-            }
-            seen[index] = true;
-            match self.get(current) {
-                Type::Callback(..) => return true,
-                Type::Inst(_, args) | Type::Tuple(args) => stack.extend(args.iter().copied()),
-                Type::List(element)
-                | Type::Projection { base: element, .. }
-                | Type::Run(element)
-                | Type::Wait(element)
-                | Type::RunSnapshot(element)
-                | Type::Op(_, element) => stack.push(*element),
-                Type::Map(key, value)
-                | Type::PendingCall(key, value)
-                | Type::Handle(key, value) => {
-                    stack.push(*key);
-                    stack.push(*value);
-                }
-                Type::Fn(_, _, ret, _) => stack.push(*ret),
-                _ => {}
-            }
-        }
-        false
+        self.callbacks[id.0 as usize]
     }
 
     /// True when the type names a holder-local native class.
@@ -809,7 +850,9 @@ impl TypeStore {
     /// `targs[i]` replaces `Var(i)`. `rowargs[i]` replaces the row
     /// variable `i`. Missing entries keep the variable.
     pub fn substitute(&mut self, ty: TypeId, targs: &[TypeId], rowargs: &[Row]) -> TypeId {
-        if targs.is_empty() && rowargs.is_empty() {
+        if (targs.is_empty() || !self.contains_var(ty))
+            && (rowargs.is_empty() || !self.contains_effect_var(ty))
+        {
             return ty;
         }
         match self.get(ty).clone() {
@@ -906,50 +949,13 @@ impl TypeStore {
 
     /// Return true when the type contains a type variable.
     pub fn contains_var(&self, ty: TypeId) -> bool {
-        match self.get(ty) {
-            Type::Var(_) => true,
-            Type::Projection { base, .. } => self.contains_var(*base),
-            Type::Inst(_, args) => args.iter().any(|a| self.contains_var(*a)),
-            Type::List(e) => self.contains_var(*e),
-            Type::Map(k, v) => self.contains_var(*k) || self.contains_var(*v),
-            Type::Tuple(elems) => elems.iter().any(|e| self.contains_var(*e)),
-            Type::Fn(params, _, ret, _) => {
-                params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
-            }
-            Type::Callback(params, _, ret, _) => {
-                params.iter().any(|p| self.contains_var(*p)) || self.contains_var(*ret)
-            }
-            Type::Run(t) | Type::Wait(t) | Type::RunSnapshot(t) => self.contains_var(*t),
-            Type::PendingCall(a, r) => self.contains_var(*a) || self.contains_var(*r),
-            Type::Handle(m, r) => self.contains_var(*m) || self.contains_var(*r),
-            _ => false,
-        }
+        self.type_variables[ty.0 as usize]
     }
 
     /// Return true when the type contains an effect variable inside a
     /// function-type row.
     pub fn contains_effect_var(&self, ty: TypeId) -> bool {
-        match self.get(ty) {
-            Type::Inst(_, args) => args.iter().any(|a| self.contains_effect_var(*a)),
-            Type::Projection { base, .. } => self.contains_effect_var(*base),
-            Type::List(e) => self.contains_effect_var(*e),
-            Type::Map(k, v) => self.contains_effect_var(*k) || self.contains_effect_var(*v),
-            Type::Tuple(elems) => elems.iter().any(|e| self.contains_effect_var(*e)),
-            Type::Fn(params, _, ret, row) => {
-                row.iter().any(|e| matches!(e, RowElem::Var(_)))
-                    || params.iter().any(|p| self.contains_effect_var(*p))
-                    || self.contains_effect_var(*ret)
-            }
-            Type::Callback(params, _, ret, row) => {
-                row.iter().any(|e| matches!(e, RowElem::Var(_)))
-                    || params.iter().any(|p| self.contains_effect_var(*p))
-                    || self.contains_effect_var(*ret)
-            }
-            Type::Run(t) | Type::Wait(t) | Type::RunSnapshot(t) => self.contains_effect_var(*t),
-            Type::PendingCall(a, r) => self.contains_effect_var(*a) || self.contains_effect_var(*r),
-            Type::Handle(m, r) => self.contains_effect_var(*m) || self.contains_effect_var(*r),
-            _ => false,
-        }
+        self.effect_variables[ty.0 as usize]
     }
 
     /// Render one row for diagnostics.
