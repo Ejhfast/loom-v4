@@ -203,7 +203,7 @@ pub struct BcClass {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BcAssociated {
     pub name: String,
-    pub bound: Option<BcInterfaceUse>,
+    pub bounds: Vec<BcInterfaceUse>,
 }
 
 /// One method requirement of a nominal interface.
@@ -1107,8 +1107,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 39 defines the optional source debug section.
 /// Version 40 adds fault source lookup instructions.
 /// Version 41 adds installed binding core roles. Version 42 stores
-/// each intrinsic definition contract beside its late slot.
-pub const VERSION: u16 = 42;
+/// each intrinsic definition contract beside its late slot. Version
+/// 43 stores several bounds for each associated interface type.
+pub const VERSION: u16 = 43;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1435,12 +1436,9 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
         write_u32(&mut out, interface.associated.len() as u32);
         for associated in &interface.associated {
             write_bytes(&mut out, associated.name.as_bytes());
-            match &associated.bound {
-                Some(bound) => {
-                    out.push(1);
-                    encode_interface_use(&mut out, bound);
-                }
-                None => out.push(0),
+            write_u32(&mut out, associated.bounds.len() as u32);
+            for bound in &associated.bounds {
+                encode_interface_use(&mut out, bound);
             }
         }
         write_u32(&mut out, interface.methods.len() as u32);
@@ -2658,12 +2656,15 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         let mut associated = Vec::with_capacity(associated_count);
         for _ in 0..associated_count {
             let name = cur.string()?;
-            let bound = match cur.u8()? {
-                0 => None,
-                1 => Some(decode_interface_use(&mut cur)?),
-                other => return Err(DecodeError::BadFlag(other)),
-            };
-            associated.push(BcAssociated { name, bound });
+            let bound_count = cur.len()?;
+            if bound_count > cur.remaining() / 12 {
+                return Err(DecodeError::BadLength);
+            }
+            let mut bounds = Vec::with_capacity(bound_count);
+            for _ in 0..bound_count {
+                bounds.push(decode_interface_use(&mut cur)?);
+            }
+            associated.push(BcAssociated { name, bounds });
         }
         let method_count = cur.len()?;
         let mut methods = Vec::with_capacity(method_count);

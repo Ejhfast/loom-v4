@@ -136,6 +136,275 @@ fn interface_contracts_cross_module_boundaries() {
 }
 
 #[test]
+fn multiple_associated_bounds_cross_module_boundaries() {
+    let library = compile_module(
+        "lib.catalog",
+        &SourceFile::new(
+            "catalog.lm",
+            r#"
+interface Named
+  def name(self): String
+end
+
+interface Priced
+  def price(self): Int
+end
+
+interface Catalog
+  type Item: Named + Priced
+  def item(self): Self.Item
+end
+
+final class Book implements Named, Priced
+  def name(self): String
+    "loom"
+  end
+
+  def price(self): Int
+    12
+  end
+end
+
+final class Shelf implements Catalog
+  type Item = Book
+
+  def item(self): Book
+    Book()
+  end
+end
+"#
+            .to_string(),
+        ),
+        &CompileEnv::new().freeze(),
+        false,
+    )
+    .expect("the library compiles");
+    let encoded = lm_bytecode::interface::encode_interface(&library.interface);
+    let interface =
+        lm_bytecode::interface::decode_interface(&encoded).expect("the exported interface decodes");
+    let mut compile_env = CompileEnv::new();
+    compile_env
+        .bind_interface(interface)
+        .expect("the interface binds");
+    compile_env
+        .bind_root("catalog", "lib.catalog")
+        .expect("the root binds");
+    let main = compile_module(
+        "app.main",
+        &SourceFile::new(
+            "main.lm",
+            r#"
+use catalog
+
+def describe[C: catalog.Catalog](value: C): String
+  item = value.item()
+  "{item.name()}:{item.price()}"
+end
+
+describe(catalog.Shelf())
+"#
+            .to_string(),
+        ),
+        &compile_env.freeze(),
+        true,
+    )
+    .expect("the program compiles");
+    let mut link_env = LinkEnv::new();
+    for module in [&library, &main] {
+        link_env
+            .bind(LinkUnit {
+                path: module.path.clone(),
+                module: module.module.clone(),
+                interface: module.interface.clone(),
+            })
+            .expect("the module binds");
+    }
+    let linked = link("app.main", &link_env.freeze()).expect("the program links");
+    let loaded = lm_vm::load(linked.module).expect("the program loads");
+    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(\"loom:12\")");
+}
+
+#[test]
+fn associated_types_must_meet_every_bound() {
+    let diagnostic = error(
+        r#"
+interface Named
+  def name(self): String
+end
+
+interface Priced
+  def price(self): Int
+end
+
+interface Catalog
+  type Item: Named + Priced
+  def item(self): Self.Item
+end
+
+final class NameOnly implements Named
+  def name(self): String
+    "name"
+  end
+end
+
+final class BadCatalog implements Catalog
+  type Item = NameOnly
+
+  def item(self): NameOnly
+    NameOnly()
+  end
+end
+
+BadCatalog()
+"#,
+    );
+    assert!(
+        diagnostic.contains("associated type `Item` does not conform to `Priced`"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn associated_bounds_reject_duplicates_and_ambiguous_methods() {
+    let duplicate = error(
+        "interface Named\n  def name(self): String\nend\n\
+         interface Catalog\n  type Item: Named + Named\nend\n1\n",
+    );
+    assert!(
+        duplicate.contains("duplicate interface bound `Named`"),
+        "{duplicate}"
+    );
+
+    let ambiguous = error(
+        r#"
+interface Left
+  def value(self): Int
+end
+
+interface Right
+  def value(self): Int
+end
+
+interface Holder
+  type Item: Left + Right
+  def item(self): Self.Item
+end
+
+def read[H: Holder](holder: H): Int
+  holder.item().value()
+end
+
+1
+"#,
+    );
+    assert!(
+        ambiguous.contains("interface method `value` is ambiguous"),
+        "{ambiguous}"
+    );
+}
+
+#[test]
+fn bytecode_verifies_and_hashes_every_associated_bound() {
+    let source = r#"
+interface Named
+  def name(self): String
+end
+
+interface Priced
+  def price(self): Int
+end
+
+interface Catalog
+  type Item: Named + Priced
+  def item(self): Self.Item
+end
+
+final class Book implements Named, Priced
+  def name(self): String
+    "loom"
+  end
+
+  def price(self): Int
+    12
+  end
+end
+
+final class NameOnly implements Named
+  def name(self): String
+    "name"
+  end
+end
+
+final class Shelf implements Catalog
+  type Item = Book
+
+  def item(self): Book
+    Book()
+  end
+end
+
+Shelf()
+"#;
+    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let catalog = module
+        .interfaces
+        .iter()
+        .position(|interface| interface.name == "Catalog")
+        .expect("the Catalog interface exists");
+    assert_eq!(module.interfaces[catalog].associated[0].bounds.len(), 2);
+
+    let bytes = lm_bytecode::encode(&module);
+    let decoded = lm_bytecode::decode(&bytes).expect("the module decodes");
+    assert_eq!(decoded.interfaces[catalog].associated[0].bounds.len(), 2);
+    lm_verify::verify_module(&decoded).expect("the decoded module verifies");
+
+    let original_hash = lm_bytecode::identity::module_identity(&module).expect("the module hashes");
+    let mut changed = module.clone();
+    let first = changed.interfaces[catalog].associated[0].bounds[0].clone();
+    changed.interfaces[catalog].associated[0].bounds[1] = first;
+    let changed_hash =
+        lm_bytecode::identity::module_identity(&changed).expect("the changed module hashes");
+    assert_ne!(
+        original_hash.interface_hashes[catalog],
+        changed_hash.interface_hashes[catalog]
+    );
+
+    let mut duplicate = module.clone();
+    let first = duplicate.interfaces[catalog].associated[0].bounds[0].clone();
+    duplicate.interfaces[catalog].associated[0]
+        .bounds
+        .push(first);
+    let failure = lm_verify::verify_module(&duplicate).expect_err("the duplicate bound verifies");
+    assert!(failure
+        .message
+        .contains("one associated type repeats an interface bound"));
+
+    let name_only = module
+        .classes
+        .iter()
+        .position(|class| class.name == "NameOnly")
+        .expect("the NameOnly class exists") as u32;
+    let name_only_type = module
+        .types
+        .iter()
+        .position(|ty| matches!(ty, BcType::Class(class) if *class == name_only))
+        .expect("the NameOnly type exists") as u32;
+    let mut missing = module;
+    let conformance = missing
+        .conformances
+        .iter_mut()
+        .find(|item| item.application.interface == catalog as u32)
+        .expect("the Catalog conformance exists");
+    conformance.associated[0] = name_only_type;
+    let failure = lm_verify::verify_module(&missing).expect_err("the missing bound verifies");
+    assert!(failure
+        .message
+        .contains("associated binding `Item` does not meet one bound"));
+}
+
+#[test]
 fn interface_bounds_infer_nonempty_effect_rows() {
     let source = r#"
 interface Source[effect e]

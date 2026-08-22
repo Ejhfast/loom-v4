@@ -60,7 +60,7 @@ pub struct InterfaceRowArg {
 pub struct AssociatedType {
     pub name: String,
     pub name_span: Span,
-    pub bound: Option<InterfaceRef>,
+    pub bounds: Vec<InterfaceRef>,
     pub value: Option<TypeExpr>,
     pub span: Span,
 }

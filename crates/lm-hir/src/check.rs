@@ -255,7 +255,7 @@ pub(crate) struct InterfaceUse {
 #[derive(Clone)]
 pub(crate) struct AssociatedInfo {
     pub(crate) name: String,
-    pub(crate) bound: Option<InterfaceUse>,
+    pub(crate) bounds: Vec<InterfaceUse>,
 }
 
 /// One method requirement of a nominal interface.
@@ -946,8 +946,12 @@ impl Ctx {
             } => self.interfaces[owner.0 as usize]
                 .associated
                 .get(assoc as usize)
-                .and_then(|item| item.bound.clone())
-                .filter(|item| item.interface == interface),
+                .and_then(|item| {
+                    item.bounds
+                        .iter()
+                        .find(|bound| bound.interface == interface)
+                })
+                .cloned(),
             _ => self.conformance_use(ty, interface),
         }
     }
@@ -984,9 +988,8 @@ impl Ctx {
             } => self.interfaces[interface.0 as usize]
                 .associated
                 .get(assoc as usize)
-                .and_then(|item| item.bound.clone())
-                .into_iter()
-                .collect(),
+                .map(|item| item.bounds.clone())
+                .unwrap_or_default(),
             _ => Vec::new(),
         };
         let mut found = Vec::new();
@@ -2111,7 +2114,7 @@ fn assemble(
                 .iter()
                 .map(|item| HirAssociated {
                     name: item.name.clone(),
-                    bound: item.bound.as_ref().map(hir_interface_use),
+                    bounds: item.bounds.iter().map(hir_interface_use).collect(),
                 })
                 .collect(),
             methods: info
@@ -2317,6 +2320,30 @@ fn resolve_interface_use(
     })
 }
 
+/// Resolve one conjunction of interface bounds.
+fn resolve_interface_bounds(
+    ctx: &mut Ctx,
+    env: &TyEnv,
+    references: &[ast::InterfaceRef],
+) -> Result<Vec<InterfaceUse>, Diagnostic> {
+    let mut bounds = Vec::new();
+    for reference in references {
+        let application = resolve_interface_use(ctx, env, reference)?;
+        if bounds
+            .iter()
+            .any(|item: &InterfaceUse| item.interface == application.interface)
+        {
+            return Err(Diagnostic::new(
+                "E1053",
+                format!("duplicate interface bound `{}`", reference.name),
+                reference.span,
+            ));
+        }
+        bounds.push(application);
+    }
+    Ok(bounds)
+}
+
 /// Resolve bounds for type parameters in declaration order.
 fn resolve_generic_bounds(
     ctx: &mut Ctx,
@@ -2325,25 +2352,9 @@ fn resolve_generic_bounds(
 ) -> Result<Vec<Vec<InterfaceUse>>, Diagnostic> {
     let mut out = Vec::new();
     for generic in generics {
-        if generic.is_effect {
-            continue;
+        if !generic.is_effect {
+            out.push(resolve_interface_bounds(ctx, env, &generic.bounds)?);
         }
-        let mut bounds = Vec::new();
-        for bound in &generic.bounds {
-            let application = resolve_interface_use(ctx, env, bound)?;
-            if bounds
-                .iter()
-                .any(|item: &InterfaceUse| item.interface == application.interface)
-            {
-                return Err(Diagnostic::new(
-                    "E1053",
-                    format!("duplicate interface bound `{}`", bound.name),
-                    bound.span,
-                ));
-            }
-            bounds.push(application);
-        }
-        out.push(bounds);
     }
     Ok(out)
 }
@@ -2386,17 +2397,13 @@ fn resolve_all_interfaces(
             }
             associated.push(AssociatedInfo {
                 name: item.name.clone(),
-                bound: None,
+                bounds: Vec::new(),
             });
         }
         ctx.interfaces[interface as usize].associated = associated;
         for (index, item) in declaration.associated.iter().enumerate() {
-            let bound = item
-                .bound
-                .as_ref()
-                .map(|reference| resolve_interface_use(ctx, &env, reference))
-                .transpose()?;
-            ctx.interfaces[interface as usize].associated[index].bound = bound;
+            let bounds = resolve_interface_bounds(ctx, &env, &item.bounds)?;
+            ctx.interfaces[interface as usize].associated[index].bounds = bounds;
         }
 
         let self_ty = ctx.store.intern(Type::Var(0));
@@ -2965,20 +2972,19 @@ fn check_class_conformances(
         types.extend(conformance.application.type_args.iter().copied());
         let rows = conformance.application.row_args.clone();
         for (index, associated) in contract.associated.iter().enumerate() {
-            let Some(bound) = &associated.bound else {
-                continue;
-            };
-            let required = ctx.substitute_interface_use(bound, &types, &rows);
-            let actual = conformance.associated[index];
-            if !ctx.type_conforms(&env, actual, &required) {
-                return Err(Diagnostic::new(
-                    "E1053",
-                    format!(
-                        "the associated type `{}` does not conform to `{}`",
-                        associated.name, ctx.interfaces[required.interface as usize].name
-                    ),
-                    class.name_span,
-                ));
+            for bound in &associated.bounds {
+                let required = ctx.substitute_interface_use(bound, &types, &rows);
+                let actual = conformance.associated[index];
+                if !ctx.type_conforms(&env, actual, &required) {
+                    return Err(Diagnostic::new(
+                        "E1053",
+                        format!(
+                            "the associated type `{}` does not conform to `{}`",
+                            associated.name, ctx.interfaces[required.interface as usize].name
+                        ),
+                        class.name_span,
+                    ));
+                }
             }
         }
         if conformance.application.interface == ctx.core_interfaces["Iterable"] {

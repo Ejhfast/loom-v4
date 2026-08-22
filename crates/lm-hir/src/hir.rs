@@ -99,7 +99,7 @@ pub struct HirInterfaceUse {
 /// One associated type requirement before bytecode lowering.
 pub struct HirAssociated {
     pub name: String,
-    pub bound: Option<HirInterfaceUse>,
+    pub bounds: Vec<HirInterfaceUse>,
 }
 
 /// One interface method requirement before bytecode lowering.

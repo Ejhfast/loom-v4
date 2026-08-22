@@ -294,10 +294,11 @@ impl Naming<'_> {
                 .iter()
                 .map(|associated| IfaceAssociated {
                     name: associated.name.clone(),
-                    bound: associated
-                        .bound
-                        .as_ref()
-                        .map(|bound| self.interface_use(bound)),
+                    bounds: associated
+                        .bounds
+                        .iter()
+                        .map(|bound| self.interface_use(bound))
+                        .collect(),
                 })
                 .collect(),
             methods: info

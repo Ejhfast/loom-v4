@@ -386,7 +386,11 @@ pub fn lower_module_with_linkage(
                 .iter()
                 .map(|item| BcAssociated {
                     name: item.name.clone(),
-                    bound: item.bound.as_ref().map(|bound| m.interface_use(bound)),
+                    bounds: item
+                        .bounds
+                        .iter()
+                        .map(|bound| m.interface_use(bound))
+                        .collect(),
                 })
                 .collect(),
             methods: interface

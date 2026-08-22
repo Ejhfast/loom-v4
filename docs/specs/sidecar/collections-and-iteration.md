@@ -258,6 +258,21 @@ def count[T: Iterable](values: T): Int
 end
 ```
 
+An associated type can also declare several bounds.
+
+```lm
+interface Catalog
+  type Item: Named + Priced
+  def item(self): Self.Item
+end
+```
+
+Each conforming class must bind `Item` to a type that satisfies every bound.
+
+Generic code can call methods from `Named` and `Priced` on `Self.Item`.
+
+The checker rejects duplicate bounds. It also rejects an ambiguous call when several bounds declare the same method name.
+
 Associated projections use `T.Item` or `Self.Item`.
 
 The type that declares the conformance owns it.

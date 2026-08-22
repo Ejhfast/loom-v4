@@ -1278,10 +1278,11 @@ fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
             .iter()
             .map(|item| BcAssociated {
                 name: item.name.clone(),
-                bound: item
-                    .bound
-                    .as_ref()
-                    .map(|bound| reloc_interface_use(bound, reloc)),
+                bounds: item
+                    .bounds
+                    .iter()
+                    .map(|bound| reloc_interface_use(bound, reloc))
+                    .collect(),
             })
             .collect(),
         methods: source

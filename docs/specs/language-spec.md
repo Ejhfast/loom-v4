@@ -545,6 +545,10 @@ Use `+` between several interface bounds. Use commas between class conformances.
 
 One unparenthesized row item can follow `with`. Parentheses group an empty row or a row with several items.
 
+An associated type can declare several interface bounds. The selected type must satisfy every bound.
+
+Code can use methods from every associated bound. A shared method name is ambiguous without a more specific operation.
+
 Generic definitions are checked once with type variables and share one bytecode body. Loaded type applications receive dense `TypeId` and class-instantiation slots used by reflection, boundary validation, and field signatures. Ordinary value slots remain uniformly represented, so `List[Int]` and `List[String]` use the same list code and buffer shape. Version 0.2 does not monomorphize or unbox generic elements; a later optimizer may specialize while preserving the verified generic body as the deoptimization target.
 
 Type arguments are inferred only when a unique solution follows from arguments and expected result:

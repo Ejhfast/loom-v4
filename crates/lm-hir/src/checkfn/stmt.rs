@@ -238,14 +238,12 @@ impl<'o> FnChecker<'o> {
                 assoc: owner_assoc,
                 ..
             } => {
-                let bound = ctx.interfaces[owner.0 as usize]
+                ctx.interfaces[owner.0 as usize]
                     .associated
                     .get(owner_assoc as usize)?
-                    .bound
-                    .as_ref()?;
-                if bound.interface != interface {
-                    return None;
-                }
+                    .bounds
+                    .iter()
+                    .find(|bound| bound.interface == interface)?;
                 Some(
                     ctx.store
                         .project(ty, lm_types::InterfaceId(interface), assoc),

@@ -99,7 +99,8 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 34 adds fault source lookup instructions.
 /// Version 35 publishes static bindings apart from late linkage.
 /// Version 36 makes a class family part of its replacement contract.
-pub const COMPILER_ABI_VERSION: u32 = 36;
+/// Version 37 adds multiple bounds to associated interface types.
+pub const COMPILER_ABI_VERSION: u32 = 37;
 
 /// The refinement work budget of one component.
 ///
@@ -492,7 +493,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             }
         }
         for associated in &interface.associated {
-            if let Some(bound) = &associated.bound {
+            for bound in &associated.bounds {
                 check_use(&format!("interface {iidx}"), bound)?;
             }
         }
@@ -1090,7 +1091,7 @@ fn push_interface_type_edges(module: &Module, space: &Space, interface: u32, out
         }
     }
     for associated in &contract.associated {
-        if let Some(bound) = &associated.bound {
+        for bound in &associated.bounds {
             for ty in &bound.types {
                 out.push(space.type_node(*ty));
             }
@@ -1620,7 +1621,7 @@ impl<'a> Resolver<'a> {
     fn interface_digest(&self, interface: u32) -> [u8; 32] {
         let contract = &self.module.interfaces[interface as usize];
         let mut out = Vec::new();
-        out.extend_from_slice(b"lm-interface-v1\0");
+        out.extend_from_slice(b"lm-interface-v2\0");
         out.extend_from_slice(&contract.type_params.to_le_bytes());
         out.extend_from_slice(&contract.effect_params.to_le_bytes());
         out.extend_from_slice(&(contract.generic_is_effect.len() as u32).to_le_bytes());
@@ -1631,12 +1632,9 @@ impl<'a> Resolver<'a> {
         out.extend_from_slice(&(contract.associated.len() as u32).to_le_bytes());
         for associated in &contract.associated {
             write_str(&mut out, &associated.name);
-            match &associated.bound {
-                Some(bound) => {
-                    out.push(1);
-                    self.interface_use_bytes(&mut out, bound, false);
-                }
-                None => out.push(0),
+            out.extend_from_slice(&(associated.bounds.len() as u32).to_le_bytes());
+            for bound in &associated.bounds {
+                self.interface_use_bytes(&mut out, bound, false);
             }
         }
         out.extend_from_slice(&(contract.methods.len() as u32).to_le_bytes());

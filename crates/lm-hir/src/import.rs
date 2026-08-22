@@ -194,7 +194,7 @@ impl<'a> Materializer<'a> {
                 .iter()
                 .map(|item| AssociatedInfo {
                     name: item.name.clone(),
-                    bound: None,
+                    bounds: Vec::new(),
                 })
                 .collect(),
             methods: Vec::new(),
@@ -212,7 +212,7 @@ impl<'a> Materializer<'a> {
             }
         }
         for associated in &interface.associated {
-            if let Some(bound) = &associated.bound {
+            for bound in &associated.bounds {
                 self.reserve_interface_use(ctx, bound, span)?;
             }
         }
@@ -446,11 +446,11 @@ impl<'a> Materializer<'a> {
                 .map(|associated| {
                     Ok(AssociatedInfo {
                         name: associated.name.clone(),
-                        bound: associated
-                            .bound
-                            .as_ref()
+                        bounds: associated
+                            .bounds
+                            .iter()
                             .map(|bound| self.resolve_interface_use(ctx, bound, span))
-                            .transpose()?,
+                            .collect::<Result<_, _>>()?,
                     })
                 })
                 .collect::<Result<_, Diagnostic>>()?;

@@ -327,12 +327,15 @@ impl Parser<'_> {
     fn associated_type(&mut self, binding: bool) -> Result<AssociatedType, Diagnostic> {
         let start = self.expect(Tok::KwType, "`type`")?;
         let (name, name_span) = self.ident("an associated type name")?;
-        let bound = if matches!(self.peek(), Tok::Colon) {
+        let mut bounds = Vec::new();
+        if matches!(self.peek(), Tok::Colon) {
             self.pos += 1;
-            Some(self.interface_ref()?)
-        } else {
-            None
-        };
+            bounds.push(self.interface_ref()?);
+            while matches!(self.peek(), Tok::Plus) {
+                self.pos += 1;
+                bounds.push(self.interface_ref()?);
+            }
+        }
         let value = if matches!(self.peek(), Tok::Assign) {
             self.pos += 1;
             Some(self.type_expr()?)
@@ -356,13 +359,13 @@ impl Parser<'_> {
         let end = value
             .as_ref()
             .map(|item| item.span)
-            .or_else(|| bound.as_ref().map(|item| item.span))
+            .or_else(|| bounds.last().map(|item| item.span))
             .unwrap_or(name_span);
         self.expect_terminator()?;
         Ok(AssociatedType {
             name,
             name_span,
-            bound,
+            bounds,
             value,
             span: start.span.to(end),
         })
@@ -2450,6 +2453,19 @@ end
         assert_eq!(bound.type_args.len(), 1);
         assert_eq!(bound.row_args.len(), 2);
         assert_eq!(module.funcs[0].generics.len(), 3);
+    }
+
+    #[test]
+    fn parses_multiple_associated_type_bounds() {
+        let module = parse(
+            "interface Named\nend\ninterface Priced\nend\n\
+             interface Catalog\n  type Item: Named + Priced\nend\n1\n",
+        )
+        .expect("the associated bounds parse");
+        let bounds = &module.interfaces[2].associated[0].bounds;
+        assert_eq!(bounds.len(), 2);
+        assert_eq!(bounds[0].name, "Named");
+        assert_eq!(bounds[1].name, "Priced");
     }
 
     #[test]

@@ -27,7 +27,8 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-const VERSION: u16 = 15;
+// Version 16 stores several bounds for each associated interface type.
+const VERSION: u16 = 16;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -158,7 +159,7 @@ pub struct IfaceInterfaceUse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfaceAssociated {
     pub name: String,
-    pub bound: Option<IfaceInterfaceUse>,
+    pub bounds: Vec<IfaceInterfaceUse>,
 }
 
 /// One method requirement in an exported interface.
@@ -726,12 +727,9 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
             write_u32(out, interface.associated.len() as u32);
             for associated in &interface.associated {
                 write_str(out, &associated.name);
-                match &associated.bound {
-                    Some(bound) => {
-                        out.push(1);
-                        encode_interface_use(out, bound);
-                    }
-                    None => out.push(0),
+                write_u32(out, associated.bounds.len() as u32);
+                for bound in &associated.bounds {
+                    encode_interface_use(out, bound);
                 }
             }
             write_u32(out, interface.methods.len() as u32);
@@ -1098,12 +1096,15 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
             let mut associated = Vec::with_capacity(associated_count);
             for _ in 0..associated_count {
                 let name = cur.string()?;
-                let bound = match cur.u8()? {
-                    0 => None,
-                    1 => Some(decode_interface_use(cur)?),
-                    other => return Err(DecodeError::BadFlag(other)),
-                };
-                associated.push(IfaceAssociated { name, bound });
+                let bound_count = cur.len()?;
+                if bound_count > cur.remaining() / 16 {
+                    return Err(DecodeError::BadLength);
+                }
+                let mut bounds = Vec::with_capacity(bound_count);
+                for _ in 0..bound_count {
+                    bounds.push(decode_interface_use(cur)?);
+                }
+                associated.push(IfaceAssociated { name, bounds });
             }
             let method_count = cur.len()?;
             let mut methods = Vec::with_capacity(method_count);

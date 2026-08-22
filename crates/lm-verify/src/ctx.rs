@@ -404,11 +404,9 @@ impl<'m> Ctx<'m> {
                     .get(owner as usize)?
                     .associated
                     .get(assoc as usize)?
-                    .bound
-                    .as_ref()?;
-                if bound.interface != interface {
-                    return None;
-                }
+                    .bounds
+                    .iter()
+                    .find(|bound| bound.interface == interface)?;
                 let mut types = vec![base];
                 types.extend(owner_application.types.iter().copied());
                 Some(self.subst_interface_use(bound, &types, &owner_application.rows))

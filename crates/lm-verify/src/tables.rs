@@ -407,9 +407,15 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                     "associated type names must be nonempty and unique".to_string(),
                 ));
             }
-            if let Some(bound) = &associated.bound {
+            let mut seen = HashSet::new();
+            for bound in &associated.bounds {
                 ctx.check_interface_use(bound, contract.type_params + 1, contract.effect_params)
                     .map_err(&ierr)?;
+                if !seen.insert(bound.interface) {
+                    return Err(ierr(
+                        "one associated type repeats an interface bound".to_string(),
+                    ));
+                }
                 let base = ctx.intern(BcType::Var(0));
                 let receiver = ctx.intern(BcType::Projection {
                     base,
@@ -929,22 +935,21 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         contract_types.push(self_ty);
         contract_types.extend_from_slice(&conformance.application.types);
         for (associated, actual) in contract.associated.iter().zip(&conformance.associated) {
-            let Some(bound) = &associated.bound else {
-                continue;
-            };
-            let required =
-                ctx.subst_interface_use(bound, &contract_types, &conformance.application.rows);
-            let found = ctx.interface_application_with_bounds(
-                *actual,
-                required.interface,
-                &module.class_bounds[conformance.class as usize],
-                0,
-            );
-            if found.as_ref() != Some(&required) {
-                return Err(cerr(format!(
-                    "the associated binding `{}` does not meet its bound",
-                    associated.name
-                )));
+            for bound in &associated.bounds {
+                let required =
+                    ctx.subst_interface_use(bound, &contract_types, &conformance.application.rows);
+                let found = ctx.interface_application_with_bounds(
+                    *actual,
+                    required.interface,
+                    &module.class_bounds[conformance.class as usize],
+                    0,
+                );
+                if found.as_ref() != Some(&required) {
+                    return Err(cerr(format!(
+                        "the associated binding `{}` does not meet one bound",
+                        associated.name
+                    )));
+                }
             }
         }
         if iterable_interface == Some(conformance.application.interface as usize) {
