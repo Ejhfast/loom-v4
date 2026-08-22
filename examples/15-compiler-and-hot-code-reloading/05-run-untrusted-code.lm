@@ -65,7 +65,7 @@ def report(): [Result[Int, CodeError]] with Compiler, Vm
   printing = "def rule(): Int with Io.Print\n" +
     "  sys.io.print(\"out\\n\")\n  1\nend\nrule()\n"
   out.push(score(printing))
-  out.freeze()
+  out
 end
 
 report()

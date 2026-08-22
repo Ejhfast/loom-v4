@@ -40,7 +40,7 @@ def report(): [Int] with Io.ReadLine
   out: [Int] = []
   out.push(convert(10))
   out.push(convert(10))
-  out.freeze()
+  out
 end
 
 # Answer every question with the same factor. Replace on the first

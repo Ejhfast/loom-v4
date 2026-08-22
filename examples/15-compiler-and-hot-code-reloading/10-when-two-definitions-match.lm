@@ -1,0 +1,132 @@
+# What makes two definitions the same definition.
+#
+# Run with `--allow Compiler,Vm`.
+#
+# `codeof(f).definition()` answers a spec, and its identity has two
+# halves. `contract_hash` covers the shape: the signature and the
+# effect row of a function, or the fields, selectors, parent, and
+# conformances of a class. `implementation_hash` covers the compiled
+# body.
+#
+# Those two answer different questions. The contract decides whether
+# a revision may fill a slot. The implementation decides whether the
+# code changed at all. A redefinition library needs both: one to
+# refuse an incompatible patch, one to skip a patch that does
+# nothing.
+#
+# Neither half notices how the source is spelled. A renamed
+# parameter and an added comment leave both hashes alone, because
+# the hashes cover the compiled form and not the text.
+#
+# Neither half notices where the definition came from, either. Two
+# modules that hold the same function hold the same identity, and
+# `module_hash` beside it records the difference.
+
+def rate(n: Int): Int
+  n * 2
+end
+
+def options(): CompileOptions
+  CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+end
+
+# Compile one revision of `rate` against the identity of the
+# original, then report which half of that identity moved.
+def revise(label: String, source: String): String with Compiler, Vm
+  spec = codeof(rate).definition()
+  known = List[(String, DefinitionSpec)]()
+  known.push(("rate", spec))
+  env = CompileEnv(List[VerifiedModule](), List[(String, String)](), known)
+  artifact = case sys.compiler.compile(
+    spec.identity.module_name,
+    "revision.lm",
+    source,
+    env,
+    options()
+  )
+  in Ok(value) then value
+  in Err(_) then return "{label}: the compiler refused the revision"
+  end
+  module = case artifact.verify()
+  in Ok(value) then value
+  in Err(problem) then return "{label}: {problem.message}"
+  end
+  code = case module.function_code[(Int,), Int]("rate")
+  in Ok(value) then value
+  in Err(problem) then return "{label}: {problem.message}"
+  end
+  other = code.definition()
+  shape = spec.identity.contract_hash == other.identity.contract_hash
+  body = spec.identity.implementation_hash == other.identity.implementation_hash
+  "{label}: same shape={shape} same body={body}"
+end
+
+# Compile the same text under two module names and compare.
+def two_modules(): String with Compiler, Vm
+  text = "def rate(n: Int): Int\n  n * 2\nend\n"
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
+  left = case sys.compiler.compile("alpha", "a.lm", text, env, options())
+  in Ok(value) then value
+  in Err(problem) then return problem.message
+  end
+  right = case sys.compiler.compile("beta", "b.lm", text, env, options())
+  in Ok(value) then value
+  in Err(problem) then return problem.message
+  end
+  a = case left.verify()
+  in Ok(m)
+    case m.function_code[(Int,), Int]("rate")
+    in Ok(code) then code.definition()
+    in Err(problem) then return problem.message
+    end
+  in Err(problem) then return problem.message
+  end
+  b = case right.verify()
+  in Ok(m)
+    case m.function_code[(Int,), Int]("rate")
+    in Ok(code) then code.definition()
+    in Err(problem) then return problem.message
+    end
+  in Err(problem) then return problem.message
+  end
+  shape = a.identity.contract_hash == b.identity.contract_hash
+  body = a.identity.implementation_hash == b.identity.implementation_hash
+  keys = "{a.identity.qualified_key} and {b.identity.qualified_key}"
+  same_module = a.module_hash == b.module_hash
+  "same identity={shape and body} same module={same_module} keys={keys}"
+end
+
+def report(): [String] with Compiler, Vm
+  out: [String] = []
+
+  # Spelling. Neither half moves.
+  out.push(revise("renamed parameter", "def rate(k: Int): Int\n  k * 2\nend\n"))
+  commented = "def rate(n: Int): Int\n  # note\n  n * 2\nend\n"
+  out.push(revise("added a comment  ", commented))
+
+  # Different instructions for the same answer. The body moves and
+  # the shape holds, so this revision may fill the slot.
+  out.push(revise("n + n            ", "def rate(n: Int): Int\n  n + n\nend\n"))
+
+  # A wider row is a different shape. The compiler holds the
+  # revision to the identity it was given, so this never becomes an
+  # artifact at all.
+  louder = "def rate(n: Int): Int with Io.Print\n" +
+    "  sys.io.print(\"x\\n\")\n  n * 2\nend\n"
+  out.push(revise("added an effect  ", louder))
+
+  out.push(two_modules())
+  out
+end
+
+report()

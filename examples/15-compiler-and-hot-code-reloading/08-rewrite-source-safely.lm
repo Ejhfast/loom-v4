@@ -12,6 +12,10 @@
 # that path travels by reference and cannot be altered. That is what
 # makes an automatic edit safe to run over source a person owns.
 #
+# A rename or a comment leaves a definition's identity untouched,
+# because identity covers the compiled form and not the text.
+# Example 10 shows that.
+#
 # Retention is per definition, and the tree it returns is a flat run
 # of tokens and trivia. So the number below is a direct child, and a
 # comment written above `def` is not part of what comes back.

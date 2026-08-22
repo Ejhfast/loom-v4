@@ -62,7 +62,7 @@ fn a_program_redefines_its_own_class() {
             "examples/15-compiler-and-hot-code-reloading/03-redefine-your-own-code.lm",
             &["Compiler", "Vm"],
         ),
-        "Done(Ok((6, true, true, 51)))"
+        "Done(Ok((6, 51)))"
     );
 }
 
@@ -149,5 +149,26 @@ fn a_batch_publishes_both_halves_or_neither() {
             &["Vm"],
         ),
         "Done(Ok(((20, 20), (30, 30), \"a slot change is stale\", (10, 30))))"
+    );
+}
+
+#[test]
+fn identity_separates_shape_from_body() {
+    // A renamed parameter and an added comment move neither half of
+    // a definition identity. Different instructions for the same
+    // answer move the body and keep the shape. A wider effect row is
+    // a different shape, so the compiler refuses it outright. And
+    // the same source in two modules holds one identity, with
+    // `module_hash` recording where each copy came from.
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/10-when-two-definitions-match.lm",
+            &["Compiler", "Vm"],
+        ),
+        "Done([\"renamed parameter: same shape=true same body=true\", \
+         \"added a comment  : same shape=true same body=true\", \
+         \"n + n            : same shape=true same body=false\", \
+         \"added an effect  : the compiler refused the revision\", \
+         \"same identity=true same module=false keys=alpha.rate and beta.rate\"])"
     );
 }

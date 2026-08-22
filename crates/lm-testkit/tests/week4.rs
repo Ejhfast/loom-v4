@@ -1218,6 +1218,30 @@ fn week4_examples_have_checked_output() {
     assert_eq!(out, "Done(([\"tick\\n\"], 123))");
     // The prints were captured by the holder, not the host.
     assert_eq!(host.borrow().printed, Vec::<String>::new());
+
+    let (out, host) = run_world(
+        "effect-polymorphism.lm",
+        &read("examples/04-effects/effect-polymorphism.lm"),
+        &["Io.Print", "Clock"],
+        VmConfig::default(),
+    )
+    .unwrap();
+    // Four call sites of two definitions, and four different rows.
+    // `apply_all` forwards its closure's row; `logged_map` joins
+    // `Io.Print` onto it, so its callers pay for both.
+    assert_eq!(out, "Done(([2, 3, 4], [2, 3, 4], [10, 20], [100, 200]))");
+    assert_eq!(
+        host.borrow().printed,
+        vec![
+            "counted 1\n",
+            "counted 2\n",
+            "counted 3\n",
+            "mapping 1\n",
+            "mapping 2\n",
+            "mapping 1\n",
+            "mapping 2\n"
+        ]
+    );
 }
 
 #[test]
@@ -1227,6 +1251,7 @@ fn week4_examples_compile_twice_to_identical_bytes() {
         "examples/04-effects/blocked.lm",
         "examples/04-effects/mock-clock.lm",
         "examples/04-effects/manual-drive.lm",
+        "examples/04-effects/effect-polymorphism.lm",
     ] {
         let source = std::fs::read_to_string(lm_testkit::repo_root().join(example)).unwrap();
         let a = lm_bytecode::encode(&compile_text(example, &source).unwrap());

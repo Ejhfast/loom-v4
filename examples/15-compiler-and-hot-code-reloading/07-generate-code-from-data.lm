@@ -91,7 +91,7 @@ def report(): (String, [Result[Int, CodeError]], Bool) with Compiler, Vm
   values: [Result[Int, CodeError]] = []
   values.push(run_tree(tree))
   values.push(run_tree(sum_of(["1", "2"])))
-  (written, values.freeze(), rejected)
+  (written, values, rejected)
 end
 
 # The generated source, its value, a second generated value, and the

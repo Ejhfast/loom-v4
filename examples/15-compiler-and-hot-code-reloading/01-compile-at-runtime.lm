@@ -15,6 +15,13 @@
 # is untrusted bytes until the independent verifier accepts it. The
 # verifier cannot install, and installation runs no guest code. Only
 # `Run.run` executes the new program.
+#
+# `Vm.install` answers a different value for each kind of input. A
+# whole module answers an `Instance`, which names the definitions it
+# brought. A single definition answers a binding, which is that
+# definition together with the slot it now occupies. Examples 03 and
+# 06 install definitions and move their bindings; this one installs
+# a module and looks a definition up by name.
 
 def build(text: String): Result[VerifiedModule, CodeError] with Compiler
   # `CompileEnv` names every outside definition the source may use.
@@ -66,7 +73,7 @@ def report(): [Result[Int, CodeError]] with Compiler, Vm
   # A program whose result is not `Int` fails at the entry lookup,
   # before anything runs.
   out.push(evaluate("\"text\"\n"))
-  out.freeze()
+  out
 end
 
 report()
