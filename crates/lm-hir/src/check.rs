@@ -271,6 +271,7 @@ pub(crate) struct MethodSig {
     pub(crate) param_names: Vec<String>,
     pub(crate) ret: TypeId,
     pub(crate) row: Row,
+    pub(crate) class_type_bounds: Vec<Vec<InterfaceUse>>,
     pub(crate) own_type_params: Vec<String>,
     pub(crate) own_type_bounds: Vec<Vec<InterfaceUse>>,
     pub(crate) own_effect_params: Vec<String>,
@@ -319,9 +320,17 @@ pub(crate) struct InterfaceInfo {
 }
 
 /// One explicit class conformance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConformancePremise {
+    pub(crate) param: u32,
+    pub(crate) bounds: Vec<InterfaceUse>,
+}
+
+/// One explicit class conformance.
 #[derive(Clone)]
 pub(crate) struct ConformanceInfo {
     pub(crate) application: InterfaceUse,
+    pub(crate) premises: Vec<ConformancePremise>,
     pub(crate) associated: Vec<TypeId>,
 }
 
@@ -976,18 +985,44 @@ impl Ctx {
         }
     }
 
-    /// Find a concrete or inherited conformance for one nominal type.
-    fn conformance_use(&mut self, ty: TypeId, interface: u32) -> Option<InterfaceUse> {
+    /// Find a satisfied conformance and its declaring type arguments.
+    fn conformance_entry(
+        &mut self,
+        env: &TyEnv,
+        ty: TypeId,
+        interface: u32,
+        depth: u32,
+    ) -> Option<(ConformanceInfo, Vec<TypeId>)> {
+        if depth >= 128 {
+            return None;
+        }
         let (mut class, mut args) = self.store.nominal_class(ty)?;
         loop {
-            let info = self.classes.get(class.0 as usize)?;
-            if let Some(application) = info
+            let conformance = self
+                .classes
+                .get(class.0 as usize)?
                 .conformances
                 .iter()
                 .find(|item| item.application.interface == interface)
-                .map(|item| item.application.clone())
-            {
-                return Some(self.substitute_interface_use(&application, &args, &[]));
+                .cloned();
+            if let Some(conformance) = conformance {
+                let mut satisfied = true;
+                for premise in &conformance.premises {
+                    let actual = args.get(premise.param as usize).copied()?;
+                    for bound in &premise.bounds {
+                        let required = self.substitute_interface_use(bound, &args, &[]);
+                        if !self.type_conforms_depth(env, actual, &required, depth + 1) {
+                            satisfied = false;
+                            break;
+                        }
+                    }
+                    if !satisfied {
+                        break;
+                    }
+                }
+                if satisfied {
+                    return Some((conformance, args));
+                }
             }
             let meta = self.store.class_meta(class).clone();
             let parent = meta.parent?;
@@ -1002,6 +1037,33 @@ impl Ctx {
         }
     }
 
+    /// Find a concrete or inherited conformance for one nominal type.
+    fn conformance_use(
+        &mut self,
+        env: &TyEnv,
+        ty: TypeId,
+        interface: u32,
+        depth: u32,
+    ) -> Option<InterfaceUse> {
+        let (conformance, args) = self.conformance_entry(env, ty, interface, depth)?;
+        Some(self.substitute_interface_use(&conformance.application, &args, &[]))
+    }
+
+    /// Resolve one associated type through a satisfied conformance.
+    pub(crate) fn conformance_associated(
+        &mut self,
+        env: &TyEnv,
+        ty: TypeId,
+        interface: u32,
+        assoc: u32,
+    ) -> Option<TypeId> {
+        let (conformance, args) = self.conformance_entry(env, ty, interface, 0)?;
+        conformance
+            .associated
+            .get(assoc as usize)
+            .map(|item| self.store.substitute(*item, &args, &[]))
+    }
+
     /// Find one interface application for a type in this scope.
     pub(crate) fn type_conformance(
         &mut self,
@@ -1009,6 +1071,20 @@ impl Ctx {
         ty: TypeId,
         interface: u32,
     ) -> Option<InterfaceUse> {
+        self.type_conformance_depth(env, ty, interface, 0)
+    }
+
+    /// Find one interface application with bounded premise recursion.
+    fn type_conformance_depth(
+        &mut self,
+        env: &TyEnv,
+        ty: TypeId,
+        interface: u32,
+        depth: u32,
+    ) -> Option<InterfaceUse> {
+        if depth >= 128 {
+            return None;
+        }
         match self.store.get(ty).clone() {
             Type::Var(index) if index >= env.type_offset => env
                 .type_bounds
@@ -1032,7 +1108,7 @@ impl Ctx {
                         .find(|bound| bound.interface == interface)
                 })
                 .cloned(),
-            _ => self.conformance_use(ty, interface),
+            _ => self.conformance_use(env, ty, interface, depth),
         }
     }
 
@@ -1043,10 +1119,86 @@ impl Ctx {
         ty: TypeId,
         required: &InterfaceUse,
     ) -> bool {
-        let found = self.type_conformance(env, ty, required.interface);
+        self.type_conforms_depth(env, ty, required, 0)
+    }
+
+    /// Find the first failed premise of one conditional conformance.
+    pub(crate) fn conformance_failure(
+        &mut self,
+        env: &TyEnv,
+        ty: TypeId,
+        interface: u32,
+    ) -> Option<(TypeId, InterfaceUse)> {
+        let (mut class, mut args) = self.store.nominal_class(ty)?;
+        loop {
+            let conformance = self
+                .classes
+                .get(class.0 as usize)?
+                .conformances
+                .iter()
+                .find(|item| item.application.interface == interface)
+                .cloned();
+            if let Some(conformance) = conformance {
+                for premise in &conformance.premises {
+                    let actual = args.get(premise.param as usize).copied()?;
+                    for bound in &premise.bounds {
+                        let required = self.substitute_interface_use(bound, &args, &[]);
+                        if !self.type_conforms(env, actual, &required) {
+                            return Some((actual, required));
+                        }
+                    }
+                }
+            }
+            let meta = self.store.class_meta(class).clone();
+            let parent = meta.parent?;
+            if meta.kind != ClassKind::EnumCase || !meta.parent_args.is_empty() {
+                args = meta
+                    .parent_args
+                    .iter()
+                    .map(|item| self.store.substitute(*item, &args, &[]))
+                    .collect();
+            }
+            class = parent;
+        }
+    }
+
+    /// Test one type against one application with bounded recursion.
+    fn type_conforms_depth(
+        &mut self,
+        env: &TyEnv,
+        ty: TypeId,
+        required: &InterfaceUse,
+        depth: u32,
+    ) -> bool {
+        let found = self.type_conformance_depth(env, ty, required.interface, depth);
         found.is_some_and(|application| {
             application.type_args == required.type_args && application.row_args == required.row_args
         })
+    }
+
+    /// Test the type arguments of one interface application.
+    fn interface_arguments_meet_bounds(
+        &mut self,
+        env: &TyEnv,
+        receiver: TypeId,
+        application: &InterfaceUse,
+    ) -> bool {
+        let Some(contract) = self.interfaces.get(application.interface as usize) else {
+            return false;
+        };
+        let type_bounds = contract.type_bounds.clone();
+        let mut types = Vec::with_capacity(application.type_args.len() + 1);
+        types.push(receiver);
+        types.extend(application.type_args.iter().copied());
+        for (actual, bounds) in application.type_args.iter().zip(type_bounds) {
+            for bound in bounds {
+                let required = self.substitute_interface_use(&bound, &types, &application.row_args);
+                if !self.type_conforms(env, *actual, &required) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Resolve one method through the interfaces on a static type.
@@ -1134,7 +1286,7 @@ impl Ctx {
                 if cur_args.is_empty() {
                     return Some((sig, cur_args, cur));
                 }
-                let sig = self.substitute_method(&sig, &cur_args, arity);
+                let sig = self.substitute_method(&sig, &cur_args, arity)?;
                 return Some((sig, cur_args, cur));
             }
             let meta = self.store.class_meta(ClassId(cur));
@@ -1148,7 +1300,21 @@ impl Ctx {
     /// parameters of the subclass. `args` replaces the class
     /// parameters of the declaring class, and the method's own
     /// parameters move down to follow the subclass parameters.
-    fn substitute_method(&mut self, sig: &MethodSig, args: &[TypeId], arity: usize) -> MethodSig {
+    fn substitute_method(
+        &mut self,
+        sig: &MethodSig,
+        args: &[TypeId],
+        arity: usize,
+    ) -> Option<MethodSig> {
+        let env = TyEnv::default();
+        for (actual, bounds) in args.iter().zip(&sig.class_type_bounds) {
+            for bound in bounds {
+                let required = self.substitute_interface_use(bound, args, &[]);
+                if !self.type_conforms(&env, *actual, &required) {
+                    return None;
+                }
+            }
+        }
         let mut targs = args.to_vec();
         for i in 0..sig.own_type_params.len() {
             let var = self.store.intern(Type::Var((arity + i) as u32));
@@ -1160,11 +1326,23 @@ impl Ctx {
             .map(|p| self.store.substitute(*p, &targs, &[]))
             .collect();
         let ret = self.store.substitute(sig.ret, &targs, &[]);
-        MethodSig {
+        let own_type_bounds = sig
+            .own_type_bounds
+            .iter()
+            .map(|bounds| {
+                bounds
+                    .iter()
+                    .map(|bound| self.substitute_interface_use(bound, &targs, &[]))
+                    .collect()
+            })
+            .collect();
+        Some(MethodSig {
             params,
             ret,
+            class_type_bounds: vec![Vec::new(); arity],
+            own_type_bounds,
             ..sig.clone()
-        }
+        })
     }
 
     /// Find a field layout index by name.
@@ -2291,6 +2469,14 @@ fn assemble(
             conformances.push(HirConformance {
                 class: class as u32,
                 application: hir_interface_use(&conformance.application),
+                premises: conformance
+                    .premises
+                    .iter()
+                    .map(|premise| HirConformancePremise {
+                        param: premise.param,
+                        bounds: premise.bounds.iter().map(hir_interface_use).collect(),
+                    })
+                    .collect(),
                 associated: conformance.associated.clone(),
             });
         }
@@ -3196,6 +3382,13 @@ fn resolve_method_sig(
             method.name_span,
         ));
     }
+    if is_init && !method.premises.is_empty() {
+        return Err(Diagnostic::new(
+            "E1038",
+            "`init` cannot declare type premises",
+            method.name_span,
+        ));
+    }
     let mut type_names = class_type_names.to_vec();
     for own in &own_type {
         if type_names.contains(own) {
@@ -3223,6 +3416,8 @@ fn resolve_method_sig(
     let own_type_bounds = resolve_generic_bounds(ctx, &env, &method.generics)?;
     let class_count = class_type_names.len();
     env.type_bounds[class_count..].clone_from_slice(&own_type_bounds);
+    let premises = resolve_conformance_premises(ctx, &env, &method.premises)?;
+    env = env_with_premises(&env, &premises);
     let mut_self = is_init || method.mut_self;
     let sig = resolve_sig(
         ctx,
@@ -3246,8 +3441,9 @@ fn resolve_method_sig(
         param_names: sig.param_names[1..].to_vec(),
         ret: if is_init { UNIT } else { sig.ret },
         row: sig.row,
+        class_type_bounds: env.type_bounds[..class_count].to_vec(),
         own_type_params: own_type,
-        own_type_bounds,
+        own_type_bounds: env.type_bounds[class_count..].to_vec(),
         own_effect_params: own_effect,
     })
 }
@@ -3255,9 +3451,10 @@ fn resolve_method_sig(
 /// Resolve the associated bindings of one class conformance list.
 fn resolve_conformance_shapes(
     ctx: &mut Ctx,
-    references: &[ast::InterfaceRef],
+    references: &[ast::ConformanceRef],
     associated_bindings: &[ast::AssociatedType],
     class_id: u32,
+    self_ty: TypeId,
     env: &TyEnv,
 ) -> Result<Vec<ConformanceInfo>, Diagnostic> {
     let mut bindings: HashMap<&str, (&ast::TypeExpr, Span)> = HashMap::new();
@@ -3276,34 +3473,47 @@ fn resolve_conformance_shapes(
     }
     let mut used: Vec<String> = Vec::new();
     let mut conformances = Vec::new();
-    let self_ty = ctx.classes[class_id as usize].self_ty;
     for reference in references {
-        let direct = resolve_interface_use(ctx, env, reference)?;
+        let premises = resolve_conformance_premises(ctx, env, &reference.premises)?;
+        let direct = resolve_interface_use(ctx, env, &reference.application)?;
         let mut closure = Vec::new();
         expand_interface_application(
             ctx,
             self_ty,
             direct,
-            reference.span,
+            reference.application.span,
             &mut Vec::new(),
             &mut closure,
         )?;
         for application in closure {
-            if let Some(existing) = conformances
-                .iter()
-                .find(|item: &&ConformanceInfo| item.application.interface == application.interface)
-            {
-                if existing.application == application {
+            if let Some(position) = conformances.iter().position(|item: &ConformanceInfo| {
+                item.application.interface == application.interface
+            }) {
+                let existing = &conformances[position];
+                if existing.application != application {
+                    return Err(Diagnostic::new(
+                        "E1053",
+                        format!(
+                            "interface `{}` has conflicting conformance arguments",
+                            ctx.interfaces[application.interface as usize].name
+                        ),
+                        reference.span,
+                    ));
+                }
+                if premises_imply(&premises, &existing.premises) {
                     continue;
                 }
-                return Err(Diagnostic::new(
-                    "E1053",
-                    format!(
-                        "interface `{}` has conflicting conformance arguments",
-                        ctx.interfaces[application.interface as usize].name
-                    ),
-                    reference.span,
-                ));
+                if !premises_imply(&existing.premises, &premises) {
+                    return Err(Diagnostic::new(
+                        "E1053",
+                        format!(
+                            "interface `{}` has incomparable conformance premises",
+                            ctx.interfaces[application.interface as usize].name
+                        ),
+                        reference.span,
+                    ));
+                }
+                conformances.remove(position);
             }
             let names: Vec<String> = ctx.interfaces[application.interface as usize]
                 .associated
@@ -3329,6 +3539,7 @@ fn resolve_conformance_shapes(
             );
             conformances.push(ConformanceInfo {
                 application,
+                premises: premises.clone(),
                 associated,
             });
         }
@@ -3343,6 +3554,80 @@ fn resolve_conformance_shapes(
         }
     }
     Ok(conformances)
+}
+
+/// Resolve class type parameter premises and their inherited bounds.
+fn resolve_conformance_premises(
+    ctx: &mut Ctx,
+    env: &TyEnv,
+    declarations: &[ast::GenericParam],
+) -> Result<Vec<ConformancePremise>, Diagnostic> {
+    let mut premises = Vec::new();
+    for declaration in declarations {
+        let Some(param) = env
+            .type_names
+            .iter()
+            .position(|name| name == &declaration.name)
+        else {
+            return Err(Diagnostic::new(
+                "E1053",
+                format!(
+                    "the conformance premise names unknown type parameter `{}`",
+                    declaration.name
+                ),
+                declaration.span,
+            ));
+        };
+        let direct = resolve_interface_bounds(ctx, env, &declaration.bounds)?;
+        let base = ctx.store.intern(Type::Var(env.type_offset + param as u32));
+        let bounds = expand_interface_bounds(ctx, base, direct, declaration.span)?;
+        premises.push(ConformancePremise {
+            param: param as u32,
+            bounds,
+        });
+    }
+    premises.sort_by_key(|premise| premise.param);
+    Ok(premises)
+}
+
+/// Test whether one premise set provides every bound in another set.
+fn premises_imply(left: &[ConformancePremise], right: &[ConformancePremise]) -> bool {
+    right.iter().all(|required| {
+        left.iter()
+            .find(|candidate| candidate.param == required.param)
+            .is_some_and(|candidate| {
+                required
+                    .bounds
+                    .iter()
+                    .all(|bound| candidate.bounds.contains(bound))
+            })
+    })
+}
+
+/// Test whether one bound table provides every required bound.
+fn bounds_imply(available: &[Vec<InterfaceUse>], required: &[Vec<InterfaceUse>]) -> bool {
+    required.iter().enumerate().all(|(index, bounds)| {
+        let Some(actual) = available.get(index) else {
+            return false;
+        };
+        bounds.iter().all(|bound| actual.contains(bound))
+    })
+}
+
+/// Add conformance premises to one class generic environment.
+fn env_with_premises(env: &TyEnv, premises: &[ConformancePremise]) -> TyEnv {
+    let mut result = env.clone();
+    for premise in premises {
+        let Some(bounds) = result.type_bounds.get_mut(premise.param as usize) else {
+            continue;
+        };
+        for bound in &premise.bounds {
+            if !bounds.contains(bound) {
+                bounds.push(bound.clone());
+            }
+        }
+    }
+    result
 }
 
 /// Check every method and associated bound of one class conformance.
@@ -3365,6 +3650,7 @@ fn check_class_conformances(
     let self_ty = ctx.classes[class_id as usize].self_ty;
     let conformances = ctx.classes[class_id as usize].conformances.clone();
     for conformance in conformances {
+        let env = env_with_premises(&env, &conformance.premises);
         let contract = ctx.interfaces[conformance.application.interface as usize].clone();
         let class_info = &ctx.classes[class_id as usize];
         let closed_native_family = class_info.native_repr == Some(NativeRepr::Text);
@@ -3385,6 +3671,16 @@ fn check_class_conformances(
         let mut types = vec![self_ty];
         types.extend(conformance.application.type_args.iter().copied());
         let rows = conformance.application.row_args.clone();
+        if !ctx.interface_arguments_meet_bounds(&env, self_ty, &conformance.application) {
+            return Err(Diagnostic::new(
+                "E1053",
+                format!(
+                    "the conformance arguments do not meet interface `{}` bounds",
+                    contract.name
+                ),
+                declaration_span,
+            ));
+        }
         for (index, associated) in contract.associated.iter().enumerate() {
             for bound in &associated.bounds {
                 let required = ctx.substitute_interface_use(bound, &types, &rows);
@@ -3443,6 +3739,16 @@ fn check_class_conformances(
                     declaration_span,
                 ));
             };
+            if !bounds_imply(&env.type_bounds, &method.class_type_bounds) {
+                return Err(Diagnostic::new(
+                    "E1053",
+                    format!(
+                        "the method `{}` needs a premise outside conformance `{}`",
+                        requirement.name, contract.name
+                    ),
+                    declaration_span,
+                ));
+            }
             let required_params: Vec<TypeId> = requirement
                 .params
                 .iter()
@@ -3836,8 +4142,14 @@ fn resolve_class(
             ));
         }
     }
-    let conformances =
-        resolve_conformance_shapes(ctx, &class.interfaces, &class.associated, idx, &env)?;
+    let conformances = resolve_conformance_shapes(
+        ctx,
+        &class.interfaces,
+        &class.associated,
+        idx,
+        self_ty,
+        &env,
+    )?;
     Ok(ClassInfo {
         imported: false,
         source_span: (!is_core).then_some(class.span),
@@ -3974,6 +4286,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         &enum_def.interfaces,
         &enum_def.associated,
         parent_idx,
+        self_ty,
         &env,
     )?;
     ctx.classes[parent_idx as usize].conformances = conformances;

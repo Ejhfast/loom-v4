@@ -39,3 +39,18 @@ The warm debug workspace suite completed in 35.955 seconds.
 The command used the existing test worker count.
 
 No later measurement can add workers to hide a regression.
+
+## Native tuples and conditional conformances
+
+These measurements include `Tuple2` through `Tuple16` and conditional conformances.
+
+| Measurement | Result | Change |
+| --- | ---: | ---: |
+| Classes | 202 | +8.0% |
+| Functions | 579 | +2.5% |
+| Artifact size | 137,303 bytes | +4.5% |
+| Core compilation | 2.258 ms | +2.5% |
+| Core loading | 1.056 ms | +7.5% |
+| Workspace suite | 38.088 seconds | +5.9% |
+
+This stage adds ten conditional conformance integration tests.

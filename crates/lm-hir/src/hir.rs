@@ -136,9 +136,16 @@ pub struct HirInterface {
 }
 
 /// One class-owned conformance before bytecode lowering.
+pub struct HirConformancePremise {
+    pub param: u32,
+    pub bounds: Vec<HirInterfaceUse>,
+}
+
+/// One class-owned conformance before bytecode lowering.
 pub struct HirConformance {
     pub class: u32,
     pub application: HirInterfaceUse,
+    pub premises: Vec<HirConformancePremise>,
     pub associated: Vec<TypeId>,
 }
 

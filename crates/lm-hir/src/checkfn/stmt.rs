@@ -249,10 +249,7 @@ impl<'o> FnChecker<'o> {
                         .project(ty, lm_types::InterfaceId(interface), assoc),
                 )
             }
-            _ => ctx
-                .store
-                .resolve_conformance(ty, lm_types::InterfaceId(interface))
-                .and_then(|items| items.get(assoc as usize).copied()),
+            _ => ctx.conformance_associated(&self.env, ty, interface, assoc),
         }
     }
 

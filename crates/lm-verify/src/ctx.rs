@@ -283,7 +283,18 @@ impl<'m> Ctx<'m> {
     /// deeply as its type table allows, so a walk on the Rust stack
     /// would abort the host.
     pub(crate) fn subst(&self, ty: u32, targs: &[u32], rows: &[Vec<BcRow>]) -> u32 {
-        if targs.is_empty() && rows.is_empty() {
+        self.subst_with_bounds(ty, targs, rows, &[])
+    }
+
+    /// Substitute one type and resolve projections with known bounds.
+    pub(crate) fn subst_with_bounds(
+        &self,
+        ty: u32,
+        targs: &[u32],
+        rows: &[Vec<BcRow>],
+        bounds: &[Vec<BcInterfaceUse>],
+    ) -> u32 {
+        if targs.is_empty() && rows.is_empty() && bounds.is_empty() {
             return ty;
         }
         let mut done: HashMap<u32, u32> = HashMap::new();
@@ -313,7 +324,7 @@ impl<'m> Ctx<'m> {
                     assoc,
                 } => {
                     let base = child(base);
-                    self.projected_type(base, interface, assoc)
+                    self.projected_type_with_bounds(base, interface, assoc, bounds)
                         .unwrap_or_else(|| {
                             self.intern(BcType::Projection {
                                 base,
@@ -375,11 +386,48 @@ impl<'m> Ctx<'m> {
         }
     }
 
+    /// Substitute one interface application with known type bounds.
+    pub(crate) fn subst_interface_use_with_bounds(
+        &self,
+        application: &BcInterfaceUse,
+        types: &[u32],
+        rows: &[Vec<BcRow>],
+        bounds: &[Vec<BcInterfaceUse>],
+    ) -> BcInterfaceUse {
+        BcInterfaceUse {
+            interface: application.interface,
+            types: application
+                .types
+                .iter()
+                .map(|item| self.subst_with_bounds(*item, types, rows, bounds))
+                .collect(),
+            rows: application
+                .rows
+                .iter()
+                .map(|item| self.row_subst(item, rows))
+                .collect(),
+        }
+    }
+
     pub(crate) fn concrete_conformance(
         &self,
         ty: u32,
         interface: u32,
     ) -> Option<(&lm_bytecode::BcConformance, Vec<u32>)> {
+        self.concrete_conformance_with_bounds(ty, interface, &[], 0)
+    }
+
+    /// Resolve one concrete conformance and prove its premises.
+    fn concrete_conformance_with_bounds(
+        &self,
+        ty: u32,
+        interface: u32,
+        bounds: &[Vec<BcInterfaceUse>],
+        depth: u32,
+    ) -> Option<(&lm_bytecode::BcConformance, Vec<u32>)> {
+        if depth >= 128 {
+            return None;
+        }
         let (mut class, mut args) = self.as_instance(ty)?;
         loop {
             if let Some(conformance) = self
@@ -388,7 +436,25 @@ impl<'m> Ctx<'m> {
                 .iter()
                 .find(|item| item.class == class && item.application.interface == interface)
             {
-                return Some((conformance, args));
+                let satisfied = conformance.premises.iter().all(|premise| {
+                    let Some(actual) = args.get(premise.param as usize).copied() else {
+                        return false;
+                    };
+                    premise.bounds.iter().all(|bound| {
+                        let required = self.subst_interface_use(bound, &args, &[]);
+                        self.interface_application_with_bounds(
+                            actual,
+                            required.interface,
+                            bounds,
+                            depth + 1,
+                        )
+                        .as_ref()
+                            == Some(&required)
+                    })
+                });
+                if satisfied {
+                    return Some((conformance, args));
+                }
             }
             let entry = &self.module.classes[class as usize];
             let parent = entry.parent()?;
@@ -405,8 +471,16 @@ impl<'m> Ctx<'m> {
         }
     }
 
-    pub(crate) fn projected_type(&self, base: u32, interface: u32, assoc: u32) -> Option<u32> {
-        let (conformance, args) = self.concrete_conformance(base, interface)?;
+    /// Resolve one projection with a generic bound table.
+    pub(crate) fn projected_type_with_bounds(
+        &self,
+        base: u32,
+        interface: u32,
+        assoc: u32,
+        bounds: &[Vec<BcInterfaceUse>],
+    ) -> Option<u32> {
+        let (conformance, args) =
+            self.concrete_conformance_with_bounds(base, interface, bounds, 0)?;
         let template = *conformance.associated.get(assoc as usize)?;
         Some(self.subst(template, &args, &[]))
     }
@@ -430,7 +504,7 @@ impl<'m> Ctx<'m> {
         bounds: &[Vec<BcInterfaceUse>],
         depth: u32,
     ) -> Option<BcInterfaceUse> {
-        if depth > 32 {
+        if depth >= 128 {
             return None;
         }
         match self.ty(ty) {
@@ -460,7 +534,8 @@ impl<'m> Ctx<'m> {
                 Some(self.subst_interface_use(bound, &types, &owner_application.rows))
             }
             _ => {
-                let (conformance, args) = self.concrete_conformance(ty, interface)?;
+                let (conformance, args) =
+                    self.concrete_conformance_with_bounds(ty, interface, bounds, depth)?;
                 Some(self.subst_interface_use(&conformance.application, &args, &[]))
             }
         }

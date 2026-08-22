@@ -324,6 +324,64 @@ impl Parser<'_> {
         })
     }
 
+    /// Parse a `when` clause with type parameter premises.
+    fn premise_clause(&mut self) -> Result<Vec<GenericParam>, Diagnostic> {
+        if !matches!(self.peek(), Tok::KwWhen) {
+            return Ok(Vec::new());
+        }
+        self.pos += 1;
+        let mut premises = Vec::new();
+        loop {
+            let (name, span) = self.ident("a type parameter name")?;
+            self.expect(Tok::Colon, "`:` after the type parameter name")?;
+            let mut bounds = vec![self.interface_ref()?];
+            while matches!(self.peek(), Tok::Plus) {
+                self.pos += 1;
+                bounds.push(self.interface_ref()?);
+            }
+            if premises
+                .iter()
+                .any(|premise: &GenericParam| premise.name == name)
+            {
+                return Err(Diagnostic::new(
+                    "E1053",
+                    format!("duplicate premise for type parameter `{name}`"),
+                    span,
+                ));
+            }
+            premises.push(GenericParam {
+                name,
+                is_effect: false,
+                bounds,
+                span,
+            });
+            if matches!(self.peek(), Tok::Comma)
+                && matches!(self.peek_at(1), Tok::Ident(_))
+                && matches!(self.peek_at(2), Tok::Colon)
+            {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        Ok(premises)
+    }
+
+    /// Parse one class or enum conformance.
+    fn conformance_ref(&mut self) -> Result<ConformanceRef, Diagnostic> {
+        let application = self.interface_ref()?;
+        let premises = self.premise_clause()?;
+        let span = premises
+            .last()
+            .map(|premise| application.span.to(premise.span))
+            .unwrap_or(application.span);
+        Ok(ConformanceRef {
+            application,
+            premises,
+            span,
+        })
+    }
+
     fn associated_type(&mut self, binding: bool) -> Result<AssociatedType, Diagnostic> {
         let start = self.expect(Tok::KwType, "`type`")?;
         let (name, name_span) = self.ident("an associated type name")?;
@@ -544,7 +602,7 @@ impl Parser<'_> {
         if matches!(self.peek(), Tok::KwImplements) {
             self.pos += 1;
             loop {
-                interfaces.push(self.interface_ref()?);
+                interfaces.push(self.conformance_ref()?);
                 if matches!(self.peek(), Tok::Comma) {
                     self.pos += 1;
                 } else if matches!(self.peek(), Tok::Plus) {
@@ -625,7 +683,7 @@ impl Parser<'_> {
         if matches!(self.peek(), Tok::KwImplements) {
             self.pos += 1;
             loop {
-                interfaces.push(self.interface_ref()?);
+                interfaces.push(self.conformance_ref()?);
                 if matches!(self.peek(), Tok::Comma) {
                     self.pos += 1;
                 } else if matches!(self.peek(), Tok::Plus) {
@@ -773,6 +831,7 @@ impl Parser<'_> {
             None
         };
         let row = self.row_clause()?;
+        let premises = self.premise_clause()?;
         let body = self.block(&[Tok::KwEnd])?;
         let end_tok = self.expect(Tok::KwEnd, "`end`")?;
         self.expect_terminator()?;
@@ -784,6 +843,7 @@ impl Parser<'_> {
             params,
             ret,
             row,
+            premises,
             body,
             span: def_tok.span.to(end_tok.span),
         })
@@ -2492,7 +2552,7 @@ end
 1
 "#;
         let module = parse(source).expect("the interface applications parse");
-        let application = &module.classes[0].interfaces[1];
+        let application = &module.classes[0].interfaces[1].application;
         assert_eq!(application.type_args.len(), 1);
         assert_eq!(application.row_args.len(), 2);
         assert!(application.row_args[0].row.is_empty());
@@ -2502,6 +2562,25 @@ end
         assert_eq!(bound.type_args.len(), 1);
         assert_eq!(bound.row_args.len(), 2);
         assert_eq!(module.funcs[0].generics.len(), 3);
+    }
+
+    #[test]
+    fn parses_conditional_conformances_and_methods() {
+        let source = "interface Show\nend\n\
+                      interface Equal\nend\n\
+                      final class Box[T, U] implements Show when T: Show, U: Equal\n\
+                      \x20 def value(self): T when T: Show + Equal\n\
+                      \x20   1\n\
+                      \x20 end\n\
+                      end\n\
+                      1\n";
+        let module = parse(source).expect("the conditional declarations parse");
+        let conformance = &module.classes[0].interfaces[0];
+        assert_eq!(conformance.application.name, "Show");
+        assert_eq!(conformance.premises.len(), 2);
+        assert_eq!(conformance.premises[0].bounds.len(), 1);
+        assert_eq!(module.classes[0].methods[0].premises.len(), 1);
+        assert_eq!(module.classes[0].methods[0].premises[0].bounds.len(), 2);
     }
 
     #[test]

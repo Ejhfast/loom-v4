@@ -420,6 +420,7 @@ impl<'a> Scanner<'a> {
             "use" => Tok::KwUse,
             "interface" => Tok::KwInterface,
             "implements" => Tok::KwImplements,
+            "when" => Tok::KwWhen,
             "type" => Tok::KwType,
             "for" => Tok::KwFor,
             _ => Tok::Ident(word.to_string()),

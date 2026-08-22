@@ -981,6 +981,24 @@ fn interface_uses_self(ctx: &Ctx<'_>, interface: u32, visiting: &mut HashSet<u32
         .any(|parent| interface_uses_self(ctx, parent.interface, visiting))
 }
 
+/// Test whether one conformance premise set provides another set.
+fn conformance_premises_imply(
+    available: &[lm_bytecode::BcConformancePremise],
+    required: &[lm_bytecode::BcConformancePremise],
+) -> bool {
+    required.iter().all(|premise| {
+        available
+            .iter()
+            .find(|candidate| candidate.param == premise.param)
+            .is_some_and(|candidate| {
+                premise
+                    .bounds
+                    .iter()
+                    .all(|bound| candidate.bounds.contains(bound))
+            })
+    })
+}
+
 /// Conformance references and their method witnesses.
 fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     let module = ctx.module;
@@ -993,6 +1011,26 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         };
         ctx.check_interface_use(&conformance.application, class.type_params, 0)
             .map_err(&cerr)?;
+        let mut seen_params = HashSet::new();
+        for premise in &conformance.premises {
+            if premise.param >= class.type_params {
+                return Err(cerr("a premise parameter is out of range".to_string()));
+            }
+            if !seen_params.insert(premise.param) {
+                return Err(cerr("a premise parameter appears twice".to_string()));
+            }
+            if premise.bounds.is_empty() {
+                return Err(cerr("a premise has no interface bound".to_string()));
+            }
+            let mut seen_interfaces = HashSet::new();
+            for bound in &premise.bounds {
+                ctx.check_interface_use(bound, class.type_params, 0)
+                    .map_err(&cerr)?;
+                if !seen_interfaces.insert(bound.interface) {
+                    return Err(cerr("a premise repeats one interface bound".to_string()));
+                }
+            }
+        }
         let contract = &module.interfaces[conformance.application.interface as usize];
         if conformance.associated.len() != contract.associated.len() {
             return Err(cerr(
@@ -1026,6 +1064,17 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             ));
         }
         let contract = &module.interfaces[conformance.application.interface as usize];
+        let mut conformance_bounds = module.class_bounds[conformance.class as usize].clone();
+        for premise in &conformance.premises {
+            let Some(bounds) = conformance_bounds.get_mut(premise.param as usize) else {
+                return Err(cerr("a premise parameter is out of range".to_string()));
+            };
+            for bound in &premise.bounds {
+                if !bounds.contains(bound) {
+                    bounds.push(bound.clone());
+                }
+            }
+        }
         if class.kind == BcClassKind::Normal
             && !class.is_final
             && interface_uses_self(ctx, conformance.application.interface, &mut HashSet::new())
@@ -1041,13 +1090,21 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         contract_types.push(self_ty);
         contract_types.extend_from_slice(&conformance.application.types);
         for parent in &contract.parents {
-            let required =
-                ctx.subst_interface_use(parent, &contract_types, &conformance.application.rows);
+            let required = ctx.subst_interface_use_with_bounds(
+                parent,
+                &contract_types,
+                &conformance.application.rows,
+                &conformance_bounds,
+            );
             let found = module.conformances.iter().find(|candidate| {
                 candidate.class == conformance.class
                     && candidate.application.interface == required.interface
             });
-            if found.map(|candidate| &candidate.application) != Some(&required) {
+            let valid = found.is_some_and(|candidate| {
+                candidate.application == required
+                    && conformance_premises_imply(&conformance.premises, &candidate.premises)
+            });
+            if !valid {
                 return Err(cerr(
                     "the conformance omits one parent interface".to_string(),
                 ));
@@ -1064,7 +1121,7 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                     "an associated binding cannot contain a callback".to_string(),
                 ));
             }
-            if !ctx.projections_proven(*ty, &module.class_bounds[conformance.class as usize]) {
+            if !ctx.projections_proven(*ty, &conformance_bounds) {
                 return Err(cerr(
                     "an associated binding uses an unproven associated type".to_string(),
                 ));
@@ -1073,7 +1130,7 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         if !ctx.interface_arguments_meet_bounds(
             self_ty,
             &conformance.application,
-            &module.class_bounds[conformance.class as usize],
+            &conformance_bounds,
         ) {
             return Err(cerr(
                 "the interface arguments do not meet their bounds".to_string(),
@@ -1081,12 +1138,16 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         }
         for (associated, actual) in contract.associated.iter().zip(&conformance.associated) {
             for bound in &associated.bounds {
-                let required =
-                    ctx.subst_interface_use(bound, &contract_types, &conformance.application.rows);
+                let required = ctx.subst_interface_use_with_bounds(
+                    bound,
+                    &contract_types,
+                    &conformance.application.rows,
+                    &conformance_bounds,
+                );
                 let found = ctx.interface_application_with_bounds(
                     *actual,
                     required.interface,
-                    &module.class_bounds[conformance.class as usize],
+                    &conformance_bounds,
                     0,
                 );
                 if found.as_ref() != Some(&required) {
@@ -1120,7 +1181,12 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             let item = conformance.associated[item_index];
             let iter = conformance.associated[iter_index];
             let actual = ctx
-                .projected_type(iter, iterator as u32, iterator_item)
+                .projected_type_with_bounds(
+                    iter,
+                    iterator as u32,
+                    iterator_item,
+                    &conformance_bounds,
+                )
                 .unwrap_or_else(|| {
                     ctx.intern(BcType::Projection {
                         base: iter,
@@ -1155,6 +1221,25 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                     "an interface method implementation cannot add generics".to_string(),
                 ));
             }
+            let class_bound_count = module.classes[owner as usize].type_params as usize;
+            let Some(method_bounds) = module.func_bounds.get(target as usize) else {
+                return Err(cerr("an interface method has no bound table".to_string()));
+            };
+            let Some(class_method_bounds) = method_bounds.get(..class_bound_count) else {
+                return Err(cerr(
+                    "an interface method has too few class bound entries".to_string(),
+                ));
+            };
+            if !ctx.type_arguments_meet_bounds(
+                &owner_args,
+                &[],
+                class_method_bounds,
+                &conformance_bounds,
+            ) {
+                return Err(cerr(
+                    "an interface method needs a premise outside the conformance".to_string(),
+                ));
+            }
             if method.params.len() != requirement.params.len() + 1
                 || method.param_muts.len() != method.params.len()
                 || method.param_muts.first().copied() != Some(requirement.mut_self)
@@ -1172,7 +1257,14 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             let required_params: Vec<u32> = requirement
                 .params
                 .iter()
-                .map(|item| ctx.subst(*item, &contract_types, &conformance.application.rows))
+                .map(|item| {
+                    ctx.subst_with_bounds(
+                        *item,
+                        &contract_types,
+                        &conformance.application.rows,
+                        &conformance_bounds,
+                    )
+                })
                 .collect();
             let params_match = actual_params.len() == required_params.len()
                 && actual_params
@@ -1192,10 +1284,11 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 ));
             }
             let actual_ret = ctx.subst(method.ret, &owner_args, &[]);
-            let required_ret = ctx.subst(
+            let required_ret = ctx.subst_with_bounds(
                 requirement.ret,
                 &contract_types,
                 &conformance.application.rows,
+                &conformance_bounds,
             );
             if !ctx.is_subtype(actual_ret, required_ret) {
                 return Err(cerr(

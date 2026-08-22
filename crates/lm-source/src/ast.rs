@@ -48,6 +48,14 @@ pub struct InterfaceRef {
     pub span: Span,
 }
 
+/// One class or enum conformance with optional type premises.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConformanceRef {
+    pub application: InterfaceRef,
+    pub premises: Vec<GenericParam>,
+    pub span: Span,
+}
+
 /// One effect-row argument of an interface application.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterfaceRowArg {
@@ -115,7 +123,7 @@ pub struct ClassDef {
     pub name_span: Span,
     pub generics: Vec<GenericParam>,
     pub parent: Option<ParentClause>,
-    pub interfaces: Vec<InterfaceRef>,
+    pub interfaces: Vec<ConformanceRef>,
     pub associated: Vec<AssociatedType>,
     pub fields: Vec<FieldDef>,
     pub methods: Vec<MethodDef>,
@@ -128,7 +136,7 @@ pub struct EnumDef {
     pub name: String,
     pub name_span: Span,
     pub generics: Vec<GenericParam>,
-    pub interfaces: Vec<InterfaceRef>,
+    pub interfaces: Vec<ConformanceRef>,
     pub associated: Vec<AssociatedType>,
     pub arms: Vec<ArmDef>,
     pub methods: Vec<MethodDef>,
@@ -168,6 +176,7 @@ pub struct MethodDef {
     /// `None` means the unit result type `()`.
     pub ret: Option<TypeExpr>,
     pub row: Vec<RowItem>,
+    pub premises: Vec<GenericParam>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }

@@ -116,8 +116,9 @@ fn week_two_negative_cases_have_stable_codes() {
         code_of("class A\n  x: Int = 0\nend\na = A()\na.grow()\n"),
         "E1026"
     );
-    // Member access on a non-object type.
-    assert_eq!(code_of("x = ()\nx.y\n"), "E1027");
+    // Unit uses its native class for member lookup.
+    assert_eq!(code_of("x = ()\nx.y\n"), "E1025");
+    // Indexing a non-object type rejects.
     assert_eq!(code_of("x = 1\nx[0]\n"), "E1027");
     // A required field is not initialized on a path.
     assert_eq!(

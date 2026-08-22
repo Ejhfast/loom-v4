@@ -104,7 +104,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 39 lowers general interpolation through `Display`.
 /// Version 40 activates equality hooks through `PartialEq`.
 /// Version 41 adds `Hashable` map paths and stable native hashes.
-pub const COMPILER_ABI_VERSION: u32 = 41;
+/// Version 42 adds conditional conformance contracts.
+pub const COMPILER_ABI_VERSION: u32 = 42;
 
 /// The refinement work budget of one component.
 ///
@@ -585,6 +586,16 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             )));
         }
         check_use(&format!("conformance {index}"), &conformance.application)?;
+        for premise in &conformance.premises {
+            if premise.param >= module.classes[conformance.class as usize].type_params {
+                return Err(fail(format!(
+                    "conformance {index}: premise parameter out of range"
+                )));
+            }
+            for bound in &premise.bounds {
+                check_use(&format!("conformance {index} premise"), bound)?;
+            }
+        }
         for ty in &conformance.associated {
             if *ty as usize >= s.types {
                 return Err(fail(format!(
@@ -1249,6 +1260,11 @@ impl Graph {
                     &conformance.application,
                     &mut succ[node as usize],
                 );
+                for premise in &conformance.premises {
+                    for bound in &premise.bounds {
+                        push_interface_use_edges(module, &s, bound, &mut succ[node as usize]);
+                    }
+                }
                 for ty in &conformance.associated {
                     succ[node as usize].push(s.type_node(*ty));
                 }
@@ -1943,6 +1959,14 @@ impl<'a> Resolver<'a> {
         out.extend_from_slice(&(conformances.len() as u32).to_le_bytes());
         for conformance in conformances {
             self.interface_use_bytes(&mut out, &conformance.application, true);
+            out.extend_from_slice(&(conformance.premises.len() as u32).to_le_bytes());
+            for premise in &conformance.premises {
+                out.extend_from_slice(&premise.param.to_le_bytes());
+                out.extend_from_slice(&(premise.bounds.len() as u32).to_le_bytes());
+                for bound in &premise.bounds {
+                    self.interface_use_bytes(&mut out, bound, true);
+                }
+            }
             out.extend_from_slice(&(conformance.associated.len() as u32).to_le_bytes());
             for ty in &conformance.associated {
                 out.extend_from_slice(&self.type_digest(*ty));

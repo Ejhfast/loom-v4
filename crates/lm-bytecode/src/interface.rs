@@ -28,7 +28,9 @@ pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
 // Version 17 binds each interface to one immutable ABI bundle.
-const VERSION: u16 = 18;
+// Version 18 adds interface inheritance and bare `Self` contracts.
+// Version 19 stores conditional conformance premises.
+const VERSION: u16 = 19;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -189,8 +191,16 @@ pub struct IfaceInterface {
 
 /// One class-owned conformance in a module interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceConformancePremise {
+    pub param: u32,
+    pub bounds: Vec<IfaceInterfaceUse>,
+}
+
+/// One class-owned conformance in a module interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfaceConformance {
     pub application: IfaceInterfaceUse,
+    pub premises: Vec<IfaceConformancePremise>,
     pub associated: Vec<IfaceType>,
 }
 
@@ -715,6 +725,14 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
             write_u32(out, class.conformances.len() as u32);
             for conformance in &class.conformances {
                 encode_interface_use(out, &conformance.application);
+                write_u32(out, conformance.premises.len() as u32);
+                for premise in &conformance.premises {
+                    write_u32(out, premise.param);
+                    write_u32(out, premise.bounds.len() as u32);
+                    for bound in &premise.bounds {
+                        encode_interface_use(out, bound);
+                    }
+                }
                 write_u32(out, conformance.associated.len() as u32);
                 for ty in &conformance.associated {
                     encode_type(out, ty);
@@ -1059,6 +1077,23 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
             let mut conformances = Vec::with_capacity(conformance_count);
             for _ in 0..conformance_count {
                 let application = decode_interface_use(cur)?;
+                let premise_count = cur.len()?;
+                if premise_count > cur.remaining() / 8 {
+                    return Err(DecodeError::BadLength);
+                }
+                let mut premises = Vec::with_capacity(premise_count);
+                for _ in 0..premise_count {
+                    let param = cur.u32()?;
+                    let bound_count = cur.len()?;
+                    if bound_count > cur.remaining() / 12 {
+                        return Err(DecodeError::BadLength);
+                    }
+                    let mut bounds = Vec::with_capacity(bound_count);
+                    for _ in 0..bound_count {
+                        bounds.push(decode_interface_use(cur)?);
+                    }
+                    premises.push(IfaceConformancePremise { param, bounds });
+                }
                 let associated_count = cur.len()?;
                 let mut associated = Vec::with_capacity(associated_count);
                 for _ in 0..associated_count {
@@ -1066,6 +1101,7 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 }
                 conformances.push(IfaceConformance {
                     application,
+                    premises,
                     associated,
                 });
             }

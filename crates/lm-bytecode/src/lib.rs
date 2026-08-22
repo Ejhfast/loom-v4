@@ -235,9 +235,17 @@ pub struct BcInterface {
 
 /// One explicit class-owned interface conformance.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BcConformancePremise {
+    pub param: u32,
+    pub bounds: Vec<BcInterfaceUse>,
+}
+
+/// One explicit class-owned interface conformance.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BcConformance {
     pub class: u32,
     pub application: BcInterfaceUse,
+    pub premises: Vec<BcConformancePremise>,
     pub associated: Vec<u32>,
 }
 
@@ -1145,7 +1153,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// 43 stores several bounds for each associated interface type.
 /// Version 44 adds deliberate fault instructions.
 /// Version 45 binds each artifact to one ABI bundle digest.
-pub const VERSION: u16 = 46;
+/// Version 46 adds interface inheritance and bare `Self` contracts.
+/// Version 47 stores conditional conformance premises.
+pub const VERSION: u16 = 47;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1522,6 +1532,14 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
     for conformance in &module.conformances {
         write_u32(&mut out, conformance.class);
         encode_interface_use(&mut out, &conformance.application);
+        write_u32(&mut out, conformance.premises.len() as u32);
+        for premise in &conformance.premises {
+            write_u32(&mut out, premise.param);
+            write_u32(&mut out, premise.bounds.len() as u32);
+            for bound in &premise.bounds {
+                encode_interface_use(&mut out, bound);
+            }
+        }
         write_u32(&mut out, conformance.associated.len() as u32);
         for associated in &conformance.associated {
             write_u32(&mut out, *associated);
@@ -2825,6 +2843,23 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     for _ in 0..conformance_count {
         let class = cur.u32()?;
         let application = decode_interface_use(&mut cur)?;
+        let premise_count = cur.len()?;
+        if premise_count > cur.remaining() / 8 {
+            return Err(DecodeError::BadLength);
+        }
+        let mut premises = Vec::with_capacity(premise_count);
+        for _ in 0..premise_count {
+            let param = cur.u32()?;
+            let bound_count = cur.len()?;
+            if bound_count > cur.remaining() / 12 {
+                return Err(DecodeError::BadLength);
+            }
+            let mut bounds = Vec::with_capacity(bound_count);
+            for _ in 0..bound_count {
+                bounds.push(decode_interface_use(&mut cur)?);
+            }
+            premises.push(BcConformancePremise { param, bounds });
+        }
         let associated_count = cur.len()?;
         if associated_count > cur.remaining() / 4 {
             return Err(DecodeError::BadLength);
@@ -2836,6 +2871,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         conformances.push(BcConformance {
             class,
             application,
+            premises,
             associated,
         });
     }

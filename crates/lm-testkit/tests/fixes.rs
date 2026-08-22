@@ -615,29 +615,29 @@ fn invalid_mut_flag_byte_is_rejected_by_the_decoder() {
 #[test]
 fn colliding_constructor_gets_a_qualified_note() {
     let source = "enum Pairing
-  Pair(a: Int, b: Int)
+  Range(a: Int, b: Int)
   Solo(a: Int)
 end
 
-p: Pairing = Pair(1, 2)
+p: Pairing = Range(1, 2)
 1
 ";
     expect_error(
         source,
-        "the enum `Pairing` has an arm named `Pair`; write `Pairing.Pair(...)`",
+        "the enum `Pairing` has an arm named `Range`; write `Pairing.Range(...)`",
     );
 }
 
 #[test]
 fn qualified_colliding_constructor_works() {
     let source = "enum Pairing
-  Pair(a: Int, b: Int)
+  Range(a: Int, b: Int)
   Solo(a: Int)
 end
 
-p: Pairing = Pairing.Pair(1, 2)
+p: Pairing = Pairing.Range(1, 2)
 case p
-in Pair(a, b) then a + b
+in Range(a, b) then a + b
 in Solo(a) then a
 end
 ";

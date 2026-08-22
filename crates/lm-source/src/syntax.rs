@@ -327,6 +327,7 @@ fn token_kind(token: &Tok) -> u16 {
         | Tok::KwUse
         | Tok::KwInterface
         | Tok::KwImplements
+        | Tok::KwWhen
         | Tok::KwType
         | Tok::KwFor
         | Tok::KwReserved(_) => KIND_KEYWORD,

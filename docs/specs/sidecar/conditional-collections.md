@@ -24,7 +24,7 @@ A class or enum can attach premises to one conformance.
 final class Box[T] implements Display when T: Display
   value: T
 
-  def append_to(self, mut builder: StringBuilder)
+  def append_to(self, mut builder: StringBuilder) when T: Display
     self.value.append_to(builder)
     ()
   end

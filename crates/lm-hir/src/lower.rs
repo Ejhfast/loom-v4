@@ -10,9 +10,9 @@
 
 use crate::hir::*;
 use lm_bytecode::{
-    BcAssociated, BcCallableContract, BcClass, BcClassKind, BcConformance, BcInterface,
-    BcInterfaceMethod, BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Instr, Module,
-    SlotContract, SlotSpec, SlotTarget, TypeApp, NO_APP, NO_PARENT,
+    BcAssociated, BcCallableContract, BcClass, BcClassKind, BcConformance, BcConformancePremise,
+    BcInterface, BcInterfaceMethod, BcInterfaceUse, BcRow, BcType, ExtendedInstr, Func, Instr,
+    Module, SlotContract, SlotSpec, SlotTarget, TypeApp, NO_APP, NO_PARENT,
 };
 use lm_source::ast::BinOp;
 use lm_types::{
@@ -421,6 +421,18 @@ pub fn lower_module_with_linkage(
         .map(|conformance| BcConformance {
             class: conformance.class,
             application: m.interface_use(&conformance.application),
+            premises: conformance
+                .premises
+                .iter()
+                .map(|premise| BcConformancePremise {
+                    param: premise.param,
+                    bounds: premise
+                        .bounds
+                        .iter()
+                        .map(|bound| m.interface_use(bound))
+                        .collect(),
+                })
+                .collect(),
             associated: conformance
                 .associated
                 .iter()

@@ -19,7 +19,7 @@
 //! shared module state: it re-interns the records of the image into
 //! the table of the target world.
 
-use crate::{BcClass, BcRow, BcType, Module, NO_PARENT};
+use crate::{BcClass, BcClassKind, BcRow, BcType, Module, NO_PARENT};
 use lm_value::TypeEnvId;
 use std::collections::HashMap;
 
@@ -960,7 +960,21 @@ impl TypeEnvs {
             }
             _ => return Ok(None),
         };
-        if class != runtime_class {
+        let runtime_args = if class == runtime_class {
+            args.clone()
+        } else {
+            let Some(runtime) = module.classes.get(runtime_class as usize) else {
+                return Ok(None);
+            };
+            if runtime.kind == BcClassKind::Case && runtime.type_params as usize == args.len() {
+                args.clone()
+            } else if runtime.type_params == 0 {
+                Vec::new()
+            } else {
+                return Ok(None);
+            }
+        };
+        if self.ancestor_args(module, runtime_class, &runtime_args, class) != Some(args) {
             return Ok(None);
         }
         let owner = match body
@@ -1008,7 +1022,7 @@ impl TypeEnvs {
             }
             _ => return Ok(None),
         };
-        let types = match self.ancestor_args(module, class, &args, owner) {
+        let types = match self.ancestor_args(module, runtime_class, &runtime_args, owner) {
             Some(types) => types,
             None => return Ok(None),
         };

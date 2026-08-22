@@ -8,9 +8,9 @@
 
 use crate::check::{ClassInfo, Ctx, FnSig, MethodSig};
 use lm_bytecode::interface::{
-    IfaceAssociated, IfaceClass, IfaceClassKind, IfaceConformance, IfaceField, IfaceFn,
-    IfaceInterface, IfaceInterfaceMethod, IfaceInterfaceUse, IfaceItem, IfaceMethod, IfaceRow,
-    IfaceType, QualName,
+    IfaceAssociated, IfaceClass, IfaceClassKind, IfaceConformance, IfaceConformancePremise,
+    IfaceField, IfaceFn, IfaceInterface, IfaceInterfaceMethod, IfaceInterfaceUse, IfaceItem,
+    IfaceMethod, IfaceRow, IfaceType, QualName,
 };
 use lm_types::{ClassKind, Row, RowElem, Type, TypeId, TypeStore};
 
@@ -200,7 +200,7 @@ impl Naming<'_> {
     /// Convert one method signature. `self` stays out of the lists.
     fn method(&self, sig: &MethodSig, class: &ClassInfo) -> IfaceMethod {
         let class_type_params = class.type_params.len() as u32;
-        let mut type_bounds = self.bounds(&class.type_bounds);
+        let mut type_bounds = self.bounds(&sig.class_type_bounds);
         type_bounds.extend(self.bounds(&sig.own_type_bounds));
         IfaceMethod {
             name: sig.name.clone(),
@@ -251,6 +251,18 @@ impl Naming<'_> {
                 .iter()
                 .map(|conformance| IfaceConformance {
                     application: self.interface_use(&conformance.application),
+                    premises: conformance
+                        .premises
+                        .iter()
+                        .map(|premise| IfaceConformancePremise {
+                            param: premise.param,
+                            bounds: premise
+                                .bounds
+                                .iter()
+                                .map(|bound| self.interface_use(bound))
+                                .collect(),
+                        })
+                        .collect(),
                     associated: conformance
                         .associated
                         .iter()

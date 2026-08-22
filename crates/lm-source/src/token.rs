@@ -59,6 +59,7 @@ pub enum Tok {
     KwUse,
     KwInterface,
     KwImplements,
+    KwWhen,
     KwType,
     KwFor,
 
@@ -143,6 +144,7 @@ impl fmt::Display for Tok {
             Tok::KwUse => "`use`",
             Tok::KwInterface => "`interface`",
             Tok::KwImplements => "`implements`",
+            Tok::KwWhen => "`when`",
             Tok::KwType => "`type`",
             Tok::KwFor => "`for`",
             Tok::KwReserved(name) => return write!(f, "`{name}`"),

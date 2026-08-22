@@ -1327,6 +1327,18 @@ fn reloc_conformance(source: &BcConformance, reloc: &Reloc) -> BcConformance {
     BcConformance {
         class: reloc.classes[source.class as usize],
         application: reloc_interface_use(&source.application, reloc),
+        premises: source
+            .premises
+            .iter()
+            .map(|premise| lm_bytecode::BcConformancePremise {
+                param: premise.param,
+                bounds: premise
+                    .bounds
+                    .iter()
+                    .map(|bound| reloc_interface_use(bound, reloc))
+                    .collect(),
+            })
+            .collect(),
         associated: source
             .associated
             .iter()

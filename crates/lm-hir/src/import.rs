@@ -21,8 +21,8 @@
 //! an imported signature may name a core type.
 
 use crate::check::{
-    AssociatedInfo, ClassInfo, ConformanceInfo, Ctx, FnSig, InterfaceInfo, InterfaceMethodSig,
-    InterfaceUse, MethodSig,
+    AssociatedInfo, ClassInfo, ConformanceInfo, ConformancePremise, Ctx, FnSig, InterfaceInfo,
+    InterfaceMethodSig, InterfaceUse, MethodSig,
 };
 use crate::hir::{HirFunc, HirImport, HirImportDef};
 use lm_bytecode::interface::{
@@ -325,6 +325,11 @@ impl<'a> Materializer<'a> {
         }
         for conformance in &class.conformances {
             self.reserve_interface_use(ctx, &conformance.application, span)?;
+            for premise in &conformance.premises {
+                for bound in &premise.bounds {
+                    self.reserve_interface_use(ctx, bound, span)?;
+                }
+            }
             for ty in &conformance.associated {
                 self.reserve_type(ctx, ty, span)?;
             }
@@ -660,6 +665,20 @@ impl<'a> Materializer<'a> {
             .map(|conformance| {
                 let application =
                     self.resolve_interface_use(ctx, &conformance.application, span)?;
+                let premises = conformance
+                    .premises
+                    .iter()
+                    .map(|premise| {
+                        Ok(ConformancePremise {
+                            param: premise.param,
+                            bounds: premise
+                                .bounds
+                                .iter()
+                                .map(|bound| self.resolve_interface_use(ctx, bound, span))
+                                .collect::<Result<_, Diagnostic>>()?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
                 let associated = conformance
                     .associated
                     .iter()
@@ -672,6 +691,7 @@ impl<'a> Materializer<'a> {
                 );
                 Ok(ConformanceInfo {
                     application,
+                    premises,
                     associated,
                 })
             })
@@ -691,6 +711,7 @@ impl<'a> Materializer<'a> {
                     param_names: fsig.param_names.clone(),
                     ret: lm_types::UNIT,
                     row: fsig.row.clone(),
+                    class_type_bounds: fsig.type_bounds.clone(),
                     own_type_params: Vec::new(),
                     own_type_bounds: Vec::new(),
                     own_effect_params: fsig.effect_params.clone(),
@@ -754,6 +775,7 @@ impl<'a> Materializer<'a> {
             param_names: sig.param_names[1..].to_vec(),
             ret: sig.ret,
             row: sig.row.clone(),
+            class_type_bounds: sig.type_bounds[..class_params.min(sig.type_bounds.len())].to_vec(),
             own_type_params,
             own_type_bounds: sig.type_bounds[class_params.min(sig.type_bounds.len())..].to_vec(),
             own_effect_params: sig.effect_params.clone(),

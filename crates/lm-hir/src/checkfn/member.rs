@@ -397,7 +397,7 @@ impl<'o> FnChecker<'o> {
                     span,
                     &type_names,
                     &{
-                        let mut bounds = ctx.classes[class as usize].type_bounds.clone();
+                        let mut bounds = sig.class_type_bounds.clone();
                         bounds.extend(sig.own_type_bounds.clone());
                         bounds
                     },
@@ -852,7 +852,7 @@ impl<'o> FnChecker<'o> {
         }
         // The superclass method is read in the subclass view.
         let arity = ctx.classes[cidx as usize].type_params.len();
-        let (sig, owner_args, _) = ctx
+        let (sig, owner_args, owner) = ctx
             .lookup_method(parent, parent_args, arity, name)
             .ok_or_else(|| {
                 Diagnostic::new(
@@ -873,15 +873,22 @@ impl<'o> FnChecker<'o> {
         if sig.mut_self {
             self.guard_iterated_mutation(&self_expr, name_span)?;
         }
+        let class_names = ctx.classes[owner as usize].type_params.clone();
+        let mut type_names = class_names.clone();
+        type_names.extend(sig.own_type_params.iter().cloned());
+        let mut pre_bound: Vec<Option<TypeId>> = owner_args.iter().map(|arg| Some(*arg)).collect();
+        pre_bound.extend(vec![None; sig.own_type_params.len()]);
+        let mut bounds = sig.class_type_bounds.clone();
+        bounds.extend(sig.own_type_bounds.clone());
         let out = self.check_poly_call(
             ctx,
             name,
             span,
-            &sig.own_type_params.clone(),
-            &sig.own_type_bounds,
+            &type_names,
+            &bounds,
             sig.own_effect_params.len(),
-            vec![None; sig.own_type_params.len()],
-            0,
+            pre_bound,
+            class_names.len(),
             &[],
             &sig.params,
             &sig.param_muts,
@@ -895,8 +902,7 @@ impl<'o> FnChecker<'o> {
         all_args.extend(out.args);
         // The callee reads its class parameters first, so the owner
         // arguments come before the method's own arguments.
-        let mut targs = owner_args;
-        targs.extend(out.targs);
+        let targs = out.targs;
         Ok(HExpr {
             ty: out.ret,
             mutable: true,

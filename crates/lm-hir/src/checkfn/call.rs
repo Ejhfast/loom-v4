@@ -806,6 +806,16 @@ impl<'o> FnChecker<'o> {
                             ctx.display_interface_use(&self.env, &found),
                             ctx.display_interface_use(&self.env, &required)
                         )
+                    } else if let Some((actual, premise)) =
+                        ctx.conformance_failure(&self.env, targs[index], required.interface)
+                    {
+                        format!(
+                            "the type argument `{argument}` does not conform to `{}` because \
+                             `{}` does not conform to `{}`",
+                            ctx.display_interface_use(&self.env, &required),
+                            ctx.display_type(&self.env, actual),
+                            ctx.display_interface_use(&self.env, &premise)
+                        )
                     } else {
                         format!(
                             "the type argument `{argument}` does not conform to `{}`",
