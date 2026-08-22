@@ -173,6 +173,12 @@ pub(crate) fn step(
             pop_expect(state, TY_INT)?;
             push(state, TY_BOOL)?;
         }
+        Instr::Native(lm_bytecode::NativeInstr::HashCombine)
+        | Instr::Native(lm_bytecode::NativeInstr::HashUnorderedCombine) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            push(state, TY_INT)?;
+        }
         Instr::EqBool | Instr::NeBool => {
             pop_expect(state, TY_BOOL)?;
             pop_expect(state, TY_BOOL)?;
@@ -748,6 +754,17 @@ pub(crate) fn step(
                 return Err(fail("NewG cannot allocate a native core class".to_string()));
             }
             let app = &module.apps[*app as usize];
+            let inside_constructor = ctx.constructor_class(fidx) == Some(*class);
+            if module.classes[*class as usize].is_frozen
+                && app
+                    .types
+                    .iter()
+                    .any(|ty| !ctx.type_always_frozen(*ty, inside_constructor))
+            {
+                return Err(fail(
+                    "a frozen class needs always-frozen type arguments".to_string(),
+                ));
+            }
             let ty = ctx.intern(BcType::Inst(*class, app.types.clone()));
             push(state, ty)?;
         }
@@ -1010,6 +1027,29 @@ pub(crate) fn step(
             let map = pop(state)?;
             as_map(map)?;
             push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::MapNextIndex) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            as_map(map)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::SealInstance) => {
+            let ty = pop(state)?;
+            let class = match ctx.ty(ty) {
+                BcType::Class(class) | BcType::Inst(class, _) => class,
+                _ => return Err(fail("seal needs a class instance".to_string())),
+            };
+            let definition = ctx
+                .module
+                .classes
+                .get(class as usize)
+                .ok_or_else(|| fail("seal names an unknown class".to_string()))?;
+            if !definition.is_frozen {
+                return Err(fail("seal needs a frozen class".to_string()));
+            }
+            push(state, ty)?;
         }
         Instr::Extended(ExtendedInstr::MapKeyAt) => {
             pop_expect(state, TY_INT)?;

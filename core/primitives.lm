@@ -12,13 +12,32 @@ interface Hashable: PartialEq
   def __hash__(self): Int
 end
 
+interface Comparable: PartialEq
+  def compare(self, other: Self): Ordering
+end
+
+interface Copyable
+  def copy(self): Self
+end
+
+interface Error: Display
+end
+
 def display[T: Display](value: T): String
   builder = StringBuilder()
   value.append_to(builder)
   builder.finish()
 end
 
-final class Int implements Display, Hashable
+def hash_of[T: Hashable](value: T): Int
+  value.__hash__()
+end
+
+def hash_combine(seed: Int, value: Int): Int
+  intrinsic("hash.combine", seed, value)
+end
+
+final class Int implements Display, Hashable, Comparable
   def append_to(self, mut builder: StringBuilder)
     builder.append_int(self)
     ()
@@ -60,6 +79,16 @@ final class Int implements Display, Hashable
     self
   end
 
+  def compare(self, other: Int): Ordering
+    if self < other
+      Less
+    elsif self > other
+      Greater
+    else
+      Equal
+    end
+  end
+
   def __lt__(self, other: Int): Bool
     intrinsic("int.lt", self, other)
   end
@@ -77,7 +106,7 @@ final class Int implements Display, Hashable
   end
 end
 
-final class Bool implements Display, Hashable
+final class Bool implements Display, Hashable, Comparable
   def append_to(self, mut builder: StringBuilder)
     builder.append_bool(self)
     ()
@@ -96,6 +125,16 @@ final class Bool implements Display, Hashable
       1
     else
       0
+    end
+  end
+
+  def compare(self, other: Bool): Ordering
+    if self == other
+      Equal
+    elsif self
+      Greater
+    else
+      Less
     end
   end
 

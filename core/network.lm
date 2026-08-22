@@ -25,7 +25,7 @@ final class SocketAddress
   end
 end
 
-enum NetError implements Display
+enum NetError implements Error
   InvalidInput(message: String)
   NameNotFound(message: String)
   Unavailable(message: String)

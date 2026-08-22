@@ -291,6 +291,7 @@ fn payload(object: &Object) -> String {
         Object::Map { entries, .. } => {
             let parts: Vec<String> = entries
                 .iter()
+                .filter(|entry| entry.is_live())
                 .map(|entry| format!("{}: {}", show(entry.key), show(entry.value)))
                 .collect();
             format!("{{{}}}", parts.join(", "))

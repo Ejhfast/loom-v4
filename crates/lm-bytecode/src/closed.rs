@@ -1378,6 +1378,7 @@ mod tests {
                 name: "C".to_string(),
                 key: "C".to_string(),
                 is_final: false,
+                is_frozen: false,
                 parent: NO_PARENT,
                 parent_args: vec![],
                 type_params: 0,

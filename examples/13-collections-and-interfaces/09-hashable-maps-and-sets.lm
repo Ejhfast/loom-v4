@@ -2,26 +2,28 @@
 #
 # This example needs no grant.
 # `Hashable` supplies equality and one stable semantic hash.
-# A user object must be frozen before it becomes a key.
+# A frozen class creates stable keys after initialization.
 
-final class AccountId implements Hashable
+frozen class AccountId implements Hashable
+  region: Int
   number: Int
 
-  def init(mut self, number: Int)
+  def init(mut self, region: Int, number: Int)
+    self.region = region
     self.number = number
   end
 
   def __eq__(self, other: AccountId): Bool
-    self.number == other.number
+    self.region == other.region and self.number == other.number
   end
 
   def __hash__(self): Int
-    self.number
+    hash_combine(hash_combine(17, self.region), self.number)
   end
 end
 
-first = AccountId(7).freeze()
-same = AccountId(7).freeze()
+first = AccountId(4, 7)
+same = AccountId(4, 7)
 
 records: Map[AccountId, String] = {first: "open"}
 previous = records.put(same, "closed")

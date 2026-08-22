@@ -1123,6 +1123,9 @@ fn relocate_metadata(
         | Object::Tuple { items: fields } => fields.iter_mut().for_each(remap),
         Object::Map { entries, .. } => {
             for entry in entries {
+                if !entry.is_live() {
+                    continue;
+                }
                 remap(&mut entry.key);
                 remap(&mut entry.value);
             }

@@ -425,6 +425,7 @@ impl World {
                         let elements = expected.and_then(|ty| self.show_map_elements(ty));
                         let parts: Vec<String> = entries
                             .iter()
+                            .filter(|entry| entry.is_live())
                             .map(|entry| {
                                 format!(
                                     "{}: {}",

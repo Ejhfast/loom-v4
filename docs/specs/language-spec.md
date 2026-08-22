@@ -531,6 +531,16 @@ end
 
 `Dog <: Animal`. Inheritance is single. A class identity is its normalized sealed definition closed over dependency hashes. An instance's runtime class slot resolves to that identity.
 
+`final class` rejects subclasses.
+
+`frozen class` implies `final class` and rejects a parent.
+
+A frozen class permits `mut self` only on `init`.
+
+Every frozen field type must always be frozen.
+
+Successful initialization marks the instance frozen.
+
 An override must preserve parameter types and `mut` markers, may narrow the result type, and may narrow but never widen its row. These restrictions make a call checked against a supertype sound without dynamic row checks.
 
 ### 5.4 Generics and representation
@@ -558,6 +568,18 @@ An interface application places type arguments in brackets. Each effect argument
 A bare interface application supplies an empty row for each effect parameter.
 
 Use `+` between several interface bounds. Use commas between class conformances.
+
+A conformance can declare type parameter premises after `when`.
+
+```lm
+final class Box[T] implements Display when T: Display
+```
+
+Each premise subject must name one class or enum type parameter.
+
+A method can declare the same premises after its effect row.
+
+The checker and verifier limit recursive conformance resolution to 128 applications.
 
 An interface can extend several interfaces after a colon. Commas separate these parent interfaces.
 
@@ -597,7 +619,22 @@ end
 interface Hashable: PartialEq
   def __hash__(self): Int
 end
+
+interface Comparable: PartialEq
+  def compare(self, other: Self): Ordering
+end
+
+interface Copyable
+  def copy(self): Self
+end
+
+interface Error: Display
+end
 ```
+
+`hash_of` returns the stable semantic hash of a `Hashable` value.
+
+`hash_combine` combines one field hash with an ordered seed.
 
 One unparenthesized row item can follow `with`. Parentheses group an empty row or a row with several items.
 
@@ -626,6 +663,14 @@ single = ("only",)
 ```
 
 `()` is unit, not a zero-field heap tuple. Tuple elements are covariant and addressed only by compile-time position. Tuples are used for lightweight returns, map entries, and typed operation argument packs. Their maximum portable arity is 16; larger records must be classes.
+
+Core declares native carriers named `Tuple2` through `Tuple16`.
+
+Conformance and method lookup view each structural tuple through its carrier.
+
+Tuple representation remains `Type::Tuple`, `BcType::Tuple`, and `Object::Tuple`.
+
+Each carrier conditionally implements `Display`, `PartialEq`, `Hashable`, and `Comparable`.
 
 ### 5.6 `Any`, `DynValue`, and deliberate dynamic boundaries
 
@@ -2731,9 +2776,17 @@ A `Map[K,V]` stores entries and semantic hashes in insertion order.
 
 It also stores a derived open-addressed index from private hash to entry position.
 
-Replacing a value retains its position. Removal keeps public iteration dense and deterministic.
+Replacing a value retains its position.
 
-Lookup is expected O(1). Iteration is O(n).
+Removal changes an entry into a tombstone.
+
+Lookup continues through tombstones, and iteration skips them.
+
+The map compacts when tombstones pass its bounded threshold.
+
+Compaction preserves the relative insertion order of live entries.
+
+Lookup is expected O(1). Removal is amortized O(1). Iteration is O(n).
 
 `K` must implement `Hashable`.
 
@@ -2755,7 +2808,9 @@ Bool, Int, Text, Char, and Bytes use native hash and equality instructions.
 
 String and Substring are the concrete Text key types.
 
-A final user class can implement `Hashable` and become a map key.
+A frozen user class can implement `Hashable` and become a map key directly.
+
+Other user classes require an explicit successful `freeze` before insertion.
 
 String, Substring, and Bytes use immutable reference-counted byte storage. Each value stores one visible byte range.
 
@@ -3224,6 +3279,10 @@ These values include portable errors, addresses, TCP helpers, and native TCP and
 
 `List`, `Map`, `Text`, its concrete classes, `Char`, and `Bytes` are native core classes in the pinned image.
 
+Core also defines `Set`, `Display`, `PartialEq`, `Hashable`, `Comparable`, `Copyable`, and `Error`.
+
+Conditional conformances give these protocols to eligible collections and algebraic values.
+
 Builders, type descriptors, faults, VMs, snapshots, procs, file leases, and resource handles are also native core classes.
 
 The image seals their complete method tables. Some bodies use intrinsics, while other bodies use ordinary verified bytecode.
@@ -3242,7 +3301,8 @@ TcpResource, TcpStream, TcpListener, Tcp
 TlsError, TlsStream
 Text, String, Substring, Char, Utf8Error, IndexError, ParseIntError, Bytes
 StringBuilder, ByteBuffer
-identity, assert, assert_message
+Display, PartialEq, Hashable, Comparable, Copyable, Error
+identity, display, hash_of, hash_combine, assert, assert_message
 ```
 
 `Any` remains an explicit primitive type.
@@ -3327,10 +3387,17 @@ fold[U,e](self, initial: U, f: (U,T) -> U with e) -> U with e
 any[e](self, f: (T) -> Bool with e) -> Bool with e
 all[e](self, f: (T) -> Bool with e) -> Bool with e
 sort_by[e](mut self, compare: (T,T) -> Ordering with e) -> () with e
+sort(mut self) -> () when T: Comparable
+min(self) -> Option[T] when T: Comparable
+max(self) -> Option[T] when T: Comparable
 freeze(self) -> List[T]
 ```
 
 Faulting index methods use `IndexOutOfBounds`; allocation failure obeys heap limits. Higher-order methods call the closure in list order and stop immediately on fault.
+
+`List[T]` conditionally implements `Display`, `PartialEq`, `Hashable`, and `Comparable`.
+
+It implements `Copyable` for every element type.
 
 ### 24.5 Maps and sets
 
@@ -3359,6 +3426,16 @@ retain[e](mut self, f: (K,V) -> Bool with e) -> () with e
 freeze(self) -> Map[K,V]
 ```
 
+Map equality ignores insertion order.
+
+Map hashing also ignores insertion order.
+
+`Map[K,V]` implements `Display` when both type arguments implement `Display`.
+
+It implements `PartialEq` and `Hashable` when `V` implements each protocol.
+
+It implements `Copyable` for every value type.
+
 For a text key type, `has`, `get`, `at`, and indexing accept Text. Insertion still requires K.
 
 Core defines `Set[T: Hashable]` as an ordinary final class over `Map[T,()]`.
@@ -3370,6 +3447,12 @@ It provides `add`, `remove`, `has`, `clear`, `reserve`, `copy`, `values`, `each`
 It also provides `union`, `intersection`, `difference`, `is_subset`, `is_superset`, and `is_disjoint`.
 
 Set equality ignores insertion order.
+
+Set hashing ignores insertion order.
+
+`Set[T]` implements `Display` when `T` implements `Display`.
+
+It implements `PartialEq`, `Hashable`, and `Copyable` for every valid element type.
 
 The core surface follows.
 
@@ -3963,16 +4046,20 @@ associated_requirement = "type", IDENT, [ bound_clause ] ;
 interface_method = "def", IDENT, "(", method_parameters, ")",
                    [ ":", type ], [ effect_clause ] ;
 
-class_decl      = [ "final" ], "class", IDENT, [ generic_params ], [ "<", type ],
+class_decl      = [ class_modifier ], "class", IDENT, [ generic_params ], [ "<", type ],
                   [ implements_clause ], separators,
                   { ( field_decl | method_decl ), separators },
                   "end" ;
-implements_clause = "implements", interface_ref, { ",", interface_ref } ;
+class_modifier  = "final" | "frozen" ;
+implements_clause = "implements", conformance, { ",", conformance } ;
+conformance     = interface_ref, [ premise_clause ] ;
+premise_clause  = "when", premise, { ",", premise } ;
+premise         = IDENT, bound_clause ;
 
 field_decl      = IDENT, ":", type, [ "=", expression ] ;
 
 method_decl     = "def", IDENT, [ generic_params ], "(", method_parameters, ")",
-                  [ ":", type ], [ effect_clause ], separators,
+                  [ ":", type ], [ effect_clause ], [ premise_clause ], separators,
                   block, "end" ;
 
 method_parameters = self_parameter, [ ",", parameters ] ;
@@ -4119,6 +4206,9 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - Parentheses are required for an empty interface row or a row with several items.
 - The `+` token separates interface bounds.
 - A comma separates class conformances.
+- A conformance or method premise starts after `when`.
+- A premise subject must name one containing type parameter.
+- `frozen class` implies `final class`.
 - A comma separates parent interfaces.
 - `()` is unit. `(T,)` and `(T,U)` are tuple types; the same parenthesized list followed by `->` is a function parameter list. A one-element tuple requires the trailing comma.
 - `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.

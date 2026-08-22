@@ -2,7 +2,9 @@
 #
 # Ordinary failure is a value, not a fault.
 
-enum Result[T, E]
+enum Result[T, E] implements Display when T: Display, E: Display,
+                           PartialEq when T: PartialEq, E: PartialEq,
+                           Hashable when T: Hashable, E: Hashable
   Ok(v: T)
   Err(error: E)
 
@@ -52,6 +54,43 @@ enum Result[T, E]
     case self
     in Ok(v)     then f(v)
     in Err(error) then Err(error)
+    end
+  end
+
+  def append_to(self, mut builder: StringBuilder) when T: Display, E: Display
+    case self
+    in Ok(value)
+      builder.append("Ok(")
+      value.append_to(builder)
+      builder.append(")")
+      ()
+    in Err(error)
+      builder.append("Err(")
+      error.append_to(builder)
+      builder.append(")")
+      ()
+    end
+  end
+
+  def __eq__(self, other: Result[T, E]): Bool when T: PartialEq, E: PartialEq
+    case self
+    in Ok(value)
+      case other
+      in Ok(other_value) then value == other_value
+      in Err(_) then false
+      end
+    in Err(error)
+      case other
+      in Ok(_) then false
+      in Err(other_error) then error == other_error
+      end
+    end
+  end
+
+  def __hash__(self): Int when T: Hashable, E: Hashable
+    case self
+    in Ok(value) then hash_combine(1, value.__hash__())
+    in Err(error) then hash_combine(2, error.__hash__())
     end
   end
 end

@@ -244,6 +244,7 @@ impl Naming<'_> {
         IfaceClass {
             kind,
             is_final: info.is_final,
+            is_frozen: info.is_frozen,
             type_params,
             type_bounds: self.bounds(&info.type_bounds),
             conformances: info

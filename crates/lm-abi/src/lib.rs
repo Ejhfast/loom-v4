@@ -501,7 +501,8 @@ impl AbiType {
 /// Version 14 adds deliberate guest failure.
 /// Version 15 adds direct integer and Boolean builder appends.
 /// Version 16 adds stable text and byte hashes.
-pub const INTRINSIC_ABI_VERSION: u32 = 16;
+/// Version 17 adds ordered and unordered hash mixing.
+pub const INTRINSIC_ABI_VERSION: u32 = 18;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -654,9 +655,12 @@ pub const INTRINSIC_STRING_BUILDER_APPEND_INT: IntrinsicSlot = 134;
 pub const INTRINSIC_STRING_BUILDER_APPEND_BOOL: IntrinsicSlot = 135;
 pub const INTRINSIC_TEXT_HASH: IntrinsicSlot = 136;
 pub const INTRINSIC_BYTES_HASH: IntrinsicSlot = 137;
+pub const INTRINSIC_HASH_COMBINE: IntrinsicSlot = 138;
+pub const INTRINSIC_HASH_UNORDERED_COMBINE: IntrinsicSlot = 139;
+pub const INTRINSIC_MAP_NEXT_INDEX: IntrinsicSlot = 140;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 138] = [
+pub const INTRINSICS: [IntrinsicDef; 141] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -1522,6 +1526,28 @@ pub const INTRINSICS: [IntrinsicDef; 138] = [
     IntrinsicDef {
         name: "bytes.hash",
         params: &[AbiType::BYTES],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "hash.combine",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "hash.unordered_combine",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "map.next_index",
+        params: &[
+            AbiType::Map(&AbiType::Var(0), &AbiType::Var(1)),
+            AbiType::INT,
+            AbiType::INT,
+        ],
         reply: AbiType::INT,
         semantic_revision: 1,
     },

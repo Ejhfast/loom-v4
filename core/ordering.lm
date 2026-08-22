@@ -2,7 +2,7 @@
 #
 # The three-way comparison result.
 
-enum Ordering
+enum Ordering implements Display, Hashable, Comparable
   Less
   Equal
   Greater
@@ -36,6 +36,42 @@ enum Ordering
     in Less    then Greater
     in Equal   then Equal
     in Greater then Less
+    end
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Less    then "Less"
+    in Equal   then "Equal"
+    in Greater then "Greater"
+    end
+    builder.append(text)
+    ()
+  end
+
+  def __eq__(self, other: Ordering): Bool
+    case self
+    in Less    then other.is_less()
+    in Equal   then other.is_equal()
+    in Greater then other.is_greater()
+    end
+  end
+
+  def __hash__(self): Int
+    case self
+    in Less    then 0
+    in Equal   then 1
+    in Greater then 2
+    end
+  end
+
+  def compare(self, other: Ordering): Ordering
+    if self.__hash__() < other.__hash__()
+      Less
+    elsif self.__hash__() > other.__hash__()
+      Greater
+    else
+      Equal
     end
   end
 end

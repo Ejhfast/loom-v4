@@ -192,6 +192,21 @@ impl<'o> FnChecker<'o> {
                     let env = self.env.clone();
                     check_key_type(ctx, &env, key, key_span)?;
                 }
+                if ctx.classes[class as usize].is_frozen {
+                    for (index, ty) in out.targs.iter().enumerate() {
+                        if !ctx.type_always_frozen(*ty, false) {
+                            let at = type_args
+                                .get(index)
+                                .map(|arg| arg.span)
+                                .unwrap_or(name_span);
+                            return Err(Diagnostic::new(
+                                "E1038",
+                                "a frozen class requires always-frozen type arguments",
+                                at,
+                            ));
+                        }
+                    }
+                }
                 Ok(HExpr {
                     ty: out.ret,
                     mutable: true,

@@ -140,7 +140,7 @@ impl Parser<'_> {
             match self.peek() {
                 Tok::Eof => break,
                 Tok::KwInterface => interfaces.push(self.interface_def()?),
-                Tok::KwClass | Tok::KwFinal => classes.push(self.class_def()?),
+                Tok::KwClass | Tok::KwFinal | Tok::KwFrozen => classes.push(self.class_def()?),
                 Tok::KwEnum => enums.push(self.enum_def()?),
                 Tok::KwDef => funcs.push(self.func_def()?),
                 Tok::KwUse => {
@@ -576,11 +576,14 @@ impl Parser<'_> {
     }
 
     fn class_def(&mut self) -> Result<ClassDef, Diagnostic> {
-        let final_tok = if matches!(self.peek(), Tok::KwFinal) {
+        let modifier_tok = if matches!(self.peek(), Tok::KwFinal | Tok::KwFrozen) {
             Some(self.next())
         } else {
             None
         };
+        let is_frozen = modifier_tok
+            .as_ref()
+            .is_some_and(|token| matches!(token.tok, Tok::KwFrozen));
         let class_tok = self.expect(Tok::KwClass, "`class`")?;
         let (name, name_span) = self.ident("a class name")?;
         let generics = self.generic_params()?;
@@ -658,7 +661,8 @@ impl Parser<'_> {
         let end_tok = self.expect(Tok::KwEnd, "`end`")?;
         self.expect_terminator()?;
         Ok(ClassDef {
-            is_final: final_tok.is_some(),
+            is_final: modifier_tok.is_some(),
+            is_frozen,
             name,
             name_span,
             generics,
@@ -667,7 +671,7 @@ impl Parser<'_> {
             associated,
             fields,
             methods,
-            span: final_tok
+            span: modifier_tok
                 .as_ref()
                 .map(|token| token.span)
                 .unwrap_or(class_tok.span)
@@ -1134,7 +1138,7 @@ impl Parser<'_> {
                 "E1002",
                 "a `def` function is only valid at the top level of a module or in a class",
             )),
-            Tok::KwClass | Tok::KwFinal | Tok::KwInterface => Err(self.error(
+            Tok::KwClass | Tok::KwFinal | Tok::KwFrozen | Tok::KwInterface => Err(self.error(
                 "E1002",
                 "a type declaration is only valid at the top level of a module",
             )),

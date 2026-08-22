@@ -37,11 +37,22 @@ enum ProcResult[R]
 end
 
 # The ordinary error of a control call on a proc.
-enum ProcError
+enum ProcError implements Error
   Dead
   NotPaused
   AlreadyPaused
   InUse
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Dead          then "the proc is not live"
+    in NotPaused     then "the proc is not paused"
+    in AlreadyPaused then "the proc is already paused"
+    in InUse         then "the proc is in use"
+    end
+    builder.append(text)
+    ()
+  end
 end
 
 # The parent of every proc class. `M` is the mailbox message type.

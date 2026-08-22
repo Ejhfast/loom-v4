@@ -1,52 +1,1700 @@
 # Core: native unit and tuple method tables.
 
-final class Unit
-end
+final class Unit implements Display, Hashable
+  def append_to(self, mut builder: StringBuilder)
+    builder.append("()")
+    ()
+  end
 
-final class Tuple2[A, B]
-  def swap(self): (B, A)
-    (self[1], self[0])
+  def __eq__(self, other: Unit): Bool
+    true
+  end
+
+  def __hash__(self): Int
+    hash_combine(0, 0)
   end
 end
 
-final class Tuple3[A, B, C]
+final class Tuple2[A, B] implements Display when A: Display, B: Display,
+  PartialEq when A: PartialEq, B: PartialEq,
+  Hashable when A: Hashable, B: Hashable,
+  Comparable when A: Comparable, B: Comparable
+  def swap(self): (B, A)
+    (self[1], self[0])
+  end
+
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple2[A, B]): Bool when A: PartialEq, B: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable
+    hash = hash_combine(2, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple2[A, B]): Ordering when A: Comparable, B: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple4[A, B, C, D]
+final class Tuple3[A, B, C] implements Display when A: Display, B: Display, C: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple3[A, B, C]): Bool when A: PartialEq, B: PartialEq, C: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable
+    hash = hash_combine(3, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple3[A, B, C]): Ordering when A: Comparable, B: Comparable, C: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple5[A, B, C, D, E]
+final class Tuple4[A, B, C, D] implements Display when A: Display, B: Display, C: Display, D: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple4[A, B, C, D]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable
+    hash = hash_combine(4, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple4[A, B, C, D]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple6[A, B, C, D, E, F]
+final class Tuple5[A, B, C, D, E] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple5[A, B, C, D, E]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable
+    hash = hash_combine(5, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple5[A, B, C, D, E]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple7[A, B, C, D, E, F, G]
+final class Tuple6[A, B, C, D, E, F] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple6[A, B, C, D, E, F]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable
+    hash = hash_combine(6, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple6[A, B, C, D, E, F]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple8[A, B, C, D, E, F, G, H]
+final class Tuple7[A, B, C, D, E, F, G] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple7[A, B, C, D, E, F, G]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable
+    hash = hash_combine(7, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple7[A, B, C, D, E, F, G]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple9[A, B, C, D, E, F, G, H, I]
+final class Tuple8[A, B, C, D, E, F, G, H] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(", ")
+    self[7].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple8[A, B, C, D, E, F, G, H]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    if not (self[7] == other[7])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable
+    hash = hash_combine(8, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash = hash_combine(hash, self[7].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple8[A, B, C, D, E, F, G, H]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[7].compare(other[7])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple10[A, B, C, D, E, F, G, H, I, J]
+final class Tuple9[A, B, C, D, E, F, G, H, I] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(", ")
+    self[7].append_to(builder)
+    builder.append(", ")
+    self[8].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple9[A, B, C, D, E, F, G, H, I]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    if not (self[7] == other[7])
+      return false
+    end
+    if not (self[8] == other[8])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable
+    hash = hash_combine(9, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash = hash_combine(hash, self[7].__hash__())
+    hash = hash_combine(hash, self[8].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple9[A, B, C, D, E, F, G, H, I]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[7].compare(other[7])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[8].compare(other[8])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple11[A, B, C, D, E, F, G, H, I, J, K]
+final class Tuple10[A, B, C, D, E, F, G, H, I, J] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(", ")
+    self[7].append_to(builder)
+    builder.append(", ")
+    self[8].append_to(builder)
+    builder.append(", ")
+    self[9].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple10[A, B, C, D, E, F, G, H, I, J]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    if not (self[7] == other[7])
+      return false
+    end
+    if not (self[8] == other[8])
+      return false
+    end
+    if not (self[9] == other[9])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable
+    hash = hash_combine(10, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash = hash_combine(hash, self[7].__hash__())
+    hash = hash_combine(hash, self[8].__hash__())
+    hash = hash_combine(hash, self[9].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple10[A, B, C, D, E, F, G, H, I, J]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[7].compare(other[7])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[8].compare(other[8])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[9].compare(other[9])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple12[A, B, C, D, E, F, G, H, I, J, K, L]
+final class Tuple11[A, B, C, D, E, F, G, H, I, J, K] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(", ")
+    self[7].append_to(builder)
+    builder.append(", ")
+    self[8].append_to(builder)
+    builder.append(", ")
+    self[9].append_to(builder)
+    builder.append(", ")
+    self[10].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple11[A, B, C, D, E, F, G, H, I, J, K]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    if not (self[7] == other[7])
+      return false
+    end
+    if not (self[8] == other[8])
+      return false
+    end
+    if not (self[9] == other[9])
+      return false
+    end
+    if not (self[10] == other[10])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable
+    hash = hash_combine(11, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash = hash_combine(hash, self[7].__hash__())
+    hash = hash_combine(hash, self[8].__hash__())
+    hash = hash_combine(hash, self[9].__hash__())
+    hash = hash_combine(hash, self[10].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple11[A, B, C, D, E, F, G, H, I, J, K]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[7].compare(other[7])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[8].compare(other[8])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[9].compare(other[9])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[10].compare(other[10])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple13[A, B, C, D, E, F, G, H, I, J, K, L, M]
+final class Tuple12[A, B, C, D, E, F, G, H, I, J, K, L] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(", ")
+    self[7].append_to(builder)
+    builder.append(", ")
+    self[8].append_to(builder)
+    builder.append(", ")
+    self[9].append_to(builder)
+    builder.append(", ")
+    self[10].append_to(builder)
+    builder.append(", ")
+    self[11].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple12[A, B, C, D, E, F, G, H, I, J, K, L]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    if not (self[7] == other[7])
+      return false
+    end
+    if not (self[8] == other[8])
+      return false
+    end
+    if not (self[9] == other[9])
+      return false
+    end
+    if not (self[10] == other[10])
+      return false
+    end
+    if not (self[11] == other[11])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable
+    hash = hash_combine(12, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash = hash_combine(hash, self[7].__hash__())
+    hash = hash_combine(hash, self[8].__hash__())
+    hash = hash_combine(hash, self[9].__hash__())
+    hash = hash_combine(hash, self[10].__hash__())
+    hash = hash_combine(hash, self[11].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple12[A, B, C, D, E, F, G, H, I, J, K, L]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[7].compare(other[7])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[8].compare(other[8])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[9].compare(other[9])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[10].compare(other[10])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[11].compare(other[11])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple14[A, B, C, D, E, F, G, H, I, J, K, L, M, N]
+final class Tuple13[A, B, C, D, E, F, G, H, I, J, K, L, M] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display, M: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable, M: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable, M: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display, M: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(", ")
+    self[7].append_to(builder)
+    builder.append(", ")
+    self[8].append_to(builder)
+    builder.append(", ")
+    self[9].append_to(builder)
+    builder.append(", ")
+    self[10].append_to(builder)
+    builder.append(", ")
+    self[11].append_to(builder)
+    builder.append(", ")
+    self[12].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple13[A, B, C, D, E, F, G, H, I, J, K, L, M]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    if not (self[7] == other[7])
+      return false
+    end
+    if not (self[8] == other[8])
+      return false
+    end
+    if not (self[9] == other[9])
+      return false
+    end
+    if not (self[10] == other[10])
+      return false
+    end
+    if not (self[11] == other[11])
+      return false
+    end
+    if not (self[12] == other[12])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable, M: Hashable
+    hash = hash_combine(13, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash = hash_combine(hash, self[7].__hash__())
+    hash = hash_combine(hash, self[8].__hash__())
+    hash = hash_combine(hash, self[9].__hash__())
+    hash = hash_combine(hash, self[10].__hash__())
+    hash = hash_combine(hash, self[11].__hash__())
+    hash = hash_combine(hash, self[12].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple13[A, B, C, D, E, F, G, H, I, J, K, L, M]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable, M: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[7].compare(other[7])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[8].compare(other[8])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[9].compare(other[9])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[10].compare(other[10])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[11].compare(other[11])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[12].compare(other[12])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple15[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O]
+final class Tuple14[A, B, C, D, E, F, G, H, I, J, K, L, M, N] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display, M: Display, N: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq, N: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable, M: Hashable, N: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable, M: Comparable, N: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display, M: Display, N: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(", ")
+    self[7].append_to(builder)
+    builder.append(", ")
+    self[8].append_to(builder)
+    builder.append(", ")
+    self[9].append_to(builder)
+    builder.append(", ")
+    self[10].append_to(builder)
+    builder.append(", ")
+    self[11].append_to(builder)
+    builder.append(", ")
+    self[12].append_to(builder)
+    builder.append(", ")
+    self[13].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple14[A, B, C, D, E, F, G, H, I, J, K, L, M, N]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq, N: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    if not (self[7] == other[7])
+      return false
+    end
+    if not (self[8] == other[8])
+      return false
+    end
+    if not (self[9] == other[9])
+      return false
+    end
+    if not (self[10] == other[10])
+      return false
+    end
+    if not (self[11] == other[11])
+      return false
+    end
+    if not (self[12] == other[12])
+      return false
+    end
+    if not (self[13] == other[13])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable, M: Hashable, N: Hashable
+    hash = hash_combine(14, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash = hash_combine(hash, self[7].__hash__())
+    hash = hash_combine(hash, self[8].__hash__())
+    hash = hash_combine(hash, self[9].__hash__())
+    hash = hash_combine(hash, self[10].__hash__())
+    hash = hash_combine(hash, self[11].__hash__())
+    hash = hash_combine(hash, self[12].__hash__())
+    hash = hash_combine(hash, self[13].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple14[A, B, C, D, E, F, G, H, I, J, K, L, M, N]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable, M: Comparable, N: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[7].compare(other[7])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[8].compare(other[8])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[9].compare(other[9])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[10].compare(other[10])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[11].compare(other[11])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[12].compare(other[12])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[13].compare(other[13])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end
 
-final class Tuple16[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P]
+final class Tuple15[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display, M: Display, N: Display, O: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq, N: PartialEq, O: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable, M: Hashable, N: Hashable, O: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable, M: Comparable, N: Comparable, O: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display, M: Display, N: Display, O: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(", ")
+    self[7].append_to(builder)
+    builder.append(", ")
+    self[8].append_to(builder)
+    builder.append(", ")
+    self[9].append_to(builder)
+    builder.append(", ")
+    self[10].append_to(builder)
+    builder.append(", ")
+    self[11].append_to(builder)
+    builder.append(", ")
+    self[12].append_to(builder)
+    builder.append(", ")
+    self[13].append_to(builder)
+    builder.append(", ")
+    self[14].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple15[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq, N: PartialEq, O: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    if not (self[7] == other[7])
+      return false
+    end
+    if not (self[8] == other[8])
+      return false
+    end
+    if not (self[9] == other[9])
+      return false
+    end
+    if not (self[10] == other[10])
+      return false
+    end
+    if not (self[11] == other[11])
+      return false
+    end
+    if not (self[12] == other[12])
+      return false
+    end
+    if not (self[13] == other[13])
+      return false
+    end
+    if not (self[14] == other[14])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable, M: Hashable, N: Hashable, O: Hashable
+    hash = hash_combine(15, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash = hash_combine(hash, self[7].__hash__())
+    hash = hash_combine(hash, self[8].__hash__())
+    hash = hash_combine(hash, self[9].__hash__())
+    hash = hash_combine(hash, self[10].__hash__())
+    hash = hash_combine(hash, self[11].__hash__())
+    hash = hash_combine(hash, self[12].__hash__())
+    hash = hash_combine(hash, self[13].__hash__())
+    hash = hash_combine(hash, self[14].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple15[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable, M: Comparable, N: Comparable, O: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[7].compare(other[7])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[8].compare(other[8])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[9].compare(other[9])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[10].compare(other[10])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[11].compare(other[11])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[12].compare(other[12])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[13].compare(other[13])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[14].compare(other[14])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
+end
+
+final class Tuple16[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P] implements Display when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display, M: Display, N: Display, O: Display, P: Display,
+  PartialEq when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq, N: PartialEq, O: PartialEq, P: PartialEq,
+  Hashable when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable, M: Hashable, N: Hashable, O: Hashable, P: Hashable,
+  Comparable when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable, M: Comparable, N: Comparable, O: Comparable, P: Comparable
+  def append_to(self, mut builder: StringBuilder) when A: Display, B: Display, C: Display, D: Display, E: Display, F: Display, G: Display, H: Display, I: Display, J: Display, K: Display, L: Display, M: Display, N: Display, O: Display, P: Display
+    builder.append("(")
+    self[0].append_to(builder)
+    builder.append(", ")
+    self[1].append_to(builder)
+    builder.append(", ")
+    self[2].append_to(builder)
+    builder.append(", ")
+    self[3].append_to(builder)
+    builder.append(", ")
+    self[4].append_to(builder)
+    builder.append(", ")
+    self[5].append_to(builder)
+    builder.append(", ")
+    self[6].append_to(builder)
+    builder.append(", ")
+    self[7].append_to(builder)
+    builder.append(", ")
+    self[8].append_to(builder)
+    builder.append(", ")
+    self[9].append_to(builder)
+    builder.append(", ")
+    self[10].append_to(builder)
+    builder.append(", ")
+    self[11].append_to(builder)
+    builder.append(", ")
+    self[12].append_to(builder)
+    builder.append(", ")
+    self[13].append_to(builder)
+    builder.append(", ")
+    self[14].append_to(builder)
+    builder.append(", ")
+    self[15].append_to(builder)
+    builder.append(")")
+    ()
+  end
+
+  def __eq__(self, other: Tuple16[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P]): Bool when A: PartialEq, B: PartialEq, C: PartialEq, D: PartialEq, E: PartialEq, F: PartialEq, G: PartialEq, H: PartialEq, I: PartialEq, J: PartialEq, K: PartialEq, L: PartialEq, M: PartialEq, N: PartialEq, O: PartialEq, P: PartialEq
+    if not (self[0] == other[0])
+      return false
+    end
+    if not (self[1] == other[1])
+      return false
+    end
+    if not (self[2] == other[2])
+      return false
+    end
+    if not (self[3] == other[3])
+      return false
+    end
+    if not (self[4] == other[4])
+      return false
+    end
+    if not (self[5] == other[5])
+      return false
+    end
+    if not (self[6] == other[6])
+      return false
+    end
+    if not (self[7] == other[7])
+      return false
+    end
+    if not (self[8] == other[8])
+      return false
+    end
+    if not (self[9] == other[9])
+      return false
+    end
+    if not (self[10] == other[10])
+      return false
+    end
+    if not (self[11] == other[11])
+      return false
+    end
+    if not (self[12] == other[12])
+      return false
+    end
+    if not (self[13] == other[13])
+      return false
+    end
+    if not (self[14] == other[14])
+      return false
+    end
+    if not (self[15] == other[15])
+      return false
+    end
+    true
+  end
+
+  def __hash__(self): Int when A: Hashable, B: Hashable, C: Hashable, D: Hashable, E: Hashable, F: Hashable, G: Hashable, H: Hashable, I: Hashable, J: Hashable, K: Hashable, L: Hashable, M: Hashable, N: Hashable, O: Hashable, P: Hashable
+    hash = hash_combine(16, self[0].__hash__())
+    hash = hash_combine(hash, self[1].__hash__())
+    hash = hash_combine(hash, self[2].__hash__())
+    hash = hash_combine(hash, self[3].__hash__())
+    hash = hash_combine(hash, self[4].__hash__())
+    hash = hash_combine(hash, self[5].__hash__())
+    hash = hash_combine(hash, self[6].__hash__())
+    hash = hash_combine(hash, self[7].__hash__())
+    hash = hash_combine(hash, self[8].__hash__())
+    hash = hash_combine(hash, self[9].__hash__())
+    hash = hash_combine(hash, self[10].__hash__())
+    hash = hash_combine(hash, self[11].__hash__())
+    hash = hash_combine(hash, self[12].__hash__())
+    hash = hash_combine(hash, self[13].__hash__())
+    hash = hash_combine(hash, self[14].__hash__())
+    hash = hash_combine(hash, self[15].__hash__())
+    hash
+  end
+
+  def compare(self, other: Tuple16[A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P]): Ordering when A: Comparable, B: Comparable, C: Comparable, D: Comparable, E: Comparable, F: Comparable, G: Comparable, H: Comparable, I: Comparable, J: Comparable, K: Comparable, L: Comparable, M: Comparable, N: Comparable, O: Comparable, P: Comparable
+    ordering = self[0].compare(other[0])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[1].compare(other[1])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[2].compare(other[2])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[3].compare(other[3])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[4].compare(other[4])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[5].compare(other[5])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[6].compare(other[6])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[7].compare(other[7])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[8].compare(other[8])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[9].compare(other[9])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[10].compare(other[10])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[11].compare(other[11])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[12].compare(other[12])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[13].compare(other[13])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[14].compare(other[14])
+    if not ordering.is_equal()
+      return ordering
+    end
+    ordering = self[15].compare(other[15])
+    if not ordering.is_equal()
+      return ordering
+    end
+    Equal
+  end
 end

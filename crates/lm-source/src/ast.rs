@@ -119,6 +119,8 @@ pub struct ParentClause {
 pub struct ClassDef {
     /// True when the declaration uses the `final` modifier.
     pub is_final: bool,
+    /// True when every completed instance is deeply immutable.
+    pub is_frozen: bool,
     pub name: String,
     pub name_span: Span,
     pub generics: Vec<GenericParam>,

@@ -274,8 +274,16 @@ The benchmark baseline lives in `benchmarks/release-baseline.md`.
 
 ## 14. Snapshot trust
 
-Admission verifies every stored map entry and semantic hash.
+Admission checks the type and frozen state of every stored map entry.
 
-The runtime trusts admitted map hashes.
+Admission does not execute `Hashable.__hash__`.
 
-Untrusted snapshot execution remains unsupported.
+The runtime therefore trusts admitted semantic hashes.
+
+A changed hash can make a restored lookup miss.
+
+It cannot bypass type checks or memory checks.
+
+Full untrusted snapshot semantics require native hash recomputation for native key types.
+
+User key hashes require a separate verified recomputation policy.

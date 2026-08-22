@@ -167,6 +167,60 @@ def map_lookup():
     return s
 
 
+def map_remove_reinsert():
+    table = {value: value for value in range(1000)}
+    index = 0
+    while index < 200000:
+        key = index % 1000
+        table.pop(key)
+        table[key] = key
+        index = index + 1
+    return len(table)
+
+
+def list_eq():
+    left = [1, 2, 3, 4, 5, 6, 7, 8]
+    right = list(left)
+    index = 0
+    equal = False
+    while index < 200000:
+        equal = left == right
+        index = index + 1
+    return equal
+
+
+def list_hash():
+    values = [1, 2, 3, 4, 5, 6, 7, 8]
+    index = 0
+    value_hash = 0
+    while index < 200000:
+        value_hash = hash(tuple(values))
+        index = index + 1
+    return value_hash
+
+
+def tuple_hash():
+    value = (1, 2, 3, 4)
+    index = 0
+    value_hash = 0
+    while index < 200000:
+        value_hash = hash(value)
+        index = index + 1
+    return value_hash
+
+
+def list_sort():
+    source = [16, 7, 12, 3, 10, 1, 14, 5, 8, 15, 2, 11, 6, 13, 4, 9]
+    index = 0
+    first = 0
+    while index < 20000:
+        values = list(source)
+        values.sort()
+        first = values[0]
+        index = index + 1
+    return first
+
+
 def string_interp():
     s = ""
     i = 0
@@ -187,6 +241,11 @@ CASES = [
     ("list_index", list_index, 1000000),
     ("map_insert", map_insert, 200000),
     ("map_lookup", map_lookup, 1000000),
+    ("map_remove_reinsert", map_remove_reinsert, 200000),
+    ("list_eq", list_eq, 200000),
+    ("list_hash", list_hash, 200000),
+    ("tuple_hash", tuple_hash, 200000),
+    ("list_sort", list_sort, 20000),
     ("string_interp", string_interp, 200000),
 ]
 

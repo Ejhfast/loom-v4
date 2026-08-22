@@ -401,6 +401,7 @@ impl<'a> Scanner<'a> {
             "true" => Tok::KwTrue,
             "false" => Tok::KwFalse,
             "final" => Tok::KwFinal,
+            "frozen" => Tok::KwFrozen,
             "class" => Tok::KwClass,
             "do" => Tok::KwDo,
             "self" => Tok::KwSelf,
@@ -639,7 +640,7 @@ mod tests {
     #[test]
     fn scans_arrow_and_new_keywords() {
         assert_eq!(
-            kinds("do |x: Int| -> mut escaping self super final class end"),
+            kinds("do |x: Int| -> mut escaping self super final frozen class end"),
             vec![
                 Tok::KwDo,
                 Tok::Pipe,
@@ -653,6 +654,7 @@ mod tests {
                 Tok::KwSelf,
                 Tok::KwSuper,
                 Tok::KwFinal,
+                Tok::KwFrozen,
                 Tok::KwClass,
                 Tok::KwEnd,
                 Tok::Eof

@@ -54,7 +54,7 @@ final class CompileOptions
   end
 end
 
-final class CompileErrors implements Display
+final class CompileErrors implements Error
   message: String
 
   def init(mut self, message: String)

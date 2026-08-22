@@ -86,7 +86,7 @@ pub trait CodeIdentity {
         let count = match object {
             Object::Instance { fields, .. } => fields.len(),
             Object::List { items, .. } | Object::Tuple { items } => items.len(),
-            Object::Map { entries, .. } => entries.len().saturating_mul(2),
+            Object::Map { index, .. } => index.live_len().saturating_mul(2),
             Object::Closure { captures, .. } => captures.len(),
             Object::DynValue { .. } => 1,
             _ => 0,
@@ -333,11 +333,14 @@ fn encode_object(
                 )?;
             }
         }
-        Object::Map { entries, .. } => {
+        Object::Map { entries, index } => {
             // Insertion order, key before value. The derived lookup
             // index never enters the encoding.
-            count(out, entries.len())?;
+            count(out, index.live_len())?;
             for entry in entries {
+                if !entry.is_live() {
+                    continue;
+                }
                 encode_value(
                     out,
                     entry.key,

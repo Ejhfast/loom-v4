@@ -6,6 +6,66 @@
 use super::*;
 
 impl<'m> Ctx<'m> {
+    /// Return the class built by one named constructor function.
+    pub(crate) fn constructor_class(&self, func: u32) -> Option<u32> {
+        self.module
+            .bindings
+            .iter()
+            .find(|binding| binding.func == func && binding.class != lm_bytecode::NO_CLASS)
+            .map(|binding| binding.class)
+    }
+
+    /// Test whether every value of one type is deeply frozen.
+    pub(crate) fn type_always_frozen(&self, ty: u32, allow_var: bool) -> bool {
+        self.type_always_frozen_inner(ty, allow_var, 0)
+    }
+
+    fn type_always_frozen_inner(&self, ty: u32, allow_var: bool, depth: usize) -> bool {
+        if depth >= 128 {
+            return false;
+        }
+        match self.ty(ty) {
+            BcType::Unit
+            | BcType::Bool
+            | BcType::Int
+            | BcType::Str
+            | BcType::Bytes
+            | BcType::Digest
+            | BcType::Fault
+            | BcType::Op(_, _) => true,
+            BcType::Var(_) => allow_var,
+            BcType::Tuple(items) => items
+                .iter()
+                .all(|item| self.type_always_frozen_inner(*item, allow_var, depth + 1)),
+            BcType::Class(class) => self.class_always_frozen(class),
+            BcType::Inst(class, args) => {
+                self.class_always_frozen(class)
+                    && args
+                        .iter()
+                        .all(|arg| self.type_always_frozen_inner(*arg, allow_var, depth + 1))
+            }
+            _ => false,
+        }
+    }
+
+    fn class_always_frozen(&self, class: u32) -> bool {
+        self.module
+            .classes
+            .get(class as usize)
+            .is_some_and(|entry| entry.is_frozen)
+            || [
+                self.core.unit,
+                self.core.int,
+                self.core.boolean,
+                self.core.text,
+                self.core.string,
+                self.core.substring,
+                self.core.char_value,
+                self.core.bytes,
+            ]
+            .contains(&Some(class))
+    }
+
     /// Find the reserved core `Hashable` interface.
     pub(crate) fn hashable_interface(&self) -> Option<u32> {
         self.module

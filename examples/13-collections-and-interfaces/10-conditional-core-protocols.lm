@@ -1,0 +1,34 @@
+# Conditional conformances make generic core protocols compose.
+# Frozen generic classes require frozen type arguments.
+
+frozen class Label[T] implements Display when T: Display
+  value: T
+
+  def init(mut self, value: T)
+    self.value = value
+  end
+
+  def append_to(self, mut builder: StringBuilder) when T: Display
+    self.value.append_to(builder)
+    ()
+  end
+end
+
+def sorted_copy[T: Comparable](values: List[T]): List[T]
+  result = values.copy()
+  result.sort()
+  result
+end
+
+labels = [Label[String]("ready"), Label[String]("set")]
+pairs = [(2, "two"), (1, "one")]
+ordered = sorted_copy(pairs)
+scores: Map[(Int, String), Int] = {(2, "two"): 20}
+
+(
+  display(labels),
+  display(ordered),
+  scores.at((2, "two")),
+  ordered.min(),
+  hash_of((2, "two")) == hash_of((2, "two"))
+)

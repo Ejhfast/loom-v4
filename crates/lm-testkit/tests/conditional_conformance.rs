@@ -110,6 +110,30 @@ Box(Plain()).label()
 }
 
 #[test]
+fn a_mutable_interface_receiver_mismatch_has_a_precise_diagnostic() {
+    let error = run(r#"
+interface Cursor
+  def next(mut self): Int
+end
+
+final class Fixed implements Cursor
+  def next(self): Int
+    1
+  end
+end
+
+Fixed()
+"#)
+    .expect_err("the receiver mismatch must reject");
+    assert!(
+        error.contains(
+            "error[E1053]: the method `next` uses `self`, but interface `Cursor` requires `mut self`"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_premise_must_name_a_class_type_parameter() {
     let source = r#"
 interface Labeled
@@ -304,10 +328,15 @@ end
 1
 "#;
     let module = compile_text("conditional.lm", source).expect("the source compiles");
+    let box_class = module
+        .classes
+        .iter()
+        .position(|class| class.name == "Box")
+        .expect("Box exists");
     let conformance = module
         .conformances
         .iter()
-        .find(|item| !item.premises.is_empty())
+        .find(|item| item.class as usize == box_class && !item.premises.is_empty())
         .expect("the conditional conformance exists");
     assert_eq!(conformance.premises.len(), 1);
     assert_eq!(conformance.premises[0].param, 0);
@@ -317,18 +346,13 @@ end
     assert_eq!(decoded.conformances, module.conformances);
     lm_verify::verify_module(&decoded).expect("the module verifies");
 
-    let box_class = module
-        .classes
-        .iter()
-        .position(|class| class.name == "Box")
-        .expect("Box exists");
     let original_identity =
         lm_bytecode::identity::module_identity(&module).expect("the module hashes");
     let mut unconditional = module.clone();
     unconditional
         .conformances
         .iter_mut()
-        .find(|item| !item.premises.is_empty())
+        .find(|item| item.class as usize == box_class && !item.premises.is_empty())
         .expect("the conditional conformance exists")
         .premises
         .clear();
@@ -349,7 +373,7 @@ end
     let premise = malformed
         .conformances
         .iter_mut()
-        .find(|item| !item.premises.is_empty())
+        .find(|item| item.class as usize == box_class && !item.premises.is_empty())
         .expect("the conditional conformance exists");
     premise.premises[0].param = u32::MAX;
     let error = lm_verify::verify_module(&malformed).expect_err("the premise index must reject");
@@ -430,4 +454,65 @@ end
     let mut vm = Vm::new(&loaded, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done(\"box word\")");
+}
+
+#[test]
+fn frozen_generic_classes_cross_module_boundaries() {
+    let library = compile_module(
+        "lib.frozen",
+        &SourceFile::new(
+            "frozen.lm",
+            r#"
+frozen class Box[T]
+  value: T
+
+  def init(mut self, value: T)
+    self.value = value
+  end
+end
+"#,
+        ),
+        &CompileEnv::new().freeze(),
+        false,
+    )
+    .expect("the library compiles");
+    let exported = library.interface.find("Box").expect("Box is exported");
+    let lm_bytecode::interface::IfaceItem::Class(class) = &exported.item else {
+        panic!("Box is not a class");
+    };
+    assert!(class.is_frozen);
+
+    let mut compile_env = CompileEnv::new();
+    compile_env
+        .bind_interface(library.interface.clone())
+        .expect("the interface binds");
+    compile_env
+        .bind_root("frozenlib", "lib.frozen")
+        .expect("the root binds");
+    let compile_env = compile_env.freeze();
+    let valid = compile_module(
+        "app.valid",
+        &SourceFile::new(
+            "valid.lm",
+            "use frozenlib\nfrozenlib.Box[String](\"ready\")\n",
+        ),
+        &compile_env,
+        true,
+    );
+    valid.expect("an always-frozen argument compiles");
+
+    let invalid = compile_module(
+        "app.invalid",
+        &SourceFile::new(
+            "invalid.lm",
+            "use frozenlib\nfrozenlib.Box[List[Int]]([])\n",
+        ),
+        &compile_env,
+        true,
+    )
+    .expect_err("a mutable argument rejects");
+    assert!(
+        invalid.contains("always-frozen type arguments"),
+        "{invalid}"
+    );
 }

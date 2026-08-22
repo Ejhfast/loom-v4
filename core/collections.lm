@@ -15,7 +15,11 @@ interface Counted
   def len(self): Int
 end
 
-final class List[T] implements Counted, Iterable
+final class List[T] implements Counted, Iterable, Copyable,
+                               Display when T: Display,
+                               PartialEq when T: PartialEq,
+                               Hashable when T: Hashable,
+                               Comparable when T: Comparable
   type Item = T
   type Iter = ListIterator[T]
 
@@ -94,6 +98,67 @@ final class List[T] implements Counted, Iterable
       result.push(value)
     end
     result
+  end
+
+  def append_to(self, mut builder: StringBuilder) when T: Display
+    builder.append("[")
+    index = 0
+    while index < self.len()
+      if index > 0
+        builder.append(", ")
+        ()
+      end
+      self.at(index).append_to(builder)
+      index = index + 1
+    end
+    builder.append("]")
+    ()
+  end
+
+  def __eq__(self, other: List[T]): Bool when T: PartialEq
+    if self.len() != other.len()
+      return false
+    end
+    index = 0
+    while index < self.len()
+      if not (self.at(index) == other.at(index))
+        return false
+      end
+      index = index + 1
+    end
+    true
+  end
+
+  def __hash__(self): Int when T: Hashable
+    hash = hash_combine(17, self.len())
+    index = 0
+    while index < self.len()
+      hash = hash_combine(hash, self.at(index).__hash__())
+      index = index + 1
+    end
+    hash
+  end
+
+  def compare(self, other: List[T]): Ordering when T: Comparable
+    length = self.len()
+    if other.len() < length
+      length = other.len()
+    end
+    index = 0
+    while index < length
+      ordering = self.at(index).compare(other.at(index))
+      if not ordering.is_equal()
+        return ordering
+      end
+      index = index + 1
+    end
+    if self.len() < other.len()
+      Less
+    elsif self.len() > other.len()
+      Greater
+    else
+      Equal
+    end
   end
 
   def slice(self, start: Int, length: Int): List[T]
@@ -293,12 +358,106 @@ final class List[T] implements Counted, Iterable
     ()
   end
 
+  def sort(mut self) when T: Comparable
+    length = self.len()
+    if length < 2
+      return
+    end
+    epoch = intrinsic("list.epoch", self)
+    source = self.copy()
+    width = 1
+    while width < length
+      result = List[T]()
+      result.reserve(length)
+      left = 0
+      while left < length
+        middle = left + width
+        if middle > length
+          middle = length
+        end
+        right = middle + width
+        if right > length
+          right = length
+        end
+        first = left
+        second = middle
+        while first < middle and second < right
+          if source.at(first).compare(source.at(second)).is_greater()
+            result.push(source.at(second))
+            second = second + 1
+          else
+            result.push(source.at(first))
+            first = first + 1
+          end
+        end
+        while first < middle
+          result.push(source.at(first))
+          first = first + 1
+        end
+        while second < right
+          result.push(source.at(second))
+          second = second + 1
+        end
+        left = right
+      end
+      source = result
+      if width > length / 2
+        width = length
+      else
+        width = width + width
+      end
+    end
+    intrinsic("list.iter_len", self, epoch)
+    intrinsic("list.reorder", self)
+    index = 0
+    while index < length
+      self.set(index, source.at(index))
+      index = index + 1
+    end
+    ()
+  end
+
+  def min(self): Option[T] when T: Comparable
+    if self.is_empty()
+      return None
+    end
+    result = self.at(0)
+    index = 1
+    while index < self.len()
+      value = self.at(index)
+      if value.compare(result).is_less()
+        result = value
+      end
+      index = index + 1
+    end
+    Some(result)
+  end
+
+  def max(self): Option[T] when T: Comparable
+    if self.is_empty()
+      return None
+    end
+    result = self.at(0)
+    index = 1
+    while index < self.len()
+      value = self.at(index)
+      if value.compare(result).is_greater()
+        result = value
+      end
+      index = index + 1
+    end
+    Some(result)
+  end
+
   def iterator(self): ListIterator[T]
     ListIterator[T](self, intrinsic("list.epoch", self))
   end
 end
 
-final class Map[K: Hashable, V] implements Counted, Iterable
+final class Map[K: Hashable, V] implements Counted, Iterable, Copyable,
+                                          Display when K: Display, V: Display,
+                                          PartialEq when V: PartialEq,
+                                          Hashable when V: Hashable
   type Item = (K, V)
   type Iter = MapIterator[K, V]
 
@@ -362,6 +521,49 @@ final class Map[K: Hashable, V] implements Counted, Iterable
       result.put(key, value)
     end
     result
+  end
+
+  def append_to(self, mut builder: StringBuilder) when K: Display, V: Display
+    builder.append("{{")
+    index = 0
+    for key, value in self
+      if index > 0
+        builder.append(", ")
+        ()
+      end
+      key.append_to(builder)
+      builder.append(": ")
+      value.append_to(builder)
+      index = index + 1
+    end
+    builder.append("}}")
+    ()
+  end
+
+  def __eq__(self, other: Map[K, V]): Bool when V: PartialEq
+    if self.len() != other.len()
+      return false
+    end
+    for key, value in self
+      case other.get(key)
+      in Some(other_value)
+        if not (value == other_value)
+          return false
+        end
+      in None
+        return false
+      end
+    end
+    true
+  end
+
+  def __hash__(self): Int when V: Hashable
+    hash = 0
+    for key, value in self
+      entry = hash_combine(key.__hash__(), value.__hash__())
+      hash = intrinsic("hash.unordered_combine", hash, entry)
+    end
+    hash_combine(self.len(), hash)
   end
 
   def keys(self): MapKeys[K, V]
@@ -437,7 +639,8 @@ final class Map[K: Hashable, V] implements Counted, Iterable
   end
 end
 
-final class Set[T: Hashable] implements Counted, Iterable, PartialEq
+final class Set[T: Hashable] implements Counted, Iterable, PartialEq, Hashable, Copyable,
+                                      Display when T: Display
   type Item = T
   type Iter = SetIterator[T]
 
@@ -486,6 +689,21 @@ final class Set[T: Hashable] implements Counted, Iterable, PartialEq
       changed = result.add(value)
     end
     result
+  end
+
+  def append_to(self, mut builder: StringBuilder) when T: Display
+    builder.append("Set[")
+    index = 0
+    for value in self
+      if index > 0
+        builder.append(", ")
+        ()
+      end
+      value.append_to(builder)
+      index = index + 1
+    end
+    builder.append("]")
+    ()
   end
 
   def values(self): List[T]
@@ -577,6 +795,14 @@ final class Set[T: Hashable] implements Counted, Iterable, PartialEq
     self.len() == other.len() and self.is_subset(other)
   end
 
+  def __hash__(self): Int
+    hash = 0
+    for value in self
+      hash = intrinsic("hash.unordered_combine", hash, value.__hash__())
+    end
+    hash_combine(self.len(), hash)
+  end
+
   def iterator(self): SetIterator[T]
     SetIterator[T](self.items.keys().iterator())
   end
@@ -620,15 +846,40 @@ final class MapIterator[K: Hashable, V] implements Iterator
   end
 
   def next(mut self): Option[(K, V)]
-    if self.index < intrinsic("map.iter_len", self.source, self.epoch)
-      key = intrinsic("map.key_at", self.source, self.index)
-      value = intrinsic("map.value_at", self.source, self.index)
-      self.index = self.index + 1
+    position = intrinsic("map.next_index", self.source, self.index, self.epoch)
+    if position >= 0
+      key = intrinsic("map.key_at", self.source, position)
+      value = intrinsic("map.value_at", self.source, position)
+      self.index = position + 1
       Some((key, value))
     else
       None
     end
   end
+end
+
+def _map_view_index[K: Hashable, V](
+  source: Map[K, V],
+  index: Int,
+  epoch: Int
+): Int
+  if index < 0
+    return -1
+  end
+  cursor = 0
+  ordinal = 0
+  while ordinal <= index
+    position = intrinsic("map.next_index", source, cursor, epoch)
+    if position < 0
+      return -1
+    end
+    if ordinal == index
+      return position
+    end
+    cursor = position + 1
+    ordinal = ordinal + 1
+  end
+  -1
 end
 
 final class SetIterator[T: Hashable] implements Iterator
@@ -689,7 +940,10 @@ final class RangeIterator implements Iterator
   end
 end
 
-final class ListSlice[T] implements Counted, Iterable
+final class ListSlice[T] implements Counted, Iterable,
+                                    Display when T: Display,
+                                    PartialEq when T: PartialEq,
+                                    Comparable when T: Comparable
   type Item = T
   type Iter = ListSliceIterator[T]
 
@@ -743,6 +997,57 @@ final class ListSlice[T] implements Counted, Iterable
       result.push(value)
     end
     result
+  end
+
+  def append_to(self, mut builder: StringBuilder) when T: Display
+    builder.append("[")
+    index = 0
+    while index < self.len()
+      if index > 0
+        builder.append(", ")
+        ()
+      end
+      self.at(index).append_to(builder)
+      index = index + 1
+    end
+    builder.append("]")
+    ()
+  end
+
+  def __eq__(self, other: ListSlice[T]): Bool when T: PartialEq
+    if self.len() != other.len()
+      return false
+    end
+    index = 0
+    while index < self.len()
+      if not (self.at(index) == other.at(index))
+        return false
+      end
+      index = index + 1
+    end
+    true
+  end
+
+  def compare(self, other: ListSlice[T]): Ordering when T: Comparable
+    length = self.len()
+    if other.len() < length
+      length = other.len()
+    end
+    index = 0
+    while index < length
+      ordering = self.at(index).compare(other.at(index))
+      if not ordering.is_equal()
+        return ordering
+      end
+      index = index + 1
+    end
+    if self.len() < other.len()
+      Less
+    elsif self.len() > other.len()
+      Greater
+    else
+      Equal
+    end
   end
 
   def iterator(self): ListSliceIterator[T]
@@ -804,7 +1109,11 @@ final class MapKeys[K: Hashable, V] implements Counted, Iterable
 
   def at(self, index: Int): K
     intrinsic("map.iter_len", self.source, self.epoch)
-    intrinsic("map.key_at", self.source, index)
+    intrinsic(
+      "map.key_at",
+      self.source,
+      _map_view_index(self.source, index, self.epoch)
+    )
   end
 
   def get(self, index: Int): Option[K]
@@ -812,7 +1121,8 @@ final class MapKeys[K: Hashable, V] implements Counted, Iterable
     if index < 0 or index >= length
       None
     else
-      Some(intrinsic("map.key_at", self.source, index))
+      position = _map_view_index(self.source, index, self.epoch)
+      Some(intrinsic("map.key_at", self.source, position))
     end
   end
 
@@ -840,7 +1150,11 @@ final class MapValues[K: Hashable, V] implements Counted, Iterable
 
   def at(self, index: Int): V
     intrinsic("map.iter_len", self.source, self.epoch)
-    intrinsic("map.value_at", self.source, index)
+    intrinsic(
+      "map.value_at",
+      self.source,
+      _map_view_index(self.source, index, self.epoch)
+    )
   end
 
   def get(self, index: Int): Option[V]
@@ -848,7 +1162,8 @@ final class MapValues[K: Hashable, V] implements Counted, Iterable
     if index < 0 or index >= length
       None
     else
-      Some(intrinsic("map.value_at", self.source, index))
+      position = _map_view_index(self.source, index, self.epoch)
+      Some(intrinsic("map.value_at", self.source, position))
     end
   end
 
@@ -876,9 +1191,10 @@ final class MapEntries[K: Hashable, V] implements Counted, Iterable
 
   def at(self, index: Int): (K, V)
     intrinsic("map.iter_len", self.source, self.epoch)
+    position = _map_view_index(self.source, index, self.epoch)
     (
-      intrinsic("map.key_at", self.source, index),
-      intrinsic("map.value_at", self.source, index)
+      intrinsic("map.key_at", self.source, position),
+      intrinsic("map.value_at", self.source, position)
     )
   end
 
@@ -887,9 +1203,10 @@ final class MapEntries[K: Hashable, V] implements Counted, Iterable
     if index < 0 or index >= length
       None
     else
+      position = _map_view_index(self.source, index, self.epoch)
       Some((
-        intrinsic("map.key_at", self.source, index),
-        intrinsic("map.value_at", self.source, index)
+        intrinsic("map.key_at", self.source, position),
+        intrinsic("map.value_at", self.source, position)
       ))
     end
   end
@@ -914,9 +1231,10 @@ final class MapKeysIterator[K: Hashable, V] implements Iterator
   end
 
   def next(mut self): Option[K]
-    if self.index < intrinsic("map.iter_len", self.source, self.epoch)
-      value = intrinsic("map.key_at", self.source, self.index)
-      self.index = self.index + 1
+    position = intrinsic("map.next_index", self.source, self.index, self.epoch)
+    if position >= 0
+      value = intrinsic("map.key_at", self.source, position)
+      self.index = position + 1
       Some(value)
     else
       None
@@ -938,9 +1256,10 @@ final class MapValuesIterator[K: Hashable, V] implements Iterator
   end
 
   def next(mut self): Option[V]
-    if self.index < intrinsic("map.iter_len", self.source, self.epoch)
-      value = intrinsic("map.value_at", self.source, self.index)
-      self.index = self.index + 1
+    position = intrinsic("map.next_index", self.source, self.index, self.epoch)
+    if position >= 0
+      value = intrinsic("map.value_at", self.source, position)
+      self.index = position + 1
       Some(value)
     else
       None
@@ -962,10 +1281,11 @@ final class MapEntriesIterator[K: Hashable, V] implements Iterator
   end
 
   def next(mut self): Option[(K, V)]
-    if self.index < intrinsic("map.iter_len", self.source, self.epoch)
-      key = intrinsic("map.key_at", self.source, self.index)
-      value = intrinsic("map.value_at", self.source, self.index)
-      self.index = self.index + 1
+    position = intrinsic("map.next_index", self.source, self.index, self.epoch)
+    if position >= 0
+      key = intrinsic("map.key_at", self.source, position)
+      value = intrinsic("map.value_at", self.source, position)
+      self.index = position + 1
       Some((key, value))
     else
       None

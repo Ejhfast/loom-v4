@@ -1,6 +1,6 @@
 # Core: immutable UTF-8 text and Unicode scalar values.
 
-class Text implements Counted, Iterable, Display, Hashable
+class Text implements Counted, Iterable, Display, Hashable, Comparable
   type Item = Char
   type Iter = TextIterator
 
@@ -226,6 +226,16 @@ class Text implements Counted, Iterable, Display, Hashable
     intrinsic("text.hash", self)
   end
 
+  def compare(self, other: Text): Ordering
+    if self < other
+      Less
+    elsif self > other
+      Greater
+    else
+      Equal
+    end
+  end
+
   def __lt__(self, other: Text): Bool
     intrinsic("text.lt", self, other)
   end
@@ -256,7 +266,7 @@ final class Substring < Text
   end
 end
 
-final class Char implements Display, Hashable
+final class Char implements Display, Hashable, Comparable
   def append_to(self, mut builder: StringBuilder)
     builder.push_char(self)
     ()
@@ -280,6 +290,16 @@ final class Char implements Display, Hashable
 
   def __hash__(self): Int
     self.codepoint()
+  end
+
+  def compare(self, other: Char): Ordering
+    if self < other
+      Less
+    elsif self > other
+      Greater
+    else
+      Equal
+    end
   end
 
   def __lt__(self, other: Char): Bool

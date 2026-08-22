@@ -245,6 +245,18 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                             at("a call type argument does not meet its interface bounds"),
                         ));
                     }
+                    if ctx.constructor_class(*callee).is_some_and(|class| {
+                        module.classes[class as usize].is_frozen
+                            && application
+                                .types
+                                .iter()
+                                .any(|ty| !ctx.type_always_frozen(*ty, false))
+                    }) {
+                        return Err(err(
+                            fidx,
+                            at("a frozen constructor needs always-frozen type arguments"),
+                        ));
+                    }
                 }
                 Instr::CallVirtual { selector, .. } => {
                     if *selector as usize >= module.selectors.len() {
@@ -552,6 +564,22 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                                     return Err(err(
                                         fidx,
                                         at("a class slot type argument does not meet its interface bounds"),
+                                    ));
+                                }
+                                let class = match ctx.ty(constructor.ret) {
+                                    BcType::Class(class) | BcType::Inst(class, _) => Some(class),
+                                    _ => None,
+                                };
+                                if class.is_some_and(|class| {
+                                    module.classes[class as usize].is_frozen
+                                        && application
+                                            .types
+                                            .iter()
+                                            .any(|ty| !ctx.type_always_frozen(*ty, false))
+                                }) {
+                                    return Err(err(
+                                        fidx,
+                                        at("a frozen class slot needs always-frozen type arguments"),
                                     ));
                                 }
                             }

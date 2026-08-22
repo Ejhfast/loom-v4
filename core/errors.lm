@@ -2,7 +2,7 @@
 #
 # These values describe portable text conversion and index failures.
 
-enum IoError implements Display
+enum IoError implements Error
   BrokenPipe
   InvalidInput(message: String)
   LimitExceeded(message: String)
@@ -20,7 +20,7 @@ enum IoError implements Display
   end
 end
 
-enum EnvError implements Display
+enum EnvError implements Error
   InvalidName(message: String)
   InvalidEncoding(message: String)
   PermissionDenied(message: String)
@@ -38,7 +38,7 @@ enum EnvError implements Display
   end
 end
 
-enum EntropyError implements Display
+enum EntropyError implements Error
   InvalidInput(message: String)
   LimitExceeded(message: String)
   Unavailable(message: String)
@@ -56,7 +56,7 @@ enum EntropyError implements Display
   end
 end
 
-enum Utf8Error implements Display
+enum Utf8Error implements Error
   OutOfBounds
   InvalidBoundary
   InvalidEncoding
@@ -72,7 +72,7 @@ enum Utf8Error implements Display
   end
 end
 
-enum IndexError implements Display
+enum IndexError implements Error
   OutOfBounds
 
   def append_to(self, mut builder: StringBuilder)
@@ -81,7 +81,7 @@ enum IndexError implements Display
   end
 end
 
-enum ParseIntError implements Display
+enum ParseIntError implements Error
   Invalid
   Overflow
   # The radix is outside 2 to 36. A radix can come from data, so this

@@ -2,7 +2,9 @@
 #
 # Absence is a value. There is no nil.
 
-enum Option[T]
+enum Option[T] implements Display when T: Display,
+                          PartialEq when T: PartialEq,
+                          Hashable when T: Hashable
   Some(v: T)
   None
 
@@ -31,6 +33,38 @@ enum Option[T]
     case self
     in Some(v) then v
     in None    then panic(message)
+    end
+  end
+
+  def append_to(self, mut builder: StringBuilder) when T: Display
+    case self
+    in Some(value)
+      builder.append("Some(")
+      value.append_to(builder)
+      builder.append(")")
+      ()
+    in None
+      builder.append("None")
+      ()
+    end
+  end
+
+  def __eq__(self, other: Option[T]): Bool when T: PartialEq
+    case self
+    in Some(value)
+      case other
+      in Some(other_value) then value == other_value
+      in None then false
+      end
+    in None
+      other.is_none()
+    end
+  end
+
+  def __hash__(self): Int when T: Hashable
+    case self
+    in Some(value) then hash_combine(1, value.__hash__())
+    in None then hash_combine(0, 0)
     end
   end
 end

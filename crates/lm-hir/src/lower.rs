@@ -472,6 +472,7 @@ pub fn lower_module_with_linkage(
             name: class.name.clone(),
             key: class.key.clone(),
             is_final: class.is_final,
+            is_frozen: class.is_frozen,
             parent: class.parent.unwrap_or(NO_PARENT),
             parent_args: class.parent_args.iter().map(|t| m.bc_ty(*t)).collect(),
             type_params: class.type_params,
@@ -1121,12 +1122,15 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 let exit_b = self.new_block();
                 self.emit(Instr::Jump(cond_b));
                 self.switch_to(cond_b);
-                self.emit(Instr::LoadLocal(*index_slot));
                 self.emit(Instr::LoadLocal(source_slot));
+                self.emit(Instr::LoadLocal(*index_slot));
                 self.emit(Instr::LoadLocal(*epoch_slot));
-                self.emit(extended(ExtendedInstr::MapIterLen));
+                self.emit(extended(ExtendedInstr::MapNextIndex));
+                self.emit(Instr::StoreLocal(*index_slot));
+                self.emit(Instr::LoadLocal(*index_slot));
+                self.emit(Instr::ConstInt(0));
                 self.emit(Instr::LtInt);
-                self.emit(Instr::JumpIfFalse(exit_b));
+                self.emit(Instr::JumpIfTrue(exit_b));
                 self.emit(Instr::Jump(body_b));
 
                 self.switch_to(body_b);
@@ -2188,6 +2192,10 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             }
             lm_abi::INTRINSIC_TEXT_HASH => Instr::Native(lm_bytecode::NativeInstr::TextHash),
             lm_abi::INTRINSIC_BYTES_HASH => Instr::Native(lm_bytecode::NativeInstr::BytesHash),
+            lm_abi::INTRINSIC_HASH_COMBINE => Instr::Native(lm_bytecode::NativeInstr::HashCombine),
+            lm_abi::INTRINSIC_HASH_UNORDERED_COMBINE => {
+                Instr::Native(lm_bytecode::NativeInstr::HashUnorderedCombine)
+            }
             lm_abi::INTRINSIC_TEXT_SPLIT => Instr::Native(lm_bytecode::NativeInstr::TextSplit),
             lm_abi::INTRINSIC_TEXT_LINES => Instr::Native(lm_bytecode::NativeInstr::TextLines),
             lm_abi::INTRINSIC_LIST_LEN => Instr::ListLen,
@@ -2210,6 +2218,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_LIST_ITER_LEN => extended(ExtendedInstr::ListIterLen),
             lm_abi::INTRINSIC_MAP_EPOCH => extended(ExtendedInstr::MapEpoch),
             lm_abi::INTRINSIC_MAP_ITER_LEN => extended(ExtendedInstr::MapIterLen),
+            lm_abi::INTRINSIC_MAP_NEXT_INDEX => extended(ExtendedInstr::MapNextIndex),
             lm_abi::INTRINSIC_MAP_KEY_AT => extended(ExtendedInstr::MapKeyAt),
             lm_abi::INTRINSIC_MAP_VALUE_AT => extended(ExtendedInstr::MapValueAt),
             lm_abi::INTRINSIC_LIST_CAPACITY => extended(ExtendedInstr::ListCapacity),
@@ -3269,6 +3278,9 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
         }
     }
     lowerer.emit(Instr::LoadLocal(self_slot));
+    if class.is_frozen {
+        lowerer.emit(extended(ExtendedInstr::SealInstance));
+    }
     let local_types = lowerer.local_types.clone();
     let blocks = lowerer.finish(true);
     Func {
@@ -3404,6 +3416,8 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::LeBytes)
         | Instr::Native(lm_bytecode::NativeInstr::GtBytes)
         | Instr::Native(lm_bytecode::NativeInstr::GeBytes)
+        | Instr::Native(lm_bytecode::NativeInstr::HashCombine)
+        | Instr::Native(lm_bytecode::NativeInstr::HashUnorderedCombine)
         | Instr::Native(lm_bytecode::NativeInstr::SbAppendChar) => (2, 1),
         Instr::Neg
         | Instr::Not
@@ -3514,6 +3528,7 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
         | ExtendedInstr::ListPop { .. }
         | ExtendedInstr::ListReorder
         | ExtendedInstr::MapClear
+        | ExtendedInstr::SealInstance
         | ExtendedInstr::AsCallback => (1, 1),
         ExtendedInstr::ListGet { .. }
         | ExtendedInstr::MapGet { .. }
@@ -3528,6 +3543,7 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
         | ExtendedInstr::ListContains
         | ExtendedInstr::MapRemove { .. }
         | ExtendedInstr::MapReserve => (2, 1),
+        ExtendedInstr::MapNextIndex => (3, 1),
         ExtendedInstr::ListSet | ExtendedInstr::ListInsert => (3, 1),
         ExtendedInstr::MakeCallback { captures, .. } => (*captures as usize, 1),
         ExtendedInstr::FunctionCode { .. } | ExtendedInstr::ClassCode { .. } => (0, 1),
@@ -3729,6 +3745,10 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::BytesTextView) => "BytesTextView".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::TextHash) => "TextHash".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesHash) => "BytesHash".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::HashCombine) => "HashCombine".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::HashUnorderedCombine) => {
+            "HashUnorderedCombine".to_string()
+        }
         Instr::Native(lm_bytecode::NativeInstr::SbAppendChar) => "SbAppendChar".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::SbByteLen) => "SbByteLen".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::SbFinish) => "SbFinish".to_string(),
@@ -3802,6 +3822,8 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::ListIterLen => "ListIterLen".to_string(),
         ExtendedInstr::MapEpoch => "MapEpoch".to_string(),
         ExtendedInstr::MapIterLen => "MapIterLen".to_string(),
+        ExtendedInstr::MapNextIndex => "MapNextIndex".to_string(),
+        ExtendedInstr::SealInstance => "SealInstance".to_string(),
         ExtendedInstr::MapKeyAt => "MapKeyAt".to_string(),
         ExtendedInstr::MapValueAt => "MapValueAt".to_string(),
         ExtendedInstr::ListCapacity => "ListCapacity".to_string(),
@@ -4037,6 +4059,7 @@ pub fn dump_cfg(module: &Module) -> String {
             BcClassKind::Case => " case",
         };
         let final_mark = if class.is_final { " final" } else { "" };
+        let frozen_mark = if class.is_frozen { " frozen" } else { "" };
         let generics = if class.type_params > 0 {
             format!(" params {}", class.type_params)
         } else {
@@ -4044,7 +4067,7 @@ pub fn dump_cfg(module: &Module) -> String {
         };
         let _ = writeln!(
             out,
-            "class class{cidx} {}{final_mark}{kind}{generics}{parent}",
+            "class class{cidx} {}{final_mark}{frozen_mark}{kind}{generics}{parent}",
             class.name
         );
         for (fidx, (name, ty)) in class.fields.iter().enumerate() {

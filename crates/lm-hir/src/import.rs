@@ -732,6 +732,7 @@ impl<'a> Materializer<'a> {
             imported: true,
             source_span: None,
             is_final: class.is_final,
+            is_frozen: class.is_frozen,
             native_repr: None,
             name: item.name.clone(),
             parent,

@@ -1,6 +1,6 @@
 # Core: TLS stream resources and operation boundary values.
 
-enum TlsError implements Display
+enum TlsError implements Error
   InvalidConfig(message: String)
   Handshake(message: String)
   Certificate(message: String)

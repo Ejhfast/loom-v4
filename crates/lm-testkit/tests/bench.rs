@@ -236,6 +236,16 @@ fn bench_language_operations() {
         base,
     );
 
+    // Each map removal leaves one tombstone. Reinsertion keeps the
+    // live map size stable and exercises periodic compaction.
+    report(
+        "map_remove_reinsert",
+        200_000,
+        "m: {Int: Int} = {}\ni = 0\nwhile i < 1000\n  m.put(i, i)\n  i = i + 1\nend\n\
+         j = 0\nwhile j < 200000\n  key = j % 1000\n  m.remove(key)\n  m.put(key, key)\n  j = j + 1\nend\nm.len()\n",
+        base,
+    );
+
     // String interpolation formats one integer into new short text.
     // Accumulation here would measure quadratic copying instead.
     report(
@@ -282,6 +292,42 @@ fn bench_language_operations() {
         "partial_eq",
         1_000_000,
         "final class Token implements PartialEq\n  value: Int\n  def init(mut self, value: Int)\n    self.value = value\n  end\n  def __eq__(self, other: Token): Bool\n    self.value == other.value\n  end\nend\ndef same[T: PartialEq](a: T, b: T): Bool\n  a == b\nend\na = Token(7)\nb = Token(7)\ni = 0\nequal = false\nwhile i < 1000000\n  equal = same(a, b)\n  i = i + 1\nend\nequal\n",
+        base,
+    );
+
+    // Conditional list equality compares all elements.
+    report(
+        "list_eq",
+        200_000,
+        "left = [1, 2, 3, 4, 5, 6, 7, 8]\nright = left.copy()\n\
+         i = 0\nequal = false\nwhile i < 200000\n  equal = left == right\n  i = i + 1\nend\nequal\n",
+        base,
+    );
+
+    // Conditional list hashing combines all elements.
+    report(
+        "list_hash",
+        200_000,
+        "values = [1, 2, 3, 4, 5, 6, 7, 8]\ni = 0\nhash = 0\n\
+         while i < 200000\n  hash = hash_of(values)\n  i = i + 1\nend\nhash\n",
+        base,
+    );
+
+    // Tuple hashing uses the ordinary conditional interface path.
+    report(
+        "tuple_hash",
+        200_000,
+        "value = (1, 2, 3, 4)\ni = 0\nhash = 0\nwhile i < 200000\n  \
+         hash = hash_of(value)\n  i = i + 1\nend\nhash\n",
+        base,
+    );
+
+    // Closure-free sorting copies and sorts sixteen integers.
+    report(
+        "list_sort",
+        20_000,
+        "source = [16, 7, 12, 3, 10, 1, 14, 5, 8, 15, 2, 11, 6, 13, 4, 9]\n\
+         i = 0\nfirst = 0\nwhile i < 20000\n  values = source.copy()\n  values.sort()\n  first = values.at(0)\n  i = i + 1\nend\nfirst\n",
         base,
     );
 

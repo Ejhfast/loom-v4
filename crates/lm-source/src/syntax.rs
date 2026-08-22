@@ -308,6 +308,7 @@ fn token_kind(token: &Tok) -> u16 {
         | Tok::KwTrue
         | Tok::KwFalse
         | Tok::KwFinal
+        | Tok::KwFrozen
         | Tok::KwClass
         | Tok::KwDo
         | Tok::KwSelf

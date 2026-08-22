@@ -5,6 +5,15 @@
 
 use super::*;
 
+fn execution_fault_message(code: FaultCode) -> &'static str {
+    match code {
+        FaultCode::MutableMapKey => {
+            "freeze the key before insertion, or declare a suitable `frozen class`"
+        }
+        _ => "",
+    }
+}
+
 impl World {
     /// Create a world with the entry loaded into the root machine.
     pub fn new(loaded: &LoadedModule, config: VmConfig, host: Box<dyn Host>) -> World {
@@ -897,7 +906,11 @@ impl World {
                     }
                     match outcome {
                         Err(code) => {
-                            self.machines[act.vm as usize].set_fault(code, "", None);
+                            self.machines[act.vm as usize].set_fault(
+                                code,
+                                execution_fault_message(code),
+                                None,
+                            );
                         }
                         Ok(None) | Ok(Some(ExecOutcome::Continue)) => {}
                         Ok(Some(ExecOutcome::Terminal(value))) => {

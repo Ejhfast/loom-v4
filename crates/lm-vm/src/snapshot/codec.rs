@@ -518,8 +518,11 @@ fn encode_object(out: &mut Out, object: &Object) {
         Object::Map { entries, index } => {
             out.u64(u64::from(index.epoch.0));
             out.leb(entries.capacity() as u64);
-            out.leb(entries.len() as u64);
+            out.leb(index.live_len() as u64);
             for entry in entries {
+                if !entry.is_live() {
+                    continue;
+                }
                 out.value(entry.key);
                 out.value(entry.value);
                 out.i64(entry.semantic_hash);
@@ -2108,8 +2111,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                     semantic_hash: cur.i64()?,
                 });
             }
-            let mut index = MapIndex::default();
-            index.epoch = epoch;
+            let index = MapIndex::with_live(epoch, entries.len());
             Object::Map { entries, index }
         }
         4 => Object::Tuple {

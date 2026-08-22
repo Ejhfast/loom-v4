@@ -5,7 +5,7 @@
 # ordinary typed errors, not machine faults (17.4). `RunSnapshot[T]` and
 # `VmSnapshot` are native snapshot types declared by the ABI.
 
-enum SnapshotError implements Display
+enum SnapshotError implements Error
   # A live host attachment has no bytes to copy. The path names the
   # machine ordinals from the snapshot root to the machine that holds
   # the attachment. The kind names the attachment.
@@ -41,7 +41,12 @@ enum SnapshotError implements Display
 end
 
 # The ordinary error of a restore.
-enum RestoreError
+enum RestoreError implements Error
   # The restored world passed a machine, heap, or graph limit.
   RestoreLimitExceeded
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append("the restored world exceeds its limit")
+    ()
+  end
 end

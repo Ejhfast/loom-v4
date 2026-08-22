@@ -105,7 +105,9 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 40 activates equality hooks through `PartialEq`.
 /// Version 41 adds `Hashable` map paths and stable native hashes.
 /// Version 42 adds conditional conformance contracts.
-pub const COMPILER_ABI_VERSION: u32 = 42;
+/// Version 43 lowers ordered and unordered hash mixing.
+/// Version 44 lowers tombstone-aware map traversal.
+pub const COMPILER_ABI_VERSION: u32 = 44;
 
 /// The refinement work budget of one component.
 ///
@@ -901,6 +903,8 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BytesTextView)
         | Instr::Native(NativeInstr::TextHash)
         | Instr::Native(NativeInstr::BytesHash)
+        | Instr::Native(NativeInstr::HashCombine)
+        | Instr::Native(NativeInstr::HashUnorderedCombine)
         | Instr::Freeze
         | Instr::EqDigest
         | Instr::NeDigest
@@ -1078,6 +1082,8 @@ fn preflight_extended(
         | ExtendedInstr::ListIterLen
         | ExtendedInstr::MapEpoch
         | ExtendedInstr::MapIterLen
+        | ExtendedInstr::MapNextIndex
+        | ExtendedInstr::SealInstance
         | ExtendedInstr::MapKeyAt
         | ExtendedInstr::MapValueAt
         | ExtendedInstr::ListCapacity
@@ -1920,6 +1926,7 @@ impl<'a> Resolver<'a> {
             BcClassKind::Case => 2,
         });
         out.push(u8::from(class.is_final));
+        out.push(u8::from(class.is_frozen));
         out.extend_from_slice(&class.type_params.to_le_bytes());
         self.bounds_bytes(&mut out, &self.module.class_bounds[c as usize], true);
         match class.parent() {
@@ -2161,6 +2168,8 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::BbFinish) => 0xa5,
             Instr::Native(NativeInstr::TextHash) => 0xed,
             Instr::Native(NativeInstr::BytesHash) => 0xee,
+            Instr::Native(NativeInstr::HashCombine) => 0xf7,
+            Instr::Native(NativeInstr::HashUnorderedCombine) => 0xf8,
             Instr::Jump(..) => 0x31,
             Instr::JumpIfFalse(..) => 0x32,
             Instr::JumpIfTrue(..) => 0x33,
@@ -2197,6 +2206,8 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::ListIterLen => 0xbe,
             ExtendedInstr::MapEpoch => 0xbf,
             ExtendedInstr::MapIterLen => 0xc0,
+            ExtendedInstr::MapNextIndex => 0xf9,
+            ExtendedInstr::SealInstance => 0xfa,
             ExtendedInstr::MapKeyAt => 0xc1,
             ExtendedInstr::MapValueAt => 0xc2,
             ExtendedInstr::ListCapacity => 0xc3,
@@ -2502,6 +2513,8 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::BbFinish)
             | Instr::Native(NativeInstr::TextHash)
             | Instr::Native(NativeInstr::BytesHash)
+            | Instr::Native(NativeInstr::HashCombine)
+            | Instr::Native(NativeInstr::HashUnorderedCombine)
             | Instr::Return
             | Instr::CallArgs
             | Instr::FaultCode
@@ -2567,6 +2580,8 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::ListIterLen
             | ExtendedInstr::MapEpoch
             | ExtendedInstr::MapIterLen
+            | ExtendedInstr::MapNextIndex
+            | ExtendedInstr::SealInstance
             | ExtendedInstr::MapKeyAt
             | ExtendedInstr::MapValueAt
             | ExtendedInstr::ListCapacity

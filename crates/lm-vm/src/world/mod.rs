@@ -365,14 +365,17 @@ impl lm_graph::CodeIdentity for ModuleCodes<'_> {
                 };
                 Ok(vec![Some(element); items.len()])
             }
-            Object::Map { entries, .. } => {
+            Object::Map { entries, index } => {
                 let Some(ClosedType::Map(key, value)) =
                     expected.and_then(|ty| self.envs.ty(ty)).cloned()
                 else {
                     return Err(FaultCode::BoundaryViolation);
                 };
-                let mut types = Vec::with_capacity(entries.len().saturating_mul(2));
-                for _ in entries {
+                let mut types = Vec::with_capacity(index.live_len().saturating_mul(2));
+                for entry in entries {
+                    if !entry.is_live() {
+                        continue;
+                    }
                     types.push(Some(key));
                     types.push(Some(value));
                 }

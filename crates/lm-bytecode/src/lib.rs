@@ -187,6 +187,8 @@ pub struct BcClass {
     pub key: String,
     /// True when the class cannot have a subclass.
     pub is_final: bool,
+    /// True when completed instances are always frozen.
+    pub is_frozen: bool,
     /// Parent class index, or `NO_PARENT`.
     pub parent: u32,
     /// Type arguments of a generic parent, as type indices. Empty
@@ -566,6 +568,10 @@ pub enum ExtendedInstr {
     MapEpoch,
     /// Pop an epoch and a map. Push the length after an epoch check.
     MapIterLen,
+    /// Pop an epoch, cursor, and map. Push the next live raw index.
+    MapNextIndex,
+    /// Pop one frozen-class instance, seal it, and push it.
+    SealInstance,
     /// Pop a position and a map. Push the key at that position.
     MapKeyAt,
     /// Pop a position and a map. Push the value at that position.
@@ -813,6 +819,10 @@ pub enum NativeInstr {
     TextHash,
     /// Pop Bytes and push its stable semantic hash.
     BytesHash,
+    /// Pop two integers and push their ordered hash mix.
+    HashCombine,
+    /// Pop two integers and push their order-independent hash mix.
+    HashUnorderedCombine,
 }
 
 impl Instr {
@@ -1155,7 +1165,9 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 45 binds each artifact to one ABI bundle digest.
 /// Version 46 adds interface inheritance and bare `Self` contracts.
 /// Version 47 stores conditional conformance premises.
-pub const VERSION: u16 = 47;
+/// Version 48 adds ordered and unordered hash instructions.
+/// Version 49 adds tombstone-aware map traversal.
+pub const VERSION: u16 = 49;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -1375,6 +1387,10 @@ const OP_MAP_PROBE_SET_VALUE: u8 = 0xf3;
 const OP_MAP_PROBE_REMOVE: u8 = 0xf4;
 const OP_MAP_INSERT_HASHED: u8 = 0xf5;
 const OP_MAP_WRITE_GUARD: u8 = 0xf6;
+const OP_HASH_COMBINE: u8 = 0xf7;
+const OP_HASH_UNORDERED_COMBINE: u8 = 0xf8;
+const OP_MAP_NEXT_INDEX: u8 = 0xf9;
+const OP_SEAL_INSTANCE: u8 = 0xfa;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -1597,6 +1613,7 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
             BcClassKind::Case => KIND_CASE,
         });
         out.push(u8::from(class.is_final));
+        out.push(u8::from(class.is_frozen));
         write_u32(&mut out, class.fields.len() as u32);
         for (name, ty) in &class.fields {
             write_bytes(&mut out, name.as_bytes());
@@ -2099,6 +2116,8 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::BytesTextView) => out.push(OP_BYTES_TEXT_VIEW),
         Instr::Native(NativeInstr::TextHash) => out.push(OP_TEXT_HASH),
         Instr::Native(NativeInstr::BytesHash) => out.push(OP_BYTES_HASH),
+        Instr::Native(NativeInstr::HashCombine) => out.push(OP_HASH_COMBINE),
+        Instr::Native(NativeInstr::HashUnorderedCombine) => out.push(OP_HASH_UNORDERED_COMBINE),
         Instr::Native(NativeInstr::LtBytes) => out.push(OP_LT_BYTES),
         Instr::Native(NativeInstr::LeBytes) => out.push(OP_LE_BYTES),
         Instr::Native(NativeInstr::GtBytes) => out.push(OP_GT_BYTES),
@@ -2209,6 +2228,8 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
         ExtendedInstr::ListIterLen => out.push(OP_LIST_ITER_LEN),
         ExtendedInstr::MapEpoch => out.push(OP_MAP_EPOCH),
         ExtendedInstr::MapIterLen => out.push(OP_MAP_ITER_LEN),
+        ExtendedInstr::MapNextIndex => out.push(OP_MAP_NEXT_INDEX),
+        ExtendedInstr::SealInstance => out.push(OP_SEAL_INSTANCE),
         ExtendedInstr::MapKeyAt => out.push(OP_MAP_KEY_AT),
         ExtendedInstr::MapValueAt => out.push(OP_MAP_VALUE_AT),
         ExtendedInstr::ListCapacity => out.push(OP_LIST_CAPACITY),
@@ -2956,6 +2977,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             other => return Err(DecodeError::BadClassKind(other)),
         };
         let is_final = cur.flag()?;
+        let is_frozen = cur.flag()?;
         let field_count = cur.len()?;
         let mut fields = Vec::with_capacity(field_count);
         for _ in 0..field_count {
@@ -2974,6 +2996,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             name: String::new(),
             key: String::new(),
             is_final,
+            is_frozen,
             parent,
             parent_args,
             type_params,
@@ -3332,6 +3355,8 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_LIST_ITER_LEN => Instr::Extended(ExtendedInstr::ListIterLen),
         OP_MAP_EPOCH => Instr::Extended(ExtendedInstr::MapEpoch),
         OP_MAP_ITER_LEN => Instr::Extended(ExtendedInstr::MapIterLen),
+        OP_MAP_NEXT_INDEX => Instr::Extended(ExtendedInstr::MapNextIndex),
+        OP_SEAL_INSTANCE => Instr::Extended(ExtendedInstr::SealInstance),
         OP_MAP_KEY_AT => Instr::Extended(ExtendedInstr::MapKeyAt),
         OP_MAP_VALUE_AT => Instr::Extended(ExtendedInstr::MapValueAt),
         OP_LIST_CAPACITY => Instr::Extended(ExtendedInstr::ListCapacity),
@@ -3404,6 +3429,8 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_BYTES_TEXT_VIEW => Instr::Native(NativeInstr::BytesTextView),
         OP_TEXT_HASH => Instr::Native(NativeInstr::TextHash),
         OP_BYTES_HASH => Instr::Native(NativeInstr::BytesHash),
+        OP_HASH_COMBINE => Instr::Native(NativeInstr::HashCombine),
+        OP_HASH_UNORDERED_COMBINE => Instr::Native(NativeInstr::HashUnorderedCombine),
         OP_LT_BYTES => Instr::Native(NativeInstr::LtBytes),
         OP_LE_BYTES => Instr::Native(NativeInstr::LeBytes),
         OP_GT_BYTES => Instr::Native(NativeInstr::GtBytes),
@@ -3524,6 +3551,7 @@ mod tests {
                     parent_args: Vec::new(),
                     key: "Counter".to_string(),
                     is_final: false,
+                    is_frozen: false,
                     parent: NO_PARENT,
                     type_params: 0,
                     kind: BcClassKind::Normal,
@@ -3535,6 +3563,7 @@ mod tests {
                     parent_args: Vec::new(),
                     key: "Box".to_string(),
                     is_final: false,
+                    is_frozen: false,
                     parent: NO_PARENT,
                     type_params: 1,
                     kind: BcClassKind::Normal,
@@ -3847,6 +3876,8 @@ mod tests {
             Instr::Extended(ExtendedInstr::ListIterLen),
             Instr::Extended(ExtendedInstr::MapEpoch),
             Instr::Extended(ExtendedInstr::MapIterLen),
+            Instr::Extended(ExtendedInstr::MapNextIndex),
+            Instr::Extended(ExtendedInstr::SealInstance),
             Instr::Extended(ExtendedInstr::MapKeyAt),
             Instr::Extended(ExtendedInstr::MapValueAt),
             Instr::Extended(ExtendedInstr::ListCapacity),
@@ -3903,6 +3934,8 @@ mod tests {
             Instr::Native(NativeInstr::BbAppend),
             Instr::Native(NativeInstr::BbLen),
             Instr::Native(NativeInstr::BbBuild),
+            Instr::Native(NativeInstr::HashCombine),
+            Instr::Native(NativeInstr::HashUnorderedCombine),
             Instr::Freeze,
             Instr::FaultCode,
             Instr::FaultDenied,

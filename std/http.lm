@@ -3,7 +3,7 @@
 use std.tls.Tls
 use std.tls.TlsClientConfig
 
-enum HttpError implements Display
+enum HttpError implements Error
   InvalidRequest(message: String)
   InvalidResponse(message: String)
   LimitExceeded(message: String)

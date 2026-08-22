@@ -741,6 +741,42 @@ fn verify_classes(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             }
             BcClassKind::Normal => {}
         }
+        if class.is_frozen {
+            if !class.is_final {
+                return Err(cerr("a frozen class must also be final".to_string()));
+            }
+            if class.kind != BcClassKind::Normal {
+                return Err(cerr("only a normal class can be frozen".to_string()));
+            }
+            if class.parent().is_some() {
+                return Err(cerr("a frozen class cannot declare a parent".to_string()));
+            }
+            if !extern_classes[cidx] {
+                let constructors: Vec<_> = module
+                    .bindings
+                    .iter()
+                    .filter(|binding| binding.class == cidx as u32)
+                    .collect();
+                if constructors.len() != 1 {
+                    return Err(cerr(
+                        "a frozen class needs one named constructor".to_string(),
+                    ));
+                }
+                if constructors[0].func as usize >= module.funcs.len() {
+                    return Err(cerr(
+                        "the frozen class constructor does not exist".to_string(),
+                    ));
+                }
+                let constructor = &module.funcs[constructors[0].func as usize];
+                if !constructor.blocks.iter().flatten().any(|instruction| {
+                    matches!(instruction, Instr::Extended(ExtendedInstr::SealInstance))
+                }) {
+                    return Err(cerr(
+                        "the frozen class constructor does not seal its instance".to_string(),
+                    ));
+                }
+            }
+        }
         if let Some(p) = class.parent() {
             if p as usize >= cidx {
                 return Err(cerr(format!("parent {p} is not an earlier class entry")));
@@ -828,6 +864,11 @@ fn verify_classes(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                     "field `{fname}` cannot store a nonescaping callback"
                 )));
             }
+            if class.is_frozen && !ctx.type_always_frozen(*fty, true) {
+                return Err(cerr(format!(
+                    "frozen class field `{fname}` has a type that is not always frozen"
+                )));
+            }
         }
         // The canonical self type of the class.
         let own_ty = ctx.class_self_type(cidx as u32);
@@ -850,6 +891,11 @@ fn verify_classes(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 )));
             }
             let f = &module.funcs[*func as usize];
+            if class.is_frozen && f.param_muts.first().copied() == Some(true) {
+                return Err(cerr(format!(
+                    "frozen class method function {func} has a mutable receiver"
+                )));
+            }
             if !f.captures.is_empty() {
                 return Err(cerr("a method function must not have captures".to_string()));
             }

@@ -30,7 +30,7 @@ const MAGIC: &[u8; 4] = b"LMIF";
 // Version 17 binds each interface to one immutable ABI bundle.
 // Version 18 adds interface inheritance and bare `Self` contracts.
 // Version 19 stores conditional conformance premises.
-const VERSION: u16 = 19;
+const VERSION: u16 = 20;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -246,6 +246,8 @@ pub struct IfaceClass {
     pub kind: IfaceClassKind,
     /// True when the class cannot have a subclass.
     pub is_final: bool,
+    /// True when completed instances are always frozen.
+    pub is_frozen: bool,
     pub type_params: u32,
     pub type_bounds: Vec<Vec<IfaceInterfaceUse>>,
     pub conformances: Vec<IfaceConformance>,
@@ -720,6 +722,7 @@ fn encode_item(out: &mut Vec<u8>, item: &IfaceItem) {
             out.push(1);
             out.push(class.kind.tag());
             out.push(u8::from(class.is_final));
+            out.push(u8::from(class.is_frozen));
             write_u32(out, class.type_params);
             encode_bounds(out, &class.type_bounds);
             write_u32(out, class.conformances.len() as u32);
@@ -1071,6 +1074,7 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
                 other => return Err(DecodeError::BadClassKind(other)),
             };
             let is_final = cur.flag()?;
+            let is_frozen = cur.flag()?;
             let type_params = cur.u32()?;
             let type_bounds = decode_bounds(cur)?;
             let conformance_count = cur.len()?;
@@ -1157,6 +1161,7 @@ fn decode_item(cur: &mut crate::Cursor<'_>) -> Result<IfaceItem, DecodeError> {
             Ok(IfaceItem::Class(IfaceClass {
                 kind,
                 is_final,
+                is_frozen,
                 type_params,
                 type_bounds,
                 conformances,

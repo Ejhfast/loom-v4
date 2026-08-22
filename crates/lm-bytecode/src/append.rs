@@ -138,6 +138,7 @@ pub fn append_resolved(
                 name: class.name.clone(),
                 key: class.key.clone(),
                 is_final: class.is_final,
+                is_frozen: class.is_frozen,
                 parent: NO_PARENT,
                 parent_args: Vec::new(),
                 type_params: class.type_params,
@@ -772,6 +773,7 @@ fn reloc_class(source: &BcClass, reloc: &AppendReloc) -> BcClass {
         name: source.name.clone(),
         key: source.key.clone(),
         is_final: source.is_final,
+        is_frozen: source.is_frozen,
         parent: source
             .parent()
             .map(|parent| reloc.classes[parent as usize])
@@ -1100,6 +1102,8 @@ fn reloc_extended(instruction: &ExtendedInstr, reloc: &AppendReloc) -> ExtendedI
         | ExtendedInstr::ListIterLen
         | ExtendedInstr::MapEpoch
         | ExtendedInstr::MapIterLen
+        | ExtendedInstr::MapNextIndex
+        | ExtendedInstr::SealInstance
         | ExtendedInstr::MapKeyAt
         | ExtendedInstr::MapValueAt
         | ExtendedInstr::ListCapacity

@@ -1,6 +1,6 @@
 # Core: portable file operation values.
 
-enum FsError implements Display
+enum FsError implements Error
   Closed
   Failed(message: String)
 

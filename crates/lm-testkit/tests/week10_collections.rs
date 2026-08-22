@@ -910,6 +910,17 @@ fn hashable_map_and_set_example_has_checked_output() {
 }
 
 #[test]
+fn conditional_core_protocol_example_has_checked_output() {
+    let path = lm_testkit::repo_root()
+        .join("examples/13-collections-and-interfaces/10-conditional-core-protocols.lm");
+    let source = std::fs::read_to_string(path).expect("the example reads");
+    assert_eq!(
+        outcome(&source),
+        "Done((\"[ready, set]\", \"[(1, one), (2, two)]\", 20, Some((1, \"one\")), true))"
+    );
+}
+
+#[test]
 fn native_for_covers_list_map_text_and_range() {
     let source = r#"
 class Source
@@ -2035,6 +2046,62 @@ table.put(1, 2)
         .restore_image(0, target, &admitted)
         .expect("the image restores");
     assert_eq!(heap_collection_capacities(fresh.heap_of(root)), before);
+}
+
+#[test]
+fn snapshots_store_tombstoned_maps_as_dense_entries() {
+    let source = r#"
+table: Map[Int, Int] = {}
+for value in Range(0, 6)
+  table.put(value, value * 10)
+end
+table.remove(1)
+table.remove(4)
+table
+"#;
+    let module = compile_text("collections.lm", source).expect("the source compiles");
+    let loaded = lm_vm::load(module).expect("the module loads");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(
+        world.show_outcome(&outcome),
+        "Done({0: 0, 2: 20, 3: 30, 5: 50})"
+    );
+    let gate = world.next_gate();
+    let snapshot = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the snapshot succeeds");
+
+    let entries = snapshot
+        .world()
+        .machines
+        .iter()
+        .flat_map(|machine| machine.objects.iter())
+        .find_map(|object| match &object.object {
+            Object::Map { entries, index } if index.live_len() == 4 => Some(entries),
+            _ => None,
+        })
+        .expect("the image contains the map");
+    assert_eq!(entries.len(), 4);
+    assert!(entries.iter().all(lm_heap::MapEntry::is_live));
+
+    let bytes = codec::encode(snapshot.world(), usize::MAX).expect("the image encodes");
+    let decoded = codec::decode(&bytes, LoadLimits::default()).expect("the image decodes");
+    let decoded_entries = decoded
+        .machines
+        .iter()
+        .flat_map(|machine| machine.objects.iter())
+        .find_map(|object| match &object.object {
+            Object::Map { entries, index } if index.live_len() == 4 => Some(entries),
+            _ => None,
+        })
+        .expect("the decoded image contains the map");
+    assert_eq!(decoded_entries.len(), 4);
+    assert!(decoded_entries.iter().all(lm_heap::MapEntry::is_live));
 }
 
 fn collection_map_hashes(image: &lm_vm::snapshot::Image) -> Vec<i64> {

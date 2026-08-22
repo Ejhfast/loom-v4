@@ -230,7 +230,7 @@ fn check_one(
 
             let children = match object {
                 Object::List { items, .. } | Object::Tuple { items } => items.len(),
-                Object::Map { entries, .. } => entries.len(),
+                Object::Map { index, .. } => index.live_len(),
                 Object::Instance { fields, .. } => fields.len(),
                 Object::DynValue { .. } => 1,
                 _ => 0,
@@ -463,6 +463,9 @@ fn check_object(
             let key = child(module, envs, expect, 0)?;
             let value = child(module, envs, expect, 1)?;
             for entry in entries {
+                if !entry.is_live() {
+                    continue;
+                }
                 scratch.work.push((entry.key, key));
                 scratch.work.push((entry.value, value));
             }

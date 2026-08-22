@@ -90,7 +90,7 @@ end
 final class ClassBinding
 end
 
-final class CodeError implements Display
+final class CodeError implements Error
   message: String
 
   def init(mut self, message: String)

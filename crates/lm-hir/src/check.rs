@@ -355,6 +355,7 @@ pub(crate) struct ClassInfo {
     pub(crate) imported: bool,
     pub(crate) source_span: Option<Span>,
     pub(crate) is_final: bool,
+    pub(crate) is_frozen: bool,
     pub(crate) native_repr: Option<NativeRepr>,
     pub(crate) name: String,
     pub(crate) parent: Option<u32>,
@@ -389,6 +390,7 @@ impl ClassInfo {
             imported: false,
             source_span: None,
             is_final: false,
+            is_frozen: false,
             native_repr: None,
             name: String::new(),
             parent: None,
@@ -754,6 +756,58 @@ pub(crate) struct Ctx {
 }
 
 impl Ctx {
+    /// Test whether every value of one type is deeply frozen.
+    pub(crate) fn type_always_frozen(&self, ty: TypeId, allow_var: bool) -> bool {
+        self.type_always_frozen_inner(ty, allow_var, 0)
+    }
+
+    fn type_always_frozen_inner(&self, ty: TypeId, allow_var: bool, depth: usize) -> bool {
+        if depth >= 128 {
+            return false;
+        }
+        match self.store.get(ty) {
+            Type::Unit
+            | Type::Bool
+            | Type::Int
+            | Type::String
+            | Type::Never
+            | Type::Bytes
+            | Type::Digest
+            | Type::Fault
+            | Type::Op(_, _) => true,
+            Type::Var(_) => allow_var,
+            Type::Tuple(items) => items
+                .iter()
+                .all(|item| self.type_always_frozen_inner(*item, allow_var, depth + 1)),
+            Type::Class(class) => self.class_always_frozen(class.0),
+            Type::Inst(class, args) => {
+                self.class_always_frozen(class.0)
+                    && args
+                        .iter()
+                        .all(|arg| self.type_always_frozen_inner(*arg, allow_var, depth + 1))
+            }
+            _ => false,
+        }
+    }
+
+    fn class_always_frozen(&self, class: u32) -> bool {
+        let info = &self.classes[class as usize];
+        info.is_frozen
+            || matches!(
+                info.native_repr,
+                Some(
+                    NativeRepr::Unit
+                        | NativeRepr::Int
+                        | NativeRepr::Bool
+                        | NativeRepr::Text
+                        | NativeRepr::String
+                        | NativeRepr::Substring
+                        | NativeRepr::Char
+                        | NativeRepr::Bytes
+                )
+            )
+    }
+
     /// Where one class comes from. The registration order fixes the
     /// three ranges: the core, then this module, then the imports.
     pub(crate) fn class_origin(&self, class: u32) -> crate::iface::ClassOrigin {
@@ -2081,6 +2135,8 @@ pub fn check_module_with(
     resolve_all_classes(&mut ctx, core, true).map_err(core_defect)?;
     // Pass 2c: resolve user classes and enums in class-index order.
     resolve_all_classes(&mut ctx, module, false)?;
+    check_frozen_classes(&ctx, core, true).map_err(core_defect)?;
+    check_frozen_classes(&ctx, module, false)?;
     check_all_conformances(&mut ctx, core, true).map_err(core_defect)?;
     check_all_conformances(&mut ctx, module, false)?;
     // Pass 2d: check every mailbox message type. The walk reads the
@@ -2395,6 +2451,7 @@ fn assemble(
             imported: info.imported,
             source_span: info.source_span,
             is_final: info.is_final,
+            is_frozen: info.is_frozen,
             native_repr: info.native_repr,
             name: info.name.clone(),
             key: keys[idx].clone(),
@@ -3756,6 +3813,26 @@ fn check_class_conformances(
                 .collect();
             let required_ret = ctx.store.substitute(requirement.ret, &types, &rows);
             let required_row = ctx.store.substitute_row(&requirement.row, &rows);
+            if method.mut_self != requirement.mut_self {
+                let required = if requirement.mut_self {
+                    "`mut self`"
+                } else {
+                    "`self`"
+                };
+                let found = if method.mut_self {
+                    "`mut self`"
+                } else {
+                    "`self`"
+                };
+                return Err(Diagnostic::new(
+                    "E1053",
+                    format!(
+                        "the method `{}` uses {found}, but interface `{}` requires {required}",
+                        requirement.name, contract.name
+                    ),
+                    declaration_span,
+                ));
+            }
             let parameters_match = method.params.len() == required_params.len()
                 && method
                     .params
@@ -3769,8 +3846,7 @@ fn check_class_conformances(
                             ctx.store.compatible(*implementation, *required)
                         }
                     });
-            let same_shape = method.mut_self == requirement.mut_self
-                && parameters_match
+            let same_shape = parameters_match
                 && method.param_muts == requirement.param_muts
                 && method.own_type_params.is_empty()
                 && method.own_effect_params.is_empty();
@@ -3825,6 +3901,42 @@ fn check_all_conformances(
 }
 
 /// Resolve one class declaration: layout, methods, and `init`.
+/// Validate the static storage rules of local frozen classes.
+fn check_frozen_classes(ctx: &Ctx, module: &ast::Module, is_core: bool) -> Result<(), Diagnostic> {
+    for class in &module.classes {
+        if !class.is_frozen {
+            continue;
+        }
+        if let Some(parent) = &class.parent {
+            return Err(Diagnostic::new(
+                "E1038",
+                "a frozen class cannot declare a parent",
+                parent.span,
+            ));
+        }
+        let classes = if is_core {
+            &ctx.core_types
+        } else {
+            &ctx.user_types
+        };
+        let info = &ctx.classes[classes[&class.name] as usize];
+        for (offset, field) in class.fields.iter().enumerate() {
+            let ty = info.field_tys[info.own_start + offset];
+            if !ctx.type_always_frozen(ty, true) {
+                return Err(Diagnostic::new(
+                    "E1038",
+                    format!(
+                        "the frozen class field `{}` has a type that is not always frozen",
+                        field.name
+                    ),
+                    field.span,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_class(
     ctx: &mut Ctx,
     class: &ast::ClassDef,
@@ -4071,6 +4183,13 @@ fn resolve_class(
             init = Some(msig);
             continue;
         }
+        if class.is_frozen && method.mut_self {
+            return Err(Diagnostic::new(
+                "E1038",
+                "a frozen class permits `mut self` only in `init`",
+                method.name_span,
+            ));
+        }
         let msig = resolve_method_sig(
             ctx,
             method,
@@ -4154,6 +4273,7 @@ fn resolve_class(
         imported: false,
         source_span: (!is_core).then_some(class.span),
         is_final: class.is_final,
+        is_frozen: class.is_frozen,
         native_repr,
         name: class.name.clone(),
         parent,
@@ -4263,6 +4383,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
         imported: false,
         source_span: (!is_core).then_some(enum_def.span),
         is_final: false,
+        is_frozen: false,
         native_repr: None,
         name: enum_def.name.clone(),
         parent: None,
@@ -4304,6 +4425,7 @@ fn resolve_enum(ctx: &mut Ctx, enum_def: &ast::EnumDef, is_core: bool) -> Result
             imported: false,
             source_span: (!is_core).then_some(enum_def.span),
             is_final: false,
+            is_frozen: false,
             native_repr: None,
             name: format!("{}.{}", enum_def.name, short),
             parent: Some(parent_idx),

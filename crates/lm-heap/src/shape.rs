@@ -111,8 +111,10 @@ mod epoch_tests {
 /// This charge includes each stored semantic hash and most index capacity.
 #[derive(Debug, Clone, Default)]
 pub struct MapIndex {
-    /// The number of entries the table already indexes.
+    /// The raw entry prefix that the table already indexes.
     pub built: u32,
+    /// The number of live entries.
+    live: u32,
     /// The structural epoch stored in existing index padding.
     pub epoch: StructuralEpoch,
     slots: Vec<MapSlot>,
@@ -135,6 +137,58 @@ impl MapSlot {
 }
 
 impl MapIndex {
+    /// Create an empty derived index for a known live count.
+    pub fn with_live(epoch: StructuralEpoch, live: usize) -> Self {
+        Self {
+            built: 0,
+            live: u32::try_from(live).expect("map entry count fits u32"),
+            epoch,
+            slots: Vec::new(),
+        }
+    }
+
+    /// Get the number of live entries.
+    pub fn live_len(&self) -> usize {
+        self.live as usize
+    }
+
+    /// Add one live entry and index it.
+    pub fn push_live(&mut self, hash: u64, entry: u32) {
+        self.live = self.live.saturating_add(1);
+        self.insert(hash, entry);
+    }
+
+    /// Advance the indexed prefix over one tombstone.
+    pub fn skip_tombstone(&mut self, entry: u32) {
+        debug_assert_eq!(entry, self.built);
+        self.built += 1;
+    }
+
+    /// Record one removed entry.
+    pub fn record_removal(&mut self) {
+        debug_assert!(self.live > 0);
+        self.live -= 1;
+    }
+
+    /// Test whether the map needs stable compaction.
+    pub fn needs_compaction(&self, storage_len: usize) -> bool {
+        let tombstones = storage_len.saturating_sub(self.live_len());
+        tombstones >= 8 && tombstones.saturating_mul(3) > storage_len
+    }
+
+    /// Drop derived data after stable compaction.
+    pub fn record_compaction(&mut self) {
+        self.built = 0;
+        self.slots.clear();
+    }
+
+    /// Reset one empty map.
+    pub fn reset(&mut self) {
+        self.built = 0;
+        self.live = 0;
+        self.slots.clear();
+    }
+
     /// Entry indices whose stored key has this hash.
     pub fn candidates(&self, hash: u64) -> MapCandidates<'_> {
         let remaining = self.slots.len();
@@ -180,8 +234,8 @@ impl MapIndex {
     /// Add one indexed entry.
     pub fn insert(&mut self, hash: u64, entry: u32) {
         debug_assert_eq!(entry, self.built);
-        let built = self.built as usize;
-        if self.slots.is_empty() || (built + 1) * 3 > self.slots.len() * 2 {
+        let required = self.live_len().max(self.built as usize + 1);
+        if self.slots.is_empty() || required * 3 > self.slots.len() * 2 {
             self.grow();
         }
         insert_map_slot(&mut self.slots, hash, entry);
@@ -268,6 +322,21 @@ pub struct MapEntry {
     pub value: Value,
     /// The stable semantic hash of `key`.
     pub semantic_hash: i64,
+}
+
+impl MapEntry {
+    /// Test whether this entry contains a key and value.
+    pub fn is_live(&self) -> bool {
+        !matches!(self.key, Value::Uninit)
+    }
+
+    /// Replace this entry with an internal tombstone.
+    pub fn remove(&mut self) -> Value {
+        debug_assert!(self.is_live());
+        self.key = Value::Uninit;
+        self.semantic_hash = 0;
+        std::mem::replace(&mut self.value, Value::Uninit)
+    }
 }
 
 impl PartialEq for MapEntry {
@@ -868,6 +937,9 @@ impl Object {
                 let mut copied = Vec::new();
                 copied.try_reserve_exact(entries.capacity())?;
                 for entry in entries {
+                    if !entry.is_live() {
+                        continue;
+                    }
                     let key = match entry.key {
                         Value::Obj(reference) => Value::Obj(map(reference)),
                         other => other,
@@ -882,10 +954,7 @@ impl Object {
                         semantic_hash: entry.semantic_hash,
                     });
                 }
-                let copied_index = MapIndex {
-                    epoch: index.epoch,
-                    ..MapIndex::default()
-                };
+                let copied_index = MapIndex::with_live(index.epoch, copied.len());
                 Object::Map {
                     entries: copied,
                     index: copied_index,
@@ -1169,6 +1238,9 @@ impl Object {
                 // The index holds hashes and positions only, never an
                 // object reference, so the walk covers the entries.
                 for entry in entries {
+                    if !entry.is_live() {
+                        continue;
+                    }
                     visit(&entry.key);
                     visit(&entry.value);
                 }
@@ -1230,19 +1302,17 @@ impl Object {
                 epoch: *epoch,
             },
             Object::Map { entries, index } => {
-                let copied_index = MapIndex {
-                    epoch: index.epoch,
-                    ..MapIndex::default()
-                };
+                let copied_index = MapIndex::with_live(index.epoch, index.live_len());
+                let mut copied = Vec::with_capacity(entries.capacity());
+                copied.extend(entries.iter().filter(|entry| entry.is_live()).map(|entry| {
+                    MapEntry {
+                        key: Value::Unit,
+                        value: Value::Unit,
+                        semantic_hash: entry.semantic_hash,
+                    }
+                }));
                 Object::Map {
-                    entries: entries
-                        .iter()
-                        .map(|entry| MapEntry {
-                            key: Value::Unit,
-                            value: Value::Unit,
-                            semantic_hash: entry.semantic_hash,
-                        })
-                        .collect(),
+                    entries: copied,
                     index: copied_index,
                 }
             }
@@ -1303,19 +1373,17 @@ impl Object {
                 epoch: *epoch,
             },
             Object::Map { entries, index } => {
-                let copied_index = MapIndex {
-                    epoch: index.epoch,
-                    ..MapIndex::default()
-                };
+                let copied_index = MapIndex::with_live(index.epoch, index.live_len());
+                let mut copied = Vec::with_capacity(entries.capacity());
+                copied.extend(entries.iter().filter(|entry| entry.is_live()).map(|entry| {
+                    MapEntry {
+                        key: value(entry.key),
+                        value: value(entry.value),
+                        semantic_hash: entry.semantic_hash,
+                    }
+                }));
                 Object::Map {
-                    entries: entries
-                        .iter()
-                        .map(|entry| MapEntry {
-                            key: value(entry.key),
-                            value: value(entry.value),
-                            semantic_hash: entry.semantic_hash,
-                        })
-                        .collect(),
+                    entries: copied,
                     // The destination index rebuilds on the first lookup.
                     index: copied_index,
                 }
@@ -1445,7 +1513,7 @@ mod tests {
                     value: Value::Obj(b),
                     semantic_hash: 1,
                 }],
-                index: MapIndex::default(),
+                index: MapIndex::with_live(StructuralEpoch::default(), 1),
             },
             Object::Tuple {
                 items: vec![Value::Obj(b), Value::Obj(a)],
@@ -1805,7 +1873,7 @@ mod tests {
                 value: Value::Obj(value),
                 semantic_hash: 1,
             }],
-            index: MapIndex::default(),
+            index: MapIndex::with_live(StructuralEpoch::default(), 1),
         };
         let mut out = Vec::new();
         map.children(&mut out);

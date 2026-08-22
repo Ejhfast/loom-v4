@@ -203,6 +203,8 @@ pub struct HirClass {
     pub source_span: Option<lm_source::Span>,
     /// True when the class cannot have a subclass.
     pub is_final: bool,
+    /// True when completed instances are always frozen.
+    pub is_frozen: bool,
     /// The primitive representation of a native core class.
     pub native_repr: Option<NativeRepr>,
     pub name: String,
@@ -747,6 +749,7 @@ pub fn dump_classes(module: &HirModule) -> String {
     let mut out = String::new();
     for (idx, class) in module.classes.iter().enumerate() {
         let final_mark = if class.is_final { " (final)" } else { "" };
+        let frozen_mark = if class.is_frozen { " (frozen)" } else { "" };
         let native_mark = if class.native_repr.is_some() {
             " (native)"
         } else {
@@ -761,15 +764,21 @@ pub fn dump_classes(module: &HirModule) -> String {
             Some(p) => {
                 let _ = writeln!(
                     out,
-                    "class {} {}{}{}{} < {}",
-                    idx, class.name, final_mark, native_mark, kind, module.classes[p as usize].name
+                    "class {} {}{}{}{}{} < {}",
+                    idx,
+                    class.name,
+                    final_mark,
+                    frozen_mark,
+                    native_mark,
+                    kind,
+                    module.classes[p as usize].name
                 );
             }
             None => {
                 let _ = writeln!(
                     out,
-                    "class {} {}{}{}{}",
-                    idx, class.name, final_mark, native_mark, kind
+                    "class {} {}{}{}{}{}",
+                    idx, class.name, final_mark, frozen_mark, native_mark, kind
                 );
             }
         }

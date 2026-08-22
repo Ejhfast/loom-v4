@@ -531,7 +531,7 @@ fn object_edges(object: &Object) -> usize {
     match object {
         Object::Instance { fields, .. } => fields.len(),
         Object::List { items, .. } | Object::Tuple { items } => items.len(),
-        Object::Map { entries, .. } => entries.len().saturating_mul(2),
+        Object::Map { index, .. } => index.live_len().saturating_mul(2),
         Object::Closure { captures, .. } => captures.len(),
         Object::DynValue { .. } => 1,
         _ => 0,
@@ -545,6 +545,9 @@ fn image_object_values(object: &Object, out: &mut Vec<Value>) {
         | Object::Tuple { items: fields } => out.extend(fields.iter().copied()),
         Object::Map { entries, .. } => {
             for entry in entries {
+                if !entry.is_live() {
+                    continue;
+                }
                 out.push(entry.key);
                 out.push(entry.value);
             }

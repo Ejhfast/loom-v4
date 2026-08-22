@@ -1,6 +1,6 @@
 # Core: immutable bytes and mutable builders.
 
-final class Bytes implements Hashable
+final class Bytes implements Hashable, Comparable
   def len(self): Int
     intrinsic("bytes.len", self)
   end
@@ -100,6 +100,16 @@ final class Bytes implements Hashable
     intrinsic("bytes.hash", self)
   end
 
+  def compare(self, other: Bytes): Ordering
+    if self < other
+      Less
+    elsif self > other
+      Greater
+    else
+      Equal
+    end
+  end
+
   def __lt__(self, other: Bytes): Bool
     intrinsic("bytes.lt", self, other)
   end
@@ -117,7 +127,7 @@ final class Bytes implements Hashable
   end
 end
 
-final class StringBuilder
+final class StringBuilder implements Copyable
   def append(mut self, text: Text): StringBuilder
     intrinsic("string_builder.append", self, text)
   end
@@ -153,9 +163,15 @@ final class StringBuilder
   def finish(mut self): String
     intrinsic("string_builder.finish", self)
   end
+
+  def copy(self): StringBuilder
+    result = StringBuilder()
+    result.append(self.build())
+    result
+  end
 end
 
-final class ByteBuffer
+final class ByteBuffer implements Copyable
   def append(mut self, byte: Int): ByteBuffer
     intrinsic("byte_buffer.append", self, byte)
   end
@@ -218,5 +234,11 @@ final class ByteBuffer
 
   def finish(mut self): Bytes
     intrinsic("byte_buffer.finish", self)
+  end
+
+  def copy(self): ByteBuffer
+    result = ByteBuffer()
+    result.extend(self.build())
+    result
   end
 end

@@ -2,7 +2,7 @@
 //! reconstruction, operation slots, first-class operation types,
 //! table edits, and the `Unreachable` terminator.
 
-use lm_bytecode::{BcRow, BcType, Instr, Module, SlotContract, SlotTarget};
+use lm_bytecode::{BcRow, BcType, ExtendedInstr, Instr, Module, SlotContract, SlotTarget};
 use lm_testkit::compile_text;
 
 fn compile(source: &str) -> Module {
@@ -32,6 +32,110 @@ fn func_index(module: &Module, name: &str) -> usize {
         .iter()
         .position(|f| f.name == name)
         .expect("the function exists")
+}
+
+fn class_index(module: &Module, name: &str) -> usize {
+    module
+        .classes
+        .iter()
+        .position(|class| class.name == name)
+        .expect("the class exists")
+}
+
+fn constructor_index(module: &Module, class: usize) -> usize {
+    module
+        .bindings
+        .iter()
+        .find(|binding| binding.class == class as u32)
+        .map(|binding| binding.func as usize)
+        .expect("the constructor exists")
+}
+
+fn add_constructor_seal(module: &mut Module, class: usize) {
+    let constructor = constructor_index(module, class);
+    let block = module.funcs[constructor]
+        .blocks
+        .iter_mut()
+        .find(|block| {
+            block
+                .iter()
+                .any(|instruction| matches!(instruction, Instr::Return))
+        })
+        .expect("the constructor returns");
+    let position = block
+        .iter()
+        .position(|instruction| matches!(instruction, Instr::Return))
+        .expect("the block returns");
+    block.insert(position, Instr::Extended(ExtendedInstr::SealInstance));
+}
+
+const FROZEN_KEY: &str = r#"
+frozen class Key
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+end
+
+Key(1)
+"#;
+
+#[test]
+fn a_frozen_class_without_a_constructor_seal_is_rejected() {
+    let mut module = compile(FROZEN_KEY);
+    let class = class_index(&module, "Key");
+    let constructor = constructor_index(&module, class);
+    for block in &mut module.funcs[constructor].blocks {
+        block.retain(|instruction| {
+            !matches!(instruction, Instr::Extended(ExtendedInstr::SealInstance))
+        });
+    }
+    assert_rejected(&module, "does not seal its instance");
+}
+
+#[test]
+fn a_seal_on_a_nonfrozen_class_is_rejected() {
+    let mut module = compile(FROZEN_KEY);
+    let class = class_index(&module, "Key");
+    module.classes[class].is_frozen = false;
+    assert_rejected(&module, "seal needs a frozen class");
+}
+
+#[test]
+fn a_forged_frozen_class_with_mutable_storage_is_rejected() {
+    let mut module = compile(
+        r#"
+final class Bad
+  values: List[Int] = []
+end
+Bad()
+"#,
+    );
+    let class = class_index(&module, "Bad");
+    module.classes[class].is_frozen = true;
+    add_constructor_seal(&mut module, class);
+    assert_rejected(&module, "not always frozen");
+}
+
+#[test]
+fn a_forged_frozen_class_with_a_mutable_method_is_rejected() {
+    let mut module = compile(
+        r#"
+final class Bad
+  value: Int = 0
+
+  def change(mut self)
+    self.value = 1
+  end
+end
+Bad()
+"#,
+    );
+    let class = class_index(&module, "Bad");
+    module.classes[class].is_frozen = true;
+    add_constructor_seal(&mut module, class);
+    assert_rejected(&module, "has a mutable receiver");
 }
 
 #[test]
