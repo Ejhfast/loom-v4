@@ -170,6 +170,7 @@ pub enum RootEvent {
 /// so the digest encoder reads the definition hash instead.
 struct ModuleCodes<'m> {
     identity: &'m lm_bytecode::identity::ModuleIdentity,
+    bundle: &'m lm_abi::AbiBundle,
     module: &'m Module,
     envs: &'m mut lm_bytecode::closed::TypeEnvs,
     core: CoreLayout,
@@ -236,6 +237,7 @@ struct PreparedRestoreReply {
 #[derive(Debug, Clone, Copy)]
 enum ResourceBacking {
     Host(u64),
+    Extension(crate::HostResource),
     Driver(VmId),
 }
 
@@ -285,6 +287,12 @@ impl WorldBudget {
 }
 
 impl lm_graph::CodeIdentity for ModuleCodes<'_> {
+    fn op_hash(&self, op: u32) -> Result<[u8; 32], FaultCode> {
+        self.bundle
+            .op_identity(op)
+            .ok_or(FaultCode::BoundaryViolation)
+    }
+
     fn func_hash(&self, func: u32) -> Result<[u8; 32], FaultCode> {
         self.identity
             .func_hashes

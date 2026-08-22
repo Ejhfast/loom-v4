@@ -58,6 +58,13 @@ pub struct DigestOption {
 /// the canonical encoding replaces them with the definition hash the
 /// identity layer proved.
 pub trait CodeIdentity {
+    /// The stable identity of one operation slot.
+    fn op_hash(&self, op: u32) -> Result<[u8; 32], FaultCode> {
+        lm_abi::standard_bundle()
+            .op_identity(op)
+            .ok_or(FaultCode::BoundaryViolation)
+    }
+
     /// The definition hash of one function slot.
     fn func_hash(&self, func: u32) -> Result<[u8; 32], FaultCode>;
     /// The definition hash of one class slot.
@@ -199,7 +206,7 @@ fn encode_value(
             // An operation crosses by manifest identity, never by
             // its dense slot.
             out.push(V_OP);
-            out.extend_from_slice(&lm_abi::op_identity(slot));
+            out.extend_from_slice(&codes.op_hash(slot)?);
         }
         Value::EmptyCase { ty, arm } => {
             out.push(V_EMPTY_CASE);
@@ -379,7 +386,7 @@ fn encode_object(
                 None => out.push(0),
                 Some(slot) => {
                     out.push(1);
-                    out.extend_from_slice(&lm_abi::op_identity(*slot));
+                    out.extend_from_slice(&codes.op_hash(*slot)?);
                 }
             }
             count(out, trace.len())?;

@@ -406,7 +406,13 @@ impl World {
             Resolution::Denied => {
                 self.machines[vm as usize].set_fault(
                     FaultCode::PolicyDenied,
-                    format!("the operation {} is not granted", lm_abi::op_name(op)),
+                    format!(
+                        "the operation {} is not granted",
+                        self.loaded
+                            .bundle()
+                            .op_name(op)
+                            .unwrap_or("<invalid operation>")
+                    ),
                     Some(op),
                 );
             }
@@ -415,7 +421,12 @@ impl World {
                 return self.route_request(stack, surface, vm, cursor, dispatch_mode);
             }
             Resolution::Root => {
-                if lm_abi::op(op).kind == lm_abi::OpKind::VmControl {
+                if self
+                    .loaded
+                    .bundle()
+                    .op(op)
+                    .is_some_and(|operation| operation.kind == lm_abi::OpKind::VmControl)
+                {
                     self.kernel_exec(stack, vm, op, dispatch_mode);
                 } else {
                     // An operation that names a handle answers
@@ -438,7 +449,7 @@ impl World {
                             .get(&resource)
                             .and_then(|file| match file.backing {
                                 ResourceBacking::Driver(driver) => Some(driver),
-                                ResourceBacking::Host(_) => None,
+                                ResourceBacking::Host(_) | ResourceBacking::Extension(_) => None,
                             })
                     });
                     if let Some(driver) = driver {
@@ -470,6 +481,13 @@ impl World {
                             return None;
                         }
                     };
+                    let moved = match self.host_move_resources(vm, op) {
+                        Ok(resources) => resources,
+                        Err(code) => {
+                            self.fault_caller(vm, op, code, "a moved host resource is invalid");
+                            return None;
+                        }
+                    };
                     if let Err(code) = self.machines[vm as usize].resources.prepare_register() {
                         self.machines[vm as usize].set_fault(
                             code,
@@ -486,7 +504,13 @@ impl World {
                         );
                         return None;
                     };
-                    match self.host.start(completion, op, args) {
+                    let started = self.host.start(completion, op, args);
+                    if !matches!(started, HostStart::Failed(_)) {
+                        for resource in moved {
+                            self.retire_resource(resource, false);
+                        }
+                    }
+                    match started {
                         HostStart::Completed(reply) => self.install_host_reply(vm, reply),
                         HostStart::Waiting(token) => self.start_wait(vm, op, token),
                         HostStart::Failed(message) => {
@@ -514,12 +538,17 @@ impl World {
     /// resource registry. Snapshot preflight reads it, and the
     /// completion or the machine termination closes it.
     pub(super) fn start_wait(&mut self, vm: VmId, op: u32, token: u64) {
-        if !lm_abi::op(op).suspends() {
+        let operation = self
+            .loaded
+            .bundle()
+            .op(op)
+            .expect("verified code names an operation");
+        if !operation.suspends() {
             self.machines[vm as usize].set_fault(
                 FaultCode::HostFault,
                 format!(
                     "the host suspended {}, which the manifest declares machine state",
-                    lm_abi::op_name(op)
+                    operation.name
                 ),
                 Some(op),
             );
@@ -562,6 +591,22 @@ impl World {
     pub(super) fn host_args(&self, vm: VmId) -> Result<Vec<HostArg>, FaultCode> {
         let m = &self.machines[vm as usize];
         let pending = m.vm.pending.as_ref().ok_or(FaultCode::MalformedState)?;
+        if pending.op >= lm_abi::OP_COUNT {
+            let operation = self
+                .loaded
+                .bundle()
+                .op(pending.op)
+                .ok_or(FaultCode::MalformedState)?;
+            if operation.params.len() != pending.args.len() {
+                return Err(FaultCode::MalformedState);
+            }
+            return pending
+                .args
+                .iter()
+                .zip(&operation.params)
+                .map(|(value, ty)| self.host_data_arg(vm, *value, *ty))
+                .collect();
+        }
         pending
             .args
             .iter()
@@ -595,7 +640,9 @@ impl World {
                             .ok_or(FaultCode::TypeMismatch)?;
                         match file.backing {
                             ResourceBacking::Host(token) => Ok(HostArg::File(token)),
-                            ResourceBacking::Driver(_) => Err(FaultCode::TypeMismatch),
+                            ResourceBacking::Driver(_) | ResourceBacking::Extension(_) => {
+                                Err(FaultCode::TypeMismatch)
+                            }
                         }
                     }
                     Object::NativeTcpStream { resource } => {
@@ -614,7 +661,9 @@ impl World {
                         }
                         match bound.backing {
                             ResourceBacking::Host(token) => Ok(HostArg::Tls(token)),
-                            ResourceBacking::Driver(_) => Err(FaultCode::TypeMismatch),
+                            ResourceBacking::Driver(_) | ResourceBacking::Extension(_) => {
+                                Err(FaultCode::TypeMismatch)
+                            }
                         }
                     }
                     Object::List { items, .. } => {
@@ -718,6 +767,242 @@ impl World {
                 _ => Err(FaultCode::TypeMismatch),
             })
             .collect()
+    }
+
+    fn host_data_arg(
+        &self,
+        vm: VmId,
+        value: Value,
+        ty: lm_abi::AbiType,
+    ) -> Result<HostArg, FaultCode> {
+        use lm_abi::{AbiConstructor, AbiPrimitive, AbiType};
+        let heap = &self.machines[vm as usize].vm.heap;
+        match ty {
+            AbiType::Primitive(AbiPrimitive::Unit) if value == Value::Unit => Ok(HostArg::Unit),
+            AbiType::Primitive(AbiPrimitive::Bool) => match value {
+                Value::Bool(value) => Ok(HostArg::Bool(value)),
+                _ => Err(FaultCode::TypeMismatch),
+            },
+            AbiType::Primitive(AbiPrimitive::Int) => match value {
+                Value::Int(value) => Ok(HostArg::Int(value)),
+                _ => Err(FaultCode::TypeMismatch),
+            },
+            AbiType::Primitive(AbiPrimitive::String) => match value.as_obj().map(|r| heap.get(r)) {
+                Some(Object::Str(value)) => Ok(HostArg::Str(value.clone())),
+                _ => Err(FaultCode::TypeMismatch),
+            },
+            AbiType::Primitive(AbiPrimitive::Bytes) => match value.as_obj().map(|r| heap.get(r)) {
+                Some(Object::Bytes(value)) => value
+                    .try_bounded()
+                    .map(HostArg::Bytes)
+                    .map_err(|_| FaultCode::HeapLimit),
+                _ => Err(FaultCode::TypeMismatch),
+            },
+            AbiType::Resource(identity) => match value.as_obj().map(|r| heap.get(r)) {
+                Some(Object::NativeHostResource { kind, resource }) if *kind == identity => {
+                    let bound = self
+                        .bound_resources
+                        .get(resource)
+                        .ok_or(FaultCode::TypeMismatch)?;
+                    if bound.owner != vm || bound.kind != crate::ResourceKind::Extension(identity) {
+                        return Err(FaultCode::TypeMismatch);
+                    }
+                    match bound.backing {
+                        ResourceBacking::Extension(resource) => Ok(HostArg::Resource(resource)),
+                        _ => Err(FaultCode::TypeMismatch),
+                    }
+                }
+                _ => Err(FaultCode::TypeMismatch),
+            },
+            AbiType::List(element) => match value.as_obj().map(|r| heap.get(r)) {
+                Some(Object::List { items, .. }) => items
+                    .iter()
+                    .map(|item| self.host_data_arg(vm, *item, *element))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(HostArg::List),
+                _ => Err(FaultCode::TypeMismatch),
+            },
+            AbiType::Tuple(elements) => match value.as_obj().map(|r| heap.get(r)) {
+                Some(Object::Tuple { items }) if items.len() == elements.len() => items
+                    .iter()
+                    .zip(elements)
+                    .map(|(item, element)| self.host_data_arg(vm, *item, *element))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(HostArg::Tuple),
+                _ => Err(FaultCode::TypeMismatch),
+            },
+            AbiType::Apply(AbiConstructor::Option, arguments) if arguments.len() == 1 => {
+                if matches!(value, Value::EmptyCase { arm: 1, .. }) {
+                    return Ok(HostArg::Option(None));
+                }
+                self.host_data_arg(vm, value, arguments[0])
+                    .map(Box::new)
+                    .map(Some)
+                    .map(HostArg::Option)
+            }
+            AbiType::Apply(AbiConstructor::Result, arguments) if arguments.len() == 2 => {
+                let Some(Object::Instance { class, fields, .. }) =
+                    value.as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let [payload] = fields.as_slice() else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                if Some(*class) == self.core.result_ok {
+                    self.host_data_arg(vm, *payload, arguments[0])
+                        .map(Box::new)
+                        .map(Ok)
+                        .map(HostArg::Result)
+                } else if Some(*class) == self.core.result_err {
+                    self.host_data_arg(vm, *payload, arguments[1])
+                        .map(Box::new)
+                        .map(Err)
+                        .map(HostArg::Result)
+                } else {
+                    Err(FaultCode::TypeMismatch)
+                }
+            }
+            AbiType::Apply(AbiConstructor::Pair, arguments) if arguments.len() == 2 => {
+                let Some(Object::Instance { class, fields, .. }) =
+                    value.as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let [first, second] = fields.as_slice() else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                if Some(*class) != self.core.pair {
+                    return Err(FaultCode::TypeMismatch);
+                }
+                Ok(HostArg::Pair(
+                    Box::new(self.host_data_arg(vm, *first, arguments[0])?),
+                    Box::new(self.host_data_arg(vm, *second, arguments[1])?),
+                ))
+            }
+            _ => Err(FaultCode::TypeMismatch),
+        }
+    }
+
+    fn host_move_resources(&self, vm: VmId, op: u32) -> Result<Vec<u64>, FaultCode> {
+        let pending = self.machines[vm as usize]
+            .vm
+            .pending
+            .as_ref()
+            .ok_or(FaultCode::MalformedState)?;
+        if op < lm_abi::OP_COUNT {
+            return Ok(Vec::new());
+        }
+        let operation = self
+            .loaded
+            .bundle()
+            .op(op)
+            .ok_or(FaultCode::MalformedState)?;
+        let mut resources = Vec::new();
+        for ((value, ty), mode) in pending
+            .args
+            .iter()
+            .zip(&operation.params)
+            .zip(&operation.param_modes)
+        {
+            if *mode == lm_abi::BoundaryMode::Move {
+                self.collect_host_resources(vm, *value, *ty, &mut resources)?;
+            }
+        }
+        resources.sort_unstable();
+        let original = resources.len();
+        resources.dedup();
+        if resources.len() != original {
+            return Err(FaultCode::BoundaryViolation);
+        }
+        Ok(resources)
+    }
+
+    fn collect_host_resources(
+        &self,
+        vm: VmId,
+        value: Value,
+        ty: lm_abi::AbiType,
+        out: &mut Vec<u64>,
+    ) -> Result<(), FaultCode> {
+        use lm_abi::{AbiConstructor, AbiType};
+        let heap = &self.machines[vm as usize].vm.heap;
+        match ty {
+            AbiType::Resource(identity) => {
+                let Some(Object::NativeHostResource { kind, resource }) =
+                    value.as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                if *kind != identity || !self.bound_resources.contains_key(resource) {
+                    return Err(FaultCode::TypeMismatch);
+                }
+                out.push(*resource);
+            }
+            AbiType::List(element) => {
+                let Some(Object::List { items, .. }) =
+                    value.as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                for item in items {
+                    self.collect_host_resources(vm, *item, *element, out)?;
+                }
+            }
+            AbiType::Tuple(elements) => {
+                let Some(Object::Tuple { items }) =
+                    value.as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                if items.len() != elements.len() {
+                    return Err(FaultCode::TypeMismatch);
+                }
+                for (item, element) in items.iter().zip(elements) {
+                    self.collect_host_resources(vm, *item, *element, out)?;
+                }
+            }
+            AbiType::Apply(AbiConstructor::Option, arguments) if arguments.len() == 1 => {
+                if !matches!(value, Value::EmptyCase { arm: 1, .. }) {
+                    self.collect_host_resources(vm, value, arguments[0], out)?;
+                }
+            }
+            AbiType::Apply(AbiConstructor::Result, arguments) if arguments.len() == 2 => {
+                let Some(Object::Instance { class, fields, .. }) =
+                    value.as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let [payload] = fields.as_slice() else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let ty = if Some(*class) == self.core.result_ok {
+                    arguments[0]
+                } else if Some(*class) == self.core.result_err {
+                    arguments[1]
+                } else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                self.collect_host_resources(vm, *payload, ty, out)?;
+            }
+            AbiType::Apply(AbiConstructor::Pair, arguments) if arguments.len() == 2 => {
+                let Some(Object::Instance { class, fields, .. }) =
+                    value.as_obj().map(|reference| heap.get(reference))
+                else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                let [first, second] = fields.as_slice() else {
+                    return Err(FaultCode::TypeMismatch);
+                };
+                if Some(*class) != self.core.pair {
+                    return Err(FaultCode::TypeMismatch);
+                }
+                self.collect_host_resources(vm, *first, arguments[0], out)?;
+                self.collect_host_resources(vm, *second, arguments[1], out)?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn host_compile_env(&self, vm: VmId, fields: &[Value]) -> Result<HostArg, FaultCode> {
@@ -967,7 +1252,9 @@ impl World {
             ResourceBacking::Host(token) => {
                 Ok(HostArg::Tcp(crate::HostTcpResource { kind: found, token }))
             }
-            ResourceBacking::Driver(_) => Err(FaultCode::TypeMismatch),
+            ResourceBacking::Driver(_) | ResourceBacking::Extension(_) => {
+                Err(FaultCode::TypeMismatch)
+            }
         }
     }
 

@@ -36,9 +36,14 @@ impl<'o> FnChecker<'o> {
                         pat.span,
                     ));
                 }
-                let op = self.pattern_descriptor(&args[0])?;
+                let op = self.pattern_descriptor(ctx, &args[0])?;
                 let args_ty = Self::op_args_type(ctx, op);
-                let reply_ty = Self::abi_type_id(ctx, lm_abi::op(op).reply);
+                let reply = ctx
+                    .bundle
+                    .op(op)
+                    .expect("the operation slot resolves")
+                    .reply;
+                let reply_ty = Self::abi_type_id(ctx, reply);
                 let call_ty = ctx.store.intern(Type::PendingCall(args_ty, reply_ty));
                 let option_ty = Self::core_inst(ctx, "Option", vec![call_ty]);
                 let (option_class, option_args) =
@@ -333,7 +338,11 @@ impl<'o> FnChecker<'o> {
     /// Resolve one exact operation named in pattern position, such as
     /// `Fs.Read`. The parser reads it as a qualified constructor with
     /// no arguments.
-    pub(super) fn pattern_descriptor(&self, pat: &ast::Pattern) -> Result<u32, Diagnostic> {
+    pub(super) fn pattern_descriptor(
+        &self,
+        ctx: &Ctx,
+        pat: &ast::Pattern,
+    ) -> Result<u32, Diagnostic> {
         let PatternKind::Ctor {
             qualifier: Some(group),
             name,
@@ -355,7 +364,7 @@ impl<'o> FnChecker<'o> {
             ));
         }
         let full = format!("{group}.{name}");
-        lm_abi::op_by_name(&full).ok_or_else(|| {
+        ctx.bundle.op_by_name(&full).ok_or_else(|| {
             Diagnostic::new(
                 "E1051",
                 format!("`{full}` is not an operation of the manifest"),

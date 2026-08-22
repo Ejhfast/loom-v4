@@ -53,6 +53,7 @@ pub enum ClosedType {
     Bytes,
     FileHandle,
     ResourceHandle,
+    HostResource,
     /// An instance type of a class without generic parameters.
     Class(u32),
     /// An instance type of a generic class applied to arguments.
@@ -666,6 +667,7 @@ impl TypeEnvs {
             BcType::Bytes => ClosedType::Bytes,
             BcType::FileHandle => ClosedType::FileHandle,
             BcType::ResourceHandle => ClosedType::ResourceHandle,
+            BcType::HostResource => ClosedType::HostResource,
             BcType::Class(c) => ClosedType::Class(*c),
             BcType::Var(i) => {
                 // A variable the environment does not bind has no
@@ -1277,6 +1279,7 @@ pub fn tag_of(node: &ClosedType) -> u8 {
         ClosedType::ResourceHandle => 25,
         ClosedType::Wait(_) => 26,
         ClosedType::Callback(_, _, _, _) => 27,
+        ClosedType::HostResource => 28,
     }
 }
 

@@ -77,7 +77,33 @@ pub fn compile_module(
     env: &FrozenCompileEnv,
     is_main: bool,
 ) -> Result<CompiledModule, String> {
-    compile_module_with_options(path, source, env, is_main, &CompileOptions::default())
+    let bundle = lm_abi::standard_bundle();
+    compile_module_with_options_and_bundle(
+        path,
+        source,
+        env,
+        is_main,
+        &CompileOptions::default(),
+        &bundle,
+    )
+}
+
+/// Compile one module against an immutable ABI bundle.
+pub fn compile_module_with_bundle(
+    path: &str,
+    source: &SourceFile,
+    env: &FrozenCompileEnv,
+    is_main: bool,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<CompiledModule, String> {
+    compile_module_with_options_and_bundle(
+        path,
+        source,
+        env,
+        is_main,
+        &CompileOptions::default(),
+        bundle,
+    )
 }
 
 /// Compile one module with explicit linkage choices.
@@ -88,6 +114,25 @@ pub fn compile_module_with_options(
     is_main: bool,
     options: &CompileOptions,
 ) -> Result<CompiledModule, String> {
+    let bundle = lm_abi::standard_bundle();
+    compile_module_with_options_and_bundle(path, source, env, is_main, options, &bundle)
+}
+
+/// Compile one module with linkage choices and one ABI bundle.
+pub fn compile_module_with_options_and_bundle(
+    path: &str,
+    source: &SourceFile,
+    env: &FrozenCompileEnv,
+    is_main: bool,
+    options: &CompileOptions,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<CompiledModule, String> {
+    if let Some(interface) = env.interface_with_another_bundle(bundle.digest()) {
+        return Err(format!(
+            "error: module `{}` uses another ABI bundle\n",
+            interface.module_path
+        ));
+    }
     if options.dynamic_result && !is_main {
         return Err("error: a dynamic result needs a main module\n".to_string());
     }
@@ -109,6 +154,7 @@ pub fn compile_module_with_options(
         &ast,
         lm_hir::CheckOptions {
             prelude: true,
+            bundle: bundle.clone(),
             module_path: path.to_string(),
             imports: env.imports().clone(),
         },
@@ -120,17 +166,19 @@ pub fn compile_module_with_options(
     if options.dynamic_result {
         package_dynamic_entry(&mut module, path)?;
     }
-    lm_verify::verify_module(&module)
+    lm_verify::verify_module_with_bundle(&module, bundle)
         .map_err(|e| format!("error: the verifier rejected `{path}`: {e}\n"))?;
-    let identity = lm_bytecode::identity::module_identity(&module)
+    let identity = lm_bytecode::identity::module_identity_with_bundle(&module, bundle)
         .map_err(|e| format!("error: `{path}`: {e}\n"))?;
     attach_source_debug(&mut module, source, syntax, &ast, &hir, &linkage)?;
     let items: Vec<IfaceItem> = hir.exports.iter().map(|e| e.item.clone()).collect();
-    let mut interface = lm_bytecode::interface::build_interface(&module, &identity, path, &items)
-        .map_err(|e| format!("error: `{path}`: {e}\n"))?;
+    let mut interface = lm_bytecode::interface::build_interface_with_bundle(
+        &module, &identity, path, &items, bundle,
+    )
+    .map_err(|e| format!("error: `{path}`: {e}\n"))?;
     interface.slots = interface_slots;
     let interface_bytes = lm_bytecode::interface::encode_interface(&interface);
-    let artifact = lm_bytecode::encode(&module);
+    let artifact = lm_bytecode::encode_with_bundle(&module, bundle);
     let container_hash = lm_bytecode::identity::container_hash(&artifact);
     Ok(CompiledModule {
         path: path.to_string(),
@@ -548,9 +596,14 @@ fn encode_contract_type(
         }
         Type::FileHandle => out.push(26),
         Type::ResourceHandle => out.push(27),
+        Type::HostResource => out.push(29),
         Type::Op(op, function) => {
             out.push(28);
-            out.extend_from_slice(&lm_abi::op_identity(*op));
+            out.extend_from_slice(
+                &hir.bundle
+                    .op_identity(*op)
+                    .ok_or_else(|| format!("operation slot {op} is outside the ABI bundle"))?,
+            );
             encode_contract_type(out, hir, *function)?;
         }
     }

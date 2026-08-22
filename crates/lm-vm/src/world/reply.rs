@@ -5,6 +5,66 @@
 
 use super::*;
 
+fn extension_reply_matches(value: &HostValue, ty: lm_abi::AbiType) -> bool {
+    use lm_abi::{AbiConstructor, AbiPrimitive, AbiType};
+    match (value, ty) {
+        (HostValue::Unit, AbiType::Primitive(AbiPrimitive::Unit))
+        | (HostValue::Bool(_), AbiType::Primitive(AbiPrimitive::Bool))
+        | (HostValue::Int(_), AbiType::Primitive(AbiPrimitive::Int))
+        | (HostValue::Str(_), AbiType::Primitive(AbiPrimitive::String))
+        | (HostValue::Bytes(_), AbiType::Primitive(AbiPrimitive::Bytes)) => true,
+        (HostValue::Resource(resource), AbiType::Resource(identity)) => resource.kind == identity,
+        (HostValue::List(values), AbiType::List(element)) => values
+            .iter()
+            .all(|value| extension_reply_matches(value, *element)),
+        (HostValue::Tuple(values), AbiType::Tuple(elements)) => {
+            values.len() == elements.len()
+                && values
+                    .iter()
+                    .zip(elements)
+                    .all(|(value, ty)| extension_reply_matches(value, *ty))
+        }
+        (
+            HostValue::Ctor(CoreCtor::Some, values),
+            AbiType::Apply(AbiConstructor::Option, arguments),
+        ) => {
+            values.len() == 1
+                && arguments.len() == 1
+                && extension_reply_matches(&values[0], arguments[0])
+        }
+        (
+            HostValue::Ctor(CoreCtor::None, values),
+            AbiType::Apply(AbiConstructor::Option, arguments),
+        ) => values.is_empty() && arguments.len() == 1,
+        (
+            HostValue::Ctor(CoreCtor::Ok, values),
+            AbiType::Apply(AbiConstructor::Result, arguments),
+        ) => {
+            values.len() == 1
+                && arguments.len() == 2
+                && extension_reply_matches(&values[0], arguments[0])
+        }
+        (
+            HostValue::Ctor(CoreCtor::Err, values),
+            AbiType::Apply(AbiConstructor::Result, arguments),
+        ) => {
+            values.len() == 1
+                && arguments.len() == 2
+                && extension_reply_matches(&values[0], arguments[1])
+        }
+        (
+            HostValue::Ctor(CoreCtor::Pair, values),
+            AbiType::Apply(AbiConstructor::Pair, arguments),
+        ) => {
+            values.len() == 2
+                && arguments.len() == 2
+                && extension_reply_matches(&values[0], arguments[0])
+                && extension_reply_matches(&values[1], arguments[1])
+        }
+        _ => false,
+    }
+}
+
 impl World {
     /// The completion key of one waiting machine.
     pub(super) fn completion_key(&self, vm: VmId) -> Option<CompletionKey> {
@@ -480,8 +540,7 @@ impl World {
         let module = self.module.clone();
         let machine = &self.machines[vm as usize];
         crate::typecheck::check_boundary_value(
-            &module,
-            &machine.vm.heap,
+            crate::typecheck::BoundaryContext::new(&module, self.loaded.bundle(), &machine.vm.heap),
             &mut self.envs,
             &mut self.check,
             value,
@@ -520,8 +579,11 @@ impl World {
         let machine = &self.machines[vm as usize];
         for (value, ty) in args.iter().zip(code.params.iter()) {
             crate::typecheck::check_boundary_value(
-                &module,
-                &machine.vm.heap,
+                crate::typecheck::BoundaryContext::new(
+                    &module,
+                    self.loaded.bundle(),
+                    &machine.vm.heap,
+                ),
                 &mut self.envs,
                 &mut self.check,
                 *value,
@@ -613,13 +675,25 @@ impl World {
 
     /// Convert one host reply into a guest value and install it.
     pub(super) fn install_host_reply(&mut self, vm: VmId, reply: HostValue) {
-        let built = self.reply_type(vm).and_then(|(ty, env)| {
-            let expected = self
-                .envs
-                .close(&self.module, ty, env)
-                .map_err(|_| FaultCode::BoundaryLimit)?;
-            self.build_host_value(vm, &reply, expected)
-        });
+        let extension_schema = self.machines[vm as usize]
+            .vm
+            .pending
+            .as_ref()
+            .filter(|pending| pending.op >= lm_abi::OP_COUNT)
+            .and_then(|pending| self.loaded.bundle().op(pending.op))
+            .map(|operation| operation.reply);
+        let built =
+            if extension_schema.is_some_and(|schema| !extension_reply_matches(&reply, schema)) {
+                Err(FaultCode::TypeMismatch)
+            } else {
+                self.reply_type(vm).and_then(|(ty, env)| {
+                    let expected = self
+                        .envs
+                        .close(&self.module, ty, env)
+                        .map_err(|_| FaultCode::BoundaryLimit)?;
+                    self.build_host_value(vm, &reply, expected)
+                })
+            };
         match built {
             Ok(value) => self.install_value_reply_with_file_close(vm, value, false),
             Err(code) => self.machines[vm as usize].set_fault(code, "", None),

@@ -354,6 +354,9 @@ fn payload(object: &Object) -> String {
         Object::NativeTcpStream { resource } => format!("TCP stream resource {resource}"),
         Object::NativeTcpListener { resource } => format!("TCP listener resource {resource}"),
         Object::NativeTlsStream { resource } => format!("TLS stream resource {resource}"),
+        Object::NativeHostResource { kind, resource } => {
+            format!("host resource {}:{resource}", hex(kind))
+        }
         Object::DynValue { value, ty } => {
             format!("dynamic type {ty} value {}", show(*value))
         }

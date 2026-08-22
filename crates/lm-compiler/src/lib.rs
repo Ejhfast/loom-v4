@@ -26,10 +26,14 @@ pub mod standard;
 
 pub use build::{build_package, BuildReport, ModuleReport};
 pub use cache::{
-    load_through_store, user_cache_dir, write_atomic, Verdict, VerdictKey, VerifiedStore,
+    compile_key_with_bundle, load_through_store, program_key_with_bundle, user_cache_dir,
+    write_atomic, Verdict, VerdictKey, VerifiedStore,
 };
 pub use env::{CompileEnv, LinkEnv, LinkUnit};
-pub use link::{link, LinkedProgram};
+pub use link::{link, link_with_bundle, LinkedProgram};
 pub use manifest::{parse_manifest, Manifest};
-pub use module::{compile_module, compile_module_with_options, CompileOptions, CompiledModule};
+pub use module::{
+    compile_module, compile_module_with_bundle, compile_module_with_options,
+    compile_module_with_options_and_bundle, CompileOptions, CompiledModule,
+};
 pub use standard::{compile_program, compile_source, CompiledSource, StandardCatalog};

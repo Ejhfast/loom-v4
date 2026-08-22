@@ -258,6 +258,7 @@ impl World {
             | (BcType::Bytes, ClosedType::Bytes)
             | (BcType::FileHandle, ClosedType::FileHandle)
             | (BcType::ResourceHandle, ClosedType::ResourceHandle) => true,
+            (BcType::HostResource, ClosedType::HostResource) => true,
             (BcType::Class(a), ClosedType::Class(b)) => a == b,
             (BcType::Inst(a, source), ClosedType::Inst(b, target)) => {
                 a == b
@@ -388,7 +389,13 @@ impl World {
             Value::Bool(v) => v.to_string(),
             Value::Int(v) => v.to_string(),
             Value::Char(value) => format!("{value:?}"),
-            Value::Op(op) => format!("<op {}>", lm_abi::op_name(op)),
+            Value::Op(op) => format!(
+                "<op {}>",
+                self.loaded
+                    .bundle()
+                    .op_name(op)
+                    .unwrap_or("<invalid operation>")
+            ),
             Value::Callback(reference) => format!("<callback {}>", reference.slot),
             Value::EmptyCase { arm: 1, .. } => "None".to_string(),
             Value::EmptyCase { ty, arm } => format!("<empty type {ty} arm {arm}>"),
@@ -571,7 +578,13 @@ impl World {
                     Object::NativeTable { vm } => format!("<table {vm}>"),
                     Object::NativeRequest { .. } => "<request>".to_string(),
                     Object::NativeCall { op, .. } => {
-                        format!("<call {}>", lm_abi::op_name(*op))
+                        format!(
+                            "<call {}>",
+                            self.loaded
+                                .bundle()
+                                .op_name(*op)
+                                .unwrap_or("<invalid operation>")
+                        )
                     }
                     Object::NativeFault { code, .. } => code.to_string(),
                     Object::NativeDigest(bytes) => render_digest(bytes),
@@ -606,6 +619,20 @@ impl World {
                             "<TLS stream closed>".to_string()
                         } else {
                             format!("<TLS stream {resource}>")
+                        }
+                    }
+                    Object::NativeHostResource { kind, resource } => {
+                        let name = self
+                            .loaded
+                            .bundle()
+                            .resource_by_identity(*kind)
+                            .and_then(|slot| self.loaded.bundle().resource(slot))
+                            .map(|resource| resource.name.as_str())
+                            .unwrap_or("extension resource");
+                        if *resource == 0 {
+                            format!("<{name} closed>")
+                        } else {
+                            format!("<{name} {resource}>")
                         }
                     }
                     Object::DynValue { value, ty } => {

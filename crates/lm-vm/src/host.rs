@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, VecDeque};
 /// One plain-data operation argument.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostArg {
+    Unit,
+    Bool(bool),
     Int(i64),
     Str(SharedText),
     Bytes(SharedBytes),
@@ -22,7 +24,12 @@ pub enum HostArg {
     Tcp(HostTcpResource),
     Shutdown(HostShutdown),
     List(Vec<HostArg>),
+    Tuple(Vec<HostArg>),
+    Option(Option<Box<HostArg>>),
+    Result(Result<Box<HostArg>, Box<HostArg>>),
+    Pair(Box<HostArg>, Box<HostArg>),
     Tls(u64),
+    Resource(HostResource),
     CompileEnv(HostCompileEnv),
     CompileOptions(HostCompileOptions),
     Syntax {
@@ -105,6 +112,14 @@ pub enum HostTcpKind {
 pub struct HostTcpResource {
     pub kind: HostTcpKind,
     pub token: u64,
+}
+
+/// One opaque extension resource at the host boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostResource {
+    pub kind: [u8; 32],
+    pub token: u64,
+    pub generation: u32,
 }
 
 /// One portable TCP shutdown direction.
@@ -191,15 +206,18 @@ pub struct HostSyntaxDiagnostic {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostValue {
     Unit,
+    Bool(bool),
     Int(i64),
     Str(SharedText),
     Bytes(SharedBytes),
     File(u64),
     List(Vec<HostValue>),
+    Tuple(Vec<HostValue>),
     SocketAddress(HostSocketAddress),
     TcpStream(u64),
     TcpListener(u64),
     TlsStream(u64),
+    Resource(HostResource),
     Artifact {
         module: SharedBytes,
         interface: SharedBytes,
@@ -211,6 +229,33 @@ pub enum HostValue {
         diagnostics: Vec<HostSyntaxDiagnostic>,
     },
     Ctor(CoreCtor, Vec<HostValue>),
+}
+
+impl HostValue {
+    /// Build one `Option.Some` reply.
+    pub fn some(value: HostValue) -> HostValue {
+        HostValue::Ctor(CoreCtor::Some, vec![value])
+    }
+
+    /// Build one `Option.None` reply.
+    pub fn none() -> HostValue {
+        HostValue::Ctor(CoreCtor::None, Vec::new())
+    }
+
+    /// Build one successful `Result` reply.
+    pub fn ok(value: HostValue) -> HostValue {
+        HostValue::Ctor(CoreCtor::Ok, vec![value])
+    }
+
+    /// Build one failed `Result` reply.
+    pub fn err(value: HostValue) -> HostValue {
+        HostValue::Ctor(CoreCtor::Err, vec![value])
+    }
+
+    /// Build one `Pair` reply.
+    pub fn pair(first: HostValue, second: HostValue) -> HostValue {
+        HostValue::Ctor(CoreCtor::Pair, vec![first, second])
+    }
 }
 
 /// How one started operation proceeds.
@@ -261,6 +306,10 @@ pub trait Host {
     fn close_tls(&mut self, _token: u64) -> bool {
         false
     }
+    /// Close one opaque extension resource during forced cleanup.
+    fn close_resource(&mut self, _resource: HostResource) -> bool {
+        false
+    }
 }
 
 /// A host without any implementation. Every started operation fails.
@@ -268,10 +317,7 @@ pub struct NullHost;
 
 impl Host for NullHost {
     fn start(&mut self, _key: CompletionKey, op: u32, _args: Vec<HostArg>) -> HostStart {
-        HostStart::Failed(format!(
-            "no host implementation for {}",
-            lm_abi::op_name(op)
-        ))
+        HostStart::Failed(format!("no host implementation for operation slot {op}"))
     }
 
     fn poll(&mut self) -> Option<HostCompletion> {

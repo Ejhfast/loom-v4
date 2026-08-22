@@ -195,6 +195,13 @@ impl FrozenCompileEnv {
         &self.env
     }
 
+    pub(crate) fn interface_with_another_bundle(&self, digest: [u8; 32]) -> Option<&Interface> {
+        self.env
+            .modules
+            .values()
+            .find(|interface| interface.bundle_digest != digest)
+    }
+
     /// The interface of one module path.
     pub fn interface(&self, path: &str) -> Option<&Interface> {
         self.env.modules.get(path)

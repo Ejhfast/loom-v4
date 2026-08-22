@@ -1485,7 +1485,7 @@ fn regenerate_fuzz_corpus() {
             debug: Vec::new(),
         };
         let mut bytes = lm_bytecode::encode(&module);
-        // The semantic region starts after the 30-byte header. Its
+        // The semantic region starts after the 62-byte header. Its
         // layout for this module: the string count (4), the type
         // count plus four primitive tags (8), the selector count (4),
         // the application count (4), four empty declaration tables
@@ -1493,7 +1493,7 @@ fn regenerate_fuzz_corpus() {
         // counts (8), the core role table, the class and function
         // counts (8), then seven function fields (28). The local-type
         // table count follows.
-        let sem_at = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
+        let sem_at = u32::from_le_bytes(bytes[38..42].try_into().unwrap()) as usize;
         let roles = 4 * lm_bytecode::CORE_ROLE_COUNT;
         let count_at = sem_at + 4 + 8 + 4 + 4 + 16 + 4 + 8 + roles + 4 + 4 + 28;
         assert_eq!(

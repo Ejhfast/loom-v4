@@ -170,11 +170,11 @@ enum Callee {
     /// A `use`-bound callable `sys` member, for example `print` after
     /// `use sys.io.print`.
     SysMember {
-        group: &'static str,
+        group: String,
         member: String,
     },
     /// A `use`-bound `sys` group object, which is not callable.
-    SysGroup(&'static str),
+    SysGroup(String),
 }
 
 /// The output of one polymorphic call check.

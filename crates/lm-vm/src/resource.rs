@@ -72,6 +72,8 @@ pub enum ResourceKind {
     TcpListener,
     /// One open TLS stream.
     TlsStream,
+    /// One opaque extension resource, by stable kind identity.
+    Extension([u8; 32]),
 }
 
 impl ResourceKind {
@@ -84,6 +86,7 @@ impl ResourceKind {
             ResourceKind::TcpStream | ResourceKind::TcpListener | ResourceKind::TlsStream => {
                 SnapshotClass::HostAttachment
             }
+            ResourceKind::Extension(_) => SnapshotClass::HostAttachment,
         }
     }
 }

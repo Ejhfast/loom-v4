@@ -163,7 +163,7 @@ fn run_reports_a_fault_with_a_stable_code() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, c257f602)\n"
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 40929592)\n"
     );
 }
 
@@ -179,7 +179,7 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 69f8ee11)\n"
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, fc07d8c0)\n"
     );
 }
 
@@ -695,7 +695,7 @@ fn inspect_dumps_the_checkpoint_container() {
     let out = lm(&["inspect", "checkpoints/asked-tree.lms"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let dump = stdout(&out);
-    assert!(dump.starts_with("container 1117 bytes hash "), "{dump}");
+    assert!(dump.starts_with("container 1149 bytes hash "), "{dump}");
     assert!(dump.contains("machine 0 state asked"), "{dump}");
     assert!(dump.contains("pending Clock.Now"), "{dump}");
     assert!(dump.contains("obj 1 Handle frozen proc 1.0"), "{dump}");

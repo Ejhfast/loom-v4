@@ -178,7 +178,7 @@ impl<'m> Ctx<'m> {
                 sup.iter().any(|s| match s {
                     BcRow::Op(m) => {
                         let sup_name = &self.module.strings[*m as usize];
-                        lm_abi::row_name_included(name, sup_name)
+                        self.bundle.row_name_included(name, sup_name)
                     }
                     BcRow::Var(_) => false,
                 })
@@ -456,7 +456,7 @@ impl<'m> Ctx<'m> {
                     let Some(name) = self.module.strings.get(*string as usize) else {
                         return Err("an interface row string is out of range".to_string());
                     };
-                    if !lm_abi::row_name_valid(name) {
+                    if !self.bundle.row_name_valid(name) {
                         return Err("an interface row names an unknown effect".to_string());
                     }
                 }
@@ -854,6 +854,7 @@ impl<'m> Ctx<'m> {
                 | BcType::Bytes
                 | BcType::FileHandle
                 | BcType::ResourceHandle
+                | BcType::HostResource
         )
     }
 
@@ -892,7 +893,7 @@ impl<'m> Ctx<'m> {
         row.iter().any(|elem| match elem {
             BcRow::Op(idx) => {
                 let text = &self.module.strings[*idx as usize];
-                lm_abi::row_name_included(name, text)
+                self.bundle.row_name_included(name, text)
             }
             BcRow::Var(_) => false,
         })
@@ -1000,14 +1001,18 @@ impl<'m> Ctx<'m> {
                 }
                 Ok(self.intern(BcType::Inst(class, types)))
             }
+            lm_abi::AbiType::Resource(_) => Ok(self.intern(BcType::HostResource)),
         }
     }
 
     /// The function type of one fixed operation as a universe index.
     pub(crate) fn fixed_sig_type(&self, op: u32) -> Result<u32, String> {
-        let def = lm_abi::op(op);
+        let def = self
+            .bundle
+            .op(op)
+            .ok_or_else(|| format!("operation slot {op} is outside the ABI bundle"))?;
         let mut params = Vec::with_capacity(def.params.len());
-        for p in def.params {
+        for p in &def.params {
             params.push(self.abi_ty(*p)?);
         }
         let ret = self.abi_ty(def.reply)?;
@@ -1018,12 +1023,15 @@ impl<'m> Ctx<'m> {
     /// The argument-view type of one fixed operation: unit for a
     /// zero-parameter operation, a tuple otherwise.
     pub(crate) fn op_args_view(&self, op: u32) -> Result<u32, String> {
-        let def = lm_abi::op(op);
+        let def = self
+            .bundle
+            .op(op)
+            .ok_or_else(|| format!("operation slot {op} is outside the ABI bundle"))?;
         if def.params.is_empty() {
             return Ok(TY_UNIT);
         }
         let mut elems = Vec::with_capacity(def.params.len());
-        for p in def.params {
+        for p in &def.params {
             elems.push(self.abi_ty(*p)?);
         }
         Ok(self.intern(BcType::Tuple(elems)))

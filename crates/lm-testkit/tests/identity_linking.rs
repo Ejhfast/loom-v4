@@ -1300,7 +1300,7 @@ fn an_impossible_binding_count_rejects_before_the_reserve() {
     let module = compile_text("t.lm", "def f(n: Int): Int\n  n + 1\nend\nf(1)\n").unwrap();
     let good = lm_bytecode::encode(&module);
     assert!(lm_bytecode::decode(&good).is_ok(), "the sample must decode");
-    let export_at = u32::from_le_bytes(good[14..18].try_into().unwrap()) as usize;
+    let export_at = u32::from_le_bytes(good[46..50].try_into().unwrap()) as usize;
     let binding_at = export_at
         + 4
         + module

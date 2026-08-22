@@ -7,8 +7,8 @@ use super::*;
 
 /// The expected operand count of one perform instruction. VM control
 /// operations count their receiver.
-pub(crate) fn perform_argc(op: u32) -> u32 {
-    let def = lm_abi::op(op);
+pub(crate) fn perform_argc(ctx: &Ctx<'_>, op: u32) -> u32 {
+    let def = ctx.bundle.op(op).expect("the operation slot was checked");
     match def.kind {
         lm_abi::OpKind::Fixed => def.params.len() as u32,
         lm_abi::OpKind::VmControl => match op {
@@ -365,10 +365,10 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     }
                 }
                 Instr::Perform { op, argc, reply_ty } => {
-                    if *op >= lm_abi::OP_COUNT {
+                    if *op >= ctx.bundle.op_count() {
                         return Err(err(fidx, at("perform operation slot out of range")));
                     }
-                    let want = perform_argc(*op);
+                    let want = perform_argc(ctx, *op);
                     if *argc != want {
                         return Err(err(fidx, at("perform argument count mismatch")));
                     }
@@ -382,7 +382,11 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                     }
                 }
                 Instr::OpConst(op) => {
-                    if *op >= lm_abi::OP_COUNT || lm_abi::op(*op).kind != lm_abi::OpKind::Fixed {
+                    if ctx
+                        .bundle
+                        .op(*op)
+                        .is_none_or(|operation| operation.kind != lm_abi::OpKind::Fixed)
+                    {
                         return Err(err(
                             fidx,
                             at("first-class operation slot is out of range or not fixed"),
@@ -577,8 +581,9 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                 // restorer answers it through the ordinary typed call
                 // path (specification 17.6).
                 Instr::AsCall { op, ty } => {
-                    let answerable = *op < lm_abi::OP_COUNT
-                        && (lm_abi::op(*op).kind == lm_abi::OpKind::Fixed
+                    let answerable = *op < ctx.bundle.op_count()
+                        && (ctx.bundle.op(*op).expect("the operation exists").kind
+                            == lm_abi::OpKind::Fixed
                             || *op == lm_abi::OP_VM_SNAPSHOT_SELF);
                     if !answerable {
                         return Err(err(
@@ -595,15 +600,17 @@ pub(crate) fn verify_func(ctx: &Ctx<'_>, func: &Func, fidx: u32) -> Result<(), V
                         return Err(err(fidx, at("invalid table edit encoding")));
                     }
                     let bound = if *kind == 0 {
-                        lm_abi::OP_COUNT
+                        ctx.bundle.op_count()
                     } else {
-                        lm_abi::GROUP_COUNT
+                        ctx.bundle.group_count()
                     };
                     if *slot >= bound {
                         return Err(err(fidx, at("table edit target out of range")));
                     }
                     if *action == 2
-                        && (*kind != 0 || lm_abi::op(*slot).kind != lm_abi::OpKind::Fixed)
+                        && (*kind != 0
+                            || ctx.bundle.op(*slot).expect("the operation exists").kind
+                                != lm_abi::OpKind::Fixed)
                     {
                         return Err(err(
                             fidx,

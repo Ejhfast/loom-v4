@@ -80,11 +80,12 @@ fn cached_binding_target(
 }
 
 fn installed_binding(
+    bundle: &lm_abi::AbiBundle,
     instance: &InstalledInstance,
     kind: PortableCodeKind,
     source_index: u32,
 ) -> Option<(u32, InstalledBindingTarget)> {
-    let module = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+    let module = lm_bytecode::decode_with_bundle(instance.artifact.as_slice(), bundle).ok()?;
     let source_slot = source_binding_slot(&module, kind, source_index)?;
     let target = cached_binding_target(instance, source_slot)?;
     Some((source_slot, target))
@@ -208,6 +209,7 @@ fn class_slot_abi(module: &lm_bytecode::Module, class: u32) -> Option<[u8; 32]> 
 }
 
 fn closed_types_match(
+    bundle: &lm_abi::AbiBundle,
     left_space: ClosedTypeSpace<'_>,
     left: ClosedTypeId,
     right_space: ClosedTypeSpace<'_>,
@@ -235,6 +237,7 @@ fn closed_types_match(
             | (ClosedType::Bytes, ClosedType::Bytes)
             | (ClosedType::FileHandle, ClosedType::FileHandle)
             | (ClosedType::ResourceHandle, ClosedType::ResourceHandle) => {}
+            (ClosedType::HostResource, ClosedType::HostResource) => {}
             (ClosedType::Class(left), ClosedType::Class(right)) => {
                 if !closed_classes_match(left_space, *left, right_space, *right) {
                     return false;
@@ -303,7 +306,7 @@ fn closed_types_match(
                 pending.push((*left_ret, *right_ret));
             }
             (ClosedType::Op(left_op, left_fn), ClosedType::Op(right_op, right_fn)) => {
-                if lm_abi::op_identity(*left_op) != lm_abi::op_identity(*right_op) {
+                if bundle.op_identity(*left_op) != bundle.op_identity(*right_op) {
                     return false;
                 }
                 pending.push((*left_fn, *right_fn));
@@ -501,21 +504,29 @@ impl World {
                 return;
             }
         };
-        let verified = lm_bytecode::decode(code.bytes.as_slice())
+        let verified = lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.loaded.bundle())
             .map_err(|error| format!("the artifact did not decode: {error}"))
             .and_then(|module| {
-                lm_verify::verify_module(&module)
+                lm_verify::verify_module_with_bundle(&module, self.loaded.bundle())
                     .map_err(|error| format!("the artifact did not verify: {error}"))?;
-                let identity = lm_bytecode::identity::module_identity(&module)
-                    .map_err(|error| format!("the artifact has no identity: {error}"))?;
+                let identity = lm_bytecode::identity::module_identity_with_bundle(
+                    &module,
+                    self.loaded.bundle(),
+                )
+                .map_err(|error| format!("the artifact has no identity: {error}"))?;
                 if let Some(bytes) = &code.interface {
                     let interface = lm_bytecode::interface::decode_interface(bytes.as_slice())
                         .map_err(|error| format!("the interface did not decode: {error}"))?;
                     if lm_bytecode::interface::encode_interface(&interface) != bytes.as_slice() {
                         return Err("the interface bytes are not canonical".to_string());
                     }
-                    lm_bytecode::interface::validate_interface(&module, &identity, &interface)
-                        .map_err(|error| format!("the interface is invalid: {error}"))?;
+                    lm_bytecode::interface::validate_interface_with_bundle(
+                        &module,
+                        &identity,
+                        &interface,
+                        self.loaded.bundle(),
+                    )
+                    .map_err(|error| format!("the interface is invalid: {error}"))?;
                 }
                 Ok(())
             });
@@ -547,17 +558,18 @@ impl World {
                 return;
             }
         };
-        let module = match lm_bytecode::decode(code.bytes.as_slice()) {
-            Ok(module) => module,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the verified module did not decode: {error}"),
-                );
-                return;
-            }
-        };
+        let module =
+            match lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.loaded.bundle()) {
+                Ok(module) => module,
+                Err(error) => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        &format!("the verified module did not decode: {error}"),
+                    );
+                    return;
+                }
+            };
         self.finish_portable_function_lookup(vm, op, code, module.entry, None);
     }
 
@@ -572,17 +584,18 @@ impl World {
         let Some(name) = self.code_name(vm, op, name, "function") else {
             return;
         };
-        let module = match lm_bytecode::decode(code.bytes.as_slice()) {
-            Ok(module) => module,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the verified module did not decode: {error}"),
-                );
-                return;
-            }
-        };
+        let module =
+            match lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.loaded.bundle()) {
+                Ok(module) => module,
+                Err(error) => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        &format!("the verified module did not decode: {error}"),
+                    );
+                    return;
+                }
+            };
         let function = module.exports.iter().find_map(|export| {
             (export.name == name && export.kind == lm_bytecode::ExportKind::Function)
                 .then_some(export.def)
@@ -614,17 +627,18 @@ impl World {
         let Some(name) = self.code_name(vm, op, name, "class") else {
             return;
         };
-        let module = match lm_bytecode::decode(code.bytes.as_slice()) {
-            Ok(module) => module,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the verified module did not decode: {error}"),
-                );
-                return;
-            }
-        };
+        let module =
+            match lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.loaded.bundle()) {
+                Ok(module) => module,
+                Err(error) => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        &format!("the verified module did not decode: {error}"),
+                    );
+                    return;
+                }
+            };
         let class = module.exports.iter().find_map(|export| {
             (export.name == name && export.kind.is_class()).then_some(export.def)
         });
@@ -707,17 +721,19 @@ impl World {
             code.kind,
             PortableCodeKind::Function | PortableCodeKind::Class
         ) {
-            Some(match lm_bytecode::decode(code.bytes.as_slice()) {
-                Ok(source) => source,
-                Err(error) => {
-                    self.finish_code_error(
-                        vm,
-                        op,
-                        &format!("the portable code did not decode: {error}"),
-                    );
-                    return;
-                }
-            })
+            Some(
+                match lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.loaded.bundle()) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        self.finish_code_error(
+                            vm,
+                            op,
+                            &format!("the portable code did not decode: {error}"),
+                        );
+                        return;
+                    }
+                },
+            )
         } else {
             None
         };
@@ -954,10 +970,14 @@ impl World {
             .copied()
             .ok_or_else(|| "the function has no verified identity".to_string())?;
         for artifact in self.installations.iter().rev() {
-            let Ok(source) = lm_bytecode::decode(artifact.as_slice()) else {
+            let Ok(source) =
+                lm_bytecode::decode_with_bundle(artifact.as_slice(), self.loaded.bundle())
+            else {
                 continue;
             };
-            let Ok(identity) = lm_bytecode::identity::module_identity(&source) else {
+            let Ok(identity) =
+                lm_bytecode::identity::module_identity_with_bundle(&source, self.loaded.bundle())
+            else {
                 continue;
             };
             if let Some(index) = identity.func_hashes.iter().position(|hash| *hash == wanted) {
@@ -1023,10 +1043,14 @@ impl World {
             .copied()
             .ok_or_else(|| "the class has no verified identity".to_string())?;
         for artifact in self.installations.iter().rev() {
-            let Ok(source) = lm_bytecode::decode(artifact.as_slice()) else {
+            let Ok(source) =
+                lm_bytecode::decode_with_bundle(artifact.as_slice(), self.loaded.bundle())
+            else {
                 continue;
             };
-            let Ok(identity) = lm_bytecode::identity::module_identity(&source) else {
+            let Ok(identity) =
+                lm_bytecode::identity::module_identity_with_bundle(&source, self.loaded.bundle())
+            else {
                 continue;
             };
             if let Some(index) = identity
@@ -1090,7 +1114,7 @@ impl World {
         links: Value,
         artifact: &[u8],
     ) -> Result<Vec<lm_bytecode::append::ResolvedImport>, String> {
-        let module = lm_bytecode::decode(artifact)
+        let module = lm_bytecode::decode_with_bundle(artifact, self.loaded.bundle())
             .map_err(|error| format!("the artifact did not decode: {error}"))?;
         let reference = links
             .as_obj()
@@ -1138,8 +1162,9 @@ impl World {
                     interface.module_path
                 ));
             }
-            let source = lm_bytecode::decode(instance.artifact.as_slice())
-                .map_err(|error| format!("a link provider did not decode: {error}"))?;
+            let source =
+                lm_bytecode::decode_with_bundle(instance.artifact.as_slice(), self.loaded.bundle())
+                    .map_err(|error| format!("a link provider did not decode: {error}"))?;
             providers.push(CodeProvider {
                 source,
                 interface,
@@ -1245,7 +1270,9 @@ impl World {
             }
         };
         let class = self.live_instance(handle).and_then(|instance| {
-            let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+            let source =
+                lm_bytecode::decode_with_bundle(instance.artifact.as_slice(), self.loaded.bundle())
+                    .ok()?;
             let export = source
                 .exports
                 .iter()
@@ -1280,8 +1307,15 @@ impl World {
             }
         };
         let binding = self.live_instance(handle).and_then(|instance| {
-            let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
-            installed_binding(instance, PortableCodeKind::Function, source.entry)
+            let source =
+                lm_bytecode::decode_with_bundle(instance.artifact.as_slice(), self.loaded.bundle())
+                    .ok()?;
+            installed_binding(
+                self.loaded.bundle(),
+                instance,
+                PortableCodeKind::Function,
+                source.entry,
+            )
         });
         let Some((slot, InstalledBindingTarget::Function(function))) = binding else {
             self.finish_code_error(vm, op, "the module entry has no installed binding");
@@ -1302,7 +1336,9 @@ impl World {
             return;
         };
         let binding = self.live_instance(handle).and_then(|instance| {
-            let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+            let source =
+                lm_bytecode::decode_with_bundle(instance.artifact.as_slice(), self.loaded.bundle())
+                    .ok()?;
             let suffix = format!(".{name}");
             let mut source_slots: Vec<u32> = source
                 .bindings
@@ -1346,12 +1382,19 @@ impl World {
             return;
         };
         let binding = self.live_instance(handle).and_then(|instance| {
-            let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+            let source =
+                lm_bytecode::decode_with_bundle(instance.artifact.as_slice(), self.loaded.bundle())
+                    .ok()?;
             let export = source
                 .exports
                 .iter()
                 .find(|export| export.name == name && export.kind.is_class())?;
-            installed_binding(instance, PortableCodeKind::Class, export.def)
+            installed_binding(
+                self.loaded.bundle(),
+                instance,
+                PortableCodeKind::Class,
+                export.def,
+            )
         });
         let Some((slot, InstalledBindingTarget::Class { .. })) = binding else {
             self.finish_code_error(
@@ -1581,8 +1624,8 @@ impl World {
             return;
         };
         let contract = self.requested_function_contract(vm, function_class);
-        let source =
-            lm_bytecode::decode(code.bytes.as_slice()).map_err(|_| FaultCode::MalformedState);
+        let source = lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.loaded.bundle())
+            .map_err(|_| FaultCode::MalformedState);
         let matches = match (contract, source) {
             (Ok((input, output)), Ok(source)) => {
                 self.portable_function_matches_contract(&source, function, input, output)
@@ -1640,17 +1683,18 @@ impl World {
         };
         let interface_bytes = instance.interface.clone();
         let artifact = instance.artifact.clone();
-        let module = match lm_bytecode::decode(artifact.as_slice()) {
-            Ok(module) => module,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the module artifact did not decode: {error}"),
-                );
-                return;
-            }
-        };
+        let module =
+            match lm_bytecode::decode_with_bundle(artifact.as_slice(), self.loaded.bundle()) {
+                Ok(module) => module,
+                Err(error) => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        &format!("the module artifact did not decode: {error}"),
+                    );
+                    return;
+                }
+            };
         let interface_key = match interface_bytes.as_ref() {
             Some(bytes) => match lm_bytecode::interface::decode_interface(bytes.as_slice()) {
                 Ok(interface) => {
@@ -1739,7 +1783,10 @@ impl World {
                 return;
             }
         };
-        let source = match lm_bytecode::decode(portable.bytes.as_slice()) {
+        let source = match lm_bytecode::decode_with_bundle(
+            portable.bytes.as_slice(),
+            self.loaded.bundle(),
+        ) {
             Ok(source) => source,
             Err(error) => {
                 self.finish_code_error(
@@ -1761,17 +1808,19 @@ impl World {
         let target_artifact = instance.artifact.clone();
         let target_interface = instance.interface.clone();
         let target_slots = instance.slots.clone();
-        let target = match lm_bytecode::decode(target_artifact.as_slice()) {
-            Ok(target) => target,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the module artifact did not decode: {error}"),
-                );
-                return;
-            }
-        };
+        let target =
+            match lm_bytecode::decode_with_bundle(target_artifact.as_slice(), self.loaded.bundle())
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        &format!("the module artifact did not decode: {error}"),
+                    );
+                    return;
+                }
+            };
         let target_index = target.slots.iter().position(|slot| slot.key == wanted.key);
         let source_contract = portable.interface.as_ref().and_then(|bytes| {
             lm_bytecode::interface::decode_interface(bytes.as_slice())
@@ -2491,7 +2540,9 @@ impl World {
             .filter(|image| image.live && image.generation == handle.generation)?
             .instances
             .get(handle.instance as usize)?;
-        let source = lm_bytecode::decode(instance.artifact.as_slice()).ok()?;
+        let source =
+            lm_bytecode::decode_with_bundle(instance.artifact.as_slice(), self.loaded.bundle())
+                .ok()?;
         let source_class = instance
             .classes
             .iter()
@@ -2597,8 +2648,10 @@ impl World {
             types: &self.envs,
             identity: &identity,
         };
-        Ok(closed_types_match(space, actual_input, space, input)
-            && closed_types_match(space, actual_output, space, output))
+        Ok(
+            closed_types_match(self.loaded.bundle(), space, actual_input, space, input)
+                && closed_types_match(self.loaded.bundle(), space, actual_output, space, output),
+        )
     }
 
     fn portable_function_matches_contract(
@@ -2640,8 +2693,9 @@ impl World {
         let source_output = source_types
             .close(module, code.ret, TypeEnvId::EMPTY)
             .map_err(|_| FaultCode::BoundaryLimit)?;
-        let source_identity = lm_bytecode::identity::module_identity(module)
-            .map_err(|_| FaultCode::MalformedState)?;
+        let source_identity =
+            lm_bytecode::identity::module_identity_with_bundle(module, self.loaded.bundle())
+                .map_err(|_| FaultCode::MalformedState)?;
         let target_identity = self.identity()?.clone();
         let source_space = ClosedTypeSpace {
             module,
@@ -2653,10 +2707,19 @@ impl World {
             types: &self.envs,
             identity: &target_identity,
         };
-        Ok(
-            closed_types_match(source_space, source_input, target_space, input)
-                && closed_types_match(source_space, source_output, target_space, output),
-        )
+        Ok(closed_types_match(
+            self.loaded.bundle(),
+            source_space,
+            source_input,
+            target_space,
+            input,
+        ) && closed_types_match(
+            self.loaded.bundle(),
+            source_space,
+            source_output,
+            target_space,
+            output,
+        ))
     }
 
     pub(super) fn code_ok(&mut self, vm: VmId, value: Value) -> Result<Value, FaultCode> {

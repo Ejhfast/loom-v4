@@ -329,6 +329,7 @@ impl World {
             abi_version: lm_abi::ABI_VERSION,
             compiler_abi: lm_bytecode::identity::COMPILER_ABI_VERSION,
             verifier_version: lm_verify::VERIFIER_VERSION,
+            bundle_digest: self.loaded.bundle().digest(),
         })
     }
 
@@ -1184,6 +1185,10 @@ impl World {
                 Object::NativeTcpStream { .. } => Object::NativeTcpStream { resource: 0 },
                 Object::NativeTcpListener { .. } => Object::NativeTcpListener { resource: 0 },
                 Object::NativeTlsStream { .. } => Object::NativeTlsStream { resource: 0 },
+                Object::NativeHostResource { kind, .. } => Object::NativeHostResource {
+                    kind: *kind,
+                    resource: 0,
+                },
                 Object::NativeResourceHandle { surface, .. } => Object::NativeResourceHandle {
                     surface: self.require_ordinal(*surface, ordinal_of)?,
                     resource: 0,

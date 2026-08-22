@@ -159,6 +159,8 @@ pub enum BcType {
     FileHandle,
     /// A holder-local resource-management designator.
     ResourceHandle,
+    /// An opaque extension host resource designator.
+    HostResource,
 }
 
 /// The declaration kind of one class.
@@ -1121,11 +1123,14 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// each intrinsic definition contract beside its late slot. Version
 /// 43 stores several bounds for each associated interface type.
 /// Version 44 adds deliberate fault instructions.
-pub const VERSION: u16 = 44;
+/// Version 45 binds each artifact to one ABI bundle digest.
+pub const VERSION: u16 = 45;
 
 /// The byte length of the container header: the magic, the version,
-/// and the three section-table entries (offset and length each).
-const HEADER_LEN: usize = 4 + 2 + 3 * 8;
+/// the ABI bundle digest, and three section-table entries.
+const HEADER_LEN: usize = 4 + 2 + 32 + 3 * 8;
+#[cfg(test)]
+const SECTION_TABLE_AT: usize = 4 + 2 + 32;
 
 // Opcode bytes for the serialized form.
 const OP_CONST_UNIT: u8 = 0x00;
@@ -1359,6 +1364,7 @@ const TY_RESOURCE_HANDLE: u8 = 26;
 const TY_WAIT: u8 = 27;
 const TY_PROJECTION: u8 = 28;
 const TY_CALLBACK: u8 = 29;
+const TY_HOST_RESOURCE: u8 = 30;
 
 // Row element tags.
 const ROW_OP: u8 = 0;
@@ -1383,12 +1389,18 @@ const SLOT_PROCESS: u8 = 4;
 /// section. The semantic bytes of a definition do not contain
 /// its own name.
 pub fn encode(module: &Module) -> Vec<u8> {
+    encode_with_bundle(module, &lm_abi::standard_bundle())
+}
+
+/// Encode a module for one exact ABI bundle.
+pub fn encode_with_bundle(module: &Module, bundle: &lm_abi::AbiBundle) -> Vec<u8> {
     let semantic = encode_semantic(module);
     let exports = encode_exports(module);
     let debug = &module.debug;
     let mut out = Vec::with_capacity(HEADER_LEN + semantic.len() + exports.len() + debug.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&bundle.digest());
     let mut offset = HEADER_LEN as u32;
     for section in [&semantic, &exports, debug] {
         write_u32(&mut out, offset);
@@ -1810,6 +1822,7 @@ fn encode_type(out: &mut Vec<u8>, ty: &BcType) {
         BcType::Bytes => out.push(TY_BYTES),
         BcType::FileHandle => out.push(TY_FILE_HANDLE),
         BcType::ResourceHandle => out.push(TY_RESOURCE_HANDLE),
+        BcType::HostResource => out.push(TY_HOST_RESOURCE),
         BcType::Op(op, f) => {
             out.push(TY_OP);
             write_u32(out, *op);
@@ -2237,6 +2250,11 @@ pub enum DecodeError {
     Truncated,
     BadMagic,
     BadVersion(u16),
+    /// The artifact names another ABI bundle.
+    BadBundle {
+        expected: [u8; 32],
+        found: [u8; 32],
+    },
     BadOpcode(u8),
     BadTypeTag(u8),
     BadRowTag(u8),
@@ -2277,6 +2295,12 @@ impl fmt::Display for DecodeError {
             DecodeError::Truncated => write!(f, "the byte stream is truncated"),
             DecodeError::BadMagic => write!(f, "the magic header is not `LMBC`"),
             DecodeError::BadVersion(v) => write!(f, "unsupported bytecode version {v}"),
+            DecodeError::BadBundle { expected, found } => write!(
+                f,
+                "the artifact uses ABI bundle {}, but this loader uses {}",
+                digest_text(found),
+                digest_text(expected)
+            ),
             DecodeError::BadOpcode(op) => write!(f, "unknown opcode byte 0x{op:02x}"),
             DecodeError::BadTypeTag(t) => write!(f, "unknown type tag {t}"),
             DecodeError::BadRowTag(t) => write!(f, "unknown row element tag {t}"),
@@ -2490,6 +2514,11 @@ fn decode_type_bounds(cur: &mut Cursor<'_>) -> Result<Vec<Vec<BcInterfaceUse>>, 
 /// section is read, so a claimed size that disagrees with the actual
 /// byte count rejects before any allocation is sized from it.
 pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
+    decode_with_bundle(bytes, &lm_abi::standard_bundle())
+}
+
+/// Decode a serialized container for one exact ABI bundle.
+pub fn decode_with_bundle(bytes: &[u8], bundle: &lm_abi::AbiBundle) -> Result<Module, DecodeError> {
     let mut cur = Cursor { bytes, pos: 0 };
     if cur.take(4)? != MAGIC {
         return Err(DecodeError::BadMagic);
@@ -2497,6 +2526,12 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     let version = cur.u16()?;
     if version != VERSION {
         return Err(DecodeError::BadVersion(version));
+    }
+    let mut found = [0u8; 32];
+    found.copy_from_slice(cur.take(32)?);
+    let expected = bundle.digest();
+    if found != expected {
+        return Err(DecodeError::BadBundle { expected, found });
     }
     // Read the section table: three (offset, length) pairs. The
     // sections must be contiguous, in order, and cover the input
@@ -2531,6 +2566,15 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
     }
     module.debug = debug_bytes.to_vec();
     Ok(module)
+}
+
+fn digest_text(digest: &[u8; 32]) -> String {
+    let mut text = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }
 
 /// Decode the export section: the definition names, the function
@@ -3053,6 +3097,7 @@ fn decode_type(cur: &mut Cursor<'_>) -> Result<BcType, DecodeError> {
         TY_BYTES => BcType::Bytes,
         TY_FILE_HANDLE => BcType::FileHandle,
         TY_RESOURCE_HANDLE => BcType::ResourceHandle,
+        TY_HOST_RESOURCE => BcType::HostResource,
         TY_OP => BcType::Op(cur.u32()?, cur.u32()?),
         other => return Err(DecodeError::BadTypeTag(other)),
     };
@@ -3470,6 +3515,25 @@ mod tests {
     }
 
     #[test]
+    fn an_artifact_rejects_another_abi_bundle() {
+        let module = sample_module();
+        let bytes = encode(&module);
+        let mut builder = lm_abi::AbiBundle::builder();
+        builder.add_group(lm_abi::GroupSpec::namespace("Telemetry"));
+        builder.add_operation(lm_abi::OperationSpec::fixed(
+            "Telemetry",
+            "Event",
+            vec![lm_abi::AbiType::STR],
+            lm_abi::AbiType::UNIT,
+        ));
+        let bundle = builder.build().expect("the extension bundle is valid");
+        assert!(matches!(
+            decode_with_bundle(&bytes, &bundle),
+            Err(DecodeError::BadBundle { .. })
+        ));
+    }
+
+    #[test]
     fn debug_data_changes_only_the_container_hash() {
         let plain = sample_module();
         let mut attached = plain.clone();
@@ -3838,20 +3902,21 @@ mod tests {
         let bytes = encode(&sample_module());
         // Shift the semantic offset forward by one.
         let mut corrupt = bytes.clone();
-        let offset = u32::from_le_bytes(corrupt[6..10].try_into().unwrap());
-        corrupt[6..10].copy_from_slice(&(offset + 1).to_le_bytes());
+        let at = SECTION_TABLE_AT;
+        let offset = u32::from_le_bytes(corrupt[at..at + 4].try_into().unwrap());
+        corrupt[at..at + 4].copy_from_slice(&(offset + 1).to_le_bytes());
         assert_eq!(decode(&corrupt), Err(DecodeError::BadSectionTable));
         // Grow the semantic length so the sections overlap the input
         // end.
         let mut corrupt = bytes.clone();
-        let len = u32::from_le_bytes(corrupt[10..14].try_into().unwrap());
-        corrupt[10..14].copy_from_slice(&(len + 1).to_le_bytes());
+        let len = u32::from_le_bytes(corrupt[at + 4..at + 8].try_into().unwrap());
+        corrupt[at + 4..at + 8].copy_from_slice(&(len + 1).to_le_bytes());
         assert_eq!(decode(&corrupt), Err(DecodeError::BadSectionTable));
         // Shrink the semantic length: the export offset no longer
         // lines up.
         let mut corrupt = bytes;
-        let len = u32::from_le_bytes(corrupt[10..14].try_into().unwrap());
-        corrupt[10..14].copy_from_slice(&(len - 1).to_le_bytes());
+        let len = u32::from_le_bytes(corrupt[at + 4..at + 8].try_into().unwrap());
+        corrupt[at + 4..at + 8].copy_from_slice(&(len - 1).to_le_bytes());
         assert_eq!(decode(&corrupt), Err(DecodeError::BadSectionTable));
     }
 
@@ -3861,7 +3926,7 @@ mod tests {
         // Read the section table for the boundary positions.
         let mut boundaries = vec![HEADER_LEN];
         for i in 0..3 {
-            let at = 6 + i * 8;
+            let at = SECTION_TABLE_AT + i * 8;
             let offset = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
             let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
             boundaries.push(offset + len);
@@ -3884,7 +3949,8 @@ mod tests {
         let module = sample_module();
         let bytes = encode(&module);
         // The export section starts with the interface-name count.
-        let exp_at = u32::from_le_bytes(bytes[14..18].try_into().unwrap()) as usize;
+        let at = SECTION_TABLE_AT + 8;
+        let exp_at = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
         let mut corrupt = bytes.clone();
         corrupt[exp_at..exp_at + 4].copy_from_slice(&1u32.to_le_bytes());
         assert!(matches!(
@@ -3898,8 +3964,9 @@ mod tests {
         // The semantic region must not contain the definition names.
         let module = sample_module();
         let bytes = encode(&module);
-        let sem_at = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
-        let sem_len = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
+        let at = SECTION_TABLE_AT;
+        let sem_at = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let sem_len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
         let semantic = &bytes[sem_at..sem_at + sem_len];
         for name in ["Counter", "Box", "main"] {
             let found = semantic.windows(name.len()).any(|w| w == name.as_bytes());

@@ -70,7 +70,7 @@ impl<'o> FnChecker<'o> {
                 }
                 match self.use_binding(ctx, name)? {
                     Some(UseBinding::SysMember { group, member }) => {
-                        return self.check_sys_value(ctx, group, &member, expr.span);
+                        return self.check_sys_value(ctx, &group, &member, expr.span);
                     }
                     Some(UseBinding::SysGroup(group)) => {
                         return Err(Diagnostic::new(

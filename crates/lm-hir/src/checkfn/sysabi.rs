@@ -7,8 +7,8 @@ use super::*;
 
 impl<'o> FnChecker<'o> {
     /// Map a surface `sys` member name to its manifest group name.
-    pub(super) fn sys_group(name: &str) -> Option<&'static str> {
-        sys_group_name(name)
+    pub(super) fn sys_group(ctx: &Ctx, name: &str) -> Option<String> {
+        sys_group_name(ctx, name)
     }
 
     /// True when the bare name `sys` means the ABI root object here.
@@ -40,7 +40,7 @@ impl<'o> FnChecker<'o> {
         &mut self,
         ctx: &Ctx,
         recv: &ast::Expr,
-    ) -> Result<Option<&'static str>, Diagnostic> {
+    ) -> Result<Option<String>, Diagnostic> {
         match &recv.kind {
             ExprKind::Field {
                 recv: inner, name, ..
@@ -48,7 +48,7 @@ impl<'o> FnChecker<'o> {
                 if matches!(inner.kind, ExprKind::Name(ref n) if n == "sys")
                     && self.sys_in_scope()?
                 {
-                    return Ok(Self::sys_group(name));
+                    return Ok(Self::sys_group(ctx, name));
                 }
             }
             ExprKind::Name(name) => {
@@ -149,12 +149,17 @@ impl<'o> FnChecker<'o> {
                     .collect();
                 Self::core_inst(ctx, constructor.text(), arguments)
             }
+            lm_abi::AbiType::Resource(_) => lm_types::HOST_RESOURCE,
         }
     }
 
     /// The callable function type of one fixed operation.
     pub(super) fn op_fn_type(ctx: &mut Ctx, op: u32) -> TypeId {
-        let def = lm_abi::op(op);
+        let def = ctx
+            .bundle
+            .op(op)
+            .expect("the operation slot resolves")
+            .clone();
         debug_assert_eq!(def.kind, lm_abi::OpKind::Fixed);
         let params: Vec<TypeId> = def
             .params
@@ -169,7 +174,11 @@ impl<'o> FnChecker<'o> {
     /// The argument-view type of one fixed operation: `()` for a
     /// zero-parameter operation, a tuple otherwise.
     pub(super) fn op_args_type(ctx: &mut Ctx, op: u32) -> TypeId {
-        let def = lm_abi::op(op);
+        let def = ctx
+            .bundle
+            .op(op)
+            .expect("the operation slot resolves")
+            .clone();
         if def.params.is_empty() {
             return UNIT;
         }
@@ -188,7 +197,8 @@ impl<'o> FnChecker<'o> {
         op: u32,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        let idx = ctx.store.intern_row_name(&lm_abi::op_name(op));
+        let name = ctx.bundle.op_name(op).expect("the operation slot resolves");
+        let idx = ctx.store.intern_row_name(name);
         let row = vec![lm_types::RowElem::Op(idx)];
         self.charge_row(ctx, &row, span)
     }
@@ -454,8 +464,12 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
-        let op = Self::resolve_sys_member(group, member, name_span)?;
-        let def = lm_abi::op(op);
+        let op = Self::resolve_sys_member(ctx, group, member, name_span)?;
+        let def = ctx
+            .bundle
+            .op(op)
+            .expect("the operation slot resolves")
+            .clone();
         let params: Vec<TypeId> = def
             .params
             .iter()
@@ -476,6 +490,7 @@ impl<'o> FnChecker<'o> {
     /// operation slot. The surface form is snake_case; a capitalized
     /// spelling of a real operation gets the casing rule.
     pub(super) fn resolve_sys_member(
+        ctx: &Ctx,
         group: &str,
         member: &str,
         name_span: Span,
@@ -486,7 +501,7 @@ impl<'o> FnChecker<'o> {
             .map(|c| c.is_ascii_uppercase())
             .unwrap_or(false);
         if starts_upper {
-            if lm_abi::fixed_member(group, member).is_some() {
+            if ctx.bundle.fixed_member(group, member).is_some() {
                 return Err(Diagnostic::new(
                     "E1051",
                     format!(
@@ -503,13 +518,15 @@ impl<'o> FnChecker<'o> {
                 name_span,
             ));
         }
-        lm_abi::fixed_member(group, &camel_member(member)).ok_or_else(|| {
-            Diagnostic::new(
-                "E1051",
-                format!("the group `{group}` has no operation named `{member}`"),
-                name_span,
-            )
-        })
+        ctx.bundle
+            .fixed_member(group, &camel_member(member))
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "E1051",
+                    format!("the group `{group}` has no operation named `{member}`"),
+                    name_span,
+                )
+            })
     }
 
     /// Check a first-class operation value `sys.<group>.<member>`.
@@ -527,7 +544,7 @@ impl<'o> FnChecker<'o> {
                 span,
             ));
         }
-        let op = Self::resolve_sys_member(group, member, span)?;
+        let op = Self::resolve_sys_member(ctx, group, member, span)?;
         let fn_ty = Self::op_fn_type(ctx, op);
         let ty = ctx.store.intern(Type::Op(op, fn_ty));
         Ok(HExpr {
@@ -541,21 +558,23 @@ impl<'o> FnChecker<'o> {
     /// such as `Io`, or an exact name such as `Clock.Now`.
     pub(super) fn resolve_descriptor(
         &self,
+        ctx: &Ctx,
         expr: &ast::Expr,
     ) -> Result<(TargetKind, u32, String), Diagnostic> {
-        self.resolve_descriptor_for(expr, "a policy target")
+        self.resolve_descriptor_for(ctx, expr, "a policy target")
     }
 
     /// Resolve a descriptor expression with a context word for the
     /// shape diagnostic.
     pub(super) fn resolve_descriptor_for(
         &self,
+        ctx: &Ctx,
         expr: &ast::Expr,
         what: &str,
     ) -> Result<(TargetKind, u32, String), Diagnostic> {
         match &expr.kind {
             ExprKind::Name(name) => {
-                if let Some(slot) = lm_abi::group_by_name(name) {
+                if let Some(slot) = ctx.bundle.group_by_name(name) {
                     return Ok((TargetKind::Group, slot, name.clone()));
                 }
                 Err(Diagnostic::new(
@@ -567,10 +586,10 @@ impl<'o> FnChecker<'o> {
             ExprKind::Field { recv, name, .. } => {
                 if let ExprKind::Name(group) = &recv.kind {
                     let full = format!("{group}.{name}");
-                    if let Some(slot) = lm_abi::op_by_name(&full) {
+                    if let Some(slot) = ctx.bundle.op_by_name(&full) {
                         return Ok((TargetKind::Exact, slot, full));
                     }
-                    if let Some(slot) = lm_abi::group_by_name(&full) {
+                    if let Some(slot) = ctx.bundle.group_by_name(&full) {
                         return Ok((TargetKind::Group, slot, full));
                     }
                     return Err(Diagnostic::new(
@@ -629,9 +648,14 @@ impl<'o> FnChecker<'o> {
                 span,
             ));
         }
-        let (kind, slot, target_name) = self.resolve_descriptor(&args[0])?;
+        let (kind, slot, target_name) = self.resolve_descriptor(ctx, &args[0])?;
         let mock = if action == TableAction::Mock {
-            if kind != TargetKind::Exact || lm_abi::op(slot).kind != lm_abi::OpKind::Fixed {
+            if kind != TargetKind::Exact
+                || ctx
+                    .bundle
+                    .op(slot)
+                    .is_none_or(|op| op.kind != lm_abi::OpKind::Fixed)
+            {
                 return Err(Diagnostic::new(
                     "E1051",
                     "`mock` needs an exact host operation, for example `Clock.Now`",
@@ -1640,7 +1664,12 @@ impl<'o> FnChecker<'o> {
                 }
                 let call = self.synth_expr(ctx, &args[0])?;
                 let want_args = Self::op_args_type(ctx, lm_abi::OP_FS_OPEN);
-                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_FS_OPEN).reply);
+                let reply = ctx
+                    .bundle
+                    .op(lm_abi::OP_FS_OPEN)
+                    .expect("the standard operation exists")
+                    .reply;
+                let want_reply = Self::abi_type_id(ctx, reply);
                 if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
                     return Err(Diagnostic::new(
                         "E1004",
@@ -1671,10 +1700,19 @@ impl<'o> FnChecker<'o> {
                 }
                 let call = self.synth_expr(ctx, &args[0])?;
                 let connect_args = Self::op_args_type(ctx, lm_abi::OP_TCP_CONNECT);
-                let connect_reply =
-                    Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TCP_CONNECT).reply);
+                let connect_reply = ctx
+                    .bundle
+                    .op(lm_abi::OP_TCP_CONNECT)
+                    .expect("the standard operation exists")
+                    .reply;
+                let connect_reply = Self::abi_type_id(ctx, connect_reply);
                 let accept_args = Self::op_args_type(ctx, lm_abi::OP_TCP_ACCEPT);
-                let accept_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TCP_ACCEPT).reply);
+                let accept_reply = ctx
+                    .bundle
+                    .op(lm_abi::OP_TCP_ACCEPT)
+                    .expect("the standard operation exists")
+                    .reply;
+                let accept_reply = Self::abi_type_id(ctx, accept_reply);
                 let valid = ctx.store.get(call.ty)
                     == &Type::PendingCall(connect_args, connect_reply)
                     || ctx.store.get(call.ty) == &Type::PendingCall(accept_args, accept_reply);
@@ -1710,7 +1748,12 @@ impl<'o> FnChecker<'o> {
                 }
                 let call = self.synth_expr(ctx, &args[0])?;
                 let want_args = Self::op_args_type(ctx, lm_abi::OP_TCP_LISTEN);
-                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TCP_LISTEN).reply);
+                let reply = ctx
+                    .bundle
+                    .op(lm_abi::OP_TCP_LISTEN)
+                    .expect("the standard operation exists")
+                    .reply;
+                let want_reply = Self::abi_type_id(ctx, reply);
                 if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
                     return Err(Diagnostic::new(
                         "E1004",
@@ -1741,7 +1784,12 @@ impl<'o> FnChecker<'o> {
                 }
                 let call = self.synth_expr(ctx, &args[0])?;
                 let want_args = Self::op_args_type(ctx, lm_abi::OP_TLS_HANDSHAKE);
-                let want_reply = Self::abi_type_id(ctx, lm_abi::op(lm_abi::OP_TLS_HANDSHAKE).reply);
+                let reply = ctx
+                    .bundle
+                    .op(lm_abi::OP_TLS_HANDSHAKE)
+                    .expect("the standard operation exists")
+                    .reply;
+                let want_reply = Self::abi_type_id(ctx, reply);
                 if ctx.store.get(call.ty) != &Type::PendingCall(want_args, want_reply) {
                     return Err(Diagnostic::new(
                         "E1004",

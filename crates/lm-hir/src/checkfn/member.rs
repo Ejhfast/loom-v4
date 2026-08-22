@@ -24,11 +24,11 @@ impl<'o> FnChecker<'o> {
         }
         // A first-class operation value `sys.<group>.<Member>`.
         if let Some(group) = self.sys_group_of(ctx, recv)? {
-            return self.check_sys_value(ctx, group, name, name_span);
+            return self.check_sys_value(ctx, &group, name, name_span);
         }
         // A bare `sys.<group>` is not a value.
         if matches!(recv.kind, ExprKind::Name(ref n) if n == "sys") && self.sys_in_scope()? {
-            if Self::sys_group(name).is_some() {
+            if Self::sys_group(ctx, name).is_some() {
                 return Err(Diagnostic::new(
                     "E1051",
                     format!(
@@ -121,7 +121,7 @@ impl<'o> FnChecker<'o> {
         }
         // A direct operation call `sys.<group>.<Member>(args)`.
         if let Some(group) = self.sys_group_of(ctx, recv)? {
-            return self.check_sys_call(ctx, group, name, name_span, type_args, args, span);
+            return self.check_sys_call(ctx, &group, name, name_span, type_args, args, span);
         }
         // `Class.spawn(args...)`, the sugar of specification 18.3.
         if name == "spawn" {
@@ -481,7 +481,11 @@ impl<'o> FnChecker<'o> {
                     ))
                 }
             };
-            let def = lm_abi::op(op);
+            let def = ctx
+                .bundle
+                .op(op)
+                .expect("the standard operation exists")
+                .clone();
             let params: Vec<TypeId> = def
                 .params
                 .iter()

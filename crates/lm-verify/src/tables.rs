@@ -15,7 +15,11 @@ fn terr(message: String) -> VerifyError {
     }
 }
 
-pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>, VerifyError> {
+pub(crate) fn verify_tables(
+    module: &Module,
+    core: CoreLayout,
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<Ctx<'_>, VerifyError> {
     verify_selectors(module)?;
     // The type table must start with the canonical primitive prefix.
     let prefix = [BcType::Unit, BcType::Bool, BcType::Int, BcType::Str];
@@ -39,7 +43,11 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
         };
         match ty {
             BcType::Unit | BcType::Bool | BcType::Int | BcType::Str => {}
-            BcType::Digest | BcType::Bytes | BcType::FileHandle | BcType::ResourceHandle => {}
+            BcType::Digest
+            | BcType::Bytes
+            | BcType::FileHandle
+            | BcType::ResourceHandle
+            | BcType::HostResource => {}
             BcType::Var(_) => {}
             BcType::Projection {
                 base,
@@ -136,7 +144,7 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
                                 "type {idx} has a row with an invalid string index"
                             )));
                         }
-                        if !lm_abi::row_name_valid(&module.strings[*s as usize]) {
+                        if !bundle.row_name_valid(&module.strings[*s as usize]) {
                             return Err(terr(format!(
                                 "type {idx} has a row that names `{}`, which is \
                                  not in the operation manifest",
@@ -157,7 +165,10 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
                 check_ref(*r)?;
             }
             BcType::Op(op, f) => {
-                if *op >= lm_abi::OP_COUNT || lm_abi::op(*op).kind != lm_abi::OpKind::Fixed {
+                if bundle
+                    .op(*op)
+                    .is_none_or(|operation| operation.kind != lm_abi::OpKind::Fixed)
+                {
                     return Err(terr(format!(
                         "type {idx} names an invalid first-class operation slot {op}"
                     )));
@@ -204,6 +215,7 @@ pub(crate) fn verify_tables(module: &Module, core: CoreLayout) -> Result<Ctx<'_>
     }
     let ctx = Ctx {
         module,
+        bundle,
         class_ty,
         uni: RefCell::new(Universe {
             types: module.types.clone(),
@@ -284,7 +296,7 @@ fn verify_type_placement(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             if *f != sig {
                 return Err(terr(format!(
                     "type {idx} claims a wrong signature for operation {}",
-                    lm_abi::op_name(*op)
+                    ctx.bundle.op_name(*op).unwrap_or("<invalid operation>")
                 )));
             }
         }
@@ -317,7 +329,7 @@ fn verify_applications(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                             "application {aidx} has a row with an invalid string index"
                         )));
                     }
-                    if !lm_abi::row_name_valid(&module.strings[*s as usize]) {
+                    if !ctx.bundle.row_name_valid(&module.strings[*s as usize]) {
                         return Err(terr(format!(
                             "application {aidx} has a row that names `{}`, which \
                              is not in the operation manifest",
@@ -474,7 +486,7 @@ fn verify_interfaces(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                     let Some(name) = module.strings.get(*string as usize) else {
                         return Err(ierr("a method row string is out of range".to_string()));
                     };
-                    if !lm_abi::row_name_valid(name) {
+                    if !ctx.bundle.row_name_valid(name) {
                         return Err(ierr("a method row names an unknown effect".to_string()));
                     }
                 }
@@ -1167,7 +1179,7 @@ fn verify_signatures(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                             "the declared row references an invalid string index",
                         ));
                     }
-                    if !lm_abi::row_name_valid(&module.strings[*s as usize]) {
+                    if !ctx.bundle.row_name_valid(&module.strings[*s as usize]) {
                         return Err(err(
                             fidx as u32,
                             format!(
@@ -1374,7 +1386,7 @@ fn verify_callable_contract(
                 let Some(name) = ctx.module.strings.get(*name as usize) else {
                     return Err(serr("the effect row has an invalid name".to_string()));
                 };
-                if !lm_abi::row_name_valid(name) {
+                if !ctx.bundle.row_name_valid(name) {
                     return Err(serr(
                         "the effect row names an operation outside the manifest".to_string(),
                     ));

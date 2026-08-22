@@ -33,6 +33,7 @@ impl World {
                 budget.resources.clone(),
             )
         };
+        root.table.set_bundle(loaded.bundle().clone());
         // The entry function of a program takes no type argument, so
         // the root frame carries the empty environment.
         root.load_frame(
@@ -142,12 +143,13 @@ impl World {
     /// Grant one root policy target by name: an exact operation such
     /// as `Io.Print`, or a whole group such as `Clock`.
     pub fn allow(&mut self, name: &str) -> Result<(), String> {
+        let bundle = self.loaded.bundle();
         let table = &mut self.machines[0].table;
-        if let Some(op) = lm_abi::op_by_name(name) {
+        if let Some(op) = bundle.op_by_name(name) {
             table.set_exact(op, Some(Action::Pass));
             return Ok(());
         }
-        if let Some(group) = lm_abi::group_by_name(name) {
+        if let Some(group) = bundle.group_by_name(name) {
             table.set_group(group, Some(Action::Pass));
             return Ok(());
         }
@@ -456,9 +458,9 @@ impl World {
             let Some(text) = self.module.strings.get(*idx as usize) else {
                 continue;
             };
-            if let Some(op) = lm_abi::op_by_name(text) {
+            if let Some(op) = self.loaded.bundle().op_by_name(text) {
                 ops.push(op);
-            } else if let Some(group) = lm_abi::group_by_name(text) {
+            } else if let Some(group) = self.loaded.bundle().group_by_name(text) {
                 groups.push(group);
             }
         }
@@ -467,12 +469,13 @@ impl World {
 
     /// Grant one root policy target to one machine, for tools.
     pub fn allow_on(&mut self, vm: VmId, name: &str) -> Result<(), String> {
+        let bundle = self.loaded.bundle();
         let table = &mut self.machines[vm as usize].table;
-        if let Some(op) = lm_abi::op_by_name(name) {
+        if let Some(op) = bundle.op_by_name(name) {
             table.set_exact(op, Some(Action::Pass));
             return Ok(());
         }
-        if let Some(group) = lm_abi::group_by_name(name) {
+        if let Some(group) = bundle.group_by_name(name) {
             table.set_group(group, Some(Action::Pass));
             return Ok(());
         }
@@ -491,7 +494,7 @@ impl World {
 
     /// True when the table of one machine passes one group by name.
     pub fn table_passes_group(&self, vm: VmId, name: &str) -> bool {
-        let Some(group) = lm_abi::group_by_name(name) else {
+        let Some(group) = self.loaded.bundle().group_by_name(name) else {
             return false;
         };
         matches!(

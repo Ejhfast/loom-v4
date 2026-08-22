@@ -62,6 +62,8 @@ pub struct HirImport {
 
 /// A checked module. The entry statements form one function.
 pub struct HirModule {
+    /// The exact operation bundle used during checking.
+    pub bundle: std::sync::Arc<lm_abi::AbiBundle>,
     pub store: TypeStore,
     pub interfaces: Vec<HirInterface>,
     pub conformances: Vec<HirConformance>,

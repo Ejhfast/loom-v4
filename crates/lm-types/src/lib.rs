@@ -51,6 +51,8 @@ pub const BYTES: TypeId = TypeId(11);
 pub const FILE_HANDLE: TypeId = TypeId(12);
 /// A holder-local resource-management designator.
 pub const RESOURCE_HANDLE: TypeId = TypeId(13);
+/// An opaque extension host resource.
+pub const HOST_RESOURCE: TypeId = TypeId(14);
 
 /// One element of an effect row.
 ///
@@ -139,6 +141,8 @@ pub enum Type {
     FileHandle,
     /// A holder-local resource-management designator.
     ResourceHandle,
+    /// An opaque extension host resource designator.
+    HostResource,
     /// An identity-indexed first-class operation value: the manifest
     /// operation slot and the callable function type.
     Op(u32, TypeId),
@@ -165,6 +169,7 @@ pub struct ClassMeta {
 
 /// An interning store for types plus the class table.
 pub struct TypeStore {
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
     types: Vec<Type>,
     index: HashMap<Type, TypeId>,
     classes: Vec<ClassMeta>,
@@ -187,7 +192,13 @@ impl Default for TypeStore {
 
 impl TypeStore {
     pub fn new() -> TypeStore {
+        TypeStore::new_with_bundle(lm_abi::standard_bundle())
+    }
+
+    /// Create a type store for one immutable ABI bundle.
+    pub fn new_with_bundle(bundle: std::sync::Arc<lm_abi::AbiBundle>) -> TypeStore {
         let mut store = TypeStore {
+            bundle,
             types: Vec::new(),
             index: HashMap::new(),
             classes: Vec::new(),
@@ -214,6 +225,7 @@ impl TypeStore {
         store.intern(Type::Bytes);
         store.intern(Type::FileHandle);
         store.intern(Type::ResourceHandle);
+        store.intern(Type::HostResource);
         store
     }
 
@@ -308,7 +320,7 @@ impl TypeStore {
                 sup.iter().any(|s| match s {
                     RowElem::Op(m) => {
                         let sup_name = &self.row_names[*m as usize];
-                        lm_abi::row_name_included(name, sup_name)
+                        self.bundle.row_name_included(name, sup_name)
                     }
                     RowElem::Var(_) => false,
                 })
@@ -530,6 +542,7 @@ impl TypeStore {
             "Bytes" => Some(BYTES),
             "FileHandle" => Some(FILE_HANDLE),
             "ResourceHandle" => Some(RESOURCE_HANDLE),
+            "HostResource" => Some(HOST_RESOURCE),
             _ => None,
         }
     }
@@ -708,6 +721,7 @@ impl TypeStore {
                 | Type::RunSnapshot(_)
                 | Type::FileHandle
                 | Type::ResourceHandle
+                | Type::HostResource
         )
     }
 
@@ -762,6 +776,7 @@ impl TypeStore {
                 | Type::Wait(_)
                 | Type::PendingCall(_, _)
                 | Type::ResourceHandle
+                | Type::HostResource
         )
     }
 
@@ -1080,6 +1095,7 @@ impl TypeStore {
             ),
             Type::FileHandle => "FileHandle".to_string(),
             Type::ResourceHandle => "ResourceHandle".to_string(),
+            Type::HostResource => "HostResource".to_string(),
             Type::PendingCall(a, r) => format!(
                 "PendingCall[{}, {}]",
                 self.display_inner(*a, variable_name, effect_name, associated_name),
@@ -1093,7 +1109,7 @@ impl TypeStore {
             Type::Op(op, f) => {
                 format!(
                     "Op[{}, {}]",
-                    lm_abi::op_name(*op),
+                    self.bundle.op_name(*op).unwrap_or("<invalid operation>"),
                     self.display_inner(*f, variable_name, effect_name, associated_name)
                 )
             }

@@ -303,7 +303,13 @@ pub fn container_hash(bytes: &[u8]) -> [u8; 32] {
 /// section since container version 8, so the digest needs no separate
 /// marker-length field.
 pub fn verification_hash(module: &Module) -> [u8; 32] {
-    verification_hash_with(lm_abi::manifest_digest(), module)
+    let bundle = lm_abi::standard_bundle();
+    verification_hash_with_bundle(&bundle, module)
+}
+
+/// Return the verification hash under one immutable ABI bundle.
+pub fn verification_hash_with_bundle(bundle: &lm_abi::AbiBundle, module: &Module) -> [u8; 32] {
+    verification_hash_with(bundle.digest(), module)
 }
 
 /// The verification hash under one exact manifest digest.
@@ -410,6 +416,7 @@ fn preflight(module: &Module) -> Result<(), IdentityError> {
             | BcType::Bytes
             | BcType::FileHandle
             | BcType::ResourceHandle
+            | BcType::HostResource
             | BcType::Var(_) => {}
             BcType::Projection {
                 base,
@@ -1447,6 +1454,7 @@ struct HashState {
 /// serializing one component, or the final all-hash view.
 struct Resolver<'a> {
     module: &'a Module,
+    bundle: &'a lm_abi::AbiBundle,
     graph: &'a Graph,
     state: &'a HashState,
     /// The current component index, or `None` for the final view.
@@ -1556,10 +1564,15 @@ impl<'a> Resolver<'a> {
             match elem {
                 BcRow::Op(idx) => {
                     let name = &self.module.strings[*idx as usize];
-                    match lm_abi::row_name_operations(name) {
+                    match self.bundle.row_name_operations(name) {
                         Some(expanded) if !expanded.is_empty() => {
                             for operation in expanded {
-                                operations.insert(lm_abi::op_name(operation));
+                                operations.insert(
+                                    self.bundle
+                                        .op_name(operation)
+                                        .expect("a bundle operation has a name")
+                                        .to_string(),
+                                );
                             }
                         }
                         _ => {
@@ -1763,6 +1776,7 @@ impl<'a> Resolver<'a> {
             BcType::Bytes => out.push(24),
             BcType::FileHandle => out.push(25),
             BcType::ResourceHandle => out.push(26),
+            BcType::HostResource => out.push(30),
             BcType::Op(op, f) => {
                 out.push(19);
                 out.extend_from_slice(&op.to_le_bytes());
@@ -2657,6 +2671,7 @@ fn refine_colours(
 /// result.
 fn closure_body_digests(
     module: &Module,
+    bundle: &lm_abi::AbiBundle,
     graph: &Graph,
     state: &HashState,
     comp_of: &[u32],
@@ -2685,6 +2700,7 @@ fn closure_body_digests(
                 let digest = {
                     let resolver = Resolver {
                         module,
+                        bundle,
                         graph,
                         state,
                         comp: None,
@@ -2738,6 +2754,15 @@ fn closure_body_digests(
 /// class and function plus the module semantic hash. The module may
 /// be unverified; every index is validated first.
 pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError> {
+    let bundle = lm_abi::standard_bundle();
+    module_identity_with_bundle(module, &bundle)
+}
+
+/// Compute the semantic identity under one immutable ABI bundle.
+pub fn module_identity_with_bundle(
+    module: &Module,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<ModuleIdentity, IdentityError> {
     preflight(module)?;
     let graph = Graph::build(module);
     let s = graph.space;
@@ -2750,7 +2775,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         body_final: vec![None; s.funcs],
         comp_hash: vec![[0u8; 32]; s.total()],
     };
-    let manifest = lm_abi::manifest_digest();
+    let manifest = bundle.digest();
     let mut max_refine_rounds = 0u32;
     // The module refinement budget, spent component by component.
     let mut refine_budget = MODULE_REFINE_WORK_BUDGET;
@@ -2844,6 +2869,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             let digest = {
                 let resolver = Resolver {
                     module,
+                    bundle,
                     graph: &graph,
                     state: &state,
                     comp: Some(comp_idx),
@@ -2865,6 +2891,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             let digest = {
                 let resolver = Resolver {
                     module,
+                    bundle,
                     graph: &graph,
                     state: &state,
                     comp: Some(comp_idx),
@@ -2892,6 +2919,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             let bytes = {
                 let resolver = Resolver {
                     module,
+                    bundle,
                     graph: &graph,
                     state: &state,
                     comp: Some(comp_idx),
@@ -2930,6 +2958,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
         {
             let resolver = Resolver {
                 module,
+                bundle,
                 graph: &graph,
                 state: &state,
                 comp: Some(comp_idx),
@@ -2979,6 +3008,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             let digest = {
                 let resolver = Resolver {
                     module,
+                    bundle,
                     graph: &graph,
                     state: &state,
                     comp: None,
@@ -3000,6 +3030,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             let digest = {
                 let resolver = Resolver {
                     module,
+                    bundle,
                     graph: &graph,
                     state: &state,
                     comp: None,
@@ -3017,7 +3048,8 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
             };
             state.app_final[a as usize] = Some(digest);
         }
-        let body_final = closure_body_digests(module, &graph, &state, &comp_of, &closure_funcs);
+        let body_final =
+            closure_body_digests(module, bundle, &graph, &state, &comp_of, &closure_funcs);
         for (f, digest) in body_final {
             state.body_final[f as usize] = Some(digest);
         }
@@ -3043,6 +3075,7 @@ pub fn module_identity(module: &Module) -> Result<ModuleIdentity, IdentityError>
     let no_colours: [u32; 0] = [];
     let resolver = Resolver {
         module,
+        bundle,
         graph: &graph,
         state: &state,
         comp: None,

@@ -144,9 +144,8 @@ fn every_interface_corruption_is_rejected() {
     let mut trailing = bytes.clone();
     trailing.push(0);
     assert!(decode_interface(&trailing).is_err());
-    // The export kind byte follows the header: magic, version, two
-    // ABI versions, the module path, the semantic hash, and the count.
-    let kind_at = 4 + 2 + 4 + 4 + (4 + "shapes".len()) + 32 + 4;
+    // The export kind byte follows the fixed fields and module path.
+    let kind_at = 4 + 2 + 4 + 4 + 32 + (4 + "shapes".len()) + 32 + 4;
     assert_eq!(bytes[kind_at], ExportKind::Class.tag());
     let mut bad_kind = bytes.clone();
     bad_kind[kind_at] = 9;
@@ -163,9 +162,10 @@ fn every_interface_corruption_is_rejected() {
 fn a_deeply_nested_interface_type_is_rejected() {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"LMIF");
-    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&17u16.to_le_bytes());
     bytes.extend_from_slice(&lm_abi::ABI_VERSION.to_le_bytes());
     bytes.extend_from_slice(&lm_bytecode::identity::COMPILER_ABI_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&lm_abi::standard_bundle().digest());
     bytes.extend_from_slice(&0u32.to_le_bytes()); // the module path
     bytes.extend_from_slice(&[0u8; 32]); // the semantic hash
     bytes.extend_from_slice(&1u32.to_le_bytes()); // one export

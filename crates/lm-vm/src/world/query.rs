@@ -397,12 +397,25 @@ impl World {
             .live_attachment()
             .map(|record| match record.kind {
                 crate::ResourceKind::PendingOperation => {
-                    format!("a pending {}", lm_abi::op_name(record.op))
+                    format!(
+                        "a pending {}",
+                        self.loaded
+                            .bundle()
+                            .op_name(record.op)
+                            .unwrap_or("<invalid operation>")
+                    )
                 }
                 crate::ResourceKind::File => "file handle".to_string(),
                 crate::ResourceKind::TcpStream => "TCP stream".to_string(),
                 crate::ResourceKind::TcpListener => "TCP listener".to_string(),
                 crate::ResourceKind::TlsStream => "TLS stream".to_string(),
+                crate::ResourceKind::Extension(identity) => self
+                    .loaded
+                    .bundle()
+                    .resource_by_identity(identity)
+                    .and_then(|slot| self.loaded.bundle().resource(slot))
+                    .map(|resource| resource.name.clone())
+                    .unwrap_or_else(|| "extension resource".to_string()),
             });
         if registered.is_some() {
             return registered;
@@ -415,7 +428,8 @@ impl World {
                 | Object::NativeResourceHandle { resource, .. }
                 | Object::NativeTcpStream { resource }
                 | Object::NativeTcpListener { resource } => *resource,
-                Object::NativeTlsStream { resource } => *resource,
+                Object::NativeTlsStream { resource }
+                | Object::NativeHostResource { resource, .. } => *resource,
                 _ => return None,
             };
             self.bound_resources
@@ -426,6 +440,13 @@ impl World {
                     crate::ResourceKind::TcpListener => "TCP listener".to_string(),
                     crate::ResourceKind::TlsStream => "TLS stream".to_string(),
                     crate::ResourceKind::PendingOperation => "pending operation".to_string(),
+                    crate::ResourceKind::Extension(identity) => self
+                        .loaded
+                        .bundle()
+                        .resource_by_identity(identity)
+                        .and_then(|slot| self.loaded.bundle().resource(slot))
+                        .map(|resource| resource.name.clone())
+                        .unwrap_or_else(|| "extension resource".to_string()),
                 })
         })
     }

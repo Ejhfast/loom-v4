@@ -40,9 +40,8 @@ fn asked_tree() -> (LoadedModule, Vec<u8>) {
     (loaded, bytes)
 }
 
-/// The fixed container frame: eight magic bytes, four version fields,
-/// one entry count, and five twelve-byte section entries.
-const PREFIX: usize = 8 + 4 * 4;
+/// The fixed frame has magic, versions, a bundle digest, and sections.
+const PREFIX: usize = 8 + 4 * 4 + 32;
 const TABLE: usize = PREFIX + 1;
 const ENTRY: usize = 12;
 const BODY: usize = TABLE + 5 * ENTRY;
@@ -153,6 +152,10 @@ fn the_frame_rules_reject_precisely() {
             "at {at}"
         );
     }
+    // The ABI bundle digest.
+    let mut bad = bytes.clone();
+    bad[24] ^= 1;
+    assert_eq!(reject(&loaded, &reseal(bad)), ImageReason::Version);
     // The container hash covers every byte before it.
     let mut bad = bytes.clone();
     let last = bad.len() - 1;

@@ -391,6 +391,8 @@ pub enum Object {
     NativeTcpListener { resource: u64 },
     /// A TLS stream resource designator. Zero marks a closed handle.
     NativeTlsStream { resource: u64 },
+    /// An opaque extension resource. Zero marks a closed handle.
+    NativeHostResource { kind: [u8; 32], resource: u64 },
     /// One value with its closed static type. Born frozen.
     DynValue { value: Value, ty: u32 },
 }
@@ -688,6 +690,16 @@ const SHAPE_TLS_STREAM: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_HOST_RESOURCE: ShapeDesc = ShapeDesc {
+    name: "HostResource",
+    has_refs: false,
+    born_frozen: true,
+    child_order: "none",
+    boundary: BoundaryPolicy::HolderLocal,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 const SHAPE_CODE: ShapeDesc = ShapeDesc {
     name: "PortableCode",
     has_refs: false,
@@ -730,7 +742,7 @@ const SHAPE_SLOT_CHANGE: ShapeDesc = ShapeDesc {
 
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 30] = [
+pub const SHAPES: [&ShapeDesc; 31] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -761,6 +773,7 @@ pub const SHAPES: [&ShapeDesc; 30] = [
     &SHAPE_CODE_HANDLE,
     &SHAPE_DYN_VALUE,
     &SHAPE_SLOT_CHANGE,
+    &SHAPE_HOST_RESOURCE,
 ];
 
 impl Object {
@@ -931,6 +944,10 @@ impl Object {
             Object::NativeTlsStream { resource } => Object::NativeTlsStream {
                 resource: *resource,
             },
+            Object::NativeHostResource { kind, resource } => Object::NativeHostResource {
+                kind: *kind,
+                resource: *resource,
+            },
             Object::DynValue { value, ty } => Object::DynValue {
                 value: match value {
                     Value::Obj(reference) => Value::Obj(map(*reference)),
@@ -976,6 +993,7 @@ impl Object {
             Object::NativeCodeHandle { .. } => 27,
             Object::DynValue { .. } => 28,
             Object::NativeSlotChange { .. } => 29,
+            Object::NativeHostResource { .. } => 30,
         }
     }
 
@@ -1021,7 +1039,7 @@ impl Object {
                 | Object::NativeWait { .. }
                 | Object::NativeTcpStream { .. }
                 | Object::NativeTcpListener { .. } => VALUE_COST,
-                Object::NativeTlsStream { .. } => VALUE_COST,
+                Object::NativeTlsStream { .. } | Object::NativeHostResource { .. } => VALUE_COST,
                 Object::NativeFault { message, trace, .. } => message
                     .len()
                     .saturating_add(trace.len().saturating_mul(std::mem::size_of::<FaultSite>())),
@@ -1091,7 +1109,7 @@ impl Object {
             | Object::NativeWait { .. }
             | Object::NativeTcpStream { .. }
             | Object::NativeTcpListener { .. } => {}
-            Object::NativeTlsStream { .. } => {}
+            Object::NativeTlsStream { .. } | Object::NativeHostResource { .. } => {}
             Object::Substring(_) => {}
             Object::DynValue { value, .. } => visit(value),
             Object::NativeSlotChange { target, .. } => visit(target),
@@ -1438,6 +1456,10 @@ mod tests {
                 kind: SlotChangeKind::Function,
                 target: Value::Obj(b),
             },
+            Object::NativeHostResource {
+                kind: [8; 32],
+                resource: 9,
+            },
         ]
     }
 
@@ -1634,6 +1656,10 @@ mod tests {
                 kind: SlotChangeKind::Value,
                 target: Value::Unit,
             },
+            Object::NativeHostResource {
+                kind: [0; 32],
+                resource: 0,
+            },
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -1781,6 +1807,7 @@ mod tests {
                 "Run",
                 "CodeHandle",
                 "SlotChange",
+                "HostResource",
             ]
         );
     }

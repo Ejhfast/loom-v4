@@ -66,7 +66,8 @@ fn object_resource(object: &Object) -> Option<u64> {
         Object::NativeFileHandle { resource }
         | Object::NativeTcpStream { resource }
         | Object::NativeTcpListener { resource }
-        | Object::NativeTlsStream { resource } => Some(*resource),
+        | Object::NativeTlsStream { resource }
+        | Object::NativeHostResource { resource, .. } => Some(*resource),
         _ => None,
     }
 }
@@ -79,10 +80,22 @@ impl World {
         expected: ClosedTypeId,
     ) -> Result<Value, FaultCode> {
         match value {
-            HostValue::Unit => Ok(Value::Unit),
-            HostValue::Int(v) => Ok(Value::Int(*v)),
-            HostValue::Str(s) => self.machines[vm as usize].alloc(Object::Str(s.clone())),
+            HostValue::Unit if matches!(self.envs.ty(expected), Some(ClosedType::Unit)) => {
+                Ok(Value::Unit)
+            }
+            HostValue::Bool(v) if matches!(self.envs.ty(expected), Some(ClosedType::Bool)) => {
+                Ok(Value::Bool(*v))
+            }
+            HostValue::Int(v) if matches!(self.envs.ty(expected), Some(ClosedType::Int)) => {
+                Ok(Value::Int(*v))
+            }
+            HostValue::Str(s) if matches!(self.envs.ty(expected), Some(ClosedType::Str)) => {
+                self.machines[vm as usize].alloc(Object::Str(s.clone()))
+            }
             HostValue::Bytes(bytes) => {
+                if !matches!(self.envs.ty(expected), Some(ClosedType::Bytes)) {
+                    return Err(FaultCode::TypeMismatch);
+                }
                 self.machines[vm as usize].alloc(Object::Bytes(bytes.clone()))
             }
             HostValue::File(token) => self.build_host_file(vm, *token),
@@ -105,6 +118,17 @@ impl World {
                     epoch: StructuralEpoch::default(),
                 })
             }
+            HostValue::Tuple(values) => {
+                let elements = match self.envs.ty(expected).cloned() {
+                    Some(ClosedType::Tuple(elements)) if elements.len() == values.len() => elements,
+                    _ => return Err(FaultCode::TypeMismatch),
+                };
+                let mut items = Vec::with_capacity(values.len());
+                for (value, element) in values.iter().zip(elements) {
+                    items.push(self.build_host_value(vm, value, element)?);
+                }
+                self.machines[vm as usize].alloc(Object::Tuple { items })
+            }
             HostValue::SocketAddress(address) => self.build_host_address(vm, *address),
             HostValue::TcpStream(token) => {
                 self.build_host_tcp(vm, *token, crate::ResourceKind::TcpStream)
@@ -113,6 +137,7 @@ impl World {
                 self.build_host_tcp(vm, *token, crate::ResourceKind::TcpListener)
             }
             HostValue::TlsStream(token) => self.build_host_tls(vm, *token),
+            HostValue::Resource(resource) => self.build_host_resource(vm, *resource),
             HostValue::Artifact { module, interface } => {
                 let valid = matches!(
                     self.envs.ty(expected),
@@ -232,6 +257,7 @@ impl World {
                 }
                 self.make_instance(vm, Some(class), fields)
             }
+            _ => Err(FaultCode::TypeMismatch),
         }
     }
 
@@ -511,6 +537,61 @@ impl World {
         }
     }
 
+    /// Register one opaque host resource and build its guest handle.
+    pub(super) fn build_host_resource(
+        &mut self,
+        vm: VmId,
+        host: crate::HostResource,
+    ) -> Result<Value, FaultCode> {
+        if self
+            .loaded
+            .bundle()
+            .resource_by_identity(host.kind)
+            .is_none()
+        {
+            self.host.close_resource(host);
+            return Err(FaultCode::TypeMismatch);
+        }
+        let resource = self.next_resource;
+        let Some(next_resource) = resource.checked_add(1) else {
+            self.host.close_resource(host);
+            return Err(FaultCode::IntegerOverflow);
+        };
+        self.next_resource = next_resource;
+        let Some(op) = self.pending_op(vm) else {
+            self.host.close_resource(host);
+            return Err(FaultCode::MalformedState);
+        };
+        let kind = crate::ResourceKind::Extension(host.kind);
+        if let Err(code) =
+            self.machines[vm as usize]
+                .resources
+                .register(kind, vm, resource, u64::MAX, op)
+        {
+            self.host.close_resource(host);
+            return Err(code);
+        }
+        self.bound_resources.insert(
+            resource,
+            BoundResource {
+                owner: vm,
+                kind,
+                backing: ResourceBacking::Extension(host),
+            },
+        );
+        let object = Object::NativeHostResource {
+            kind: host.kind,
+            resource,
+        };
+        match self.machines[vm as usize].alloc(object) {
+            Ok(value) => Ok(value),
+            Err(code) => {
+                self.retire_resource(resource, true);
+                Err(code)
+            }
+        }
+    }
+
     /// Remove one file resource. Close its host token when requested.
     pub(super) fn retire_file(&mut self, resource: u64, close_host: bool) -> bool {
         self.retire_resource(resource, close_host)
@@ -538,8 +619,11 @@ impl World {
                     crate::ResourceKind::TlsStream => {
                         self.host.close_tls(token);
                     }
-                    crate::ResourceKind::PendingOperation => {}
+                    crate::ResourceKind::PendingOperation | crate::ResourceKind::Extension(_) => {}
                 },
+                ResourceBacking::Extension(resource) => {
+                    self.host.close_resource(resource);
+                }
                 ResourceBacking::Driver(_) => {}
             }
         }

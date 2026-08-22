@@ -226,10 +226,11 @@ fn prove_inner(
     })?;
     let module = aggregate.module();
     check_identity(image, identity)?;
-    let tables = resolve_type_tables(image, module)?;
+    let tables = resolve_type_tables(image, module, aggregate.bundle())?;
     let admit = Admit {
         image,
         module,
+        bundle: aggregate.bundle(),
         identity,
         installations,
         witness: tables,
@@ -245,6 +246,7 @@ fn prove_inner(
             abi_version: image.abi_version,
             compiler_abi: image.compiler_abi,
             verifier_version: image.verifier_version,
+            bundle_digest: aggregate.bundle().digest(),
         },
         loaded: aggregate.clone(),
     })
@@ -341,24 +343,27 @@ fn rebuild_aggregate(
             )
         })?;
     for (index, bytes) in image.installations.iter().enumerate() {
-        let addition = lm_bytecode::decode(bytes).map_err(|error| {
+        let addition = lm_bytecode::decode_with_bundle(bytes, base.bundle()).map_err(|error| {
             ImageError::admission(
                 ImageReason::Code,
                 format!("installed artifact {index} did not decode: {error}"),
             )
         })?;
-        lm_verify::verify_module(&addition).map_err(|error| {
+        lm_verify::verify_module_with_bundle(&addition, base.bundle()).map_err(|error| {
             ImageError::admission(
                 ImageReason::Code,
                 format!("installed artifact {index} did not verify: {error}"),
             )
         })?;
-        let source_identity = lm_bytecode::identity::module_identity(&addition).map_err(|_| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("installed artifact {index} has no semantic identity"),
-            )
-        })?;
+        let source_identity =
+            lm_bytecode::identity::module_identity_with_bundle(&addition, base.bundle()).map_err(
+                |_| {
+                    ImageError::admission(
+                        ImageReason::Code,
+                        format!("installed artifact {index} has no semantic identity"),
+                    )
+                },
+            )?;
         let instance = image
             .vm_images
             .iter()
@@ -415,7 +420,7 @@ fn rebuild_aggregate(
         });
         module = appended.module;
     }
-    let loaded = crate::load(module).map_err(|error| {
+    let loaded = crate::load_with_bundle(module, base.bundle()).map_err(|error| {
         ImageError::admission(
             ImageReason::Code,
             format!("the installed aggregate did not verify: {error}"),
@@ -612,6 +617,7 @@ struct WitnessTables {
 struct Admit<'m> {
     image: &'m Image,
     module: &'m lm_bytecode::Module,
+    bundle: &'m std::sync::Arc<lm_abi::AbiBundle>,
     identity: &'m ModuleIdentity,
     installations: &'m [InstallationProof],
     /// The witness tables the image carries.
@@ -631,6 +637,7 @@ struct Admit<'m> {
 fn resolve_type_tables(
     image: &Image,
     module: &lm_bytecode::Module,
+    bundle: &lm_abi::AbiBundle,
 ) -> Result<WitnessTables, ImageError> {
     let mut canonical = TypeEnvs::new(u32::MAX, u32::MAX);
     canonical
@@ -692,7 +699,7 @@ fn resolve_type_tables(
                 }
             }
             ClosedType::Op(op, _) => {
-                if *op >= lm_abi::OP_COUNT {
+                if *op >= bundle.op_count() {
                     return fail(
                         ImageReason::Code,
                         format!("closed type {at} names operation slot {op}"),
@@ -986,24 +993,25 @@ impl Admit<'_> {
         if kind == PortableCodeKind::Artifact && origin.is_none() {
             return Ok(());
         }
-        let module = lm_bytecode::decode(bytes).map_err(|error| {
+        let module = lm_bytecode::decode_with_bundle(bytes, self.bundle).map_err(|error| {
             ImageError::admission(
                 ImageReason::Code,
                 format!("a portable code value did not decode: {error}"),
             )
         })?;
-        lm_verify::verify_module(&module).map_err(|error| {
+        lm_verify::verify_module_with_bundle(&module, self.bundle).map_err(|error| {
             ImageError::admission(
                 ImageReason::Code,
                 format!("a portable code value did not verify: {error}"),
             )
         })?;
-        let identity = lm_bytecode::identity::module_identity(&module).map_err(|error| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("a portable code value did not hash: {error}"),
-            )
-        })?;
+        let identity = lm_bytecode::identity::module_identity_with_bundle(&module, self.bundle)
+            .map_err(|error| {
+                ImageError::admission(
+                    ImageReason::Code,
+                    format!("a portable code value did not hash: {error}"),
+                )
+            })?;
         if let Some(interface) = interface {
             self.check_interface(&module, &identity, interface, "a portable code value")?;
         }
@@ -1078,7 +1086,13 @@ impl Admit<'_> {
                 format!("{owner} has noncanonical interface bytes"),
             );
         }
-        lm_bytecode::interface::validate_interface(source, identity, &interface).map_err(|error| {
+        lm_bytecode::interface::validate_interface_with_bundle(
+            source,
+            identity,
+            &interface,
+            self.bundle,
+        )
+        .map_err(|error| {
             ImageError::admission(
                 ImageReason::Code,
                 format!("{owner} has an invalid interface: {error}"),
@@ -1838,6 +1852,7 @@ impl Admit<'_> {
                     | Object::NativeTcpStream { resource }
                     | Object::NativeTcpListener { resource }
                     | Object::NativeTlsStream { resource }
+                    | Object::NativeHostResource { resource, .. }
                     if resource != 0
             ) {
                 return fail(
@@ -1859,7 +1874,7 @@ impl Admit<'_> {
             .into_iter()
             .flatten()
             {
-                if op >= lm_abi::OP_COUNT {
+                if op >= self.bundle.op_count() {
                     return fail(
                         ImageReason::Code,
                         at(&format!(
@@ -2059,7 +2074,7 @@ impl Admit<'_> {
             object_ref(value, &format!("operand {idx}"))?;
         }
         if let Some(pending) = &m.pending {
-            if pending.op >= lm_abi::OP_COUNT {
+            if pending.op >= self.bundle.op_count() {
                 return fail(
                     ImageReason::Code,
                     at("the pending request names no manifest operation"),
@@ -2072,7 +2087,7 @@ impl Admit<'_> {
         match &m.terminal {
             Some(ImageTerminal::Done(value)) => object_ref(value, "the terminal value")?,
             Some(ImageTerminal::Fault(rec)) => {
-                if rec.op.is_some_and(|op| op >= lm_abi::OP_COUNT) {
+                if rec.op.is_some_and(|op| op >= self.bundle.op_count()) {
                     return fail(
                         ImageReason::Code,
                         at("the terminal fault names no manifest operation"),

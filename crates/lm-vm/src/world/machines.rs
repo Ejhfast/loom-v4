@@ -354,14 +354,15 @@ impl World {
         self.check_slot_safepoint(key)
             .map_err(|_| "the VM image is not at a safe installation point".to_string())?;
 
-        let addition = lm_bytecode::decode(artifact.as_slice())
+        let addition = lm_bytecode::decode_with_bundle(artifact.as_slice(), self.loaded.bundle())
             .map_err(|error| format!("the artifact did not decode: {error}"))?;
-        lm_verify::verify_module(&addition)
+        lm_verify::verify_module_with_bundle(&addition, self.loaded.bundle())
             .map_err(|error| format!("the artifact did not verify: {error}"))?;
-        let identity = lm_bytecode::identity::module_identity(&addition)
-            .map_err(|error| format!("the artifact has no semantic identity: {error}"))?;
+        let identity =
+            lm_bytecode::identity::module_identity_with_bundle(&addition, self.loaded.bundle())
+                .map_err(|error| format!("the artifact has no semantic identity: {error}"))?;
         let appended = lm_bytecode::append::append_resolved(&self.module, &addition, imports)?;
-        let next = crate::load(appended.module)
+        let next = crate::load_with_bundle(appended.module, self.loaded.bundle())
             .map_err(|error| format!("the installed code did not verify: {error}"))?;
 
         let slot_count = next.module().slots.len();
@@ -674,8 +675,7 @@ impl World {
             .vm
             .heap;
         crate::typecheck::check_boundary_value(
-            &self.module,
-            source_heap,
+            crate::typecheck::BoundaryContext::new(&self.module, self.loaded.bundle(), source_heap),
             &mut self.envs,
             &mut self.check,
             value,
@@ -808,8 +808,11 @@ impl World {
             _ => return Err(FaultCode::MalformedState),
         };
         crate::typecheck::check_boundary_value(
-            &self.module,
-            &self.vm_images[key.image as usize].heap,
+            crate::typecheck::BoundaryContext::new(
+                &self.module,
+                self.loaded.bundle(),
+                &self.vm_images[key.image as usize].heap,
+            ),
             &mut self.envs,
             &mut self.check,
             value,
@@ -971,13 +974,15 @@ impl World {
         generation: u32,
     ) -> Machine {
         debug_assert!(self.heap_shared);
-        Machine::empty_with_budgets(
+        let mut machine = Machine::empty_with_budgets(
             config,
             parent,
             generation,
             self.budget.heap.clone(),
             self.budget.resources.clone(),
-        )
+        );
+        machine.table.set_bundle(self.loaded.bundle().clone());
+        machine
     }
 
     /// Create one image-owned heap with the world ledger.
@@ -1984,13 +1989,22 @@ impl World {
                             .bound_resources
                             .get(&resource)
                             .map(|bound| match bound.kind {
-                                crate::ResourceKind::File => "file",
-                                crate::ResourceKind::TcpStream => "tcp-stream",
-                                crate::ResourceKind::TcpListener => "tcp-listener",
-                                crate::ResourceKind::TlsStream => "tls-stream",
-                                crate::ResourceKind::PendingOperation => "pending-operation",
+                                crate::ResourceKind::File => "file".to_string(),
+                                crate::ResourceKind::TcpStream => "tcp-stream".to_string(),
+                                crate::ResourceKind::TcpListener => "tcp-listener".to_string(),
+                                crate::ResourceKind::TlsStream => "tls-stream".to_string(),
+                                crate::ResourceKind::PendingOperation => {
+                                    "pending-operation".to_string()
+                                }
+                                crate::ResourceKind::Extension(identity) => self
+                                    .loaded
+                                    .bundle()
+                                    .resource_by_identity(identity)
+                                    .and_then(|slot| self.loaded.bundle().resource(slot))
+                                    .map(|resource| resource.name.clone())
+                                    .unwrap_or_else(|| "extension-resource".to_string()),
                             })
-                            .unwrap_or("closed");
+                            .unwrap_or_else(|| "closed".to_string());
                         let built = self.machines[vm as usize].alloc(Object::Str(name.into()));
                         self.reply_or_fault(vm, op, built);
                     }

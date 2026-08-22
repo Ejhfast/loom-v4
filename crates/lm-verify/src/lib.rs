@@ -202,6 +202,7 @@ fn include_parameter_type_facts(facts: &mut TypeFacts, known: &[TypeFacts], chil
 /// Shared lookup context for one module.
 struct Ctx<'m> {
     module: &'m Module,
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
     /// Class index to the type index of its `Class` entry, when the
     /// module contains one.
     class_ty: Vec<Option<u32>>,
@@ -252,7 +253,16 @@ pub const VERIFIER_VERSION: u32 = 30;
 /// carries. The verifier proves the shape of every filled slot, so it
 /// reads no definition hash and no source name.
 pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
-    let ctx = verify_structure(module)?;
+    let bundle = lm_abi::standard_bundle();
+    verify_module_with_bundle(module, &bundle)
+}
+
+/// Verify a full module against one immutable ABI bundle.
+pub fn verify_module_with_bundle(
+    module: &Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<(), VerifyError> {
+    let ctx = verify_structure(module, bundle.clone())?;
     let imported = module.extern_funcs();
     for (idx, func) in module.funcs.iter().enumerate() {
         // An imported function has no body to check. The structural
@@ -270,12 +280,24 @@ pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
 /// may skip only the dataflow, never this pass, so a hash-equal
 /// byte stream with a non-canonical table is rejected on every load.
 pub fn verify_structure_only(module: &Module) -> Result<(), VerifyError> {
-    verify_structure(module).map(|_| ())
+    let bundle = lm_abi::standard_bundle();
+    verify_structure_only_with_bundle(module, &bundle)
 }
 
-fn verify_structure(module: &Module) -> Result<Ctx<'_>, VerifyError> {
+/// Validate module-level rules against one immutable ABI bundle.
+pub fn verify_structure_only_with_bundle(
+    module: &Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<(), VerifyError> {
+    verify_structure(module, bundle.clone()).map(|_| ())
+}
+
+fn verify_structure(
+    module: &Module,
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<Ctx<'_>, VerifyError> {
     let core = lm_bytecode::corepin::declared_layout(module);
-    let ctx = verify_tables(module, core)?;
+    let ctx = verify_tables(module, core, bundle)?;
     let entry = module.entry as usize;
     if entry >= module.funcs.len() {
         return Err(err(
@@ -1328,7 +1350,7 @@ mod tests {
         ];
         complete_bounds(&mut m);
         let core = lm_bytecode::corepin::declared_layout(&m);
-        let ctx = verify_tables(&m, core).expect("the tables verify");
+        let ctx = verify_tables(&m, core, lm_abi::standard_bundle()).expect("the tables verify");
         assert!(ctx.is_subtype(7, 5), "an IntBox fits Box[Int]");
         assert!(!ctx.is_subtype(7, 6), "an IntBox fits no Box[String]");
     }
@@ -1361,7 +1383,7 @@ mod tests {
         ];
         complete_bounds(&mut m);
         let core = lm_bytecode::corepin::declared_layout(&m);
-        let ctx = verify_tables(&m, core).expect("the tables verify");
+        let ctx = verify_tables(&m, core, lm_abi::standard_bundle()).expect("the tables verify");
 
         let joined = ctx.join(4, 5).expect("the siblings join");
         assert_eq!(ctx.ty(joined), BcType::Inst(0, vec![TY_INT]));
@@ -1410,7 +1432,7 @@ mod tests {
         ];
         complete_bounds(&mut m);
         let core = lm_bytecode::corepin::declared_layout(&m);
-        let ctx = verify_tables(&m, core).expect("the tables verify");
+        let ctx = verify_tables(&m, core, lm_abi::standard_bundle()).expect("the tables verify");
 
         assert!(ctx.vars_bounded(bounded, 1, 0));
         assert!(!ctx.is_subtype(left, right));
@@ -1506,7 +1528,8 @@ mod tests {
                 // The three remaining walks run directly, because no
                 // small program reaches a type this deep.
                 let core = lm_bytecode::corepin::declared_layout(&m);
-                let ctx = verify_tables(&m, core).expect("the tables verify");
+                let ctx =
+                    verify_tables(&m, core, lm_abi::standard_bundle()).expect("the tables verify");
                 assert!(ctx.vars_bounded(deep, 1, 0));
                 let closed = ctx.subst(deep, &[TY_INT], &[]);
                 assert_ne!(closed, deep);

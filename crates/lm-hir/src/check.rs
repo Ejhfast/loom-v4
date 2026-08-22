@@ -180,6 +180,8 @@ pub const PRELUDE_CTORS: [&str; 17] = [
 #[derive(Debug, Clone)]
 pub struct CheckOptions {
     pub prelude: bool,
+    /// The operation bundle available to this module.
+    pub bundle: std::sync::Arc<lm_abi::AbiBundle>,
     /// The module path of the source under compilation, for example
     /// `mathlib.matrix`. It names this module's classes inside the
     /// emitted interface, and it forms the qualified key of every
@@ -195,6 +197,7 @@ impl Default for CheckOptions {
     fn default() -> CheckOptions {
         CheckOptions {
             prelude: true,
+            bundle: lm_abi::standard_bundle(),
             module_path: String::new(),
             imports: crate::import::ImportEnv::new(),
         }
@@ -372,34 +375,18 @@ impl ClassInfo {
 #[derive(Clone)]
 pub(crate) enum UseBinding {
     /// A `sys` group object, by manifest group name (`Io`).
-    SysGroup(&'static str),
+    SysGroup(String),
     /// A callable `sys` member: the manifest group name plus the
     /// surface member name (`print`, `read_line`, or `Vm`).
-    SysMember { group: &'static str, member: String },
+    SysMember { group: String, member: String },
     /// A whole module bound to a short name. A member of it resolves
     /// through the qualified key `alias.member`.
     Module(String),
 }
 
 /// Map a surface `sys` member name to its manifest group name.
-pub(crate) fn sys_group_name(name: &str) -> Option<&'static str> {
-    match name {
-        "io" => Some("Io"),
-        "fs" => Some("Fs"),
-        "clock" => Some("Clock"),
-        "rand" => Some("Rand"),
-        "net" => Some("Net"),
-        "proc" => Some("Proc"),
-        "vm" => Some("Vm"),
-        "compiler" => Some("Compiler"),
-        "reflect" => Some("Reflect"),
-        "wait" => Some("Wait"),
-        "dns" => Some("Dns"),
-        "tcp" => Some("Tcp"),
-        "tls" => Some("Tls"),
-        "choose" => Some("Choose"),
-        _ => None,
-    }
+pub(crate) fn sys_group_name(ctx: &Ctx, name: &str) -> Option<String> {
+    ctx.bundle.surface_group(name).map(str::to_string)
 }
 
 /// The manifest member name of one surface member:
@@ -593,7 +580,7 @@ fn resolve_uses(
                 ));
             }
             2 => {
-                let Some(group) = sys_group_name(&decl.path[1]) else {
+                let Some(group) = sys_group_name(ctx, &decl.path[1]) else {
                     return Err(Diagnostic::new(
                         "E1052",
                         format!("`sys` has no group named `{}`", decl.path[1]),
@@ -603,7 +590,7 @@ fn resolve_uses(
                 UseBinding::SysGroup(group)
             }
             3 => {
-                let Some(group) = sys_group_name(&decl.path[1]) else {
+                let Some(group) = sys_group_name(ctx, &decl.path[1]) else {
                     return Err(Diagnostic::new(
                         "E1052",
                         format!("`sys` has no group named `{}`", decl.path[1]),
@@ -618,7 +605,7 @@ fn resolve_uses(
                     .unwrap_or(false);
                 let is_ctor = group == "Vm" && member == "Vm";
                 if starts_upper && !is_ctor {
-                    if lm_abi::fixed_member(group, &member).is_some() {
+                    if ctx.bundle.fixed_member(&group, &member).is_some() {
                         return Err(Diagnostic::new(
                             "E1052",
                             format!(
@@ -636,7 +623,12 @@ fn resolve_uses(
                         decl.name_span,
                     ));
                 }
-                if !is_ctor && lm_abi::fixed_member(group, &camel_member(&member)).is_none() {
+                if !is_ctor
+                    && ctx
+                        .bundle
+                        .fixed_member(&group, &camel_member(&member))
+                        .is_none()
+                {
                     return Err(Diagnostic::new(
                         "E1052",
                         format!("the group `{group}` has no operation named `{member}`"),
@@ -682,6 +674,7 @@ pub(crate) struct TyEnv {
 
 /// Shared module state for all function checkers.
 pub(crate) struct Ctx {
+    pub(crate) bundle: std::sync::Arc<lm_abi::AbiBundle>,
     pub(crate) store: TypeStore,
     pub(crate) classes: Vec<ClassInfo>,
     pub(crate) user_types: HashMap<String, u32>,
@@ -1424,7 +1417,7 @@ pub(crate) fn resolve_row(
             row.push(RowElem::Var(pos as u32));
             continue;
         }
-        if lm_abi::row_name_valid(&item.name) {
+        if ctx.bundle.row_name_valid(&item.name) {
             let idx = ctx.store.intern_row_name(&item.name);
             row.push(RowElem::Op(idx));
             continue;
@@ -1647,7 +1640,8 @@ pub fn check_module_with(
     }
     let core = core_ast();
     let mut ctx = Ctx {
-        store: TypeStore::new(),
+        bundle: options.bundle.clone(),
+        store: TypeStore::new_with_bundle(options.bundle.clone()),
         classes: Vec::new(),
         user_types: HashMap::new(),
         core_types: HashMap::new(),
@@ -2230,6 +2224,7 @@ fn assemble(
         }
     }
     Ok(HirModule {
+        bundle: ctx.bundle,
         store: ctx.store,
         interfaces,
         conformances,

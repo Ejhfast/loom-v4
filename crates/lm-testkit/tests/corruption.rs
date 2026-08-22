@@ -591,8 +591,8 @@ fn unknown_opcode_is_rejected_by_the_decoder() {
     let mut bytes = valid_bytes();
     // The semantic region ends with the entry index; the final
     // Return opcode sits directly before it.
-    let sem_at = u32::from_le_bytes(bytes[6..10].try_into().unwrap()) as usize;
-    let sem_len = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
+    let sem_at = u32::from_le_bytes(bytes[38..42].try_into().unwrap()) as usize;
+    let sem_len = u32::from_le_bytes(bytes[42..46].try_into().unwrap()) as usize;
     let pos = sem_at + sem_len - 5;
     assert_eq!(bytes[pos], 0x34, "the semantic region ends with Return");
     bytes[pos] = 0xfe;

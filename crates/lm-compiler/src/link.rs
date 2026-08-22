@@ -29,7 +29,7 @@
 //! code that the verifier did not admit.
 
 use crate::env::FrozenLinkEnv;
-use lm_bytecode::identity::{module_identity, ModuleIdentity};
+use lm_bytecode::identity::ModuleIdentity;
 use lm_bytecode::interface::Interface;
 use lm_bytecode::{
     BcAssociated, BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceMethod,
@@ -279,6 +279,16 @@ struct Reloc {
 /// The order is a topological order of the import graph: a module
 /// links after every module it imports.
 pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError> {
+    let bundle = lm_abi::standard_bundle();
+    link_with_bundle(root, env, &bundle)
+}
+
+/// Link one program against an immutable ABI bundle.
+pub fn link_with_bundle(
+    root: &str,
+    env: &FrozenLinkEnv,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<LinkedProgram, LinkError> {
     let order = link_order(root, env)?;
     let mut merged = Merged::default();
     let mut entry: Option<u32> = None;
@@ -286,7 +296,10 @@ pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError>
         let unit = env
             .unit(path)
             .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
-        let identity = module_identity(&unit.module)
+        if unit.interface.bundle_digest != bundle.digest() {
+            return Err(fail(format!("the module `{path}` uses another ABI bundle")));
+        }
+        let identity = lm_bytecode::identity::module_identity_with_bundle(&unit.module, bundle)
             .map_err(|e| fail(format!("the module `{path}` does not hash: {e}")))?;
         let reloc = relocate(&mut merged, &unit.module, &identity, path)?;
         register_exports(&mut merged, &unit.module, &unit.interface, path, &reloc)?;
@@ -319,11 +332,11 @@ pub fn link(root: &str, env: &FrozenLinkEnv) -> Result<LinkedProgram, LinkError>
         },
     };
     // The merged program meets the whole verifier before it runs.
-    lm_verify::verify_module(&module)
+    lm_verify::verify_module_with_bundle(&module, bundle)
         .map_err(|e| fail(format!("the linked program does not verify: {e}")))?;
-    let artifact = lm_bytecode::encode(&module);
+    let artifact = lm_bytecode::encode_with_bundle(&module, bundle);
     let container_hash = lm_bytecode::identity::container_hash(&artifact);
-    let semantic_hash = module_identity(&module)
+    let semantic_hash = lm_bytecode::identity::module_identity_with_bundle(&module, bundle)
         .map_err(|e| fail(format!("the linked program does not hash: {e}")))?
         .semantic_hash;
     Ok(LinkedProgram {

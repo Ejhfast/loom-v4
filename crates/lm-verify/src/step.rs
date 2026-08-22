@@ -1136,8 +1136,11 @@ pub(crate) fn step(
             else {
                 unreachable!("the structural pass checked the slot kind");
             };
-            let name = lm_abi::op_name(lm_abi::OP_PROC_SEND);
-            if !ctx.row_has_name(&func.row, &name) {
+            let name = ctx
+                .bundle
+                .op_name(lm_abi::OP_PROC_SEND)
+                .expect("the standard operation exists");
+            if !ctx.row_has_name(&func.row, name) {
                 return Err(fail(format!(
                     "the send through a slot is not inside the claimed `{name}` row"
                 )));
@@ -1561,13 +1564,19 @@ pub(crate) fn step(
         Instr::Perform { op, reply_ty, .. } => {
             let reply_ty = *reply_ty;
             let op = *op;
-            let name = lm_abi::op_name(op);
-            if !ctx.row_has_name(&func.row, &name) {
+            let name = ctx
+                .bundle
+                .op_name(op)
+                .expect("the structural pass checked the operation");
+            if !ctx.row_has_name(&func.row, name) {
                 return Err(fail(format!(
                     "the perform of `{name}` is not inside the claimed row"
                 )));
             }
-            let def = lm_abi::op(op);
+            let def = ctx
+                .bundle
+                .op(op)
+                .expect("the structural pass checked the operation");
             match def.kind {
                 lm_abi::OpKind::Fixed => {
                     for want in def.params.iter().rev() {
@@ -2262,7 +2271,12 @@ pub(crate) fn step(
                             pop_run(state)?;
                             let args = ctx.op_args_view(lm_abi::OP_FS_OPEN).map_err(&fail)?;
                             let reply = ctx
-                                .abi_ty(lm_abi::op(lm_abi::OP_FS_OPEN).reply)
+                                .abi_ty(
+                                    ctx.bundle
+                                        .op(lm_abi::OP_FS_OPEN)
+                                        .expect("the standard operation exists")
+                                        .reply,
+                                )
                                 .map_err(&fail)?;
                             if ctx.ty(call) != BcType::PendingCall(args, reply) {
                                 return Err(fail(
@@ -2286,12 +2300,22 @@ pub(crate) fn step(
                             let connect_args =
                                 ctx.op_args_view(lm_abi::OP_TCP_CONNECT).map_err(&fail)?;
                             let connect_reply = ctx
-                                .abi_ty(lm_abi::op(lm_abi::OP_TCP_CONNECT).reply)
+                                .abi_ty(
+                                    ctx.bundle
+                                        .op(lm_abi::OP_TCP_CONNECT)
+                                        .expect("the standard operation exists")
+                                        .reply,
+                                )
                                 .map_err(&fail)?;
                             let accept_args =
                                 ctx.op_args_view(lm_abi::OP_TCP_ACCEPT).map_err(&fail)?;
                             let accept_reply = ctx
-                                .abi_ty(lm_abi::op(lm_abi::OP_TCP_ACCEPT).reply)
+                                .abi_ty(
+                                    ctx.bundle
+                                        .op(lm_abi::OP_TCP_ACCEPT)
+                                        .expect("the standard operation exists")
+                                        .reply,
+                                )
                                 .map_err(&fail)?;
                             let valid = ctx.ty(call)
                                 == BcType::PendingCall(connect_args, connect_reply)
@@ -2310,7 +2334,12 @@ pub(crate) fn step(
                             pop_run(state)?;
                             let args = ctx.op_args_view(lm_abi::OP_TCP_LISTEN).map_err(&fail)?;
                             let reply = ctx
-                                .abi_ty(lm_abi::op(lm_abi::OP_TCP_LISTEN).reply)
+                                .abi_ty(
+                                    ctx.bundle
+                                        .op(lm_abi::OP_TCP_LISTEN)
+                                        .expect("the standard operation exists")
+                                        .reply,
+                                )
                                 .map_err(&fail)?;
                             if ctx.ty(call) != BcType::PendingCall(args, reply) {
                                 return Err(fail(
@@ -2325,7 +2354,12 @@ pub(crate) fn step(
                             pop_run(state)?;
                             let args = ctx.op_args_view(lm_abi::OP_TLS_HANDSHAKE).map_err(&fail)?;
                             let reply = ctx
-                                .abi_ty(lm_abi::op(lm_abi::OP_TLS_HANDSHAKE).reply)
+                                .abi_ty(
+                                    ctx.bundle
+                                        .op(lm_abi::OP_TLS_HANDSHAKE)
+                                        .expect("the standard operation exists")
+                                        .reply,
+                                )
                                 .map_err(&fail)?;
                             if ctx.ty(call) != BcType::PendingCall(args, reply) {
                                 return Err(fail(
@@ -2733,8 +2767,11 @@ pub(crate) fn step(
                     "perform target type {callee_ty} is not an operation value"
                 )));
             };
-            let name = lm_abi::op_name(op);
-            if !ctx.row_has_name(&func.row, &name) {
+            let name = ctx
+                .bundle
+                .op_name(op)
+                .expect("the structural pass checked the operation");
+            if !ctx.row_has_name(&func.row, name) {
                 return Err(fail(format!(
                     "the perform of `{name}` is not inside the claimed row"
                 )));
@@ -2774,11 +2811,15 @@ pub(crate) fn step(
                 // The dependent grant rule: `pass` is charged to the
                 // granter's claimed row.
                 let name = if *kind == 0 {
-                    lm_abi::op_name(*slot)
+                    ctx.bundle
+                        .op_name(*slot)
+                        .expect("the structural pass checked the operation")
                 } else {
-                    lm_abi::GROUPS[*slot as usize].to_string()
+                    ctx.bundle
+                        .group_name(*slot)
+                        .expect("the structural pass checked the group")
                 };
-                if !ctx.row_has_name(&func.row, &name) {
+                if !ctx.row_has_name(&func.row, name) {
                     return Err(fail(format!(
                         "the pass of `{name}` is not inside the claimed row"
                     )));
@@ -2792,7 +2833,10 @@ pub(crate) fn step(
                 return Err(fail(format!("as_call on non-request type {request}")));
             }
             let view = ctx.op_args_view(*op).map_err(&fail)?;
-            let def = lm_abi::op(*op);
+            let def = ctx
+                .bundle
+                .op(*op)
+                .expect("the structural pass checked the operation");
             let reply = ctx.abi_ty(def.reply).map_err(&fail)?;
             let call = ctx.intern(BcType::PendingCall(view, reply));
             let out = ctx

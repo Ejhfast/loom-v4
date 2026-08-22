@@ -795,7 +795,7 @@ impl<'a> Materializer<'a> {
         for elem in row {
             match elem {
                 IfaceRow::Op(name) => {
-                    if !lm_abi::row_name_valid(name) {
+                    if !ctx.bundle.row_name_valid(name) {
                         return Err(error(
                             span,
                             format!("the interface names `{name}`, which is not an operation"),
@@ -901,6 +901,7 @@ impl<'a> Materializer<'a> {
             IfaceType::Bytes => lm_types::BYTES,
             IfaceType::FileHandle => lm_types::FILE_HANDLE,
             IfaceType::ResourceHandle => lm_types::RESOURCE_HANDLE,
+            IfaceType::HostResource => lm_types::HOST_RESOURCE,
             IfaceType::Digest => lm_types::DIGEST,
             IfaceType::Fault => lm_types::FAULT,
             IfaceType::Request => lm_types::REQUEST,

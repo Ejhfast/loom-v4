@@ -243,7 +243,7 @@ impl World {
         // The birth grant of specification 18.3. A mailbox-bearing
         // proc needs the `Proc` group to receive, and the spawner
         // already carries `Proc.Spawn`, so it may pass the group.
-        let Some(group) = lm_abi::group_by_name("Proc") else {
+        let Some(group) = self.loaded.bundle().group_by_name("Proc") else {
             self.machines.pop();
             self.machines[vm as usize].children -= 1;
             self.fault_caller(
@@ -866,7 +866,12 @@ impl World {
             );
             return;
         };
-        let built = self.machines[vm as usize].alloc(Object::Str(lm_abi::op_name(op).into()));
+        let name = self
+            .loaded
+            .bundle()
+            .op_name(op)
+            .unwrap_or("<invalid operation>");
+        let built = self.machines[vm as usize].alloc(Object::Str(name.into()));
         match built.and_then(|value| self.machines[vm as usize].push(value).map(|_| ())) {
             Ok(()) => {}
             Err(code) => self.machines[vm as usize].set_fault(code, "", None),
@@ -935,6 +940,7 @@ impl World {
                     .map_err(|_| FaultCode::BoundaryLimit);
                 let mut codes = ModuleCodes {
                     identity,
+                    bundle: loaded.bundle(),
                     module: &module,
                     envs: &mut self.envs,
                     core: self.core,

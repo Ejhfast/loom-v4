@@ -230,7 +230,7 @@ impl<'o> FnChecker<'o> {
                 // A `use`-bound callable member: the same operation
                 // call rule as the qualified `sys` path. The alias
                 // grants nothing and the row charge is identical.
-                self.check_sys_call(ctx, group, &member, name_span, type_args, args, span)
+                self.check_sys_call(ctx, &group, &member, name_span, type_args, args, span)
             }
             Callee::SysGroup(group) => Err(Diagnostic::new(
                 "E1051",

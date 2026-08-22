@@ -611,7 +611,7 @@ impl World {
     /// Clear the route after one validated reply consumes its token.
     pub(super) fn consume_reply_sink(&mut self, sink: ReplySink) {
         debug_assert!(sink.ordinal > 0);
-        debug_assert!((sink.op as usize) < lm_abi::OP_COUNT as usize);
+        debug_assert!(sink.op < self.loaded.bundle().op_count());
         if sink.surface != sink.target {
             debug_assert!(self.machines[sink.surface as usize]
                 .vm

@@ -92,6 +92,7 @@ impl Naming<'_> {
             Type::Bytes => IfaceType::Bytes,
             Type::FileHandle => IfaceType::FileHandle,
             Type::ResourceHandle => IfaceType::ResourceHandle,
+            Type::HostResource => IfaceType::HostResource,
             Type::Digest => IfaceType::Digest,
             Type::Fault => IfaceType::Fault,
             Type::Request => IfaceType::Request,

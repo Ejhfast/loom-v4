@@ -11,10 +11,15 @@
 //! change to any of these changes the digest and therefore the ABI
 //! version.
 
+mod bundle;
 mod fault;
 mod sha;
 pub mod syntax;
 
+pub use bundle::{
+    standard_bundle, AbiBundle, AbiBundleBuilder, BoundaryMode, BundleGroup, BundleOp, GroupSpec,
+    OperationSpec, ResourceDescriptor,
+};
 pub use fault::{FaultCode, SnapshotClass, FAULT_CODES};
 pub use sha::{sha256, sha256_hex};
 
@@ -38,7 +43,8 @@ pub use sha::{sha256, sha256_hex};
 /// activation. It also moves verification into the Compiler group.
 /// Version 17 adds installed function and class binding controls.
 /// Version 18 adds guest snapshot encoding.
-pub const ABI_VERSION: u32 = 18;
+/// Version 19 adds immutable ABI bundles and extension resources.
+pub const ABI_VERSION: u32 = 19;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -281,6 +287,8 @@ pub enum AbiType {
     Map(&'static AbiType, &'static AbiType),
     Tuple(&'static [AbiType]),
     Apply(AbiConstructor, &'static [AbiType]),
+    /// One opaque extension resource, by stable resource identity.
+    Resource([u8; 32]),
 }
 
 impl AbiType {
@@ -420,13 +428,25 @@ impl AbiType {
                 let parts: Vec<String> = arguments.iter().map(|argument| argument.text()).collect();
                 format!("{}[{}]", constructor.text(), parts.join(", "))
             }
+            AbiType::Resource(identity) => {
+                use std::fmt::Write as _;
+                let mut text = String::with_capacity(64);
+                for byte in identity {
+                    let _ = write!(text, "{byte:02x}");
+                }
+                format!("HostResource[{text}]")
+            }
         }
     }
 
     /// True when every generic constructor has its required arity.
     pub fn valid(self) -> bool {
         match self {
-            AbiType::Primitive(_) | AbiType::Core(_) | AbiType::Native(_) | AbiType::Var(_) => true,
+            AbiType::Primitive(_)
+            | AbiType::Core(_)
+            | AbiType::Native(_)
+            | AbiType::Var(_)
+            | AbiType::Resource(_) => true,
             AbiType::List(element) => element.valid(),
             AbiType::Map(key, value) => key.valid() && value.valid(),
             AbiType::Tuple(elements) => elements.iter().all(|element| element.valid()),

@@ -193,6 +193,7 @@ impl<'m> ModLowerer<'m> {
             Type::Bytes => self.intern_type(BcType::Bytes),
             Type::FileHandle => self.intern_type(BcType::FileHandle),
             Type::ResourceHandle => self.intern_type(BcType::ResourceHandle),
+            Type::HostResource => self.intern_type(BcType::HostResource),
             Type::Digest => self.intern_type(BcType::Digest),
             Type::Class(c) => self.intern_type(BcType::Class(c.0)),
             Type::Inst(c, args) => {
@@ -3478,6 +3479,7 @@ fn type_text(module: &Module, idx: u32) -> String {
         BcType::Bytes => "Bytes".to_string(),
         BcType::FileHandle => "FileHandle".to_string(),
         BcType::ResourceHandle => "ResourceHandle".to_string(),
+        BcType::HostResource => "HostResource".to_string(),
         BcType::Digest => "Digest".to_string(),
         BcType::Class(c) => module
             .classes

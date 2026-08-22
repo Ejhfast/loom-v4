@@ -138,6 +138,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lm-embed"
+version = "0.1.0"
+dependencies = [
+ "lm-abi",
+ "lm-bytecode",
+ "lm-compiler",
+ "lm-source",
+ "lm-vm",
+]
+
+[[package]]
 name = "lm-graph"
 version = "0.1.0"
 dependencies = [

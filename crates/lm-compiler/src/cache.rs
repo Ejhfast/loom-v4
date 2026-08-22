@@ -101,12 +101,31 @@ pub fn compile_key(
     roots: &[(String, String)],
     visible: &[(String, [u8; 32])],
 ) -> [u8; 32] {
+    compile_key_with_bundle(
+        module_path,
+        is_main,
+        source,
+        roots,
+        visible,
+        &lm_abi::standard_bundle(),
+    )
+}
+
+/// Compute one module compile key under an ABI bundle.
+pub fn compile_key_with_bundle(
+    module_path: &str,
+    is_main: bool,
+    source: &str,
+    roots: &[(String, String)],
+    visible: &[(String, [u8; 32])],
+    bundle: &lm_abi::AbiBundle,
+) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(TAG);
     bytes.extend_from_slice(&(lm_bytecode::VERSION as u32).to_le_bytes());
     bytes.extend_from_slice(&lm_bytecode::identity::COMPILER_ABI_VERSION.to_le_bytes());
     bytes.extend_from_slice(&lm_verify::VERIFIER_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&lm_abi::manifest_digest());
+    bytes.extend_from_slice(&bundle.digest());
     bytes.extend_from_slice(&lm_hir::core_source_digest());
     write_str(&mut bytes, module_path);
     bytes.push(u8::from(is_main));
@@ -146,6 +165,15 @@ const PROGRAM_ENTRY_VERSION: u32 = 1;
 /// build loop already holds, and it covers the embedded core image.
 /// A core edit therefore moves every module hash and misses this key.
 pub fn program_key(root_module: &str, modules: &[(String, [u8; 32])]) -> [u8; 32] {
+    program_key_with_bundle(root_module, modules, &lm_abi::standard_bundle())
+}
+
+/// Compute one linked-program key under an ABI bundle.
+pub fn program_key_with_bundle(
+    root_module: &str,
+    modules: &[(String, [u8; 32])],
+    bundle: &lm_abi::AbiBundle,
+) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(PROGRAM_TAG);
     // The container format version: a new container encodes the
@@ -159,7 +187,7 @@ pub fn program_key(root_module: &str, modules: &[(String, [u8; 32])]) -> [u8; 32
     bytes.extend_from_slice(&lm_verify::VERIFIER_VERSION.to_le_bytes());
     // The operation manifest: the linker and the verifier both read
     // the operation table.
-    bytes.extend_from_slice(&lm_abi::manifest_digest());
+    bytes.extend_from_slice(&bundle.digest());
     // The entry module: the same module set with another entry links
     // to another program.
     write_str(&mut bytes, root_module);

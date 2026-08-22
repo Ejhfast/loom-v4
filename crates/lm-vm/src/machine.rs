@@ -260,13 +260,32 @@ pub enum Action {
 ///
 /// Each vector ends at its highest edited slot. A default table owns
 /// no allocation, so operation-manifest growth does not enlarge each machine.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PolicyTable {
     exact: Vec<Option<Action>>,
     group: Vec<Option<Action>>,
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
+}
+
+impl Default for PolicyTable {
+    fn default() -> PolicyTable {
+        PolicyTable {
+            exact: Vec::new(),
+            group: Vec::new(),
+            bundle: lm_abi::standard_bundle(),
+        }
+    }
 }
 
 impl PolicyTable {
+    pub(crate) fn set_bundle(&mut self, bundle: std::sync::Arc<lm_abi::AbiBundle>) {
+        self.bundle = bundle;
+    }
+
+    pub(crate) fn bundle(&self) -> &std::sync::Arc<lm_abi::AbiBundle> {
+        &self.bundle
+    }
+
     fn action(entries: &[Option<Action>], slot: u32) -> Option<Action> {
         entries.get(slot as usize).copied().flatten()
     }
@@ -293,11 +312,11 @@ impl PolicyTable {
     }
 
     pub(crate) fn set_exact(&mut self, slot: u32, action: Option<Action>) -> bool {
-        Self::set(&mut self.exact, lm_abi::OP_COUNT, slot, action)
+        Self::set(&mut self.exact, self.bundle.op_count(), slot, action)
     }
 
     pub(crate) fn set_group(&mut self, slot: u32, action: Option<Action>) -> bool {
-        Self::set(&mut self.group, lm_abi::GROUP_COUNT, slot, action)
+        Self::set(&mut self.group, self.bundle.group_count(), slot, action)
     }
 
     pub(crate) fn group_action(&self, slot: u32) -> Option<Action> {
@@ -340,7 +359,8 @@ impl PolicyTable {
             return Some(action);
         }
         let mut passed = false;
-        for group in lm_abi::groups_containing_op(op) {
+        let groups = self.bundle.groups_containing_op(op).unwrap_or_default();
+        for group in groups {
             match Self::action(&self.group, *group) {
                 Some(Action::Block) => return Some(Action::Block),
                 Some(Action::Pass) => passed = true,
@@ -3284,7 +3304,8 @@ impl Machine {
             }
             _ => return Err(BAD_TYPE),
         };
-        let decoded = lm_bytecode::decode(code.bytes.as_slice()).map_err(|_| BAD_STATE)?;
+        let decoded = lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.table.bundle())
+            .map_err(|_| BAD_STATE)?;
         let debug = lm_bytecode::debug::decode(&decoded.debug).map_err(|_| BAD_STATE)?;
         lm_bytecode::debug::validate(&debug, &decoded).map_err(|_| BAD_STATE)?;
         let kind = match code.kind {
@@ -3313,7 +3334,9 @@ impl Machine {
             .sources
             .get(definition.source as usize)
             .ok_or(BAD_STATE)?;
-        let identity = lm_bytecode::identity::module_identity(&decoded).map_err(|_| BAD_STATE)?;
+        let identity =
+            lm_bytecode::identity::module_identity_with_bundle(&decoded, self.table.bundle())
+                .map_err(|_| BAD_STATE)?;
         let syntax_class = module.core_roles[lm_bytecode::corepin::ROLE_SYNTAX_NODE];
         let source_class = module.core_roles[lm_bytecode::corepin::ROLE_DEFINITION_SOURCE];
         if syntax_class == lm_bytecode::NO_ROLE || source_class == lm_bytecode::NO_ROLE {
@@ -3364,8 +3387,11 @@ impl Machine {
             }
             _ => return Err(BAD_TYPE),
         };
-        let decoded = lm_bytecode::decode(code.bytes.as_slice()).map_err(|_| BAD_STATE)?;
-        let identity = lm_bytecode::identity::module_identity(&decoded).map_err(|_| BAD_STATE)?;
+        let decoded = lm_bytecode::decode_with_bundle(code.bytes.as_slice(), self.table.bundle())
+            .map_err(|_| BAD_STATE)?;
+        let identity =
+            lm_bytecode::identity::module_identity_with_bundle(&decoded, self.table.bundle())
+                .map_err(|_| BAD_STATE)?;
         let value = self.alloc_definition_spec(module, &code, &decoded, &identity)?;
         self.push(value)
     }
@@ -3482,7 +3508,9 @@ impl Machine {
         };
         let debug = lm_bytecode::debug::decode(&module.debug).map_err(|_| BAD_STATE)?;
         lm_bytecode::debug::validate(&debug, module).map_err(|_| BAD_STATE)?;
-        let identity = lm_bytecode::identity::module_identity(module).map_err(|_| BAD_STATE)?;
+        let identity =
+            lm_bytecode::identity::module_identity_with_bundle(module, self.table.bundle())
+                .map_err(|_| BAD_STATE)?;
         if primary {
             if let Some(site) = trace.into_iter().next() {
                 let location = self.alloc_fault_location(module, envs, &debug, &identity, site)?;

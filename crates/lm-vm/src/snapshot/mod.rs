@@ -78,7 +78,7 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 24 stores bounded fault execution traces.
 /// Version 25 stores installed function and class binding handles.
 /// Version 26 stores slot versions and pending slot changes.
-pub const FORMAT_VERSION: u32 = 26;
+pub const FORMAT_VERSION: u32 = 27;
 
 /// The section kinds, in canonical order.
 ///
@@ -575,6 +575,8 @@ pub struct AdmissionIdentity {
     pub abi_version: u32,
     pub compiler_abi: u32,
     pub verifier_version: u32,
+    /// The exact ABI bundle used by this image.
+    pub bundle_digest: [u8; 32],
 }
 
 /// One admitted image plus its canonical bytes.
@@ -621,7 +623,8 @@ impl SnapshotImage {
         if let Some(bytes) = self.bytes.get() {
             return Ok(bytes);
         }
-        let written = codec::encode(&self.world, self.byte_limit)?;
+        let written =
+            codec::encode_with_bundle(&self.world, self.byte_limit, self.loaded.bundle())?;
         let hash = codec::stored_container_hash(&written);
         let _ = self.bytes.set(std::sync::Arc::new(written));
         let _ = self.hash.set(hash);

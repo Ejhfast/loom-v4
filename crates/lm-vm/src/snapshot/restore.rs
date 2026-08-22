@@ -173,6 +173,7 @@ impl World {
             .map_err(|_| RestoreFail::OtherProgram)?;
         if identity.base_semantic != base.semantic_hash
             || identity.base_verification != self.base_verification_hash()
+            || identity.bundle_digest != self.loaded.bundle().digest()
         {
             return Err(RestoreFail::OtherProgram);
         }
@@ -544,8 +545,9 @@ impl World {
                 let artifact = artifacts
                     .get(instance.installation as usize)
                     .ok_or(RestoreFail::OtherProgram)?;
-                let module = lm_bytecode::decode(artifact.as_slice())
-                    .map_err(|_| RestoreFail::OtherProgram)?;
+                let module =
+                    lm_bytecode::decode_with_bundle(artifact.as_slice(), self.loaded.bundle())
+                        .map_err(|_| RestoreFail::OtherProgram)?;
                 let mut exports = try_vec(module.exports.len())?;
                 for export in &module.exports {
                     if export.kind != lm_bytecode::ExportKind::Function {
@@ -932,7 +934,11 @@ fn restore_state(
     };
     machine.paused = source.paused;
     if source.is_proc {
-        let group = lm_abi::group_by_name("Proc").expect("the manifest declares the Proc group");
+        let group = machine
+            .table
+            .bundle()
+            .group_by_name("Proc")
+            .expect("the standard bundle declares the Proc group");
         machine.table.set_group(group, Some(Action::Pass));
     }
     machine.children = children;

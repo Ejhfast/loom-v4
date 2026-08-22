@@ -21,7 +21,7 @@ mod world;
 pub use host::{
     CoreCtor, Host, HostArg, HostCompileDefinition, HostCompileEnv, HostCompileModule,
     HostCompileOptions, HostCompileSlot, HostCompletion, HostIpAddress, HostOpenOptions,
-    HostParseStatus, HostSeekFrom, HostShutdown, HostSocketAddress, HostStart,
+    HostParseStatus, HostResource, HostSeekFrom, HostShutdown, HostSocketAddress, HostStart,
     HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, NullHost, RecordingHost,
 };
 pub use machine::{
@@ -231,6 +231,7 @@ impl DispatchRow {
 #[derive(Debug, Clone)]
 pub struct LoadedModule {
     module: std::sync::Arc<Module>,
+    bundle: std::sync::Arc<lm_abi::AbiBundle>,
     dispatch: std::sync::Arc<[DispatchRow]>,
     core: lm_bytecode::corepin::CoreLayout,
     /// The verifier input hash.
@@ -257,6 +258,11 @@ impl LoadedModule {
         &self.module
     }
 
+    /// Return the immutable ABI bundle used to verify this module.
+    pub fn bundle(&self) -> &std::sync::Arc<lm_abi::AbiBundle> {
+        &self.bundle
+    }
+
     pub(crate) fn module_store(&self) -> std::sync::Arc<Module> {
         self.module.clone()
     }
@@ -270,7 +276,8 @@ impl LoadedModule {
     pub fn identity(&self) -> Result<&lm_bytecode::identity::ModuleIdentity, FaultCode> {
         self.identity
             .get_or_init(|| {
-                lm_bytecode::identity::module_identity(&self.module).map_err(|e| e.to_string())
+                lm_bytecode::identity::module_identity_with_bundle(&self.module, &self.bundle)
+                    .map_err(|e| e.to_string())
             })
             .as_ref()
             .map_err(|_| FaultCode::BoundaryViolation)
@@ -283,7 +290,9 @@ impl LoadedModule {
     /// Return the canonical verified bytes that supplied this module.
     pub(crate) fn artifact_bytes(&self) -> SharedBytes {
         self.artifact
-            .get_or_init(|| SharedBytes::from(lm_bytecode::encode(&self.module)))
+            .get_or_init(|| {
+                SharedBytes::from(lm_bytecode::encode_with_bundle(&self.module, &self.bundle))
+            })
             .clone()
     }
 
@@ -307,8 +316,17 @@ pub type VerifiedKey = ([u8; 32], u32, u32);
 /// The value comes from the decoded content alone. No hash stored in
 /// an artifact enters it, and the container stores no hash at all.
 pub fn verified_key(module: &Module) -> VerifiedKey {
+    let bundle = lm_abi::standard_bundle();
+    verified_key_with_bundle(module, &bundle)
+}
+
+/// Return the verified-code cache key under one ABI bundle.
+pub fn verified_key_with_bundle(
+    module: &Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> VerifiedKey {
     (
-        lm_bytecode::identity::verification_hash(module),
+        lm_bytecode::identity::verification_hash_with_bundle(bundle, module),
         lm_bytecode::identity::COMPILER_ABI_VERSION,
         lm_verify::VERIFIER_VERSION,
     )
@@ -368,18 +386,38 @@ impl VerifiedCache {
 
 /// Verify a decoded module and admit it for execution.
 pub fn load(module: Module) -> Result<LoadedModule, VerifyError> {
-    load_inner(module, None)
+    let bundle = lm_abi::standard_bundle();
+    load_with_bundle(module, &bundle)
+}
+
+/// Verify and load one decoded module under an ABI bundle.
+pub fn load_with_bundle(
+    module: Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<LoadedModule, VerifyError> {
+    load_inner(module, bundle, None)
 }
 
 /// Admit a decoded module through the verified-code cache. A second
 /// load of the same semantic module under the same ABI and verifier
 /// version skips re-verification.
 pub fn load_cached(module: Module, cache: &mut VerifiedCache) -> Result<LoadedModule, VerifyError> {
-    load_inner(module, Some(cache))
+    let bundle = lm_abi::standard_bundle();
+    load_cached_with_bundle(module, &bundle, cache)
+}
+
+/// Load one decoded module through a bundle-bound verified cache.
+pub fn load_cached_with_bundle(
+    module: Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+    cache: &mut VerifiedCache,
+) -> Result<LoadedModule, VerifyError> {
+    load_inner(module, bundle, Some(cache))
 }
 
 fn load_inner(
     module: Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
     cache: Option<&mut VerifiedCache>,
 ) -> Result<LoadedModule, VerifyError> {
     // Only a linked module executes. An import slot names a definition
@@ -407,16 +445,16 @@ fn load_inner(
             //
             // The key therefore fixes every verifier input, so a hit
             // skips every pass, not only the function dataflow.
-            let key = verified_key(&module);
+            let key = verified_key_with_bundle(&module, bundle);
             if !cache.verified.contains(&key) {
-                lm_verify::verify_module(&module)?;
+                lm_verify::verify_module_with_bundle(&module, bundle)?;
                 cache.verifications = cache.verifications.saturating_add(1);
                 cache.verified.insert(key);
             }
         }
-        None => lm_verify::verify_module(&module)?,
+        None => lm_verify::verify_module_with_bundle(&module, bundle)?,
     }
-    Ok(admit(module))
+    Ok(admit(module, bundle.clone()))
 }
 
 /// Admit a decoded module through a verdict an external store kept.
@@ -435,6 +473,17 @@ pub fn load_with_record(
     key: &VerifiedKey,
     _record: &VerifiedRecord,
 ) -> Result<LoadedModule, VerifyError> {
+    let bundle = lm_abi::standard_bundle();
+    load_with_record_and_bundle(module, &bundle, key, _record)
+}
+
+/// Load one module through a stored verdict and an ABI bundle.
+pub fn load_with_record_and_bundle(
+    module: Module,
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+    key: &VerifiedKey,
+    _record: &VerifiedRecord,
+) -> Result<LoadedModule, VerifyError> {
     let reject = |message: &str| VerifyError {
         func: None,
         message: message.to_string(),
@@ -442,7 +491,7 @@ pub fn load_with_record(
     if !module.imports.is_empty() {
         return Err(reject("the module has unresolved import slots"));
     }
-    if verified_key(&module) != *key {
+    if verified_key_with_bundle(&module, bundle) != *key {
         return Err(reject("the stored verdict does not belong to this module"));
     }
     // The key proves the verdict belongs to this module. It does not
@@ -455,13 +504,13 @@ pub fn load_with_record(
     // It costs a small part of a verifier run, and it bounds the
     // damage of a store an attacker reaches: the table rules of these
     // exact bytes hold, whatever the verdict claims.
-    lm_verify::verify_structure_only(&module)?;
-    Ok(admit(module))
+    lm_verify::verify_structure_only_with_bundle(&module, bundle)?;
+    Ok(admit(module, bundle.clone()))
 }
 
 /// Build the sealed dispatch tables of an admitted module.
-fn admit(module: Module) -> LoadedModule {
-    let verification = lm_bytecode::identity::verification_hash(&module);
+fn admit(module: Module, bundle: std::sync::Arc<lm_abi::AbiBundle>) -> LoadedModule {
+    let verification = lm_bytecode::identity::verification_hash_with_bundle(&bundle, &module);
     let core = lm_bytecode::corepin::declared_layout(&module);
     // Build the sealed per-class selector tables. A child inherits
     // the resolved parent methods; own methods override entries.
@@ -497,6 +546,7 @@ fn admit(module: Module) -> LoadedModule {
     }
     LoadedModule {
         module: std::sync::Arc::new(module),
+        bundle,
         dispatch: dispatch.into(),
         core,
         verification,
@@ -507,8 +557,17 @@ fn admit(module: Module) -> LoadedModule {
 
 /// Decode serialized bytecode, verify it, and admit it for execution.
 pub fn load_bytes(bytes: &[u8]) -> Result<LoadedModule, LoadError> {
-    let module = lm_bytecode::decode(bytes).map_err(LoadError::Decode)?;
-    load(module).map_err(LoadError::Verify)
+    let bundle = lm_abi::standard_bundle();
+    load_bytes_with_bundle(bytes, &bundle)
+}
+
+/// Decode and load artifact bytes under one ABI bundle.
+pub fn load_bytes_with_bundle(
+    bytes: &[u8],
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+) -> Result<LoadedModule, LoadError> {
+    let module = lm_bytecode::decode_with_bundle(bytes, bundle).map_err(LoadError::Decode)?;
+    load_with_bundle(module, bundle).map_err(LoadError::Verify)
 }
 
 /// Decode serialized bytecode and admit it through the verified-code
@@ -517,8 +576,18 @@ pub fn load_bytes_cached(
     bytes: &[u8],
     cache: &mut VerifiedCache,
 ) -> Result<LoadedModule, LoadError> {
-    let module = lm_bytecode::decode(bytes).map_err(LoadError::Decode)?;
-    load_cached(module, cache).map_err(LoadError::Verify)
+    let bundle = lm_abi::standard_bundle();
+    load_bytes_cached_with_bundle(bytes, &bundle, cache)
+}
+
+/// Decode artifact bytes through a bundle-bound verified cache.
+pub fn load_bytes_cached_with_bundle(
+    bytes: &[u8],
+    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
+    cache: &mut VerifiedCache,
+) -> Result<LoadedModule, LoadError> {
+    let module = lm_bytecode::decode_with_bundle(bytes, bundle).map_err(LoadError::Decode)?;
+    load_cached_with_bundle(module, bundle, cache).map_err(LoadError::Verify)
 }
 
 /// A single-machine view over one world with a null host and no

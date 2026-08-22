@@ -27,8 +27,8 @@ use crate::{DecodeError, Module};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-// Version 16 stores several bounds for each associated interface type.
-const VERSION: u16 = 16;
+// Version 17 binds each interface to one immutable ABI bundle.
+const VERSION: u16 = 17;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -87,6 +87,7 @@ pub enum IfaceType {
     Bytes,
     FileHandle,
     ResourceHandle,
+    HostResource,
     Fault,
     Request,
     PolicyTable,
@@ -325,6 +326,8 @@ pub struct IfaceSlotSpec {
 pub struct Interface {
     pub abi_version: u32,
     pub compiler_abi_version: u32,
+    /// The exact operation bundle used to build this interface.
+    pub bundle_digest: [u8; 32],
     /// The module path, for example `mathlib.matrix`.
     pub module_path: String,
     pub semantic_hash: [u8; 32],
@@ -344,10 +347,21 @@ impl Interface {
 /// signature, with the compiler ABI version and the operation
 /// manifest. No body takes part.
 pub fn interface_hash(kind: ExportKind, name: &str, item: &IfaceItem) -> [u8; 32] {
+    let bundle = lm_abi::standard_bundle();
+    interface_hash_with_bundle(&bundle, kind, name, item)
+}
+
+/// Return one export contract hash under an immutable ABI bundle.
+pub fn interface_hash_with_bundle(
+    bundle: &lm_abi::AbiBundle,
+    kind: ExportKind,
+    name: &str,
+    item: &IfaceItem,
+) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(TAG_IFACE);
     bytes.extend_from_slice(&COMPILER_ABI_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&lm_abi::manifest_digest());
+    bytes.extend_from_slice(&bundle.digest());
     bytes.push(kind.tag());
     write_str(&mut bytes, name);
     encode_item(&mut bytes, item);
@@ -361,6 +375,18 @@ pub fn build_interface(
     identity: &ModuleIdentity,
     module_path: &str,
     items: &[IfaceItem],
+) -> Result<Interface, String> {
+    let bundle = lm_abi::standard_bundle();
+    build_interface_with_bundle(module, identity, module_path, items, &bundle)
+}
+
+/// Build one interface under an immutable ABI bundle.
+pub fn build_interface_with_bundle(
+    module: &Module,
+    identity: &ModuleIdentity,
+    module_path: &str,
+    items: &[IfaceItem],
+    bundle: &lm_abi::AbiBundle,
 ) -> Result<Interface, String> {
     if items.len() != module.exports.len() {
         return Err("the interface items do not align with the export table".to_string());
@@ -378,13 +404,14 @@ pub fn build_interface(
             kind: export.kind,
             name: export.name.clone(),
             item: item.clone(),
-            iface_hash: interface_hash(export.kind, &export.name, item),
+            iface_hash: interface_hash_with_bundle(bundle, export.kind, &export.name, item),
             def_hash,
         });
     }
     Ok(Interface {
         abi_version: lm_abi::ABI_VERSION,
         compiler_abi_version: COMPILER_ABI_VERSION,
+        bundle_digest: bundle.digest(),
         module_path: module_path.to_string(),
         semantic_hash: identity.semantic_hash,
         exports,
@@ -398,11 +425,25 @@ pub fn validate_interface(
     identity: &ModuleIdentity,
     interface: &Interface,
 ) -> Result<(), String> {
+    let bundle = lm_abi::standard_bundle();
+    validate_interface_with_bundle(module, identity, interface, &bundle)
+}
+
+/// Validate one decoded interface under an immutable ABI bundle.
+pub fn validate_interface_with_bundle(
+    module: &Module,
+    identity: &ModuleIdentity,
+    interface: &Interface,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<(), String> {
     if interface.abi_version != lm_abi::ABI_VERSION {
         return Err("the interface has another operation ABI version".to_string());
     }
     if interface.compiler_abi_version != COMPILER_ABI_VERSION {
         return Err("the interface has another compiler ABI version".to_string());
+    }
+    if interface.bundle_digest != bundle.digest() {
+        return Err("the interface has another ABI bundle".to_string());
     }
     if interface.semantic_hash != identity.semantic_hash {
         return Err("the interface names another module identity".to_string());
@@ -414,7 +455,9 @@ pub fn validate_interface(
         if entry.kind != export.kind || entry.name != export.name {
             return Err("an interface export differs from the module export".to_string());
         }
-        if entry.iface_hash != interface_hash(entry.kind, &entry.name, &entry.item) {
+        if entry.iface_hash
+            != interface_hash_with_bundle(bundle, entry.kind, &entry.name, &entry.item)
+        {
             return Err("an interface export has an invalid interface hash".to_string());
         }
         let definition = if export.kind.is_class() {
@@ -627,6 +670,7 @@ fn encode_type(out: &mut Vec<u8>, ty: &IfaceType) {
         IfaceType::Bytes => out.push(23),
         IfaceType::FileHandle => out.push(24),
         IfaceType::ResourceHandle => out.push(25),
+        IfaceType::HostResource => out.push(29),
     }
 }
 
@@ -762,6 +806,7 @@ pub fn encode_interface(interface: &Interface) -> Vec<u8> {
     out.extend_from_slice(&VERSION.to_le_bytes());
     write_u32(&mut out, interface.abi_version);
     write_u32(&mut out, interface.compiler_abi_version);
+    out.extend_from_slice(&interface.bundle_digest);
     write_str(&mut out, &interface.module_path);
     out.extend_from_slice(&interface.semantic_hash);
     write_u32(&mut out, interface.exports.len() as u32);
@@ -948,6 +993,7 @@ fn decode_type(cur: &mut crate::Cursor<'_>, depth: u32) -> Result<IfaceType, Dec
         23 => IfaceType::Bytes,
         24 => IfaceType::FileHandle,
         25 => IfaceType::ResourceHandle,
+        29 => IfaceType::HostResource,
         other => return Err(DecodeError::BadTypeTag(other)),
     };
     Ok(ty)
@@ -1168,6 +1214,8 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
     }
     let abi_version = cur.u32()?;
     let compiler_abi_version = cur.u32()?;
+    let mut bundle_digest = [0u8; 32];
+    bundle_digest.copy_from_slice(cur.take(32)?);
     let module_path = cur.string()?;
     let mut semantic_hash = [0u8; 32];
     semantic_hash.copy_from_slice(cur.take(32)?);
@@ -1240,6 +1288,7 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
     Ok(Interface {
         abi_version,
         compiler_abi_version,
+        bundle_digest,
         module_path,
         semantic_hash,
         exports,
@@ -1276,6 +1325,7 @@ pub fn type_text(ty: &IfaceType) -> String {
         IfaceType::Bytes => "Bytes".to_string(),
         IfaceType::FileHandle => "FileHandle".to_string(),
         IfaceType::ResourceHandle => "ResourceHandle".to_string(),
+        IfaceType::HostResource => "HostResource".to_string(),
         IfaceType::Fault => "Fault".to_string(),
         IfaceType::Request => "Request".to_string(),
         IfaceType::PolicyTable => "PolicyTable".to_string(),

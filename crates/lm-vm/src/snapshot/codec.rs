@@ -113,9 +113,10 @@ pub(super) fn stored_container_hash(bytes: &[u8]) -> [u8; 32] {
 // The writer.
 // ---------------------------------------------------------------
 
-struct Out {
+struct Out<'a> {
     bytes: Vec<u8>,
     limit: usize,
+    bundle: &'a lm_abi::AbiBundle,
     /// The first operation slot the image named that the manifest has
     /// not.
     ///
@@ -126,7 +127,7 @@ struct Out {
     bad_op: Option<u32>,
 }
 
-impl Out {
+impl Out<'_> {
     fn over_limit(&self) -> bool {
         self.bytes.len() > self.limit
     }
@@ -153,11 +154,13 @@ impl Out {
 
     /// The identity of one operation slot the image names.
     fn op_identity(&mut self, slot: u32) -> [u8; 32] {
-        if slot >= lm_abi::OP_COUNT {
+        if slot >= self.bundle.op_count() {
             self.bad_op = self.bad_op.or(Some(slot));
             return [0u8; 32];
         }
-        lm_abi::op_identity(slot)
+        self.bundle
+            .op_identity(slot)
+            .expect("the operation slot is inside the bundle")
     }
 
     /// The finished bytes, or the reason the image has no encoding.
@@ -246,11 +249,21 @@ impl Out {
 /// `limit` bounds the container. The writer stops as soon as the
 /// buffer passes it, so a runaway world never builds a huge buffer.
 pub fn encode(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
-    let header = section_header(image);
-    let code = section_code(image, limit)?;
-    let types = section_types(image, limit)?;
-    let heaps = section_heaps(image, limit)?;
-    let machines = section_machines(image, limit)?;
+    let bundle = lm_abi::standard_bundle();
+    encode_with_bundle(image, limit, &bundle)
+}
+
+/// Encode one image under an immutable ABI bundle.
+pub fn encode_with_bundle(
+    image: &Image,
+    limit: usize,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<Vec<u8>, SnapshotFail> {
+    let header = section_header(image, bundle);
+    let code = section_code(image, limit, bundle)?;
+    let types = section_types(image, limit, bundle)?;
+    let heaps = section_heaps(image, limit, bundle)?;
+    let machines = section_machines(image, limit, bundle)?;
     let payloads = [
         (SECTION_HEADER, header),
         (SECTION_CODE, code),
@@ -275,6 +288,7 @@ pub fn encode(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
     let mut out = Out {
         bytes: Vec::new(),
         limit,
+        bundle,
         bad_op: None,
     };
     out.bytes.extend_from_slice(&MAGIC);
@@ -282,6 +296,7 @@ pub fn encode(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
     out.u32(lm_abi::ABI_VERSION);
     out.u32(COMPILER_ABI_VERSION);
     out.u32(lm_verify::VERIFIER_VERSION);
+    out.hash(&bundle.digest());
     // The entry count is one byte for every table this format writes,
     // and the reader proves it.
     out.u8(payloads.len() as u8);
@@ -307,17 +322,18 @@ pub fn encode(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
 
 /// The fixed prefix length: magic plus four version fields.
 fn prefix_len() -> usize {
-    MAGIC.len() + 4 * 4
+    MAGIC.len() + 4 * 4 + 32
 }
 
 /// The fixed byte length of one section-table entry: kind, offset,
 /// and length, each a little-endian 32-bit field.
 const SECTION_ENTRY_BYTES: usize = 12;
 
-fn section_header(image: &Image) -> Vec<u8> {
+fn section_header(image: &Image, bundle: &lm_abi::AbiBundle) -> Vec<u8> {
     let mut out = Out {
         bytes: Vec::new(),
         limit: usize::MAX,
+        bundle,
         bad_op: None,
     };
     out.leb(image.machines.len() as u64);
@@ -333,10 +349,15 @@ fn section_header(image: &Image) -> Vec<u8> {
     out.bytes
 }
 
-fn section_code(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
+fn section_code(
+    image: &Image,
+    limit: usize,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<Vec<u8>, SnapshotFail> {
     let mut out = Out {
         bytes: Vec::new(),
         limit,
+        bundle,
         bad_op: None,
     };
     out.leb(image.funcs.len() as u64);
@@ -366,10 +387,15 @@ fn section_code(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
 /// module string slot, exactly as a heap object names a class. The
 /// code manifest carries the definition hash of every class the image
 /// names, and admission proves every slot.
-fn section_types(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
+fn section_types(
+    image: &Image,
+    limit: usize,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<Vec<u8>, SnapshotFail> {
     let mut out = Out {
         bytes: Vec::new(),
         limit,
+        bundle,
         bad_op: None,
     };
     out.leb(image.types.len() as u64);
@@ -446,10 +472,15 @@ fn encode_closed_type(out: &mut Out, node: &ClosedType) {
     }
 }
 
-fn section_heaps(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
+fn section_heaps(
+    image: &Image,
+    limit: usize,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<Vec<u8>, SnapshotFail> {
     let mut out = Out {
         bytes: Vec::new(),
         limit,
+        bundle,
         bad_op: None,
     };
     for objects in image
@@ -644,13 +675,22 @@ fn encode_object(out: &mut Out, object: &Object) {
         | Object::NativeTlsStream { resource } => {
             out.u64(*resource);
         }
+        Object::NativeHostResource { kind, resource } => {
+            out.hash(kind);
+            out.u64(*resource);
+        }
     }
 }
 
-fn section_machines(image: &Image, limit: usize) -> Result<Vec<u8>, SnapshotFail> {
+fn section_machines(
+    image: &Image,
+    limit: usize,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<Vec<u8>, SnapshotFail> {
     let mut out = Out {
         bytes: Vec::new(),
         limit,
+        bundle,
         bad_op: None,
     };
     for image in &image.vm_images {
@@ -878,6 +918,7 @@ struct Cursor<'b, 'd> {
     /// The end of the section the reader is inside.
     end: usize,
     budget: &'d DecodeBudget,
+    bundle: &'d lm_abi::AbiBundle,
 }
 
 type Read<T> = Result<T, ImageError>;
@@ -887,12 +928,17 @@ fn err<T>(reason: ImageReason, detail: impl Into<String>) -> Read<T> {
 }
 
 impl<'b, 'd> Cursor<'b, 'd> {
-    fn new(bytes: &'b [u8], budget: &'d DecodeBudget) -> Cursor<'b, 'd> {
+    fn new(
+        bytes: &'b [u8],
+        budget: &'d DecodeBudget,
+        bundle: &'d lm_abi::AbiBundle,
+    ) -> Cursor<'b, 'd> {
         Cursor {
             bytes,
             at: 0,
             end: bytes.len(),
             budget,
+            bundle,
         }
     }
 
@@ -1130,7 +1176,7 @@ fn load_external_inner(
         );
     }
     let decode_budget = DecodeBudget::new(limits.max_alloc_bytes);
-    let (image, hash) = decode_inner(bytes, limits, &decode_budget)?;
+    let (image, hash) = decode_inner(bytes, limits, &decode_budget, loaded.bundle())?;
     decode_budget.charge(bytes.len(), "container copy")?;
     let mut admission_budget = AdmissionBudget::default();
     let proof = match cache {
@@ -1208,17 +1254,18 @@ pub(super) fn seal_admitted(
     // container past its byte limit breaks the limit rule. An
     // operation slot the manifest has not breaks the code rule, and
     // reporting it as a limit names the wrong rule.
-    let bytes = encode(&image, limit).map_err(|error| match error {
-        SnapshotFail::LimitExceeded => ImageError::admission(
-            ImageReason::LimitExceeded,
-            "the admitted image passes the container byte limit",
-        ),
-        SnapshotFail::Fault(_, detail) => ImageError::admission(ImageReason::Code, detail),
-        SnapshotFail::ResourceActive { kind, .. } => ImageError::admission(
-            ImageReason::State,
-            format!("the admitted image holds a live {kind} attachment"),
-        ),
-    })?;
+    let bytes =
+        encode_with_bundle(&image, limit, loaded.bundle()).map_err(|error| match error {
+            SnapshotFail::LimitExceeded => ImageError::admission(
+                ImageReason::LimitExceeded,
+                "the admitted image passes the container byte limit",
+            ),
+            SnapshotFail::Fault(_, detail) => ImageError::admission(ImageReason::Code, detail),
+            SnapshotFail::ResourceActive { kind, .. } => ImageError::admission(
+                ImageReason::State,
+                format!("the admitted image holds a live {kind} attachment"),
+            ),
+        })?;
     let hash = stored_container_hash(&bytes);
     Ok(SnapshotImage {
         bytes: std::sync::OnceLock::from(std::sync::Arc::new(bytes)),
@@ -1237,8 +1284,18 @@ pub(super) fn seal_admitted(
 /// it establishes no interpreter invariant, so its result is ordinary
 /// `Image` data that `admit` must still prove.
 pub fn decode(bytes: &[u8], limits: LoadLimits) -> Result<Image, ImageError> {
+    let bundle = lm_abi::standard_bundle();
+    decode_with_bundle(bytes, limits, &bundle)
+}
+
+/// Decode one container under an immutable ABI bundle.
+pub fn decode_with_bundle(
+    bytes: &[u8],
+    limits: LoadLimits,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<Image, ImageError> {
     let mut budget = DecodeBudget::new(limits.max_alloc_bytes);
-    decode_with_budget(bytes, limits, &mut budget)
+    decode_with_budget_and_bundle(bytes, limits, &mut budget, bundle)
 }
 
 /// Decode one container with a caller-owned allocation ledger.
@@ -1247,13 +1304,25 @@ pub fn decode_with_budget(
     limits: LoadLimits,
     budget: &mut DecodeBudget,
 ) -> Result<Image, ImageError> {
-    decode_inner(bytes, limits, budget).map(|(image, _)| image)
+    let bundle = lm_abi::standard_bundle();
+    decode_with_budget_and_bundle(bytes, limits, budget, &bundle)
+}
+
+/// Decode one container with a budget and one ABI bundle.
+pub fn decode_with_budget_and_bundle(
+    bytes: &[u8],
+    limits: LoadLimits,
+    budget: &mut DecodeBudget,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<Image, ImageError> {
+    decode_inner(bytes, limits, budget, bundle).map(|(image, _)| image)
 }
 
 fn decode_inner(
     bytes: &[u8],
     limits: LoadLimits,
     budget: &DecodeBudget,
+    bundle: &lm_abi::AbiBundle,
 ) -> Result<(Image, [u8; 32]), ImageError> {
     if bytes.len() > limits.max_bytes {
         return err(
@@ -1272,7 +1341,7 @@ fn decode_inner(
         );
     }
     budget.charge(std::mem::size_of::<Image>(), "image record")?;
-    let mut cur = Cursor::new(bytes, budget);
+    let mut cur = Cursor::new(bytes, budget, bundle);
     let magic = cur.take(MAGIC.len())?;
     if magic != MAGIC {
         return err(ImageReason::Magic, "the container magic is not `LMSNAP`");
@@ -1281,6 +1350,8 @@ fn decode_inner(
     let abi_version = cur.u32()?;
     let compiler_abi = cur.u32()?;
     let verifier_version = cur.u32()?;
+    let mut bundle_digest = [0u8; 32];
+    bundle_digest.copy_from_slice(cur.take(32)?);
     if format != FORMAT_VERSION {
         return err(
             ImageReason::Version,
@@ -1296,6 +1367,12 @@ fn decode_inner(
         return err(
             ImageReason::Version,
             "the container names another ABI, compiler, or verifier version",
+        );
+    }
+    if bundle_digest != bundle.digest() {
+        return err(
+            ImageReason::Version,
+            "the container names another ABI bundle",
         );
     }
     // The container hash covers every byte before it. It is checked
@@ -1372,6 +1449,7 @@ fn decode_inner(
             at: offset as usize,
             end: (offset + length) as usize,
             budget,
+            bundle,
         }
     };
     // Section 1: the header. The machine count is checked against the
@@ -1783,6 +1861,7 @@ fn decode_closed_type(cur: &mut Cursor<'_, '_>, limits: &LoadLimits, at: u32) ->
             let row = decode_row(cur, limits)?;
             ClosedType::Callback(params, muts, ret, row)
         }
+        28 => ClosedType::HostResource,
         other => {
             return err(
                 ImageReason::Layout,
@@ -1805,7 +1884,8 @@ fn decode_value(cur: &mut Cursor<'_, '_>, objects: u32, callbacks: u32) -> Read<
         V_INT => Value::Int(cur.i64()?),
         V_OP => {
             let id = cur.hash()?;
-            let slot = (0..lm_abi::OP_COUNT).find(|slot| lm_abi::op_identity(*slot) == id);
+            let slot =
+                (0..cur.bundle.op_count()).find(|slot| cur.bundle.op_identity(*slot) == Some(id));
             match slot {
                 Some(slot) => Value::Op(slot),
                 None => {
@@ -1885,7 +1965,7 @@ fn decode_values(
 
 fn decode_op(cur: &mut Cursor<'_, '_>) -> Read<u32> {
     let id = cur.hash()?;
-    match (0..lm_abi::OP_COUNT).find(|slot| lm_abi::op_identity(*slot) == id) {
+    match (0..cur.bundle.op_count()).find(|slot| cur.bundle.op_identity(*slot) == Some(id)) {
         Some(slot) => Ok(slot),
         None => err(
             ImageReason::Code,
@@ -2272,6 +2352,10 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 target,
             }
         }
+        30 => Object::NativeHostResource {
+            kind: cur.hash()?,
+            resource: cur.u64()?,
+        },
         other => {
             return err(
                 ImageReason::Layout,

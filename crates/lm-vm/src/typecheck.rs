@@ -35,6 +35,29 @@ pub(crate) struct BoundaryScratch {
     subtype_seen: HashSet<(ClosedTypeId, ClosedTypeId)>,
 }
 
+/// The immutable inputs for one boundary check.
+#[derive(Clone, Copy)]
+pub(crate) struct BoundaryContext<'a> {
+    module: &'a Module,
+    bundle: &'a lm_abi::AbiBundle,
+    heap: &'a Heap,
+}
+
+impl<'a> BoundaryContext<'a> {
+    /// Create one boundary-check context.
+    pub(crate) fn new(
+        module: &'a Module,
+        bundle: &'a lm_abi::AbiBundle,
+        heap: &'a Heap,
+    ) -> BoundaryContext<'a> {
+        BoundaryContext {
+            module,
+            bundle,
+            heap,
+        }
+    }
+}
+
 impl BoundaryScratch {
     fn reset(&mut self) {
         self.work.clear();
@@ -66,14 +89,18 @@ fn env_fault(_: TypeEnvFull) -> FaultCode {
 
 /// Check one value against the closed type of its receiving position.
 pub(crate) fn check_boundary_value(
-    module: &Module,
-    heap: &Heap,
+    context: BoundaryContext<'_>,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     value: Value,
     reply_ty: u32,
     env: TypeEnvId,
 ) -> Result<(), FaultCode> {
+    let BoundaryContext {
+        module,
+        bundle,
+        heap,
+    } = context;
     if module.types.get(reply_ty as usize).is_none() || envs.env(env).is_none() {
         return Err(FaultCode::MalformedState);
     }
@@ -95,7 +122,7 @@ pub(crate) fn check_boundary_value(
         if steps > MAX_STEPS {
             return Err(FaultCode::BoundaryLimit);
         }
-        check_one(module, heap, envs, scratch, value, expect)?;
+        check_one(module, bundle, heap, envs, scratch, value, expect)?;
     }
     Ok(())
 }
@@ -121,6 +148,7 @@ enum Kind {
     Bytes,
     FileHandle,
     ResourceHandle,
+    HostResource,
     Wait,
     Fault,
     Request,
@@ -168,6 +196,7 @@ enum Node {
 /// Check one value and expected type pair.
 fn check_one(
     module: &Module,
+    bundle: &lm_abi::AbiBundle,
     heap: &Heap,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
@@ -209,7 +238,7 @@ fn check_one(
             if children > 0 && !scratch.mark((reference.slot, expect)) {
                 return Ok(());
             }
-            check_object(module, envs, scratch, object, kind, expect)
+            check_object(module, bundle, envs, scratch, object, kind, expect)
         }
         Node::Callback => Err(FaultCode::BoundaryViolation),
         Node::Option { payload, case } => {
@@ -255,6 +284,7 @@ fn resolve(module: &Module, envs: &TypeEnvs, expect: ClosedTypeId) -> Result<Nod
         ClosedType::Bytes => Node::Heap(Kind::Bytes),
         ClosedType::FileHandle => Node::Heap(Kind::FileHandle),
         ClosedType::ResourceHandle => Node::Heap(Kind::ResourceHandle),
+        ClosedType::HostResource => Node::Heap(Kind::HostResource),
         ClosedType::Fault => Node::Heap(Kind::Fault),
         ClosedType::Request => Node::Heap(Kind::Request),
         ClosedType::PolicyTable => Node::Heap(Kind::PolicyTable),
@@ -372,6 +402,7 @@ fn kind_of(object: &Object) -> Kind {
         Object::Bytes(_) => Kind::Bytes,
         Object::NativeFileHandle { .. } => Kind::FileHandle,
         Object::NativeResourceHandle { .. } => Kind::ResourceHandle,
+        Object::NativeHostResource { .. } => Kind::HostResource,
         Object::NativeWait { .. } => Kind::Wait,
         Object::NativeFault { .. } => Kind::Fault,
         Object::NativeRequest { .. } => Kind::Request,
@@ -413,6 +444,7 @@ fn kind_of(object: &Object) -> Kind {
 /// Check one object and add its typed children.
 fn check_object(
     module: &Module,
+    bundle: &lm_abi::AbiBundle,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     object: &Object,
@@ -453,7 +485,7 @@ fn check_object(
             check_instance(module, envs, scratch, *class, fields, expect)
         }
         (Object::Closure { func, env, .. }, Kind::Closure) => {
-            check_closure(module, envs, scratch, *func, env.env(), expect)
+            check_closure(module, bundle, envs, scratch, *func, env.env(), expect)
         }
         (Object::DynValue { value, ty }, Kind::DynValue) => {
             if envs.ty(*ty).is_none() {
@@ -492,6 +524,7 @@ fn child(
 /// Check a closure's callable type before it can execute.
 fn check_closure(
     module: &Module,
+    bundle: &lm_abi::AbiBundle,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     func: u32,
@@ -518,7 +551,7 @@ fn check_closure(
     let actual = envs
         .intern(ClosedType::Fn(params, code.param_muts.clone(), result, row))
         .map_err(env_fault)?;
-    if closed_is_subtype(module, envs, scratch, actual, expect)? {
+    if closed_is_subtype(module, bundle, envs, scratch, actual, expect)? {
         Ok(())
     } else {
         Err(FaultCode::TypeMismatch)
@@ -528,6 +561,7 @@ fn check_closure(
 /// Check the closed subtype relation used by callable values.
 fn closed_is_subtype(
     module: &Module,
+    bundle: &lm_abi::AbiBundle,
     envs: &mut TypeEnvs,
     scratch: &mut BoundaryScratch,
     found: ClosedTypeId,
@@ -581,7 +615,7 @@ fn closed_is_subtype(
                         .iter()
                         .zip(expected_muts.iter())
                         .all(|(found, expected)| !*found || *expected)
-                    || !row_included(module, &found_row, &expected_row)
+                    || !row_included(module, bundle, &found_row, &expected_row)
                 {
                     return Ok(false);
                 }
@@ -599,7 +633,7 @@ fn closed_is_subtype(
                         .iter()
                         .zip(expected_muts.iter())
                         .all(|(found, expected)| !*found || *expected)
-                    || !row_included(module, &found_row, &expected_row)
+                    || !row_included(module, bundle, &found_row, &expected_row)
                 {
                     return Ok(false);
                 }
@@ -614,7 +648,12 @@ fn closed_is_subtype(
     Ok(true)
 }
 
-fn row_included(module: &Module, sub: &ClosedRow, sup: &ClosedRow) -> bool {
+fn row_included(
+    module: &Module,
+    bundle: &lm_abi::AbiBundle,
+    sub: &ClosedRow,
+    sup: &ClosedRow,
+) -> bool {
     sub.iter().all(|slot| {
         let Some(name) = module.strings.get(*slot as usize) else {
             return false;
@@ -623,7 +662,7 @@ fn row_included(module: &Module, sub: &ClosedRow, sup: &ClosedRow) -> bool {
             let Some(candidate_name) = module.strings.get(*candidate as usize) else {
                 return false;
             };
-            lm_abi::row_name_included(name, candidate_name)
+            bundle.row_name_included(name, candidate_name)
         })
     })
 }
@@ -741,8 +780,7 @@ mod tests {
 
         assert_eq!(
             check_boundary_value(
-                &module,
-                &heap,
+                BoundaryContext::new(&module, &lm_abi::standard_bundle(), &heap),
                 &mut envs,
                 &mut scratch,
                 Value::Int(41),
@@ -769,8 +807,7 @@ mod tests {
 
         assert_eq!(
             check_boundary_value(
-                &module,
-                &heap,
+                BoundaryContext::new(&module, &lm_abi::standard_bundle(), &heap),
                 &mut envs,
                 &mut scratch,
                 Value::Obj(closure),
@@ -797,8 +834,7 @@ mod tests {
 
         assert_eq!(
             check_boundary_value(
-                &module,
-                &heap,
+                BoundaryContext::new(&module, &lm_abi::standard_bundle(), &heap),
                 &mut envs,
                 &mut scratch,
                 Value::Obj(closure),
@@ -840,8 +876,7 @@ mod tests {
 
         assert_eq!(
             check_boundary_value(
-                &module,
-                &heap,
+                BoundaryContext::new(&module, &lm_abi::standard_bundle(), &heap),
                 &mut envs,
                 &mut scratch,
                 Value::Obj(instance),
