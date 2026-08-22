@@ -525,6 +525,86 @@ copy_box = copy(box)
 }
 
 #[test]
+fn display_drives_custom_and_generic_interpolation() {
+    let source = r#"
+final class Label implements Display
+  text: String
+
+  def init(mut self, text: String)
+    self.text = text
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append("<")
+    builder.append(self.text)
+    builder.append(">")
+    ()
+  end
+end
+
+def render[T: Display](value: T): String
+  "value={value}"
+end
+
+one = Label("one")
+letter = case "é".at(0)
+in Some(value) then value
+in None then panic("the text is empty")
+end
+("{one}", render(Label("two")), display(Label("three")), "{letter}", render(7), display(true), display(letter))
+"#;
+    assert_eq!(
+        outcome(source),
+        "Done((\"<one>\", \"value=<two>\", \"<three>\", \"é\", \"value=7\", \
+         \"true\", \"é\"))"
+    );
+
+    let missing = error(
+        "final class Label\n  def append_to(self, mut builder: StringBuilder)\n    ()\n  end\nend\n\"{Label()}\"\n",
+    );
+    assert!(missing.contains("does not implement Display"), "{missing}");
+}
+
+#[test]
+fn core_display_interpolation_keeps_native_builder_instructions() {
+    let module = compile_text(
+        "native_display.lm",
+        "number = 7\nflag = true\ntext = \"ok\"\nletter = case text.at(0)\n\
+         in Some(value) then value\nin None then panic(\"the text is empty\")\nend\n\
+         \"{number}:{flag}:{text}:{letter}\"\n",
+    )
+    .expect("the source compiles");
+    let instructions: Vec<Instr> = module.funcs[module.entry as usize]
+        .blocks
+        .iter()
+        .flatten()
+        .cloned()
+        .collect();
+    assert!(instructions.contains(&Instr::Native(lm_bytecode::NativeInstr::SbAppendInt)));
+    assert!(instructions.contains(&Instr::Native(lm_bytecode::NativeInstr::SbAppendBool)));
+    assert!(instructions.contains(&Instr::Native(lm_bytecode::NativeInstr::SbAppendStr)));
+    assert!(instructions.contains(&Instr::Native(lm_bytecode::NativeInstr::SbAppendChar)));
+    assert!(instructions
+        .iter()
+        .all(|instruction| !matches!(instruction, Instr::CallInterface { .. })));
+}
+
+#[test]
+fn core_errors_display_without_message_methods() {
+    let source = r#"
+file = FsError.Closed
+snapshot = SnapshotError.ResourceActive([], "socket")
+utf8 = Utf8Error.InvalidBoundary
+("{file}", "{snapshot}", display(utf8))
+"#;
+    assert_eq!(
+        outcome(source),
+        "Done((\"file handle is closed\", \"a live socket blocks snapshot creation\", \
+         \"the text index is not a UTF-8 boundary\"))"
+    );
+}
+
+#[test]
 fn enums_can_implement_interfaces() {
     let source = r#"
 interface Labeled

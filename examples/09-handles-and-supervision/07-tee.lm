@@ -16,15 +16,15 @@ def read_twice(): String with Fs.Open, Fs.Read, Fs.Close
   in Ok(file)
     first = case file.read(6)
     in Ok(bytes)  then bytes.text()
-    in Err(error) then error.message()
+    in Err(error) then display(error)
     end
     second = case file.read(6)
     in Ok(bytes)  then bytes.text()
-    in Err(error) then error.message()
+    in Err(error) then display(error)
     end
     file.close()
     "{first}+{second}"
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   end
 end
 
@@ -86,5 +86,5 @@ in Ok(backing)
   in Done(_)  then "the child finished before it opened a file"
   in Fault(_) then "the child faulted before it opened a file"
   end
-in Err(error) then error.message()
+in Err(error) then display(error)
 end

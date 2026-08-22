@@ -1674,7 +1674,7 @@ case Http().send_secure(
   Http().default_limits()
 )
 in Ok(response) then "{{response.status}} {{response.body.text()}}"
-in Err(error) then error.message()
+in Err(error) then display(error)
 end
 "#
         );

@@ -38,7 +38,7 @@ def run_filter() with Io.ReadBytes, Io.Write, Env.Get, Fs.CurrentDir, Entropy.By
   in Ok(Some(text))
     parse_chunk(text).expect("LOOM_COPY_CHUNK must contain a positive integer")
   in Ok(None) then 65536
-  in Err(error) then panic(error.message())
+  in Err(error) then panic(display(error))
   end
 
   chunk = if args.is_empty()

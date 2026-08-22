@@ -641,20 +641,66 @@ impl<'m> Oracle<'m> {
                 self.intrinsic(*intrinsic, args, frame, depth)
             }
             HExprKind::Interp(parts) => {
-                let mut out = String::new();
+                let builder = self.alloc(OKind::Sb(Some(String::new())));
                 for part in parts {
                     match part {
-                        HInterpPart::Lit(text) => out.push_str(text),
-                        HInterpPart::Expr(e) => match self.eval(e, frame, depth)? {
-                            OV::Int(v) => out.push_str(&v.to_string()),
-                            OV::Bool(v) => out.push_str(if v { "true" } else { "false" }),
-                            OV::Char(value) => out.push(value),
-                            OV::Str(s) => out.push_str(&s),
-                            OV::Substring(s) => out.push_str(&s),
-                            _ => return Err(Stop::Limit("non-scalar interpolation")),
-                        },
+                        HInterpPart::Lit(text) => {
+                            let object = self.as_obj(&builder)?;
+                            match &mut object.borrow_mut().kind {
+                                OKind::Sb(Some(buffer)) => buffer.push_str(text),
+                                _ => return Err(Stop::Limit("invalid interpolation builder")),
+                            };
+                        }
+                        HInterpPart::Native { value, kind } => {
+                            let value = self.eval(value, frame, depth)?;
+                            let text = match (kind, value) {
+                                (HInterpNative::Int, OV::Int(value)) => value.to_string(),
+                                (HInterpNative::Bool, OV::Bool(true)) => "true".to_string(),
+                                (HInterpNative::Bool, OV::Bool(false)) => "false".to_string(),
+                                (HInterpNative::Char, OV::Char(value)) => value.to_string(),
+                                (HInterpNative::Text, OV::Str(value))
+                                | (HInterpNative::Text, OV::Substring(value)) => {
+                                    value.as_ref().clone()
+                                }
+                                _ => return Err(Stop::Limit("invalid native interpolation")),
+                            };
+                            let object = self.as_obj(&builder)?;
+                            match &mut object.borrow_mut().kind {
+                                OKind::Sb(Some(buffer)) => buffer.push_str(&text),
+                                _ => return Err(Stop::Limit("invalid interpolation builder")),
+                            };
+                        }
+                        HInterpPart::Display {
+                            value, selector, ..
+                        } => {
+                            let receiver = self.eval(value, frame, depth)?;
+                            let class = match self.native_class(&receiver) {
+                                Some(class) => class,
+                                None => {
+                                    let object = self.as_obj(&receiver)?;
+                                    let class = match &object.borrow().kind {
+                                        OKind::Instance { class, .. } => *class,
+                                        _ => {
+                                            return Err(Stop::Limit(
+                                                "display call on a non-instance",
+                                            ))
+                                        }
+                                    };
+                                    class
+                                }
+                            };
+                            let func = self
+                                .find_method(class, selector)
+                                .ok_or(Stop::Limit("unknown display selector"))?;
+                            self.call(func, vec![receiver, builder.clone()], vec![], depth + 1)?;
+                        }
                     }
                 }
+                let object = self.as_obj(&builder)?;
+                let out = match &object.borrow().kind {
+                    OKind::Sb(Some(buffer)) => buffer.clone(),
+                    _ => return Err(Stop::Limit("invalid interpolation builder")),
+                };
                 Ok(OV::Str(Rc::new(out)))
             }
             HExprKind::If { arms, else_body } => {
@@ -1444,6 +1490,26 @@ impl<'m> Oracle<'m> {
                 let builder = self.as_obj(&values[0])?;
                 frozen_guard(&builder)?;
                 let text = self.as_text(&values[1])?.to_string();
+                match &mut builder.borrow_mut().kind {
+                    OKind::Sb(Some(buffer)) => buffer.push_str(&text),
+                    OKind::Sb(None) => return Err(Stop::Fault("InvalidVmState")),
+                    _ => return Err(Stop::Limit("builder op on a non-builder")),
+                }
+                Ok(values[0].clone())
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_APPEND_INT
+            | lm_abi::INTRINSIC_STRING_BUILDER_APPEND_BOOL => {
+                let builder = self.as_obj(&values[0])?;
+                frozen_guard(&builder)?;
+                let text = if intrinsic == lm_abi::INTRINSIC_STRING_BUILDER_APPEND_INT {
+                    self.as_int(&values[1])?.to_string()
+                } else {
+                    match &values[1] {
+                        OV::Bool(true) => "true".to_string(),
+                        OV::Bool(false) => "false".to_string(),
+                        _ => return Err(Stop::Limit("expected a Bool value")),
+                    }
+                };
                 match &mut builder.borrow_mut().kind {
                     OKind::Sb(Some(buffer)) => buffer.push_str(&text),
                     OKind::Sb(None) => return Err(Stop::Fault("InvalidVmState")),

@@ -34,7 +34,7 @@ end
 
 def describe(host: String, path: String): String with Http.Client
   case get(host, path)
-  in Err(error) then "{host}{path} failed: {error.message()}"
+  in Err(error) then "{host}{path} failed: {error}"
   in Ok(response)
     kind = case response.header("content-type")
     in Some(value) then value.text()

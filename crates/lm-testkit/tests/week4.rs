@@ -1147,7 +1147,7 @@ fn read_line_reply_uses_the_pinned_core_result() {
     let source = "def go(): String with Io.ReadLine\n  \
         case sys.io.read_line()\n  in Ok(line)\n    \
         case line\n    in Some(text) then text\n    in None then \"<eof>\"\n    end\n  \
-        in Err(e) then e.message()\n  end\nend\ngo()\n";
+        in Err(e) then display(e)\n  end\nend\ngo()\n";
     let (out, host) = run_world("t.lm", source, &["Io.ReadLine"], VmConfig::default()).unwrap();
     assert_eq!(out, "Done(\"<eof>\")");
     host.borrow_mut().input.push("hello".to_string());

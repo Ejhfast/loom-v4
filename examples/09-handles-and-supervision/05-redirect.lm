@@ -12,11 +12,11 @@ def read_config(): String with Fs.Open, Fs.Read, Fs.Close
   in Ok(file)
     text = case file.read(1024)
     in Ok(bytes)  then bytes.text()
-    in Err(error) then error.message()
+    in Err(error) then display(error)
     end
     file.close()
     text
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   end
 end
 
@@ -49,8 +49,8 @@ in Ok(approved)
   # The child closed the shared entry, so this alias is closed too.
   case approved.read(1)
   in Err(Closed) then "{text} (the shared entry is closed)"
-  in Err(error)  then error.message()
+  in Err(error)  then display(error)
   in Ok(_)       then "{text} (the entry is still open)"
   end
-in Err(error) then error.message()
+in Err(error) then display(error)
 end

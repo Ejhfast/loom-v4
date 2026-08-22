@@ -24,6 +24,6 @@ response = case http.parse_response(
   limits
 )
 in Ok(value) then "{value.status} {value.body.text()}"
-in Err(error) then error.message()
+in Err(error) then display(error)
 end
 (request_bytes, response)

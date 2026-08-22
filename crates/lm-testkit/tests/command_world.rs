@@ -98,11 +98,11 @@ use std.io.read_to_end
 
 def go(): (String, String) with Io.ReadBytes
   line_error = case ConsoleLineReader().read_line(3)
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   in Ok(_) then "missing line error"
   end
   total_error = case read_to_end(2)
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   in Ok(_) then "missing total error"
   end
   (line_error, total_error)

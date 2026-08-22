@@ -2,7 +2,7 @@
 
 def close_after_error(file: FileHandle, error: FsError): String with Fs.Close
   file.close()
-  error.message()
+  display(error)
 end
 
 def round_trip(path: String): String with Fs.Open, Fs.Write, Fs.Flush, Fs.Seek, Fs.Read, Fs.Close
@@ -34,9 +34,9 @@ def round_trip(path: String): String with Fs.Open, Fs.Write, Fs.Flush, Fs.Seek, 
 
     case file.close()
     in Ok(_)      then text
-    in Err(error) then error.message()
+    in Err(error) then display(error)
     end
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   end
 end
 

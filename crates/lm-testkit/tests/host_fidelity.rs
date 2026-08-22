@@ -19,9 +19,9 @@ def worker(): String with Fs.Open, Fs.Read, Fs.Close
     in Ok(b)
       file.close()
       b.text()
-    in Err(e) then e.message()
+    in Err(e) then display(e)
     end
-  in Err(e) then e.message()
+  in Err(e) then display(e)
   end
 end
 

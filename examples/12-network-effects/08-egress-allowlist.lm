@@ -20,7 +20,7 @@ def call_out(host: String): String with Http.CleartextClient
   request = HttpRequest("GET", "/data", [], Bytes(""))
   case http.send(host, 80, request, http.default_limits())
   in Ok(response) then "{host}: {response.status} {response.body.text()}"
-  in Err(error)   then "{host}: {error.message()}"
+  in Err(error)   then "{host}: {error}"
   end
 end
 

@@ -354,7 +354,26 @@ pub enum NativeOp {
 #[derive(Clone)]
 pub enum HInterpPart {
     Lit(String),
-    Expr(HExpr),
+    Native {
+        value: HExpr,
+        kind: HInterpNative,
+    },
+    Display {
+        value: HExpr,
+        interface: u32,
+        method: u32,
+        builder: u32,
+        selector: String,
+    },
+}
+
+/// One allocation-free native interpolation path.
+#[derive(Clone, Copy)]
+pub enum HInterpNative {
+    Text,
+    Int,
+    Bool,
+    Char,
 }
 
 /// One policy-table edit action.

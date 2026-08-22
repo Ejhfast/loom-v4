@@ -101,7 +101,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 36 makes a class family part of its replacement contract.
 /// Version 37 adds multiple bounds to associated interface types.
 /// Version 38 adds interface inheritance and bare `Self` contracts.
-pub const COMPILER_ABI_VERSION: u32 = 38;
+/// Version 39 lowers general interpolation through `Display`.
+pub const COMPILER_ABI_VERSION: u32 = 39;
 
 /// The refinement work budget of one component.
 ///

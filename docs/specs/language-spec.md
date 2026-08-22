@@ -134,7 +134,17 @@ A string is immutable UTF-8 text:
 "Hello {name}!"
 ```
 
-Escapes are `\\`, `\"`, `\'`, `\n`, `\r`, `\t`, `\0`, and `\u{HEX}`. `{ expression }` interpolates a compiler-known pure textual conversion. `{{` and `}}` encode literal braces. Version 0.2 provides interpolation for core scalar values, `String`, `Bytes`, `Digest`, and `Fault`.
+Escapes are `\\`, `\"`, `\'`, `\n`, `\r`, `\t`, `\0`, and `\u{HEX}`.
+
+`{ expression }` accepts a value that implements `Display`.
+
+`Display.append_to` writes into one `StringBuilder` without an intermediate `String`.
+
+`Int`, `Bool`, `Char`, and every `Text` value use native builder operations.
+
+The pure `display(value)` helper builds one standalone `String`.
+
+`{{` and `}}` encode literal braces.
 
 Triple-quoted strings preserve line breaks and use the same escaping and interpolation rules. A byte string is immutable bytes:
 
@@ -562,6 +572,14 @@ An enum family can conform because its family is closed.
 An interface name is a bound. It is not a value type.
 
 Version 0.2 has no existential interface value.
+
+The core `Display` interface controls string interpolation.
+
+```lm
+interface Display
+  def append_to(self, mut builder: StringBuilder)
+end
+```
 
 One unparenthesized row item can follow `with`. Parentheses group an empty row or a row with several items.
 

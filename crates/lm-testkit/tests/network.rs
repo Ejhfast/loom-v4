@@ -37,36 +37,36 @@ def exchange(): String with Tcp
   address = case loopback(0)
   in Ok(value)  then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   listener = case Tcp().listen(address, 8)
   in Ok(value)  then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   bound = case listener.local_address()
   in Ok(value)  then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   client = case Tcp().connect(bound)
   in Ok(value)  then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   accepted = case listener.accept()
   in Ok(value)  then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   case client.write_all(Bytes("hello"))
   in Err(error)
-    return error.message()
+    return display(error)
   in Ok(_)      then ()
   end
   answer = case accepted.first.read_exact(5)
   in Ok(bytes)  then bytes.text()
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   end
   client.close()
   accepted.first.close()
@@ -212,21 +212,21 @@ def close_twice(): String with Tcp.Listener
   address = case loopback(0)
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   listener = case Tcp().listen(address, 4)
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   case listener.close()
   in Err(error)
-    return error.message()
+    return display(error)
   in Ok(_) then ()
   end
   case listener.close()
   in Err(Closed) then "closed"
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   in Ok(_) then "accepted"
   end
 end

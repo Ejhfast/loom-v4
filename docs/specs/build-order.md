@@ -857,8 +857,8 @@ case files.with_open(path, ReadOnly()) { |file|
   file.read_text(max_bytes: 1_000_000)
 }
 in Ok(Ok(text))   then sys.io.print(text)
-in Ok(Err(error)) then sys.io.error(error.message())
-in Err(error)     then sys.io.error(error.message())
+in Ok(Err(error)) then sys.io.error(display(error))
+in Err(error)     then sys.io.error(display(error))
 end
 ```
 

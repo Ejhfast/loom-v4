@@ -8,7 +8,7 @@ def read_secret(): String with Fs.Open, Fs.Close
   in Ok(file)
     file.close()
     "the child opened the secret"
-  in Err(error) then "the child was refused: {error.message()}"
+  in Err(error) then "the child was refused: {error}"
   end
 end
 

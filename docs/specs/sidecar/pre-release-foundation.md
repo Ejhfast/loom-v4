@@ -1,6 +1,6 @@
 # Pre-release Language and Host Foundation
 
-Status: stages 1 through 4 implemented. Stages 5 through 7 remain required.
+Status: stages 1 through 5 implemented. Stages 6 and 7 remain required.
 
 This sidecar defines the first public release foundation.
 
@@ -80,9 +80,7 @@ The CLI treats a closed report stream as a completed report.
 
 Its constructor is its stable programmatic category.
 
-It gains `message(): String`.
-
-It later conforms to the common display interface.
+It implements the common display interface.
 
 `RunSnapshot[T].to_bytes()` returns `Result[Bytes, SnapshotError]`.
 
@@ -405,7 +403,7 @@ end
 
 `EntropyError` distinguishes invalid counts, limits, unavailability, and platform failure.
 
-Every error type provides `message(): String`.
+Every portable error type implements `Display`.
 
 ## 10. Stage 1 implementation
 
@@ -416,7 +414,7 @@ It includes these changes.
 - Add focused probes for every reported failure.
 - Repair broken-pipe handling.
 - Reserve host faults for host defects.
-- Add snapshot error messages and snapshot byte encoding.
+- Add snapshot error text and snapshot byte encoding.
 - Add deliberate panic and assertion functions.
 - Add `Option.expect` and `Result.expect`.
 - Accept control statements in short case arms.
@@ -604,7 +602,7 @@ String interpolation accepts any value that conforms to `Display`.
 
 The core scalar and text implementations lower to existing builder intrinsics.
 
-Error enums implement `Display` and remove their repeated `message()` convention.
+Portable error values implement `Display` and remove their repeated `message()` methods.
 
 A pure core helper builds a standalone `String` from any `Display` value.
 
@@ -615,6 +613,19 @@ The verifier checks each selected display call.
 Stage 5 passes when a user class interpolates through its declared conformance.
 
 `string_interp` and `string_builder` must remain within normal benchmark noise.
+
+The Stage 5 gate passed on 2026-08-22.
+
+Workspace linting and testing completed without failures.
+
+The warm full workspace suite completed in about 30 seconds.
+
+The selected execution benchmarks found no regression.
+
+| Benchmark | Stage 4 | Stage 5 |
+|---|---:|---:|
+| `string_interp` | 258.1 ns | 199.2 ns |
+| `string_builder` | 43.3 ns | 41.4 ns |
 
 ## 19. Stage 6: `PartialEq`
 

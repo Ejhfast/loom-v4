@@ -988,8 +988,11 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
         | HExprKind::Perform { args, .. } => collect_dependency_exprs(args, out),
         HExprKind::Interp(parts) => {
             for part in parts {
-                if let HInterpPart::Expr(value) = part {
-                    collect_dependency_expr(value, out);
+                match part {
+                    HInterpPart::Lit(_) => {}
+                    HInterpPart::Native { value, .. } | HInterpPart::Display { value, .. } => {
+                        collect_dependency_expr(value, out)
+                    }
                 }
             }
         }

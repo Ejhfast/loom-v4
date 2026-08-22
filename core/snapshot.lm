@@ -5,7 +5,7 @@
 # ordinary typed errors, not machine faults (17.4). `RunSnapshot[T]` and
 # `VmSnapshot` are native snapshot types declared by the ABI.
 
-enum SnapshotError
+enum SnapshotError implements Display
   # A live host attachment has no bytes to copy. The path names the
   # machine ordinals from the snapshot root to the machine that holds
   # the attachment. The kind names the attachment.
@@ -23,11 +23,19 @@ enum SnapshotError
     end
   end
 
-  def message(self): String
+  def append_to(self, mut builder: StringBuilder)
     case self
-    in ResourceActive(_, kind) then "a live {kind} blocks snapshot creation"
-    in SnapshotLimitExceeded  then "the snapshot exceeds its byte limit"
-    in BadImage(reason)       then reason
+    in ResourceActive(_, kind)
+      builder.append("a live ")
+      builder.append(kind)
+      builder.append(" blocks snapshot creation")
+      ()
+    in SnapshotLimitExceeded
+      builder.append("the snapshot exceeds its byte limit")
+      ()
+    in BadImage(reason)
+      builder.append(reason)
+      ()
     end
   end
 end

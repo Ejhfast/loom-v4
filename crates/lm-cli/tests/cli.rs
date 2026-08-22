@@ -172,7 +172,7 @@ fn run_reports_a_fault_with_a_stable_code() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 870ce4ce)\n"
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 139f88cd)\n"
     );
 }
 
@@ -188,7 +188,7 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 5370b5ae)\n"
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 421504b4)\n"
     );
 }
 
@@ -671,7 +671,7 @@ fn run_interface_example_uses_one_and_two_bounds() {
     assert_eq!(
         collections_example("03-define-an-interface.lm"),
         "Done((\"book loom costs 12\", \"seat 14 costs 40\", 35, \
-         \"book atlas costs 12\", 24))\n"
+         \"book atlas costs 12\", 24, \"item=Book(loom)\"))\n"
     );
 }
 

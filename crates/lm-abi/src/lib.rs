@@ -504,7 +504,8 @@ impl AbiType {
 /// Version 12 adds dynamic result rendering.
 /// Version 13 adds immutable public syntax construction.
 /// Version 14 adds deliberate guest failure.
-pub const INTRINSIC_ABI_VERSION: u32 = 14;
+/// Version 15 adds direct integer and Boolean builder appends.
+pub const INTRINSIC_ABI_VERSION: u32 = 15;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -653,9 +654,11 @@ pub const INTRINSIC_SYNTAX_BUILD_NODE: IntrinsicSlot = 130;
 pub const INTRINSIC_SYNTAX_TO_TREE: IntrinsicSlot = 131;
 pub const INTRINSIC_PANIC: IntrinsicSlot = 132;
 pub const INTRINSIC_ASSERT_FAIL: IntrinsicSlot = 133;
+pub const INTRINSIC_STRING_BUILDER_APPEND_INT: IntrinsicSlot = 134;
+pub const INTRINSIC_STRING_BUILDER_APPEND_BOOL: IntrinsicSlot = 135;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 134] = [
+pub const INTRINSICS: [IntrinsicDef; 136] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -1498,6 +1501,18 @@ pub const INTRINSICS: [IntrinsicDef; 134] = [
         name: "control.assert_fail",
         params: &[AbiType::STR],
         reply: AbiType::NEVER,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.append_int",
+        params: &[AbiType::STRING_BUILDER, AbiType::INT],
+        reply: AbiType::STRING_BUILDER,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "string_builder.append_bool",
+        params: &[AbiType::STRING_BUILDER, AbiType::BOOL],
+        reply: AbiType::STRING_BUILDER,
         semantic_revision: 1,
     },
 ];

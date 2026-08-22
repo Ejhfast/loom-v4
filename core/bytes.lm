@@ -122,6 +122,14 @@ final class StringBuilder
     intrinsic("string_builder.append", self, text)
   end
 
+  def append_int(mut self, value: Int): StringBuilder
+    intrinsic("string_builder.append_int", self, value)
+  end
+
+  def append_bool(mut self, value: Bool): StringBuilder
+    intrinsic("string_builder.append_bool", self, value)
+  end
+
   def push_char(mut self, value: Char): StringBuilder
     intrinsic("string_builder.push_char", self, value)
   end

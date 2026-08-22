@@ -48,7 +48,7 @@ class Server < Proc[TcpListener]
       stream = case listener.accept()
       in Ok(value) then value.first
       in Err(error)
-        return "accept: {error.message()}"
+        return "accept: {error}"
       end
       # A malformed request closes one connection. It does not stop
       # the server.
@@ -58,7 +58,7 @@ class Server < Proc[TcpListener]
         case http.write_response(stream, response, "OK", limits)
         in Ok(_) then ()
         in Err(error)
-          return "write: {error.message()}"
+          return "write: {error}"
         end
       in Err(_) then ()
       end
@@ -80,22 +80,22 @@ def call(
   wire = case http.serialize_request("127.0.0.1", port, request, limits)
   in Ok(value) then value
   in Err(error)
-    return "serialize: {error.message()}"
+    return "serialize: {error}"
   end
   stream = case Tcp().connect(loopback(port))
   in Ok(value) then value
   in Err(error)
-    return "connect: {error.message()}"
+    return "connect: {error}"
   end
   case stream.write_all(wire)
   in Ok(_) then ()
   in Err(error)
     stream.close()
-    return "write: {error.message()}"
+    return "write: {error}"
   end
   answer = case http.read_response(stream, request.method, limits)
   in Ok(response) then "{response.status} {response.body.text()}"
-  in Err(error)   then "read: {error.message()}"
+  in Err(error)   then "read: {error}"
   end
   stream.close()
   answer
@@ -107,13 +107,13 @@ def main(): String with Proc, Tcp.Server, Tcp.Connect
   listener = case Tcp().listen(loopback(0), 8)
   in Ok(value) then value
   in Err(error)
-    return "listen: {error.message()}"
+    return "listen: {error}"
   end
   # Port zero asks the host for a free port. Read the real port back.
   port = case listener.local_address()
   in Ok(value) then value.port
   in Err(error)
-    return "address: {error.message()}"
+    return "address: {error}"
   end
 
   server = Server.spawn()

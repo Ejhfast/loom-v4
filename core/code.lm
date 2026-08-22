@@ -90,10 +90,15 @@ end
 final class ClassBinding
 end
 
-final class CodeError
+final class CodeError implements Display
   message: String
 
   def init(mut self, message: String)
     self.message = message
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append(self.message)
+    ()
   end
 end

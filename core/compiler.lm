@@ -54,10 +54,15 @@ final class CompileOptions
   end
 end
 
-final class CompileErrors
+final class CompileErrors implements Display
   message: String
 
   def init(mut self, message: String)
     self.message = message
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append(self.message)
+    ()
   end
 end

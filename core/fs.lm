@@ -1,14 +1,16 @@
 # Core: portable file operation values.
 
-enum FsError
+enum FsError implements Display
   Closed
   Failed(message: String)
 
-  def message(self): String
-    case self
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
     in Closed    then "file handle is closed"
     in Failed(m) then m
     end
+    builder.append(text)
+    ()
   end
 end
 

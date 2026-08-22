@@ -3,20 +3,28 @@
 use std.tls.Tls
 use std.tls.TlsClientConfig
 
-enum HttpError
+enum HttpError implements Display
   InvalidRequest(message: String)
   InvalidResponse(message: String)
   LimitExceeded(message: String)
   Network(error: NetError)
   Tls(error: TlsError)
 
-  def message(self): String
+  def append_to(self, mut builder: StringBuilder)
     case self
-    in InvalidRequest(value)  then value
-    in InvalidResponse(value) then value
-    in LimitExceeded(value)   then value
-    in Network(error)         then error.message()
-    in Tls(error)             then error.message()
+    in InvalidRequest(value)
+      builder.append(value)
+      ()
+    in InvalidResponse(value)
+      builder.append(value)
+      ()
+    in LimitExceeded(value)
+      builder.append(value)
+      ()
+    in Network(error)
+      error.append_to(builder)
+    in Tls(error)
+      error.append_to(builder)
     end
   end
 end

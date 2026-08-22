@@ -21,11 +21,11 @@ def read_settings(): String with Fs.Open, Fs.Read, Fs.Close
   in Ok(file)
     text = case file.read(1024)
     in Ok(bytes)  then bytes.text()
-    in Err(error) then error.message()
+    in Err(error) then display(error)
     end
     file.close()
     text
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   end
 end
 

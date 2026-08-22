@@ -11,11 +11,11 @@ const CHILD: &str = "do ||: String with Fs.Open, Fs.Read, Fs.Close\n\
                      \x20 in Ok(f)\n\
                      \x20   text = case f.read(6)\n\
                      \x20   in Ok(b)  then b.text()\n\
-                     \x20   in Err(e) then e.message()\n\
+                     \x20   in Err(e) then display(e)\n\
                      \x20   end\n\
                      \x20   f.close()\n\
                      \x20   text\n\
-                     \x20 in Err(e) then e.message()\n\
+                     \x20 in Err(e) then display(e)\n\
                      \x20 end\n\
                      end";
 

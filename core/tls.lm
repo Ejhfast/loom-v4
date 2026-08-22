@@ -1,6 +1,6 @@
 # Core: TLS stream resources and operation boundary values.
 
-enum TlsError
+enum TlsError implements Display
   InvalidConfig(message: String)
   Handshake(message: String)
   Certificate(message: String)
@@ -9,15 +9,28 @@ enum TlsError
   Closed
   LimitExceeded(message: String)
 
-  def message(self): String
+  def append_to(self, mut builder: StringBuilder)
     case self
-    in InvalidConfig(value) then value
-    in Handshake(value)     then value
-    in Certificate(value)   then value
-    in Protocol(value)      then value
-    in Network(error)       then error.message()
-    in Closed               then "TLS stream is closed"
-    in LimitExceeded(value) then value
+    in InvalidConfig(value)
+      builder.append(value)
+      ()
+    in Handshake(value)
+      builder.append(value)
+      ()
+    in Certificate(value)
+      builder.append(value)
+      ()
+    in Protocol(value)
+      builder.append(value)
+      ()
+    in Network(error)
+      error.append_to(builder)
+    in Closed
+      builder.append("TLS stream is closed")
+      ()
+    in LimitExceeded(value)
+      builder.append(value)
+      ()
     end
   end
 end

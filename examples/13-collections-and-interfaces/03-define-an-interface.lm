@@ -21,7 +21,7 @@ interface Discountable
   def discount(self): Int
 end
 
-final class Book implements Priced
+final class Book implements Priced, Display
   title: String
 
   def init(mut self, title: String)
@@ -34,6 +34,14 @@ final class Book implements Priced
 
   def label(self): String
     "book {self.title}"
+  end
+
+  # Display writes into the active interpolation builder.
+  def append_to(self, mut builder: StringBuilder)
+    builder.append("Book(")
+    builder.append(self.title)
+    builder.append(")")
+    ()
   end
 end
 
@@ -88,10 +96,17 @@ def cart_total[P: Priced](items: [P]): Int
   items.fold(0) { |sum: Int, item: P| sum + item.price() }
 end
 
+# Interpolation accepts any type that implements Display.
+def rendered[D: Display](item: D): String
+  "item={item}"
+end
+
+book = Book("loom")
 (
-  describe(Book("loom")),
+  describe(book),
   describe(Ticket(14)),
   final_price(Ticket(14)),
   Cart(Book("atlas")).receipt(),
-  cart_total([Book("a"), Book("b")])
+  cart_total([Book("a"), Book("b")]),
+  rendered(book)
 )

@@ -54,41 +54,41 @@ def exchange(): String with Tcp, Tls
   address = case loopback(0)
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   listener = case Tcp().listen(address, 4)
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   bound = case listener.local_address()
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   client = case Tcp().connect(bound)
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   server = case listener.accept()
   in Ok(value) then value.first
   in Err(error)
-    return error.message()
+    return display(error)
   end
   secure = case Tls().handshake(client, test_tls_config())
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   case secure.write_all(Bytes("hello"))
   in Ok(_) then ()
   in Err(error)
-    return error.message()
+    return display(error)
   end
   received = case server.read_exact(5)
   in Ok(value) then value.text()
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   end
   secure.shutdown()
   secure.close()
@@ -121,38 +121,38 @@ def exchange(): String with Tcp, Tls
   address = case loopback(0)
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   listener = case Tcp().listen(address, 4)
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   bound = case listener.local_address()
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   client = case Tcp().connect(bound)
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   server = case listener.accept()
   in Ok(value) then value.first
   in Err(error)
-    return error.message()
+    return display(error)
   end
   secure = case Tls().handshake(client, test_tls_config())
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   wire = Bytes("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong")
   case server.write_all(wire)
   in Ok(_) then ()
   in Err(error)
-    return error.message()
+    return display(error)
   end
   response = case Http().read_tls_response(
     secure,
@@ -161,7 +161,7 @@ def exchange(): String with Tcp, Tls
   )
   in Ok(value) then value
   in Err(error)
-    return error.message()
+    return display(error)
   end
   secure.close()
   server.close()

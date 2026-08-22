@@ -1543,24 +1543,58 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             HExprKind::Interp(parts) => {
                 self.m
                     .intern_type(BcType::Class(self.m.string_builder_class));
+                let builder_slot = parts.iter().find_map(|part| match part {
+                    HInterpPart::Display { builder, .. } => Some(*builder),
+                    _ => None,
+                });
                 self.emit(Instr::Native(lm_bytecode::NativeInstr::SbNew));
+                if let Some(builder) = builder_slot {
+                    self.emit(Instr::StoreLocal(builder));
+                }
                 for part in parts {
                     match part {
                         HInterpPart::Lit(text) => {
+                            if let Some(builder) = builder_slot {
+                                self.emit(Instr::LoadLocal(builder));
+                            }
                             let idx = self.m.intern_string(text);
                             self.emit(Instr::ConstStr(idx));
                             self.emit(Instr::Native(lm_bytecode::NativeInstr::SbAppendStr));
+                            if builder_slot.is_some() {
+                                self.emit(Instr::Pop);
+                            }
                         }
-                        HInterpPart::Expr(e) => {
-                            self.lower_expr(e);
-                            let instr = match e.ty {
-                                INT => Instr::Native(lm_bytecode::NativeInstr::SbAppendInt),
-                                BOOL => Instr::Native(lm_bytecode::NativeInstr::SbAppendBool),
-                                _ => Instr::Native(lm_bytecode::NativeInstr::SbAppendStr),
-                            };
-                            self.emit(instr);
+                        HInterpPart::Native { value, kind } => {
+                            if let Some(builder) = builder_slot {
+                                self.emit(Instr::LoadLocal(builder));
+                            }
+                            self.lower_expr(value);
+                            self.emit(interp_native_instr(*kind));
+                            if builder_slot.is_some() {
+                                self.emit(Instr::Pop);
+                            }
+                        }
+                        HInterpPart::Display {
+                            value,
+                            interface,
+                            method,
+                            builder,
+                            selector: _,
+                        } => {
+                            self.lower_expr(value);
+                            self.emit(Instr::LoadLocal(*builder));
+                            let recv_ty = self.m.bc_ty(value.ty);
+                            self.emit(Instr::CallInterface {
+                                interface: *interface,
+                                method: *method,
+                                recv_ty,
+                            });
+                            self.emit(Instr::Pop);
                         }
                     }
+                }
+                if let Some(builder) = builder_slot {
+                    self.emit(Instr::LoadLocal(builder));
                 }
                 self.emit(Instr::Native(lm_bytecode::NativeInstr::SbFinish));
             }
@@ -1764,6 +1798,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BYTES_NE => Instr::Native(lm_bytecode::NativeInstr::NeBytes),
             lm_abi::INTRINSIC_STRING_BUILDER_APPEND => {
                 Instr::Native(lm_bytecode::NativeInstr::SbAppendStr)
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_APPEND_INT => {
+                Instr::Native(lm_bytecode::NativeInstr::SbAppendInt)
+            }
+            lm_abi::INTRINSIC_STRING_BUILDER_APPEND_BOOL => {
+                Instr::Native(lm_bytecode::NativeInstr::SbAppendBool)
             }
             lm_abi::INTRINSIC_STRING_BUILDER_LEN => Instr::Native(lm_bytecode::NativeInstr::SbLen),
             lm_abi::INTRINSIC_STRING_BUILDER_CLEAR => {
@@ -2276,8 +2316,13 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         }
         HExprKind::Interp(parts) => {
             for part in parts {
-                if let HInterpPart::Expr(e) = part {
-                    shift_expr_in_place(e, base, max);
+                match part {
+                    HInterpPart::Lit(_) => {}
+                    HInterpPart::Native { value, .. } => shift_expr_in_place(value, base, max),
+                    HInterpPart::Display { value, builder, .. } => {
+                        shift_expr_in_place(value, base, max);
+                        shift_slot(builder, base, max);
+                    }
                 }
             }
         }
@@ -2471,6 +2516,16 @@ fn binary_instr(op: BinOp, operand_ty: TypeId) -> Instr {
             _ => Instr::NeRef,
         },
     }
+}
+
+fn interp_native_instr(kind: HInterpNative) -> Instr {
+    let native = match kind {
+        HInterpNative::Text => lm_bytecode::NativeInstr::SbAppendStr,
+        HInterpNative::Int => lm_bytecode::NativeInstr::SbAppendInt,
+        HInterpNative::Bool => lm_bytecode::NativeInstr::SbAppendBool,
+        HInterpNative::Char => lm_bytecode::NativeInstr::SbAppendChar,
+    };
+    Instr::Native(native)
 }
 
 fn lower_func(m: &mut ModLowerer<'_>, func: &HirFunc) -> Func {

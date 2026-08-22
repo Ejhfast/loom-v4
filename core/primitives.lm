@@ -1,5 +1,21 @@
 # Primitive values use these final core method tables.
-final class Int
+
+interface Display
+  def append_to(self, mut builder: StringBuilder)
+end
+
+def display[T: Display](value: T): String
+  builder = StringBuilder()
+  value.append_to(builder)
+  builder.finish()
+end
+
+final class Int implements Display
+  def append_to(self, mut builder: StringBuilder)
+    builder.append_int(self)
+    ()
+  end
+
   def abs(self): Int
     intrinsic("int.abs", self)
   end
@@ -53,7 +69,12 @@ final class Int
   end
 end
 
-final class Bool
+final class Bool implements Display
+  def append_to(self, mut builder: StringBuilder)
+    builder.append_bool(self)
+    ()
+  end
+
   def __not__(self): Bool
     intrinsic("bool.not", self)
   end

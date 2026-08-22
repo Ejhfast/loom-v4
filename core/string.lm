@@ -1,8 +1,13 @@
 # Core: immutable UTF-8 text and Unicode scalar values.
 
-class Text implements Counted, Iterable
+class Text implements Counted, Iterable, Display
   type Item = Char
   type Iter = TextIterator
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append(self)
+    ()
+  end
 
   def len(self): Int
     intrinsic("text.len", self)
@@ -251,7 +256,12 @@ final class Substring < Text
   end
 end
 
-final class Char
+final class Char implements Display
+  def append_to(self, mut builder: StringBuilder)
+    builder.push_char(self)
+    ()
+  end
+
   def codepoint(self): Int
     intrinsic("char.codepoint", self)
   end

@@ -549,28 +549,60 @@ impl<'o> FnChecker<'o> {
         parts: &[ast::InterpPart],
     ) -> Result<HExpr, Diagnostic> {
         let mut checked = Vec::new();
+        let display = ctx.core_interfaces["Display"];
+        let display_method = ctx.interfaces[display as usize]
+            .methods
+            .iter()
+            .position(|method| method.name == "append_to")
+            .expect("Display declares append_to") as u32;
+        let text = Self::core_class(ctx, "Text");
+        let char_value = Self::core_class(ctx, "Char");
+        let builder_ty = ctx.classes[ctx.core_types["StringBuilder"] as usize].self_ty;
+        let mut builder_slot = None;
         for part in parts {
             match part {
                 ast::InterpPart::Lit(text) => checked.push(HInterpPart::Lit(text.clone())),
                 ast::InterpPart::Expr(e) => {
                     let h = self.synth_expr(ctx, e)?;
-                    // Every Text form appends through the same builder
-                    // path, so a Substring interpolates without a copy.
-                    let text = Self::core_class(ctx, "Text");
-                    let interpolable =
-                        matches!(h.ty, INT | BOOL | STRING) || ctx.store.compatible(text, h.ty);
-                    if !interpolable {
+                    let native = if h.ty == INT {
+                        Some(HInterpNative::Int)
+                    } else if h.ty == BOOL {
+                        Some(HInterpNative::Bool)
+                    } else if h.ty == char_value {
+                        Some(HInterpNative::Char)
+                    } else if h.ty == STRING || ctx.store.compatible(text, h.ty) {
+                        // Every Text form appends through one builder path.
+                        // A Substring therefore needs no copy.
+                        Some(HInterpNative::Text)
+                    } else {
+                        None
+                    };
+                    if let Some(kind) = native {
+                        checked.push(HInterpPart::Native { value: h, kind });
+                        continue;
+                    }
+                    if ctx.type_conformance(&self.env, h.ty, display).is_none() {
                         return Err(Diagnostic::new(
                             "E1034",
                             format!(
-                                "cannot interpolate a value of type {}; this slice \
-                                 interpolates Int, Bool, and Text",
+                                "type {} does not implement Display and cannot be interpolated",
                                 ctx.display_type(&self.env, h.ty)
                             ),
                             e.span,
                         ));
                     }
-                    checked.push(HInterpPart::Expr(h));
+                    let builder = *builder_slot.get_or_insert_with(|| {
+                        let slot = self.locals.len() as u32;
+                        self.locals.push((builder_ty, true));
+                        slot
+                    });
+                    checked.push(HInterpPart::Display {
+                        value: h,
+                        interface: display,
+                        method: display_method,
+                        builder,
+                        selector: "append_to".to_string(),
+                    });
                 }
             }
         }

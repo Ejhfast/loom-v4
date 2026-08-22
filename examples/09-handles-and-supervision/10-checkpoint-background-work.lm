@@ -34,5 +34,5 @@ in Ok(file)
   in Fault(_)   then "the index failed"
   end
   "{checkpoint}; {result}"
-in Err(error) then error.message()
+in Err(error) then display(error)
 end

@@ -16,9 +16,9 @@ def read_message(): String with Fs.Open, Fs.Read, Fs.Close
     in Ok(bytes)
       file.close()
       "the child read {bytes.len()} bytes"
-    in Err(error) then error.message()
+    in Err(error) then display(error)
     end
-  in Err(error) then error.message()
+  in Err(error) then display(error)
   end
 end
 

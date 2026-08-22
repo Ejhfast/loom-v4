@@ -2,68 +2,99 @@
 #
 # These values describe portable text conversion and index failures.
 
-enum IoError
+enum IoError implements Display
   BrokenPipe
   InvalidInput(message: String)
   LimitExceeded(message: String)
   Failed(message: String)
 
-  def message(self): String
-    case self
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
     in BrokenPipe      then "the output pipe is closed"
     in InvalidInput(m) then m
     in LimitExceeded(m) then m
     in Failed(m)       then m
     end
+    builder.append(text)
+    ()
   end
 end
 
-enum EnvError
+enum EnvError implements Display
   InvalidName(message: String)
   InvalidEncoding(message: String)
   PermissionDenied(message: String)
   Failed(message: String)
 
-  def message(self): String
-    case self
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
     in InvalidName(m)      then m
     in InvalidEncoding(m)  then m
     in PermissionDenied(m) then m
     in Failed(m)           then m
     end
+    builder.append(text)
+    ()
   end
 end
 
-enum EntropyError
+enum EntropyError implements Display
   InvalidInput(message: String)
   LimitExceeded(message: String)
   Unavailable(message: String)
   Failed(message: String)
 
-  def message(self): String
-    case self
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
     in InvalidInput(m)  then m
     in LimitExceeded(m) then m
     in Unavailable(m)   then m
     in Failed(m)        then m
     end
+    builder.append(text)
+    ()
   end
 end
 
-enum Utf8Error
+enum Utf8Error implements Display
   OutOfBounds
   InvalidBoundary
   InvalidEncoding
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in OutOfBounds     then "the text index is out of bounds"
+    in InvalidBoundary then "the text index is not a UTF-8 boundary"
+    in InvalidEncoding then "the bytes are not valid UTF-8"
+    end
+    builder.append(text)
+    ()
+  end
 end
 
-enum IndexError
+enum IndexError implements Display
   OutOfBounds
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append("the index is out of bounds")
+    ()
+  end
 end
 
-enum ParseIntError
+enum ParseIntError implements Display
   Invalid
   Overflow
   # The radix is outside 2 to 36. A radix can come from data, so this
   # is an ordinary failure and not a fault.
   BadRadix
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in Invalid  then "the text is not an integer"
+    in Overflow then "the integer is out of range"
+    in BadRadix then "the radix is outside 2 through 36"
+    end
+    builder.append(text)
+    ()
+  end
 end

@@ -25,7 +25,7 @@ final class SocketAddress
   end
 end
 
-enum NetError
+enum NetError implements Display
   InvalidInput(message: String)
   NameNotFound(message: String)
   Unavailable(message: String)
@@ -40,8 +40,8 @@ enum NetError
   Unsupported(message: String)
   Failed(message: String)
 
-  def message(self): String
-    case self
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
     in InvalidInput(m)     then m
     in NameNotFound(m)     then m
     in Unavailable(m)      then m
@@ -56,6 +56,8 @@ enum NetError
     in Unsupported(m)      then m
     in Failed(m)           then m
     end
+    builder.append(text)
+    ()
   end
 end
 
