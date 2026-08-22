@@ -244,10 +244,10 @@ Interface effect arguments are invariant.
 
 Row inclusion alone cannot compare them safely because an effect parameter can occur inside a method parameter type.
 
-The `+` token joins several bounds or conformances.
+The `+` token joins several bounds. A comma joins class conformances.
 
 ```lm
-final class LoggedSource implements Counted + Source with Io.Print
+final class LoggedSource implements Counted, Source with Io.Print
 end
 ```
 

@@ -524,12 +524,12 @@ impl Parser<'_> {
             self.pos += 1;
             loop {
                 interfaces.push(self.interface_ref()?);
-                if matches!(self.peek(), Tok::Plus) {
+                if matches!(self.peek(), Tok::Comma) {
                     self.pos += 1;
-                } else if matches!(self.peek(), Tok::Comma) {
+                } else if matches!(self.peek(), Tok::Plus) {
                     return Err(self.error(
                         "E1053",
-                        "`+` separates class conformances. Parenthesize a multi-item interface effect row.",
+                        "`,` separates class conformances. Use `+` only between bounds.",
                     ));
                 } else {
                     break;
@@ -2430,7 +2430,7 @@ end
 interface Counted
 end
 
-final class Worker implements Counted + Service[Int] with () with (Io.Print, Clock.Now)
+final class Worker implements Counted, Service[Int] with () with (Io.Print, Clock.Now)
 end
 
 def apply_service[effect e, P: Service[Int] with e with (), U: Counted](value: P, other: U): Int with e
@@ -2461,11 +2461,11 @@ end
         assert_eq!(old_effect.code, "E1053");
         assert!(old_effect.message.contains("follow `with`"));
 
-        let old_separator =
-            parse("interface A\nend\ninterface B\nend\nfinal class C implements A, B\nend\n1\n")
-                .expect_err("the old conformance separator must fail");
-        assert_eq!(old_separator.code, "E1053");
-        assert!(old_separator.message.contains("`+` separates"));
+        let bound_separator =
+            parse("interface A\nend\ninterface B\nend\nfinal class C implements A + B\nend\n1\n")
+                .expect_err("a bound separator cannot separate conformances");
+        assert_eq!(bound_separator.code, "E1053");
+        assert!(bound_separator.message.contains("`,` separates"));
     }
 
     #[test]

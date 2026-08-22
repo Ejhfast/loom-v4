@@ -13,8 +13,8 @@ interface Formats[T, effect e]
   def format(self, value: T): String with e
 end
 
-# `+` joins distinct conformances. Both conformances are pure here.
-final class Quiet implements Labeled + Formats[Int]
+# A comma joins distinct conformances. Both conformances are pure here.
+final class Quiet implements Labeled, Formats[Int]
   def label(self): String
     "quiet"
   end
@@ -25,7 +25,7 @@ final class Quiet implements Labeled + Formats[Int]
 end
 
 # Each conformance states its own exact row.
-final class Logged implements Labeled with Io.Print + Formats[Int] with Io.Print
+final class Logged implements Labeled with Io.Print, Formats[Int] with Io.Print
   def label(self): String with Io.Print
     sys.io.print("read label\n")
     "logged"

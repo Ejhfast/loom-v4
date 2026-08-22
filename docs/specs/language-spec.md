@@ -541,7 +541,7 @@ An interface application places type arguments in brackets. Each effect argument
 
 A bare interface application supplies an empty row for each effect parameter.
 
-Use `+` between several interface bounds or class conformances.
+Use `+` between several interface bounds. Use commas between class conformances.
 
 One unparenthesized row item can follow `with`. Parentheses group an empty row or a row with several items.
 
@@ -3802,7 +3802,7 @@ class_decl      = [ "final" ], "class", IDENT, [ generic_params ], [ "<", type ]
                   [ implements_clause ], separators,
                   { ( field_decl | method_decl ), separators },
                   "end" ;
-implements_clause = "implements", interface_ref, { "+", interface_ref } ;
+implements_clause = "implements", interface_ref, { ",", interface_ref } ;
 
 field_decl      = IDENT, ":", type, [ "=", expression ] ;
 
@@ -3948,7 +3948,8 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - A missing interface `with` clause supplies empty rows.
 - Each interface `with` clause supplies one effect argument in declaration order.
 - Parentheses are required for an empty interface row or a row with several items.
-- The `+` token separates interface bounds and class conformances.
+- The `+` token separates interface bounds.
+- A comma separates class conformances.
 - `()` is unit. `(T,)` and `(T,U)` are tuple types; the same parenthesized list followed by `->` is a function parameter list. A one-element tuple requires the trailing comma.
 - `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.
 - A left brace followed by a pipe starts a brace closure. Other braces start a map literal. `{}` is an empty map.

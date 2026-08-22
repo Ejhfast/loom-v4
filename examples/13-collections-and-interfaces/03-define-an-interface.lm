@@ -38,7 +38,7 @@ final class Book implements Priced
 end
 
 # One class can conform to several interfaces.
-final class Ticket implements Priced + Discountable
+final class Ticket implements Priced, Discountable
   seat: Int
 
   def init(mut self, seat: Int)
