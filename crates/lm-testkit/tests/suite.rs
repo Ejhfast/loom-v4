@@ -59,3 +59,11 @@ fn counts_example_prints_the_word_counts() {
 fn closures_example_prints_done_42() {
     assert_eq!(run_example("examples/02-objects/closures.lm"), "Done(42)");
 }
+
+#[test]
+fn tuples_example_has_checked_output() {
+    assert_eq!(
+        run_example("examples/03-types/tuples.lm"),
+        "Done((7, \"span (2, 9) flipped (9, 2)\", true, true))"
+    );
+}

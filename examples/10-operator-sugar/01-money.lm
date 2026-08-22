@@ -8,7 +8,7 @@
 # hook directly, and the compiler inlines a trivial body, so `Money`
 # arithmetic costs what the field arithmetic inside it costs.
 
-final class Money
+final class Money implements Display
   cents: Int
 
   def init(mut self, cents: Int)
@@ -33,8 +33,12 @@ final class Money
     Money(0 - self.cents)
   end
 
-  def text(self): String
-    "{self.cents}c"
+  # `Display` gives money one text form, so interpolation reads a
+  # `Money` value directly.
+  def append_to(self, mut builder: StringBuilder)
+    builder.append_int(self.cents)
+    builder.append("c")
+    ()
   end
 end
 
@@ -43,4 +47,4 @@ tax = Money(12)
 total = (price + tax) * 3
 refund = -total
 
-"{total.text()} then {refund.text()}"
+"{total} then {refund}"

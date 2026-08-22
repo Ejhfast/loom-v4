@@ -1,0 +1,65 @@
+# Give a value one text form and give errors one contract.
+#
+# This example needs no grant.
+#
+# `Display` writes text into a `StringBuilder`, and interpolation
+# accepts every `Display` value. `Error` extends `Display`, so one
+# generic bound reports every conforming error.
+
+final class Badge implements Display
+  holder: String
+  level: Int
+
+  def init(mut self, holder: String, level: Int)
+    self.holder = holder
+    self.level = level
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append(self.holder)
+    builder.append(" level ")
+    builder.append_int(self.level)
+    ()
+  end
+end
+
+enum GateError implements Error
+  Closed
+  TooLow(need: Int)
+
+  def append_to(self, mut builder: StringBuilder)
+    case self
+    in Closed
+      builder.append("the gate is closed")
+    in TooLow(need)
+      builder.append("the badge needs level ")
+      builder.append_int(need)
+    end
+    ()
+  end
+end
+
+def enter(badge: Badge, open: Bool): Result[String, GateError]
+  if not open
+    return Err(GateError.Closed)
+  end
+  if badge.level < 3
+    return Err(GateError.TooLow(3))
+  end
+  Ok("{badge} may pass")
+end
+
+# One bound reports every error that follows the contract.
+def report[E: Error](error: E): String
+  "rejected: {error}"
+end
+
+granted = enter(Badge("crew", 5), true)
+closed = enter(Badge("crew", 5), false)
+low = enter(Badge("guest", 1), true)
+
+(
+  granted.expect("the badge passes"),
+  case closed in Err(e) then report(e) in Ok(_) then "unexpected" end,
+  case low in Err(e) then report(e) in Ok(_) then "unexpected" end
+)

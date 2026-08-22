@@ -1,0 +1,40 @@
+# Return several values as one tuple.
+#
+# This example needs no grant.
+#
+# A tuple type spells its element types, for example `(Int, Int)`.
+# Every arity from two through sixteen has a core method table, so a
+# tuple conforms to `Display`, `PartialEq`, `Hashable`, and
+# `Comparable` when each element type conforms.
+
+def bounds(values: List[Int]): (Int, Int)
+  low = values.at(0)
+  high = values.at(0)
+  for value in values
+    if value < low
+      low = value
+    end
+    if value > high
+      high = value
+    end
+  end
+  (low, high)
+end
+
+span = bounds([4, 9, 2, 6])
+
+# A case pattern takes one tuple apart.
+width = case span
+in (low, high) then high - low
+end
+
+# `swap` answers the reversed tuple.
+flipped = span.swap()
+
+# Interpolation reads a tuple through `Display`.
+shown = "span {span} flipped {flipped}"
+
+# `compare` orders tuples by their elements, left to right.
+ordering = (1, "one").compare((1, "two"))
+
+(width, shown, span == (2, 9), ordering.is_less())

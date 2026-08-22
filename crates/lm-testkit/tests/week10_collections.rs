@@ -921,6 +921,26 @@ fn conditional_core_protocol_example_has_checked_output() {
 }
 
 #[test]
+fn contracts_with_self_example_has_checked_output() {
+    let path = lm_testkit::repo_root()
+        .join("examples/13-collections-and-interfaces/11-contracts-with-self.lm");
+    let source = std::fs::read_to_string(path).expect("the example reads");
+    assert_eq!(outcome(&source), "Done((true, 4, true, true))");
+}
+
+#[test]
+fn display_and_error_example_has_checked_output() {
+    let path = lm_testkit::repo_root()
+        .join("examples/13-collections-and-interfaces/12-display-and-errors.lm");
+    let source = std::fs::read_to_string(path).expect("the example reads");
+    assert_eq!(
+        outcome(&source),
+        "Done((\"crew level 5 may pass\", \"rejected: the gate is closed\", \
+         \"rejected: the badge needs level 3\"))"
+    );
+}
+
+#[test]
 fn native_for_covers_list_map_text_and_range() {
     let source = r#"
 class Source

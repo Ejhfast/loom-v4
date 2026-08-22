@@ -1,0 +1,55 @@
+# Write contracts that name the conforming type.
+#
+# This example needs no grant.
+#
+# `Self` in an interface names the conforming class. `PartialEq`
+# takes `Self` as a parameter, and `Copyable` returns `Self`.
+# `Comparable` extends `PartialEq`, so one conformance supplies
+# `compare` and `__eq__` together.
+
+final class Version implements Comparable, Copyable
+  major: Int
+  minor: Int
+
+  def init(mut self, major: Int, minor: Int)
+    self.major = major
+    self.minor = minor
+  end
+
+  def __eq__(self, other: Version): Bool
+    self.major == other.major and self.minor == other.minor
+  end
+
+  def compare(self, other: Version): Ordering
+    ordering = self.major.compare(other.major)
+    if ordering.is_equal()
+      self.minor.compare(other.minor)
+    else
+      ordering
+    end
+  end
+
+  def copy(self): Version
+    Version(self.major, self.minor)
+  end
+end
+
+releases = [Version(1, 4), Version(0, 9), Version(1, 2)]
+
+# `sort`, `min`, and `max` ask for `T: Comparable`. This list holds
+# them because `Version` conforms.
+ordered = releases.copy()
+ordered.sort()
+
+first = ordered.at(0)
+newest = releases.max().expect("the list holds versions")
+
+# `copy` returns `Self`, so a copy keeps its class.
+pinned = newest.copy()
+
+(
+  first == Version(0, 9),
+  newest.minor,
+  pinned == newest,
+  releases.at(0).compare(releases.at(1)).is_greater()
+)
