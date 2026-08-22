@@ -37,6 +37,19 @@ re-ran every case here against `59eecc8`.
   restores from one image run independently and give different
   answers.
 - A snapshot refuses while the machine holds an open file handle.
+- **A snapshot carries a spawned proc.** A machine that spawns a proc,
+  sends it a message, and stops at an effect captures and restores.
+  The restored machine holds the live proc.
+- **The container round trip carries a proc world.**
+  `checkpoints/asked-tree.lm` saves a world of three machines and two
+  mailboxes into 1117 bytes. `lm snapshot verify` reports `state=asked
+  machines=3 mailboxes=2`, and `lm snapshot run` restores that world
+  and resumes it at `Asked(Clock.Now)`.
+- **The compiler and reflection surface runs.** All eleven programs of
+  `examples/15-compiler-and-hot-code-reloading` answer correctly. They
+  cover `sys.compiler.compile`, `sys.compiler.compile_syntax`, and
+  `sys.reflect.parse_syntax`. The untrusted-code program reports
+  `PolicyDenied`, so a grant still bounds compiled code.
 - A request token names one machine. Machine B rejects the token of
   machine A with `InvalidRequestToken`.
 - A second answer to one token faults with `InvalidRequestToken`.
@@ -507,7 +520,6 @@ surface the user reads.
 
 - `Self` as a value or a constructor, for example `Self()`.
 - `Self` inside a generic bound.
-- A snapshot of a machine that holds a spawned proc.
 - Interface conformance across module boundaries.
-- The 58 `Vm` operations of the metaprogramming work, and the
-  `Compiler` and `Reflect` groups.
+- The 58 `Vm` operations one at a time. The pass ran the examples that
+  use them, and it did not probe each operation.
