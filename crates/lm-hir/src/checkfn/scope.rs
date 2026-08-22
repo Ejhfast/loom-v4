@@ -139,14 +139,14 @@ impl<'o> FnChecker<'o> {
         let declared = if self.declared_row.is_empty() {
             "empty".to_string()
         } else {
-            format!("`{}`", ctx.store.display_row(&self.declared_row))
+            format!("`{}`", ctx.display_row(&self.env, &self.declared_row))
         };
         Err(Diagnostic::new(
             "E1046",
             format!(
                 "this call needs the effect row `{}`, but the declared row \
                  of the enclosing callable is {declared}",
-                ctx.store.display_row(row)
+                ctx.display_row(&self.env, row)
             ),
             span,
         ))

@@ -15,7 +15,7 @@ interface Counted
   def len(self): Int
 end
 
-final class List[T] implements Counted, Iterable
+final class List[T] implements Counted + Iterable
   type Item = T
   type Iter = ListIterator[T]
 
@@ -298,7 +298,7 @@ final class List[T] implements Counted, Iterable
   end
 end
 
-final class Map[K, V] implements Counted, Iterable
+final class Map[K, V] implements Counted + Iterable
   type Item = (K, V)
   type Iter = MapIterator[K, V]
 
@@ -530,7 +530,7 @@ final class RangeIterator implements Iterator
   end
 end
 
-final class ListSlice[T] implements Counted, Iterable
+final class ListSlice[T] implements Counted + Iterable
   type Item = T
   type Iter = ListSliceIterator[T]
 
@@ -627,7 +627,7 @@ final class ListSliceIterator[T] implements Iterator
   end
 end
 
-final class MapKeys[K, V] implements Counted, Iterable
+final class MapKeys[K, V] implements Counted + Iterable
   type Item = K
   type Iter = MapKeysIterator[K, V]
 
@@ -663,7 +663,7 @@ final class MapKeys[K, V] implements Counted, Iterable
   end
 end
 
-final class MapValues[K, V] implements Counted, Iterable
+final class MapValues[K, V] implements Counted + Iterable
   type Item = V
   type Iter = MapValuesIterator[K, V]
 
@@ -699,7 +699,7 @@ final class MapValues[K, V] implements Counted, Iterable
   end
 end
 
-final class MapEntries[K, V] implements Counted, Iterable
+final class MapEntries[K, V] implements Counted + Iterable
   type Item = (K, V)
   type Iter = MapEntriesIterator[K, V]
 

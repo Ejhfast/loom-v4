@@ -197,7 +197,9 @@ final class Values[T] implements Iterable
 end
 ```
 
-An interface application writes effect arguments with `effect`.
+An interface application places type arguments in brackets.
+
+Each effect argument follows one `with` keyword.
 
 ```lm
 interface Source[effect e]
@@ -205,12 +207,49 @@ interface Source[effect e]
   def next(mut self): Option[Self.Item] with e
 end
 
-final class PureSource implements Source[effect ()]
+final class PureSource implements Source
   type Item = Int
+end
+
+final class LoudSource implements Source with Io.Print
+  type Item = Int
+end
+
+def drain[effect e, S: Source with e](mut source: S): Int with e
+  source.next()
 end
 ```
 
+A bare interface application supplies an empty row for every effect parameter.
+
+One unparenthesized item can follow `with`.
+
+Parentheses group an empty row or a row with several items.
+
+Repeat `with` for each effect parameter.
+
+```lm
+interface Duplex[T, effect read, effect write]
+end
+
+final class Channel implements Duplex[Int] with () with (Fs.Write, Clock.Now)
+end
+```
+
+Type arguments and effect arguments retain their separate declaration order.
+
 Generic calls infer interface effect arguments from the selected conformance.
+
+Interface effect arguments are invariant.
+
+Row inclusion alone cannot compare them safely because an effect parameter can occur inside a method parameter type.
+
+The `+` token joins several bounds or conformances.
+
+```lm
+final class LoggedSource implements Counted + Source with Io.Print
+end
+```
 
 A type parameter adds one or more bounds after a colon.
 

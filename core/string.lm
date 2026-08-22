@@ -1,6 +1,6 @@
 # Core: immutable UTF-8 text and Unicode scalar values.
 
-class Text implements Counted, Iterable
+class Text implements Counted + Iterable
   type Item = Char
   type Iter = TextIterator
 

@@ -1,0 +1,70 @@
+# Interface effect arguments follow `with`.
+# Run this example with `--allow Io.Print`.
+#
+# A bare interface application requires empty effect rows. A generic
+# row can pass one conformance row through its caller.
+
+interface Labeled[effect e]
+  def label(self): String with e
+end
+
+# Type arguments remain in brackets. Effect arguments follow `with`.
+interface Formats[T, effect e]
+  def format(self, value: T): String with e
+end
+
+# `+` joins distinct conformances. Both conformances are pure here.
+final class Quiet implements Labeled + Formats[Int]
+  def label(self): String
+    "quiet"
+  end
+
+  def format(self, value: Int): String
+    "n={value}"
+  end
+end
+
+# Each conformance states its own exact row.
+final class Logged implements Labeled with Io.Print + Formats[Int] with Io.Print
+  def label(self): String with Io.Print
+    sys.io.print("read label\n")
+    "logged"
+  end
+
+  def format(self, value: Int): String with Io.Print
+    sys.io.print("format {value}\n")
+    "n={value}"
+  end
+end
+
+# No `with` means that `P` must have a pure conformance.
+def describe_pure[P: Labeled](item: P): String
+  "it is {item.label()}"
+end
+
+# The call infers `e` from the selected conformance.
+def describe[effect e, P: Labeled with e](item: P): String with e
+  "it is {item.label()}"
+end
+
+# One row variable can constrain several interface applications.
+# This form also combines type arguments, effect arguments, and bounds.
+def summary[
+  effect e,
+  P: Labeled with e + Formats[Int] with e
+](item: P, value: Int): String with e
+  "{item.label()}: {item.format(value)}"
+end
+
+def go(): (String, String, String, String) with Io.Print
+  quiet = Quiet()
+  logged = Logged()
+  (
+    describe_pure(quiet),
+    describe(quiet),
+    describe(logged),
+    summary(logged, 7)
+  )
+end
+
+go()

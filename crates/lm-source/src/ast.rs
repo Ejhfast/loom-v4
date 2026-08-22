@@ -43,15 +43,16 @@ pub struct GenericParam {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterfaceRef {
     pub name: String,
-    pub args: Vec<InterfaceArg>,
+    pub type_args: Vec<TypeExpr>,
+    pub row_args: Vec<InterfaceRowArg>,
     pub span: Span,
 }
 
-/// One type or effect argument of an interface application.
+/// One effect-row argument of an interface application.
 #[derive(Debug, Clone, PartialEq)]
-pub enum InterfaceArg {
-    Type(TypeExpr),
-    Effect(Vec<RowItem>, Span),
+pub struct InterfaceRowArg {
+    pub row: Vec<RowItem>,
+    pub span: Span,
 }
 
 /// One associated type requirement or binding.

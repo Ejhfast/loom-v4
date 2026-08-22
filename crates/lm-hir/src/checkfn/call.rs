@@ -777,16 +777,27 @@ impl<'o> FnChecker<'o> {
         for (index, bounds) in type_bounds.iter().enumerate() {
             for bound in bounds {
                 let required = ctx.substitute_interface_use(bound, &targs, &rowargs);
-                if !ctx.type_conforms(&self.env, targs[index], &required) {
-                    return Err(Diagnostic::new(
-                        "E1053",
+                let found = ctx.type_conformance(&self.env, targs[index], required.interface);
+                let conforms = found.as_ref().is_some_and(|application| {
+                    application.type_args == required.type_args
+                        && application.row_args == required.row_args
+                });
+                if !conforms {
+                    let argument = ctx.display_type(&self.env, targs[index]);
+                    let message = if let Some(found) = found {
                         format!(
-                            "the type argument `{}` does not conform to `{}`",
-                            ctx.display_type(&self.env, targs[index]),
-                            ctx.interfaces[required.interface as usize].name
-                        ),
-                        span,
-                    ));
+                            "the type argument `{argument}` conforms to `{}`, but the bound \
+                             requires `{}`",
+                            ctx.display_interface_use(&self.env, &found),
+                            ctx.display_interface_use(&self.env, &required)
+                        )
+                    } else {
+                        format!(
+                            "the type argument `{argument}` does not conform to `{}`",
+                            ctx.display_interface_use(&self.env, &required)
+                        )
+                    };
+                    return Err(Diagnostic::new("E1053", message, span));
                 }
             }
         }

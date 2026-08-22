@@ -529,7 +529,21 @@ class Box[T]
 end
 ```
 
-Class arguments are invariant. Version 0.2 has no generic bounds, traits, higher-kinded parameters, specialization syntax, or user-declared variance. Top-level functions and methods may declare type and effect parameters.
+Class arguments are invariant. Type parameters can declare nominal interface bounds.
+
+Interface applications are invariant in both type arguments and effect arguments.
+
+Version 0.2 has no higher-kinded parameters, specialization syntax, or user-declared variance.
+
+Top-level functions and methods may declare type and effect parameters.
+
+An interface application places type arguments in brackets. Each effect argument follows one `with` keyword.
+
+A bare interface application supplies an empty row for each effect parameter.
+
+Use `+` between several interface bounds or class conformances.
+
+One unparenthesized row item can follow `with`. Parentheses group an empty row or a row with several items.
 
 Generic definitions are checked once with type variables and share one bytecode body. Loaded type applications receive dense `TypeId` and class-instantiation slots used by reflection, boundary validation, and field signatures. Ordinary value slots remain uniformly represented, so `List[Int]` and `List[String]` use the same list code and buffer shape. Version 0.2 does not monomorphize or unbox generic elements; a later optimizer may specialize while preserving the verified generic body as the deoptimization target.
 
@@ -3775,11 +3789,20 @@ This EBNF-like grammar is normative with the clarifications below. `NL` denotes 
 module          = opt_separators, { definition, separators },
                   [ expression, opt_separators ], EOF ;
 
-definition      = class_decl | enum_decl | function_decl ;
+definition      = interface_decl | class_decl | enum_decl | function_decl ;
 
-class_decl      = [ "final" ], "class", IDENT, [ type_params ], [ "<", type ], separators,
+interface_decl  = "interface", IDENT, [ generic_params ], separators,
+                  { ( associated_requirement | interface_method ), separators },
+                  "end" ;
+associated_requirement = "type", IDENT, [ bound_clause ] ;
+interface_method = "def", IDENT, "(", method_parameters, ")",
+                   [ ":", type ], [ effect_clause ] ;
+
+class_decl      = [ "final" ], "class", IDENT, [ generic_params ], [ "<", type ],
+                  [ implements_clause ], separators,
                   { ( field_decl | method_decl ), separators },
                   "end" ;
+implements_clause = "implements", interface_ref, { "+", interface_ref } ;
 
 field_decl      = IDENT, ":", type, [ "=", expression ] ;
 
@@ -3794,16 +3817,19 @@ function_decl   = "def", IDENT, [ generic_params ], "(", [ parameters ], ")",
                   [ ":", type ], [ effect_clause ], separators,
                   block, "end" ;
 
-enum_decl       = "enum", IDENT, [ type_params ], separators,
+enum_decl       = "enum", IDENT, [ generic_params ], separators,
                   { enum_arm, separators },
                   { method_decl, separators },
                   "end" ;
 
 enum_arm        = IDENT, [ "(", [ field_parameters ], ")" ] ;
 
-type_params     = "[", IDENT, { ",", IDENT }, "]" ;
 generic_params  = "[", generic_param, { ",", generic_param }, "]" ;
-generic_param   = IDENT | "effect", IDENT ;
+generic_param   = IDENT, [ bound_clause ] | "effect", IDENT ;
+bound_clause    = ":", interface_ref, { "+", interface_ref } ;
+
+interface_ref   = qualified_name, [ type_args ], { interface_row_arg } ;
+interface_row_arg = "with", ( row_item | "(", [ row_items ], ")" ) ;
 
 parameters      = parameter, { ",", parameter } ;
 parameter       = { parameter_modifier }, IDENT, ":", type ;
@@ -3812,6 +3838,7 @@ field_parameters= field_parameter, { ",", field_parameter } ;
 field_parameter = IDENT, ":", type ;
 
 effect_clause   = "with", row_item, { ",", row_item } ;
+row_items       = row_item, { ",", row_item } ;
 row_item        = qualified_name | IDENT ;
 
 type            = primary_type, [ function_type_tail ] ;
@@ -3917,6 +3944,11 @@ literal         = INT | FLOAT | CHAR | STRING | BYTES
 - A parameter modifier can occur once. The two modifiers can use either order.
 - `escaping` is valid only when the parameter has a direct function type.
 - Classes and enums declare only type parameters. Top-level functions and methods may additionally declare `effect` parameters.
+- Interface applications use invariant type and effect arguments.
+- A missing interface `with` clause supplies empty rows.
+- Each interface `with` clause supplies one effect argument in declaration order.
+- Parentheses are required for an empty interface row or a row with several items.
+- The `+` token separates interface bounds and class conformances.
 - `()` is unit. `(T,)` and `(T,U)` are tuple types; the same parenthesized list followed by `->` is a function parameter list. A one-element tuple requires the trailing comma.
 - `do || ... end` and `{ || ... }` are empty-parameter closures. A closure may put exactly one body expression on the header line; a multi-expression body starts after a separator.
 - A left brace followed by a pipe starts a brace closure. Other braces start a map literal. `{}` is an empty map.

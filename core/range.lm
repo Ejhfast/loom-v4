@@ -2,7 +2,7 @@
 #
 # A half-open integer range `[start, stop)`.
 
-class Range implements Counted, Iterable
+class Range implements Counted + Iterable
   type Item = Int
   type Iter = RangeIterator
 

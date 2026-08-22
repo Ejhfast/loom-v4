@@ -264,19 +264,30 @@ impl Parser<'_> {
             name.push_str(&part);
             name_span = name_span.to(span);
         }
-        if !matches!(self.peek(), Tok::LBracket) {
-            return Ok(InterfaceRef {
-                name,
-                args: Vec::new(),
-                span: name_span,
-            });
-        }
-        self.pos += 1;
-        let mut args = Vec::new();
-        loop {
-            if matches!(self.peek(), Tok::KwEffect) {
-                let start = self.next();
-                self.expect(Tok::LParen, "`(` after `effect`")?;
+        let (type_args, type_end) = if matches!(self.peek(), Tok::LBracket) {
+            self.pos += 1;
+            let mut arguments = Vec::new();
+            loop {
+                if matches!(self.peek(), Tok::KwEffect) {
+                    return Err(self.error("E1053", "interface effect arguments follow `with`"));
+                }
+                arguments.push(self.type_expr()?);
+                if matches!(self.peek(), Tok::Comma) {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            let close = self.expect(Tok::RBracket, "`]` after the interface type arguments")?;
+            (arguments, Some(close.span))
+        } else {
+            (Vec::new(), None)
+        };
+        let mut row_args = Vec::new();
+        while matches!(self.peek(), Tok::KwWith) {
+            let start = self.next();
+            let (row, end) = if matches!(self.peek(), Tok::LParen) {
+                self.pos += 1;
                 let mut row = Vec::new();
                 if !matches!(self.peek(), Tok::RParen) {
                     loop {
@@ -288,22 +299,28 @@ impl Parser<'_> {
                         }
                     }
                 }
-                let close = self.expect(Tok::RParen, "`)` after the effect argument")?;
-                args.push(InterfaceArg::Effect(row, start.span.to(close.span)));
+                let close = self.expect(Tok::RParen, "`)` after the effect row")?;
+                (row, close.span)
             } else {
-                args.push(InterfaceArg::Type(self.type_expr()?));
-            }
-            if matches!(self.peek(), Tok::Comma) {
-                self.pos += 1;
-            } else {
-                break;
-            }
+                let item = self.row_item()?;
+                let end = item.span;
+                (vec![item], end)
+            };
+            row_args.push(InterfaceRowArg {
+                row,
+                span: start.span.to(end),
+            });
         }
-        let close = self.expect(Tok::RBracket, "`]` after the interface arguments")?;
+        let span = row_args
+            .last()
+            .map(|argument| name_span.to(argument.span))
+            .or_else(|| type_end.map(|end| name_span.to(end)))
+            .unwrap_or(name_span);
         Ok(InterfaceRef {
             name,
-            args,
-            span: name_span.to(close.span),
+            type_args,
+            row_args,
+            span,
         })
     }
 
@@ -507,8 +524,13 @@ impl Parser<'_> {
             self.pos += 1;
             loop {
                 interfaces.push(self.interface_ref()?);
-                if matches!(self.peek(), Tok::Comma) {
+                if matches!(self.peek(), Tok::Plus) {
                     self.pos += 1;
+                } else if matches!(self.peek(), Tok::Comma) {
+                    return Err(self.error(
+                        "E1053",
+                        "`+` separates class conformances. Parenthesize a multi-item interface effect row.",
+                    ));
                 } else {
                     break;
                 }
@@ -2397,6 +2419,53 @@ mod tests {
             TypeExprKind::Fn(_, _, _, row) => assert_eq!(row.len(), 1),
             other => panic!("expected a function type, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_interface_type_and_effect_arguments_separately() {
+        let source = r#"
+interface Service[T, effect first, effect second]
+end
+
+interface Counted
+end
+
+final class Worker implements Counted + Service[Int] with () with (Io.Print, Clock.Now)
+end
+
+def apply_service[effect e, P: Service[Int] with e with (), U: Counted](value: P, other: U): Int with e
+  1
+end
+
+1
+"#;
+        let module = parse(source).expect("the interface applications parse");
+        let application = &module.classes[0].interfaces[1];
+        assert_eq!(application.type_args.len(), 1);
+        assert_eq!(application.row_args.len(), 2);
+        assert!(application.row_args[0].row.is_empty());
+        assert_eq!(application.row_args[1].row.len(), 2);
+
+        let bound = &module.funcs[0].generics[1].bounds[0];
+        assert_eq!(bound.type_args.len(), 1);
+        assert_eq!(bound.row_args.len(), 2);
+        assert_eq!(module.funcs[0].generics.len(), 3);
+    }
+
+    #[test]
+    fn rejects_old_interface_argument_and_conformance_syntax() {
+        let old_effect = parse(
+            "interface Source[effect e]\nend\nfinal class C implements Source[effect ()]\nend\n1\n",
+        )
+        .expect_err("the old effect wrapper must fail");
+        assert_eq!(old_effect.code, "E1053");
+        assert!(old_effect.message.contains("follow `with`"));
+
+        let old_separator =
+            parse("interface A\nend\ninterface B\nend\nfinal class C implements A, B\nend\n1\n")
+                .expect_err("the old conformance separator must fail");
+        assert_eq!(old_separator.code, "E1053");
+        assert!(old_separator.message.contains("`+` separates"));
     }
 
     #[test]

@@ -914,11 +914,20 @@ impl TypeStore {
 
     /// Render one row for diagnostics.
     pub fn display_row(&self, row: &[RowElem]) -> String {
+        self.display_row_with_names(row, &|_| None)
+    }
+
+    /// Render one row with source effect names supplied by the caller.
+    pub fn display_row_with_names(
+        &self,
+        row: &[RowElem],
+        effect_name: &impl Fn(u32) -> Option<String>,
+    ) -> String {
         let parts: Vec<String> = row
             .iter()
             .map(|e| match e {
                 RowElem::Op(n) => self.row_names[*n as usize].clone(),
-                RowElem::Var(v) => format!("e{v}"),
+                RowElem::Var(v) => effect_name(*v).unwrap_or_else(|| format!("e{v}")),
             })
             .collect();
         parts.join(", ")
@@ -926,7 +935,7 @@ impl TypeStore {
 
     /// Render one type name for diagnostics.
     pub fn display(&self, id: TypeId) -> String {
-        self.display_with_names(id, &|_| None, &|_, _| None)
+        self.display_with_names(id, &|_| None, &|_| None, &|_, _| None)
     }
 
     /// Render one type with source names supplied by the caller.
@@ -934,15 +943,17 @@ impl TypeStore {
         &self,
         id: TypeId,
         variable_name: &impl Fn(u32) -> Option<String>,
+        effect_name: &impl Fn(u32) -> Option<String>,
         associated_name: &impl Fn(InterfaceId, u32) -> Option<String>,
     ) -> String {
-        self.display_inner(id, variable_name, associated_name)
+        self.display_inner(id, variable_name, effect_name, associated_name)
     }
 
     fn display_inner(
         &self,
         id: TypeId,
         variable_name: &impl Fn(u32) -> Option<String>,
+        effect_name: &impl Fn(u32) -> Option<String>,
         associated_name: &impl Fn(InterfaceId, u32) -> Option<String>,
     ) -> String {
         match self.get(id) {
@@ -957,23 +968,23 @@ impl TypeStore {
             Type::Inst(c, args) => {
                 let parts: Vec<String> = args
                     .iter()
-                    .map(|a| self.display_inner(*a, variable_name, associated_name))
+                    .map(|a| self.display_inner(*a, variable_name, effect_name, associated_name))
                     .collect();
                 format!("{}[{}]", self.classes[c.0 as usize].name, parts.join(", "))
             }
             Type::List(e) => format!(
                 "[{}]",
-                self.display_inner(*e, variable_name, associated_name)
+                self.display_inner(*e, variable_name, effect_name, associated_name)
             ),
             Type::Map(k, v) => format!(
                 "{{{}: {}}}",
-                self.display_inner(*k, variable_name, associated_name),
-                self.display_inner(*v, variable_name, associated_name)
+                self.display_inner(*k, variable_name, effect_name, associated_name),
+                self.display_inner(*v, variable_name, effect_name, associated_name)
             ),
             Type::Tuple(elems) => {
                 let parts: Vec<String> = elems
                     .iter()
-                    .map(|e| self.display_inner(*e, variable_name, associated_name))
+                    .map(|e| self.display_inner(*e, variable_name, effect_name, associated_name))
                     .collect();
                 if parts.len() == 1 {
                     format!("({},)", parts[0])
@@ -990,13 +1001,23 @@ impl TypeStore {
                     if muts.get(i).copied().unwrap_or(false) {
                         out.push_str("mut ");
                     }
-                    out.push_str(&self.display_inner(*p, variable_name, associated_name));
+                    out.push_str(&self.display_inner(
+                        *p,
+                        variable_name,
+                        effect_name,
+                        associated_name,
+                    ));
                 }
                 out.push_str(") -> ");
-                out.push_str(&self.display_inner(*ret, variable_name, associated_name));
+                out.push_str(&self.display_inner(
+                    *ret,
+                    variable_name,
+                    effect_name,
+                    associated_name,
+                ));
                 if !row.is_empty() {
                     out.push_str(" with ");
-                    out.push_str(&self.display_row(row));
+                    out.push_str(&self.display_row_with_names(row, effect_name));
                 }
                 out
             }
@@ -1009,13 +1030,23 @@ impl TypeStore {
                     if muts.get(i).copied().unwrap_or(false) {
                         out.push_str("mut ");
                     }
-                    out.push_str(&self.display_inner(*p, variable_name, associated_name));
+                    out.push_str(&self.display_inner(
+                        *p,
+                        variable_name,
+                        effect_name,
+                        associated_name,
+                    ));
                 }
                 out.push_str(") -> ");
-                out.push_str(&self.display_inner(*ret, variable_name, associated_name));
+                out.push_str(&self.display_inner(
+                    *ret,
+                    variable_name,
+                    effect_name,
+                    associated_name,
+                ));
                 if !row.is_empty() {
                     out.push_str(" with ");
-                    out.push_str(&self.display_row(row));
+                    out.push_str(&self.display_row_with_names(row, effect_name));
                 }
                 out
             }
@@ -1025,7 +1056,7 @@ impl TypeStore {
                 interface,
                 assoc,
             } => {
-                let base = self.display_inner(*base, variable_name, associated_name);
+                let base = self.display_inner(*base, variable_name, effect_name, associated_name);
                 let name = associated_name(*interface, *assoc)
                     .unwrap_or_else(|| format!("<interface {} type {}>", interface.0, assoc));
                 format!("{base}.{name}")
@@ -1036,34 +1067,34 @@ impl TypeStore {
             Type::Vm => "Vm".to_string(),
             Type::Run(t) => format!(
                 "Run[{}]",
-                self.display_inner(*t, variable_name, associated_name)
+                self.display_inner(*t, variable_name, effect_name, associated_name)
             ),
             Type::Wait(t) => format!(
                 "Wait[{}]",
-                self.display_inner(*t, variable_name, associated_name)
+                self.display_inner(*t, variable_name, effect_name, associated_name)
             ),
             Type::VmSnapshot => "VmSnapshot".to_string(),
             Type::RunSnapshot(t) => format!(
                 "RunSnapshot[{}]",
-                self.display_inner(*t, variable_name, associated_name)
+                self.display_inner(*t, variable_name, effect_name, associated_name)
             ),
             Type::FileHandle => "FileHandle".to_string(),
             Type::ResourceHandle => "ResourceHandle".to_string(),
             Type::PendingCall(a, r) => format!(
                 "PendingCall[{}, {}]",
-                self.display_inner(*a, variable_name, associated_name),
-                self.display_inner(*r, variable_name, associated_name)
+                self.display_inner(*a, variable_name, effect_name, associated_name),
+                self.display_inner(*r, variable_name, effect_name, associated_name)
             ),
             Type::Handle(m, r) => format!(
                 "Handle[{}, {}]",
-                self.display_inner(*m, variable_name, associated_name),
-                self.display_inner(*r, variable_name, associated_name)
+                self.display_inner(*m, variable_name, effect_name, associated_name),
+                self.display_inner(*r, variable_name, effect_name, associated_name)
             ),
             Type::Op(op, f) => {
                 format!(
                     "Op[{}, {}]",
                     lm_abi::op_name(*op),
-                    self.display_inner(*f, variable_name, associated_name)
+                    self.display_inner(*f, variable_name, effect_name, associated_name)
                 )
             }
         }
@@ -1132,6 +1163,16 @@ mod tests {
         let io = store.intern_row_name("Io.Print");
         let f2 = store.intern_fn(vec![], vec![], UNIT, vec![RowElem::Op(io)]);
         assert_eq!(store.display(f2), "() -> () with Io.Print");
+        let f3 = store.intern_fn(vec![], vec![], UNIT, vec![RowElem::Var(0)]);
+        assert_eq!(
+            store.display_with_names(
+                f3,
+                &|_| None,
+                &|index| (index == 0).then(|| "calls".to_string()),
+                &|_, _| None,
+            ),
+            "() -> () with calls"
+        );
     }
 
     #[test]

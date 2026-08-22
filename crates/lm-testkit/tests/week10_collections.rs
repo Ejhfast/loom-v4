@@ -142,20 +142,20 @@ interface Source[effect e]
   def next(mut self): Int with e
 end
 
-final class PureCounter implements Source[effect ()]
+final class PureCounter implements Source
   def next(mut self): Int
     1
   end
 end
 
-final class LoudCounter implements Source[effect (Io.Print)]
+final class LoudCounter implements Source with Io.Print
   def next(mut self): Int with Io.Print
     sys.io.print("tick")
     2
   end
 end
 
-def drain[S: Source[effect (e)], effect e](mut source: S): Int with e
+def drain[S: Source with e, effect e](mut source: S): Int with e
   source.next()
 end
 
@@ -164,6 +164,141 @@ drain(PureCounter()) + drain(LoudCounter())
     assert_eq!(
         run_allowed("collections.lm", source, &["Io.Print"]).expect("the program runs"),
         "Done(3)"
+    );
+}
+
+#[test]
+fn a_concrete_empty_interface_bound_accepts_only_pure_conformances() {
+    let declarations = r#"
+interface Labeled[effect e]
+  def label(self): String with e
+end
+
+final class Quiet implements Labeled
+  def label(self): String
+    "quiet"
+  end
+end
+
+final class Loud implements Labeled with Io.Print
+  def label(self): String with Io.Print
+    sys.io.print("loud")
+    "loud"
+  end
+end
+
+def describe[P: Labeled](item: P): String
+  "it is {item.label()}"
+end
+
+def describe_loud[P: Labeled with Io.Print](item: P): String with Io.Print
+  "it is {item.label()}"
+end
+"#;
+    assert_eq!(
+        outcome(&format!("{declarations}\ndescribe(Quiet())\n")),
+        "Done(\"it is quiet\")"
+    );
+    assert_eq!(
+        run_allowed(
+            "collections.lm",
+            &format!("{declarations}\ndescribe_loud(Loud())\n"),
+            &["Io.Print"],
+        )
+        .expect("the concrete effect bound accepts the matching conformance"),
+        "Done(\"it is loud\")"
+    );
+    let diagnostic = error(&format!("{declarations}\ndescribe(Loud())\n"));
+    assert!(
+        diagnostic.contains("conforms to `Labeled with Io.Print`")
+            && diagnostic.contains("bound requires `Labeled`")
+    );
+}
+
+#[test]
+fn an_effect_error_uses_the_declared_parameter_name() {
+    let diagnostic = error(
+        r#"
+interface Labeled[effect e]
+  def label(self): String with e
+end
+
+def describe[effect calls, P: Labeled with calls](item: P): String
+  item.label()
+end
+
+"#,
+    );
+    assert!(diagnostic.contains("effect row `calls`"), "{diagnostic}");
+    assert!(!diagnostic.contains("e0"), "{diagnostic}");
+}
+
+#[test]
+fn interface_effect_arguments_remain_invariant() {
+    let diagnostic = error(
+        r#"
+interface Runner[effect e]
+  def run(self, job: () -> Int with e): Int
+end
+
+final class PureRunner implements Runner
+  def run(self, job: () -> Int): Int
+    job()
+  end
+end
+
+def needs_print[R: Runner with Io.Print](runner: R): Int
+  1
+end
+
+needs_print(PureRunner())
+"#,
+    );
+    assert!(
+        diagnostic.contains("conforms to `Runner`")
+            && diagnostic.contains("bound requires `Runner with Io.Print`")
+    );
+}
+
+#[test]
+fn repeated_with_clauses_bind_multiple_effect_parameters() {
+    let source = r#"
+interface TwoPhase[effect first, effect last]
+  def first(self): Int with first
+  def last(self): Int with last
+end
+
+final class Mixed implements TwoPhase with () with Io.Print
+  def first(self): Int
+    1
+  end
+
+  def last(self): Int with Io.Print
+    sys.io.print("last\n")
+    2
+  end
+end
+
+def both[effect first, effect last, T: TwoPhase with first with last](value: T): Int with first, last
+  value.first() + value.last()
+end
+
+both(Mixed())
+"#;
+    assert_eq!(
+        run_allowed("collections.lm", source, &["Io.Print"]).expect("the program runs"),
+        "Done(3)"
+    );
+}
+
+#[test]
+fn interface_effect_row_example_has_checked_output() {
+    let path = lm_testkit::repo_root()
+        .join("examples/13-collections-and-interfaces/08-interface-effect-rows.lm");
+    let source = std::fs::read_to_string(path).expect("the example reads");
+    assert_eq!(
+        run_allowed("interface-effect-rows.lm", &source, &["Io.Print"]).expect("the example runs"),
+        "Done((\"it is quiet\", \"it is quiet\", \"it is logged\", \"logged: n=7\"))"
     );
 }
 

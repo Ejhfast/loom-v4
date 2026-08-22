@@ -420,7 +420,7 @@ fn infer_bound_row(ctx: &Ctx, declared: &Row, actual: &Row, rowargs: &mut [Optio
             .copied()
             .filter(|index| rowargs[*index].is_none())
             .collect();
-        (unresolved.len() == 1).then_some(unresolved[0])
+        (unresolved.len() == 1).then(|| unresolved[0])
     };
     let Some(solve) = solve else {
         return;

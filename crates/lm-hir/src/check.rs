@@ -755,6 +755,7 @@ impl Ctx {
                 let position = index.checked_sub(env.type_offset)? as usize;
                 env.type_names.get(position).cloned()
             },
+            &|index| env.effect_names.get(index as usize).cloned(),
             &|interface, assoc| {
                 self.interfaces
                     .get(interface.0 as usize)?
@@ -763,6 +764,45 @@ impl Ctx {
                     .map(|item| item.name.clone())
             },
         )
+    }
+
+    /// Render one effect row with names from its lexical scope.
+    pub(crate) fn display_row(&self, env: &TyEnv, row: &Row) -> String {
+        self.store
+            .display_row_with_names(row, &|index| env.effect_names.get(index as usize).cloned())
+    }
+
+    /// Render one interface application with source generic names.
+    pub(crate) fn display_interface_use(&self, env: &TyEnv, application: &InterfaceUse) -> String {
+        let mut text = self.interfaces[application.interface as usize].name.clone();
+        if !application.type_args.is_empty() {
+            let arguments: Vec<String> = application
+                .type_args
+                .iter()
+                .map(|argument| self.display_type(env, *argument))
+                .collect();
+            text.push('[');
+            text.push_str(&arguments.join(", "));
+            text.push(']');
+        }
+        if application.row_args.iter().any(|row| !row.is_empty()) {
+            for row in &application.row_args {
+                text.push_str(" with ");
+                if row.is_empty() {
+                    text.push_str("()");
+                    continue;
+                }
+                let row = self.display_row(env, row);
+                if row.contains(',') {
+                    text.push('(');
+                    text.push_str(&row);
+                    text.push(')');
+                } else {
+                    text.push_str(&row);
+                }
+            }
+        }
+        text
     }
 
     /// Look up a class or enum type name in the given scope.
@@ -2233,44 +2273,43 @@ fn resolve_interface_use(
         )
     })?;
     let kinds = ctx.interfaces[interface as usize].generic_is_effect.clone();
-    if kinds.len() != reference.args.len() {
+    let type_count = kinds.iter().filter(|is_effect| !**is_effect).count();
+    let effect_count = kinds.iter().filter(|is_effect| **is_effect).count();
+    if type_count != reference.type_args.len() {
         return Err(Diagnostic::new(
             "E1053",
             format!(
-                "the interface `{}` takes {} argument(s), found {}",
+                "the interface `{}` takes {type_count} type argument(s), found {}",
                 reference.name,
-                kinds.len(),
-                reference.args.len()
+                reference.type_args.len()
             ),
             reference.span,
         ));
     }
-    let mut type_args = Vec::new();
-    let mut row_args = Vec::new();
-    for (is_effect, argument) in kinds.into_iter().zip(reference.args.iter()) {
-        match (is_effect, argument) {
-            (false, ast::InterfaceArg::Type(ty)) => {
-                type_args.push(resolve_type(ctx, env, ty)?);
-            }
-            (true, ast::InterfaceArg::Effect(row, _)) => {
-                row_args.push(resolve_row(ctx, env, row)?);
-            }
-            (false, ast::InterfaceArg::Effect(_, span)) => {
-                return Err(Diagnostic::new(
-                    "E1053",
-                    "an interface type parameter needs a type argument",
-                    *span,
-                ));
-            }
-            (true, ast::InterfaceArg::Type(ty)) => {
-                return Err(Diagnostic::new(
-                    "E1053",
-                    "an interface effect parameter needs an effect argument",
-                    ty.span,
-                ));
-            }
-        }
+    if !reference.row_args.is_empty() && effect_count != reference.row_args.len() {
+        return Err(Diagnostic::new(
+            "E1053",
+            format!(
+                "the interface `{}` takes {effect_count} effect argument(s), found {}",
+                reference.name,
+                reference.row_args.len()
+            ),
+            reference.span,
+        ));
     }
+    let mut type_args = Vec::with_capacity(reference.type_args.len());
+    for argument in &reference.type_args {
+        type_args.push(resolve_type(ctx, env, argument)?);
+    }
+    let row_args = if reference.row_args.is_empty() {
+        vec![Vec::new(); effect_count]
+    } else {
+        reference
+            .row_args
+            .iter()
+            .map(|argument| resolve_row(ctx, env, &argument.row))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     Ok(InterfaceUse {
         interface,
         type_args,
@@ -3324,7 +3363,7 @@ fn resolve_class(
                             "the override of `{}` widens the effect row; the parent \
                              row is `{}`",
                             method.name,
-                            display_row_or_empty(&ctx.store, &base.row)
+                            display_row_or_empty(&ctx.store, &base.own_effect_params, &base.row)
                         ),
                         method.name_span,
                     ));
@@ -3370,11 +3409,11 @@ fn resolve_class(
     })
 }
 
-fn display_row_or_empty(store: &TypeStore, row: &Row) -> String {
+fn display_row_or_empty(store: &TypeStore, names: &[String], row: &Row) -> String {
     if row.is_empty() {
         "empty".to_string()
     } else {
-        store.display_row(row)
+        store.display_row_with_names(row, &|index| names.get(index as usize).cloned())
     }
 }
 

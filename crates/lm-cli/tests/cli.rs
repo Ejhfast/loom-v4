@@ -394,8 +394,7 @@ fn run_tls_driver_example_exposes_lower_requests() {
     assert_eq!(stdout(&out), "Done(5)\n");
 }
 
-/// Run one `examples/13-collections-and-interfaces` program and
-/// return its result line. None of these examples needs a grant.
+/// Run one pure collections example and return its result line.
 fn collections_example(name: &str) -> String {
     let path = format!("examples/13-collections-and-interfaces/{name}");
     let out = lm(&["run", "--show-result", &path]);
