@@ -750,36 +750,23 @@ pub fn run_on_worker(
     grants: &[&str],
     host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
 ) -> Result<WorkerOutcome, String> {
-    run_command_on_worker(loaded, config, grants, &[], host)
-}
-
-/// Run one command program with its command arguments.
-pub fn run_command_on_worker(
-    loaded: &lm_vm::LoadedModule,
-    config: lm_vm::VmConfig,
-    grants: &[&str],
-    arguments: &[String],
-    host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
-) -> Result<WorkerOutcome, String> {
     std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .stack_size(WORKER_STACK)
             .spawn_scoped(scope, move || {
-                let mut world = World::new_command(loaded, config, arguments, host())?;
+                let mut world = World::new(loaded, config, host());
                 for grant in grants {
                     world
                         .allow(grant)
                         .map_err(|error| format!("--allow: {error}"))?;
                 }
                 let outcome = Scheduler::default().run(&mut world);
-                let exit_code = world.command_exit_code(&outcome)?;
                 let fault_context = world
                     .root_fault()
                     .map(|fault| world.fault_context(fault))
                     .unwrap_or_default();
                 Ok(WorkerOutcome {
                     faulted: matches!(outcome, Outcome::Fault(_)),
-                    exit_code,
                     text: world.show_outcome(&outcome),
                     fault_context,
                 })
@@ -800,8 +787,6 @@ pub fn run_command_on_worker(
 pub struct WorkerOutcome {
     /// True when the root machine faulted.
     pub faulted: bool,
-    /// The operating-system status selected by the terminal value.
-    pub exit_code: u8,
     /// The stable outcome text, for example `Done(42)`.
     pub text: String,
     /// The retained guest locations of the root fault.

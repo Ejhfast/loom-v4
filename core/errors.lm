@@ -34,22 +34,6 @@ enum EnvError
   end
 end
 
-enum ProcessError
-  InvalidInput(message: String)
-  PermissionDenied(message: String)
-  NotFound(message: String)
-  Failed(message: String)
-
-  def message(self): String
-    case self
-    in InvalidInput(m)     then m
-    in PermissionDenied(m) then m
-    in NotFound(m)         then m
-    in Failed(m)           then m
-    end
-  end
-end
-
 enum EntropyError
   InvalidInput(message: String)
   LimitExceeded(message: String)

@@ -2035,8 +2035,8 @@ fn a_nonzero_image_reference_generation_rejects() {
 ///
 /// A grant widens what one program reaches, so one list serves the
 /// whole corpus and a new program needs no entry here.
-const GATE_GRANTS: [&str; 10] = [
-    "Vm", "Io", "Proc", "Clock", "Rand", "Compiler", "Reflect", "Env", "Process", "Entropy",
+const GATE_GRANTS: [&str; 11] = [
+    "Vm", "Io", "Fs", "Proc", "Clock", "Rand", "Compiler", "Reflect", "Env", "Args", "Entropy",
 ];
 
 /// The bytecode boundaries the gate drives for one program.

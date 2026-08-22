@@ -62,7 +62,16 @@ const USAGE: &str = "usage:
   lm snapshot run [--allow LIST] [--program <file>] <file.lms>";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Result<Vec<String>, _> = std::env::args_os()
+        .skip(1)
+        .map(|argument| argument.into_string())
+        .collect();
+    let Ok(args) = args else {
+        report_stderr(format_args!(
+            "error: a command-line argument is not valid UTF-8\n"
+        ));
+        return ExitCode::from(1);
+    };
     match run_cli(&args) {
         Ok(code) => code,
         Err(message) => {
@@ -435,20 +444,15 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
     // is the thread-backed baseline of specification 22.12.
     let seed = options.rand_seed;
     let grants: Vec<&str> = options.allow.iter().map(|g| g.as_str()).collect();
-    let result = lm_proc::run_command_on_worker(
+    let arguments = options.command_args;
+    let result = lm_proc::run_on_worker(
         &loaded,
         options.config,
         &grants,
-        &options.command_args,
-        Box::new(move || Box::new(lm_host::CliHost::new(seed))),
+        Box::new(move || Box::new(lm_host::CliHost::with_args(seed, arguments))),
     )
     .map_err(|e| format!("error: {e}\n"))?;
-    let (faulted, exit_code, text, fault_context) = (
-        result.faulted,
-        result.exit_code,
-        result.text,
-        result.fault_context,
-    );
+    let (faulted, text, fault_context) = (result.faulted, result.text, result.fault_context);
     if options.show_result {
         outln!("{text}");
     } else if faulted {
@@ -463,7 +467,11 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
             }
         }
     }
-    Ok(ExitCode::from(exit_code))
+    if faulted {
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
 }
 
 fn extension(path: &str) -> &str {
@@ -719,12 +727,12 @@ const SINGLE_FILE_MODULE_PATH: &str = "";
 
 /// Compile one source file and its selected standard modules.
 fn compile_file(source: &SourceFile) -> Result<lm_compiler::CompiledSource, String> {
-    lm_compiler::compile_command_source(SINGLE_FILE_MODULE_PATH, source)
+    lm_compiler::compile_source(SINGLE_FILE_MODULE_PATH, source, true)
 }
 
 /// Compile one source file to decoded bytecode.
 fn compile(source: &SourceFile) -> Result<lm_bytecode::Module, String> {
-    lm_compiler::compile_command_program(SINGLE_FILE_MODULE_PATH, source)
+    lm_compiler::compile_program(SINGLE_FILE_MODULE_PATH, source)
 }
 
 #[cfg(test)]

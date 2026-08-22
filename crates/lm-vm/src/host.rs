@@ -164,10 +164,6 @@ pub enum CoreCtor {
     EnvInvalidEncoding,
     EnvPermissionDenied,
     EnvFailed,
-    ProcessInvalidInput,
-    ProcessPermissionDenied,
-    ProcessNotFound,
-    ProcessFailed,
     EntropyInvalidInput,
     EntropyLimitExceeded,
     EntropyUnavailable,
@@ -358,6 +354,7 @@ pub struct RecordingHost {
     /// The maximum bytes accepted by one console write.
     pub console_write_limit: usize,
     pub environment: BTreeMap<String, String>,
+    pub arguments: Vec<String>,
     pub current_dir: String,
     now: i64,
     monotonic: i64,
@@ -560,6 +557,7 @@ impl RecordingHost {
             written_error_bytes: Vec::new(),
             console_write_limit: usize::MAX,
             environment: BTreeMap::new(),
+            arguments: Vec::new(),
             current_dir: "/loom".to_string(),
             now: 1_000,
             monotonic: 0,
@@ -860,9 +858,16 @@ impl RecordingHost {
                     .unwrap_or_else(|| HostValue::Ctor(CoreCtor::None, vec![]));
                 HostStart::Completed(core_ok(value))
             }
-            lm_abi::OP_PROCESS_CURRENT_DIR => {
+            lm_abi::OP_FS_CURRENT_DIR => {
                 HostStart::Completed(core_ok(HostValue::Str(self.current_dir.clone().into())))
             }
+            lm_abi::OP_ARGS_GET => HostStart::Completed(HostValue::List(
+                self.arguments
+                    .iter()
+                    .cloned()
+                    .map(|value| HostValue::Str(value.into()))
+                    .collect(),
+            )),
             lm_abi::OP_ENTROPY_BYTES => {
                 let Some(HostArg::Int(count)) = args.first() else {
                     return HostStart::Failed("Entropy.Bytes needs one integer".to_string());

@@ -45,8 +45,9 @@ pub use sha::{sha256, sha256_hex};
 /// Version 18 adds guest snapshot encoding.
 /// Version 19 adds immutable ABI bundles and extension resources.
 /// Version 20 adds command input, output, environment, process, and
-/// entropy operations.
-pub const ABI_VERSION: u32 = 20;
+/// entropy operations. Version 21 adds `Args.Get` and moves the
+/// current directory operation into `Fs`.
+pub const ABI_VERSION: u32 = 21;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -84,7 +85,7 @@ pub const GROUPS: [&str; 25] = [
     "Http.Client",
     "Choose",
     "Env",
-    "Process",
+    "Args",
     "Entropy",
 ];
 
@@ -180,7 +181,6 @@ pub enum AbiCore {
     IoError,
     FsError,
     EnvError,
-    ProcessError,
     EntropyError,
     SnapshotError,
     IpAddress,
@@ -216,7 +216,6 @@ impl AbiCore {
             AbiCore::IoError => "IoError",
             AbiCore::FsError => "FsError",
             AbiCore::EnvError => "EnvError",
-            AbiCore::ProcessError => "ProcessError",
             AbiCore::EntropyError => "EntropyError",
             AbiCore::SnapshotError => "SnapshotError",
             AbiCore::IpAddress => "IpAddress",
@@ -323,7 +322,6 @@ impl AbiType {
     pub const IO_ERROR: AbiType = AbiType::Core(AbiCore::IoError);
     pub const FS_ERROR: AbiType = AbiType::Core(AbiCore::FsError);
     pub const ENV_ERROR: AbiType = AbiType::Core(AbiCore::EnvError);
-    pub const PROCESS_ERROR: AbiType = AbiType::Core(AbiCore::ProcessError);
     pub const ENTROPY_ERROR: AbiType = AbiType::Core(AbiCore::EntropyError);
     pub const SNAPSHOT_ERROR: AbiType = AbiType::Core(AbiCore::SnapshotError);
     pub const IP_ADDRESS: AbiType = AbiType::Core(AbiCore::IpAddress);
@@ -350,6 +348,7 @@ impl AbiType {
     pub const TCP_LISTENER: AbiType = AbiType::Native(AbiNative::TcpListener);
     pub const TLS_STREAM: AbiType = AbiType::Native(AbiNative::TlsStream);
 
+    pub const LIST_STR: AbiType = AbiType::List(&AbiType::STR);
     pub const LIST_SUBSTRING: AbiType = AbiType::List(&AbiType::SUBSTRING);
     pub const LIST_SYNTAX_ELEMENT: AbiType = AbiType::List(&AbiType::SYNTAX_ELEMENT);
     pub const RESULT_OPTION_STR_IO_ERROR: AbiType = AbiType::Apply(
@@ -370,10 +369,8 @@ impl AbiType {
             AbiType::ENV_ERROR,
         ],
     );
-    pub const RESULT_STR_PROCESS_ERROR: AbiType = AbiType::Apply(
-        AbiConstructor::Result,
-        &[AbiType::STR, AbiType::PROCESS_ERROR],
-    );
+    pub const RESULT_STR_FS_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::STR, AbiType::FS_ERROR]);
     pub const RESULT_BYTES_ENTROPY_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
         &[AbiType::BYTES, AbiType::ENTROPY_ERROR],
@@ -1720,11 +1717,12 @@ pub const OP_IO_READ_BYTES: OpSlot = 108;
 pub const OP_IO_WRITE: OpSlot = 109;
 pub const OP_IO_WRITE_ERROR: OpSlot = 110;
 pub const OP_ENV_GET: OpSlot = 111;
-pub const OP_PROCESS_CURRENT_DIR: OpSlot = 112;
+pub const OP_FS_CURRENT_DIR: OpSlot = 112;
 pub const OP_ENTROPY_BYTES: OpSlot = 113;
+pub const OP_ARGS_GET: OpSlot = 114;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 114] = [
+pub const OPS: [OpDef; 115] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -2777,11 +2775,11 @@ pub const OPS: [OpDef; 114] = [
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
-        group: "Process",
+        group: "Fs",
         member: "CurrentDir",
         kind: OpKind::Fixed,
         params: &[],
-        reply: AbiType::RESULT_STR_PROCESS_ERROR,
+        reply: AbiType::RESULT_STR_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::MachineState,
     },
@@ -2791,6 +2789,15 @@ pub const OPS: [OpDef; 114] = [
         kind: OpKind::Fixed,
         params: &[AbiType::INT],
         reply: AbiType::RESULT_BYTES_ENTROPY_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Args",
+        member: "Get",
+        kind: OpKind::Fixed,
+        params: &[],
+        reply: AbiType::LIST_STR,
         schema: "",
         snapshot: SnapshotClass::MachineState,
     },

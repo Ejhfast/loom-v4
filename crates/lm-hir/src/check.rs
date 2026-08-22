@@ -66,7 +66,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 94] = [
+pub const PRELUDE_TYPES: [&str; 92] = [
     "Option",
     "Result",
     "Ordering",
@@ -83,7 +83,6 @@ pub const PRELUDE_TYPES: [&str; 94] = [
     "Choice",
     "SnapshotError",
     "RestoreError",
-    "ExitStatus",
     "ByteReader",
     "ByteWriter",
     "Artifact",
@@ -122,7 +121,6 @@ pub const PRELUDE_TYPES: [&str; 94] = [
     "FsError",
     "IoError",
     "EnvError",
-    "ProcessError",
     "EntropyError",
     "OpenOptions",
     "SeekFrom",

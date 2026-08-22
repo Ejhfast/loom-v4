@@ -1,10 +1,4 @@
-# Core: command status and byte stream helpers.
-
-enum ExitStatus
-  Success
-  Failure
-  Code(value: Int)
-end
+# Core: byte stream helpers.
 
 interface ByteReader[effect e]
   type Error

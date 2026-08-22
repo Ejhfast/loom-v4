@@ -7,18 +7,21 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 const SOURCE: &str = r#"
-use std.io
+use std.io.write_all
 
-def go(): (Int, String, String, Int) with Io.ReadBytes, Io.Write, Env.Get, Process.CurrentDir, Entropy.Bytes
+def go(): (Int, String, String, Int, Int, Int) with Io.ReadBytes, Io.Write, Env.Get, Fs.CurrentDir, Entropy.Bytes, Args
   input = sys.io.read_bytes(8).expect("input works")
   name = case sys.env.get("LOOM_NAME").expect("environment works")
   in Some(value) then value
   in None then "missing"
   end
-  directory = sys.process.current_dir().expect("directory works")
+  directory = sys.fs.current_dir().expect("directory works")
   entropy = sys.entropy.bytes(12).expect("entropy works")
-  io.write_all(input).expect("output works")
-  (input.len(), name, directory, entropy.len())
+  arguments = sys.args()
+  arguments.push("local")
+  original = sys.args()
+  write_all(input).expect("output works")
+  (input.len(), name, directory, entropy.len(), arguments.len(), original.len())
 end
 go()
 "#;
@@ -30,6 +33,7 @@ fn standard_command_operations_cross_one_checked_boundary() {
     let host = Rc::new(RefCell::new(RecordingHost::new(1)));
     host.borrow_mut().input_bytes = vec![0xff, 0, 0xfe];
     host.borrow_mut().set_env("LOOM_NAME", "loom");
+    host.borrow_mut().arguments = vec!["first".to_string(), "second".to_string()];
     host.borrow_mut().current_dir = "/work".to_string();
     host.borrow_mut().console_write_limit = 2;
     let mut world = World::new(&loaded, VmConfig::default(), Box::new(host.clone()));
@@ -37,15 +41,16 @@ fn standard_command_operations_cross_one_checked_boundary() {
         "Io.ReadBytes",
         "Io.Write",
         "Env.Get",
-        "Process.CurrentDir",
+        "Fs.CurrentDir",
         "Entropy.Bytes",
+        "Args",
     ] {
         world.allow(grant).expect("the operation has a grant");
     }
     let outcome = lm_proc::run_world(&mut world);
     assert_eq!(
         world.show_outcome(&outcome),
-        "Done((3, \"loom\", \"/work\", 12))"
+        "Done((3, \"loom\", \"/work\", 12, 3, 2))"
     );
     assert_eq!(host.borrow().written_bytes, [0xff, 0, 0xfe]);
 }
@@ -53,10 +58,10 @@ fn standard_command_operations_cross_one_checked_boundary() {
 #[test]
 fn standard_io_buffers_lines_and_preserves_remaining_input() {
     let source = r#"
-use std.io
+use std.io.ConsoleLineReader
 
 def go(): (Option[String], Option[String], Option[String], Option[String]) with Io.ReadBytes
-  reader = io.ConsoleLineReader()
+  reader = ConsoleLineReader()
   first = reader.read_line(8).expect("the first line reads")
   second = reader.read_line(8).expect("the second line reads")
   third = reader.read_line(8).expect("the final line reads")
@@ -88,14 +93,15 @@ go()
 #[test]
 fn standard_io_reports_line_and_total_input_limits() {
     let source = r#"
-use std.io
+use std.io.ConsoleLineReader
+use std.io.read_to_end
 
 def go(): (String, String) with Io.ReadBytes
-  line_error = case io.ConsoleLineReader().read_line(3)
+  line_error = case ConsoleLineReader().read_line(3)
   in Err(error) then error.message()
   in Ok(_) then "missing line error"
   end
-  total_error = case io.read_to_end(2)
+  total_error = case read_to_end(2)
   in Err(error) then error.message()
   in Ok(_) then "missing total error"
   end
@@ -121,7 +127,7 @@ go()
 #[test]
 fn generic_stream_helpers_use_the_writer_effect_argument() {
     let source = r#"
-use std.io
+use std.io.write_all_to
 
 final class PartialSink implements ByteWriter
   type Error = String
@@ -135,7 +141,7 @@ final class PartialSink implements ByteWriter
   end
 end
 
-io.write_all_to(PartialSink(), Bytes("abcdef")).expect("the write completes")
+write_all_to(PartialSink(), Bytes("abcdef")).expect("the write completes")
 "#;
     let bytes = compile_to_bytes("writer.lm", source).expect("the source compiles");
     let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
@@ -152,6 +158,25 @@ io.write_all_to(PartialSink(), Bytes("abcdef")).expect("the write completes")
 fn command_operations_still_need_policy_grants() {
     let source = "def go(): Int with Entropy.Bytes\n  sys.entropy.bytes(1).expect(\"entropy works\").len()\nend\ngo()\n";
     let bytes = compile_to_bytes("denied.lm", source).expect("the source compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Fault(PolicyDenied)");
+}
+
+#[test]
+fn args_needs_a_declared_row_and_policy_grant() {
+    let missing_row = "def go(): Int\n  sys.args().len()\nend\ngo()\n";
+    let error = compile_to_bytes("args-row.lm", missing_row)
+        .expect_err("the operation needs its declared row");
+    assert!(error.contains("Args.Get"), "{error}");
+
+    let source = "def go(): Int with Args\n  sys.args().len()\nend\ngo()\n";
+    let bytes = compile_to_bytes("args-policy.lm", source).expect("the source compiles");
     let loaded = lm_vm::load_bytes(&bytes).expect("the artifact verifies");
     let mut world = World::new(
         &loaded,

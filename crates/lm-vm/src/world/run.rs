@@ -5,55 +5,10 @@
 
 use super::*;
 
-fn command_arguments(machine: &mut Machine, arguments: &[String]) -> Result<Value, FaultCode> {
-    let base = machine.vm.operands.len();
-    for argument in arguments {
-        match machine.alloc(Object::Str(argument.clone().into())) {
-            Ok(value) => machine.vm.operands.push(value),
-            Err(error) => {
-                machine.vm.operands.truncate(base);
-                return Err(error);
-            }
-        }
-    }
-    let items = machine.vm.operands.split_off(base);
-    let value = machine.alloc(Object::List {
-        items,
-        epoch: StructuralEpoch::default(),
-    })?;
-    let reference = value.as_obj().ok_or(FaultCode::MalformedState)?;
-    lm_graph::freeze(&mut machine.vm.heap, reference, &machine.config.graph)?;
-    Ok(value)
-}
-
 impl World {
     /// Create a world with the entry loaded into the root machine.
     pub fn new(loaded: &LoadedModule, config: VmConfig, host: Box<dyn Host>) -> World {
         World::new_with_limits(loaded, config, WorldLimits::default(), host)
-    }
-
-    /// Create one command world with exact program arguments.
-    pub fn new_command(
-        loaded: &LoadedModule,
-        config: VmConfig,
-        arguments: &[String],
-        host: Box<dyn Host>,
-    ) -> Result<World, String> {
-        let mut world = World::new(loaded, config, host);
-        let entry = &world.module.funcs[world.module.entry as usize];
-        if entry.params.is_empty() {
-            if arguments.is_empty() {
-                return Ok(world);
-            }
-            return Err("the command value does not accept arguments".to_string());
-        }
-        let value = command_arguments(&mut world.machines[0], arguments)
-            .map_err(|error| format!("the command arguments failed: {error}"))?;
-        let Some(local) = world.machines[0].vm.locals.first_mut() else {
-            return Err("the command entry has no argument local".to_string());
-        };
-        *local = value;
-        Ok(world)
     }
 
     /// Create a world with exact aggregate limits.
@@ -79,23 +34,13 @@ impl World {
             )
         };
         root.table.set_bundle(loaded.bundle().clone());
-        let entry_args = if module.funcs[module.entry as usize].params.is_empty() {
-            Ok(Vec::new())
-        } else {
-            command_arguments(&mut root, &[]).map(|value| vec![value])
-        };
-        match entry_args {
-            Ok(args) => root.load_frame(
-                &module,
-                module.entry,
-                args,
-                None,
-                lm_value::TypeEnvId::EMPTY,
-            ),
-            Err(error) => {
-                root.set_fault(error, "command argument construction failed", None);
-            }
-        }
+        root.load_frame(
+            &module,
+            module.entry,
+            Vec::new(),
+            None,
+            lm_value::TypeEnvId::EMPTY,
+        );
         World {
             base_loaded: loaded.clone(),
             loaded: loaded.clone(),
@@ -214,31 +159,6 @@ impl World {
     /// The root machine identifier.
     pub fn root(&self) -> VmId {
         0
-    }
-
-    /// Convert one terminal command result into an operating-system status.
-    pub fn command_exit_code(&self, outcome: &Outcome) -> Result<u8, String> {
-        let Outcome::Done(value) = outcome else {
-            return Ok(1);
-        };
-        let Some(reference) = value.as_obj() else {
-            return Ok(0);
-        };
-        let Object::Instance { class, fields, .. } = self.machines[0].vm.heap.get(reference) else {
-            return Ok(0);
-        };
-        if Some(*class) == self.core.exit_status_success {
-            Ok(0)
-        } else if Some(*class) == self.core.exit_status_failure {
-            Ok(1)
-        } else if Some(*class) == self.core.exit_status_code {
-            let Some(Value::Int(code)) = fields.first() else {
-                return Err("ExitStatus.Code has no integer value".to_string());
-            };
-            u8::try_from(*code).map_err(|_| "ExitStatus.Code must be between 0 and 255".to_string())
-        } else {
-            Ok(0)
-        }
     }
 
     /// Read access to one machine heap, for inspection and tests.

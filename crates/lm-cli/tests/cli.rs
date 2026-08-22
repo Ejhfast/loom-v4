@@ -172,7 +172,7 @@ fn run_reports_a_fault_with_a_stable_code() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 1246ca05)\n"
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 8b4ff15e)\n"
     );
 }
 
@@ -188,7 +188,7 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 0c82332e)\n"
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, da855ab8)\n"
     );
 }
 
@@ -222,14 +222,16 @@ fn help_and_version_succeed() {
 }
 
 #[test]
-fn callable_command_entries_receive_exact_arguments() {
+fn args_effect_receives_exact_arguments() {
     let path = probe(
         "command-arguments",
-        "do |args: [String]|: String\n  \"{args.len()}:{args.at(0)}:{args.at(1)}\"\nend\n",
+        "def go(): String with Args\n  args = sys.args()\n  \"{args.len()}:{args.at(0)}:{args.at(1)}\"\nend\ngo()\n",
     );
     let out = lm(&[
         "run",
         "--show-result",
+        "--allow",
+        "Args",
         path.to_str().expect("the path is valid UTF-8"),
         "--",
         "",
@@ -240,11 +242,28 @@ fn callable_command_entries_receive_exact_arguments() {
     let _ = std::fs::remove_file(path);
 }
 
+#[cfg(unix)]
 #[test]
-fn a_built_artifact_keeps_its_command_entry() {
+fn cli_rejects_an_argument_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lm"))
+        .arg(std::ffi::OsString::from_vec(vec![0xff]))
+        .current_dir(repo_root())
+        .output()
+        .expect("the lm binary runs");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "error: a command-line argument is not valid UTF-8\n"
+    );
+}
+
+#[test]
+fn a_built_artifact_can_read_arguments() {
     let path = probe(
         "command-artifact",
-        "do |args: [String]|: String\n  args.at(0)\nend\n",
+        "def go(): String with Args\n  sys.args().at(0)\nend\ngo()\n",
     );
     let build = lm(&["build", path.to_str().expect("the path is valid UTF-8")]);
     assert!(build.status.success(), "{}", stderr(&build));
@@ -256,6 +275,8 @@ fn a_built_artifact_keeps_its_command_entry() {
     let out = lm(&[
         "run",
         "--show-result",
+        "--allow",
+        "Args",
         artifact.to_str().expect("the path is valid UTF-8"),
         "--",
         "artifact",
@@ -268,36 +289,25 @@ fn a_built_artifact_keeps_its_command_entry() {
 }
 
 #[test]
-fn zero_argument_command_entries_run() {
-    let path = probe("command-zero", "do ||: Int\n  42\nend\n");
+fn args_effect_returns_an_empty_list() {
+    let path = probe(
+        "command-zero",
+        "def go(): Int with Args\n  sys.args().len()\nend\ngo()\n",
+    );
     let out = lm(&[
         "run",
         "--show-result",
+        "--allow",
+        "Args",
         path.to_str().expect("the path is valid UTF-8"),
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "Done(42)\n");
+    assert_eq!(stdout(&out), "Done(0)\n");
     let _ = std::fs::remove_file(path);
 }
 
 #[test]
-fn command_exit_status_maps_to_process_status() {
-    let path = probe(
-        "command-status",
-        "do |args: [String]|: ExitStatus\n  if args.at(0) == \"success\"\n    ExitStatus.Success\n  elsif args.at(0) == \"failure\"\n    ExitStatus.Failure\n  else\n    ExitStatus.Code(args.at(0).parse_int(10).expect(\"the status is an integer\"))\n  end\nend\n",
-    );
-    let file = path.to_str().expect("the path is valid UTF-8");
-    assert_eq!(lm(&["run", file, "--", "success"]).status.code(), Some(0));
-    assert_eq!(lm(&["run", file, "--", "failure"]).status.code(), Some(1));
-    assert_eq!(lm(&["run", file, "--", "7"]).status.code(), Some(7));
-    let invalid = lm(&["run", file, "--", "256"]);
-    assert_eq!(invalid.status.code(), Some(1));
-    assert!(stderr(&invalid).contains("between 0 and 255"));
-    let _ = std::fs::remove_file(path);
-}
-
-#[test]
-fn command_arguments_reject_a_non_callable_value() {
+fn unused_arguments_do_not_change_the_program_entry() {
     let path = probe("command-value", "42\n");
     let out = lm(&[
         "run",
@@ -305,17 +315,13 @@ fn command_arguments_reject_a_non_callable_value() {
         "--",
         "extra",
     ]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("does not accept arguments"));
+    assert!(out.status.success(), "{}", stderr(&out));
     let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn run_rejects_an_argument_before_the_separator() {
-    let path = probe(
-        "command-separator",
-        "do |args: [String]|: Int\n  args.len()\nend\n",
-    );
+    let path = probe("command-separator", "0\n");
     let out = lm(&[
         "run",
         path.to_str().expect("the path is valid UTF-8"),
@@ -327,23 +333,13 @@ fn run_rejects_an_argument_before_the_separator() {
 }
 
 #[test]
-fn another_callable_signature_gets_a_command_diagnostic() {
-    let path = probe("command-signature", "do |value: Int|: Int\n  value\nend\n");
-    let out = lm(&["check", path.to_str().expect("the path is valid UTF-8")]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("error[E1067]"));
-    assert!(stderr(&out).contains("`()` or `[String]`"));
-    let _ = std::fs::remove_file(path);
-}
-
-#[test]
 fn the_binary_filter_preserves_invalid_utf8() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lm"))
         .args([
             "run",
             "--allow",
-            "Io.ReadBytes,Io.Write,Env.Get,Process.CurrentDir,Entropy.Bytes",
-            "examples/16-command-applications/01-binary-filter.lm",
+            "Io.ReadBytes,Io.Write,Env.Get,Fs.CurrentDir,Entropy.Bytes,Args",
+            "examples/04-effects/binary-filter.lm",
             "--",
             "2",
         ])
@@ -369,7 +365,7 @@ fn the_binary_filter_preserves_invalid_utf8() {
 fn byte_output_reports_a_closed_pipe() {
     let path = probe(
         "byte-broken-pipe",
-        "do ||: ExitStatus with Io.Write\n  case sys.io.write(\"hello\".bytes())\n  in Err(IoError.BrokenPipe) then ExitStatus.Success\n  in Err(_) then ExitStatus.Failure\n  in Ok(_) then ExitStatus.Failure\n  end\nend\n",
+        "def go(): Bool with Io.Write\n  case sys.io.write(\"hello\".bytes())\n  in Err(IoError.BrokenPipe) then true\n  in Err(_) then false\n  in Ok(_) then false\n  end\nend\ngo()\n",
     );
     let mut child = Command::new(env!("CARGO_BIN_EXE_lm"))
         .args(["run", "--allow", "Io.Write"])
@@ -547,14 +543,32 @@ fn a_package_command_receives_its_arguments() {
     .expect("the manifest writes");
     std::fs::write(
         root.join("src/main.lm"),
-        "use std.io\n\ndo |args: [String]|: String\n  \"{args.at(0)}:{args.at(1)}\"\nend\n",
+        "def go(): String with Args\n  args = sys.args()\n  \"{args.at(0)}:{args.at(1)}\"\nend\ngo()\n",
     )
     .expect("the source writes");
     let path = root.display().to_string();
-    let out = lm(&["run", "--show-result", &path, "--", "first", "second"]);
+    let out = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Args",
+        &path,
+        "--",
+        "first",
+        "second",
+    ]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "Done(\"first:second\")\n");
-    let cached = lm(&["run", "--show-result", &path, "--", "third", "fourth"]);
+    let cached = lm(&[
+        "run",
+        "--show-result",
+        "--allow",
+        "Args",
+        &path,
+        "--",
+        "third",
+        "fourth",
+    ]);
     assert!(cached.status.success(), "{}", stderr(&cached));
     assert_eq!(stdout(&cached), "Done(\"third:fourth\")\n");
     let _ = std::fs::remove_dir_all(root);

@@ -94,7 +94,6 @@ impl<'o> FnChecker<'o> {
                     lm_abi::AbiCore::IoError => "IoError",
                     lm_abi::AbiCore::FsError => "FsError",
                     lm_abi::AbiCore::EnvError => "EnvError",
-                    lm_abi::AbiCore::ProcessError => "ProcessError",
                     lm_abi::AbiCore::EntropyError => "EntropyError",
                     lm_abi::AbiCore::SnapshotError => "SnapshotError",
                     lm_abi::AbiCore::IpAddress => "IpAddress",

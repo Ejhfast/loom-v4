@@ -1199,7 +1199,7 @@ One graph walker must define reachability and ordering for freeze, verification,
 sys.io       sys.fs       sys.clock    sys.rand
 sys.dns      sys.tcp      sys.tls      sys.proc
 sys.vm       sys.compiler sys.reflect  sys.wait
-sys.choose
+sys.choose   sys.env      sys.entropy
 ```
 
 `Choose.Pick(Int) -> Int` states a number of candidates and answers one
@@ -1223,6 +1223,7 @@ snake_case form of its descriptor name: `sys.io.print` performs
 `Io.Print`, and `sys.io.read_line` performs `Io.ReadLine`. The
 mapping is mechanical. Descriptors keep initial capitals, and they
 appear wherever code names, grants, mocks, or matches an operation.
+`Args.Get` also has the direct `sys.args()` surface.
 Exactly one `sys` member is capitalized: the machine constructor
 `sys.vm.Vm()`, whose name is the constructed type. Every other
 member is a snake_case verb, including members that return objects,
@@ -2739,6 +2740,8 @@ Io.Print       (String) -> ()
 Io.Error       (String) -> ()
 Io.ReadLine    () -> Result[Option[String], IoError]
 Io.ReadBytes   (Int) -> Result[Bytes, IoError]
+Io.Write       (Bytes) -> Result[Int, IoError]
+Io.WriteError  (Bytes) -> Result[Int, IoError]
 ```
 
 `Print` and `Error` accept text exactly as supplied. Line-ending policy belongs to wrappers. Reads may suspend.
@@ -2752,6 +2755,7 @@ Fs.Write       (FileHandle, Bytes) -> Result[Int, FsError]
 Fs.Seek        (FileHandle, SeekFrom) -> Result[Int, FsError]
 Fs.Flush       (FileHandle) -> Result[(), FsError]
 Fs.Close       (FileHandle) -> Result[(), FsError]
+Fs.CurrentDir  () -> Result[String, FsError]
 Fs.Stat        (String) -> Result[FileInfo, FsError]
 Fs.ReadDir     (String) -> Result[[DirEntry], FsError]
 Fs.CreateDir   (String) -> Result[(), FsError]
@@ -2763,6 +2767,17 @@ A live `FileHandle` names one resource entry and one service binding. The bindin
 
 File operations can suspend their proc. The host adapter performs blocking platform work outside the scheduler thread.
 
+#### Program inputs
+
+```text
+Args.Get  () -> [String]
+Env.Get   (String) -> Result[Option[String], EnvError]
+```
+
+`Args.Get` returns a fresh guest-owned list.
+
+`Env.Get` returns `Ok(None)` when the name is absent.
+
 ### 23.3 Clock and randomness
 
 ```text
@@ -2772,6 +2787,7 @@ Clock.Sleep     (Int) -> Result[(), ClockError]
 
 Rand.Bytes      (Int) -> Result[Bytes, RandError]
 Rand.Int        (Int, Int) -> Result[Int, RandError]  # half-open [low, high)
+Entropy.Bytes   (Int) -> Result[Bytes, EntropyError]
 ```
 
 Range validation is ordinary deterministic checking before host entropy use.
@@ -3467,12 +3483,11 @@ deep_equal[T](a: T, b: T): Bool
 `std/io` contains thin wrappers:
 
 ```lm
-print(text: String) with Io.Print
-println(text: String) with Io.Print
-eprint(text: String) with Io.Error
-eprintln(text: String) with Io.Error
-read_line(): Result[Option[String], IoError] with Io.ReadLine
-read_all(max_bytes: Int): Result[Bytes, IoError] with Io.ReadBytes
+write_all(bytes: Bytes): Result[(), IoError] with Io.Write
+write_error_all(bytes: Bytes): Result[(), IoError] with Io.WriteError
+print(text: Text): Result[(), IoError] with Io.Write
+print_error(text: Text): Result[(), IoError] with Io.WriteError
+read_to_end(max_bytes: Int): Result[Bytes, IoError] with Io.ReadBytes
 ```
 
 `std/fs` makes scoped access the standard file path:
@@ -3530,7 +3545,7 @@ Secure HTTP uses `Http.Client` and an explicit `TlsClientConfig`.
 
 Proxy policy, redirects, cookies, decompression, and connection pools remain separate code.
 
-Command-line arguments are passed as the root entry tuple by the CLI rather than read ambiently. `Process.EnvGet` and `Process.CurrentDir` are optional explicit host operations; `std/process` wraps them when the host ABI enables that group.
+`Args.Get` returns command-line arguments through the `sys.args()` surface. `Env.Get` reads one environment value. `Fs.CurrentDir` reads the current directory.
 
 ### 24.11 JSON
 
@@ -3696,13 +3711,15 @@ lm snapshot verify <file>
 lm snapshot run <file>
 ```
 
-`check` parses/resolves/types/checks without producing an installed executable. `build` writes canonical artifact/interface files atomically. `run` links the module and accepts exactly three entry shapes:
+`check` parses, resolves, and checks types without producing an installed executable. `build` writes canonical artifact and interface files atomically.
 
-- a frozen non-callable value, which is reported directly and accepts no command-line arguments;
-- `() -> T with e`, invoked with the empty argument tuple;
-- `([String]) -> T with e`, invoked with one frozen list containing the strings after `--`.
+`run` links the module and invokes its zero-parameter entry function. The function has the type `() -> T with e`.
 
-Other callable signatures are valid for embedding but `lm run` reports a signature error. For callable entries, `run` constructs a root VM, applies an explicit host policy profile, and invokes the entry. It does not infer grants solely from the artifact row; a profile must choose them.
+A returned callable is an ordinary terminal value. `lm run` does not invoke it by a special rule.
+
+The entry can use `sys.args()` to read strings after `--`. The call needs the `Args` row and policy grant.
+
+`run` constructs a root VM and applies an explicit host policy profile. The artifact row does not grant operations.
 
 ### 26.4 Root policy profiles
 

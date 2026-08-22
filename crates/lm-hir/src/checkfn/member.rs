@@ -119,6 +119,13 @@ impl<'o> FnChecker<'o> {
                 .expect("qualified constructors resolve or fail");
             return self.construct_arm(ctx, arm, type_args, args, expected, span);
         }
+        // `sys.args()` is the direct surface of `Args.Get`.
+        if name == "args"
+            && matches!(recv.kind, ExprKind::Name(ref value) if value == "sys")
+            && self.sys_in_scope()?
+        {
+            return self.check_sys_call(ctx, "Args", "get", name_span, type_args, args, span);
+        }
         // A direct operation call `sys.<group>.<Member>(args)`.
         if let Some(group) = self.sys_group_of(ctx, recv)? {
             return self.check_sys_call(ctx, &group, name, name_span, type_args, args, span);

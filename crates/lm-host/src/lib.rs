@@ -27,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub struct CliHost {
     started: Instant,
     rand_state: u64,
+    arguments: Vec<String>,
     sleeps: HashMap<u64, (CompletionKey, Instant)>,
     next_token: u64,
     next_file: u64,
@@ -39,9 +40,15 @@ pub struct CliHost {
 impl CliHost {
     /// Create a host. `rand_seed` seeds the deterministic PRNG.
     pub fn new(rand_seed: u64) -> CliHost {
+        CliHost::with_args(rand_seed, Vec::new())
+    }
+
+    /// Create a host with exact program arguments.
+    pub fn with_args(rand_seed: u64, arguments: Vec<String>) -> CliHost {
         CliHost {
             started: Instant::now(),
             rand_state: rand_seed.max(1),
+            arguments,
             sleeps: HashMap::new(),
             next_token: 1,
             next_file: 1,
@@ -301,25 +308,16 @@ impl Host for CliHost {
                     },
                 }
             }
-            lm_abi::OP_PROCESS_CURRENT_DIR => match std::env::current_dir() {
+            lm_abi::OP_FS_CURRENT_DIR => match std::env::current_dir() {
                 Ok(path) => match path.into_os_string().into_string() {
                     Ok(path) => HostStart::Completed(ok_value(HostValue::Str(path.into()))),
-                    Err(_) => HostStart::Completed(error_value(
-                        CoreCtor::ProcessInvalidInput,
-                        Some("the current directory is not valid UTF-8"),
+                    Err(_) => HostStart::Completed(fs_error(
+                        "the current directory is not valid UTF-8".to_string(),
                     )),
                 },
-                Err(error) => {
-                    let ctor = match error.kind() {
-                        std::io::ErrorKind::PermissionDenied => CoreCtor::ProcessPermissionDenied,
-                        std::io::ErrorKind::NotFound => CoreCtor::ProcessNotFound,
-                        _ => CoreCtor::ProcessFailed,
-                    };
-                    HostStart::Completed(error_value(
-                        ctor,
-                        Some(&format!("current directory query failed: {error}")),
-                    ))
-                }
+                Err(error) => HostStart::Completed(fs_error(format!(
+                    "current directory query failed: {error}"
+                ))),
             },
             lm_abi::OP_ENTROPY_BYTES => {
                 let Some(HostArg::Int(count)) = args.first() else {
@@ -346,6 +344,13 @@ impl Host for CliHost {
                     )),
                 }
             }
+            lm_abi::OP_ARGS_GET => HostStart::Completed(HostValue::List(
+                self.arguments
+                    .iter()
+                    .cloned()
+                    .map(|value| HostValue::Str(value.into()))
+                    .collect(),
+            )),
             lm_abi::OP_CLOCK_NOW => {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1232,7 +1237,7 @@ mod tests {
 
     #[test]
     fn command_queries_return_typed_values() {
-        let mut host = CliHost::new(1);
+        let mut host = CliHost::with_args(1, vec!["one".to_string(), "two".to_string()]);
         let missing = unwrap_ok_value(run_host(
             &mut host,
             lm_abi::OP_ENV_GET,
@@ -1241,9 +1246,16 @@ mod tests {
             )],
         ));
         assert_eq!(missing, HostValue::Ctor(CoreCtor::None, vec![]));
-        let directory =
-            unwrap_ok_value(run_host(&mut host, lm_abi::OP_PROCESS_CURRENT_DIR, vec![]));
+        let directory = unwrap_ok_value(run_host(&mut host, lm_abi::OP_FS_CURRENT_DIR, vec![]));
         assert!(matches!(directory, HostValue::Str(path) if !path.is_empty()));
+        let arguments = run_host(&mut host, lm_abi::OP_ARGS_GET, vec![]);
+        assert_eq!(
+            arguments,
+            HostValue::List(vec![
+                HostValue::Str("one".into()),
+                HostValue::Str("two".into()),
+            ])
+        );
         let invalid = run_host(&mut host, lm_abi::OP_ENTROPY_BYTES, vec![HostArg::Int(-1)]);
         assert_eq!(
             invalid,

@@ -1,10 +1,10 @@
 # Pre-release Language and Host Foundation
 
-Status: stages 1 through 3 implemented.
+Status: stages 1 through 3 implemented. Stages 4 through 7 remain required.
 
 This sidecar defines the first public release foundation.
 
-It covers language reliability, extensible host operations, and the command application world.
+It covers language reliability, host operations, and program inputs.
 
 Self-hosting is outside this work.
 
@@ -17,30 +17,26 @@ Each stage records its build, test, and execution costs.
 The first public release makes four user-visible promises.
 
 1. Guest code and malformed external data never crash the host process.
-2. A command program can consume inputs and perform normal application work.
-3. An embedder can add typed host operations without changing Loom's core.
-4. Every operation remains visible to effect checking and runtime policy.
+2. A program can consume host inputs and perform normal application work.
+3. Every operation remains visible to effect checking and runtime policy.
+4. Core protocols use interfaces where user types can participate.
 
 The release can omit later convenience features.
 
-It cannot omit a safe extension boundary.
-
 It cannot turn ordinary platform failures into host faults.
 
-It cannot accept command arguments and then discard them.
+It cannot accept program arguments and then discard them.
 
 ## 2. Terms
 
 | Term | Meaning |
 |---|---|
 | standard bundle | The pinned groups and operations distributed with Loom |
-| extension bundle | Immutable operation definitions supplied by one embedder |
-| ABI bundle | The standard bundle plus zero or more extension bundles |
+| ABI bundle | The immutable operation definitions used by one program |
 | bundle digest | The canonical identity of one ABI bundle |
 | host failure | An ordinary platform failure returned as a typed value |
 | host defect | A host implementation violates its declared operation contract |
-| command entry | The program value selected by `lm run` |
-| command arguments | The strings after the command-line `--` separator |
+| program arguments | The strings after the command-line `--` separator |
 
 ## 3. Error boundary
 
@@ -148,15 +144,13 @@ The CLI accepts `--version` and `-V` with a successful status.
 
 An unknown command remains an error.
 
-## 7. ABI bundles
+## 7. ABI identity
 
 ### 7.1 Purpose
 
 The current standard operation manifest becomes the standard ABI bundle.
 
-An embedder can add operations without editing `lm-abi`.
-
-The compiler, verifier, VM, and host receive the same immutable bundle.
+The compiler, verifier, VM, and host receive the same immutable value.
 
 The standard command uses the standard bundle.
 
@@ -178,23 +172,9 @@ group memberships
 
 Each group contains exact operation names or other group names.
 
-A bundle builder rejects duplicate names.
-
-It rejects missing group members.
-
-It rejects recursive group membership.
-
-It rejects unsupported type schemas.
-
-It rejects a redefinition of a standard name.
-
 ### 7.3 Dense runtime slots
 
 Standard operations retain their current slots.
-
-Extension operations follow the standard operations.
-
-The builder sorts extension operations by stable identity.
 
 The resulting slots remain dense.
 
@@ -220,9 +200,9 @@ The checker resolves row names through the active bundle.
 
 It creates `sys` operation members from the active bundle.
 
-An extension operation uses the same call syntax as a standard operation.
+Every active operation uses the same call syntax.
 
-An extension group uses the same row syntax as a standard group.
+Every active group uses the same row syntax.
 
 The compiler emits the operation's dense slot.
 
@@ -248,73 +228,39 @@ The VM reads operation names, kinds, signatures, and groups from that bundle.
 
 A world rejects installed code from another bundle.
 
-### 7.8 Host registration
+### 7.8 Public status
 
-The embedding API registers one implementation for each served operation.
+The ABI bundle machinery remains an internal runtime boundary.
 
-The API supplies checked owned arguments.
+This release does not expose a stable embedding crate.
 
-The API supplies a typed reply builder.
+Host extensibility needs a separate design and implementation unit.
 
-The host receives no writable guest pointer.
+That unit must use the same checker, verifier, policy, and snapshot contracts.
 
-An asynchronous implementation receives a single-use completion handle.
+## 8. Program host inputs
 
-The host can cancel a pending completion.
+### 8.1 Program arguments
 
-The VM rejects a reply with the wrong declared type.
+The program entry remains an ordinary zero-parameter entry function.
 
-### 7.9 Extension resources
+The CLI does not call a terminal closure by a special rule.
 
-An extension bundle can declare an opaque resource kind.
-
-Each resource kind has a stable qualified name.
-
-Each resource value carries a kind, token, and generation.
-
-The VM resource registry owns its lifecycle record.
-
-Each kind declares cleanup and cancellation callbacks.
-
-The first release classifies extension resources as host attachments.
-
-Any live extension resource blocks snapshot creation.
-
-### 7.10 Initial embedding scope
-
-The first Rust API supports data operations and opaque resources.
-
-It supports synchronous and asynchronous completion.
-
-It supports policy configuration and manual driving.
-
-It does not bypass artifact verification.
-
-It does not expose raw heap storage.
-
-The initial release does not require a C interface.
-
-## 8. Command application world
-
-### 8.1 Entry forms
-
-`lm run` accepts these entry forms.
+The standard bundle defines this operation.
 
 ```text
-frozen non-callable value
-() -> T with e
-([String]) -> T with e
+Args.Get () -> [String]
 ```
 
-A frozen non-callable value accepts no command arguments.
+Loom exposes the operation as `sys.args()`.
 
-The zero-argument function receives the empty tuple.
+The call charges the `Args` effect row.
 
-The argument function receives one frozen list.
+Runtime policy must grant `Args` or `Args.Get`.
 
-The list contains strings after `--` in their original order.
+Each call returns a guest-owned list in the original argument order.
 
-Any other callable signature produces a command-entry diagnostic.
+The CLI rejects a native argument that is not valid UTF-8.
 
 ### 8.2 Argument parsing
 
@@ -328,29 +274,13 @@ The CLI never ignores an extra positional token.
 
 ### 8.3 Exit status
 
-Core defines `ExitStatus`.
-
-```lm
-enum ExitStatus
-  Success
-  Failure
-  Code(value: Int)
-end
-```
-
-An entry returning another type exits with status zero after normal completion.
-
-`Success` exits with status zero.
-
-`Failure` exits with status one.
-
-`Code(value)` accepts values from zero through 255.
-
-An invalid code produces a command-entry diagnostic and status one.
+Normal completion exits with status zero.
 
 A machine fault exits with status one.
 
-An embedder remains free to interpret terminal values differently.
+The first release needs a separate explicit status operation.
+
+A terminal value does not control process status by its nominal type.
 
 ### 8.4 Standard input and output
 
@@ -410,13 +340,14 @@ The count cannot exceed the supplied byte length.
 
 The interfaces do not merge filesystem, network, and process authority.
 
-### 8.6 Environment and current directory
+### 8.6 Environment, arguments, and current directory
 
 The standard bundle adds these operations.
 
 ```text
-Env.Get              (String) -> Result[Option[String], EnvError]
-Process.CurrentDir   ()       -> Result[String, ProcessError]
+Args.Get       ()       -> [String]
+Env.Get        (String) -> Result[Option[String], EnvError]
+Fs.CurrentDir  ()       -> Result[String, FsError]
 ```
 
 `Env.Get` reads one named variable.
@@ -427,9 +358,7 @@ An absent variable returns `Ok(None)`.
 
 Invalid platform text returns an encoding error.
 
-The current directory is a host query.
-
-It does not grant filesystem access.
+`Fs.CurrentDir` uses the filesystem effect and error family.
 
 ### 8.7 Secure entropy
 
@@ -474,8 +403,6 @@ end
 
 `EnvError` distinguishes invalid names, invalid encoding, denial, and platform failure.
 
-`ProcessError` distinguishes invalid input, denial, missing paths, and platform failure.
-
 `EntropyError` distinguishes invalid counts, limits, unavailability, and platform failure.
 
 Every error type provides `message(): String`.
@@ -501,7 +428,7 @@ Stage 1 passes when failed platform I/O cannot panic the host process.
 
 ## 11. Stage 2 implementation
 
-Stage 2 makes the host boundary extensible.
+Stage 2 gives the host boundary one verified ABI identity.
 
 It includes these changes.
 
@@ -509,25 +436,22 @@ It includes these changes.
 - Convert standard manifest queries into standard-bundle queries.
 - Thread bundles through checking, verification, loading, and execution.
 - Bind artifacts and snapshots to the bundle digest.
-- Add extension operations and groups.
-- Add extension resource descriptors.
-- Add the `lm-embed` Rust crate.
-- Add a custom telemetry operation example.
+- Keep the dynamic bundle builder as internal runtime machinery.
+- Defer the public host extension API.
 
-Stage 2 passes when custom typed operations need no core source edit.
+Stage 2 passes when each artifact and snapshot binds one exact ABI bundle.
 
 ## 12. Stage 3 implementation
 
-Stage 3 makes Loom useful as a command application.
+Stage 3 makes Loom useful as an application language.
 
 It includes these changes.
 
-- Activate callable command entries.
-- Pass command arguments after `--`.
+- Add `Args.Get` and the `sys.args()` surface.
+- Pass arguments after `--` through the `Args` effect.
 - Add byte console operations.
 - Add result-bearing output.
-- Add environment and current-directory operations.
-- Add explicit command exit status.
+- Add environment and filesystem current-directory operations.
 - Add secure entropy.
 - Add stream interfaces and standard helpers.
 
@@ -541,14 +465,11 @@ Each new resource needs cleanup, cancellation, and snapshot tests.
 
 Each new error needs rendering and pattern tests.
 
-The extension suite includes these cases.
+The ABI bundle suite includes these cases.
 
-- A custom operation compiles and runs.
-- A missing implementation faults only its machine.
-- A wrong reply type faults only its machine.
 - A different bundle rejects the artifact.
-- A custom group expands to its exact operations.
-- A live custom resource blocks a snapshot.
+- A different bundle rejects the snapshot.
+- The verifier checks operation slots against the bound bundle.
 
 The command suite includes these cases.
 
@@ -556,10 +477,10 @@ The command suite includes these cases.
 - A closed output pipe returns `BrokenPipe`.
 - CLI fault reporting on a closed pipe does not panic.
 - Arguments preserve empty strings and Unicode.
-- A non-callable entry rejects command arguments.
+- `sys.args()` preserves empty strings and Unicode.
+- `sys.args()` needs the `Args` row and a policy grant.
 - Environment absence returns `None`.
 - Secure entropy never uses deterministic `Rand` state.
-- Every exit status maps correctly.
 
 ## 14. Release checks
 
@@ -587,18 +508,158 @@ The release benchmark compared Stage 3 with commit `ed3bb7a`.
 
 | Measurement | Stage 2 | Stage 3 | Change |
 |---|---:|---:|---:|
-| core classes | 172 | 194 | +12.8% |
-| core functions | 513 | 538 | +4.9% |
-| core artifact | 112,328 bytes | 119,594 bytes | +6.5% |
-| core compilation | 1.885 ms | 1.937 ms | +2.8% |
-| core loading | 0.802 ms | 0.837 ms | +4.4% |
+| core classes | 172 | 185 | +7.6% |
+| core functions | 513 | 528 | +2.9% |
+| core artifact | 112,328 bytes | 117,003 bytes | +4.2% |
+| core compilation | 1.885 ms | 1.973 ms | +4.7% |
+| core loading | 0.802 ms | 0.830 ms | +3.5% |
 
-Stage 3 adds core contracts, command status values, and typed errors.
+Stage 3 adds core contracts, program input operations, and typed errors.
 
 The selected execution benchmarks found no runtime regression.
 
 | Benchmark | Stage 2 | Stage 3 |
 |---|---:|---:|
-| `int_loop` | 34.8 ns | 31.8 ns |
-| `direct_call` | 32.7 ns | 31.3 ns |
-| `world_int_loop` | 35.5 ns | 34.2 ns |
+| `int_loop` | 34.8 ns | 33.5 ns |
+| `direct_call` | 32.7 ns | 32.9 ns |
+| `world_int_loop` | 35.5 ns | 36.5 ns |
+
+## 16. Interface doctrine
+
+The first release adds an interface only when language syntax or generic core code consumes it.
+
+The required core interface set contains these interfaces.
+
+```lm
+interface Display
+  def append_to(self, mut builder: StringBuilder)
+end
+
+interface PartialEq
+  def __eq__(self, other: Self): Bool
+end
+
+interface Hashable: PartialEq
+  def __hash__(self): Int
+end
+```
+
+`Iterable`, `Iterator`, `Counted`, `ByteReader`, and `ByteWriter` remain part of this set.
+
+The first release does not add unused `Clone`, `Default`, `Ord`, or marker interfaces.
+
+A later generic consumer can justify each additional interface.
+
+## 17. Stage 4: `Self` and interface composition
+
+Stage 4 provides the type foundation required by the new core interfaces.
+
+Inside an interface contract, bare `Self` names the conforming type.
+
+`Self` can appear in parameters, results, and nested type applications.
+
+Inside a class, `Self` names the current nominal type application.
+
+Interface inheritance uses the existing colon form.
+
+An inherited interface contributes its methods and associated type requirements.
+
+Two bounds can contribute one identical method contract without ambiguity.
+
+Different contracts with one method name remain ambiguous.
+
+Enums can declare and implement interfaces.
+
+Interface contracts and inherited contracts enter interface identity hashes.
+
+An interface name remains invalid as a value type.
+
+The diagnostic states that the name is an interface bound.
+
+The first release does not add existential interface values.
+
+A future release can add an explicit form such as `dyn Display`.
+
+Stage 4 passes when `clone(): Self` and `same(other: Self)` enforce the conforming type.
+
+## 18. Stage 5: `Display`
+
+String interpolation accepts any value that conforms to `Display`.
+
+`append_to` writes into the interpolation builder without an intermediate `String` allocation.
+
+The core scalar and text implementations lower to existing builder intrinsics.
+
+Error enums implement `Display` and remove their repeated `message()` convention.
+
+A pure core helper builds a standalone `String` from any `Display` value.
+
+The checker removes the closed interpolation type list.
+
+The verifier checks each selected display call.
+
+Stage 5 passes when a user class interpolates through its declared conformance.
+
+`string_interp` and `string_builder` must remain within normal benchmark noise.
+
+## 19. Stage 6: `PartialEq`
+
+The `==` operator requires `PartialEq` and calls `__eq__`.
+
+The `!=` operator negates the same result.
+
+Core removes `__ne__` as an independent semantic hook.
+
+Int, Bool, Text, Char, and Bytes implement the interface.
+
+A method named `__eq__` without conformance does not enable the operator.
+
+Stage 6 passes when generic equality uses one verified interface dispatch.
+
+Primitive equality benchmarks must remain within normal benchmark noise.
+
+## 20. Stage 7: `Hashable`, `Map`, and `Set`
+
+`Hashable` extends `PartialEq`.
+
+Its equality must be reflexive, symmetric, and transitive.
+
+Equal values must return equal semantic hashes.
+
+A hash must remain stable while its value is frozen.
+
+The VM mixes each semantic hash with a private process seed.
+
+`Map[K, V]` requires `K` to conform to `Hashable`.
+
+Map construction records one verified key strategy for `K`.
+
+Built-in key strategies retain the current native hash and equality path.
+
+User key strategies call the verified `__hash__` and `__eq__` implementations.
+
+Each stored entry caches its semantic hash.
+
+A lookup computes the query hash once.
+
+It calls equality only for matching hash candidates.
+
+The map contract rejects an effectful hash or equality method.
+
+Snapshots retain enough type identity to reconstruct the same verified strategy.
+
+Core adds `Set[T]` over the same key strategy after the map gate passes.
+
+Stage 7 passes when a frozen user class works as a map key and set element.
+
+Existing Int, Text, and Bytes map benchmarks must not regress.
+
+## 21. Interface release gates
+
+Each stage records core compilation, artifact size, loading time, and full suite time.
+
+Each stage measures its affected runtime benchmarks.
+
+The full suite retains the current duration as its reference.
+
+No stage can hide slower tests by adding workers.

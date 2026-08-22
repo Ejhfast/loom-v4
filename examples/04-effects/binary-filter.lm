@@ -1,0 +1,59 @@
+# Copy standard input to standard output without text decoding.
+#
+# Run with these grants:
+# Io.ReadBytes,Io.Write,Env.Get,Fs.CurrentDir,Entropy.Bytes,Args
+#
+# The first argument sets the read size. `LOOM_COPY_CHUNK` supplies
+# the default when the command has no argument.
+
+use std.io.write_all
+
+def parse_chunk(text: Text): Result[Int, String]
+  case text.parse_int(10)
+  in Ok(value)
+    if value > 0
+      Ok(value)
+    else
+      Err("the read size must be positive")
+    end
+  in Err(_)
+    Err("the read size must be an integer")
+  end
+end
+
+def copy_input(count: Int): Result[(), IoError] with Io.ReadBytes, Io.Write
+  loop do
+    bytes = sys.io.read_bytes(count)?
+    if bytes.is_empty()
+      break
+    end
+    write_all(bytes)?
+  end
+  Ok(())
+end
+
+def run_filter() with Io.ReadBytes, Io.Write, Env.Get, Fs.CurrentDir, Entropy.Bytes, Args
+  args = sys.args()
+  default_chunk = case sys.env.get("LOOM_COPY_CHUNK")
+  in Ok(Some(text))
+    parse_chunk(text).expect("LOOM_COPY_CHUNK must contain a positive integer")
+  in Ok(None) then 65536
+  in Err(error) then panic(error.message())
+  end
+
+  chunk = if args.is_empty()
+    default_chunk
+  else
+    parse_chunk(args.at(0)).expect("the read size must be a positive integer")
+  end
+
+  directory = sys.fs.current_dir().expect("the current directory is available")
+  assert_message(directory.len() > 0, "the current directory is empty")
+
+  entropy = sys.entropy.bytes(16).expect("secure entropy is available")
+  assert_message(entropy.len() == 16, "the entropy result has the wrong size")
+
+  copy_input(chunk).expect("the stream copy completes")
+end
+
+run_filter()

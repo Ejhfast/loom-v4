@@ -310,14 +310,10 @@ fn verify_structure(
         ));
     }
     let entry_func = &module.funcs[entry];
-    let command_arguments = entry_func.param_muts == [false]
-        && matches!(entry_func.params.as_slice(), [parameter]
-        if matches!(module.types.get(*parameter as usize), Some(BcType::List(element))
-            if matches!(module.types.get(*element as usize), Some(BcType::Str))));
-    if !entry_func.params.is_empty() && !command_arguments {
+    if !entry_func.params.is_empty() {
         return Err(err(
             module.entry,
-            "the entry function must have no parameters or one `[String]` parameter",
+            "the entry function must not have parameters",
         ));
     }
     if !entry_func.captures.is_empty() {
@@ -1255,17 +1251,6 @@ mod tests {
         m.funcs[0].local_types = vec![TY_INT, TY_INT];
         let e = verify_module(&m).unwrap_err();
         assert!(e.message.contains("entry function"), "{e}");
-    }
-
-    #[test]
-    fn accepts_one_immutable_command_argument_list() {
-        let mut m = module_with(vec![vec![ConstInt(1), Return]]);
-        let arguments = m.types.len() as u32;
-        m.types.push(BcType::List(TY_STR));
-        m.funcs[0].params = vec![arguments];
-        m.funcs[0].param_muts = vec![false];
-        m.funcs[0].local_types = vec![arguments];
-        verify_module(&m).expect("the command entry verifies");
     }
 
     #[test]

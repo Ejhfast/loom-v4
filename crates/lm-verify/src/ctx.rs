@@ -924,7 +924,6 @@ impl<'m> Ctx<'m> {
                     lm_abi::AbiCore::IoError => (self.core.io_error, "IoError"),
                     lm_abi::AbiCore::FsError => (self.core.fs_error, "FsError"),
                     lm_abi::AbiCore::EnvError => (self.core.env_error, "EnvError"),
-                    lm_abi::AbiCore::ProcessError => (self.core.process_error, "ProcessError"),
                     lm_abi::AbiCore::EntropyError => (self.core.entropy_error, "EntropyError"),
                     lm_abi::AbiCore::SnapshotError => (self.core.snapshot_error, "SnapshotError"),
                     lm_abi::AbiCore::IpAddress => (self.core.ip_address, "IpAddress"),

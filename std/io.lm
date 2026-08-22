@@ -1,4 +1,4 @@
-# Standard library: process console helpers.
+# Standard library: host console helpers.
 
 def write_all_to[effect e, W: ByteWriter with e](
   writer: W,

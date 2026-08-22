@@ -127,36 +127,6 @@ pub fn compile_module_with_options_and_bundle(
     options: &CompileOptions,
     bundle: &std::sync::Arc<lm_abi::AbiBundle>,
 ) -> Result<CompiledModule, String> {
-    compile_module_impl(path, source, env, is_main, options, bundle, false)
-}
-
-/// Compile one command module against the standard ABI bundle.
-pub fn compile_command_module(
-    path: &str,
-    source: &SourceFile,
-    env: &FrozenCompileEnv,
-) -> Result<CompiledModule, String> {
-    let bundle = lm_abi::standard_bundle();
-    compile_module_impl(
-        path,
-        source,
-        env,
-        true,
-        &CompileOptions::default(),
-        &bundle,
-        true,
-    )
-}
-
-fn compile_module_impl(
-    path: &str,
-    source: &SourceFile,
-    env: &FrozenCompileEnv,
-    is_main: bool,
-    options: &CompileOptions,
-    bundle: &std::sync::Arc<lm_abi::AbiBundle>,
-    command_entry: bool,
-) -> Result<CompiledModule, String> {
     if let Some(interface) = env.interface_with_another_bundle(bundle.digest()) {
         return Err(format!(
             "error: module `{}` uses another ABI bundle\n",
@@ -193,9 +163,6 @@ fn compile_module_impl(
     let (linkage, interface_slots) = select_linkage(path, &hir, env, options)?;
     let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
         .map_err(|error| format!("error: `{path}`: {error}\n"))?;
-    if command_entry {
-        package_command_entry(&mut module, path)?;
-    }
     if options.dynamic_result {
         package_dynamic_entry(&mut module, path)?;
     }
@@ -222,86 +189,6 @@ fn compile_module_impl(
         semantic_hash: identity.semantic_hash,
         container_hash,
     })
-}
-
-/// Replace a callable module value with one command entry function.
-pub(crate) fn package_command_entry(module: &mut Module, path: &str) -> Result<(), String> {
-    let old_entry = module.entry;
-    let entry = module
-        .funcs
-        .get(old_entry as usize)
-        .ok_or_else(|| format!("error: `{path}` has no entry function\n"))?
-        .clone();
-    let callable = module
-        .types
-        .get(entry.ret as usize)
-        .cloned()
-        .ok_or_else(|| format!("error: `{path}` has an invalid entry type\n"))?;
-    let BcType::Fn(params, param_muts, ret, closure_row) = callable else {
-        return Ok(());
-    };
-    let accepts_args = match params.as_slice() {
-        [] if param_muts.is_empty() => false,
-        [parameter]
-            if param_muts == [false]
-                && matches!(
-                    module.types.get(*parameter as usize),
-                    Some(BcType::List(element))
-                        if matches!(module.types.get(*element as usize), Some(BcType::Str))
-                ) =>
-        {
-            true
-        }
-        _ => {
-            return Err(format!(
-                "error[E1067]: the command function must accept `()` or `[String]` in `{path}`\n"
-            ));
-        }
-    };
-    let wrapper_params = if accepts_args {
-        params.clone()
-    } else {
-        Vec::new()
-    };
-    let mut row = entry.row.clone();
-    row.extend(closure_row);
-    row.sort_by_key(|element| match element {
-        lm_bytecode::BcRow::Op(index) => (
-            0u8,
-            module
-                .strings
-                .get(*index as usize)
-                .cloned()
-                .unwrap_or_default(),
-            0u32,
-        ),
-        lm_bytecode::BcRow::Var(index) => (1u8, String::new(), *index),
-    });
-    row.dedup();
-    let mut block = vec![Instr::Call(old_entry)];
-    if accepts_args {
-        block.push(Instr::LoadLocal(0));
-    }
-    block.push(Instr::CallValue {
-        argc: u32::from(accepts_args),
-    });
-    block.push(Instr::Return);
-    let wrapper = lm_bytecode::Func {
-        name: "<command entry>".to_string(),
-        type_params: 0,
-        effect_params: 0,
-        params: wrapper_params.clone(),
-        param_muts: vec![false; wrapper_params.len()],
-        ret,
-        row,
-        captures: Vec::new(),
-        local_types: wrapper_params,
-        blocks: vec![block],
-    };
-    module.entry = module.funcs.len() as u32;
-    module.funcs.push(wrapper);
-    module.func_bounds.push(Vec::new());
-    Ok(())
 }
 
 pub(crate) fn attach_source_debug(

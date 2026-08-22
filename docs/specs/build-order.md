@@ -40,7 +40,6 @@ crates/
   lm-compiler/     source-to-artifact pipeline and bootstrap frontend
   lm-testkit/      UI/run/corruption/conformance harnesses
   lm-cli/          lm check/build/run/test/inspect/disasm/snapshot
-  lm-embed/        stable Rust embedding API and optional C shim
 core/
   option.lm result.lm ordering.lm pair.lm range.lm
   vm.lm proc.lm errors.lm native.lmi

@@ -181,20 +181,6 @@ pub fn compile_source(
     source: &SourceFile,
     is_main: bool,
 ) -> Result<CompiledSource, String> {
-    compile_source_mode(path, source, is_main, false)
-}
-
-/// Compile one source file as a command program.
-pub fn compile_command_source(path: &str, source: &SourceFile) -> Result<CompiledSource, String> {
-    compile_source_mode(path, source, true, true)
-}
-
-fn compile_source_mode(
-    path: &str,
-    source: &SourceFile,
-    is_main: bool,
-    command_entry: bool,
-) -> Result<CompiledSource, String> {
     let ast = lm_source::parse::parse(&source.text).map_err(|error| error.render(source))?;
     let uses: Vec<Vec<String>> = ast.uses.iter().map(|item| item.path.clone()).collect();
     let standard = modules_for_uses(&uses);
@@ -204,11 +190,7 @@ fn compile_source_mode(
         env.bind_interface(module.interface.clone())
             .map_err(|error| format!("error: {error}\n"))?;
     }
-    let root = if command_entry {
-        crate::module::compile_command_module(path, source, &env.freeze())?
-    } else {
-        compile_module(path, source, &env.freeze(), is_main)?
-    };
+    let root = compile_module(path, source, &env.freeze(), is_main)?;
     if standard.is_empty() {
         return Ok(CompiledSource {
             program: root.module.clone(),
@@ -248,19 +230,6 @@ fn compile_source_mode(
 /// A source without a `std` import keeps the direct checker path. A
 /// source with a `std` import uses the literal module linker.
 pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String> {
-    compile_program_mode(path, source, false)
-}
-
-/// Compile one runnable source module with command entry activation.
-pub fn compile_command_program(path: &str, source: &SourceFile) -> Result<Module, String> {
-    compile_program_mode(path, source, true)
-}
-
-fn compile_program_mode(
-    path: &str,
-    source: &SourceFile,
-    command_entry: bool,
-) -> Result<Module, String> {
     let (ast, syntax) =
         lm_source::syntax::parse_complete(&source.text).map_err(|error| error.render(source))?;
     let uses_standard = ast
@@ -268,12 +237,7 @@ fn compile_program_mode(
         .iter()
         .any(|item| item.path.first().map(String::as_str) == Some("std"));
     if uses_standard {
-        let compiled = if command_entry {
-            compile_command_source(path, source)?
-        } else {
-            compile_source(path, source, true)?
-        };
-        return Ok(compiled.program);
+        return Ok(compile_source(path, source, true)?.program);
     }
     let hir = lm_hir::check_module_with(
         &ast,
@@ -289,9 +253,6 @@ fn compile_program_mode(
         crate::module::select_linkage(path, &hir, &env.freeze(), &CompileOptions::default())?;
     let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
         .map_err(|error| format!("error: `{path}`: {error}\n"))?;
-    if command_entry {
-        crate::module::package_command_entry(&mut module, path)?;
-    }
     crate::module::attach_source_debug(&mut module, source, syntax, &ast, &hir, &linkage)?;
     Ok(module)
 }
@@ -340,7 +301,7 @@ mod tests {
 
     #[test]
     fn io_source_selects_only_io() {
-        let compiled = compile("use std.io\nio.print(\"ready\")\n");
+        let compiled = compile("use std.io.print\nprint(\"ready\")\n");
         assert_eq!(compiled.standard_modules, &[IO_PATH]);
     }
 
