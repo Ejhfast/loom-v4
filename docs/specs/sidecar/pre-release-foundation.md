@@ -1,6 +1,6 @@
 # Pre-release Language and Host Foundation
 
-Status: accepted implementation plan.
+Status: stages 1 through 3 implemented.
 
 This sidecar defines the first public release foundation.
 
@@ -10,7 +10,7 @@ Self-hosting is outside this work.
 
 Interpreter and compiler optimization are outside this work.
 
-Each stage keeps the current performance within normal measurement noise.
+Each stage records its build, test, and execution costs.
 
 ## 1. Release contract
 
@@ -372,6 +372,12 @@ Writes may accept fewer bytes than requested.
 
 `std/io` supplies `write_all`, text printing, and buffered line reading.
 
+Core does not model the process streams as zero-field resource classes.
+
+The `std.io` helpers call the `sys.io` operations directly.
+
+`ConsoleLineReader` is a class because it owns pending bytes and end-of-input state.
+
 The existing text operations remain during migration.
 
 They use the same underlying host streams.
@@ -395,6 +401,12 @@ end
 Concrete resource types retain their exact operation rows.
 
 Generic helpers use the interface effect argument.
+
+`ByteWriter.write` returns a positive count for each nonempty successful write.
+
+The count cannot exceed the supplied byte length.
+
+`std.io.write_all_to` faults when a writer breaks this contract.
 
 The interfaces do not merge filesystem, network, and process authority.
 
@@ -441,9 +453,9 @@ Completed argument, environment, directory, and entropy values are machine state
 
 A pending console operation is a host attachment.
 
-A pending environment query is a host attachment.
+Environment, directory, and entropy queries complete inside the host call.
 
-A pending entropy request is a host attachment.
+They leave no pending host attachment.
 
 No host worker object enters snapshot bytes.
 
@@ -562,3 +574,31 @@ Do not add workers to hide slower tests.
 Record any accepted compile-time or runtime change explicitly.
 
 The branch closes Stage 3 only after all three stage gates pass.
+
+## 15. Stage 3 implementation record
+
+The Stage 3 gate passed on 2026-08-21.
+
+Workspace linting and testing completed without failures.
+
+The warm full workspace suite completed in about 29 seconds.
+
+The release benchmark compared Stage 3 with commit `ed3bb7a`.
+
+| Measurement | Stage 2 | Stage 3 | Change |
+|---|---:|---:|---:|
+| core classes | 172 | 194 | +12.8% |
+| core functions | 513 | 538 | +4.9% |
+| core artifact | 112,328 bytes | 119,594 bytes | +6.5% |
+| core compilation | 1.885 ms | 1.937 ms | +2.8% |
+| core loading | 0.802 ms | 0.837 ms | +4.4% |
+
+Stage 3 adds core contracts, command status values, and typed errors.
+
+The selected execution benchmarks found no runtime regression.
+
+| Benchmark | Stage 2 | Stage 3 |
+|---|---:|---:|
+| `int_loop` | 34.8 ns | 31.8 ns |
+| `direct_call` | 32.7 ns | 31.3 ns |
+| `world_int_loop` | 35.5 ns | 34.2 ns |

@@ -35,7 +35,7 @@ pub const NO_APP: u32 = u32::MAX;
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 143;
+pub const CORE_ROLE_COUNT: usize = 165;
 
 /// Join a module path and a declaration name into one qualified key.
 ///

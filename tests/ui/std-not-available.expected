@@ -1,2 +1,2 @@
-error[E1052]: `std.io` names no module of `std`
+error[E1052]: `std.missing` names no module of `std`
   --> tests/ui/std-not-available.lm:1:1

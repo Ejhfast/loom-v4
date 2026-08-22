@@ -1,0 +1,186 @@
+# Standard library: process console helpers.
+
+def write_all_to[effect e, W: ByteWriter with e](
+  writer: W,
+  bytes: Bytes
+): Result[(), W.Error] with e
+  offset = 0
+  while offset < bytes.len()
+    remaining = bytes.len() - offset
+    count = if remaining < 65536
+      remaining
+    else
+      65536
+    end
+    part = bytes.slice(offset, count).expect("the write suffix is valid")
+    case writer.write(part)
+    in Ok(written)
+      assert_message(written > 0, "a byte writer made no progress")
+      assert_message(written <= part.len(), "a byte writer accepted too many bytes")
+      offset = offset + written
+    in Err(error)
+      return Err(error)
+    end
+  end
+  Ok(())
+end
+
+def write_all(bytes: Bytes): Result[(), IoError] with Io.Write
+  offset = 0
+  while offset < bytes.len()
+    remaining = bytes.len() - offset
+    count = if remaining < 65536
+      remaining
+    else
+      65536
+    end
+    part = case bytes.slice(offset, count)
+    in Ok(value) then value
+    in Err(_)
+      return Err(IoError.Failed("the output suffix is invalid"))
+    end
+    case sys.io.write(part)
+    in Ok(written)
+      if written <= 0 or written > part.len()
+        return Err(IoError.Failed("the output stream made invalid progress"))
+      end
+      offset = offset + written
+    in Err(error)
+      return Err(error)
+    end
+  end
+  Ok(())
+end
+
+def write_error_all(bytes: Bytes): Result[(), IoError] with Io.WriteError
+  offset = 0
+  while offset < bytes.len()
+    remaining = bytes.len() - offset
+    count = if remaining < 65536
+      remaining
+    else
+      65536
+    end
+    part = case bytes.slice(offset, count)
+    in Ok(value) then value
+    in Err(_)
+      return Err(IoError.Failed("the error output suffix is invalid"))
+    end
+    case sys.io.write_error(part)
+    in Ok(written)
+      if written <= 0 or written > part.len()
+        return Err(IoError.Failed("the error output stream made invalid progress"))
+      end
+      offset = offset + written
+    in Err(error)
+      return Err(error)
+    end
+  end
+  Ok(())
+end
+
+def print(text: Text): Result[(), IoError] with Io.Write
+  write_all(text.bytes())
+end
+
+def print_error(text: Text): Result[(), IoError] with Io.WriteError
+  write_error_all(text.bytes())
+end
+
+def read_to_end(max_bytes: Int): Result[Bytes, IoError] with Io.ReadBytes
+  if max_bytes < 0
+    return Err(IoError.InvalidInput("the input limit is negative"))
+  end
+  buffer = ByteBuffer()
+  loop do
+    remaining = max_bytes - buffer.len()
+    count = if remaining < 8192
+      remaining + 1
+    else
+      8192
+    end
+    bytes = sys.io.read_bytes(count)?
+    if bytes.is_empty()
+      return Ok(buffer.finish())
+    end
+    buffer.extend(bytes)
+    if buffer.len() > max_bytes
+      return Err(IoError.LimitExceeded("the input exceeds its byte limit"))
+    end
+  end
+end
+
+final class ConsoleLineReader
+  buffer: ByteBuffer = ByteBuffer()
+  newline: Bytes = Bytes("\n")
+  searched: Int = 0
+  ended: Bool = false
+
+  def read_line(mut self, max_bytes: Int): Result[Option[String], IoError] with Io.ReadBytes
+    if max_bytes < 0
+      return Err(IoError.InvalidInput("the line limit is negative"))
+    end
+    loop do
+      newline = if self.searched < self.buffer.len()
+        self.buffer.find_from_or(self.newline, self.searched, -1)
+      else
+        -1
+      end
+      if newline >= 0
+        if newline > max_bytes
+          return Err(IoError.LimitExceeded("the input line exceeds its byte limit"))
+        end
+        line_end = if newline > 0 and self.buffer.at_or(newline - 1, -1) == 13
+          newline - 1
+        else
+          newline
+        end
+        data = self.buffer.build()
+        line = data.slice(0, line_end).expect("the line bounds are valid")
+        rest_start = newline + 1
+        rest_length = data.len() - rest_start
+        rest = data.slice(rest_start, rest_length).expect("the remaining input bounds are valid")
+        self.buffer.clear()
+        self.buffer.extend(rest)
+        self.searched = 0
+        case line.utf8()
+        in Ok(text) then return Ok(Some(text))
+        in Err(_)
+          return Err(IoError.InvalidInput("the input line is not valid UTF-8"))
+        end
+      end
+      self.searched = self.buffer.len()
+
+      if self.buffer.len() > max_bytes
+        return Err(IoError.LimitExceeded("the input line exceeds its byte limit"))
+      end
+      if self.ended
+        if self.buffer.len() == 0
+          return Ok(None)
+        end
+        line = self.buffer.build()
+        self.buffer.clear()
+        self.searched = 0
+        case line.utf8()
+        in Ok(text) then return Ok(Some(text))
+        in Err(_)
+          return Err(IoError.InvalidInput("the input line is not valid UTF-8"))
+        end
+      end
+
+      remaining = max_bytes - self.buffer.len()
+      count = if remaining < 8192
+        remaining + 1
+      else
+        8192
+      end
+      bytes = sys.io.read_bytes(count)?
+      if bytes.is_empty()
+        self.ended = true
+      else
+        self.buffer.extend(bytes)
+        ()
+      end
+    end
+  end
+end

@@ -74,11 +74,20 @@ impl CliHost {
     }
 
     fn start_stream(&mut self, key: CompletionKey, request: StreamRequest) -> HostStart {
+        let typed = matches!(
+            request,
+            StreamRequest::ReadBytes(_) | StreamRequest::Write(_) | StreamRequest::WriteError(_)
+        );
         let Some(token) = self.take_token() else {
             return HostStart::Failed("the completion token space is exhausted".to_string());
         };
         if self.io().submit_stream(key, token, request) {
             HostStart::Waiting(token)
+        } else if typed {
+            HostStart::Completed(error_value(
+                CoreCtor::IoErrorLimitExceeded,
+                Some("the console queue is full"),
+            ))
         } else {
             HostStart::Failed("the I/O queue is full".to_string())
         }
@@ -181,6 +190,17 @@ fn tls_error(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
     )
 }
 
+fn ok_value(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn error_value(ctor: CoreCtor, message: Option<&str>) -> HostValue {
+    let fields = message
+        .map(|message| vec![HostValue::Str(message.to_string().into())])
+        .unwrap_or_default();
+    HostValue::Ctor(CoreCtor::Err, vec![HostValue::Ctor(ctor, fields)])
+}
+
 fn byte_list(value: &HostArg) -> Option<Vec<SharedBytes>> {
     let HostArg::List(values) = value else {
         return None;
@@ -196,6 +216,8 @@ fn byte_list(value: &HostArg) -> Option<Vec<SharedBytes>> {
 
 const MAX_FILE_IO_BYTES: usize = 16 << 20;
 const MAX_NETWORK_IO_BYTES: usize = 16 << 20;
+const MAX_CONSOLE_IO_BYTES: usize = 16 << 20;
+const MAX_ENTROPY_BYTES: usize = 16 << 20;
 
 impl Host for CliHost {
     fn start(&mut self, key: CompletionKey, op: u32, args: Vec<HostArg>) -> HostStart {
@@ -213,6 +235,117 @@ impl Host for CliHost {
                 self.start_stream(key, StreamRequest::Error(text.clone()))
             }
             lm_abi::OP_IO_READ_LINE => self.start_stream(key, StreamRequest::ReadLine),
+            lm_abi::OP_IO_READ_BYTES => {
+                let Some(HostArg::Int(count)) = args.first() else {
+                    return HostStart::Failed("Io.ReadBytes needs one integer".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::IoErrorInvalidInput,
+                        Some("the read count is negative"),
+                    ));
+                };
+                if count > MAX_CONSOLE_IO_BYTES {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::IoErrorLimitExceeded,
+                        Some("the read count is too large"),
+                    ));
+                }
+                self.start_stream(key, StreamRequest::ReadBytes(count))
+            }
+            lm_abi::OP_IO_WRITE => {
+                let Some(HostArg::Bytes(bytes)) = args.first() else {
+                    return HostStart::Failed("Io.Write needs one byte value".to_string());
+                };
+                if bytes.len() > MAX_CONSOLE_IO_BYTES {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::IoErrorLimitExceeded,
+                        Some("the write value is too large"),
+                    ));
+                }
+                self.start_stream(key, StreamRequest::Write(bytes.clone()))
+            }
+            lm_abi::OP_IO_WRITE_ERROR => {
+                let Some(HostArg::Bytes(bytes)) = args.first() else {
+                    return HostStart::Failed("Io.WriteError needs one byte value".to_string());
+                };
+                if bytes.len() > MAX_CONSOLE_IO_BYTES {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::IoErrorLimitExceeded,
+                        Some("the write value is too large"),
+                    ));
+                }
+                self.start_stream(key, StreamRequest::WriteError(bytes.clone()))
+            }
+            lm_abi::OP_ENV_GET => {
+                let Some(HostArg::Str(name)) = args.first() else {
+                    return HostStart::Failed("Env.Get needs one string".to_string());
+                };
+                if name.is_empty() || name.contains('=') || name.contains('\0') {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::EnvInvalidName,
+                        Some("the environment name is invalid"),
+                    ));
+                }
+                match std::env::var_os(name.as_str()) {
+                    None => HostStart::Completed(ok_value(HostValue::Ctor(CoreCtor::None, vec![]))),
+                    Some(value) => match value.into_string() {
+                        Ok(value) => HostStart::Completed(ok_value(HostValue::Ctor(
+                            CoreCtor::Some,
+                            vec![HostValue::Str(value.into())],
+                        ))),
+                        Err(_) => HostStart::Completed(error_value(
+                            CoreCtor::EnvInvalidEncoding,
+                            Some("the environment value is not valid UTF-8"),
+                        )),
+                    },
+                }
+            }
+            lm_abi::OP_PROCESS_CURRENT_DIR => match std::env::current_dir() {
+                Ok(path) => match path.into_os_string().into_string() {
+                    Ok(path) => HostStart::Completed(ok_value(HostValue::Str(path.into()))),
+                    Err(_) => HostStart::Completed(error_value(
+                        CoreCtor::ProcessInvalidInput,
+                        Some("the current directory is not valid UTF-8"),
+                    )),
+                },
+                Err(error) => {
+                    let ctor = match error.kind() {
+                        std::io::ErrorKind::PermissionDenied => CoreCtor::ProcessPermissionDenied,
+                        std::io::ErrorKind::NotFound => CoreCtor::ProcessNotFound,
+                        _ => CoreCtor::ProcessFailed,
+                    };
+                    HostStart::Completed(error_value(
+                        ctor,
+                        Some(&format!("current directory query failed: {error}")),
+                    ))
+                }
+            },
+            lm_abi::OP_ENTROPY_BYTES => {
+                let Some(HostArg::Int(count)) = args.first() else {
+                    return HostStart::Failed("Entropy.Bytes needs one integer".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::EntropyInvalidInput,
+                        Some("the entropy count is negative"),
+                    ));
+                };
+                if count > MAX_ENTROPY_BYTES {
+                    return HostStart::Completed(error_value(
+                        CoreCtor::EntropyLimitExceeded,
+                        Some("the entropy count is too large"),
+                    ));
+                }
+                let mut bytes = vec![0; count];
+                match getrandom::getrandom(&mut bytes) {
+                    Ok(()) => HostStart::Completed(ok_value(HostValue::Bytes(bytes.into()))),
+                    Err(_) => HostStart::Completed(error_value(
+                        CoreCtor::EntropyUnavailable,
+                        Some("secure entropy is unavailable"),
+                    )),
+                }
+            }
             lm_abi::OP_CLOCK_NOW => {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -911,7 +1044,7 @@ mod tests {
         completion.result.expect("the host operation succeeds")
     }
 
-    fn fs_ok_value(value: HostValue) -> HostValue {
+    fn unwrap_ok_value(value: HostValue) -> HostValue {
         match value {
             HostValue::Ctor(CoreCtor::Ok, mut values) if values.len() == 1 => {
                 values.pop().expect("the success value exists")
@@ -1074,6 +1207,57 @@ mod tests {
     }
 
     #[test]
+    fn secure_entropy_does_not_advance_deterministic_rand() {
+        let draw = |host: &mut CliHost| match run_host(
+            host,
+            lm_abi::OP_RAND_INT,
+            vec![HostArg::Int(0), HostArg::Int(1_000_000)],
+        ) {
+            HostValue::Int(value) => value,
+            other => panic!("expected one random integer, found {other:?}"),
+        };
+        let mut plain = CliHost::new(91);
+        let plain_pair = (draw(&mut plain), draw(&mut plain));
+        let mut secure = CliHost::new(91);
+        let first = draw(&mut secure);
+        let entropy = unwrap_ok_value(run_host(
+            &mut secure,
+            lm_abi::OP_ENTROPY_BYTES,
+            vec![HostArg::Int(32)],
+        ));
+        let second = draw(&mut secure);
+        assert_eq!((first, second), plain_pair);
+        assert!(matches!(entropy, HostValue::Bytes(bytes) if bytes.len() == 32));
+    }
+
+    #[test]
+    fn command_queries_return_typed_values() {
+        let mut host = CliHost::new(1);
+        let missing = unwrap_ok_value(run_host(
+            &mut host,
+            lm_abi::OP_ENV_GET,
+            vec![HostArg::Str(
+                "LOOM_TEST_VALUE_THAT_DOES_NOT_EXIST_9D02".into(),
+            )],
+        ));
+        assert_eq!(missing, HostValue::Ctor(CoreCtor::None, vec![]));
+        let directory =
+            unwrap_ok_value(run_host(&mut host, lm_abi::OP_PROCESS_CURRENT_DIR, vec![]));
+        assert!(matches!(directory, HostValue::Str(path) if !path.is_empty()));
+        let invalid = run_host(&mut host, lm_abi::OP_ENTROPY_BYTES, vec![HostArg::Int(-1)]);
+        assert_eq!(
+            invalid,
+            HostValue::Ctor(
+                CoreCtor::Err,
+                vec![HostValue::Ctor(
+                    CoreCtor::EntropyInvalidInput,
+                    vec![HostValue::Str("the entropy count is negative".into())],
+                )],
+            )
+        );
+    }
+
+    #[test]
     fn sleep_uses_the_completion_channel() {
         let mut host = CliHost::new(1);
         let token = match host.start(completion(), lm_abi::OP_CLOCK_SLEEP, vec![HostArg::Int(1)]) {
@@ -1096,7 +1280,7 @@ mod tests {
         let path_text = path.0.to_string_lossy().into_owned();
         let mut host = CliHost::new(1);
 
-        let token = match fs_ok_value(run_host(
+        let token = match unwrap_ok_value(run_host(
             &mut host,
             lm_abi::OP_FS_OPEN,
             vec![
@@ -1108,7 +1292,7 @@ mod tests {
             other => panic!("expected a file token, found {other:?}"),
         };
         assert_eq!(
-            fs_ok_value(run_host(
+            unwrap_ok_value(run_host(
                 &mut host,
                 lm_abi::OP_FS_WRITE,
                 vec![HostArg::File(token), HostArg::Bytes(b"hello".into())],
@@ -1116,7 +1300,7 @@ mod tests {
             HostValue::Int(5)
         );
         assert_eq!(
-            fs_ok_value(run_host(
+            unwrap_ok_value(run_host(
                 &mut host,
                 lm_abi::OP_FS_FLUSH,
                 vec![HostArg::File(token)],
@@ -1124,7 +1308,7 @@ mod tests {
             HostValue::Unit
         );
         assert_eq!(
-            fs_ok_value(run_host(
+            unwrap_ok_value(run_host(
                 &mut host,
                 lm_abi::OP_FS_SEEK,
                 vec![
@@ -1135,7 +1319,7 @@ mod tests {
             HostValue::Int(0)
         );
         assert_eq!(
-            fs_ok_value(run_host(
+            unwrap_ok_value(run_host(
                 &mut host,
                 lm_abi::OP_FS_READ,
                 vec![HostArg::File(token), HostArg::Int(5)],
@@ -1143,7 +1327,7 @@ mod tests {
             HostValue::Bytes(b"hello".into())
         );
         assert_eq!(
-            fs_ok_value(run_host(
+            unwrap_ok_value(run_host(
                 &mut host,
                 lm_abi::OP_FS_CLOSE,
                 vec![HostArg::File(token)],

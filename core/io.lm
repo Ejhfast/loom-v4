@@ -1,0 +1,17 @@
+# Core: command status and byte stream helpers.
+
+enum ExitStatus
+  Success
+  Failure
+  Code(value: Int)
+end
+
+interface ByteReader[effect e]
+  type Error
+  def read(self, count: Int): Result[Bytes, Self.Error] with e
+end
+
+interface ByteWriter[effect e]
+  type Error
+  def write(self, bytes: Bytes): Result[Int, Self.Error] with e
+end

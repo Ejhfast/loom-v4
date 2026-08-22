@@ -100,7 +100,8 @@ use std::collections::{BTreeSet, HashMap};
 /// Version 35 publishes static bindings apart from late linkage.
 /// Version 36 makes a class family part of its replacement contract.
 /// Version 37 adds multiple bounds to associated interface types.
-pub const COMPILER_ABI_VERSION: u32 = 37;
+/// Version 38 adds callable command entry wrappers.
+pub const COMPILER_ABI_VERSION: u32 = 38;
 
 /// The refinement work budget of one component.
 ///

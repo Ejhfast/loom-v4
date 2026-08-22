@@ -50,7 +50,7 @@ const USAGE: &str = "usage:
   lm build [file.lm | package directory]
   lm run [--show-result] [--allow Op1,Group2,...] [--rand-seed N]
          [--fuel N] [--max-frames N] [--heap-bytes N]
-         [file.lm | file.lma | package directory]
+         [file.lm | file.lma | package directory] [-- arguments...]
   (`lm build` and `lm run` default to the current directory)
   lm disasm <file.lm | file.lma>
   lm inspect --shapes
@@ -120,7 +120,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             build_artifact(&options.file)
         }
         "run" => {
-            let options = parse_options_with(rest, Some("."))?;
+            let options = parse_run_options(rest, Some("."))?;
             if is_package(&options.file) {
                 let report = build_package(&options.file, true)?;
                 let program = report.program.ok_or_else(|| {
@@ -435,14 +435,20 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
     // is the thread-backed baseline of specification 22.12.
     let seed = options.rand_seed;
     let grants: Vec<&str> = options.allow.iter().map(|g| g.as_str()).collect();
-    let result = lm_proc::run_on_worker(
+    let result = lm_proc::run_command_on_worker(
         &loaded,
         options.config,
         &grants,
+        &options.command_args,
         Box::new(move || Box::new(lm_host::CliHost::new(seed))),
     )
-    .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
-    let (faulted, text, fault_context) = (result.faulted, result.text, result.fault_context);
+    .map_err(|e| format!("error: {e}\n"))?;
+    let (faulted, exit_code, text, fault_context) = (
+        result.faulted,
+        result.exit_code,
+        result.text,
+        result.fault_context,
+    );
     if options.show_result {
         outln!("{text}");
     } else if faulted {
@@ -457,11 +463,7 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
             }
         }
     }
-    if faulted {
-        Ok(ExitCode::from(1))
-    } else {
-        Ok(ExitCode::SUCCESS)
-    }
+    Ok(ExitCode::from(exit_code))
 }
 
 fn extension(path: &str) -> &str {
@@ -579,6 +581,8 @@ struct Options {
     allow: Vec<String>,
     rand_seed: u64,
     config: VmConfig,
+    /// The tokens after the `lm run` separator.
+    command_args: Vec<String>,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -590,6 +594,18 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
 /// default to the current directory, so both work from any directory
 /// inside a package.
 fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Options, String> {
+    parse_options_mode(args, default_file, false)
+}
+
+fn parse_run_options(args: &[String], default_file: Option<&str>) -> Result<Options, String> {
+    parse_options_mode(args, default_file, true)
+}
+
+fn parse_options_mode(
+    args: &[String],
+    default_file: Option<&str>,
+    command_mode: bool,
+) -> Result<Options, String> {
     let mut file = None;
     let mut extra = None;
     let mut program = None;
@@ -599,9 +615,17 @@ fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Opt
     let mut allow = Vec::new();
     let mut rand_seed = 1;
     let mut config = VmConfig::default();
+    let mut command_args = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--" if command_mode => {
+                command_args.extend(iter.cloned());
+                break;
+            }
+            "--" => {
+                return Err(format!("error: `--` is valid only for `lm run`\n{USAGE}\n"));
+            }
             "--show-result" => show_result = true,
             "--live" => live = true,
             "--shapes" => shapes = true,
@@ -628,6 +652,10 @@ fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Opt
             other => {
                 if file.is_none() {
                     file = Some(other.to_string());
+                } else if command_mode {
+                    return Err(format!(
+                        "error: unexpected argument `{other}` before `--`\n{USAGE}\n"
+                    ));
                 } else if extra.is_none() {
                     extra = Some(other.to_string());
                 } else {
@@ -649,6 +677,7 @@ fn parse_options_with(args: &[String], default_file: Option<&str>) -> Result<Opt
         allow,
         rand_seed,
         config,
+        command_args,
     })
 }
 
@@ -690,12 +719,12 @@ const SINGLE_FILE_MODULE_PATH: &str = "";
 
 /// Compile one source file and its selected standard modules.
 fn compile_file(source: &SourceFile) -> Result<lm_compiler::CompiledSource, String> {
-    lm_compiler::compile_source(SINGLE_FILE_MODULE_PATH, source, true)
+    lm_compiler::compile_command_source(SINGLE_FILE_MODULE_PATH, source)
 }
 
 /// Compile one source file to decoded bytecode.
 fn compile(source: &SourceFile) -> Result<lm_bytecode::Module, String> {
-    lm_compiler::compile_program(SINGLE_FILE_MODULE_PATH, source)
+    lm_compiler::compile_command_program(SINGLE_FILE_MODULE_PATH, source)
 }
 
 #[cfg(test)]

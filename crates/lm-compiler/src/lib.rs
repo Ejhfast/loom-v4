@@ -33,7 +33,11 @@ pub use env::{CompileEnv, LinkEnv, LinkUnit};
 pub use link::{link, link_with_bundle, LinkedProgram};
 pub use manifest::{parse_manifest, Manifest};
 pub use module::{
-    compile_module, compile_module_with_bundle, compile_module_with_options,
-    compile_module_with_options_and_bundle, CompileOptions, CompiledModule,
+    compile_command_module, compile_module, compile_module_with_bundle,
+    compile_module_with_options, compile_module_with_options_and_bundle, CompileOptions,
+    CompiledModule,
 };
-pub use standard::{compile_program, compile_source, CompiledSource, StandardCatalog};
+pub use standard::{
+    compile_command_program, compile_command_source, compile_program, compile_source,
+    CompiledSource, StandardCatalog,
+};

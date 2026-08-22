@@ -52,7 +52,25 @@ pub struct CoreLayout {
     pub option_none: Option<u32>,
     pub result_ok: Option<u32>,
     pub result_err: Option<u32>,
+    pub io_error_broken_pipe: Option<u32>,
+    pub io_error_invalid_input: Option<u32>,
+    pub io_error_limit_exceeded: Option<u32>,
     pub io_error_failed: Option<u32>,
+    pub env_error_invalid_name: Option<u32>,
+    pub env_error_invalid_encoding: Option<u32>,
+    pub env_error_permission_denied: Option<u32>,
+    pub env_error_failed: Option<u32>,
+    pub process_error_invalid_input: Option<u32>,
+    pub process_error_permission_denied: Option<u32>,
+    pub process_error_not_found: Option<u32>,
+    pub process_error_failed: Option<u32>,
+    pub entropy_error_invalid_input: Option<u32>,
+    pub entropy_error_limit_exceeded: Option<u32>,
+    pub entropy_error_unavailable: Option<u32>,
+    pub entropy_error_failed: Option<u32>,
+    pub exit_status_success: Option<u32>,
+    pub exit_status_failure: Option<u32>,
+    pub exit_status_code: Option<u32>,
     pub run_done: Option<u32>,
     pub run_fault: Option<u32>,
     pub step_ran: Option<u32>,
@@ -79,6 +97,10 @@ pub struct CoreLayout {
     pub option: Option<u32>,
     pub result: Option<u32>,
     pub io_error: Option<u32>,
+    pub env_error: Option<u32>,
+    pub process_error: Option<u32>,
+    pub entropy_error: Option<u32>,
+    pub exit_status: Option<u32>,
     pub run_result: Option<u32>,
     pub step_event: Option<u32>,
     pub drive_event: Option<u32>,
@@ -189,7 +211,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 143] = [
+pub const PINNED_LABELS: [&str; 165] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -333,6 +355,28 @@ pub const PINNED_LABELS: [&str; 143] = [
     "DefinitionSpec",
     "SlotChange",
     "DefinitionIdentity",
+    "IoError.BrokenPipe",
+    "IoError.InvalidInput",
+    "IoError.LimitExceeded",
+    "EnvError",
+    "EnvError.InvalidName",
+    "EnvError.InvalidEncoding",
+    "EnvError.PermissionDenied",
+    "EnvError.Failed",
+    "ProcessError",
+    "ProcessError.InvalidInput",
+    "ProcessError.PermissionDenied",
+    "ProcessError.NotFound",
+    "ProcessError.Failed",
+    "EntropyError",
+    "EntropyError.InvalidInput",
+    "EntropyError.LimitExceeded",
+    "EntropyError.Unavailable",
+    "EntropyError.Failed",
+    "ExitStatus",
+    "ExitStatus.Success",
+    "ExitStatus.Failure",
+    "ExitStatus.Code",
 ];
 
 /// The core role of immediate integer values.
@@ -446,6 +490,28 @@ pub const ROLE_CLASS_BINDING: usize = 139;
 pub const ROLE_DEFINITION_SPEC: usize = 140;
 pub const ROLE_SLOT_CHANGE: usize = 141;
 pub const ROLE_DEFINITION_IDENTITY: usize = 142;
+pub const ROLE_IO_ERROR_BROKEN_PIPE: usize = 143;
+pub const ROLE_IO_ERROR_INVALID_INPUT: usize = 144;
+pub const ROLE_IO_ERROR_LIMIT_EXCEEDED: usize = 145;
+pub const ROLE_ENV_ERROR: usize = 146;
+pub const ROLE_ENV_ERROR_INVALID_NAME: usize = 147;
+pub const ROLE_ENV_ERROR_INVALID_ENCODING: usize = 148;
+pub const ROLE_ENV_ERROR_PERMISSION_DENIED: usize = 149;
+pub const ROLE_ENV_ERROR_FAILED: usize = 150;
+pub const ROLE_PROCESS_ERROR: usize = 151;
+pub const ROLE_PROCESS_ERROR_INVALID_INPUT: usize = 152;
+pub const ROLE_PROCESS_ERROR_PERMISSION_DENIED: usize = 153;
+pub const ROLE_PROCESS_ERROR_NOT_FOUND: usize = 154;
+pub const ROLE_PROCESS_ERROR_FAILED: usize = 155;
+pub const ROLE_ENTROPY_ERROR: usize = 156;
+pub const ROLE_ENTROPY_ERROR_INVALID_INPUT: usize = 157;
+pub const ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED: usize = 158;
+pub const ROLE_ENTROPY_ERROR_UNAVAILABLE: usize = 159;
+pub const ROLE_ENTROPY_ERROR_FAILED: usize = 160;
+pub const ROLE_EXIT_STATUS: usize = 161;
+pub const ROLE_EXIT_STATUS_SUCCESS: usize = 162;
+pub const ROLE_EXIT_STATUS_FAILURE: usize = 163;
+pub const ROLE_EXIT_STATUS_CODE: usize = 164;
 
 fn parse_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
@@ -512,7 +578,29 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Result.Ok" => &mut layout.result_ok,
         "Result.Err" => &mut layout.result_err,
         "IoError" => &mut layout.io_error,
+        "IoError.BrokenPipe" => &mut layout.io_error_broken_pipe,
+        "IoError.InvalidInput" => &mut layout.io_error_invalid_input,
+        "IoError.LimitExceeded" => &mut layout.io_error_limit_exceeded,
         "IoError.Failed" => &mut layout.io_error_failed,
+        "EnvError" => &mut layout.env_error,
+        "EnvError.InvalidName" => &mut layout.env_error_invalid_name,
+        "EnvError.InvalidEncoding" => &mut layout.env_error_invalid_encoding,
+        "EnvError.PermissionDenied" => &mut layout.env_error_permission_denied,
+        "EnvError.Failed" => &mut layout.env_error_failed,
+        "ProcessError" => &mut layout.process_error,
+        "ProcessError.InvalidInput" => &mut layout.process_error_invalid_input,
+        "ProcessError.PermissionDenied" => &mut layout.process_error_permission_denied,
+        "ProcessError.NotFound" => &mut layout.process_error_not_found,
+        "ProcessError.Failed" => &mut layout.process_error_failed,
+        "EntropyError" => &mut layout.entropy_error,
+        "EntropyError.InvalidInput" => &mut layout.entropy_error_invalid_input,
+        "EntropyError.LimitExceeded" => &mut layout.entropy_error_limit_exceeded,
+        "EntropyError.Unavailable" => &mut layout.entropy_error_unavailable,
+        "EntropyError.Failed" => &mut layout.entropy_error_failed,
+        "ExitStatus" => &mut layout.exit_status,
+        "ExitStatus.Success" => &mut layout.exit_status_success,
+        "ExitStatus.Failure" => &mut layout.exit_status_failure,
+        "ExitStatus.Code" => &mut layout.exit_status_code,
         "RunResult" => &mut layout.run_result,
         "RunResult.Done" => &mut layout.run_done,
         "RunResult.Fault" => &mut layout.run_fault,

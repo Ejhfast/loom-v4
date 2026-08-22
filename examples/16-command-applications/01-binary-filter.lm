@@ -1,0 +1,75 @@
+# Copy standard input to standard output without text decoding.
+#
+# Run with these grants:
+# Io.ReadBytes,Io.Write,Env.Get,Process.CurrentDir,Entropy.Bytes
+#
+# The first argument sets the read size. `LOOM_COPY_CHUNK` supplies
+# the default when the command has no argument.
+
+use std.io
+
+def parse_chunk(text: Text): Result[Int, String]
+  case text.parse_int(10)
+  in Ok(value)
+    if value > 0
+      Ok(value)
+    else
+      Err("the read size must be positive")
+    end
+  in Err(_)
+    Err("the read size must be an integer")
+  end
+end
+
+def copy_input(count: Int): Result[(), IoError] with Io.ReadBytes, Io.Write
+  loop do
+    bytes = sys.io.read_bytes(count)?
+    if bytes.is_empty()
+      break
+    end
+    io.write_all(bytes)?
+  end
+  Ok(())
+end
+
+do |args: [String]|: ExitStatus with Io.ReadBytes, Io.Write, Env.Get, Process.CurrentDir, Entropy.Bytes
+  default_chunk = case sys.env.get("LOOM_COPY_CHUNK")
+  in Ok(Some(text))
+    case parse_chunk(text)
+    in Ok(value) then value
+    in Err(_) then return ExitStatus.Failure
+    end
+  in Ok(None) then 65536
+  in Err(_) then return ExitStatus.Failure
+  end
+
+  chunk = if args.is_empty()
+    default_chunk
+  else
+    case parse_chunk(args.at(0))
+    in Ok(value) then value
+    in Err(_) then return ExitStatus.Failure
+    end
+  end
+
+  case sys.process.current_dir()
+  in Ok(path)
+    if path.is_empty()
+      return ExitStatus.Failure
+    end
+  in Err(_) then return ExitStatus.Failure
+  end
+
+  case sys.entropy.bytes(16)
+  in Ok(bytes)
+    if bytes.len() != 16
+      return ExitStatus.Failure
+    end
+  in Err(_) then return ExitStatus.Failure
+  end
+
+  case copy_input(chunk)
+  in Ok(_) then ExitStatus.Success
+  in Err(_) then ExitStatus.Failure
+  end
+end

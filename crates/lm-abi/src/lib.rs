@@ -44,7 +44,9 @@ pub use sha::{sha256, sha256_hex};
 /// Version 17 adds installed function and class binding controls.
 /// Version 18 adds guest snapshot encoding.
 /// Version 19 adds immutable ABI bundles and extension resources.
-pub const ABI_VERSION: u32 = 19;
+/// Version 20 adds command input, output, environment, process, and
+/// entropy operations.
+pub const ABI_VERSION: u32 = 20;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -58,7 +60,7 @@ pub type OpSlot = u32;
 /// list makes a namespace group. Its members are the operations whose
 /// `group` field names that group. A nonempty list can name exact
 /// operations or other groups.
-pub const GROUPS: [&str; 22] = [
+pub const GROUPS: [&str; 25] = [
     "Io",
     "Fs",
     "Clock",
@@ -81,6 +83,9 @@ pub const GROUPS: [&str; 22] = [
     "Tls.Client",
     "Http.Client",
     "Choose",
+    "Env",
+    "Process",
+    "Entropy",
 ];
 
 const TCP_STREAM_MEMBERS: &[&str] = &[
@@ -108,7 +113,7 @@ const TLS_CLIENT_MEMBERS: &[&str] = &["Tls.Handshake", "Tls.Stream"];
 const HTTP_CLIENT_MEMBERS: &[&str] = &["Dns.Resolve", "Tcp.Client", "Tls.Client"];
 
 /// The explicit members of each group slot.
-pub const GROUP_MEMBERS: [&[&str]; 22] = [
+pub const GROUP_MEMBERS: [&[&str]; 25] = [
     &[],
     &[],
     &[],
@@ -130,6 +135,9 @@ pub const GROUP_MEMBERS: [&[&str]; 22] = [
     TLS_STREAM_MEMBERS,
     TLS_CLIENT_MEMBERS,
     HTTP_CLIENT_MEMBERS,
+    &[],
+    &[],
+    &[],
     &[],
 ];
 
@@ -171,6 +179,9 @@ pub enum AbiCore {
     SeekFrom,
     IoError,
     FsError,
+    EnvError,
+    ProcessError,
+    EntropyError,
     SnapshotError,
     IpAddress,
     SocketAddress,
@@ -204,6 +215,9 @@ impl AbiCore {
             AbiCore::SeekFrom => "SeekFrom",
             AbiCore::IoError => "IoError",
             AbiCore::FsError => "FsError",
+            AbiCore::EnvError => "EnvError",
+            AbiCore::ProcessError => "ProcessError",
+            AbiCore::EntropyError => "EntropyError",
             AbiCore::SnapshotError => "SnapshotError",
             AbiCore::IpAddress => "IpAddress",
             AbiCore::SocketAddress => "SocketAddress",
@@ -308,6 +322,9 @@ impl AbiType {
     pub const SEEK_FROM: AbiType = AbiType::Core(AbiCore::SeekFrom);
     pub const IO_ERROR: AbiType = AbiType::Core(AbiCore::IoError);
     pub const FS_ERROR: AbiType = AbiType::Core(AbiCore::FsError);
+    pub const ENV_ERROR: AbiType = AbiType::Core(AbiCore::EnvError);
+    pub const PROCESS_ERROR: AbiType = AbiType::Core(AbiCore::ProcessError);
+    pub const ENTROPY_ERROR: AbiType = AbiType::Core(AbiCore::EntropyError);
     pub const SNAPSHOT_ERROR: AbiType = AbiType::Core(AbiCore::SnapshotError);
     pub const IP_ADDRESS: AbiType = AbiType::Core(AbiCore::IpAddress);
     pub const SOCKET_ADDRESS: AbiType = AbiType::Core(AbiCore::SocketAddress);
@@ -341,6 +358,25 @@ impl AbiType {
             AbiType::Apply(AbiConstructor::Option, &[AbiType::STR]),
             AbiType::IO_ERROR,
         ],
+    );
+    pub const RESULT_BYTES_IO_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::BYTES, AbiType::IO_ERROR]);
+    pub const RESULT_INT_IO_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::INT, AbiType::IO_ERROR]);
+    pub const RESULT_OPTION_STR_ENV_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[
+            AbiType::Apply(AbiConstructor::Option, &[AbiType::STR]),
+            AbiType::ENV_ERROR,
+        ],
+    );
+    pub const RESULT_STR_PROCESS_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::STR, AbiType::PROCESS_ERROR],
+    );
+    pub const RESULT_BYTES_ENTROPY_ERROR: AbiType = AbiType::Apply(
+        AbiConstructor::Result,
+        &[AbiType::BYTES, AbiType::ENTROPY_ERROR],
     );
     pub const RESULT_VM_SNAPSHOT_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
@@ -1680,9 +1716,15 @@ pub const OP_VM_CHANGE_PROCESS: OpSlot = 104;
 pub const OP_VM_REPLACE_ALL: OpSlot = 105;
 pub const OP_VM_RUN_SNAPSHOT_BYTES: OpSlot = 106;
 pub const OP_VM_SNAPSHOT_BYTES: OpSlot = 107;
+pub const OP_IO_READ_BYTES: OpSlot = 108;
+pub const OP_IO_WRITE: OpSlot = 109;
+pub const OP_IO_WRITE_ERROR: OpSlot = 110;
+pub const OP_ENV_GET: OpSlot = 111;
+pub const OP_PROCESS_CURRENT_DIR: OpSlot = 112;
+pub const OP_ENTROPY_BYTES: OpSlot = 113;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 108] = [
+pub const OPS: [OpDef; 114] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -2698,6 +2740,60 @@ pub const OPS: [OpDef; 108] = [
         schema: "(VmSnapshot) -> Result[Bytes, SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
+    OpDef {
+        group: "Io",
+        member: "ReadBytes",
+        kind: OpKind::Fixed,
+        params: &[AbiType::INT],
+        reply: AbiType::RESULT_BYTES_IO_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Io",
+        member: "Write",
+        kind: OpKind::Fixed,
+        params: &[AbiType::BYTES],
+        reply: AbiType::RESULT_INT_IO_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Io",
+        member: "WriteError",
+        kind: OpKind::Fixed,
+        params: &[AbiType::BYTES],
+        reply: AbiType::RESULT_INT_IO_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::HostAttachment,
+    },
+    OpDef {
+        group: "Env",
+        member: "Get",
+        kind: OpKind::Fixed,
+        params: &[AbiType::STR],
+        reply: AbiType::RESULT_OPTION_STR_ENV_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Process",
+        member: "CurrentDir",
+        kind: OpKind::Fixed,
+        params: &[],
+        reply: AbiType::RESULT_STR_PROCESS_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Entropy",
+        member: "Bytes",
+        kind: OpKind::Fixed,
+        params: &[AbiType::INT],
+        reply: AbiType::RESULT_BYTES_ENTROPY_ERROR,
+        schema: "",
+        snapshot: SnapshotClass::MachineState,
+    },
 ];
 
 /// The number of exact operations.
@@ -3261,6 +3357,9 @@ mod tests {
                 "Compiler.Compile",
                 "Compiler.CompileSyntax",
                 "Reflect.ParseSyntax",
+                "Io.ReadBytes",
+                "Io.Write",
+                "Io.WriteError",
             ]
         );
         // A VM control operation runs inside the driver loop, so it

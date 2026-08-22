@@ -104,6 +104,28 @@ pub(crate) const ROLE_PARSE_STATUS: usize = 125;
 pub(crate) const ROLE_PARSE_COMPLETE: usize = 126;
 pub(crate) const ROLE_PARSE_INCOMPLETE: usize = 127;
 pub(crate) const ROLE_PARSE_INVALID: usize = 128;
+pub(crate) const ROLE_IO_ERROR_BROKEN_PIPE: usize = 143;
+pub(crate) const ROLE_IO_ERROR_INVALID_INPUT: usize = 144;
+pub(crate) const ROLE_IO_ERROR_LIMIT_EXCEEDED: usize = 145;
+pub(crate) const ROLE_ENV_ERROR: usize = 146;
+pub(crate) const ROLE_ENV_ERROR_INVALID_NAME: usize = 147;
+pub(crate) const ROLE_ENV_ERROR_INVALID_ENCODING: usize = 148;
+pub(crate) const ROLE_ENV_ERROR_PERMISSION_DENIED: usize = 149;
+pub(crate) const ROLE_ENV_ERROR_FAILED: usize = 150;
+pub(crate) const ROLE_PROCESS_ERROR: usize = 151;
+pub(crate) const ROLE_PROCESS_ERROR_INVALID_INPUT: usize = 152;
+pub(crate) const ROLE_PROCESS_ERROR_PERMISSION_DENIED: usize = 153;
+pub(crate) const ROLE_PROCESS_ERROR_NOT_FOUND: usize = 154;
+pub(crate) const ROLE_PROCESS_ERROR_FAILED: usize = 155;
+pub(crate) const ROLE_ENTROPY_ERROR: usize = 156;
+pub(crate) const ROLE_ENTROPY_ERROR_INVALID_INPUT: usize = 157;
+pub(crate) const ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED: usize = 158;
+pub(crate) const ROLE_ENTROPY_ERROR_UNAVAILABLE: usize = 159;
+pub(crate) const ROLE_ENTROPY_ERROR_FAILED: usize = 160;
+pub(crate) const ROLE_EXIT_STATUS: usize = 161;
+pub(crate) const ROLE_EXIT_STATUS_SUCCESS: usize = 162;
+pub(crate) const ROLE_EXIT_STATUS_FAILURE: usize = 163;
+pub(crate) const ROLE_EXIT_STATUS_CODE: usize = 164;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,7 +145,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 21] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 25] = [
     (
         ROLE_OPTION,
         1,
@@ -131,7 +153,60 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 21] = [
         "Option",
     ),
     (ROLE_RESULT, 2, &[ROLE_RESULT_OK, ROLE_RESULT_ERR], "Result"),
-    (ROLE_IO_ERROR, 0, &[ROLE_IO_ERROR_FAILED], "IoError"),
+    (
+        ROLE_IO_ERROR,
+        0,
+        &[
+            ROLE_IO_ERROR_BROKEN_PIPE,
+            ROLE_IO_ERROR_INVALID_INPUT,
+            ROLE_IO_ERROR_LIMIT_EXCEEDED,
+            ROLE_IO_ERROR_FAILED,
+        ],
+        "IoError",
+    ),
+    (
+        ROLE_ENV_ERROR,
+        0,
+        &[
+            ROLE_ENV_ERROR_INVALID_NAME,
+            ROLE_ENV_ERROR_INVALID_ENCODING,
+            ROLE_ENV_ERROR_PERMISSION_DENIED,
+            ROLE_ENV_ERROR_FAILED,
+        ],
+        "EnvError",
+    ),
+    (
+        ROLE_PROCESS_ERROR,
+        0,
+        &[
+            ROLE_PROCESS_ERROR_INVALID_INPUT,
+            ROLE_PROCESS_ERROR_PERMISSION_DENIED,
+            ROLE_PROCESS_ERROR_NOT_FOUND,
+            ROLE_PROCESS_ERROR_FAILED,
+        ],
+        "ProcessError",
+    ),
+    (
+        ROLE_ENTROPY_ERROR,
+        0,
+        &[
+            ROLE_ENTROPY_ERROR_INVALID_INPUT,
+            ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED,
+            ROLE_ENTROPY_ERROR_UNAVAILABLE,
+            ROLE_ENTROPY_ERROR_FAILED,
+        ],
+        "EntropyError",
+    ),
+    (
+        ROLE_EXIT_STATUS,
+        0,
+        &[
+            ROLE_EXIT_STATUS_SUCCESS,
+            ROLE_EXIT_STATUS_FAILURE,
+            ROLE_EXIT_STATUS_CODE,
+        ],
+        "ExitStatus",
+    ),
     (
         ROLE_RUN_RESULT,
         1,
@@ -280,12 +355,30 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 21] = [
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 70] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 88] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
     (ROLE_RESULT_ERR, &[FieldShape::Var(1)]),
+    (ROLE_IO_ERROR_BROKEN_PIPE, &[]),
+    (ROLE_IO_ERROR_INVALID_INPUT, &[FieldShape::Str]),
+    (ROLE_IO_ERROR_LIMIT_EXCEEDED, &[FieldShape::Str]),
     (ROLE_IO_ERROR_FAILED, &[FieldShape::Str]),
+    (ROLE_ENV_ERROR_INVALID_NAME, &[FieldShape::Str]),
+    (ROLE_ENV_ERROR_INVALID_ENCODING, &[FieldShape::Str]),
+    (ROLE_ENV_ERROR_PERMISSION_DENIED, &[FieldShape::Str]),
+    (ROLE_ENV_ERROR_FAILED, &[FieldShape::Str]),
+    (ROLE_PROCESS_ERROR_INVALID_INPUT, &[FieldShape::Str]),
+    (ROLE_PROCESS_ERROR_PERMISSION_DENIED, &[FieldShape::Str]),
+    (ROLE_PROCESS_ERROR_NOT_FOUND, &[FieldShape::Str]),
+    (ROLE_PROCESS_ERROR_FAILED, &[FieldShape::Str]),
+    (ROLE_ENTROPY_ERROR_INVALID_INPUT, &[FieldShape::Str]),
+    (ROLE_ENTROPY_ERROR_LIMIT_EXCEEDED, &[FieldShape::Str]),
+    (ROLE_ENTROPY_ERROR_UNAVAILABLE, &[FieldShape::Str]),
+    (ROLE_ENTROPY_ERROR_FAILED, &[FieldShape::Str]),
+    (ROLE_EXIT_STATUS_SUCCESS, &[]),
+    (ROLE_EXIT_STATUS_FAILURE, &[]),
+    (ROLE_EXIT_STATUS_CODE, &[FieldShape::Int]),
     (ROLE_RUN_DONE, &[FieldShape::Var(0)]),
     (ROLE_RUN_FAULT, &[FieldShape::Fault]),
     (ROLE_STEP_RAN, &[]),

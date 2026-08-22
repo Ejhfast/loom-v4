@@ -33,6 +33,8 @@ pub const CORE_SOURCE: &str = concat!(
     "\n",
     include_str!("../../../core/errors.lm"),
     "\n",
+    include_str!("../../../core/io.lm"),
+    "\n",
     include_str!("../../../core/fs.lm"),
     "\n",
     include_str!("../../../core/network.lm"),
@@ -64,7 +66,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 87] = [
+pub const PRELUDE_TYPES: [&str; 94] = [
     "Option",
     "Result",
     "Ordering",
@@ -81,6 +83,9 @@ pub const PRELUDE_TYPES: [&str; 87] = [
     "Choice",
     "SnapshotError",
     "RestoreError",
+    "ExitStatus",
+    "ByteReader",
+    "ByteWriter",
     "Artifact",
     "VerifiedModule",
     "FunctionCode",
@@ -115,6 +120,10 @@ pub const PRELUDE_TYPES: [&str; 87] = [
     "CompileErrors",
     "DynValue",
     "FsError",
+    "IoError",
+    "EnvError",
+    "ProcessError",
+    "EntropyError",
     "OpenOptions",
     "SeekFrom",
     "IpAddress",

@@ -1,5 +1,6 @@
 //! End-to-end tests for the `lm` binary.
 
+use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -24,6 +25,14 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
+}
+
+fn probe(name: &str, source: &str) -> std::path::PathBuf {
+    let path = repo_root()
+        .join("target")
+        .join(format!("cli-{name}-{}.lm", std::process::id()));
+    std::fs::write(&path, source).expect("the probe source writes");
+    path
 }
 
 #[test]
@@ -163,7 +172,7 @@ fn run_reports_a_fault_with_a_stable_code() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 40929592)\n"
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 1246ca05)\n"
     );
 }
 
@@ -179,7 +188,7 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, fc07d8c0)\n"
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 0c82332e)\n"
     );
 }
 
@@ -210,6 +219,170 @@ fn help_and_version_succeed() {
         stdout(&version),
         format!("lm {}\n", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn callable_command_entries_receive_exact_arguments() {
+    let path = probe(
+        "command-arguments",
+        "do |args: [String]|: String\n  \"{args.len()}:{args.at(0)}:{args.at(1)}\"\nend\n",
+    );
+    let out = lm(&[
+        "run",
+        "--show-result",
+        path.to_str().expect("the path is valid UTF-8"),
+        "--",
+        "",
+        "猫",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(\"2::猫\")\n");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_built_artifact_keeps_its_command_entry() {
+    let path = probe(
+        "command-artifact",
+        "do |args: [String]|: String\n  args.at(0)\nend\n",
+    );
+    let build = lm(&["build", path.to_str().expect("the path is valid UTF-8")]);
+    assert!(build.status.success(), "{}", stderr(&build));
+    let artifact = repo_root()
+        .join("build/debug")
+        .join(path.file_stem().expect("the source has a stem"))
+        .with_extension("lma");
+    let interface = artifact.with_extension("lmi");
+    let out = lm(&[
+        "run",
+        "--show-result",
+        artifact.to_str().expect("the path is valid UTF-8"),
+        "--",
+        "artifact",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(\"artifact\")\n");
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(artifact);
+    let _ = std::fs::remove_file(interface);
+}
+
+#[test]
+fn zero_argument_command_entries_run() {
+    let path = probe("command-zero", "do ||: Int\n  42\nend\n");
+    let out = lm(&[
+        "run",
+        "--show-result",
+        path.to_str().expect("the path is valid UTF-8"),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(42)\n");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn command_exit_status_maps_to_process_status() {
+    let path = probe(
+        "command-status",
+        "do |args: [String]|: ExitStatus\n  if args.at(0) == \"success\"\n    ExitStatus.Success\n  elsif args.at(0) == \"failure\"\n    ExitStatus.Failure\n  else\n    ExitStatus.Code(args.at(0).parse_int(10).expect(\"the status is an integer\"))\n  end\nend\n",
+    );
+    let file = path.to_str().expect("the path is valid UTF-8");
+    assert_eq!(lm(&["run", file, "--", "success"]).status.code(), Some(0));
+    assert_eq!(lm(&["run", file, "--", "failure"]).status.code(), Some(1));
+    assert_eq!(lm(&["run", file, "--", "7"]).status.code(), Some(7));
+    let invalid = lm(&["run", file, "--", "256"]);
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(stderr(&invalid).contains("between 0 and 255"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn command_arguments_reject_a_non_callable_value() {
+    let path = probe("command-value", "42\n");
+    let out = lm(&[
+        "run",
+        path.to_str().expect("the path is valid UTF-8"),
+        "--",
+        "extra",
+    ]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("does not accept arguments"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn run_rejects_an_argument_before_the_separator() {
+    let path = probe(
+        "command-separator",
+        "do |args: [String]|: Int\n  args.len()\nend\n",
+    );
+    let out = lm(&[
+        "run",
+        path.to_str().expect("the path is valid UTF-8"),
+        "misplaced",
+    ]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("before `--`"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn another_callable_signature_gets_a_command_diagnostic() {
+    let path = probe("command-signature", "do |value: Int|: Int\n  value\nend\n");
+    let out = lm(&["check", path.to_str().expect("the path is valid UTF-8")]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("error[E1067]"));
+    assert!(stderr(&out).contains("`()` or `[String]`"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn the_binary_filter_preserves_invalid_utf8() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lm"))
+        .args([
+            "run",
+            "--allow",
+            "Io.ReadBytes,Io.Write,Env.Get,Process.CurrentDir,Entropy.Bytes",
+            "examples/16-command-applications/01-binary-filter.lm",
+            "--",
+            "2",
+        ])
+        .env_remove("LOOM_COPY_CHUNK")
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the lm binary starts");
+    child
+        .stdin
+        .take()
+        .expect("the input pipe exists")
+        .write_all(&[0xff, 0x00, 0xfe, b'\n'])
+        .expect("the input bytes write");
+    let output = child.wait_with_output().expect("the lm binary exits");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(output.stdout, [0xff, 0x00, 0xfe, b'\n']);
+}
+
+#[test]
+fn byte_output_reports_a_closed_pipe() {
+    let path = probe(
+        "byte-broken-pipe",
+        "do ||: ExitStatus with Io.Write\n  case sys.io.write(\"hello\".bytes())\n  in Err(IoError.BrokenPipe) then ExitStatus.Success\n  in Err(_) then ExitStatus.Failure\n  in Ok(_) then ExitStatus.Failure\n  end\nend\n",
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lm"))
+        .args(["run", "--allow", "Io.Write"])
+        .arg(&path)
+        .current_dir(repo_root())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the lm binary starts");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("the lm binary exits");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -360,6 +533,31 @@ fn a_proc_package_builds_and_runs() {
     let out = lm(&["run", "--show-result", &path, "--allow", "Proc"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).ends_with("Done(42)\n"), "{}", stdout(&out));
+}
+
+#[test]
+fn a_package_command_receives_its_arguments() {
+    let root = repo_root().join("target/test-command-package");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("the package directory exists");
+    std::fs::write(
+        root.join("lm.package"),
+        "[package]\nname = \"commandapp\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("the manifest writes");
+    std::fs::write(
+        root.join("src/main.lm"),
+        "use std.io\n\ndo |args: [String]|: String\n  \"{args.at(0)}:{args.at(1)}\"\nend\n",
+    )
+    .expect("the source writes");
+    let path = root.display().to_string();
+    let out = lm(&["run", "--show-result", &path, "--", "first", "second"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Done(\"first:second\")\n");
+    let cached = lm(&["run", "--show-result", &path, "--", "third", "fourth"]);
+    assert!(cached.status.success(), "{}", stderr(&cached));
+    assert_eq!(stdout(&cached), "Done(\"third:fourth\")\n");
+    let _ = std::fs::remove_dir_all(root);
 }
 
 // ---------------------------------------------------------------

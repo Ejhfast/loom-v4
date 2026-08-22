@@ -13,7 +13,7 @@ use crate::cache::{
 use crate::env::{CompileEnv, LinkEnv, LinkUnit};
 use crate::graph::{load_workspace, module_order, Workspace};
 use crate::link::link;
-use crate::module::compile_module;
+use crate::module::{compile_command_module, compile_module};
 use lm_source::SourceFile;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -151,8 +151,11 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
                             .map_err(|e| format!("error: {e}\n"))?;
                     }
                     let source = SourceFile::new(display_name(&module.file), text.clone());
-                    let entry =
-                        compile_module(&module.path, &source, &local.freeze(), module.is_main)?;
+                    let entry = if module.is_main {
+                        compile_command_module(&module.path, &source, &local.freeze())?
+                    } else {
+                        compile_module(&module.path, &source, &local.freeze(), false)?
+                    };
                     dir.write(&key, &entry.artifact, &entry.interface_bytes)?;
                     entry
                 }

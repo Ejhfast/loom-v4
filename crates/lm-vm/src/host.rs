@@ -156,7 +156,22 @@ pub enum CoreCtor {
     None,
     Ok,
     Err,
+    IoErrorBrokenPipe,
+    IoErrorInvalidInput,
+    IoErrorLimitExceeded,
     IoErrorFailed,
+    EnvInvalidName,
+    EnvInvalidEncoding,
+    EnvPermissionDenied,
+    EnvFailed,
+    ProcessInvalidInput,
+    ProcessPermissionDenied,
+    ProcessNotFound,
+    ProcessFailed,
+    EntropyInvalidInput,
+    EntropyLimitExceeded,
+    EntropyUnavailable,
+    EntropyFailed,
     FsErrorClosed,
     FsErrorFailed,
     Pair,
@@ -337,6 +352,13 @@ pub struct RecordingHost {
     pub printed: Vec<String>,
     pub errors: Vec<String>,
     pub input: Vec<String>,
+    pub input_bytes: Vec<u8>,
+    pub written_bytes: Vec<u8>,
+    pub written_error_bytes: Vec<u8>,
+    /// The maximum bytes accepted by one console write.
+    pub console_write_limit: usize,
+    pub environment: BTreeMap<String, String>,
+    pub current_dir: String,
     now: i64,
     monotonic: i64,
     rand_state: u64,
@@ -389,6 +411,9 @@ fn deferred_op(op: u32) -> bool {
             | lm_abi::OP_IO_PRINT
             | lm_abi::OP_IO_ERROR
             | lm_abi::OP_IO_READ_LINE
+            | lm_abi::OP_IO_READ_BYTES
+            | lm_abi::OP_IO_WRITE
+            | lm_abi::OP_IO_WRITE_ERROR
             | lm_abi::OP_DNS_RESOLVE
             | lm_abi::OP_TCP_CONNECT
             | lm_abi::OP_TCP_LISTEN
@@ -438,12 +463,25 @@ struct MemoryStream {
 
 const MAX_FILE_IO_BYTES: usize = 16 << 20;
 const MAX_NETWORK_IO_BYTES: usize = 16 << 20;
+const MAX_CONSOLE_IO_BYTES: usize = 16 << 20;
+const MAX_ENTROPY_BYTES: usize = 16 << 20;
 const MAX_DNS_RESULTS: usize = 64;
 const MAX_VIRTUAL_STREAM_BYTES: usize = 64 << 20;
 const VIRTUAL_WRITE_CHUNK: usize = 4 << 10;
 
 fn fs_ok(value: HostValue) -> HostValue {
     HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn core_ok(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn core_error(ctor: CoreCtor, message: Option<&str>) -> HostValue {
+    let fields = message
+        .map(|message| vec![HostValue::Str(message.to_string().into())])
+        .unwrap_or_default();
+    HostValue::Ctor(CoreCtor::Err, vec![HostValue::Ctor(ctor, fields)])
 }
 
 fn fs_failed(message: impl Into<String>) -> HostValue {
@@ -517,6 +555,12 @@ impl RecordingHost {
             printed: Vec::new(),
             errors: Vec::new(),
             input: Vec::new(),
+            input_bytes: Vec::new(),
+            written_bytes: Vec::new(),
+            written_error_bytes: Vec::new(),
+            console_write_limit: usize::MAX,
+            environment: BTreeMap::new(),
+            current_dir: "/loom".to_string(),
             now: 1_000,
             monotonic: 0,
             rand_state: seed.max(1),
@@ -548,6 +592,11 @@ impl RecordingHost {
     /// Set one deterministic DNS answer.
     pub fn set_dns(&mut self, name: impl Into<String>, addresses: Vec<HostIpAddress>) {
         self.dns.insert(name.into(), addresses);
+    }
+
+    /// Set one environment value before execution.
+    pub fn set_env(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.environment.insert(name.into(), value.into());
     }
 
     fn next_rand(&mut self) -> u64 {
@@ -742,6 +791,98 @@ impl RecordingHost {
                     )
                 };
                 HostStart::Completed(reply)
+            }
+            lm_abi::OP_IO_READ_BYTES => {
+                let Some(HostArg::Int(count)) = args.first() else {
+                    return HostStart::Failed("Io.ReadBytes needs one integer".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::IoErrorInvalidInput,
+                        Some("the read count is negative"),
+                    ));
+                };
+                if count > MAX_CONSOLE_IO_BYTES {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::IoErrorLimitExceeded,
+                        Some("the read count is too large"),
+                    ));
+                }
+                let count = count.min(self.input_bytes.len());
+                let bytes: Vec<u8> = self.input_bytes.drain(..count).collect();
+                HostStart::Completed(core_ok(HostValue::Bytes(bytes.into())))
+            }
+            lm_abi::OP_IO_WRITE => {
+                let Some(HostArg::Bytes(bytes)) = args.first() else {
+                    return HostStart::Failed("Io.Write needs one byte value".to_string());
+                };
+                if bytes.len() > MAX_CONSOLE_IO_BYTES {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::IoErrorLimitExceeded,
+                        Some("the write value is too large"),
+                    ));
+                }
+                let written = bytes.len().min(self.console_write_limit);
+                self.written_bytes.extend_from_slice(&bytes[..written]);
+                HostStart::Completed(core_ok(HostValue::Int(written as i64)))
+            }
+            lm_abi::OP_IO_WRITE_ERROR => {
+                let Some(HostArg::Bytes(bytes)) = args.first() else {
+                    return HostStart::Failed("Io.WriteError needs one byte value".to_string());
+                };
+                if bytes.len() > MAX_CONSOLE_IO_BYTES {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::IoErrorLimitExceeded,
+                        Some("the write value is too large"),
+                    ));
+                }
+                let written = bytes.len().min(self.console_write_limit);
+                self.written_error_bytes
+                    .extend_from_slice(&bytes[..written]);
+                HostStart::Completed(core_ok(HostValue::Int(written as i64)))
+            }
+            lm_abi::OP_ENV_GET => {
+                let Some(HostArg::Str(name)) = args.first() else {
+                    return HostStart::Failed("Env.Get needs one string".to_string());
+                };
+                if name.is_empty() || name.contains('=') || name.contains('\0') {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::EnvInvalidName,
+                        Some("the environment name is invalid"),
+                    ));
+                }
+                let value = self
+                    .environment
+                    .get(name.as_str())
+                    .map(|value| {
+                        HostValue::Ctor(CoreCtor::Some, vec![HostValue::Str(value.clone().into())])
+                    })
+                    .unwrap_or_else(|| HostValue::Ctor(CoreCtor::None, vec![]));
+                HostStart::Completed(core_ok(value))
+            }
+            lm_abi::OP_PROCESS_CURRENT_DIR => {
+                HostStart::Completed(core_ok(HostValue::Str(self.current_dir.clone().into())))
+            }
+            lm_abi::OP_ENTROPY_BYTES => {
+                let Some(HostArg::Int(count)) = args.first() else {
+                    return HostStart::Failed("Entropy.Bytes needs one integer".to_string());
+                };
+                let Ok(count) = usize::try_from(*count) else {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::EntropyInvalidInput,
+                        Some("the entropy count is negative"),
+                    ));
+                };
+                if count > MAX_ENTROPY_BYTES {
+                    return HostStart::Completed(core_error(
+                        CoreCtor::EntropyLimitExceeded,
+                        Some("the entropy count is too large"),
+                    ));
+                }
+                let bytes: Vec<u8> = (0..count)
+                    .map(|index| (index as u8).wrapping_mul(73).wrapping_add(41))
+                    .collect();
+                HostStart::Completed(core_ok(HostValue::Bytes(bytes.into())))
             }
             lm_abi::OP_CLOCK_NOW => {
                 self.now += 1;

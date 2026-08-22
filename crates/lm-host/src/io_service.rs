@@ -67,6 +67,9 @@ pub(crate) enum StreamRequest {
     Print(SharedText),
     Error(SharedText),
     ReadLine,
+    ReadBytes(usize),
+    Write(SharedBytes),
+    WriteError(SharedBytes),
 }
 
 enum FileJob {
@@ -155,8 +158,11 @@ impl IoService {
             return false;
         }
         let target = match &request {
-            StreamRequest::ReadLine => &self.input,
-            StreamRequest::Print(_) | StreamRequest::Error(_) => &self.output,
+            StreamRequest::ReadLine | StreamRequest::ReadBytes(_) => &self.input,
+            StreamRequest::Print(_)
+            | StreamRequest::Error(_)
+            | StreamRequest::Write(_)
+            | StreamRequest::WriteError(_) => &self.output,
         };
         let sent = target
             .send(StreamJob(Job {
@@ -327,9 +333,11 @@ fn input_worker(
     while let Ok(StreamJob(job)) = jobs.recv() {
         let value = match job.request {
             StreamRequest::ReadLine => read_line(),
-            StreamRequest::Print(_) | StreamRequest::Error(_) => {
-                HostValue::Ctor(CoreCtor::Err, vec![])
-            }
+            StreamRequest::ReadBytes(count) => read_bytes(count),
+            StreamRequest::Print(_)
+            | StreamRequest::Error(_)
+            | StreamRequest::Write(_)
+            | StreamRequest::WriteError(_) => HostValue::Ctor(CoreCtor::Err, vec![]),
         };
         let _ = completions.send(HostCompletion {
             key: job.key,
@@ -349,18 +357,29 @@ fn output_worker(
         let result = match job.request {
             StreamRequest::Print(text) => {
                 let mut out = std::io::stdout();
-                out.write_all(text.as_bytes()).and_then(|_| out.flush())
+                match out.write_all(text.as_bytes()).and_then(|_| out.flush()) {
+                    Ok(()) => Ok(HostValue::Unit),
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                        Ok(HostValue::Unit)
+                    }
+                    Err(error) => Err(format!("stream write failed: {error}")),
+                }
             }
             StreamRequest::Error(text) => {
                 let mut out = std::io::stderr();
-                out.write_all(text.as_bytes()).and_then(|_| out.flush())
+                match out.write_all(text.as_bytes()).and_then(|_| out.flush()) {
+                    Ok(()) => Ok(HostValue::Unit),
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                        Ok(HostValue::Unit)
+                    }
+                    Err(error) => Err(format!("stream write failed: {error}")),
+                }
             }
-            StreamRequest::ReadLine => unreachable!("input uses its own worker"),
-        };
-        let result = match result {
-            Ok(()) => Ok(HostValue::Unit),
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(HostValue::Unit),
-            Err(error) => Err(format!("stream write failed: {error}")),
+            StreamRequest::Write(bytes) => Ok(write_bytes(std::io::stdout(), &bytes)),
+            StreamRequest::WriteError(bytes) => Ok(write_bytes(std::io::stderr(), &bytes)),
+            StreamRequest::ReadLine | StreamRequest::ReadBytes(_) => {
+                unreachable!("input uses its own worker")
+            }
         };
         let _ = completions.send(HostCompletion {
             key: job.key,
@@ -394,7 +413,53 @@ fn read_line() -> HostValue {
     }
 }
 
+fn read_bytes(count: usize) -> HostValue {
+    let mut bytes = vec![0; count];
+    let input = std::io::stdin();
+    let mut input = input.lock();
+    loop {
+        match input.read(&mut bytes) {
+            Ok(read) => {
+                bytes.truncate(read);
+                return io_ok(HostValue::Bytes(bytes.into()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return io_error(format!("stdin read failed: {error}")),
+        }
+    }
+}
+
+fn write_bytes(mut output: impl Write, bytes: &[u8]) -> HostValue {
+    let written = loop {
+        match output.write(bytes) {
+            Ok(written) => break written,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return broken_pipe(),
+            Err(error) => return io_error(format!("stream write failed: {error}")),
+        }
+    };
+    loop {
+        match output.flush() {
+            Ok(()) => return io_ok(HostValue::Int(written as i64)),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return broken_pipe(),
+            Err(error) => return io_error(format!("stream flush failed: {error}")),
+        }
+    }
+}
+
+fn broken_pipe() -> HostValue {
+    HostValue::Ctor(
+        CoreCtor::Err,
+        vec![HostValue::Ctor(CoreCtor::IoErrorBrokenPipe, vec![])],
+    )
+}
+
 fn fs_ok(value: HostValue) -> HostValue {
+    HostValue::Ctor(CoreCtor::Ok, vec![value])
+}
+
+fn io_ok(value: HostValue) -> HostValue {
     HostValue::Ctor(CoreCtor::Ok, vec![value])
 }
 

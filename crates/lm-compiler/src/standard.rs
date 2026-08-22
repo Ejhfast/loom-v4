@@ -12,12 +12,15 @@ use lm_bytecode::Module;
 use lm_source::SourceFile;
 use std::sync::OnceLock;
 
+const IO_PATH: &str = "std.io";
 const TLS_PATH: &str = "std.tls";
 const HTTP_PATH: &str = "std.http";
 
+const IO_SOURCE: &str = include_str!("../../../std/io.lm");
 const TLS_SOURCE: &str = include_str!("../../../std/tls.lm");
 const HTTP_SOURCE: &str = include_str!("../../../std/http.lm");
 
+static IO: OnceLock<CompiledModule> = OnceLock::new();
 static TLS: OnceLock<CompiledModule> = OnceLock::new();
 static HTTP: OnceLock<CompiledModule> = OnceLock::new();
 
@@ -45,7 +48,7 @@ impl StandardCatalog {
 
     /// The module paths supplied by this catalog.
     pub fn paths(self) -> &'static [&'static str] {
-        &[TLS_PATH, HTTP_PATH]
+        &[IO_PATH, TLS_PATH, HTTP_PATH]
     }
 
     /// Compile and return one bundled module.
@@ -53,6 +56,7 @@ impl StandardCatalog {
     /// The cache runs each standard-module compiler once per process.
     pub fn module(self, path: &str) -> Option<&'static CompiledModule> {
         match path {
+            IO_PATH => Some(io()),
             TLS_PATH => Some(tls()),
             HTTP_PATH => Some(http()),
             _ => None,
@@ -61,10 +65,12 @@ impl StandardCatalog {
 
     /// Select a module and its dependencies in link order.
     pub fn select(self, paths: &[&str]) -> Result<Vec<&'static CompiledModule>, String> {
+        let mut needs_io = false;
         let mut needs_tls = false;
         let mut needs_http = false;
         for path in paths {
             match *path {
+                IO_PATH => needs_io = true,
                 TLS_PATH => needs_tls = true,
                 HTTP_PATH => {
                     needs_tls = true;
@@ -73,7 +79,7 @@ impl StandardCatalog {
                 _ => return Err(format!("`{path}` is not a bundled standard module")),
             }
         }
-        Ok(selected_modules(needs_tls, needs_http))
+        Ok(selected_modules(needs_io, needs_tls, needs_http))
     }
 
     /// Bind selected standard interfaces into one compile environment.
@@ -114,19 +120,30 @@ fn tls() -> &'static CompiledModule {
     TLS.get_or_init(|| compile_bundled(TLS_PATH, "std/tls.lm", TLS_SOURCE, &[]))
 }
 
+fn io() -> &'static CompiledModule {
+    IO.get_or_init(|| compile_bundled(IO_PATH, "std/io.lm", IO_SOURCE, &[]))
+}
+
 fn http() -> &'static CompiledModule {
     HTTP.get_or_init(|| compile_bundled(HTTP_PATH, "std/http.lm", HTTP_SOURCE, &[tls()]))
 }
 
 fn module_for_use(path: &[String]) -> Option<&'static str> {
     let text = path.join(".");
-    [HTTP_PATH, TLS_PATH]
+    [IO_PATH, HTTP_PATH, TLS_PATH]
         .into_iter()
         .find(|module| text == *module || text.starts_with(&format!("{module}.")))
 }
 
-fn selected_modules(needs_tls: bool, needs_http: bool) -> Vec<&'static CompiledModule> {
+fn selected_modules(
+    needs_io: bool,
+    needs_tls: bool,
+    needs_http: bool,
+) -> Vec<&'static CompiledModule> {
     let mut modules = Vec::new();
+    if needs_io {
+        modules.push(io());
+    }
     if needs_tls {
         modules.push(tls());
     }
@@ -138,10 +155,12 @@ fn selected_modules(needs_tls: bool, needs_http: bool) -> Vec<&'static CompiledM
 
 /// Select the standard-module closure named by source `use` paths.
 pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledModule> {
+    let mut needs_io = false;
     let mut needs_tls = false;
     let mut needs_http = false;
     for path in uses {
         match module_for_use(path) {
+            Some(IO_PATH) => needs_io = true,
             Some(TLS_PATH) => needs_tls = true,
             Some(HTTP_PATH) => {
                 needs_tls = true;
@@ -150,7 +169,7 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
             _ => {}
         }
     }
-    selected_modules(needs_tls, needs_http)
+    selected_modules(needs_io, needs_tls, needs_http)
 }
 
 /// Compile one source module and link its requested standard modules.
@@ -162,6 +181,20 @@ pub fn compile_source(
     source: &SourceFile,
     is_main: bool,
 ) -> Result<CompiledSource, String> {
+    compile_source_mode(path, source, is_main, false)
+}
+
+/// Compile one source file as a command program.
+pub fn compile_command_source(path: &str, source: &SourceFile) -> Result<CompiledSource, String> {
+    compile_source_mode(path, source, true, true)
+}
+
+fn compile_source_mode(
+    path: &str,
+    source: &SourceFile,
+    is_main: bool,
+    command_entry: bool,
+) -> Result<CompiledSource, String> {
     let ast = lm_source::parse::parse(&source.text).map_err(|error| error.render(source))?;
     let uses: Vec<Vec<String>> = ast.uses.iter().map(|item| item.path.clone()).collect();
     let standard = modules_for_uses(&uses);
@@ -171,7 +204,11 @@ pub fn compile_source(
         env.bind_interface(module.interface.clone())
             .map_err(|error| format!("error: {error}\n"))?;
     }
-    let root = compile_module(path, source, &env.freeze(), is_main)?;
+    let root = if command_entry {
+        crate::module::compile_command_module(path, source, &env.freeze())?
+    } else {
+        compile_module(path, source, &env.freeze(), is_main)?
+    };
     if standard.is_empty() {
         return Ok(CompiledSource {
             program: root.module.clone(),
@@ -211,6 +248,19 @@ pub fn compile_source(
 /// A source without a `std` import keeps the direct checker path. A
 /// source with a `std` import uses the literal module linker.
 pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String> {
+    compile_program_mode(path, source, false)
+}
+
+/// Compile one runnable source module with command entry activation.
+pub fn compile_command_program(path: &str, source: &SourceFile) -> Result<Module, String> {
+    compile_program_mode(path, source, true)
+}
+
+fn compile_program_mode(
+    path: &str,
+    source: &SourceFile,
+    command_entry: bool,
+) -> Result<Module, String> {
     let (ast, syntax) =
         lm_source::syntax::parse_complete(&source.text).map_err(|error| error.render(source))?;
     let uses_standard = ast
@@ -218,7 +268,12 @@ pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String
         .iter()
         .any(|item| item.path.first().map(String::as_str) == Some("std"));
     if uses_standard {
-        return Ok(compile_source(path, source, true)?.program);
+        let compiled = if command_entry {
+            compile_command_source(path, source)?
+        } else {
+            compile_source(path, source, true)?
+        };
+        return Ok(compiled.program);
     }
     let hir = lm_hir::check_module_with(
         &ast,
@@ -234,6 +289,9 @@ pub fn compile_program(path: &str, source: &SourceFile) -> Result<Module, String
         crate::module::select_linkage(path, &hir, &env.freeze(), &CompileOptions::default())?;
     let mut module = lm_hir::lower_module_with_linkage(&hir, &linkage)
         .map_err(|error| format!("error: `{path}`: {error}\n"))?;
+    if command_entry {
+        crate::module::package_command_entry(&mut module, path)?;
+    }
     crate::module::attach_source_debug(&mut module, source, syntax, &ast, &hir, &linkage)?;
     Ok(module)
 }
@@ -250,7 +308,7 @@ mod tests {
     #[test]
     fn catalog_lists_selective_modules() {
         let catalog = StandardCatalog::bundled();
-        assert_eq!(catalog.paths(), &[TLS_PATH, HTTP_PATH]);
+        assert_eq!(catalog.paths(), &[IO_PATH, TLS_PATH, HTTP_PATH]);
         assert!(modules_for_uses(&[]).is_empty());
         let selected = catalog.select(&[HTTP_PATH]).expect("the module exists");
         let paths: Vec<&str> = selected.iter().map(|module| module.path.as_str()).collect();
@@ -278,6 +336,12 @@ mod tests {
     fn tls_source_selects_only_tls() {
         let compiled = compile("use std.tls.TlsVersion\nTlsVersion.Tls13\n");
         assert_eq!(compiled.standard_modules, &[TLS_PATH]);
+    }
+
+    #[test]
+    fn io_source_selects_only_io() {
+        let compiled = compile("use std.io\nio.print(\"ready\")\n");
+        assert_eq!(compiled.standard_modules, &[IO_PATH]);
     }
 
     #[test]

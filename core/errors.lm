@@ -3,11 +3,65 @@
 # These values describe portable text conversion and index failures.
 
 enum IoError
+  BrokenPipe
+  InvalidInput(message: String)
+  LimitExceeded(message: String)
   Failed(message: String)
 
   def message(self): String
     case self
-    in Failed(m) then m
+    in BrokenPipe      then "the output pipe is closed"
+    in InvalidInput(m) then m
+    in LimitExceeded(m) then m
+    in Failed(m)       then m
+    end
+  end
+end
+
+enum EnvError
+  InvalidName(message: String)
+  InvalidEncoding(message: String)
+  PermissionDenied(message: String)
+  Failed(message: String)
+
+  def message(self): String
+    case self
+    in InvalidName(m)      then m
+    in InvalidEncoding(m)  then m
+    in PermissionDenied(m) then m
+    in Failed(m)           then m
+    end
+  end
+end
+
+enum ProcessError
+  InvalidInput(message: String)
+  PermissionDenied(message: String)
+  NotFound(message: String)
+  Failed(message: String)
+
+  def message(self): String
+    case self
+    in InvalidInput(m)     then m
+    in PermissionDenied(m) then m
+    in NotFound(m)         then m
+    in Failed(m)           then m
+    end
+  end
+end
+
+enum EntropyError
+  InvalidInput(message: String)
+  LimitExceeded(message: String)
+  Unavailable(message: String)
+  Failed(message: String)
+
+  def message(self): String
+    case self
+    in InvalidInput(m)  then m
+    in LimitExceeded(m) then m
+    in Unavailable(m)   then m
+    in Failed(m)        then m
     end
   end
 end
