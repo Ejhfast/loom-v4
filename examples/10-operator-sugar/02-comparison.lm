@@ -1,18 +1,15 @@
-# Comparison and equality hooks.
+# Comparison hooks and declared equality.
 #
 # `<`, `<=`, `>`, and `>=` read `__lt__`, `__le__`, `__gt__`, and
-# `__ge__`. `==` and `!=` read `__eq__` and `__ne__`.
+# `__ge__`.
 #
-# A class without `__eq__` keeps the rule of specification 6.4: two
-# instances compare by reference. `Version` declares `__eq__`, so it
-# compares by value instead.
+# `PartialEq` lets `==` read `__eq__`.
 #
-# `__eq__` governs `==` alone. `Map` keys, `digest`, and `deep_equal`
-# use structural identity and never call the hook, so a class that
-# makes `==` disagree with its structure gets a map lookup that misses.
-# `Version` keeps them in step: equal fields mean equal values.
+# `!=` negates the same method result.
+#
+# A class without `PartialEq` compares instances by reference.
 
-final class Version
+final class Version implements PartialEq
   major: Int
   minor: Int
 
@@ -23,10 +20,6 @@ final class Version
 
   def __eq__(self, other: Version): Bool
     self.major == other.major and self.minor == other.minor
-  end
-
-  def __ne__(self, other: Version): Bool
-    not (self == other)
   end
 
   def __lt__(self, other: Version): Bool
@@ -44,8 +37,7 @@ end
 
 lines: [String] = []
 
-# Two separate instances, equal fields. Without `__eq__` this reads
-# false, because the values sit at different heap slots.
+# Two separate instances compare through the declared conformance.
 if Version(1, 4) == Version(1, 4)
   lines.push("equal by value")
 end

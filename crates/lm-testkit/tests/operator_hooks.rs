@@ -1,9 +1,8 @@
-//! User-declared operator hooks (specification 6.4).
+//! User-declared operator methods (specification 6.4).
 //!
-//! An operator reads its hook from the class of the left operand and
-//! then takes the ordinary method path. These cases pin the four
-//! consequences: the parameter type, the result type, the effect row,
-//! and the dispatch rule.
+//! Arithmetic and ordering read methods from the left operand.
+//!
+//! Equality reads `__eq__` through `PartialEq`.
 
 use lm_testkit::{compile_text, repo_root, run_allowed, run_text};
 use lm_vm::VmConfig;
@@ -88,11 +87,10 @@ Tag() + 7
     assert_eq!(run(source), "Done(\"tag7\")");
 }
 
-/// `==` reads `__eq__` when the class declares one, and keeps
-/// reference identity when it does not.
+/// `==` reads `__eq__` only through a `PartialEq` conformance.
 #[test]
-fn equality_uses_the_hook_only_when_declared() {
-    let with_hook = "final class V
+fn equality_uses_only_the_declared_conformance() {
+    let with_hook = "final class V implements PartialEq
   x: Int
   def init(mut self, x: Int)
     self.x = x
@@ -104,15 +102,114 @@ end
 if V(1) == V(1)\n  1\nelse\n  0\nend
 ";
     assert_eq!(run(with_hook), "Done(1)");
-    let without_hook = "final class W
+    let without_conformance = "final class W
   x: Int
   def init(mut self, x: Int)
     self.x = x
   end
+  def __eq__(self, other: W): Bool
+    self.x == other.x
+  end
 end
 if W(1) == W(1)\n  1\nelse\n  0\nend
 ";
-    assert_eq!(run(without_hook), "Done(0)");
+    assert_eq!(run(without_conformance), "Done(0)");
+}
+
+#[test]
+fn generic_equality_uses_one_interface_call() {
+    let source = "final class V implements PartialEq
+  x: Int
+  def init(mut self, x: Int)
+    self.x = x
+  end
+  def __eq__(self, other: V): Bool
+    self.x == other.x
+  end
+end
+def same[T: PartialEq](a: T, b: T): Bool
+  a == b
+end
+def same_text(a: Text, b: Text): Bool
+  same[Text](a, b)
+end
+(
+  same(V(1), V(1)),
+  same(1, 1),
+  same(true, true),
+  same(\"x\", \"x\"),
+  same(Bytes(\"x\"), Bytes(\"x\")),
+  same(\"x\".at(0).expect(\"char\"), \"x\".at(0).expect(\"char\")),
+  same_text(\"x\", \"x\")
+)
+";
+    assert_eq!(
+        run(source),
+        "Done((true, true, true, true, true, true, true))"
+    );
+    let module = compile_text("partial_eq.lm", source).expect("the program compiles");
+    let same = module
+        .funcs
+        .iter()
+        .find(|func| func.name == "same")
+        .expect("same exists");
+    let calls = same
+        .blocks
+        .iter()
+        .flatten()
+        .filter(|instr| matches!(instr, lm_bytecode::Instr::CallInterface { .. }))
+        .count();
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn not_equal_negates_eq_and_ignores_ne() {
+    let source = "final class Contrary implements PartialEq
+  def __eq__(self, other: Contrary): Bool
+    false
+  end
+  def __ne__(self, other: Contrary): Bool
+    false
+  end
+end
+Contrary() != Contrary()
+";
+    assert_eq!(run(source), "Done(true)");
+}
+
+#[test]
+fn partial_eq_enforces_finality_and_its_method_contract() {
+    let open = "class Open implements PartialEq
+  def __eq__(self, other: Open): Bool
+    true
+  end
+end
+Open() == Open()
+";
+    let error = compile_text("open_eq.lm", open).expect_err("the class rejects");
+    assert!(
+        error.contains("a non-final class cannot conform"),
+        "{error}"
+    );
+
+    let effectful = "final class Loud implements PartialEq
+  def __eq__(self, other: Loud): Bool with Io.Print
+    sys.io.print(\"compare\")
+    true
+  end
+end
+Loud() == Loud()
+";
+    let error = compile_text("effectful_eq.lm", effectful).expect_err("the method rejects");
+    assert!(
+        error.contains("has effects outside interface `PartialEq`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn core_ne_methods_are_not_public() {
+    assert_eq!(code_of("1.__ne__(2)\n"), "E1026");
 }
 
 /// The row of the hook reaches the caller, so an operator cannot

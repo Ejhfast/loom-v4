@@ -1,6 +1,6 @@
 # Pre-release Language and Host Foundation
 
-Status: stages 1 through 5 implemented. Stages 6 and 7 remain required.
+Status: stages 1 through 6 implemented. Stage 7 remains required.
 
 This sidecar defines the first public release foundation.
 
@@ -574,6 +574,8 @@ A normal class that conforms to a `Self`-dependent interface must be final.
 
 An enum family can conform because its family is closed.
 
+The closed native `Text` family can conform for the same reason.
+
 Class `Self` names the declared class application. It does not promise a dynamic subclass type.
 
 Artifacts store direct parent applications.
@@ -629,11 +631,17 @@ The selected execution benchmarks found no regression.
 
 ## 19. Stage 6: `PartialEq`
 
-The `==` operator requires `PartialEq` and calls `__eq__`.
+An explicit `PartialEq` conformance activates a user `__eq__` method.
+
+The `==` operator calls that method for a conforming left type.
 
 The `!=` operator negates the same result.
 
-Core removes `__ne__` as an independent semantic hook.
+Core removes `__ne__` as a surface method.
+
+Built-in structural and identity equality remain language rules.
+
+These rules do not imply a `PartialEq` conformance.
 
 Int, Bool, Text, Char, and Bytes implement the interface.
 
@@ -642,6 +650,31 @@ A method named `__eq__` without conformance does not enable the operator.
 Stage 6 passes when generic equality uses one verified interface dispatch.
 
 Primitive equality benchmarks must remain within normal benchmark noise.
+
+The Stage 6 gate passed on 2026-08-22.
+
+Workspace testing completed without failures.
+
+The warm full workspace suite completed in about 30 seconds.
+
+Core size and startup costs did not increase.
+
+| Measurement | Stage 5 | Stage 6 |
+|---|---:|---:|
+| core classes | 185 | 185 |
+| core functions | 540 | 535 |
+| core artifact | 119,968 bytes | 119,518 bytes |
+| core compilation | 1.948 ms | 1.943 ms |
+| core loading | 0.838 ms | 0.835 ms |
+
+Native equality retained its existing instructions.
+
+| Benchmark | Stage 5 | Stage 6 |
+|---|---:|---:|
+| `int_eq` | 33.4 ns | 32.0 ns |
+| `text_eq` | 40.8 ns | 40.5 ns |
+
+Generic `PartialEq` dispatch measured 93.8 ns per comparison.
 
 ## 20. Stage 7: `Hashable`, `Map`, and `Set`
 

@@ -102,7 +102,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 37 adds multiple bounds to associated interface types.
 /// Version 38 adds interface inheritance and bare `Self` contracts.
 /// Version 39 lowers general interpolation through `Display`.
-pub const COMPILER_ABI_VERSION: u32 = 39;
+/// Version 40 activates equality hooks through `PartialEq`.
+pub const COMPILER_ABI_VERSION: u32 = 40;
 
 /// The refinement work budget of one component.
 ///

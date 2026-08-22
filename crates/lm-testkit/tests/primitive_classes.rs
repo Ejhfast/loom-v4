@@ -70,6 +70,7 @@ fn an_int_tag_supports_verified_virtual_dispatch() {
 fn the_verifier_rejects_a_nonfinal_int_role() {
     let mut module = compile_text("int_role.lm", "1\n").expect("the program compiles");
     let class = module.core_roles[ROLE_INT];
+    module.conformances.retain(|item| item.class != class);
     module.classes[class as usize].is_final = false;
     let error = lm_verify::verify_module(&module).expect_err("the role rejects");
     assert!(

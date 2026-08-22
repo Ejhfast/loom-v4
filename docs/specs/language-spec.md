@@ -581,6 +581,14 @@ interface Display
 end
 ```
 
+The core `PartialEq` interface controls user-defined value equality.
+
+```lm
+interface PartialEq
+  def __eq__(self, other: Self): Bool
+end
+```
+
 One unparenthesized row item can follow `with`. Parentheses group an empty row or a row with several items.
 
 An associated type can declare several interface bounds. The selected type must satisfy every bound.
@@ -861,8 +869,8 @@ a - b   -> a.__sub__(b)
 a * b   -> a.__mul__(b)
 a / b   -> a.__div__(b)
 a % b   -> a.__rem__(b)
-a == b  -> a.__eq__(b)
-a != b  -> a.__ne__(b)
+a == b  -> a.__eq__(b), when the left type implements PartialEq
+a != b  -> not a.__eq__(b), through the same conformance
 a < b   -> a.__lt__(b)
 a <= b  -> a.__le__(b)
 a > b   -> a.__gt__(b)
@@ -873,14 +881,18 @@ Each core method body names one pure intrinsic manifest entry. Static resolution
 
 `Text + Text` uses `Text.__add__` and produces String.
 
-Any class may declare these hooks. The operator reads the hook from the class of the left operand, and the call takes the ordinary method path:
+Any class may declare the arithmetic and ordering hooks.
+
+The operator reads the hook from the class of the left operand.
+
+The call takes the ordinary method path:
 
 - the declared parameter type checks the right operand;
 - the declared result type is the type of the operator expression, and it needs no relation to the operand types;
 - the declared effect row is charged to the caller, so `a + b` can perform an operation, and the caller must hold the row;
 - a `final` class calls directly, and any other class dispatches virtually.
 
-A class that declares no hook keeps the rules below. The operator sugar adds a spelling and removes no rule.
+A class that declares no arithmetic or ordering hook keeps the rules below.
 
 ```lm
 final class Money
@@ -898,15 +910,35 @@ end
 Money(150) + Money(250)
 ```
 
-Version 0.2 states no rule about the meaning of a hook. `__eq__` need not be symmetric, and `__lt__` need not order anything. A later interface or protocol feature can require such properties of a class that claims them.
+An explicit `PartialEq` conformance activates a user-defined `__eq__` method.
 
-`__eq__` governs `==` and `!=` alone. `Map` keys, `digest`, and `std.value.deep_equal` never call a hook.
+A method with that name does not activate value equality by itself.
+
+The contract is pure. It accepts the conforming type and returns `Bool`.
+
+A normal user class with this conformance must be `final`.
+
+The compiler resolves a final receiver statically.
+
+A generic receiver uses one verified interface call.
+
+Native values retain their existing equality instructions.
+
+The `!=` operator never reads a `__ne__` method.
+
+Built-in structural and identity equality remain language rules.
+
+They do not create an implicit `PartialEq` conformance.
+
+`Hashable` extends `PartialEq` for map and set keys.
+
+`digest` and `std.value.deep_equal` never call a user method.
 
 Text map keys use their visible UTF-8 content. A `String` key and a `Substring` key match when their visible content matches.
 
 `has`, `get`, `at`, and map indexing accept Text for any text-keyed map. `put` still requires the declared key type.
 
-Other classes use structural identity for map keys. A class hook can therefore disagree with map lookup and deep equality.
+Other classes use reference identity for direct equality unless they implement `PartialEq`.
 
 `and` and `or` remain control-flow operators. They evaluate the right operand only when required.
 
@@ -3345,7 +3377,6 @@ to_upper_ascii() -> String
 replace(needle: Text, replacement: Text) -> String
 parse_int(radix: Int) -> Result[Int,ParseIntError]
 __eq__(other: Text) -> Bool
-__ne__(other: Text) -> Bool
 __lt__(other: Text) -> Bool
 __le__(other: Text) -> Bool
 __gt__(other: Text) -> Bool
@@ -3407,7 +3438,6 @@ codepoint() -> Int
 utf8_len() -> Int
 is_ascii() -> Bool
 __eq__(other: Char) -> Bool
-__ne__(other: Char) -> Bool
 __lt__(other: Char) -> Bool
 __le__(other: Char) -> Bool
 __gt__(other: Char) -> Bool
@@ -3436,7 +3466,6 @@ utf8_view() -> Result[Substring,Utf8Error]
 text() -> String
 __add__(other: Bytes) -> Bytes
 __eq__(other: Bytes) -> Bool
-__ne__(other: Bytes) -> Bool
 __lt__(other: Bytes) -> Bool
 __le__(other: Bytes) -> Bool
 __gt__(other: Bytes) -> Bool
@@ -3457,12 +3486,18 @@ __ge__(other: Bytes) -> Bool
 
 `text` is a compatibility conversion that faults with `BadCast`. It returns a bounded String after successful validation.
 
-`+`, `==`, `!=`, and the four ordering operators use the paired-underscore Bytes hook methods. The ordering hooks carry the unsigned byte rule of section 6.4.
+`+`, `==`, and the ordering operators use the paired-underscore `Bytes` methods.
+
+`!=` negates the `PartialEq` result.
+
+The ordering methods use unsigned byte order.
 
 The final nominal builders have the following surface.
 
 ```text
 StringBuilder.append(text: Text) -> StringBuilder
+StringBuilder.append_int(value: Int) -> StringBuilder
+StringBuilder.append_bool(value: Bool) -> StringBuilder
 StringBuilder.push_char(value: Char) -> StringBuilder
 StringBuilder.len() -> Int
 StringBuilder.byte_len() -> Int

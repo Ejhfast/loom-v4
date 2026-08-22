@@ -923,7 +923,7 @@ impl Ctx {
         }
     }
 
-    fn instantiate_interface_method(
+    pub(crate) fn instantiate_interface_method(
         &mut self,
         receiver: TypeId,
         application: &InterfaceUse,
@@ -3291,8 +3291,10 @@ fn check_class_conformances(
     for conformance in conformances {
         let contract = ctx.interfaces[conformance.application.interface as usize].clone();
         let class_info = &ctx.classes[class_id as usize];
+        let closed_native_family = class_info.native_repr == Some(NativeRepr::Text);
         if class_info.kind == ClassKind::Normal
             && !class_info.is_final
+            && !closed_native_family
             && interface_uses_self(ctx, conformance.application.interface, &mut HashSet::new())
         {
             return Err(Diagnostic::new(

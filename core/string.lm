@@ -1,6 +1,6 @@
 # Core: immutable UTF-8 text and Unicode scalar values.
 
-class Text implements Counted, Iterable, Display
+class Text implements Counted, Iterable, Display, PartialEq
   type Item = Char
   type Iter = TextIterator
 
@@ -222,10 +222,6 @@ class Text implements Counted, Iterable, Display
     intrinsic("text.eq", self, other)
   end
 
-  def __ne__(self, other: Text): Bool
-    intrinsic("text.ne", self, other)
-  end
-
   def __lt__(self, other: Text): Bool
     intrinsic("text.lt", self, other)
   end
@@ -256,7 +252,7 @@ final class Substring < Text
   end
 end
 
-final class Char implements Display
+final class Char implements Display, PartialEq
   def append_to(self, mut builder: StringBuilder)
     builder.push_char(self)
     ()
@@ -276,10 +272,6 @@ final class Char implements Display
 
   def __eq__(self, other: Char): Bool
     intrinsic("char.eq", self, other)
-  end
-
-  def __ne__(self, other: Char): Bool
-    intrinsic("char.ne", self, other)
   end
 
   def __lt__(self, other: Char): Bool

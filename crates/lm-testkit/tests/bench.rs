@@ -261,6 +261,30 @@ fn bench_language_operations() {
         base,
     );
 
+    // Integer equality keeps its sealed instruction inside a hot loop.
+    report(
+        "int_eq",
+        1_000_000,
+        "i = 0\nsame = false\nwhile i < 1000000\n  same = i == i\n  i = i + 1\nend\nsame\n",
+        base,
+    );
+
+    // Text equality keeps its native content instruction.
+    report(
+        "text_eq",
+        1_000_000,
+        "a = \"loom\"\nb = \"loom\"\ni = 0\nsame = false\nwhile i < 1000000\n  same = a == b\n  i = i + 1\nend\nsame\n",
+        base,
+    );
+
+    // Generic equality measures one verified interface call.
+    report(
+        "partial_eq",
+        1_000_000,
+        "final class Token implements PartialEq\n  value: Int\n  def init(mut self, value: Int)\n    self.value = value\n  end\n  def __eq__(self, other: Token): Bool\n    self.value == other.value\n  end\nend\ndef same[T: PartialEq](a: T, b: T): Bool\n  a == b\nend\na = Token(7)\nb = Token(7)\ni = 0\nequal = false\nwhile i < 1000000\n  equal = same(a, b)\n  i = i + 1\nend\nequal\n",
+        base,
+    );
+
     // Recursion: the call path with a growing activation stack.
     report(
         "recursion",

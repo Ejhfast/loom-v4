@@ -98,6 +98,109 @@ impl<'o> FnChecker<'o> {
         )
     }
 
+    /// Select one native equality intrinsic and its right operand type.
+    fn native_equality(
+        ctx: &Ctx,
+        ty: TypeId,
+        op: BinOp,
+    ) -> Option<(lm_abi::IntrinsicSlot, TypeId)> {
+        let (class, _) = class_of(ctx, ty)?;
+        let repr = ctx.classes[class as usize].native_repr?;
+        let (equal, not_equal, operand) = match repr {
+            NativeRepr::Int => (lm_abi::INTRINSIC_INT_EQ, lm_abi::INTRINSIC_INT_NE, INT),
+            NativeRepr::Bool => (lm_abi::INTRINSIC_BOOL_EQ, lm_abi::INTRINSIC_BOOL_NE, BOOL),
+            NativeRepr::Text | NativeRepr::String | NativeRepr::Substring => (
+                lm_abi::INTRINSIC_STRING_EQ,
+                lm_abi::INTRINSIC_STRING_NE,
+                ctx.classes[ctx.core_types["Text"] as usize].self_ty,
+            ),
+            NativeRepr::Char => (
+                lm_abi::INTRINSIC_CHAR_EQ,
+                lm_abi::INTRINSIC_CHAR_NE,
+                ctx.classes[class as usize].self_ty,
+            ),
+            NativeRepr::Bytes => (
+                lm_abi::INTRINSIC_BYTES_EQ,
+                lm_abi::INTRINSIC_BYTES_NE,
+                lm_types::BYTES,
+            ),
+            _ => return None,
+        };
+        Some((if op == BinOp::Eq { equal } else { not_equal }, operand))
+    }
+
+    /// Build equality through the declared `PartialEq` conformance.
+    fn partial_eq_operator(
+        &mut self,
+        ctx: &mut Ctx,
+        op: BinOp,
+        recv: HExpr,
+        application: InterfaceUse,
+        right: &ast::Expr,
+        span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        if let Some((class, class_args, found)) = Self::find_operator_hook(ctx, recv.ty, "__eq__") {
+            let equal = self.operator_hook(
+                ctx,
+                recv,
+                class,
+                class_args,
+                found,
+                "__eq__",
+                std::slice::from_ref(right),
+                span,
+            )?;
+            return Ok(if op == BinOp::Eq {
+                equal
+            } else {
+                HExpr {
+                    ty: BOOL,
+                    mutable: true,
+                    kind: HExprKind::Not(Box::new(equal)),
+                }
+            });
+        }
+
+        let interface = ctx.core_interfaces["PartialEq"];
+        let method = ctx.interfaces[interface as usize]
+            .methods
+            .iter()
+            .position(|method| method.name == "__eq__")
+            .expect("PartialEq declares __eq__") as u32;
+        let contract = ctx.interfaces[interface as usize].methods[method as usize].clone();
+        let requirement = ctx.instantiate_interface_method(recv.ty, &application, &contract);
+        let checked = self.check_args_simple(
+            ctx,
+            std::slice::from_ref(right),
+            &requirement.params,
+            &requirement.param_muts,
+            &requirement.param_names,
+            "__eq__",
+            span,
+        )?;
+        self.charge_row(ctx, &requirement.row, span)?;
+        let equal = HExpr {
+            ty: requirement.ret,
+            mutable: true,
+            kind: HExprKind::InterfaceCall {
+                recv: Box::new(recv),
+                interface,
+                method,
+                selector: "__eq__".to_string(),
+                args: checked,
+            },
+        };
+        Ok(if op == BinOp::Eq {
+            equal
+        } else {
+            HExpr {
+                ty: BOOL,
+                mutable: true,
+                kind: HExprKind::Not(Box::new(equal)),
+            }
+        })
+    }
+
     pub(super) fn synth_binary(
         &mut self,
         ctx: &mut Ctx,
@@ -195,18 +298,20 @@ impl<'o> FnChecker<'o> {
             }
             BinOp::Eq | BinOp::Ne => {
                 let l = self.synth_expr(ctx, left)?;
-                let hook = if op == BinOp::Eq { "__eq__" } else { "__ne__" };
-                if let Some((class, cargs, found)) = Self::find_operator_hook(ctx, l.ty, hook) {
-                    return self.operator_hook(
-                        ctx,
-                        l,
-                        class,
-                        cargs,
-                        found,
-                        hook,
-                        std::slice::from_ref(right),
-                        left.span,
-                    );
+                let partial_eq = ctx.core_interfaces["PartialEq"];
+                if let Some(application) = ctx.type_conformance(&self.env, l.ty, partial_eq) {
+                    if let Some((intrinsic, operand_ty)) = Self::native_equality(ctx, l.ty, op) {
+                        let r = self.check_expr(ctx, right, operand_ty)?;
+                        return Ok(HExpr {
+                            ty: BOOL,
+                            mutable: true,
+                            kind: HExprKind::Intrinsic {
+                                intrinsic,
+                                args: vec![l, r],
+                            },
+                        });
+                    }
+                    return self.partial_eq_operator(ctx, op, l, application, right, left.span);
                 }
                 let r = if matches!(&right.kind, ExprKind::Name(name) if name == "None") {
                     self.check_expr(ctx, right, l.ty)?
