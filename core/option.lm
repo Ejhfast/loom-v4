@@ -26,4 +26,11 @@ enum Option[T]
     in None    then fallback
     end
   end
+
+  def expect(self, message: String): T
+    case self
+    in Some(v) then v
+    in None    then panic(message)
+    end
+  end
 end

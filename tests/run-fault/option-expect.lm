@@ -1,0 +1,2 @@
+missing: Option[Int] = None
+missing.expect("missing item")

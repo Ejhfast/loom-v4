@@ -4,7 +4,7 @@
 //! and nested exact-arm exhaustiveness.
 
 use lm_testkit::{compile_text, run_allowed, run_text};
-use lm_vm::{LoadError, VmConfig};
+use lm_vm::{LoadError, RecordingHost, VmConfig, World};
 
 fn run(source: &str) -> String {
     run_text("fixes.lm", source, VmConfig::default()).unwrap()
@@ -19,6 +19,61 @@ fn expect_error(source: &str, needle: &str) {
     assert!(
         rendered.contains(needle),
         "expected `{needle}` in:\n{rendered}"
+    );
+}
+
+#[test]
+fn guest_code_can_encode_a_snapshot() {
+    let source = "def go(): Bool with Vm\n\
+  case sys.vm.snapshot_self()\n\
+  in Ok(snapshot)\n\
+    case snapshot.to_bytes()\n\
+    in Ok(bytes) then bytes.len() > 32\n\
+    in Err(_) then false\n\
+    end\n\
+  in Err(_) then false\n\
+  end\n\
+end\n\
+go()\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done(true)");
+
+    let source = "def go(): Bool with Vm\n\
+  run = sys.vm.Vm().activate_or_fault(do ||: Int\n\
+    42\n\
+  end, args: ())\n\
+  run.step()\n\
+  case run.snapshot()\n\
+  in Ok(snapshot)\n\
+    case snapshot.to_bytes()\n\
+    in Ok(bytes) then bytes.len() > 32\n\
+    in Err(_) then false\n\
+    end\n\
+  in Err(_) then false\n\
+  end\n\
+end\n\
+go()\n";
+    assert_eq!(allowed(source, &["Vm"]), "Done(true)");
+}
+
+#[test]
+fn a_deliberate_fault_keeps_its_message_and_source() {
+    let source = "value = 1\npanic(\"the item is missing\")\n";
+    let bytes =
+        lm_testkit::compile_to_bytes("panic-source.lm", source).expect("the program compiles");
+    let loaded = lm_vm::load_bytes(&bytes).expect("the program verifies");
+    let mut world = World::new(
+        &loaded,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Fault(UserPanic)");
+    let fault = world.root_fault().expect("the root machine faulted");
+    assert_eq!(fault.message, "the item is missing");
+    let context = world.fault_context(fault);
+    assert!(
+        context.iter().any(|line| line.contains("panic-source.lm")),
+        "missing source context: {context:?}"
     );
 }
 

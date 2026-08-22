@@ -2149,6 +2149,9 @@ impl World {
                 self.take_vm_snapshot(vm, op, image);
             }
             lm_abi::OP_VM_LOAD_SNAPSHOT => self.load_snapshot(vm, op, args),
+            lm_abi::OP_VM_RUN_SNAPSHOT_BYTES | lm_abi::OP_VM_SNAPSHOT_BYTES => {
+                self.snapshot_bytes(vm, op, args[0])
+            }
             lm_abi::OP_VM_RESTORE => self.restore_snapshot(vm, op, args),
             lm_abi::OP_VM_RESTORE_VM => self.restore_vm_snapshot(vm, op, args),
             lm_abi::OP_PROC_RECV_WAIT

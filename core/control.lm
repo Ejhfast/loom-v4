@@ -1,0 +1,21 @@
+# Core: deliberate program failure.
+
+def panic(message: String): Never
+  intrinsic("control.panic", message)
+end
+
+def assert(condition: Bool)
+  if condition
+    ()
+  else
+    intrinsic("control.assert_fail", "assertion failed")
+  end
+end
+
+def assert_message(condition: Bool, message: String)
+  if condition
+    ()
+  else
+    intrinsic("control.assert_fail", message)
+  end
+end

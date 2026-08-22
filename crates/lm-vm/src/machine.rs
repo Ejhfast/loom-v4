@@ -447,6 +447,8 @@ pub enum ExecOutcome {
     Continue,
     /// The last frame returned this terminal value.
     Terminal(Value),
+    /// Guest code stopped itself with a message.
+    Raise { code: FaultCode, message: String },
     /// A perform: the arguments are recorded in `Pending` by the
     /// driver.
     Perform { op: u32, args: Vec<Value> },
@@ -4548,6 +4550,19 @@ impl Machine {
                     trace: Box::default(),
                 })?;
                 self.push(value)?;
+            }
+            Instr::RaiseUserPanic | Instr::RaiseAssertionFailed => {
+                let reference = self.pop_obj()?;
+                let message = match self.vm.heap.get(reference) {
+                    Object::Str(text) => text.to_string(),
+                    _ => return Err(BAD_TYPE),
+                };
+                let code = if matches!(instr, Instr::RaiseUserPanic) {
+                    FaultCode::UserPanic
+                } else {
+                    FaultCode::AssertionFailed
+                };
+                return Ok(ExecOutcome::Raise { code, message });
             }
         }
         Ok(ExecOutcome::Continue)

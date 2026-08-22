@@ -1,7 +1,7 @@
 //! End-to-end tests for the `lm` binary.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn repo_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -163,7 +163,7 @@ fn run_reports_a_fault_with_a_stable_code() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 8e9b9fce)\n"
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, c257f602)\n"
     );
 }
 
@@ -179,7 +179,7 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, b9110d4f)\n"
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 69f8ee11)\n"
     );
 }
 
@@ -196,6 +196,41 @@ fn unknown_command_prints_usage() {
     let out = lm(&["frobnicate"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("usage:"), "{}", stderr(&out));
+}
+
+#[test]
+fn help_and_version_succeed() {
+    let help = lm(&["--help"]);
+    assert!(help.status.success(), "{}", stderr(&help));
+    assert!(stdout(&help).starts_with("usage:\n"));
+
+    let version = lm(&["--version"]);
+    assert!(version.status.success(), "{}", stderr(&version));
+    assert_eq!(
+        stdout(&version),
+        format!("lm {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn a_closed_output_pipe_does_not_panic() {
+    let path = repo_root().join("target/test-closed-pipe.lm");
+    std::fs::write(
+        &path,
+        "def go() with Io.Print\n  for n in Range(0, 100)\n    sys.io.print(\"line {n}\\n\")\n  end\nend\ngo()\n",
+    )
+    .expect("the probe source writes");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lm"))
+        .args(["run", "--allow", "Io.Print"])
+        .arg(&path)
+        .current_dir(repo_root())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the lm binary starts");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("the lm binary exits");
+    assert!(output.status.success(), "{}", stderr(&output));
 }
 
 #[test]

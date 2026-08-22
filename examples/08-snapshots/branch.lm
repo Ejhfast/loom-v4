@@ -9,9 +9,9 @@ def restore_run(snap: RunSnapshot[Int]): Int with Vm
   in Ok(restored)
     case restored.run()
     in Done(value) then value
-    in Fault(_)    then -1
+    in Fault(_)    then panic("the restored run faulted")
     end
-  in Err(_) then -2
+  in Err(_) then panic("the snapshot restore failed")
   end
 end
 

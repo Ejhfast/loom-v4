@@ -108,7 +108,7 @@ assert_message(condition: Bool, message: String)
 
 `panic` creates `Fault(UserPanic)`.
 
-The fault carries the supplied message and current source position.
+The fault carries the supplied message and current source call chain.
 
 `assert` and `assert_message` create `Fault(AssertionFailed)`.
 

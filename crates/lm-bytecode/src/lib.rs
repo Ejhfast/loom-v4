@@ -506,6 +506,10 @@ pub enum Instr {
     /// to deny a request through `reject`. The code is fixed, so no
     /// program can claim a machine-internal fault.
     FaultDenied,
+    /// Pop a message and stop with `UserPanic`.
+    RaiseUserPanic,
+    /// Pop a message and stop with `AssertionFailed`.
+    RaiseAssertionFailed,
     /// The runtime backstop behind a proven-exhaustive `case`. It
     /// faults if executed. Ends the block.
     Unreachable,
@@ -783,7 +787,14 @@ pub enum NativeInstr {
 impl Instr {
     /// Return true when the instruction ends a basic block.
     pub fn is_terminator(&self) -> bool {
-        matches!(self, Instr::Jump(_) | Instr::Return | Instr::Unreachable)
+        matches!(
+            self,
+            Instr::Jump(_)
+                | Instr::Return
+                | Instr::RaiseUserPanic
+                | Instr::RaiseAssertionFailed
+                | Instr::Unreachable
+        )
     }
 }
 
@@ -1109,7 +1120,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 /// Version 41 adds installed binding core roles. Version 42 stores
 /// each intrinsic definition contract beside its late slot. Version
 /// 43 stores several bounds for each associated interface type.
-pub const VERSION: u16 = 43;
+/// Version 44 adds deliberate fault instructions.
+pub const VERSION: u16 = 44;
 
 /// The byte length of the container header: the magic, the version,
 /// and the three section-table entries (offset and length each).
@@ -1315,6 +1327,8 @@ const OP_CODE_SOURCE: u8 = 0xe7;
 const OP_FAULT_SITE: u8 = 0xe8;
 const OP_FAULT_TRACE: u8 = 0xe9;
 const OP_CODE_DEFINITION: u8 = 0xea;
+const OP_RAISE_USER_PANIC: u8 = 0xeb;
+const OP_RAISE_ASSERTION_FAILED: u8 = 0xec;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -2088,6 +2102,8 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::CallArgs => out.push(OP_CALL_ARGS),
         Instr::FaultCode => out.push(OP_FAULT_CODE),
         Instr::FaultDenied => out.push(OP_FAULT_DENIED),
+        Instr::RaiseUserPanic => out.push(OP_RAISE_USER_PANIC),
+        Instr::RaiseAssertionFailed => out.push(OP_RAISE_ASSERTION_FAILED),
         Instr::RequestOp => out.push(OP_REQUEST_OP),
         Instr::Unreachable => out.push(OP_UNREACHABLE),
     }
@@ -3298,6 +3314,8 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_CALL_ARGS => Instr::CallArgs,
         OP_FAULT_CODE => Instr::FaultCode,
         OP_FAULT_DENIED => Instr::FaultDenied,
+        OP_RAISE_USER_PANIC => Instr::RaiseUserPanic,
+        OP_RAISE_ASSERTION_FAILED => Instr::RaiseAssertionFailed,
         OP_REQUEST_OP => Instr::RequestOp,
         OP_UNREACHABLE => Instr::Unreachable,
         other => return Err(DecodeError::BadOpcode(other)),

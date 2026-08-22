@@ -909,6 +909,9 @@ impl World {
                                 self.machines[act.vm as usize].set_done(value);
                             }
                         }
+                        Ok(Some(ExecOutcome::Raise { code, message })) => {
+                            self.machines[act.vm as usize].set_fault(code, message, None);
+                        }
                         Ok(Some(ExecOutcome::Perform { op, args })) => {
                             if let Some(event) = self.handle_perform(stack, act.vm, op, args) {
                                 return event;

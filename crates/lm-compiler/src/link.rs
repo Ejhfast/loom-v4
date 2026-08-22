@@ -1538,6 +1538,8 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::CallArgs
         | Instr::FaultCode
         | Instr::FaultDenied
+        | Instr::RaiseUserPanic
+        | Instr::RaiseAssertionFailed
         | Instr::RequestOp
         | Instr::Unreachable => *instr,
         Instr::Digest { ty } => Instr::Digest {

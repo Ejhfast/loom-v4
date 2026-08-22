@@ -1,0 +1,5 @@
+(
+  SnapshotError.SnapshotLimitExceeded.message(),
+  SnapshotError.BadImage("invalid data").message(),
+  SnapshotError.ResourceActive([], "file").message()
+)

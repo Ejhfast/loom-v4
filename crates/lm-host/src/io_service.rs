@@ -359,6 +359,7 @@ fn output_worker(
         };
         let result = match result {
             Ok(()) => Ok(HostValue::Unit),
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(HostValue::Unit),
             Err(error) => Err(format!("stream write failed: {error}")),
         };
         let _ = completions.send(HostCompletion {

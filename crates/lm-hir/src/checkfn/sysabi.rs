@@ -75,6 +75,7 @@ impl<'o> FnChecker<'o> {
         match t {
             lm_abi::AbiType::Primitive(primitive) => match primitive {
                 lm_abi::AbiPrimitive::Unit => UNIT,
+                lm_abi::AbiPrimitive::Never => lm_types::NEVER,
                 lm_abi::AbiPrimitive::Bool => BOOL,
                 lm_abi::AbiPrimitive::Int => INT,
                 lm_abi::AbiPrimitive::String => STRING,
@@ -714,6 +715,8 @@ impl<'o> FnChecker<'o> {
                 | Type::Handle(_, _)
                 | Type::ResourceHandle
                 | Type::Fault
+                | Type::VmSnapshot
+                | Type::RunSnapshot(_)
         ) && code_class.is_none()
         {
             return Ok(None);
@@ -736,7 +739,7 @@ impl<'o> FnChecker<'o> {
             self.check_code_method(ctx, recv_h, class, name, name_span, type_args, args, span)?
         } else {
             match recv_ty {
-                Type::Vm | Type::Run(_) => {
+                Type::Vm | Type::Run(_) | Type::VmSnapshot | Type::RunSnapshot(_) => {
                     self.check_machine_method(ctx, recv_h, recv_ty, name, name_span, args, span)?
                 }
                 Type::Wait(_) => {
@@ -1106,6 +1109,24 @@ impl<'o> FnChecker<'o> {
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
         Ok(match (recv_ty, name) {
+            (kind @ Type::RunSnapshot(_), "to_bytes") | (kind @ Type::VmSnapshot, "to_bytes") => {
+                Self::expect_no_args(name, args, span)?;
+                let op = if matches!(kind, Type::RunSnapshot(_)) {
+                    lm_abi::OP_VM_RUN_SNAPSHOT_BYTES
+                } else {
+                    lm_abi::OP_VM_SNAPSHOT_BYTES
+                };
+                self.charge_op(ctx, op, span)?;
+                let error = Self::core_class(ctx, "SnapshotError");
+                HExpr {
+                    ty: Self::core_inst(ctx, "Result", vec![lm_types::BYTES, error]),
+                    mutable: true,
+                    kind: HExprKind::Perform {
+                        op,
+                        args: vec![recv_h],
+                    },
+                }
+            }
             (Type::Vm, "activate" | "activate_or_fault") => {
                 if args.len() != 2 {
                     return Err(Diagnostic::new(

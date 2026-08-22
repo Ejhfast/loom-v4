@@ -209,6 +209,8 @@ impl<'o> FnChecker<'o> {
                     | Type::Handle(_, _)
                     | Type::ResourceHandle
                     | Type::Fault
+                    | Type::VmSnapshot
+                    | Type::RunSnapshot(_)
             )
         {
             let out =

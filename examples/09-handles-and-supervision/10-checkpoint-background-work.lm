@@ -8,7 +8,7 @@ def index_file(file: FileHandle): Int with Fs.Read, Fs.Close
   end
   case file.close()
   in Ok(_)  then size
-  in Err(_) then -1
+  in Err(_) then panic("the checkpoint failed")
   end
 end
 

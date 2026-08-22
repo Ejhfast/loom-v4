@@ -27,6 +27,13 @@ enum Result[T, E]
     end
   end
 
+  def expect(self, message: String): T
+    case self
+    in Ok(v)  then v
+    in Err(_) then panic(message)
+    end
+  end
+
   def map[U, effect e](self, f: (T) -> U with e): Result[U, E] with e
     case self
     in Ok(v)     then Ok(f(v))

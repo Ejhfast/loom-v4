@@ -1823,6 +1823,8 @@ impl<'m> Oracle<'m> {
                 }
                 Ok(OV::Unit)
             }
+            lm_abi::INTRINSIC_PANIC => Err(Stop::Fault("UserPanic")),
+            lm_abi::INTRINSIC_ASSERT_FAIL => Err(Stop::Fault("AssertionFailed")),
             _ => Err(Stop::Limit("unknown intrinsic")),
         }
     }

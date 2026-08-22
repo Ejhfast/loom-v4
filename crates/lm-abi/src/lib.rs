@@ -37,7 +37,8 @@ pub use sha::{sha256, sha256_hex};
 /// controls. Version 16 adds stable slot discovery and fallible
 /// activation. It also moves verification into the Compiler group.
 /// Version 17 adds installed function and class binding controls.
-pub const ABI_VERSION: u32 = 17;
+/// Version 18 adds guest snapshot encoding.
+pub const ABI_VERSION: u32 = 18;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -130,6 +131,7 @@ pub const GROUP_MEMBERS: [&[&str]; 22] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbiPrimitive {
     Unit,
+    Never,
     Bool,
     Int,
     String,
@@ -141,6 +143,7 @@ impl AbiPrimitive {
     fn text(self) -> &'static str {
         match self {
             AbiPrimitive::Unit => "()",
+            AbiPrimitive::Never => "Never",
             AbiPrimitive::Bool => "Bool",
             AbiPrimitive::Int => "Int",
             AbiPrimitive::String => "String",
@@ -282,6 +285,7 @@ pub enum AbiType {
 
 impl AbiType {
     pub const UNIT: AbiType = AbiType::Primitive(AbiPrimitive::Unit);
+    pub const NEVER: AbiType = AbiType::Primitive(AbiPrimitive::Never);
     pub const BOOL: AbiType = AbiType::Primitive(AbiPrimitive::Bool);
     pub const INT: AbiType = AbiType::Primitive(AbiPrimitive::Int);
     pub const STR: AbiType = AbiType::Primitive(AbiPrimitive::String);
@@ -446,7 +450,8 @@ impl AbiType {
 /// Version 11 adds immutable public syntax traversal.
 /// Version 12 adds dynamic result rendering.
 /// Version 13 adds immutable public syntax construction.
-pub const INTRINSIC_ABI_VERSION: u32 = 13;
+/// Version 14 adds deliberate guest failure.
+pub const INTRINSIC_ABI_VERSION: u32 = 14;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -593,9 +598,11 @@ pub const INTRINSIC_SYNTAX_BUILD_TOKEN: IntrinsicSlot = 128;
 pub const INTRINSIC_SYNTAX_BUILD_TRIVIA: IntrinsicSlot = 129;
 pub const INTRINSIC_SYNTAX_BUILD_NODE: IntrinsicSlot = 130;
 pub const INTRINSIC_SYNTAX_TO_TREE: IntrinsicSlot = 131;
+pub const INTRINSIC_PANIC: IntrinsicSlot = 132;
+pub const INTRINSIC_ASSERT_FAIL: IntrinsicSlot = 133;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 132] = [
+pub const INTRINSICS: [IntrinsicDef; 134] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -1428,6 +1435,18 @@ pub const INTRINSICS: [IntrinsicDef; 132] = [
         reply: AbiType::SYNTAX_TREE,
         semantic_revision: 1,
     },
+    IntrinsicDef {
+        name: "control.panic",
+        params: &[AbiType::STR],
+        reply: AbiType::NEVER,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "control.assert_fail",
+        params: &[AbiType::STR],
+        reply: AbiType::NEVER,
+        semantic_revision: 1,
+    },
 ];
 
 /// The number of pure intrinsic slots.
@@ -1639,9 +1658,11 @@ pub const OP_VM_CHANGE_CLASS: OpSlot = 102;
 pub const OP_VM_CHANGE_VALUE: OpSlot = 103;
 pub const OP_VM_CHANGE_PROCESS: OpSlot = 104;
 pub const OP_VM_REPLACE_ALL: OpSlot = 105;
+pub const OP_VM_RUN_SNAPSHOT_BYTES: OpSlot = 106;
+pub const OP_VM_SNAPSHOT_BYTES: OpSlot = 107;
 
 /// The exact operations, in canonical slot order.
-pub const OPS: [OpDef; 106] = [
+pub const OPS: [OpDef; 108] = [
     OpDef {
         group: "Io",
         member: "Print",
@@ -2637,6 +2658,24 @@ pub const OPS: [OpDef; 106] = [
         params: &[],
         reply: AbiType::UNIT,
         schema: "(Vm, List[SlotChange]) -> Result[(), CodeError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "RunSnapshotBytes",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "[T](RunSnapshot[T]) -> Result[Bytes, SnapshotError]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "SnapshotBytes",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(VmSnapshot) -> Result[Bytes, SnapshotError]",
         snapshot: SnapshotClass::MachineState,
     },
 ];

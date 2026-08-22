@@ -2675,6 +2675,34 @@ pub(crate) fn step(
                             let out = ctx.result_inst(image, error).map_err(&fail)?;
                             push(state, out)?;
                         }
+                        lm_abi::OP_VM_RUN_SNAPSHOT_BYTES => {
+                            let image = pop(state)?;
+                            if !matches!(ctx.ty(image), BcType::RunSnapshot(_)) {
+                                return Err(fail(
+                                    "`Vm.RunSnapshotBytes` needs a RunSnapshot".to_string(),
+                                ));
+                            }
+                            let error = ctx
+                                .plain_inst(ctx.core.snapshot_error, "SnapshotError")
+                                .map_err(&fail)?;
+                            let bytes = ctx.intern(BcType::Bytes);
+                            let out = ctx.result_inst(bytes, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
+                        lm_abi::OP_VM_SNAPSHOT_BYTES => {
+                            let image = pop(state)?;
+                            if ctx.ty(image) != BcType::VmSnapshot {
+                                return Err(fail(
+                                    "`Vm.SnapshotBytes` needs a VmSnapshot".to_string(),
+                                ));
+                            }
+                            let error = ctx
+                                .plain_inst(ctx.core.snapshot_error, "SnapshotError")
+                                .map_err(&fail)?;
+                            let bytes = ctx.intern(BcType::Bytes);
+                            let out = ctx.result_inst(bytes, error).map_err(&fail)?;
+                            push(state, out)?;
+                        }
                         lm_abi::OP_VM_RESTORE_VM => {
                             let image = pop(state)?;
                             if ctx.ty(image) != BcType::VmSnapshot {
@@ -2793,6 +2821,9 @@ pub(crate) fn step(
             pop_expect(state, TY_STR)?;
             let fault = ctx.intern(BcType::Fault);
             push(state, fault)?;
+        }
+        Instr::RaiseUserPanic | Instr::RaiseAssertionFailed => {
+            pop_expect(state, TY_STR)?;
         }
         Instr::RequestOp => {
             let request = pop(state)?;

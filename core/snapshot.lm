@@ -22,6 +22,14 @@ enum SnapshotError
     in BadImage(_)           then false
     end
   end
+
+  def message(self): String
+    case self
+    in ResourceActive(_, kind) then "a live {kind} blocks snapshot creation"
+    in SnapshotLimitExceeded  then "the snapshot exceeds its byte limit"
+    in BadImage(reason)       then reason
+    end
+  end
 end
 
 # The ordinary error of a restore.

@@ -20,6 +20,28 @@ fn associated_type_diagnostics_use_source_names() {
 }
 
 #[test]
+fn interface_type_diagnostics_name_the_bound_rule() {
+    let source = "interface Priced\n  def price(self): Int\nend\n\
+                  final class Book implements Priced\n  def price(self): Int\n    1\n  end\nend\n\
+                  def read(item: Priced): Int\n  item.price()\nend\n";
+    let error = compile_text("t.lm", source).expect_err("the interface is not a value type");
+    assert!(
+        error.contains("`Priced` is an interface; use it as a generic bound"),
+        "{error}"
+    );
+}
+
+#[test]
+fn associated_type_diagnostics_suggest_self_projection() {
+    let source = "interface Source\n  type Item\n  def next(self): Item\nend\n";
+    let error = compile_text("t.lm", source).expect_err("the projection needs Self");
+    assert!(
+        error.contains("`Item` is an associated type; write `Self.Item`"),
+        "{error}"
+    );
+}
+
+#[test]
 fn negative_cases_have_stable_codes() {
     // Scanner rules.
     assert_eq!(code_of("\u{1}\n"), "E0001");

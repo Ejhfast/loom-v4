@@ -1009,6 +1009,8 @@ fn reloc_instr(instruction: &Instr, reloc: &AppendReloc) -> Instr {
         | Instr::CallArgs
         | Instr::FaultCode
         | Instr::FaultDenied
+        | Instr::RaiseUserPanic
+        | Instr::RaiseAssertionFailed
         | Instr::RequestOp
         | Instr::Unreachable
         | Instr::Native(_) => *instruction,

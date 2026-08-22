@@ -38,6 +38,10 @@ pub enum FaultCode {
     /// nondigestible native value raises it.
     BoundaryViolation,
     HostFault,
+    /// Guest code stopped itself with `panic`.
+    UserPanic,
+    /// A guest assertion failed.
+    AssertionFailed,
     /// An operation needed a live proc. The reference names a dead or
     /// replaced machine (specification 12.3).
     DeadProc,
@@ -70,7 +74,7 @@ pub enum FaultCode {
 /// so a loader must map a name back to a code. This table is the one
 /// place that lists the codes, so a new code joins both directions at
 /// once.
-pub const FAULT_CODES: [FaultCode; 23] = [
+pub const FAULT_CODES: [FaultCode; 25] = [
     FaultCode::IntegerOverflow,
     FaultCode::DivideByZero,
     FaultCode::OutOfFuel,
@@ -89,6 +93,8 @@ pub const FAULT_CODES: [FaultCode; 23] = [
     FaultCode::BoundaryLimit,
     FaultCode::BoundaryViolation,
     FaultCode::HostFault,
+    FaultCode::UserPanic,
+    FaultCode::AssertionFailed,
     FaultCode::DeadProc,
     FaultCode::UninitializedField,
     FaultCode::UnreachableCode,
@@ -127,6 +133,8 @@ impl fmt::Display for FaultCode {
             FaultCode::BoundaryLimit => "BoundaryLimit",
             FaultCode::BoundaryViolation => "BoundaryViolation",
             FaultCode::HostFault => "HostFault",
+            FaultCode::UserPanic => "UserPanic",
+            FaultCode::AssertionFailed => "AssertionFailed",
             FaultCode::DeadProc => "DeadProc",
             FaultCode::UninitializedField => "UninitializedField",
             FaultCode::UnreachableCode => "UnreachableCode",

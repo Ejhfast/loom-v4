@@ -87,15 +87,15 @@ def upgrade(child: Run[Int], tcp: ResourceHandle): Int with Vm
         return -7
       end
       finish(child, secure)
-    in _ then -8
+    in _ then panic("the TLS client produced no stream")
     end
-  in Done(_)  then -9
-  in Fault(_) then -10
+  in Done(_)  then panic("the TLS client returned early")
+  in Fault(_) then panic("the TLS client faulted")
   end
 end
 
 case loopback(8443)
-in Err(_) then -11
+in Err(_) then panic("the listener setup failed")
 in Ok(address)
   child = sys.vm.Vm().activate_or_fault(client, args: (address,))
   case child.drive()
@@ -104,9 +104,9 @@ in Ok(address)
     in Call(Tcp.Connect, call, (peer,))
       tcp = child.serve_tcp_stream(call, peer)
       upgrade(child, tcp)
-    in _ then -12
+    in _ then panic("the TLS server produced no stream")
     end
-  in Done(_)  then -13
-  in Fault(_) then -14
+  in Done(_)  then panic("the TLS server returned early")
+  in Fault(_) then panic("the TLS server faulted")
   end
 end

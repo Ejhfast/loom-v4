@@ -25,7 +25,7 @@ class Collector < Proc[Int]
   def on_spawn(self): Int with Proc
     case self.receive()
     in Msg(value) then value
-    in Closed then -1
+    in Closed then panic("the worker closed before one request")
     end
   end
 end

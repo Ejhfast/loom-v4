@@ -821,7 +821,9 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             }
             HStmt::Expr(expr) => {
                 self.lower_expr(expr);
-                self.emit(Instr::Pop);
+                if expr.ty != NEVER {
+                    self.emit(Instr::Pop);
+                }
             }
         }
     }
@@ -1082,7 +1084,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         match last {
             HStmt::Expr(expr) => {
                 self.lower_expr(expr);
-                true
+                expr.ty != NEVER
             }
             stmt if stmt.diverges() => {
                 self.lower_stmt(stmt);
@@ -1910,6 +1912,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_SYNTAX_BUILD_TRIVIA => extended(ExtendedInstr::SyntaxBuildTrivia),
             lm_abi::INTRINSIC_SYNTAX_BUILD_NODE => extended(ExtendedInstr::SyntaxBuildNode),
             lm_abi::INTRINSIC_SYNTAX_TO_TREE => extended(ExtendedInstr::SyntaxToTree),
+            lm_abi::INTRINSIC_PANIC => Instr::RaiseUserPanic,
+            lm_abi::INTRINSIC_ASSERT_FAIL => Instr::RaiseAssertionFailed,
             _ => unreachable!("the checker accepts only manifest intrinsics"),
         };
         self.emit(instr);
@@ -3098,6 +3102,7 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         Instr::FaultCode => (1, 1),
         Instr::FaultDenied => (1, 1),
         Instr::RequestOp => (1, 1),
+        Instr::RaiseUserPanic | Instr::RaiseAssertionFailed => (1, 0),
         Instr::Unreachable => (0, 0),
         Instr::CallInterface {
             interface, method, ..
@@ -3367,6 +3372,8 @@ fn instr_text(instr: &Instr) -> String {
         Instr::CallArgs => "CallArgs".to_string(),
         Instr::FaultCode => "FaultCode".to_string(),
         Instr::FaultDenied => "FaultDenied".to_string(),
+        Instr::RaiseUserPanic => "RaiseUserPanic".to_string(),
+        Instr::RaiseAssertionFailed => "RaiseAssertionFailed".to_string(),
         Instr::RequestOp => "RequestOp".to_string(),
         Instr::Unreachable => "Unreachable".to_string(),
         Instr::CallInterface {

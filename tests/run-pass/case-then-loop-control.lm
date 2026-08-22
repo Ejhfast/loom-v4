@@ -1,0 +1,14 @@
+def count(): Int
+  n = 0
+  loop
+    n = n + 1
+    case n
+    in 1 then continue
+    in 3 then break
+    in _ then ()
+    end
+  end
+  n
+end
+
+count()

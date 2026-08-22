@@ -14,8 +14,35 @@
 
 use lm_source::SourceFile;
 use lm_vm::{VmConfig, World};
+use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
+
+fn report_stdout(args: std::fmt::Arguments<'_>) {
+    let _ = std::io::stdout().lock().write_fmt(args);
+}
+
+fn report_stderr(args: std::fmt::Arguments<'_>) {
+    let _ = std::io::stderr().lock().write_fmt(args);
+}
+
+macro_rules! out {
+    ($($arg:tt)*) => {
+        report_stdout(format_args!($($arg)*))
+    };
+}
+
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        report_stdout(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+macro_rules! errln {
+    ($($arg:tt)*) => {
+        report_stderr(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
 
 const USAGE: &str = "usage:
   lm new <name>
@@ -39,7 +66,7 @@ fn main() -> ExitCode {
     match run_cli(&args) {
         Ok(code) => code,
         Err(message) => {
-            eprint!("{message}");
+            report_stderr(format_args!("{message}"));
             ExitCode::from(1)
         }
     }
@@ -51,6 +78,14 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
         return Err(format!("{USAGE}\n"));
     };
     match command.as_str() {
+        "--help" | "-h" => {
+            out!("{USAGE}\n");
+            Ok(ExitCode::SUCCESS)
+        }
+        "--version" | "-V" => {
+            outln!("lm {}", env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
+        }
         "check" => {
             // `check` runs the full admission path: parse, check,
             // lower, and verify. It compiles exactly what `run` and
@@ -71,9 +106,9 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| format!("error: `{}` has no name\n", options.file))?;
             lm_compiler::scaffold::new_package(dir, name)?;
-            println!("created {}", dir.display());
-            println!("  {}", dir.join("lm.package").display());
-            println!("  {}", dir.join("src").join("main.lm").display());
+            outln!("created {}", dir.display());
+            outln!("  {}", dir.join("lm.package").display());
+            outln!("  {}", dir.join("src").join("main.lm").display());
             Ok(ExitCode::SUCCESS)
         }
         "build" => {
@@ -104,7 +139,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
         "disasm" => {
             let options = parse_options(rest)?;
             let module = read_module(&options.file)?;
-            print!("{}", lm_hir::dump_cfg(&module));
+            out!("{}", lm_hir::dump_cfg(&module));
             Ok(ExitCode::SUCCESS)
         }
         "inspect" => {
@@ -113,7 +148,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 // The native shape table: the one declaration point
                 // for child order, boundary policy, digestibility,
                 // and snapshot classification.
-                print!("{}", lm_vm::dump_shapes());
+                out!("{}", lm_vm::dump_shapes());
                 return Ok(ExitCode::SUCCESS);
             }
             if options.live {
@@ -126,12 +161,12 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                         .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
                 }
                 let outcome = lm_proc::run_world(&mut world);
-                print!("{}", world.dump_live(&outcome));
+                out!("{}", world.dump_live(&outcome));
                 return Ok(ExitCode::SUCCESS);
             }
             if extension(&options.file) == "lms" {
                 let image = load_image(&options)?;
-                print!("{}", lm_vm::snapshot::dump::dump(&image));
+                out!("{}", lm_vm::snapshot::dump::dump(&image));
                 return Ok(ExitCode::SUCCESS);
             }
             match extension(&options.file) {
@@ -139,7 +174,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                     let bytes = read_bytes(&options.file)?;
                     let interface = lm_bytecode::interface::decode_interface(&bytes)
                         .map_err(|e| format!("error: cannot decode the interface: {e}\n"))?;
-                    print!("{}", lm_bytecode::interface::dump_interface(&interface));
+                    out!("{}", lm_bytecode::interface::dump_interface(&interface));
                     Ok(ExitCode::SUCCESS)
                 }
                 "lma" => {
@@ -148,12 +183,12 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                         .map_err(|e| format!("error: cannot decode the artifact: {e}\n"))?;
                     let identity = lm_bytecode::identity::module_identity(&module)
                         .map_err(|e| format!("error: {e}\n"))?;
-                    println!("module   {}", hex(&identity.semantic_hash));
-                    println!(
+                    outln!("module   {}", hex(&identity.semantic_hash));
+                    outln!(
                         "container {}",
                         hex(&lm_bytecode::identity::container_hash(&bytes))
                     );
-                    println!(
+                    outln!(
                         "classes {} functions {} bindings {} entry fn{}",
                         module.classes.len(),
                         module.funcs.len(),
@@ -178,7 +213,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 "verify" => {
                     let options = parse_options(rest)?;
                     let image = load_image(&options)?;
-                    println!("{}", lm_vm::snapshot::dump::verdict(image.world()));
+                    outln!("{}", lm_vm::snapshot::dump::verdict(image.world()));
                     Ok(ExitCode::SUCCESS)
                 }
                 "run" => snapshot_run(rest),
@@ -254,9 +289,9 @@ fn snapshot_save(args: &[String]) -> Result<ExitCode, String> {
         .to_vec();
     let verdict = lm_vm::snapshot::dump::verdict(image.world());
     write_atomic(Path::new(&out), &bytes)?;
-    println!("wrote {out}");
-    println!("  {} bytes", bytes.len());
-    println!("  {verdict}");
+    outln!("wrote {out}");
+    outln!("  {} bytes", bytes.len());
+    outln!("  {verdict}");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -293,13 +328,13 @@ fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
     loop {
         match world.run_machine(root) {
             lm_vm::RootEvent::Done(value) => {
-                println!("Done({})", world.show_result_of(root, value));
+                outln!("Done({})", world.show_result_of(root, value));
                 return Ok(ExitCode::SUCCESS);
             }
             lm_vm::RootEvent::Fault(rec) => {
-                println!("Fault({})", rec.code);
+                outln!("Fault({})", rec.code);
                 for line in world.fault_context(&rec) {
-                    println!("{line}");
+                    outln!("{line}");
                 }
                 return Ok(ExitCode::from(1));
             }
@@ -307,18 +342,18 @@ fn snapshot_run(args: &[String]) -> Result<ExitCode, String> {
                 let op = world
                     .pending_op_of(root)
                     .expect("an asked machine holds its request");
-                println!("Asked({})", lm_abi::op_name(op));
+                outln!("Asked({})", lm_abi::op_name(op));
                 return Ok(ExitCode::SUCCESS);
             }
             lm_vm::RootEvent::Blocked => {
                 if lm_proc::drain_procs(&mut world) > 0 {
                     continue;
                 }
-                println!("Fault(HostFault)");
+                outln!("Fault(HostFault)");
                 return Ok(ExitCode::from(1));
             }
             lm_vm::RootEvent::Ran | lm_vm::RootEvent::Waiting => {
-                println!("Fault(HostFault)");
+                outln!("Fault(HostFault)");
                 return Ok(ExitCode::from(1));
             }
         }
@@ -384,9 +419,9 @@ fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport
     }
     for line in lines {
         if to_stderr {
-            eprintln!("{line}");
+            errln!("{line}");
         } else {
-            println!("{line}");
+            outln!("{line}");
         }
     }
     Ok(report)
@@ -409,16 +444,16 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
     .map_err(|e| format!("error: --allow: {e}\n{USAGE}\n"))?;
     let (faulted, text, fault_context) = (result.faulted, result.text, result.fault_context);
     if options.show_result {
-        println!("{text}");
+        outln!("{text}");
     } else if faulted {
-        eprintln!("{text}");
+        errln!("{text}");
     }
     if faulted {
         for line in fault_context {
             if options.show_result {
-                println!("{line}");
+                outln!("{line}");
             } else {
-                eprintln!("{line}");
+                errln!("{line}");
             }
         }
     }
@@ -518,9 +553,9 @@ fn build_artifact(path: &str) -> Result<ExitCode, String> {
         .map_err(|e| format!("error: cannot create `{}`: {e}\n", dir.display()))?;
     write_atomic(&dir.join(format!("{stem}.lma")), &container)?;
     write_atomic(&dir.join(format!("{stem}.lmi")), &interface_bytes)?;
-    println!("built {stem}");
-    println!("  semantic  {}", hex(&identity.semantic_hash));
-    println!("  container {}", hex(&container_hash));
+    outln!("built {stem}");
+    outln!("  semantic  {}", hex(&identity.semantic_hash));
+    outln!("  container {}", hex(&container_hash));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -661,4 +696,17 @@ fn compile_file(source: &SourceFile) -> Result<lm_compiler::CompiledSource, Stri
 /// Compile one source file to decoded bytecode.
 fn compile(source: &SourceFile) -> Result<lm_bytecode::Module, String> {
     lm_compiler::compile_program(SINGLE_FILE_MODULE_PATH, source)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_and_version_succeed() {
+        assert_eq!(run_cli(&["--help".to_string()]), Ok(ExitCode::SUCCESS));
+        assert_eq!(run_cli(&["-h".to_string()]), Ok(ExitCode::SUCCESS));
+        assert_eq!(run_cli(&["--version".to_string()]), Ok(ExitCode::SUCCESS));
+        assert_eq!(run_cli(&["-V".to_string()]), Ok(ExitCode::SUCCESS));
+    }
 }

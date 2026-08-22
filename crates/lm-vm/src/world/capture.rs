@@ -119,6 +119,23 @@ impl World {
         self.reply_or_fault(vm, op, built);
     }
 
+    /// Encode one guest snapshot as its canonical container.
+    pub(super) fn snapshot_bytes(&mut self, vm: VmId, op: u32, value: Value) {
+        let Some(image) = self.admitted_snapshot_arg(vm, op, value) else {
+            return;
+        };
+        let built = match image.bytes() {
+            Ok(bytes) => SharedBytes::try_from_slice(bytes.as_slice())
+                .map_err(|_| FaultCode::HeapLimit)
+                .and_then(|bytes| self.machines[vm as usize].alloc(Object::Bytes(bytes)))
+                .and_then(|bytes| self.make_instance(vm, self.core.result_ok, vec![bytes])),
+            Err(fail) => self
+                .build_snapshot_error(vm, &fail)
+                .and_then(|error| self.make_instance(vm, self.core.result_err, vec![error])),
+        };
+        self.reply_or_fault(vm, op, built);
+    }
+
     /// `sys.vm.Vm().restore(snap)`.
     ///
     /// A guest holds a snapshot as container bytes. Bytes this world

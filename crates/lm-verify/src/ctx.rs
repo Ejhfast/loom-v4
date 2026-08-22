@@ -904,6 +904,7 @@ impl<'m> Ctx<'m> {
         match t {
             lm_abi::AbiType::Primitive(primitive) => match primitive {
                 lm_abi::AbiPrimitive::Unit => Ok(TY_UNIT),
+                lm_abi::AbiPrimitive::Never => Err("Never has no runtime value".to_string()),
                 lm_abi::AbiPrimitive::Bool => Ok(TY_BOOL),
                 lm_abi::AbiPrimitive::Int => Ok(TY_INT),
                 lm_abi::AbiPrimitive::String => Ok(TY_STR),

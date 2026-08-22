@@ -23,6 +23,7 @@ pub const CORE_SOURCE: &str = concat!(
     include_str!("../../../core/option.lm"),
     "\n",
     include_str!("../../../core/result.lm"),
+    include_str!("../../../core/control.lm"),
     "\n",
     include_str!("../../../core/ordering.lm"),
     "\n",
@@ -1234,6 +1235,23 @@ pub(crate) fn resolve_type(
                 }
                 return Ok(ctx.store.intern(Type::Class(ClassId(class))));
             }
+            if ctx.lookup_interface(name, env).is_some() {
+                return Err(Diagnostic::new(
+                    "E1013",
+                    format!("`{name}` is an interface; use it as a generic bound"),
+                    ty.span,
+                ));
+            }
+            if let Some(interface) = env.self_interface {
+                let info = &ctx.interfaces[interface as usize];
+                if info.associated.iter().any(|item| item.name == *name) {
+                    return Err(Diagnostic::new(
+                        "E1013",
+                        format!("`{name}` is an associated type; write `Self.{name}`"),
+                        ty.span,
+                    ));
+                }
+            }
             if matches!(
                 name.as_str(),
                 "List" | "Map" | "Run" | "Wait" | "RunSnapshot"
@@ -1350,6 +1368,13 @@ pub(crate) fn resolve_type(
                         resolved.push(resolve_type(ctx, env, arg)?);
                     }
                     return Ok(ctx.store.intern(Type::Inst(ClassId(class), resolved)));
+                }
+                if ctx.lookup_interface(other, env).is_some() {
+                    return Err(Diagnostic::new(
+                        "E1013",
+                        format!("`{other}` is an interface; use it as a generic bound"),
+                        ty.span,
+                    ));
                 }
                 Err(Diagnostic::new(
                     "E1013",

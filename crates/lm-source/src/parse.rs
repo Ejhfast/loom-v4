@@ -1930,7 +1930,7 @@ impl Parser<'_> {
                     let pattern = self.pattern()?;
                     let (body, hi) = if matches!(self.peek(), Tok::KwThen) {
                         self.pos += 1;
-                        if matches!(self.peek(), Tok::KwReturn) {
+                        if matches!(self.peek(), Tok::KwReturn | Tok::KwBreak | Tok::KwContinue) {
                             let stmt = self.stmt()?;
                             let hi = stmt.span;
                             (vec![stmt], hi)
@@ -2573,6 +2573,23 @@ end
             panic!("the expression is a case");
         };
         assert!(matches!(arms[0].body[0].kind, StmtKind::Return { .. }));
+    }
+
+    #[test]
+    fn parses_loop_control_in_then_arms() {
+        let source = "loop\n  case x\n  in 1 then continue\n  in _ then break\n  end\nend\n1\n";
+        let module = parse(source).unwrap();
+        let StmtKind::While { body, .. } = &module.entry[0].kind else {
+            panic!("the first statement is a loop");
+        };
+        let StmtKind::Expr(value) = &body[0].kind else {
+            panic!("the loop body holds an expression");
+        };
+        let ExprKind::Case { arms, .. } = &value.kind else {
+            panic!("the expression is a case");
+        };
+        assert!(matches!(arms[0].body[0].kind, StmtKind::Continue));
+        assert!(matches!(arms[1].body[0].kind, StmtKind::Break));
     }
 
     #[test]

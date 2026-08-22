@@ -62,6 +62,8 @@ pub(crate) fn perform_argc(op: u32) -> u32 {
             lm_abi::OP_VM_SNAPSHOT_HELD
             | lm_abi::OP_VM_LOAD_SNAPSHOT
             | lm_abi::OP_VM_SNAPSHOT_VM
+            | lm_abi::OP_VM_RUN_SNAPSHOT_BYTES
+            | lm_abi::OP_VM_SNAPSHOT_BYTES
             | lm_abi::OP_VM_RESTORE_VM => 1,
             lm_abi::OP_VM_RESTORE
             | lm_abi::OP_VM_RESOURCE

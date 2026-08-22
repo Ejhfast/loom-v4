@@ -847,6 +847,8 @@ fn preflight_instr(
         | Instr::CallArgs
         | Instr::FaultCode
         | Instr::FaultDenied
+        | Instr::RaiseUserPanic
+        | Instr::RaiseAssertionFailed
         | Instr::RequestOp
         | Instr::Unreachable => Ok(()),
         Instr::ConstStr(idx) => {
@@ -2049,6 +2051,8 @@ impl<'a> Resolver<'a> {
             Instr::NeDigest => 0x7a,
             Instr::FaultDenied => 0x88,
             Instr::RequestOp => 0x89,
+            Instr::RaiseUserPanic => 0xeb,
+            Instr::RaiseAssertionFailed => 0xec,
             Instr::Extended(instr) => Self::extended_instr_tag(instr),
         }
     }
@@ -2368,6 +2372,8 @@ impl<'a> Resolver<'a> {
             | Instr::EqDigest
             | Instr::NeDigest
             | Instr::FaultDenied
+            | Instr::RaiseUserPanic
+            | Instr::RaiseAssertionFailed
             | Instr::RequestOp => {}
             Instr::Extended(instr) => self.extended_instr_bytes(out, instr),
         }
