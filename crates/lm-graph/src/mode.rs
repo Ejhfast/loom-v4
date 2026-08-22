@@ -1052,8 +1052,16 @@ mod tests {
         let build = |heap: &mut Heap, first: i64, second: i64| {
             let map = heap.alloc(Object::Map {
                 entries: vec![
-                    (Value::Int(first), Value::Int(10)),
-                    (Value::Int(second), Value::Int(20)),
+                    lm_heap::MapEntry {
+                        key: Value::Int(first),
+                        value: Value::Int(10),
+                        semantic_hash: first,
+                    },
+                    lm_heap::MapEntry {
+                        key: Value::Int(second),
+                        value: Value::Int(20),
+                        semantic_hash: second,
+                    },
                 ],
                 index: MapIndex::default(),
             });
@@ -1067,6 +1075,30 @@ mod tests {
         let d2 =
             digest_value(&mut heap, Value::Obj(backward), &mut Slots, &limits()).expect("digests");
         assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn a_map_digest_ignores_cached_semantic_hashes() {
+        let mut heap = Heap::new(1 << 20);
+        let build = |heap: &mut Heap, hash: i64| {
+            let map = heap.alloc(Object::Map {
+                entries: vec![lm_heap::MapEntry {
+                    key: Value::Int(1),
+                    value: Value::Int(10),
+                    semantic_hash: hash,
+                }],
+                index: MapIndex::default(),
+            });
+            freeze(heap, map, &GraphLimits::default()).expect("the map freezes");
+            map
+        };
+        let first = build(&mut heap, 1);
+        let second = build(&mut heap, 99);
+        let first_digest =
+            digest_value(&mut heap, Value::Obj(first), &mut Slots, &limits()).expect("digests");
+        let second_digest =
+            digest_value(&mut heap, Value::Obj(second), &mut Slots, &limits()).expect("digests");
+        assert_eq!(first_digest, second_digest);
     }
 
     // -----------------------------------------------------------

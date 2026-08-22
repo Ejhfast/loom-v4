@@ -899,6 +899,17 @@ fn interface_effect_row_example_has_checked_output() {
 }
 
 #[test]
+fn hashable_map_and_set_example_has_checked_output() {
+    let path = lm_testkit::repo_root()
+        .join("examples/13-collections-and-interfaces/09-hashable-maps-and-sets.lm");
+    let source = std::fs::read_to_string(path).expect("the example reads");
+    assert_eq!(
+        outcome(&source),
+        "Done((1, \"closed\", Some(\"open\"), 1, true, true, false))"
+    );
+}
+
+#[test]
 fn native_for_covers_list_map_text_and_range() {
     let source = r#"
 class Source
@@ -1345,6 +1356,378 @@ removed = table.remove("c")
 }
 
 #[test]
+fn hashable_user_keys_support_every_map_operation() {
+    let source = r#"
+final class Key implements Hashable
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+
+  def __eq__(self, other: Key): Bool
+    self.value == other.value
+  end
+
+  def __hash__(self): Int
+    self.value % 2
+  end
+end
+
+def read[K: Hashable, V](table: Map[K, V], key: K): Option[V]
+  table.get(key)
+end
+
+first = Key(1).freeze()
+same = Key(1).freeze()
+collision = Key(3).freeze()
+table: Map[Key, String] = {first: "one"}
+added = table.put(collision, "three")
+replaced = table.put(same, "uno")
+indexed = table[same]
+before = (
+  table.len(),
+  table.has(same),
+  indexed,
+  table.at(first),
+  table.at(collision),
+  read[Key, String](table, same)
+)
+removed = table.remove(same)
+(added, replaced, before, removed, table.len(), table.has(first))
+"#;
+    assert_eq!(
+        outcome(source),
+        "Done((None, Some(\"one\"), (2, true, \"uno\", \"uno\", \"three\", Some(\"uno\")), \
+         Some(\"uno\"), 1, false))"
+    );
+}
+
+#[test]
+fn hashable_user_keys_cross_module_boundaries() {
+    let library = compile_module(
+        "lib.keys",
+        &SourceFile::new(
+            "keys.lm",
+            r#"
+final class Key implements Hashable
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+
+  def __eq__(self, other: Key): Bool
+    self.value == other.value
+  end
+
+  def __hash__(self): Int
+    self.value
+  end
+end
+"#
+            .to_string(),
+        ),
+        &CompileEnv::new().freeze(),
+        false,
+    )
+    .expect("the library compiles");
+    let mut compile_env = CompileEnv::new();
+    compile_env
+        .bind_interface(library.interface.clone())
+        .expect("the interface binds");
+    compile_env
+        .bind_root("keys", "lib.keys")
+        .expect("the root binds");
+    let main = compile_module(
+        "app.main",
+        &SourceFile::new(
+            "main.lm",
+            r#"
+use keys
+
+table = Map[keys.Key, Int]()
+first = table.put(keys.Key(7).freeze(), 9)
+table.at(keys.Key(7).freeze())
+"#
+            .to_string(),
+        ),
+        &compile_env.freeze(),
+        true,
+    )
+    .expect("the program compiles");
+    let mut link_env = LinkEnv::new();
+    for module in [&library, &main] {
+        link_env
+            .bind(LinkUnit {
+                path: module.path.clone(),
+                module: module.module.clone(),
+                interface: module.interface.clone(),
+            })
+            .expect("the module binds");
+    }
+    let linked = link("app.main", &link_env.freeze()).expect("the program links");
+    let loaded = lm_vm::load(linked.module).expect("the program loads");
+    let mut vm = Vm::new(&loaded, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(9)");
+}
+
+#[test]
+fn a_map_signature_accepts_a_later_hashable_class() {
+    let source = r#"
+def read(table: Map[Key, Int], key: Key): Int
+  table.at(key)
+end
+
+final class Key implements Hashable
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+
+  def __eq__(self, other: Key): Bool
+    self.value == other.value
+  end
+
+  def __hash__(self): Int
+    self.value
+  end
+end
+
+key = Key(4).freeze()
+table: Map[Key, Int] = {key: 8}
+read(table, key)
+"#;
+    assert_eq!(outcome(source), "Done(8)");
+}
+
+#[test]
+fn a_mutable_user_key_faults_during_insertion() {
+    let source = r#"
+final class Key implements Hashable
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+
+  def __eq__(self, other: Key): Bool
+    self.value == other.value
+  end
+
+  def __hash__(self): Int
+    self.value
+  end
+end
+
+table = Map[Key, Int]()
+table.put(Key(1), 2)
+"#;
+    assert_eq!(outcome(source), "Fault(MutableMapKey)");
+}
+
+#[test]
+fn built_in_hashes_follow_value_equality() {
+    let source = r#"
+text: Text = "value"
+part = " value ".trim()
+letter = case "é".at(0)
+in Some(value) then value
+in None then panic("the text is empty")
+end
+(
+  text.__hash__() == part.__hash__(),
+  Bytes("value").__hash__() == Bytes("value").__hash__(),
+  7.__hash__(),
+  true.__hash__(),
+  letter.__hash__()
+)
+"#;
+    assert_eq!(outcome(source), "Done((true, true, 7, 1, 233))");
+}
+
+#[test]
+fn set_supports_ordered_algebra_and_user_elements() {
+    let source = r#"
+final class Key implements Hashable
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+
+  def __eq__(self, other: Key): Bool
+    self.value == other.value
+  end
+
+  def __hash__(self): Int
+    self.value % 2
+  end
+end
+
+left = set_from_list[Int]([3, 1, 3, 2])
+right = set_from_list[Int]([2, 3, 1])
+extra = set_from_list[Int]([2, 4])
+seen = List[Int]()
+left.each() { |value: Int| seen.push(value) }
+user = Set[Key]()
+first = user.add(Key(7).freeze())
+duplicate = user.add(Key(7).freeze())
+(
+  left.values(),
+  left == right,
+  left.union(extra).values(),
+  left.intersection(extra).values(),
+  left.difference(extra).values(),
+  left.is_subset(left.union(extra)),
+  left.is_superset(right),
+  left.is_disjoint(set_from_list[Int]([8, 9])),
+  seen,
+  first,
+  duplicate,
+  user.len(),
+  user.has(Key(7).freeze()),
+  left.remove(1),
+  left.remove(1),
+  left.values()
+)
+"#;
+    assert_eq!(
+        outcome(source),
+        "Done(([3, 1, 2], true, [3, 1, 2, 4], [2], [3, 1], true, true, true, [3, 1, 2], \
+         true, false, 1, true, true, false, [3, 2]))"
+    );
+}
+
+#[test]
+fn a_set_iterator_rejects_a_structural_change() {
+    let source = r#"
+values = set_from_list[Int]([1, 2])
+iterator = values.iterator()
+first = iterator.next()
+added = values.add(3)
+iterator.next()
+"#;
+    assert_eq!(outcome(source), "Fault(CollectionModified)");
+}
+
+#[test]
+fn hashable_rejects_open_and_effectful_implementations() {
+    let open = r#"
+class Key implements Hashable
+  def __eq__(self, other: Key): Bool
+    true
+  end
+
+  def __hash__(self): Int
+    1
+  end
+end
+
+Key()
+"#;
+    let failure = error(open);
+    assert!(
+        failure.contains("a non-final class cannot conform"),
+        "{failure}"
+    );
+
+    let effectful = r#"
+final class Key implements Hashable
+  def __eq__(self, other: Key): Bool
+    true
+  end
+
+  def __hash__(self): Int with Io.Print
+    sys.io.print("hash")
+    1
+  end
+end
+
+Key()
+"#;
+    let failure = error(effectful);
+    assert!(
+        failure.contains("has effects outside interface `Hashable`"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn the_verifier_separates_native_and_hashable_map_paths() {
+    let source = r#"
+final class Key implements Hashable
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+
+  def __eq__(self, other: Key): Bool
+    self.value == other.value
+  end
+
+  def __hash__(self): Int
+    self.value
+  end
+end
+
+def query(table: Map[Key, Int], key: Key): Bool
+  table.has(key)
+end
+
+query(Map[Key, Int](), Key(1).freeze())
+"#;
+    let module = compile_text("hashable_map.lm", source).expect("the source compiles");
+    let query = module
+        .funcs
+        .iter()
+        .position(|function| function.name == "query")
+        .expect("the query function exists");
+    assert!(module.funcs[query]
+        .blocks
+        .iter()
+        .flatten()
+        .any(|instruction| matches!(instruction, Instr::Extended(ExtendedInstr::MapProbe))));
+
+    let mut forged_literal = module.clone();
+    let map = forged_literal.funcs[query].params[0];
+    forged_literal.funcs[query].blocks =
+        vec![vec![Instr::MapNew { ty: map, count: 1 }, Instr::Return]];
+    let failure = lm_verify::verify_module(&forged_literal)
+        .expect_err("a native user-key map literal verifies");
+    assert!(failure
+        .message
+        .contains("a native map instruction needs a native key type"));
+
+    let mut forged = module.clone();
+    forged.funcs[query].blocks = vec![vec![
+        Instr::LoadLocal(0),
+        Instr::LoadLocal(1),
+        Instr::MapHas,
+        Instr::Return,
+    ]];
+    let failure = lm_verify::verify_module(&forged).expect_err("the native path verifies");
+    assert!(failure
+        .message
+        .contains("a native map instruction needs a native key type"));
+
+    let mut forged = module;
+    let key = forged
+        .classes
+        .iter_mut()
+        .find(|class| class.name == "Key")
+        .expect("the key class exists");
+    key.is_final = false;
+    let failure = lm_verify::verify_module(&forged).expect_err("the open key verifies");
+    assert!(failure
+        .message
+        .contains("a non-final class conforms to a Self-dependent interface"));
+}
+
+#[test]
 fn views_are_live_retaining_and_fail_fast() {
     let source = r#"
 slice = [1, 2, 3].slice_view(1, 2)
@@ -1630,12 +2013,15 @@ table.put(1, 2)
         .capture_snapshot(gate, 0, false)
         .expect("the snapshot succeeds");
     let before = collection_capacities(snapshot.world());
+    let before_hashes = collection_map_hashes(snapshot.world());
     assert!(before.0 >= 20);
     assert!(before.1 >= 20);
+    assert_eq!(before_hashes, vec![1]);
 
     let bytes = codec::encode(snapshot.world(), usize::MAX).expect("the image encodes");
     let decoded = codec::decode(&bytes, LoadLimits::default()).expect("the image decodes");
     assert_eq!(collection_capacities(&decoded), before);
+    assert_eq!(collection_map_hashes(&decoded), before_hashes);
 
     let admitted = codec::load_external(&bytes, &loaded, LoadLimits::default())
         .expect("the image is admitted");
@@ -1649,6 +2035,20 @@ table.put(1, 2)
         .restore_image(0, target, &admitted)
         .expect("the image restores");
     assert_eq!(heap_collection_capacities(fresh.heap_of(root)), before);
+}
+
+fn collection_map_hashes(image: &lm_vm::snapshot::Image) -> Vec<i64> {
+    image
+        .machines
+        .iter()
+        .flat_map(|machine| machine.objects.iter())
+        .find_map(|object| match &object.object {
+            Object::Map { entries, .. } if entries.len() == 1 => {
+                Some(entries.iter().map(|entry| entry.semantic_hash).collect())
+            }
+            _ => None,
+        })
+        .expect("the image contains the map")
 }
 
 fn collection_capacities(image: &lm_vm::snapshot::Image) -> (usize, usize) {
@@ -1816,15 +2216,20 @@ fn scalar_digest_calls_fail_during_checking() {
 }
 
 #[test]
-fn empty_map_constructors_check_their_key_type() {
+fn empty_map_constructors_enforce_the_hashable_key_bound() {
     let source = r#"
 final class Key
   value: Int = 1
 end
 
-Map[Key, Int]()
+    Map[Key, Int]()
 "#;
-    assert!(error(source).contains("E1033"));
+    let failure = error(source);
+    assert!(failure.contains("E1053"), "{failure}");
+    assert!(
+        failure.contains("does not conform to `Hashable`"),
+        "{failure}"
+    );
 }
 
 #[test]

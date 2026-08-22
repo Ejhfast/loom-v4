@@ -245,7 +245,8 @@ use tables::verify_tables;
 /// Version 28 verifies versioned constructors in class slots.
 /// Version 29 verifies portable definition source lookup.
 /// Version 30 verifies fault source lookup instructions.
-pub const VERIFIER_VERSION: u32 = 30;
+/// Version 31 verifies native and interface-backed map paths.
+pub const VERIFIER_VERSION: u32 = 31;
 
 /// Verify a full module. Every table and every function must pass.
 ///

@@ -21,8 +21,8 @@ pub(crate) const HEADER_COST: usize = 32;
 pub const MIN_OBJECT_COST: usize = HEADER_COST;
 /// Logical byte cost of one stored value.
 pub(crate) const VALUE_COST: usize = 16;
-/// Logical byte cost of one map entry (key and value).
-pub(crate) const ENTRY_COST: usize = 2 * VALUE_COST;
+/// Logical byte cost of one map entry and its semantic hash.
+pub(crate) const ENTRY_COST: usize = 2 * VALUE_COST + 8;
 
 /// One collection epoch. Mutation history does not change value equality.
 #[derive(Debug, Clone, Copy, Default, Eq)]
@@ -106,11 +106,9 @@ mod epoch_tests {
 /// design.
 ///
 /// The table doubles at a load factor of two thirds, so it holds
-/// between 1.5 and 3 slots for each entry. One slot is 16 bytes, and
-/// `ENTRY_COST` charges 32 bytes for each entry, so the charge covers
-/// the table at the low end and falls under it at the high end. The
-/// gap is bounded and small, and the previous hash table was larger
-/// at every load factor.
+/// between 1.5 and 3 slots for each entry. One slot is 16 bytes.
+/// `ENTRY_COST` charges 40 bytes for each entry.
+/// This charge includes each stored semantic hash and most index capacity.
 #[derive(Debug, Clone, Default)]
 pub struct MapIndex {
     /// The number of entries the table already indexes.
@@ -147,6 +145,36 @@ impl MapIndex {
             next,
             remaining,
         }
+    }
+
+    /// Find one candidate slot after an optional prior slot.
+    pub fn probe(&self, hash: u64, prior: Option<u32>) -> Option<(u32, u32)> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mut next = match prior {
+            Some(slot) => (slot as usize + 1) & (self.slots.len() - 1),
+            None => map_slot(hash, self.slots.len()),
+        };
+        let mut remaining = self.slots.len();
+        while remaining > 0 {
+            let slot = self.slots[next];
+            if slot.entry == EMPTY_MAP_ENTRY {
+                return None;
+            }
+            if slot.hash == hash {
+                return Some((next as u32, slot.entry));
+            }
+            next = (next + 1) & (self.slots.len() - 1);
+            remaining -= 1;
+        }
+        None
+    }
+
+    /// Get the entry stored in one occupied index slot.
+    pub fn entry_at(&self, slot: u32) -> Option<u32> {
+        let slot = self.slots.get(slot as usize)?;
+        (slot.entry != EMPTY_MAP_ENTRY).then_some(slot.entry)
     }
 
     /// Add one indexed entry.
@@ -233,6 +261,22 @@ impl PartialEq for MapIndex {
     }
 }
 
+/// One insertion-ordered map entry.
+#[derive(Debug, Clone, Copy)]
+pub struct MapEntry {
+    pub key: Value,
+    pub value: Value,
+    /// The stable semantic hash of `key`.
+    pub semantic_hash: i64,
+}
+
+impl PartialEq for MapEntry {
+    /// A cached semantic hash does not change entry equality.
+    fn eq(&self, other: &MapEntry) -> bool {
+        self.key == other.key && self.value == other.value
+    }
+}
+
 /// One portable verified-code value kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortableCodeKind {
@@ -298,7 +342,7 @@ pub enum Object {
     /// A map with entries in insertion order plus a derived lookup
     /// index.
     Map {
-        entries: Vec<(Value, Value)>,
+        entries: Vec<MapEntry>,
         index: MapIndex,
     },
     /// A fixed-arity immutable tuple. Born frozen.
@@ -823,16 +867,20 @@ impl Object {
             Object::Map { entries, index } => {
                 let mut copied = Vec::new();
                 copied.try_reserve_exact(entries.capacity())?;
-                for (key, value) in entries {
-                    let key = match key {
-                        Value::Obj(reference) => Value::Obj(map(*reference)),
-                        other => *other,
+                for entry in entries {
+                    let key = match entry.key {
+                        Value::Obj(reference) => Value::Obj(map(reference)),
+                        other => other,
                     };
-                    let value = match value {
-                        Value::Obj(reference) => Value::Obj(map(*reference)),
-                        other => *other,
+                    let value = match entry.value {
+                        Value::Obj(reference) => Value::Obj(map(reference)),
+                        other => other,
                     };
-                    copied.push((key, value));
+                    copied.push(MapEntry {
+                        key,
+                        value,
+                        semantic_hash: entry.semantic_hash,
+                    });
                 }
                 let copied_index = MapIndex {
                     epoch: index.epoch,
@@ -1120,9 +1168,9 @@ impl Object {
             Object::Map { entries, .. } => {
                 // The index holds hashes and positions only, never an
                 // object reference, so the walk covers the entries.
-                for (k, v) in entries {
-                    visit(k);
-                    visit(v);
+                for entry in entries {
+                    visit(&entry.key);
+                    visit(&entry.value);
                 }
             }
             Object::Closure { captures, .. } => captures.iter().for_each(&mut visit),
@@ -1187,7 +1235,14 @@ impl Object {
                     ..MapIndex::default()
                 };
                 Object::Map {
-                    entries: vec![(Value::Unit, Value::Unit); entries.len()],
+                    entries: entries
+                        .iter()
+                        .map(|entry| MapEntry {
+                            key: Value::Unit,
+                            value: Value::Unit,
+                            semantic_hash: entry.semantic_hash,
+                        })
+                        .collect(),
                     index: copied_index,
                 }
             }
@@ -1255,7 +1310,11 @@ impl Object {
                 Object::Map {
                     entries: entries
                         .iter()
-                        .map(|(k, v)| (value(*k), value(*v)))
+                        .map(|entry| MapEntry {
+                            key: value(entry.key),
+                            value: value(entry.value),
+                            semantic_hash: entry.semantic_hash,
+                        })
                         .collect(),
                     // The destination index rebuilds on the first lookup.
                     index: copied_index,
@@ -1381,7 +1440,11 @@ mod tests {
                 epoch: Default::default(),
             },
             Object::Map {
-                entries: vec![(Value::Obj(a), Value::Obj(b))],
+                entries: vec![MapEntry {
+                    key: Value::Obj(a),
+                    value: Value::Obj(b),
+                    semantic_hash: 1,
+                }],
                 index: MapIndex::default(),
             },
             Object::Tuple {
@@ -1737,7 +1800,11 @@ mod tests {
             generation: 0,
         };
         let map = Object::Map {
-            entries: vec![(Value::Obj(key), Value::Obj(value))],
+            entries: vec![MapEntry {
+                key: Value::Obj(key),
+                value: Value::Obj(value),
+                semantic_hash: 1,
+            }],
             index: MapIndex::default(),
         };
         let mut out = Vec::new();

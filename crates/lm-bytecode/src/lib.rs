@@ -636,6 +636,22 @@ pub enum ExtendedInstr {
     FaultSite { ty: u32 },
     /// Pop a fault and push its bounded source trace.
     FaultTrace { ty: u32 },
+    /// Pop a prior token, semantic hash, and map. Push the next probe token.
+    MapProbe,
+    /// Pop a probe token and push whether it names one entry.
+    MapProbeFound,
+    /// Pop a probe token and map. Push the selected key.
+    MapProbeKey,
+    /// Pop a probe token and map. Push the selected value.
+    MapProbeValue,
+    /// Pop a value, probe token, and map. Replace the selected value.
+    MapProbeSetValue,
+    /// Pop a probe token and map. Remove and push the selected value.
+    MapProbeRemove,
+    /// Pop a token, hash, value, key, and map. Insert one new entry.
+    MapInsertHashed,
+    /// Pop a map, check its write capability, and push unit.
+    MapWriteGuard,
 }
 
 /// One native value instruction.
@@ -785,6 +801,10 @@ pub enum NativeInstr {
     BytesCompact,
     /// Pop valid UTF-8 bytes and push one shared Substring.
     BytesTextView,
+    /// Pop Text and push its stable semantic hash.
+    TextHash,
+    /// Pop Bytes and push its stable semantic hash.
+    BytesHash,
 }
 
 impl Instr {
@@ -1335,6 +1355,16 @@ const OP_FAULT_TRACE: u8 = 0xe9;
 const OP_CODE_DEFINITION: u8 = 0xea;
 const OP_RAISE_USER_PANIC: u8 = 0xeb;
 const OP_RAISE_ASSERTION_FAILED: u8 = 0xec;
+const OP_TEXT_HASH: u8 = 0xed;
+const OP_BYTES_HASH: u8 = 0xee;
+const OP_MAP_PROBE: u8 = 0xef;
+const OP_MAP_PROBE_FOUND: u8 = 0xf0;
+const OP_MAP_PROBE_KEY: u8 = 0xf1;
+const OP_MAP_PROBE_VALUE: u8 = 0xf2;
+const OP_MAP_PROBE_SET_VALUE: u8 = 0xf3;
+const OP_MAP_PROBE_REMOVE: u8 = 0xf4;
+const OP_MAP_INSERT_HASHED: u8 = 0xf5;
+const OP_MAP_WRITE_GUARD: u8 = 0xf6;
 
 // Type tags for the serialized type table.
 const TY_UNIT: u8 = 0;
@@ -2049,6 +2079,8 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::BbFinish) => out.push(OP_BB_FINISH),
         Instr::Native(NativeInstr::BytesCompact) => out.push(OP_BYTES_COMPACT),
         Instr::Native(NativeInstr::BytesTextView) => out.push(OP_BYTES_TEXT_VIEW),
+        Instr::Native(NativeInstr::TextHash) => out.push(OP_TEXT_HASH),
+        Instr::Native(NativeInstr::BytesHash) => out.push(OP_BYTES_HASH),
         Instr::Native(NativeInstr::LtBytes) => out.push(OP_LT_BYTES),
         Instr::Native(NativeInstr::LeBytes) => out.push(OP_LE_BYTES),
         Instr::Native(NativeInstr::GtBytes) => out.push(OP_GT_BYTES),
@@ -2236,6 +2268,14 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
             out.push(OP_FAULT_TRACE);
             write_u32(out, ty);
         }
+        ExtendedInstr::MapProbe => out.push(OP_MAP_PROBE),
+        ExtendedInstr::MapProbeFound => out.push(OP_MAP_PROBE_FOUND),
+        ExtendedInstr::MapProbeKey => out.push(OP_MAP_PROBE_KEY),
+        ExtendedInstr::MapProbeValue => out.push(OP_MAP_PROBE_VALUE),
+        ExtendedInstr::MapProbeSetValue => out.push(OP_MAP_PROBE_SET_VALUE),
+        ExtendedInstr::MapProbeRemove => out.push(OP_MAP_PROBE_REMOVE),
+        ExtendedInstr::MapInsertHashed => out.push(OP_MAP_INSERT_HASHED),
+        ExtendedInstr::MapWriteGuard => out.push(OP_MAP_WRITE_GUARD),
     }
 }
 
@@ -3301,6 +3341,14 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_CODE_DEFINITION => Instr::Extended(ExtendedInstr::CodeDefinition),
         OP_FAULT_SITE => Instr::Extended(ExtendedInstr::FaultSite { ty: cur.u32()? }),
         OP_FAULT_TRACE => Instr::Extended(ExtendedInstr::FaultTrace { ty: cur.u32()? }),
+        OP_MAP_PROBE => Instr::Extended(ExtendedInstr::MapProbe),
+        OP_MAP_PROBE_FOUND => Instr::Extended(ExtendedInstr::MapProbeFound),
+        OP_MAP_PROBE_KEY => Instr::Extended(ExtendedInstr::MapProbeKey),
+        OP_MAP_PROBE_VALUE => Instr::Extended(ExtendedInstr::MapProbeValue),
+        OP_MAP_PROBE_SET_VALUE => Instr::Extended(ExtendedInstr::MapProbeSetValue),
+        OP_MAP_PROBE_REMOVE => Instr::Extended(ExtendedInstr::MapProbeRemove),
+        OP_MAP_INSERT_HASHED => Instr::Extended(ExtendedInstr::MapInsertHashed),
+        OP_MAP_WRITE_GUARD => Instr::Extended(ExtendedInstr::MapWriteGuard),
         OP_SB_NEW => Instr::Native(NativeInstr::SbNew),
         OP_SB_APPEND_STR => Instr::Native(NativeInstr::SbAppendStr),
         OP_SB_APPEND_INT => Instr::Native(NativeInstr::SbAppendInt),
@@ -3318,6 +3366,8 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
         OP_BB_FINISH => Instr::Native(NativeInstr::BbFinish),
         OP_BYTES_COMPACT => Instr::Native(NativeInstr::BytesCompact),
         OP_BYTES_TEXT_VIEW => Instr::Native(NativeInstr::BytesTextView),
+        OP_TEXT_HASH => Instr::Native(NativeInstr::TextHash),
+        OP_BYTES_HASH => Instr::Native(NativeInstr::BytesHash),
         OP_LT_BYTES => Instr::Native(NativeInstr::LtBytes),
         OP_LE_BYTES => Instr::Native(NativeInstr::LeBytes),
         OP_GT_BYTES => Instr::Native(NativeInstr::GtBytes),

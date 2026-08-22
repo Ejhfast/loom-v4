@@ -66,7 +66,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 92] = [
+pub const PRELUDE_TYPES: [&str; 94] = [
     "Option",
     "Result",
     "Ordering",
@@ -147,8 +147,10 @@ pub const PRELUDE_TYPES: [&str; 92] = [
     "ByteBuffer",
     "List",
     "Map",
+    "Set",
     "ListIterator",
     "MapIterator",
+    "SetIterator",
     "TextIterator",
     "RangeIterator",
     "ListSlice",
@@ -716,6 +718,10 @@ pub(crate) struct Ctx {
     pub(crate) import_start: u32,
     pub(crate) user_interface_start: u32,
     pub(crate) import_interface_start: u32,
+    /// Map-key proofs that wait for the complete class table.
+    deferred_map_keys: Vec<(TyEnv, TypeId, Span)>,
+    /// True while class conformances can still be unresolved.
+    defer_map_keys: bool,
 }
 
 impl Ctx {
@@ -954,7 +960,8 @@ impl Ctx {
     fn conformance_use(&mut self, ty: TypeId, interface: u32) -> Option<InterfaceUse> {
         let (mut class, mut args) = self.store.nominal_class(ty)?;
         loop {
-            if let Some(application) = self.classes[class.0 as usize]
+            let info = self.classes.get(class.0 as usize)?;
+            if let Some(application) = info
                 .conformances
                 .iter()
                 .find(|item| item.application.interface == interface)
@@ -1391,7 +1398,7 @@ pub(crate) fn resolve_type(
                     ));
                 }
                 let key = resolve_type(ctx, env, &args[0])?;
-                check_key_type(ctx, key, args[0].span)?;
+                check_key_type(ctx, env, key, args[0].span)?;
                 let value = resolve_type(ctx, env, &args[1])?;
                 Ok(ctx.store.intern(Type::Map(key, value)))
             }
@@ -1441,7 +1448,7 @@ pub(crate) fn resolve_type(
         }
         ast::TypeExprKind::MapShort(key, value) => {
             let key_ty = resolve_type(ctx, env, key)?;
-            check_key_type(ctx, key_ty, key.span)?;
+            check_key_type(ctx, env, key_ty, key.span)?;
             let value = resolve_type(ctx, env, value)?;
             Ok(ctx.store.intern(Type::Map(key_ty, value)))
         }
@@ -1510,41 +1517,58 @@ pub(crate) fn resolve_row(
     Ok(ctx.store.canonical_row(row))
 }
 
-pub(crate) fn check_key_type(ctx: &Ctx, key: TypeId, span: Span) -> Result<(), Diagnostic> {
-    let mut text_key = false;
-    if let (Some((mut class, _)), Some(text)) = (
-        ctx.store.nominal_class(key),
-        ctx.core_types.get("Text").copied(),
-    ) {
-        loop {
-            if class.0 == text {
-                text_key = true;
-                break;
-            }
-            let Some(parent) = ctx.store.class_meta(class).parent else {
-                break;
-            };
-            class = parent;
-        }
-    }
-    if text_key
-        || matches!(ctx.store.get(key), Type::Var(_))
+pub(crate) fn check_key_type(
+    ctx: &mut Ctx,
+    env: &TyEnv,
+    key: TypeId,
+    span: Span,
+) -> Result<(), Diagnostic> {
+    let native_class = ctx
+        .store
+        .nominal_class(key)
+        .map(|(class, _)| class.0)
+        .is_some_and(|class| {
+            ["Text", "String", "Substring", "Char"]
+                .iter()
+                .any(|name| ctx.core_types.get(*name).copied() == Some(class))
+        });
+    let native = native_class
         || matches!(
             key,
             lm_types::BOOL | lm_types::INT | lm_types::STRING | lm_types::BYTES
-        )
-    {
+        );
+    let unresolved = ctx.store.nominal_class(key).is_some_and(|(class, _)| {
+        ctx.classes
+            .get(class.0 as usize)
+            .is_none_or(|info| info.name.is_empty())
+    });
+    if unresolved && ctx.defer_map_keys {
+        ctx.deferred_map_keys.push((env.clone(), key, span));
+        return Ok(());
+    }
+    let hashable = ctx.core_interfaces["Hashable"];
+    if native || ctx.type_conformance(env, key, hashable).is_some() {
         Ok(())
     } else {
         Err(Diagnostic::new(
             "E1033",
             format!(
-                "a map key must be Bool, Int, Text, String, Substring, or Bytes, found {}",
-                ctx.store.display(key)
+                "the type {} does not implement Hashable and cannot be a map key",
+                ctx.display_type(env, key)
             ),
             span,
         ))
     }
+}
+
+/// Validate map keys after every class conformance is available.
+fn check_deferred_map_keys(ctx: &mut Ctx) -> Result<(), Diagnostic> {
+    ctx.defer_map_keys = false;
+    let deferred = std::mem::take(&mut ctx.deferred_map_keys);
+    for (env, key, span) in deferred {
+        check_key_type(ctx, &env, key, span)?;
+    }
+    Ok(())
 }
 
 /// Check the mailbox message type of every proc class of one module.
@@ -1718,6 +1742,10 @@ pub fn check_module_with(
             option_class: 0,
             some_class: 0,
             none_class: 0,
+            partial_eq_interface: 0,
+            partial_eq_method: 0,
+            hashable_interface: 0,
+            hashable_method: 0,
         },
         uses: HashMap::new(),
         imports: Vec::new(),
@@ -1725,6 +1753,8 @@ pub fn check_module_with(
         import_start: 0,
         user_interface_start: 0,
         import_interface_start: 0,
+        deferred_map_keys: Vec::new(),
+        defer_map_keys: true,
     };
     // Pass 1: predeclare all type names. The core comes first, so a
     // core class that a module class inherits always keeps the lower
@@ -1755,10 +1785,24 @@ pub fn check_module_with(
     materializer.finish_interfaces(&mut ctx, import_span)?;
     resolve_all_interfaces(&mut ctx, module, false)?;
     let option_class = ctx.core_types["Option"];
+    let partial_eq_interface = ctx.core_interfaces["PartialEq"];
+    let hashable_interface = ctx.core_interfaces["Hashable"];
     ctx.core = CoreIds {
         option_class,
         some_class: option_class + 1,
         none_class: option_class + 2,
+        partial_eq_interface,
+        partial_eq_method: ctx.interfaces[partial_eq_interface as usize]
+            .methods
+            .iter()
+            .position(|method| method.name == "__eq__")
+            .expect("PartialEq declares __eq__") as u32,
+        hashable_interface,
+        hashable_method: ctx.interfaces[hashable_interface as usize]
+            .methods
+            .iter()
+            .position(|method| method.name == "__hash__")
+            .expect("Hashable declares __hash__") as u32,
     };
     // Pass 2a: predeclare top-level function signatures.
     for (idx, func) in module.funcs.iter().enumerate() {
@@ -1863,6 +1907,7 @@ pub fn check_module_with(
     // and before any field default, because both may name an
     // imported class.
     let import_fields = materializer.finish(&mut ctx, import_span)?;
+    check_deferred_map_keys(&mut ctx)?;
     // Pass 3: check field defaults. The table is index addressed, like
     // the class table.
     let mut own_defaults: Vec<Vec<(Option<HExpr>, Vec<TypeId>)>> =

@@ -544,9 +544,9 @@ fn image_object_values(object: &Object, out: &mut Vec<Value>) {
         | Object::List { items: fields, .. }
         | Object::Tuple { items: fields } => out.extend(fields.iter().copied()),
         Object::Map { entries, .. } => {
-            for (key, value) in entries {
-                out.push(*key);
-                out.push(*value);
+            for entry in entries {
+                out.push(entry.key);
+                out.push(entry.value);
             }
         }
         Object::Closure { captures, .. } => out.extend(captures.iter().copied()),

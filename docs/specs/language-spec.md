@@ -481,6 +481,8 @@ The type universe has four strata.
 
 The minimum set includes `Option`, `Result`, `Choice`, `Ordering`, `Pair`, `Range`, `RunResult`, `StepEvent`, `DriveEvent`, `Recv`, and `ProcResult`.
 
+It also includes `Set` and the core collection interfaces.
+
 It also includes portable operation errors and typed VM request tokens.
 
 **Host and holder types** include `Vm`, `Run[T]`, waits, snapshots, proc handles, policy tables, and resource handles.
@@ -509,7 +511,11 @@ An artifact carries a **core role table**: one class slot per stable core role, 
 
 Pattern matching and exhaustiveness use the same enum machinery as user enums. The host ABI reads the same slots, so `Io.ReadLine` and user code cannot silently disagree about what `Result` means.
 
-The prelude merely puts `Option`, `Some`, `None`, `Result`, `Ok`, `Err`, `Ordering`, `Pair`, `Range`, `List`, and `Map` into unqualified scope. Removing a name from a future prelude revision does not change its core identity.
+The prelude puts common result, range, and collection names into unqualified scope.
+
+These collection names include `List`, `Map`, and `Set`.
+
+Removing a future prelude name does not change its core identity.
 
 ### 5.3 Nominal classes and inheritance
 
@@ -586,6 +592,10 @@ The core `PartialEq` interface controls user-defined value equality.
 ```lm
 interface PartialEq
   def __eq__(self, other: Self): Bool
+end
+
+interface Hashable: PartialEq
+  def __hash__(self): Int
 end
 ```
 
@@ -2717,15 +2727,35 @@ The snapshot form serializes semantic fields, never a live completion token. A p
 
 A `List[T]` object stores length, capacity, and a reference to a contiguous `Value` buffer. `push` is amortized O(1); indexed access is O(1); insertion/removal is O(n). Frozen lists keep the same representation and reject writes through the common frozen barrier.
 
-A `Map[K,V]` stores entries in insertion order plus an open-addressed index from hash to entry position. Replacing a value retains the original position; removal leaves/reuses an internal tombstone while public iteration remains dense and deterministic. Lookup is expected O(1), iteration O(n).
+A `Map[K,V]` stores entries and semantic hashes in insertion order.
 
-Map keys must be frozen and digestible at insertion. The runtime uses a process-keyed 64-bit lookup hash cached on immutable keys.
+It also stores a derived open-addressed index from private hash to entry position.
+
+Replacing a value retains its position. Removal keeps public iteration dense and deterministic.
+
+Lookup is expected O(1). Iteration is O(n).
+
+`K` must implement `Hashable`.
+
+Equal keys must return equal semantic hashes.
+
+A semantic hash must remain stable while its value is frozen.
+
+A user heap key must be frozen before insertion. A mutable key faults with `MutableMapKey`.
+
+The runtime mixes each semantic hash with a private process key.
 
 The process key is not guest state. Snapshots rebuild derived map indexes with the active process key.
 
+Snapshots store each entry semantic hash. Restoration does not call guest code.
+
 Insertion order, equality, serialization, and digest do not depend on bucket order. Fuel charges use logical key size, not actual probe count.
 
-This version accepts Bool, Int, Text, and Bytes map keys. String and Substring are the concrete Text key types.
+Bool, Int, Text, Char, and Bytes use native hash and equality instructions.
+
+String and Substring are the concrete Text key types.
+
+A final user class can implement `Hashable` and become a map key.
 
 String, Substring, and Bytes use immutable reference-counted byte storage. Each value stores one visible byte range.
 
@@ -3308,7 +3338,7 @@ Faulting index methods use `IndexOutOfBounds`; allocation failure obeys heap lim
 
 ### 24.5 Maps and sets
 
-`Map[K,V]` requires frozen digestible keys at insertion and preserves insertion order:
+`Map[K,V]` requires `K: Hashable` and preserves insertion order:
 
 ```text
 Map[K,V]() -> Map[K,V]
@@ -3320,9 +3350,13 @@ put(mut self, key: K, value: V) -> Option[V]
 get_or_insert_with[e](mut self, key: K, f: () -> V with e) -> V with e
 remove(mut self, key: K) -> Option[V]
 clear(mut self) -> ()
-keys(self) -> List[K]
-values(self) -> List[V]
-entries(self) -> List[Pair[K,V]]
+copy(self) -> Map[K,V]
+keys(self) -> MapKeys[K,V]
+values(self) -> MapValues[K,V]
+entries(self) -> MapEntries[K,V]
+keys_list(self) -> List[K]
+values_list(self) -> List[V]
+entries_list(self) -> List[(K,V)]
 each[e](self, f: (K,V) -> () with e) -> () with e
 map_values[U,e](self, f: (K,V) -> U with e) -> Map[K,U] with e
 retain[e](mut self, f: (K,V) -> Bool with e) -> () with e
@@ -3331,7 +3365,42 @@ freeze(self) -> Map[K,V]
 
 For a text key type, `has`, `get`, `at`, and indexing accept Text. Insertion still requires K.
 
-`std/set` defines `Set[T]` as an ordinary sealed class over `Map[T,()]`, with `add`, `remove`, `has`, `union`, `intersection`, `difference`, `is_subset`, and ordered `values`. A deque is not core; `std/deque` may be added as a package without affecting language semantics.
+Core defines `Set[T: Hashable]` as an ordinary final class over `Map[T,()]`.
+
+It preserves first insertion order.
+
+It provides `add`, `remove`, `has`, `clear`, `reserve`, `copy`, `values`, `each`, and `retain`.
+
+It also provides `union`, `intersection`, `difference`, `is_subset`, `is_superset`, and `is_disjoint`.
+
+Set equality ignores insertion order.
+
+The core surface follows.
+
+```text
+Set[T]() -> Set[T]
+set_from_list[T](values: List[T]) -> Set[T]
+len(self) -> Int
+is_empty(self) -> Bool
+has(self, value: T) -> Bool
+add(mut self, value: T) -> Bool
+remove(mut self, value: T) -> Bool
+clear(mut self) -> ()
+reserve(mut self, additional: Int) -> ()
+copy(self) -> Set[T]
+values(self) -> List[T]
+each[e](self, f: (T) -> () with e) -> () with e
+add_all(mut self, values: List[T]) -> ()
+retain[e](mut self, f: (T) -> Bool with e) -> () with e
+union(self, other: Set[T]) -> Set[T]
+intersection(self, other: Set[T]) -> Set[T]
+difference(self, other: Set[T]) -> Set[T]
+is_subset(self, other: Set[T]) -> Bool
+is_superset(self, other: Set[T]) -> Bool
+is_disjoint(self, other: Set[T]) -> Bool
+```
+
+A deque is not core. A later standard module can add one without changing language semantics.
 
 ### 24.6 Strings, bytes, builders, and formatting
 

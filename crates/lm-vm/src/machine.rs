@@ -11,7 +11,7 @@ use crate::{FaultCode, VmConfig};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnvFull, TypeEnvs};
 use lm_bytecode::{ExtendedInstr, Instr, Module};
 use lm_heap::{
-    process_lookup_hash, FaultSite, Heap, HeapBudget, MapIndex, NativeByteBuffer,
+    process_lookup_hash, FaultSite, Heap, HeapBudget, MapEntry, MapIndex, NativeByteBuffer,
     NativeStringBuilder, Object, SharedBytes, SharedText, StructuralEpoch,
 };
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
@@ -54,6 +54,29 @@ fn method_of(dispatch: &[crate::DispatchRow], class: u32, selector: u32) -> Resu
         .get(class as usize)
         .and_then(|row| row.method(selector))
         .ok_or(BAD_TYPE)
+}
+
+/// Encode one map epoch and optional index slot as an opaque `Int`.
+fn map_probe_token(epoch: u32, slot: Option<u32>) -> Result<i64, FaultCode> {
+    let low = match slot {
+        Some(slot) => slot.checked_add(1).ok_or(BAD_STATE)?,
+        None => 0,
+    };
+    Ok(((u64::from(epoch) << 32) | u64::from(low)) as i64)
+}
+
+/// Decode one map probe token.
+fn map_probe_parts(token: i64) -> Result<(u32, Option<u32>), FaultCode> {
+    if token == 0 {
+        return Err(BAD_STATE);
+    }
+    let bits = token as u64;
+    let epoch = (bits >> 32) as u32;
+    if epoch == 0 {
+        return Err(BAD_STATE);
+    }
+    let low = bits as u32;
+    Ok((epoch, (low != 0).then_some(low.wrapping_sub(1))))
 }
 
 /// A dense machine identifier inside one world.
@@ -1342,6 +1365,7 @@ impl Machine {
         match (a, b) {
             (Value::Int(x), Value::Int(y)) => x == y,
             (Value::Bool(x), Value::Bool(y)) => x == y,
+            (Value::Char(x), Value::Char(y)) => x == y,
             (Value::Obj(x), Value::Obj(y)) => {
                 if x == y {
                     return true;
@@ -1359,21 +1383,65 @@ impl Machine {
         }
     }
 
-    /// Get the lookup hash of one map key.
-    ///
-    /// Strings and bytes hash by content. The hash agrees with
-    /// `key_eq`. It stays inside the process.
-    #[inline(never)]
-    fn key_hash(&self, key: Value) -> u64 {
+    /// Get the stable semantic hash of one native map key.
+    fn key_semantic_hash(&self, key: Value) -> Result<i64, FaultCode> {
         match key {
-            Value::Bool(value) => process_lookup_hash((0u8, value)),
-            Value::Int(value) => process_lookup_hash((1u8, value)),
+            Value::Bool(value) => Ok(i64::from(value)),
+            Value::Int(value) => Ok(value),
+            Value::Char(value) => Ok(i64::from(u32::from(value))),
             Value::Obj(r) => match self.vm.heap.get(r) {
-                Object::Str(s) | Object::Substring(s) => s.lookup_hash() ^ 0x4c_6f_6f_6d_54_65_78,
-                Object::Bytes(b) => b.lookup_hash() ^ 0x4c_6f_6f_6d_42_79_74,
-                _ => process_lookup_hash(3u8),
+                Object::Str(text) | Object::Substring(text) => Ok(text.semantic_hash() as i64),
+                Object::Bytes(bytes) => Ok(bytes.semantic_hash() as i64),
+                _ => Err(BAD_TYPE),
             },
-            _ => process_lookup_hash(4u8),
+            _ => Err(BAD_TYPE),
+        }
+    }
+
+    /// Mix one semantic hash with the private process hash key.
+    fn map_index_hash(hash: i64) -> u64 {
+        process_lookup_hash(hash)
+    }
+
+    /// Get the private index hash of one native map key.
+    fn key_index_hash(&self, key: Value) -> Result<u64, FaultCode> {
+        match key {
+            Value::Bool(value) => Ok(Self::map_index_hash(i64::from(value))),
+            Value::Int(value) => Ok(Self::map_index_hash(value)),
+            Value::Char(value) => Ok(Self::map_index_hash(i64::from(u32::from(value)))),
+            Value::Obj(r) => match self.vm.heap.get(r) {
+                Object::Str(text) | Object::Substring(text) => Ok(text.lookup_hash()),
+                Object::Bytes(bytes) => Ok(bytes.lookup_hash()),
+                _ => Err(BAD_TYPE),
+            },
+            _ => Err(BAD_TYPE),
+        }
+    }
+
+    /// Extend one map index through every stored entry.
+    fn ensure_map_index(&mut self, r: ObjRef) -> Result<(), FaultCode> {
+        let (built, len) = match self.vm.heap.get(r) {
+            Object::Map { entries, index } => (index.built as usize, entries.len()),
+            _ => return Err(BAD_TYPE),
+        };
+        if built == len {
+            return Ok(());
+        }
+        let mut mixed = Vec::with_capacity(len - built);
+        for index in built..len {
+            let semantic = match self.vm.heap.get(r) {
+                Object::Map { entries, .. } => entries[index].semantic_hash,
+                _ => return Err(BAD_TYPE),
+            };
+            mixed.push(Self::map_index_hash(semantic));
+        }
+        if let Object::Map { index, .. } = self.vm.heap.get_mut(r) {
+            for (offset, hash) in mixed.into_iter().enumerate() {
+                index.insert(hash, (built + offset) as u32);
+            }
+            Ok(())
+        } else {
+            Err(BAD_TYPE)
         }
     }
 
@@ -1381,33 +1449,15 @@ impl Machine {
     /// the hash index. The index is a cache: the call first indexes
     /// the entries appended since the last lookup.
     fn map_lookup(&mut self, r: ObjRef, key: Value) -> Result<Option<usize>, FaultCode> {
-        let (built, len) = match self.vm.heap.get(r) {
-            Object::Map { entries, index, .. } => (index.built as usize, entries.len()),
-            _ => return Err(FaultCode::TypeMismatch),
-        };
-        if built < len {
-            let mut hashes = Vec::with_capacity(len - built);
-            for i in built..len {
-                let k = match self.vm.heap.get(r) {
-                    Object::Map { entries, .. } => entries[i].0,
-                    _ => return Err(FaultCode::TypeMismatch),
-                };
-                hashes.push(self.key_hash(k));
-            }
-            if let Object::Map { index, .. } = self.vm.heap.get_mut(r) {
-                for (offset, hash) in hashes.into_iter().enumerate() {
-                    index.insert(hash, (built + offset) as u32);
-                }
-            }
-        }
-        let hash = self.key_hash(key);
+        self.ensure_map_index(r)?;
+        let hash = self.key_index_hash(key)?;
         let (entries, candidates) = match self.vm.heap.get(r) {
             Object::Map { entries, index, .. } => (entries, index.candidates(hash)),
             _ => return Err(FaultCode::TypeMismatch),
         };
         for i in candidates {
             let k = match entries.get(i as usize) {
-                Some(entry) => entry.0,
+                Some(entry) => entry.key,
                 None => continue,
             };
             if self.key_eq(k, key) {
@@ -1415,6 +1465,158 @@ impl Machine {
             }
         }
         Ok(None)
+    }
+
+    /// Resolve one live probe token to its map entry.
+    fn map_token_entry(&self, r: ObjRef, token: i64) -> Result<Option<usize>, FaultCode> {
+        let (epoch, slot) = map_probe_parts(token)?;
+        let Object::Map { entries, index, .. } = self.vm.heap.get(r) else {
+            return Err(BAD_TYPE);
+        };
+        if index.epoch.0 != epoch {
+            return Err(FaultCode::CollectionModified);
+        }
+        let Some(slot) = slot else {
+            return Ok(None);
+        };
+        let entry = index.entry_at(slot).ok_or(BAD_STATE)? as usize;
+        if entry >= entries.len() {
+            return Err(BAD_STATE);
+        }
+        Ok(Some(entry))
+    }
+
+    /// Execute one verified interface-backed map operation.
+    fn exec_hashable_map_instr(&mut self, instr: ExtendedInstr) -> Result<(), FaultCode> {
+        match instr {
+            ExtendedInstr::MapProbe => {
+                let prior = self.pop_int()?;
+                let semantic = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.ensure_map_index(r)?;
+                let (epoch, prior_slot) = if prior == 0 {
+                    let epoch = match self.vm.heap.get_mut(r) {
+                        Object::Map { index, .. } => index.epoch.observe(),
+                        _ => return Err(BAD_TYPE),
+                    };
+                    (epoch, None)
+                } else {
+                    let (epoch, slot) = map_probe_parts(prior)?;
+                    let current = match self.vm.heap.get(r) {
+                        Object::Map { index, .. } => index.epoch.0,
+                        _ => return Err(BAD_TYPE),
+                    };
+                    if current != epoch {
+                        return Err(FaultCode::CollectionModified);
+                    }
+                    if slot.is_none() {
+                        self.push(Value::Int(prior))?;
+                        return Ok(());
+                    }
+                    (epoch, slot)
+                };
+                let hash = Self::map_index_hash(semantic);
+                let slot = match self.vm.heap.get(r) {
+                    Object::Map { index, .. } => index.probe(hash, prior_slot).map(|item| item.0),
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Int(map_probe_token(epoch, slot)?))?;
+            }
+            ExtendedInstr::MapProbeFound => {
+                let token = self.pop_int()?;
+                let (_, slot) = map_probe_parts(token)?;
+                self.push(Value::Bool(slot.is_some()))?;
+            }
+            ExtendedInstr::MapProbeKey | ExtendedInstr::MapProbeValue => {
+                let token = self.pop_int()?;
+                let r = self.pop_obj()?;
+                let entry = self
+                    .map_token_entry(r, token)?
+                    .ok_or(FaultCode::MissingKey)?;
+                let value = match self.vm.heap.get(r) {
+                    Object::Map { entries, .. } => {
+                        let pair = entries.get(entry).ok_or(BAD_STATE)?;
+                        if matches!(instr, ExtendedInstr::MapProbeKey) {
+                            pair.key
+                        } else {
+                            pair.value
+                        }
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(value)?;
+            }
+            ExtendedInstr::MapProbeSetValue => {
+                let value = self.pop()?;
+                let token = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let entry = self.map_token_entry(r, token)?.ok_or(BAD_STATE)?;
+                match self.vm.heap.get_mut(r) {
+                    Object::Map { entries, .. } => {
+                        entries.get_mut(entry).ok_or(BAD_STATE)?.value = value;
+                    }
+                    _ => return Err(BAD_TYPE),
+                }
+                self.push(Value::Unit)?;
+            }
+            ExtendedInstr::MapProbeRemove => {
+                let token = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                let entry = self.map_token_entry(r, token)?.ok_or(BAD_STATE)?;
+                let value = match self.vm.heap.get_mut(r) {
+                    Object::Map { entries, index } => {
+                        index.epoch.bump()?;
+                        let value = entries.remove(entry).value;
+                        index.clear();
+                        value
+                    }
+                    _ => return Err(BAD_TYPE),
+                };
+                self.vm.heap.recharge(r);
+                self.push(value)?;
+            }
+            ExtendedInstr::MapInsertHashed => {
+                let token = self.pop_int()?;
+                let semantic = self.pop_int()?;
+                let value = self.pop()?;
+                let key = self.pop()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                if self.map_token_entry(r, token)?.is_some() {
+                    return Err(BAD_STATE);
+                }
+                if let Value::Obj(key) = key {
+                    if !self.vm.heap.is_frozen(key) {
+                        return Err(FaultCode::MutableMapKey);
+                    }
+                }
+                self.reserve(40, &[Value::Obj(r), key, value])?;
+                match self.vm.heap.get_mut(r) {
+                    Object::Map { entries, index } => {
+                        index.epoch.bump()?;
+                        let entry = entries.len() as u32;
+                        entries.push(MapEntry {
+                            key,
+                            value,
+                            semantic_hash: semantic,
+                        });
+                        index.insert(Self::map_index_hash(semantic), entry);
+                    }
+                    _ => return Err(BAD_TYPE),
+                }
+                self.vm.heap.recharge(r);
+                self.push(Value::Unit)?;
+            }
+            ExtendedInstr::MapWriteGuard => {
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                self.push(Value::Unit)?;
+            }
+            _ => unreachable!("the hashable map dispatcher receives one map instruction"),
+        }
+        Ok(())
     }
 
     fn frozen_guard(&self, r: ObjRef) -> Result<(), FaultCode> {
@@ -1546,6 +1748,7 @@ impl Machine {
             Instr::Native(
                 lm_bytecode::NativeInstr::StrByteLen
                 | lm_bytecode::NativeInstr::StrCharCount
+                | lm_bytecode::NativeInstr::TextHash
                 | lm_bytecode::NativeInstr::StrConcat
                 | lm_bytecode::NativeInstr::StrStartsWith
                 | lm_bytecode::NativeInstr::StrEndsWith
@@ -1602,6 +1805,11 @@ impl Machine {
                 let count = self.text_value(string)?.char_count();
                 let count = i64::try_from(count).map_err(|_| FaultCode::IntegerOverflow)?;
                 self.push(Value::Int(count))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::TextHash) => {
+                let text = self.pop_obj()?;
+                let hash = self.text_value(text)?.semantic_hash() as i64;
+                self.push(Value::Int(hash))?;
             }
             Instr::Native(lm_bytecode::NativeInstr::StrConcat) => {
                 let other = self.pop_obj()?;
@@ -2540,6 +2748,14 @@ impl Machine {
                 };
                 self.push(Value::Bool(valid))?;
             }
+            Instr::Native(lm_bytecode::NativeInstr::BytesHash) => {
+                let bytes = self.pop_obj()?;
+                let hash = match self.vm.heap.get(bytes) {
+                    Object::Bytes(bytes) => bytes.semantic_hash() as i64,
+                    _ => return Err(BAD_TYPE),
+                };
+                self.push(Value::Int(hash))?;
+            }
             Instr::Native(lm_bytecode::NativeInstr::EqBytes)
             | Instr::Native(lm_bytecode::NativeInstr::NeBytes) => {
                 let right = self.pop_obj()?;
@@ -2636,20 +2852,25 @@ impl Machine {
                 Object::Map { entries, .. } => {
                     let entry = entries.get_mut(pos).ok_or(BAD_STATE)?;
                     if discard {
-                        entry.1 = value;
+                        entry.value = value;
                         None
                     } else {
-                        Some(std::mem::replace(&mut entry.1, value))
+                        Some(std::mem::replace(&mut entry.value, value))
                     }
                 }
                 _ => return Err(BAD_TYPE),
             },
             None => {
-                self.reserve(32, &[Value::Obj(r), key, value])?;
+                let hash = self.key_semantic_hash(key)?;
+                self.reserve(40, &[Value::Obj(r), key, value])?;
                 match self.vm.heap.get_mut(r) {
                     Object::Map { entries, index } => {
                         index.epoch.bump()?;
-                        entries.push((key, value));
+                        entries.push(MapEntry {
+                            key,
+                            value,
+                            semantic_hash: hash,
+                        });
                     }
                     _ => return Err(BAD_TYPE),
                 }
@@ -2710,7 +2931,9 @@ impl Machine {
                 let r = self.pop_obj()?;
                 let value = match self.map_lookup(r, key)? {
                     Some(pos) => match self.vm.heap.get(r) {
-                        Object::Map { entries, .. } => Some(entries.get(pos).ok_or(BAD_STATE)?.1),
+                        Object::Map { entries, .. } => {
+                            Some(entries.get(pos).ok_or(BAD_STATE)?.value)
+                        }
                         _ => return Err(BAD_TYPE),
                     },
                     None => None,
@@ -2763,7 +2986,7 @@ impl Machine {
                 let expected = self.pop_int()?;
                 let r = self.pop_obj()?;
                 let (len, epoch) = match self.vm.heap.get(r) {
-                    Object::Map { entries, index } => (entries.len(), index.epoch.0),
+                    Object::Map { entries, index, .. } => (entries.len(), index.epoch.0),
                     _ => return Err(BAD_TYPE),
                 };
                 if expected < 0 || epoch != expected as u32 {
@@ -2782,7 +3005,7 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 }
                 .ok_or(FaultCode::IndexOutOfBounds)?;
-                let value = if value { entry.1 } else { entry.0 };
+                let value = if value { entry.value } else { entry.key };
                 self.push(value)?;
             }
         }
@@ -3000,7 +3223,7 @@ impl Machine {
                     Some(position) => match self.vm.heap.get_mut(r) {
                         Object::Map { entries, index } => {
                             index.epoch.bump()?;
-                            let value = entries.remove(position).1;
+                            let value = entries.remove(position).value;
                             index.clear();
                             Some(value)
                         }
@@ -3043,8 +3266,8 @@ impl Machine {
                 self.frozen_guard(r)?;
                 let additional =
                     usize::try_from(additional).map_err(|_| FaultCode::IndexOutOfBounds)?;
-                let growth = additional.checked_mul(32).ok_or(FaultCode::HeapLimit)?;
-                if let Object::Map { entries, index } = self.vm.heap.get(r) {
+                let growth = additional.checked_mul(40).ok_or(FaultCode::HeapLimit)?;
+                if let Object::Map { entries, index, .. } = self.vm.heap.get(r) {
                     if additional > entries.capacity().saturating_sub(entries.len()) {
                         index.epoch.ensure_bumpable()?;
                     }
@@ -3908,6 +4131,16 @@ impl Machine {
             ExtendedInstr::MapReserve => {
                 self.exec_collection_extension(module, envs, CollectionExtensionOp::MapReserve)?;
             }
+            ExtendedInstr::MapProbe
+            | ExtendedInstr::MapProbeFound
+            | ExtendedInstr::MapProbeKey
+            | ExtendedInstr::MapProbeValue
+            | ExtendedInstr::MapProbeSetValue
+            | ExtendedInstr::MapProbeRemove
+            | ExtendedInstr::MapInsertHashed
+            | ExtendedInstr::MapWriteGuard => {
+                self.exec_hashable_map_instr(instr)?;
+            }
             ExtendedInstr::CallSlot { slot, app } => {
                 let target = match slots.and_then(|slots| slots.get(slot as usize)) {
                     Some(ImageSlotTarget::Function(target)) => *target,
@@ -4406,19 +4639,24 @@ impl Machine {
                     .checked_sub(2 * count as usize)
                     .ok_or(BAD_STATE)?;
                 let flat: Vec<Value> = self.vm.operands.split_off(split);
-                let mut entries: Vec<(Value, Value)> = Vec::new();
+                let mut entries: Vec<MapEntry> = Vec::new();
                 let mut index = MapIndex::default();
                 for pair in flat.chunks_exact(2) {
                     let (key, value) = (pair[0], pair[1]);
-                    let hash = self.key_hash(key);
+                    let semantic = self.key_semantic_hash(key)?;
+                    let hash = Self::map_index_hash(semantic);
                     let hit = index
                         .candidates(hash)
-                        .find(|i| self.key_eq(entries[*i as usize].0, key));
+                        .find(|i| self.key_eq(entries[*i as usize].key, key));
                     match hit {
-                        Some(pos) => entries[pos as usize].1 = value,
+                        Some(pos) => entries[pos as usize].value = value,
                         None => {
                             index.insert(hash, entries.len() as u32);
-                            entries.push((key, value));
+                            entries.push(MapEntry {
+                                key,
+                                value,
+                                semantic_hash: semantic,
+                            });
                         }
                     }
                 }
@@ -4447,7 +4685,7 @@ impl Machine {
                     None => return Err(FaultCode::MissingKey),
                 };
                 let value = match self.vm.heap.get(r) {
-                    Object::Map { entries, .. } => entries.get(pos).ok_or(BAD_STATE)?.1,
+                    Object::Map { entries, .. } => entries.get(pos).ok_or(BAD_STATE)?.value,
                     _ => return Err(BAD_TYPE),
                 };
                 self.push(value)?;
@@ -5245,6 +5483,34 @@ fn integer_text_len(value: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_map_rebuilds_its_private_index_from_semantic_hashes() {
+        let mut machine = Machine::empty(VmConfig::default(), None);
+        let map = machine
+            .alloc(Object::Map {
+                entries: vec![MapEntry {
+                    key: Value::Int(7),
+                    value: Value::Int(9),
+                    semantic_hash: 99,
+                }],
+                index: MapIndex::default(),
+            })
+            .expect("the map allocation succeeds");
+        machine.push(map).expect("the map operand fits");
+        machine.push(Value::Int(99)).expect("the hash operand fits");
+        machine
+            .push(Value::Int(0))
+            .expect("the first probe marker fits");
+        machine
+            .exec_hashable_map_instr(ExtendedInstr::MapProbe)
+            .expect("the probe succeeds");
+        let token = machine.pop_int().expect("the probe returns a token");
+        assert!(machine
+            .map_token_entry(map.as_obj().expect("the map has one reference"), token)
+            .expect("the token is valid")
+            .is_some());
+    }
 
     #[test]
     fn policy_set_overlap_has_stable_precedence() {

@@ -272,7 +272,8 @@ impl<'o> FnChecker<'o> {
                 let mut key_ty: Option<TypeId> = None;
                 for (key, _) in entries {
                     let k = self.synth_expr(ctx, key)?;
-                    check_key_type(ctx, k.ty, key.span)?;
+                    let env = self.env.clone();
+                    check_key_type(ctx, &env, k.ty, key.span)?;
                     key_ty = Some(match key_ty {
                         None => k.ty,
                         Some(prev) => ctx

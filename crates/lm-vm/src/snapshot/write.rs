@@ -1446,9 +1446,9 @@ fn for_object_values(object: &Object, out: &mut Vec<u32>) {
             }
         }
         Object::Map { entries, .. } => {
-            for (key, value) in entries {
-                collect_empty_type(*key, out);
-                collect_empty_type(*value, out);
+            for entry in entries {
+                collect_empty_type(entry.key, out);
+                collect_empty_type(entry.value, out);
             }
         }
         Object::Closure { captures, .. } => {
@@ -1518,9 +1518,9 @@ fn remap_object_empty_types(object: &mut Object, map: &HashMap<u32, u32>) {
             }
         }
         Object::Map { entries, .. } => {
-            for (key, value) in entries {
-                remap_empty_type(key, map);
-                remap_empty_type(value, map);
+            for entry in entries {
+                remap_empty_type(&mut entry.key, map);
+                remap_empty_type(&mut entry.value, map);
             }
         }
         Object::Closure { captures, .. } => {

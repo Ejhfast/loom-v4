@@ -298,7 +298,7 @@ final class List[T] implements Counted, Iterable
   end
 end
 
-final class Map[K, V] implements Counted, Iterable
+final class Map[K: Hashable, V] implements Counted, Iterable
   type Item = (K, V)
   type Iter = MapIterator[K, V]
 
@@ -437,6 +437,151 @@ final class Map[K, V] implements Counted, Iterable
   end
 end
 
+final class Set[T: Hashable] implements Counted, Iterable, PartialEq
+  type Item = T
+  type Iter = SetIterator[T]
+
+  items: Map[T, ()] = {}
+
+  def len(self): Int
+    self.items.len()
+  end
+
+  def is_empty(self): Bool
+    self.items.is_empty()
+  end
+
+  def has(self, value: T): Bool
+    self.items.has(value)
+  end
+
+  # Return true when this call adds a new value.
+  def add(mut self, value: T): Bool
+    case self.items.put(value, ())
+    in Some(_) then false
+    in None then true
+    end
+  end
+
+  # Return true when this call removes a value.
+  def remove(mut self, value: T): Bool
+    case self.items.remove(value)
+    in Some(_) then true
+    in None then false
+    end
+  end
+
+  def clear(mut self)
+    self.items.clear()
+  end
+
+  def reserve(mut self, additional: Int)
+    self.items.reserve(additional)
+  end
+
+  def copy(self): Set[T]
+    result = Set[T]()
+    result.reserve(self.len())
+    for value in self
+      changed = result.add(value)
+    end
+    result
+  end
+
+  def values(self): List[T]
+    self.items.keys_list()
+  end
+
+  def each[effect e](self, f: (T) -> () with e): () with e
+    for value in self
+      f(value)
+    end
+    ()
+  end
+
+  def add_all(mut self, values: List[T])
+    for value in values
+      changed = self.add(value)
+    end
+  end
+
+  def retain[effect e](mut self, f: (T) -> Bool with e): () with e
+    removed = List[T]()
+    for value in self
+      if not f(value)
+        removed.push(value)
+      end
+    end
+    for value in removed
+      changed = self.remove(value)
+    end
+    ()
+  end
+
+  def union(self, other: Set[T]): Set[T]
+    result = self.copy()
+    for value in other
+      changed = result.add(value)
+    end
+    result
+  end
+
+  def intersection(self, other: Set[T]): Set[T]
+    result = Set[T]()
+    result.reserve(self.len())
+    for value in self
+      if other.has(value)
+        changed = result.add(value)
+      end
+    end
+    result
+  end
+
+  def difference(self, other: Set[T]): Set[T]
+    result = Set[T]()
+    result.reserve(self.len())
+    for value in self
+      if not other.has(value)
+        changed = result.add(value)
+      end
+    end
+    result
+  end
+
+  def is_subset(self, other: Set[T]): Bool
+    if self.len() > other.len()
+      return false
+    end
+    for value in self
+      if not other.has(value)
+        return false
+      end
+    end
+    true
+  end
+
+  def is_superset(self, other: Set[T]): Bool
+    other.is_subset(self)
+  end
+
+  def is_disjoint(self, other: Set[T]): Bool
+    for value in self
+      if other.has(value)
+        return false
+      end
+    end
+    true
+  end
+
+  def __eq__(self, other: Set[T]): Bool
+    self.len() == other.len() and self.is_subset(other)
+  end
+
+  def iterator(self): SetIterator[T]
+    SetIterator[T](self.items.keys().iterator())
+  end
+end
+
 final class ListIterator[T] implements Iterator
   type Item = T
 
@@ -461,7 +606,7 @@ final class ListIterator[T] implements Iterator
   end
 end
 
-final class MapIterator[K, V] implements Iterator
+final class MapIterator[K: Hashable, V] implements Iterator
   type Item = (K, V)
 
   source: Map[K, V]
@@ -483,6 +628,20 @@ final class MapIterator[K, V] implements Iterator
     else
       None
     end
+  end
+end
+
+final class SetIterator[T: Hashable] implements Iterator
+  type Item = T
+
+  source: MapKeysIterator[T, ()]
+
+  def init(mut self, source: MapKeysIterator[T, ()])
+    self.source = source
+  end
+
+  def next(mut self): Option[T]
+    self.source.next()
   end
 end
 
@@ -627,7 +786,7 @@ final class ListSliceIterator[T] implements Iterator
   end
 end
 
-final class MapKeys[K, V] implements Counted, Iterable
+final class MapKeys[K: Hashable, V] implements Counted, Iterable
   type Item = K
   type Iter = MapKeysIterator[K, V]
 
@@ -663,7 +822,7 @@ final class MapKeys[K, V] implements Counted, Iterable
   end
 end
 
-final class MapValues[K, V] implements Counted, Iterable
+final class MapValues[K: Hashable, V] implements Counted, Iterable
   type Item = V
   type Iter = MapValuesIterator[K, V]
 
@@ -699,7 +858,7 @@ final class MapValues[K, V] implements Counted, Iterable
   end
 end
 
-final class MapEntries[K, V] implements Counted, Iterable
+final class MapEntries[K: Hashable, V] implements Counted, Iterable
   type Item = (K, V)
   type Iter = MapEntriesIterator[K, V]
 
@@ -741,7 +900,7 @@ final class MapEntries[K, V] implements Counted, Iterable
   end
 end
 
-final class MapKeysIterator[K, V] implements Iterator
+final class MapKeysIterator[K: Hashable, V] implements Iterator
   type Item = K
 
   source: Map[K, V]
@@ -765,7 +924,7 @@ final class MapKeysIterator[K, V] implements Iterator
   end
 end
 
-final class MapValuesIterator[K, V] implements Iterator
+final class MapValuesIterator[K: Hashable, V] implements Iterator
   type Item = V
 
   source: Map[K, V]
@@ -789,7 +948,7 @@ final class MapValuesIterator[K, V] implements Iterator
   end
 end
 
-final class MapEntriesIterator[K, V] implements Iterator
+final class MapEntriesIterator[K: Hashable, V] implements Iterator
   type Item = (K, V)
 
   source: Map[K, V]
@@ -831,8 +990,15 @@ def list_repeated[T](value: T, count: Int): List[T]
   result
 end
 
-def map_with_capacity[K, V](capacity: Int): Map[K, V]
+def map_with_capacity[K: Hashable, V](capacity: Int): Map[K, V]
   result = Map[K, V]()
   result.reserve(capacity)
+  result
+end
+
+def set_from_list[T: Hashable](values: List[T]): Set[T]
+  result = Set[T]()
+  result.reserve(values.len())
+  result.add_all(values)
   result
 end

@@ -462,9 +462,9 @@ fn check_object(
         (Object::Map { entries, .. }, Kind::Map) => {
             let key = child(module, envs, expect, 0)?;
             let value = child(module, envs, expect, 1)?;
-            for (entry_key, entry_value) in entries {
-                scratch.work.push((*entry_key, key));
-                scratch.work.push((*entry_value, value));
+            for entry in entries {
+                scratch.work.push((entry.key, key));
+                scratch.work.push((entry.value, value));
             }
             Ok(())
         }

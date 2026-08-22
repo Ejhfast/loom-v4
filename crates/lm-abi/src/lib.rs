@@ -505,7 +505,8 @@ impl AbiType {
 /// Version 13 adds immutable public syntax construction.
 /// Version 14 adds deliberate guest failure.
 /// Version 15 adds direct integer and Boolean builder appends.
-pub const INTRINSIC_ABI_VERSION: u32 = 15;
+/// Version 16 adds stable text and byte hashes.
+pub const INTRINSIC_ABI_VERSION: u32 = 16;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -656,9 +657,11 @@ pub const INTRINSIC_PANIC: IntrinsicSlot = 132;
 pub const INTRINSIC_ASSERT_FAIL: IntrinsicSlot = 133;
 pub const INTRINSIC_STRING_BUILDER_APPEND_INT: IntrinsicSlot = 134;
 pub const INTRINSIC_STRING_BUILDER_APPEND_BOOL: IntrinsicSlot = 135;
+pub const INTRINSIC_TEXT_HASH: IntrinsicSlot = 136;
+pub const INTRINSIC_BYTES_HASH: IntrinsicSlot = 137;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 136] = [
+pub const INTRINSICS: [IntrinsicDef; 138] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -1513,6 +1516,18 @@ pub const INTRINSICS: [IntrinsicDef; 136] = [
         name: "string_builder.append_bool",
         params: &[AbiType::STRING_BUILDER, AbiType::BOOL],
         reply: AbiType::STRING_BUILDER,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "text.hash",
+        params: &[AbiType::TEXT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.hash",
+        params: &[AbiType::BYTES],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
 ];

@@ -351,6 +351,28 @@ fn bench_language_operations() {
         base,
     );
 
+    // A map with immutable byte keys uses the native byte hash path.
+    report(
+        "map_bytes_lookup",
+        500_000,
+        "key = Bytes(\"loom\")\nm: {Bytes: Int} = {}\nm.put(key, 7)\n\
+         j = 0\ns = 0\nwhile j < 500000\n  s = s + m.at(key)\n  j = j + 1\nend\ns\n",
+        base,
+    );
+
+    // A user key uses one hash call and one equality call per lookup.
+    report(
+        "map_hashable_lookup",
+        500_000,
+        "final class Key implements Hashable\n  value: Int\n  \
+         def init(mut self, value: Int)\n    self.value = value\n  end\n  \
+         def __eq__(self, other: Key): Bool\n    self.value == other.value\n  end\n  \
+         def __hash__(self): Int\n    self.value\n  end\nend\n\
+         key = Key(7).freeze()\nm = Map[Key, Int]()\nm.put(key, 9)\n\
+         j = 0\ns = 0\nwhile j < 500000\n  s = s + m.at(key)\n  j = j + 1\nend\ns\n",
+        base,
+    );
+
     // The string builder uses the growable text path.
     report(
         "string_builder",

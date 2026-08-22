@@ -78,7 +78,9 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// Version 24 stores bounded fault execution traces.
 /// Version 25 stores installed function and class binding handles.
 /// Version 26 stores slot versions and pending slot changes.
-pub const FORMAT_VERSION: u32 = 27;
+/// Version 27 stores the exact ABI bundle digest.
+/// Version 28 stores each map entry semantic hash.
+pub const FORMAT_VERSION: u32 = 28;
 
 /// The section kinds, in canonical order.
 ///

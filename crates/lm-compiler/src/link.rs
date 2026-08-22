@@ -1469,6 +1469,7 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::TextReplace)
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntStatus)
         | Instr::Native(lm_bytecode::NativeInstr::TextParseIntValue)
+        | Instr::Native(lm_bytecode::NativeInstr::TextHash)
         | Instr::Native(lm_bytecode::NativeInstr::BytesEndsWith)
         | Instr::Native(lm_bytecode::NativeInstr::BytesContains)
         | Instr::Native(lm_bytecode::NativeInstr::TextSplit)
@@ -1545,6 +1546,7 @@ fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::GeBytes)
         | Instr::Native(lm_bytecode::NativeInstr::BytesCompact)
         | Instr::Native(lm_bytecode::NativeInstr::BytesTextView)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesHash)
         | Instr::Freeze
         | Instr::EqDigest
         | Instr::NeDigest
@@ -1667,6 +1669,14 @@ fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedInstr {
         | ExtendedInstr::ListReorder
         | ExtendedInstr::MapClear
         | ExtendedInstr::MapReserve
+        | ExtendedInstr::MapProbe
+        | ExtendedInstr::MapProbeFound
+        | ExtendedInstr::MapProbeKey
+        | ExtendedInstr::MapProbeValue
+        | ExtendedInstr::MapProbeSetValue
+        | ExtendedInstr::MapProbeRemove
+        | ExtendedInstr::MapInsertHashed
+        | ExtendedInstr::MapWriteGuard
         | ExtendedInstr::SyntaxTreeRoot
         | ExtendedInstr::SyntaxKind
         | ExtendedInstr::SyntaxCategory

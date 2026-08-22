@@ -98,22 +98,6 @@ pub(crate) fn verify_tables(
             BcType::Map(k, v) => {
                 check_ref(*k)?;
                 check_ref(*v)?;
-                let text_key = match module.types[*k as usize] {
-                    BcType::Class(class) => {
-                        Some(class) == core.text || Some(class) == core.substring
-                    }
-                    _ => false,
-                };
-                if !text_key
-                    && !matches!(
-                        module.types[*k as usize],
-                        BcType::Bool | BcType::Int | BcType::Str | BcType::Bytes | BcType::Var(_)
-                    )
-                {
-                    return Err(terr(format!(
-                        "type {idx} has a map key type outside Bool, Int, Text, String, Substring, or Bytes"
-                    )));
-                }
             }
             BcType::Tuple(elems) => {
                 if elems.is_empty() || elems.len() > MAX_TUPLE_ARITY {
@@ -230,9 +214,33 @@ pub(crate) fn verify_tables(
     verify_imports(&ctx)?;
     verify_classes(&ctx)?;
     verify_conformances(&ctx)?;
+    verify_map_key_types(&ctx)?;
     verify_signatures(&ctx)?;
     verify_slots(&ctx)?;
     Ok(ctx)
+}
+
+/// Reject one concrete map key that cannot implement `Hashable`.
+///
+/// A type variable or projection needs its use-site bounds. The
+/// instruction verifier checks those bounds before any map operation.
+fn verify_map_key_types(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let hashable = ctx.hashable_interface();
+    for (index, ty) in ctx.module.types.iter().enumerate() {
+        let BcType::Map(key, _) = ty else {
+            continue;
+        };
+        if ctx.native_map_key(*key)
+            || matches!(ctx.ty(*key), BcType::Var(_) | BcType::Projection { .. })
+            || hashable.is_some_and(|interface| ctx.concrete_conformance(*key, interface).is_some())
+        {
+            continue;
+        }
+        return Err(terr(format!(
+            "type {index} has a map key type that does not implement Hashable"
+        )));
+    }
+    Ok(())
 }
 
 /// The selector table holds no duplicate name.
@@ -956,17 +964,21 @@ fn interface_type_uses_self(ctx: &Ctx<'_>, root: u32) -> bool {
     false
 }
 
-fn interface_uses_self(ctx: &Ctx<'_>, interface: u32) -> bool {
-    ctx.module.interfaces[interface as usize]
-        .methods
+fn interface_uses_self(ctx: &Ctx<'_>, interface: u32, visiting: &mut HashSet<u32>) -> bool {
+    if !visiting.insert(interface) {
+        return false;
+    }
+    let contract = &ctx.module.interfaces[interface as usize];
+    contract.methods.iter().any(|method| {
+        method
+            .params
+            .iter()
+            .any(|ty| interface_type_uses_self(ctx, *ty))
+            || interface_type_uses_self(ctx, method.ret)
+    }) || contract
+        .parents
         .iter()
-        .any(|method| {
-            method
-                .params
-                .iter()
-                .any(|ty| interface_type_uses_self(ctx, *ty))
-                || interface_type_uses_self(ctx, method.ret)
-        })
+        .any(|parent| interface_uses_self(ctx, parent.interface, visiting))
 }
 
 /// Conformance references and their method witnesses.
@@ -1016,7 +1028,7 @@ fn verify_conformances(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
         let contract = &module.interfaces[conformance.application.interface as usize];
         if class.kind == BcClassKind::Normal
             && !class.is_final
-            && interface_uses_self(ctx, conformance.application.interface)
+            && interface_uses_self(ctx, conformance.application.interface, &mut HashSet::new())
         {
             return Err(cerr(
                 "a non-final class conforms to a Self-dependent interface".to_string(),

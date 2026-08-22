@@ -1,6 +1,6 @@
 # Pre-release Language and Host Foundation
 
-Status: stages 1 through 6 implemented. Stage 7 remains required.
+Status: stages 1 through 7 implemented.
 
 This sidecar defines the first public release foundation.
 
@@ -686,15 +686,19 @@ Equal values must return equal semantic hashes.
 
 A hash must remain stable while its value is frozen.
 
-The VM mixes each semantic hash with a private process seed.
+The VM mixes each semantic hash with a private process key.
 
 `Map[K, V]` requires `K` to conform to `Hashable`.
 
-Map construction records one verified key strategy for `K`.
+Bytecode selects a native path or an interface-backed path for each map operation.
 
-Built-in key strategies retain the current native hash and equality path.
+Built-in keys retain the current native instruction path.
 
-User key strategies call the verified `__hash__` and `__eq__` implementations.
+Generic and user keys call verified `__hash__` and `__eq__` implementations.
+
+Compiler-private probe instructions separate these calls from synchronous VM instructions.
+
+The VM never invokes guest code inside one collection instruction.
 
 Each stored entry caches its semantic hash.
 
@@ -702,15 +706,58 @@ A lookup computes the query hash once.
 
 It calls equality only for matching hash candidates.
 
+The VM mixes semantic hashes with a private process key before bucket access.
+
 The map contract rejects an effectful hash or equality method.
 
-Snapshots retain enough type identity to reconstruct the same verified strategy.
+User heap keys must be frozen before insertion.
 
-Core adds `Set[T]` over the same key strategy after the map gate passes.
+A mutable user heap key faults with `MutableMapKey`.
+
+Snapshots store semantic hashes beside entries.
+
+Snapshots omit the private derived index.
+
+Restoration rebuilds that index with the active process key.
+
+Core defines ordered `Set[T]` as an ordinary class over `Map[T, ()]`.
+
+`Set` provides insertion, removal, traversal, copying, filtering, and standard set algebra.
 
 Stage 7 passes when a frozen user class works as a map key and set element.
 
 Existing Int, Text, and Bytes map benchmarks must not regress.
+
+The Stage 7 gate passed on 2026-08-22.
+
+Workspace testing completed without failures.
+
+Strict workspace linting completed without warnings.
+
+The warm full workspace suite completed in 35.7 seconds.
+
+Set added two classes and thirty functions.
+
+Those methods account for this stage's measured core growth.
+
+| Measurement | Stage 6 | Stage 7 |
+|---|---:|---:|
+| core classes | 185 | 187 |
+| core functions | 535 | 565 |
+| core artifact | 119,518 bytes | 131,407 bytes |
+| core compilation | 1.943 ms | 2.145 ms |
+| core loading | 0.835 ms | 0.983 ms |
+
+Native map operations retained their existing instruction path.
+
+| Benchmark | Stage 6 | Stage 7 |
+|---|---:|---:|
+| `map_insert` | 128.0 ns | 122.3 ns |
+| `map_lookup` | 71.6 ns | 68.0 ns |
+| `map_str_lookup` | 60.5 ns | 60.4 ns |
+| `map_bytes_lookup` | 57.4 ns | 52.7 ns |
+
+The generic user-key lookup measured 207.2 ns.
 
 ## 21. Interface release gates
 

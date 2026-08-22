@@ -1,6 +1,6 @@
 # Core: immutable bytes and mutable builders.
 
-final class Bytes implements PartialEq
+final class Bytes implements Hashable
   def len(self): Int
     intrinsic("bytes.len", self)
   end
@@ -94,6 +94,10 @@ final class Bytes implements PartialEq
 
   def __eq__(self, other: Bytes): Bool
     intrinsic("bytes.eq", self, other)
+  end
+
+  def __hash__(self): Int
+    intrinsic("bytes.hash", self)
   end
 
   def __lt__(self, other: Bytes): Bool

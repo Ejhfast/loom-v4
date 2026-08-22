@@ -6,6 +6,37 @@
 use super::*;
 
 impl<'m> Ctx<'m> {
+    /// Find the reserved core `Hashable` interface.
+    pub(crate) fn hashable_interface(&self) -> Option<u32> {
+        self.module
+            .interfaces
+            .iter()
+            .position(|interface| interface.key == "core.Hashable")
+            .map(|index| index as u32)
+    }
+
+    /// Test whether native map instructions support one key type.
+    pub(crate) fn native_map_key(&self, ty: u32) -> bool {
+        match self.ty(ty) {
+            BcType::Bool | BcType::Int | BcType::Str | BcType::Bytes => true,
+            BcType::Class(class) | BcType::Inst(class, _) => [
+                self.core.text,
+                self.core.string,
+                self.core.substring,
+                self.core.char_value,
+                self.core.bytes,
+            ]
+            .contains(&Some(class)),
+            _ => false,
+        }
+    }
+
+    /// Test whether one key type proves the core `Hashable` contract.
+    pub(crate) fn hashable_map_key(&self, func: u32, ty: u32) -> bool {
+        self.hashable_interface()
+            .is_some_and(|interface| self.interface_application(func, ty, interface, 0).is_some())
+    }
+
     pub(crate) fn ty(&self, idx: u32) -> BcType {
         self.uni.borrow().types[idx as usize].clone()
     }

@@ -103,7 +103,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// Version 38 adds interface inheritance and bare `Self` contracts.
 /// Version 39 lowers general interpolation through `Display`.
 /// Version 40 activates equality hooks through `PartialEq`.
-pub const COMPILER_ABI_VERSION: u32 = 40;
+/// Version 41 adds `Hashable` map paths and stable native hashes.
+pub const COMPILER_ABI_VERSION: u32 = 41;
 
 /// The refinement work budget of one component.
 ///
@@ -887,6 +888,8 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::GeBytes)
         | Instr::Native(NativeInstr::BytesCompact)
         | Instr::Native(NativeInstr::BytesTextView)
+        | Instr::Native(NativeInstr::TextHash)
+        | Instr::Native(NativeInstr::BytesHash)
         | Instr::Freeze
         | Instr::EqDigest
         | Instr::NeDigest
@@ -1089,7 +1092,15 @@ fn preflight_extended(
         | ExtendedInstr::SyntaxBuildToken
         | ExtendedInstr::SyntaxBuildTrivia
         | ExtendedInstr::SyntaxBuildNode
-        | ExtendedInstr::SyntaxToTree => {}
+        | ExtendedInstr::SyntaxToTree
+        | ExtendedInstr::MapProbe
+        | ExtendedInstr::MapProbeFound
+        | ExtendedInstr::MapProbeKey
+        | ExtendedInstr::MapProbeValue
+        | ExtendedInstr::MapProbeSetValue
+        | ExtendedInstr::MapProbeRemove
+        | ExtendedInstr::MapInsertHashed
+        | ExtendedInstr::MapWriteGuard => {}
         ExtendedInstr::CallSlot { slot, app } | ExtendedInstr::NewSlot { slot, app } => {
             if *slot as usize >= module.slots.len() {
                 return Err(bad("slot index"));
@@ -2124,6 +2135,8 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::SbByteLen) => 0xa3,
             Instr::Native(NativeInstr::SbFinish) => 0xa4,
             Instr::Native(NativeInstr::BbFinish) => 0xa5,
+            Instr::Native(NativeInstr::TextHash) => 0xed,
+            Instr::Native(NativeInstr::BytesHash) => 0xee,
             Instr::Jump(..) => 0x31,
             Instr::JumpIfFalse(..) => 0x32,
             Instr::JumpIfTrue(..) => 0x33,
@@ -2199,6 +2212,14 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::FaultSite { .. } => 0xe8,
             ExtendedInstr::FaultTrace { .. } => 0xe9,
             ExtendedInstr::CodeDefinition => 0xea,
+            ExtendedInstr::MapProbe => 0xef,
+            ExtendedInstr::MapProbeFound => 0xf0,
+            ExtendedInstr::MapProbeKey => 0xf1,
+            ExtendedInstr::MapProbeValue => 0xf2,
+            ExtendedInstr::MapProbeSetValue => 0xf3,
+            ExtendedInstr::MapProbeRemove => 0xf4,
+            ExtendedInstr::MapInsertHashed => 0xf5,
+            ExtendedInstr::MapWriteGuard => 0xf6,
         }
     }
 
@@ -2455,6 +2476,8 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::SbByteLen)
             | Instr::Native(NativeInstr::SbFinish)
             | Instr::Native(NativeInstr::BbFinish)
+            | Instr::Native(NativeInstr::TextHash)
+            | Instr::Native(NativeInstr::BytesHash)
             | Instr::Return
             | Instr::CallArgs
             | Instr::FaultCode
@@ -2545,7 +2568,15 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::SyntaxBuildToken
             | ExtendedInstr::SyntaxBuildTrivia
             | ExtendedInstr::SyntaxBuildNode
-            | ExtendedInstr::SyntaxToTree => {}
+            | ExtendedInstr::SyntaxToTree
+            | ExtendedInstr::MapProbe
+            | ExtendedInstr::MapProbeFound
+            | ExtendedInstr::MapProbeKey
+            | ExtendedInstr::MapProbeValue
+            | ExtendedInstr::MapProbeSetValue
+            | ExtendedInstr::MapProbeRemove
+            | ExtendedInstr::MapInsertHashed
+            | ExtendedInstr::MapWriteGuard => {}
             ExtendedInstr::CallSlot { slot, app } | ExtendedInstr::NewSlot { slot, app } => {
                 self.slot_contract_bytes(out, *slot, false);
                 if *app == crate::NO_APP {

@@ -23,6 +23,8 @@ pub enum FaultCode {
     FrozenWrite,
     IndexOutOfBounds,
     MissingKey,
+    /// A map insertion received a heap key that is not frozen.
+    MutableMapKey,
     /// A collection changed during active traversal.
     CollectionModified,
     /// A tracked collection cannot represent another structural epoch.
@@ -74,7 +76,7 @@ pub enum FaultCode {
 /// so a loader must map a name back to a code. This table is the one
 /// place that lists the codes, so a new code joins both directions at
 /// once.
-pub const FAULT_CODES: [FaultCode; 25] = [
+pub const FAULT_CODES: [FaultCode; 26] = [
     FaultCode::IntegerOverflow,
     FaultCode::DivideByZero,
     FaultCode::OutOfFuel,
@@ -83,6 +85,7 @@ pub const FAULT_CODES: [FaultCode; 25] = [
     FaultCode::FrozenWrite,
     FaultCode::IndexOutOfBounds,
     FaultCode::MissingKey,
+    FaultCode::MutableMapKey,
     FaultCode::CollectionModified,
     FaultCode::CollectionEpochExhausted,
     FaultCode::BadCast,
@@ -123,6 +126,7 @@ impl fmt::Display for FaultCode {
             FaultCode::FrozenWrite => "FrozenWrite",
             FaultCode::IndexOutOfBounds => "IndexOutOfBounds",
             FaultCode::MissingKey => "MissingKey",
+            FaultCode::MutableMapKey => "MutableMapKey",
             FaultCode::CollectionModified => "CollectionModified",
             FaultCode::CollectionEpochExhausted => "CollectionEpochExhausted",
             FaultCode::BadCast => "BadCast",

@@ -425,19 +425,19 @@ impl World {
                         let elements = expected.and_then(|ty| self.show_map_elements(ty));
                         let parts: Vec<String> = entries
                             .iter()
-                            .map(|(k, v)| {
+                            .map(|entry| {
                                 format!(
                                     "{}: {}",
                                     self.show_value_inner(
                                         heap,
-                                        *k,
+                                        entry.key,
                                         elements.map(|pair| pair.0),
                                         depth + 1,
                                         visited,
                                     ),
                                     self.show_value_inner(
                                         heap,
-                                        *v,
+                                        entry.value,
                                         elements.map(|pair| pair.1),
                                         depth + 1,
                                         visited,

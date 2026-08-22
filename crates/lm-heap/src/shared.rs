@@ -21,6 +21,18 @@ pub fn process_lookup_hash<T: Hash>(value: T) -> u64 {
     HASHER.get_or_init(RandomState::new).hash_one(value)
 }
 
+/// Hash stable bytes for a semantic value hash.
+fn semantic_hash_bytes(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 fn amortized_growth(length: usize, capacity: usize, additional: usize) -> usize {
     let required = length.saturating_add(additional);
     if required <= capacity {
@@ -315,6 +327,7 @@ pub struct SharedText {
     byte_len: usize,
     scalar_start: usize,
     scalar_len: usize,
+    semantic_hash: AtomicU64,
     lookup_hash: AtomicU64,
 }
 
@@ -341,6 +354,7 @@ impl SharedText {
                 byte_len: span.len,
                 scalar_start,
                 scalar_len: scalar_end - scalar_start,
+                semantic_hash: AtomicU64::new(0),
                 lookup_hash: AtomicU64::new(0),
             };
         }
@@ -356,6 +370,7 @@ impl SharedText {
             scalar_start: 0,
             scalar_len,
             root,
+            semantic_hash: AtomicU64::new(0),
             lookup_hash: AtomicU64::new(0),
         }
     }
@@ -488,6 +503,7 @@ impl SharedText {
             byte_len: end - start,
             scalar_start,
             scalar_len: scalar_end - scalar_start,
+            semantic_hash: AtomicU64::new(0),
             lookup_hash: AtomicU64::new(0),
         })
     }
@@ -508,6 +524,7 @@ impl SharedText {
             byte_len: byte_end - byte_start,
             scalar_start: root_start,
             scalar_len: length,
+            semantic_hash: AtomicU64::new(0),
             lookup_hash: AtomicU64::new(0),
         })
     }
@@ -597,18 +614,32 @@ impl SharedText {
             .expect("a text view stays inside its root");
         SharedBytes {
             span,
+            semantic_hash: AtomicU64::new(0),
             lookup_hash: AtomicU64::new(0),
             utf8_state: AtomicU8::new(UTF8_VALID),
         }
     }
 
-    /// Get the cached hash for map lookup.
+    /// Get the stable semantic hash of this text.
+    pub fn semantic_hash(&self) -> u64 {
+        let cached = self.semantic_hash.load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+        let hash = semantic_hash_bytes(self.as_str().as_bytes());
+        if hash != 0 {
+            self.semantic_hash.store(hash, Ordering::Relaxed);
+        }
+        hash
+    }
+
+    /// Get the cached private hash for map lookup.
     pub fn lookup_hash(&self) -> u64 {
         let cached = self.lookup_hash.load(Ordering::Relaxed);
         if cached != 0 {
             return cached;
         }
-        let hash = process_lookup_hash(self.as_str());
+        let hash = process_lookup_hash(self.semantic_hash() as i64);
         if hash != 0 {
             self.lookup_hash.store(hash, Ordering::Relaxed);
         }
@@ -627,7 +658,7 @@ impl SharedText {
 
     /// Test whether this value has computed its lookup hash.
     pub fn has_cached_hash(&self) -> bool {
-        self.lookup_hash.load(Ordering::Relaxed) != 0
+        self.semantic_hash.load(Ordering::Relaxed) != 0
     }
 }
 
@@ -645,6 +676,7 @@ impl Clone for SharedText {
             byte_len: self.byte_len,
             scalar_start: self.scalar_start,
             scalar_len: self.scalar_len,
+            semantic_hash: AtomicU64::new(self.semantic_hash.load(Ordering::Relaxed)),
             lookup_hash: AtomicU64::new(self.lookup_hash.load(Ordering::Relaxed)),
         }
     }
@@ -702,9 +734,10 @@ impl Hash for SharedText {
     }
 }
 
-/// Immutable binary data with shared storage and a cached lookup hash.
+/// Immutable binary data with shared storage and cached hashes.
 pub struct SharedBytes {
     span: ByteSpan,
+    semantic_hash: AtomicU64,
     lookup_hash: AtomicU64,
     utf8_state: AtomicU8,
 }
@@ -752,6 +785,7 @@ impl SharedBytes {
     pub fn slice(&self, start: usize, end: usize) -> Option<SharedBytes> {
         Some(SharedBytes {
             span: self.span.slice(start, end)?,
+            semantic_hash: AtomicU64::new(0),
             lookup_hash: AtomicU64::new(0),
             utf8_state: AtomicU8::new(UTF8_UNKNOWN),
         })
@@ -845,13 +879,26 @@ impl SharedBytes {
         Ok(SharedBytes::from(bytes))
     }
 
-    /// Get the cached hash for map lookup.
+    /// Get the stable semantic hash of these bytes.
+    pub fn semantic_hash(&self) -> u64 {
+        let cached = self.semantic_hash.load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+        let hash = semantic_hash_bytes(self.as_slice());
+        if hash != 0 {
+            self.semantic_hash.store(hash, Ordering::Relaxed);
+        }
+        hash
+    }
+
+    /// Get the cached private hash for map lookup.
     pub fn lookup_hash(&self) -> u64 {
         let cached = self.lookup_hash.load(Ordering::Relaxed);
         if cached != 0 {
             return cached;
         }
-        let hash = process_lookup_hash(self.as_slice());
+        let hash = process_lookup_hash(self.semantic_hash() as i64);
         if hash != 0 {
             self.lookup_hash.store(hash, Ordering::Relaxed);
         }
@@ -865,7 +912,7 @@ impl SharedBytes {
 
     /// Test whether this value has computed its lookup hash.
     pub fn has_cached_hash(&self) -> bool {
-        self.lookup_hash.load(Ordering::Relaxed) != 0
+        self.semantic_hash.load(Ordering::Relaxed) != 0
     }
 }
 
@@ -879,6 +926,7 @@ impl Clone for SharedBytes {
     fn clone(&self) -> SharedBytes {
         SharedBytes {
             span: self.span.clone(),
+            semantic_hash: AtomicU64::new(self.semantic_hash.load(Ordering::Relaxed)),
             lookup_hash: AtomicU64::new(self.lookup_hash.load(Ordering::Relaxed)),
             utf8_state: AtomicU8::new(self.utf8_state.load(Ordering::Relaxed)),
         }
@@ -889,6 +937,7 @@ impl From<Vec<u8>> for SharedBytes {
     fn from(bytes: Vec<u8>) -> SharedBytes {
         SharedBytes {
             span: ByteSpan::from_vec(bytes),
+            semantic_hash: AtomicU64::new(0),
             lookup_hash: AtomicU64::new(0),
             utf8_state: AtomicU8::new(UTF8_UNKNOWN),
         }
@@ -1267,13 +1316,16 @@ mod tests {
     }
 
     #[test]
-    fn clones_keep_the_cached_lookup_hash() {
+    fn clones_keep_the_cached_hashes() {
         let text = SharedText::from("key");
         assert!(!text.has_cached_hash());
-        let hash = text.lookup_hash();
+        let semantic_hash = text.semantic_hash();
+        let lookup_hash = text.lookup_hash();
         let clone = text.clone();
-        assert_eq!(clone.lookup_hash(), hash);
+        assert_eq!(clone.semantic_hash(), semantic_hash);
+        assert_eq!(clone.lookup_hash(), lookup_hash);
         assert!(clone.has_cached_hash());
+        assert_ne!(clone.lookup_hash.load(Ordering::Relaxed), 0);
         assert!(text.shares_storage(&clone));
     }
 
@@ -1315,7 +1367,7 @@ mod tests {
         let slice = bytes.slice(1, 3).expect("the range is valid");
         assert_eq!(slice.as_slice(), &[0xff, 2]);
         assert!(bytes.shares_storage(&slice));
-        assert_eq!(slice.lookup_hash(), slice.clone().lookup_hash());
+        assert_eq!(slice.semantic_hash(), slice.clone().semantic_hash());
     }
 
     #[test]

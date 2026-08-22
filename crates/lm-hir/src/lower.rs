@@ -29,6 +29,7 @@ fn extended(instr: ExtendedInstr) -> Instr {
 struct ModLowerer<'m> {
     store: &'m TypeStore,
     funcs: &'m [HirFunc],
+    classes: &'m [HirClass],
     /// Small expression bodies that direct calls can inline.
     inline_bodies: Vec<Option<HExpr>>,
     strings: Vec<String>,
@@ -326,6 +327,7 @@ pub fn lower_module_with_linkage(
     let mut m = ModLowerer {
         store: &hir.store,
         funcs: &hir.funcs,
+        classes: &hir.classes,
         inline_bodies,
         strings: Vec::new(),
         string_index: HashMap::new(),
@@ -633,6 +635,16 @@ struct Lowerer<'a, 'm> {
     local_types: Vec<u32>,
 }
 
+#[derive(Clone, Copy)]
+enum MapAction {
+    Has,
+    At,
+    Get,
+    Put,
+    Remove,
+    PutDiscard,
+}
+
 impl<'a, 'm> Lowerer<'a, 'm> {
     fn new(m: &'a mut ModLowerer<'m>, local_types: Vec<u32>) -> Lowerer<'a, 'm> {
         Lowerer {
@@ -692,6 +704,197 @@ impl<'a, 'm> Lowerer<'a, 'm> {
     fn scratch_of(&mut self, ty: TypeId) -> u32 {
         let bc = self.m.bc_ty(ty);
         self.scratch(bc)
+    }
+
+    /// Test whether the existing native map instructions support one key type.
+    fn native_map_key(&self, ty: TypeId) -> bool {
+        match self.m.store.get(ty) {
+            Type::Bool | Type::Int | Type::String | Type::Bytes => true,
+            Type::Class(class) | Type::Inst(class, _) => matches!(
+                self.m.classes[class.0 as usize].native_repr,
+                Some(
+                    NativeRepr::Text
+                        | NativeRepr::String
+                        | NativeRepr::Substring
+                        | NativeRepr::Char
+                        | NativeRepr::Bytes
+                )
+            ),
+            _ => false,
+        }
+    }
+
+    /// Emit a `Hashable.__hash__` call for one value in a local slot.
+    fn lower_hash_call(&mut self, key: u32, key_ty: TypeId) {
+        self.emit(Instr::LoadLocal(key));
+        let recv_ty = self.m.bc_ty(key_ty);
+        self.emit(Instr::CallInterface {
+            interface: self.m.core.hashable_interface,
+            method: self.m.core.hashable_method,
+            recv_ty,
+        });
+    }
+
+    /// Emit a `PartialEq.__eq__` call for one stored and query key.
+    fn lower_key_eq_call(&mut self, map: u32, token: u32, key: u32, key_ty: TypeId) {
+        self.emit(Instr::LoadLocal(map));
+        self.emit(Instr::LoadLocal(token));
+        self.emit(extended(ExtendedInstr::MapProbeKey));
+        self.emit(Instr::LoadLocal(key));
+        let recv_ty = self.m.bc_ty(key_ty);
+        self.emit(Instr::CallInterface {
+            interface: self.m.core.partial_eq_interface,
+            method: self.m.core.partial_eq_method,
+            recv_ty,
+        });
+    }
+
+    /// Lower one map operation whose key strategy uses verified interfaces.
+    fn lower_hashable_map_action(
+        &mut self,
+        action: MapAction,
+        args: &[HExpr],
+        reply: Option<TypeId>,
+    ) {
+        let (key_ty, value_ty) = match self.m.store.get(args[0].ty) {
+            Type::Map(key, value) => (*key, *value),
+            _ => unreachable!("a map intrinsic receives a map"),
+        };
+        let map = self.scratch_of(args[0].ty);
+        let key = self.scratch_of(key_ty);
+        let value = matches!(action, MapAction::Put | MapAction::PutDiscard)
+            .then(|| self.scratch_of(value_ty));
+        let hash = self.scratch_of(INT);
+        let token = self.scratch_of(INT);
+        let reply_ty = reply.map(|ty| self.m.bc_ty(ty));
+
+        self.lower_expr(&args[0]);
+        self.emit(Instr::StoreLocal(map));
+        self.lower_expr(&args[1]);
+        self.emit(Instr::StoreLocal(key));
+        if let Some(slot) = value {
+            self.lower_expr(&args[2]);
+            self.emit(Instr::StoreLocal(slot));
+        }
+        if matches!(
+            action,
+            MapAction::Put | MapAction::PutDiscard | MapAction::Remove
+        ) {
+            self.emit(Instr::LoadLocal(map));
+            self.emit(extended(ExtendedInstr::MapWriteGuard));
+            self.emit(Instr::Pop);
+        }
+        self.lower_hash_call(key, key_ty);
+        self.emit(Instr::StoreLocal(hash));
+        self.emit(Instr::LoadLocal(map));
+        self.emit(Instr::LoadLocal(hash));
+        self.emit(Instr::ConstInt(0));
+        self.emit(extended(ExtendedInstr::MapProbe));
+        self.emit(Instr::StoreLocal(token));
+
+        let probe = self.new_block();
+        let compare = self.new_block();
+        let advance = self.new_block();
+        let hit = self.new_block();
+        let miss = self.new_block();
+        let join = self.new_block();
+        self.emit(Instr::Jump(probe));
+
+        self.switch_to(probe);
+        self.emit(Instr::LoadLocal(token));
+        self.emit(extended(ExtendedInstr::MapProbeFound));
+        self.emit(Instr::JumpIfTrue(compare));
+        self.emit(Instr::Jump(miss));
+
+        self.switch_to(compare);
+        self.lower_key_eq_call(map, token, key, key_ty);
+        self.emit(Instr::JumpIfTrue(hit));
+        self.emit(Instr::Jump(advance));
+
+        self.switch_to(advance);
+        self.emit(Instr::LoadLocal(map));
+        self.emit(Instr::LoadLocal(hash));
+        self.emit(Instr::LoadLocal(token));
+        self.emit(extended(ExtendedInstr::MapProbe));
+        self.emit(Instr::StoreLocal(token));
+        self.emit(Instr::Jump(probe));
+
+        self.switch_to(hit);
+        match action {
+            MapAction::Has => self.emit(Instr::ConstBool(true)),
+            MapAction::At | MapAction::Get => {
+                self.emit(Instr::LoadLocal(map));
+                self.emit(Instr::LoadLocal(token));
+                self.emit(extended(ExtendedInstr::MapProbeValue));
+                if matches!(action, MapAction::Get) {
+                    self.emit(extended(ExtendedInstr::OptionSome {
+                        ty: reply_ty.expect("get returns Option"),
+                    }));
+                }
+            }
+            MapAction::Put => {
+                let old = self.scratch_of(value_ty);
+                self.emit(Instr::LoadLocal(map));
+                self.emit(Instr::LoadLocal(token));
+                self.emit(extended(ExtendedInstr::MapProbeValue));
+                self.emit(Instr::StoreLocal(old));
+                self.emit(Instr::LoadLocal(map));
+                self.emit(Instr::LoadLocal(token));
+                self.emit(Instr::LoadLocal(value.expect("put has a value")));
+                self.emit(extended(ExtendedInstr::MapProbeSetValue));
+                self.emit(Instr::Pop);
+                self.emit(Instr::LoadLocal(old));
+                self.emit(extended(ExtendedInstr::OptionSome {
+                    ty: reply_ty.expect("put returns Option"),
+                }));
+            }
+            MapAction::Remove => {
+                self.emit(Instr::LoadLocal(map));
+                self.emit(Instr::LoadLocal(token));
+                self.emit(extended(ExtendedInstr::MapProbeRemove));
+                self.emit(extended(ExtendedInstr::OptionSome {
+                    ty: reply_ty.expect("remove returns Option"),
+                }));
+            }
+            MapAction::PutDiscard => {
+                self.emit(Instr::LoadLocal(map));
+                self.emit(Instr::LoadLocal(token));
+                self.emit(Instr::LoadLocal(value.expect("put has a value")));
+                self.emit(extended(ExtendedInstr::MapProbeSetValue));
+            }
+        }
+        self.emit(Instr::Jump(join));
+
+        self.switch_to(miss);
+        match action {
+            MapAction::Has => self.emit(Instr::ConstBool(false)),
+            MapAction::At => {
+                self.emit(Instr::LoadLocal(map));
+                self.emit(Instr::LoadLocal(token));
+                self.emit(extended(ExtendedInstr::MapProbeValue));
+            }
+            MapAction::Get | MapAction::Remove => {
+                self.emit(extended(ExtendedInstr::OptionNone {
+                    ty: reply_ty.expect("the operation returns Option"),
+                }));
+            }
+            MapAction::Put | MapAction::PutDiscard => {
+                self.emit(Instr::LoadLocal(map));
+                self.emit(Instr::LoadLocal(key));
+                self.emit(Instr::LoadLocal(value.expect("put has a value")));
+                self.emit(Instr::LoadLocal(hash));
+                self.emit(Instr::LoadLocal(token));
+                self.emit(extended(ExtendedInstr::MapInsertHashed));
+                if matches!(action, MapAction::Put) {
+                    self.emit(Instr::Pop);
+                    self.emit(extended(ExtendedInstr::OptionNone {
+                        ty: reply_ty.expect("put returns Option"),
+                    }));
+                }
+            }
+        }
+        self.emit(Instr::Jump(join));
+        self.switch_to(join);
     }
 
     /// Emit a structural comparison of the tuples in the locals `a`
@@ -1484,15 +1687,40 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 });
             }
             HExprKind::MapLit(entries) => {
-                for (key, value) in entries {
-                    self.lower_expr(key);
-                    self.lower_expr(value);
+                let (key_ty, _) = match self.m.store.get(expr.ty) {
+                    Type::Map(key, value) => (*key, *value),
+                    _ => unreachable!("a map literal has a map type"),
+                };
+                if self.native_map_key(key_ty) {
+                    for (key, value) in entries {
+                        self.lower_expr(key);
+                        self.lower_expr(value);
+                    }
+                    let ty = self.m.bc_ty(expr.ty);
+                    self.emit(Instr::MapNew {
+                        ty,
+                        count: entries.len() as u32,
+                    });
+                } else {
+                    let map = self.scratch_of(expr.ty);
+                    let ty = self.m.bc_ty(expr.ty);
+                    self.emit(Instr::MapNew { ty, count: 0 });
+                    self.emit(Instr::StoreLocal(map));
+                    for (key, value) in entries {
+                        let args = vec![
+                            HExpr {
+                                ty: expr.ty,
+                                mutable: true,
+                                kind: HExprKind::Local(map),
+                            },
+                            key.clone(),
+                            value.clone(),
+                        ];
+                        self.lower_hashable_map_action(MapAction::PutDiscard, &args, None);
+                        self.emit(Instr::Pop);
+                    }
+                    self.emit(Instr::LoadLocal(map));
                 }
-                let ty = self.m.bc_ty(expr.ty);
-                self.emit(Instr::MapNew {
-                    ty,
-                    count: entries.len() as u32,
-                });
             }
             HExprKind::Native {
                 op: NativeOp::ListGet,
@@ -1503,6 +1731,22 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 args,
             } => self.lower_map_get(expr, args),
             HExprKind::Native { op, args } => {
+                let map_action = match op {
+                    NativeOp::MapHas => Some(MapAction::Has),
+                    NativeOp::MapAt => Some(MapAction::At),
+                    NativeOp::MapPut => Some(MapAction::Put),
+                    _ => None,
+                };
+                if let Some(action) = map_action {
+                    let key_ty = match self.m.store.get(args[0].ty) {
+                        Type::Map(key, _) => *key,
+                        _ => unreachable!("a map operation receives a map"),
+                    };
+                    if !self.native_map_key(key_ty) {
+                        self.lower_hashable_map_action(action, args, Some(expr.ty));
+                        return;
+                    }
+                }
                 let operand_ty = args.first().map(|arg| arg.ty);
                 for arg in args {
                     self.lower_expr(arg);
@@ -1708,6 +1952,14 @@ impl<'a, 'm> Lowerer<'a, 'm> {
 
     /// Lower `map.get(k)` to one hash-table probe.
     fn lower_map_get(&mut self, expr: &HExpr, args: &[HExpr]) {
+        let key_ty = match self.m.store.get(args[0].ty) {
+            Type::Map(key, _) => *key,
+            _ => unreachable!("a map operation receives a map"),
+        };
+        if !self.native_map_key(key_ty) {
+            self.lower_hashable_map_action(MapAction::Get, args, Some(expr.ty));
+            return;
+        }
         self.lower_expr(&args[0]);
         self.lower_expr(&args[1]);
         let ty = self.m.bc_ty(expr.ty);
@@ -1739,6 +1991,24 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         if intrinsic == lm_abi::INTRINSIC_INT_ABS {
             self.lower_int_abs(&args[0]);
             return;
+        }
+        let map_action = match intrinsic {
+            lm_abi::INTRINSIC_MAP_HAS => Some(MapAction::Has),
+            lm_abi::INTRINSIC_MAP_AT => Some(MapAction::At),
+            lm_abi::INTRINSIC_MAP_GET => Some(MapAction::Get),
+            lm_abi::INTRINSIC_MAP_PUT => Some(MapAction::Put),
+            lm_abi::INTRINSIC_MAP_REMOVE => Some(MapAction::Remove),
+            _ => None,
+        };
+        if let Some(action) = map_action {
+            let key_ty = match self.m.store.get(args[0].ty) {
+                Type::Map(key, _) => *key,
+                _ => unreachable!("a map intrinsic receives a map"),
+            };
+            if !self.native_map_key(key_ty) {
+                self.lower_hashable_map_action(action, args, Some(reply));
+                return;
+            }
         }
         for arg in args {
             self.lower_expr(arg);
@@ -1904,6 +2174,8 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BYTES_CONTAINS => {
                 Instr::Native(lm_bytecode::NativeInstr::BytesContains)
             }
+            lm_abi::INTRINSIC_TEXT_HASH => Instr::Native(lm_bytecode::NativeInstr::TextHash),
+            lm_abi::INTRINSIC_BYTES_HASH => Instr::Native(lm_bytecode::NativeInstr::BytesHash),
             lm_abi::INTRINSIC_TEXT_SPLIT => Instr::Native(lm_bytecode::NativeInstr::TextSplit),
             lm_abi::INTRINSIC_TEXT_LINES => Instr::Native(lm_bytecode::NativeInstr::TextLines),
             lm_abi::INTRINSIC_LIST_LEN => Instr::ListLen,
@@ -3108,6 +3380,8 @@ fn stack_effect(module: &Module, instr: &Instr) -> (usize, usize) {
         | Instr::Native(lm_bytecode::NativeInstr::CharUtf8Len)
         | Instr::Native(lm_bytecode::NativeInstr::BytesCompact)
         | Instr::Native(lm_bytecode::NativeInstr::BytesTextView)
+        | Instr::Native(lm_bytecode::NativeInstr::TextHash)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesHash)
         | Instr::Native(lm_bytecode::NativeInstr::SbByteLen)
         | Instr::Native(lm_bytecode::NativeInstr::SbFinish)
         | Instr::Native(lm_bytecode::NativeInstr::BbFinish)
@@ -3239,6 +3513,13 @@ fn extended_stack_effect(module: &Module, instr: &ExtendedInstr) -> (usize, usiz
         | ExtendedInstr::SyntaxToTree => (1, 1),
         ExtendedInstr::SyntaxBuildToken | ExtendedInstr::SyntaxBuildTrivia => (3, 1),
         ExtendedInstr::SyntaxBuildNode => (3, 1),
+        ExtendedInstr::MapProbe => (3, 1),
+        ExtendedInstr::MapProbeFound => (1, 1),
+        ExtendedInstr::MapProbeKey | ExtendedInstr::MapProbeValue => (2, 1),
+        ExtendedInstr::MapProbeSetValue => (3, 1),
+        ExtendedInstr::MapProbeRemove => (2, 1),
+        ExtendedInstr::MapInsertHashed => (5, 1),
+        ExtendedInstr::MapWriteGuard => (1, 1),
     }
 }
 
@@ -3394,6 +3675,8 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::GeBytes) => "GeBytes".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesCompact) => "BytesCompact".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesTextView) => "BytesTextView".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::TextHash) => "TextHash".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesHash) => "BytesHash".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::SbAppendChar) => "SbAppendChar".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::SbByteLen) => "SbByteLen".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::SbFinish) => "SbFinish".to_string(),
@@ -3504,6 +3787,14 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::SyntaxBuildTrivia => "SyntaxBuildTrivia".to_string(),
         ExtendedInstr::SyntaxBuildNode => "SyntaxBuildNode".to_string(),
         ExtendedInstr::SyntaxToTree => "SyntaxToTree".to_string(),
+        ExtendedInstr::MapProbe => "MapProbe".to_string(),
+        ExtendedInstr::MapProbeFound => "MapProbeFound".to_string(),
+        ExtendedInstr::MapProbeKey => "MapProbeKey".to_string(),
+        ExtendedInstr::MapProbeValue => "MapProbeValue".to_string(),
+        ExtendedInstr::MapProbeSetValue => "MapProbeSetValue".to_string(),
+        ExtendedInstr::MapProbeRemove => "MapProbeRemove".to_string(),
+        ExtendedInstr::MapInsertHashed => "MapInsertHashed".to_string(),
+        ExtendedInstr::MapWriteGuard => "MapWriteGuard".to_string(),
     }
 }
 

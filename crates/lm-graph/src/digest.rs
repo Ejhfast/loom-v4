@@ -337,10 +337,10 @@ fn encode_object(
             // Insertion order, key before value. The derived lookup
             // index never enters the encoding.
             count(out, entries.len())?;
-            for (key, value) in entries {
+            for entry in entries {
                 encode_value(
                     out,
-                    *key,
+                    entry.key,
                     child_types.next().flatten(),
                     expected_by_slot,
                     scratch,
@@ -348,7 +348,7 @@ fn encode_object(
                 )?;
                 encode_value(
                     out,
-                    *value,
+                    entry.value,
                     child_types.next().flatten(),
                     expected_by_slot,
                     scratch,

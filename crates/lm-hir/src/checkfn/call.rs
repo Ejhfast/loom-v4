@@ -183,7 +183,8 @@ impl<'o> FnChecker<'o> {
                             Diagnostic::new("E1024", "Map needs a key type", span)
                         })?;
                     let key_span = type_args.first().map(|arg| arg.span).unwrap_or(name_span);
-                    check_key_type(ctx, key, key_span)?;
+                    let env = self.env.clone();
+                    check_key_type(ctx, &env, key, key_span)?;
                 }
                 Ok(HExpr {
                     ty: out.ret,
@@ -456,7 +457,7 @@ impl<'o> FnChecker<'o> {
                 if type_args.len() == 2 {
                     let env = self.env.clone();
                     let k = resolve_type(ctx, &env, &type_args[0])?;
-                    check_key_type(ctx, k, type_args[0].span)?;
+                    check_key_type(ctx, &env, k, type_args[0].span)?;
                     let v = resolve_type(ctx, &env, &type_args[1])?;
                     return Ok(Callee::MapCtor(k, v));
                 }

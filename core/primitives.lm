@@ -8,13 +8,17 @@ interface PartialEq
   def __eq__(self, other: Self): Bool
 end
 
+interface Hashable: PartialEq
+  def __hash__(self): Int
+end
+
 def display[T: Display](value: T): String
   builder = StringBuilder()
   value.append_to(builder)
   builder.finish()
 end
 
-final class Int implements Display, PartialEq
+final class Int implements Display, Hashable
   def append_to(self, mut builder: StringBuilder)
     builder.append_int(self)
     ()
@@ -52,6 +56,10 @@ final class Int implements Display, PartialEq
     intrinsic("int.eq", self, other)
   end
 
+  def __hash__(self): Int
+    self
+  end
+
   def __lt__(self, other: Int): Bool
     intrinsic("int.lt", self, other)
   end
@@ -69,7 +77,7 @@ final class Int implements Display, PartialEq
   end
 end
 
-final class Bool implements Display, PartialEq
+final class Bool implements Display, Hashable
   def append_to(self, mut builder: StringBuilder)
     builder.append_bool(self)
     ()
@@ -81,6 +89,14 @@ final class Bool implements Display, PartialEq
 
   def __eq__(self, other: Bool): Bool
     intrinsic("bool.eq", self, other)
+  end
+
+  def __hash__(self): Int
+    if self
+      1
+    else
+      0
+    end
   end
 
 end

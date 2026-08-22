@@ -36,7 +36,7 @@ use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
 use lm_heap::{
-    CodeHandleKind, FaultSite, MapIndex, NativeByteBuffer, NativeStringBuilder, Object,
+    CodeHandleKind, FaultSite, MapEntry, MapIndex, NativeByteBuffer, NativeStringBuilder, Object,
     PortableCode, PortableCodeKind, SlotChangeKind, StructuralEpoch,
 };
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
@@ -519,9 +519,10 @@ fn encode_object(out: &mut Out, object: &Object) {
             out.u64(u64::from(index.epoch.0));
             out.leb(entries.capacity() as u64);
             out.leb(entries.len() as u64);
-            for (key, value) in entries {
-                out.value(*key);
-                out.value(*value);
+            for entry in entries {
+                out.value(entry.key);
+                out.value(entry.value);
+                out.i64(entry.semantic_hash);
             }
         }
         Object::Tuple { items } => out.values(items),
@@ -2088,7 +2089,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
         }
         3 => {
             let epoch = decode_epoch(cur)?;
-            let max_capacity = u64::try_from(limits.max_bytes / 32).unwrap_or(u64::MAX);
+            let max_capacity = u64::try_from(limits.max_bytes / 40).unwrap_or(u64::MAX);
             let capacity = cur.allocation_count(max_capacity, "map capacity")?;
             let count = cur.count(limits.max_stack_values as u64, "map entry")?;
             if capacity < count {
@@ -2097,11 +2098,15 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                     "a map capacity is smaller than its entry count",
                 );
             }
-            let mut entries: Vec<(Value, Value)> = cur.vector(capacity, "map capacity")?;
+            let mut entries: Vec<MapEntry> = cur.vector(capacity, "map capacity")?;
             for _ in 0..count {
                 let key = decode_value(cur, objects, 0)?;
                 let value = decode_value(cur, objects, 0)?;
-                entries.push((key, value));
+                entries.push(MapEntry {
+                    key,
+                    value,
+                    semantic_hash: cur.i64()?,
+                });
             }
             let mut index = MapIndex::default();
             index.epoch = epoch;

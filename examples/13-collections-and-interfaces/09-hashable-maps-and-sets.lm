@@ -1,0 +1,41 @@
+# Use one value type in a map and a set.
+#
+# This example needs no grant.
+# `Hashable` supplies equality and one stable semantic hash.
+# A user object must be frozen before it becomes a key.
+
+final class AccountId implements Hashable
+  number: Int
+
+  def init(mut self, number: Int)
+    self.number = number
+  end
+
+  def __eq__(self, other: AccountId): Bool
+    self.number == other.number
+  end
+
+  def __hash__(self): Int
+    self.number
+  end
+end
+
+first = AccountId(7).freeze()
+same = AccountId(7).freeze()
+
+records: Map[AccountId, String] = {first: "open"}
+previous = records.put(same, "closed")
+
+active = Set[AccountId]()
+added = active.add(first)
+duplicate = active.add(same)
+
+(
+  records.len(),
+  records.at(first),
+  previous,
+  active.len(),
+  active.has(same),
+  added,
+  duplicate
+)

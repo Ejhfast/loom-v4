@@ -1122,9 +1122,9 @@ fn relocate_metadata(
         | Object::List { items: fields, .. }
         | Object::Tuple { items: fields } => fields.iter_mut().for_each(remap),
         Object::Map { entries, .. } => {
-            for (key, value) in entries {
-                remap(key);
-                remap(value);
+            for entry in entries {
+                remap(&mut entry.key);
+                remap(&mut entry.value);
             }
         }
         Object::Closure { captures, .. } => captures.iter_mut().for_each(remap),

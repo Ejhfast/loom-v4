@@ -97,6 +97,25 @@ pub(crate) fn step(
             _ => Err(fail(format!("expected a map type, found type {ty}"))),
         }
     };
+    let native_map_key = |ty: u32| -> Result<(), VerifyError> {
+        if ctx.native_map_key(ty) {
+            Ok(())
+        } else {
+            Err(fail(
+                "a native map instruction needs a native key type".to_string(),
+            ))
+        }
+    };
+    let hashable_map = |map: u32| -> Result<(u32, u32), VerifyError> {
+        let (key, value) = as_map(map)?;
+        if ctx.hashable_map_key(fidx, key) {
+            Ok((key, value))
+        } else {
+            Err(fail(
+                "an interface-backed map instruction needs a Hashable key type".to_string(),
+            ))
+        }
+    };
     // The claimed row of a call must sit inside the caller's row.
     let charge_row = |row: &[BcRow]| -> Result<(), VerifyError> {
         if ctx.row_included(row, &func.row) {
@@ -167,7 +186,8 @@ pub(crate) fn step(
             push(state, TY_BOOL)?;
         }
         Instr::Native(lm_bytecode::NativeInstr::StrByteLen)
-        | Instr::Native(lm_bytecode::NativeInstr::StrCharCount) => {
+        | Instr::Native(lm_bytecode::NativeInstr::StrCharCount)
+        | Instr::Native(lm_bytecode::NativeInstr::TextHash) => {
             let text = ctx.plain_inst(ctx.core.text, "Text").map_err(&fail)?;
             pop_expect(state, text)?;
             push(state, TY_INT)?;
@@ -851,6 +871,14 @@ pub(crate) fn step(
         }
         Instr::MapNew { ty, count } => {
             let (k, v) = as_map(*ty)?;
+            if !ctx.hashable_map_key(fidx, k) {
+                return Err(fail(
+                    "map construction needs a Hashable key type".to_string(),
+                ));
+            }
+            if *count > 0 {
+                native_map_key(k)?;
+            }
             for _ in 0..*count {
                 pop_expect(state, v)?;
                 pop_expect(state, k)?;
@@ -866,6 +894,7 @@ pub(crate) fn step(
             let key = pop(state)?;
             let m = pop(state)?;
             let (k, _) = as_map(m)?;
+            native_map_key(k)?;
             if !ctx.accepts_map_query_key(key, k) {
                 return Err(fail(format!("map key expects type {k}, found type {key}")));
             }
@@ -875,6 +904,7 @@ pub(crate) fn step(
             let key = pop(state)?;
             let m = pop(state)?;
             let (k, v) = as_map(m)?;
+            native_map_key(k)?;
             if !ctx.accepts_map_query_key(key, k) {
                 return Err(fail(format!("map key expects type {k}, found type {key}")));
             }
@@ -885,6 +915,7 @@ pub(crate) fn step(
             let key = pop(state)?;
             let m = pop(state)?;
             let (k, v) = as_map(m)?;
+            native_map_key(k)?;
             if !ctx.is_subtype(key, k) || !ctx.is_subtype(value, v) {
                 return Err(fail("map put entry types do not match".to_string()));
             }
@@ -947,6 +978,7 @@ pub(crate) fn step(
             let key = pop(state)?;
             let map = pop(state)?;
             let (expected_key, found) = as_map(map)?;
+            native_map_key(expected_key)?;
             if !ctx.accepts_map_query_key(key, expected_key) {
                 return Err(fail(format!(
                     "map key expects type {expected_key}, found type {key}"
@@ -990,6 +1022,62 @@ pub(crate) fn step(
             let map = pop(state)?;
             let (_, value) = as_map(map)?;
             push(state, value)?;
+        }
+        Instr::Extended(ExtendedInstr::MapProbe) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            hashable_map(map)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::MapProbeFound) => {
+            pop_expect(state, TY_INT)?;
+            push(state, TY_BOOL)?;
+        }
+        Instr::Extended(ExtendedInstr::MapProbeKey) => {
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            let (key, _) = hashable_map(map)?;
+            push(state, key)?;
+        }
+        Instr::Extended(ExtendedInstr::MapProbeValue) => {
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            let (_, value) = hashable_map(map)?;
+            push(state, value)?;
+        }
+        Instr::Extended(ExtendedInstr::MapProbeSetValue) => {
+            let value = pop(state)?;
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            let (_, expected) = hashable_map(map)?;
+            if !ctx.is_subtype(value, expected) {
+                return Err(fail("map value replacement type mismatch".to_string()));
+            }
+            push(state, TY_UNIT)?;
+        }
+        Instr::Extended(ExtendedInstr::MapProbeRemove) => {
+            pop_expect(state, TY_INT)?;
+            let map = pop(state)?;
+            let (_, value) = hashable_map(map)?;
+            push(state, value)?;
+        }
+        Instr::Extended(ExtendedInstr::MapInsertHashed) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            let value = pop(state)?;
+            let key = pop(state)?;
+            let map = pop(state)?;
+            let (expected_key, expected_value) = hashable_map(map)?;
+            if !ctx.is_subtype(key, expected_key) || !ctx.is_subtype(value, expected_value) {
+                return Err(fail("map insertion type mismatch".to_string()));
+            }
+            push(state, TY_UNIT)?;
+        }
+        Instr::Extended(ExtendedInstr::MapWriteGuard) => {
+            let map = pop(state)?;
+            hashable_map(map)?;
+            push(state, TY_UNIT)?;
         }
         Instr::Extended(ExtendedInstr::ListCapacity) => {
             let list = pop(state)?;
@@ -1061,6 +1149,7 @@ pub(crate) fn step(
             let key = pop(state)?;
             let map = pop(state)?;
             let (expected_key, value) = as_map(map)?;
+            native_map_key(expected_key)?;
             if !ctx.is_subtype(key, expected_key) {
                 return Err(fail("map remove key type does not match".to_string()));
             }
@@ -1419,6 +1508,13 @@ pub(crate) fn step(
             let bytes = pop(state)?;
             if ctx.ty(bytes) != BcType::Bytes {
                 return Err(fail(format!("len on non-bytes type {bytes}")));
+            }
+            push(state, TY_INT)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BytesHash) => {
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("hash on non-bytes type {bytes}")));
             }
             push(state, TY_INT)?;
         }

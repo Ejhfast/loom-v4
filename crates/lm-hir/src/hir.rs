@@ -25,6 +25,14 @@ pub struct CoreIds {
     pub some_class: u32,
     /// Class index of the `Option.None` case.
     pub none_class: u32,
+    /// Interface index of `PartialEq`.
+    pub partial_eq_interface: u32,
+    /// Method index of `PartialEq.__eq__`.
+    pub partial_eq_method: u32,
+    /// Interface index of `Hashable`.
+    pub hashable_interface: u32,
+    /// Method index of `Hashable.__hash__`.
+    pub hashable_method: u32,
 }
 
 /// One exported top-level definition of the source module.

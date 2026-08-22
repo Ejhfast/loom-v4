@@ -1113,7 +1113,15 @@ fn reloc_extended(instruction: &ExtendedInstr, reloc: &AppendReloc) -> ExtendedI
         | ExtendedInstr::SyntaxBuildToken
         | ExtendedInstr::SyntaxBuildTrivia
         | ExtendedInstr::SyntaxBuildNode
-        | ExtendedInstr::SyntaxToTree => *instruction,
+        | ExtendedInstr::SyntaxToTree
+        | ExtendedInstr::MapProbe
+        | ExtendedInstr::MapProbeFound
+        | ExtendedInstr::MapProbeKey
+        | ExtendedInstr::MapProbeValue
+        | ExtendedInstr::MapProbeSetValue
+        | ExtendedInstr::MapProbeRemove
+        | ExtendedInstr::MapInsertHashed
+        | ExtendedInstr::MapWriteGuard => *instruction,
     }
 }
 
